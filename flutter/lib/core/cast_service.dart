@@ -349,6 +349,8 @@ class CastController extends ChangeNotifier {
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   int _volume = 60;
+  bool _muted = false;
+  double _speed = 1.0;
   String _currentMediaUrl = '';
   String _currentTitle = '';
   Timer? _pollTimer;
@@ -363,6 +365,8 @@ class CastController extends ChangeNotifier {
   Duration get position => _position;
   Duration get duration => _duration;
   int get volume => _volume;
+  bool get muted => _muted;
+  double get speed => _speed;
   String get currentTitle => _currentTitle;
   bool get isCasting =>
       _activeDevice != null &&
@@ -1290,6 +1294,57 @@ class CastController extends ChangeNotifier {
     );
   }
 
+  static String formatDlnaSpeed(double speed) {
+    final clamped = speed.clamp(0.5, 3.0);
+    if ((clamped - clamped.roundToDouble()).abs() < 0.001) {
+      return clamped.round().toString();
+    }
+    return clamped
+        .toStringAsFixed(2)
+        .replaceFirst(RegExp(r'0+$'), '')
+        .replaceFirst(RegExp(r'\.$'), '');
+  }
+
+  Future<void> setSpeed(double nextSpeed) async {
+    final device = _activeDevice;
+    final clamped = nextSpeed.clamp(0.5, 3.0).toDouble();
+    _speed = clamped;
+    _notify();
+    if (device == null) return;
+    try {
+      await _sendSoapAction(
+        controlUrl: device.avTransportControlUrl,
+        serviceType: _avTransportService,
+        action: 'Play',
+        bodyXml:
+            '<u:Play xmlns:u="$_avTransportService"><InstanceID>0</InstanceID><Speed>${formatDlnaSpeed(clamped)}</Speed></u:Play>',
+      );
+      _state = CastSessionState.playing;
+      _notify();
+    } catch (_) {}
+  }
+
+  Future<void> toggleMute() async {
+    final device = _activeDevice;
+    _muted = !_muted;
+    _notify();
+    final rcUrl = device?.renderingControlUrl;
+    if (rcUrl == null || rcUrl.isEmpty) return;
+    try {
+      await _sendSoapAction(
+        controlUrl: rcUrl,
+        serviceType: _renderingControlService,
+        action: 'SetMute',
+        bodyXml: '''
+<u:SetMute xmlns:u="$_renderingControlService">
+  <InstanceID>0</InstanceID>
+  <Channel>Master</Channel>
+  <DesiredMute>${_muted ? 1 : 0}</DesiredMute>
+</u:SetMute>''',
+      );
+    } catch (_) {}
+  }
+
   Future<void> togglePlayPause() async {
     final device = _activeDevice;
     if (device == null) return;
@@ -1301,7 +1356,7 @@ class CastController extends ChangeNotifier {
           serviceType: _avTransportService,
           action: 'Play',
           bodyXml:
-              '<u:Play xmlns:u="$_avTransportService"><InstanceID>0</InstanceID><Speed>1</Speed></u:Play>',
+              '<u:Play xmlns:u="$_avTransportService"><InstanceID>0</InstanceID><Speed>${formatDlnaSpeed(_speed)}</Speed></u:Play>',
         );
         _state = CastSessionState.playing;
       } else {
@@ -1345,6 +1400,7 @@ class CastController extends ChangeNotifier {
     final device = _activeDevice;
     final next = (_volume + delta).clamp(0, 100);
     _volume = next;
+    if (next > 0 && _muted) _muted = false;
     _notify();
     final rcUrl = device?.renderingControlUrl;
     if (rcUrl == null || rcUrl.isEmpty) return;
@@ -1371,6 +1427,8 @@ class CastController extends ChangeNotifier {
     _state = CastSessionState.idle;
     _statusMessage = null;
     _currentMediaUrl = '';
+    _speed = 1.0;
+    _muted = false;
     _notify();
     if (device != null) {
       try {

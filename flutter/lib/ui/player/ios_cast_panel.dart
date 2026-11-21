@@ -1,9 +1,11 @@
+import 'dart:ui';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../core/cast_service.dart';
 import '../apple_theme.dart';
 import '../ios_glass_popover.dart';
+import '../poster_image.dart';
 
 /// Opens the 爱优腾-style TV Casting popover anchored to the top-right Cast
 /// button. Shows live LAN DLNA discovery + native iOS AirPlay route picker.
@@ -344,30 +346,51 @@ class _CastRowTile extends StatelessWidget {
   }
 }
 
-/// 爱优腾-style active casting remote stage rendered inside the player viewport
-/// while a TV/DLNA device is playing. Lets the user switch device, exit cast,
-/// scrub progress, pause/play, adjust TV volume, and pick episodes/lines.
-class IosCastingRemoteStage extends StatelessWidget {
+/// 爱优腾 / Apple TV Remote-style active casting remote control stage.
+///
+/// In iOS portrait mode (`halfScreen: true`), the player viewport smoothly
+/// expands to ~half screen height and transforms into a full-featured TV
+/// remote with play/pause, ±15s seek, smooth progress scrub, previous/next
+/// episode switching, playback speed pills, TV volume/mute rocker, and quick
+/// episode/line sheets.
+class IosCastingRemoteStage extends StatefulWidget {
   final CastController controller;
   final String episodeLabel;
+  final String? posterUrl;
   final VoidCallback onBack;
   final VoidCallback onSwitchDevice;
   final VoidCallback onExitCast;
+  final VoidCallback? onPreviousEpisode;
+  final VoidCallback? onNextEpisode;
   final VoidCallback? onOpenEpisodes;
   final VoidCallback? onOpenLines;
   final bool compact;
+  final bool halfScreen;
 
   const IosCastingRemoteStage({
     super.key,
     required this.controller,
     required this.episodeLabel,
+    this.posterUrl,
     required this.onBack,
     required this.onSwitchDevice,
     required this.onExitCast,
+    this.onPreviousEpisode,
+    this.onNextEpisode,
     this.onOpenEpisodes,
     this.onOpenLines,
     this.compact = false,
+    this.halfScreen = false,
   });
+
+  @override
+  State<IosCastingRemoteStage> createState() => _IosCastingRemoteStageState();
+}
+
+class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
+  static const List<double> _speedOptions = [0.75, 1.0, 1.25, 1.5, 2.0];
+
+  double? _draggingProgress;
 
   String _fmt(Duration d) {
     final s = d.inSeconds.clamp(0, 359999);
@@ -380,8 +403,16 @@ class IosCastingRemoteStage extends StatelessWidget {
     return '${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
   }
 
+  String _formatSpeedLabel(double speed) {
+    if ((speed - speed.roundToDouble()).abs() < 0.001) {
+      return '${speed.toStringAsFixed(1)}x';
+    }
+    return '${speed.toStringAsFixed(2).replaceFirst(RegExp(r'0+$'), '')}x';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final controller = widget.controller;
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) {
@@ -390,265 +421,629 @@ class IosCastingRemoteStage extends StatelessWidget {
         final isConnecting = controller.state == CastSessionState.connecting;
         final durMs = controller.duration.inMilliseconds.clamp(1, 1 << 31);
         final posMs = controller.position.inMilliseconds.clamp(0, durMs);
-        final progress = (posMs / durMs).clamp(0.0, 1.0);
+        final liveProgress = (posMs / durMs).clamp(0.0, 1.0);
+        final sliderProgress = (_draggingProgress ?? liveProgress).clamp(0.0, 1.0);
+        final displayPos = _draggingProgress != null && controller.duration > Duration.zero
+            ? Duration(
+                milliseconds: (controller.duration.inMilliseconds * sliderProgress).round(),
+              )
+            : controller.position;
 
-        return Container(
-          key: const Key('ios-casting-remote-stage'),
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [
-                Color(0xFF0E1320),
-                Color(0xFF0A0D14),
-                Color(0xFF06070A),
-              ],
-            ),
-          ),
-          child: SafeArea(
-            bottom: !compact,
-            child: Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: compact ? 14 : 24,
-                vertical: compact ? 8 : 14,
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  // Top bar: back + casting status + switch device / exit
-                  Row(
-                    children: [
-                      GestureDetector(
-                        onTap: onBack,
-                        child: Container(
-                          width: 34,
-                          height: 34,
-                          decoration: BoxDecoration(
+        final poster = widget.posterUrl?.trim() ?? '';
+
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final availH = constraints.maxHeight;
+            final expandedRemote = widget.halfScreen || (!widget.compact && availH >= 320);
+            final tight = availH < 345;
+            final centerSize = expandedRemote ? (tight ? 58.0 : 66.0) : (widget.compact ? 50.0 : 60.0);
+            final sideBtnSize = expandedRemote ? (tight ? 42.0 : 46.0) : 40.0;
+
+            return ClipRect(
+              child: Container(
+                key: const Key('ios-casting-remote-stage'),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Color(0xFF131B2E),
+                      Color(0xFF0C101B),
+                      Color(0xFF070A11),
+                    ],
+                  ),
+                  border: widget.halfScreen
+                      ? Border(
+                          bottom: BorderSide(
                             color: Colors.white.withValues(alpha: 0.12),
-                            shape: BoxShape.circle,
+                            width: 0.7,
                           ),
-                          child: const Icon(
-                            CupertinoIcons.chevron_back,
-                            color: Colors.white,
-                            size: 18,
+                        )
+                      : null,
+                ),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (poster.isNotEmpty)
+                      Positioned.fill(
+                        child: Opacity(
+                          opacity: 0.22,
+                          child: ImageFiltered(
+                            imageFilter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
+                            child: PosterImage(
+                              url: poster,
+                              fit: BoxFit.cover,
+                              placeholder: const SizedBox.shrink(),
+                            ),
                           ),
                         ),
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
+                    Positioned.fill(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              const Color(0xFF0E1424).withValues(alpha: 0.72),
+                              const Color(0xFF0A0E18).withValues(alpha: 0.86),
+                              const Color(0xFF070910).withValues(alpha: 0.96),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    SafeArea(
+                      top: !widget.halfScreen,
+                      bottom: !widget.compact && !widget.halfScreen,
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: expandedRemote ? 18 : (widget.compact ? 14 : 24),
+                          vertical: expandedRemote ? (tight ? 10 : 14) : (widget.compact ? 8 : 14),
+                        ),
                         child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
+                            // 1. Top header: Back + Casting Status + Switch Device / Exit
                             Row(
                               children: [
-                                Icon(
-                                  CupertinoIcons.tv_fill,
-                                  size: 13,
-                                  color: isConnecting
-                                      ? AppleColors.systemOrange
-                                      : AppleColors.systemGreen,
-                                ),
-                                const SizedBox(width: 5),
-                                Flexible(
-                                  child: Text(
-                                    isConnecting
-                                        ? '正在连接 ${device?.name ?? "电视"}…'
-                                        : '正在投屏到 ${device?.name ?? "电视"}',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
+                                GestureDetector(
+                                  onTap: widget.onBack,
+                                  child: Container(
+                                    width: 34,
+                                    height: 34,
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withValues(alpha: 0.12),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: Colors.white.withValues(alpha: 0.14),
+                                        width: 0.7,
+                                      ),
+                                    ),
+                                    child: const Icon(
+                                      CupertinoIcons.chevron_back,
                                       color: Colors.white,
-                                      fontSize: 13.5,
-                                      fontWeight: FontWeight.w700,
+                                      size: 18,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Container(
+                                            width: 7,
+                                            height: 7,
+                                            decoration: BoxDecoration(
+                                              color: isConnecting
+                                                  ? AppleColors.systemOrange
+                                                  : AppleColors.systemGreen,
+                                              shape: BoxShape.circle,
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: (isConnecting
+                                                          ? AppleColors.systemOrange
+                                                          : AppleColors.systemGreen)
+                                                      .withValues(alpha: 0.6),
+                                                  blurRadius: 6,
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Flexible(
+                                            child: Text(
+                                              isConnecting
+                                                  ? '正在连接 ${device?.name ?? "电视"}…'
+                                                  : '正在投屏 · ${device?.name ?? "电视"}',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 13.5,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      if (widget.episodeLabel.isNotEmpty)
+                                        Padding(
+                                          padding: const EdgeInsets.only(top: 1.5),
+                                          child: Text(
+                                            widget.episodeLabel,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              color: Colors.white60,
+                                              fontSize: 11,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                _CastPillButton(
+                                  key: const Key('ios-cast-switch-device'),
+                                  label: '换设备',
+                                  onTap: widget.onSwitchDevice,
+                                ),
+                                const SizedBox(width: 6),
+                                _CastPillButton(
+                                  key: const Key('ios-cast-exit-button'),
+                                  label: '退出投屏',
+                                  danger: true,
+                                  onTap: widget.onExitCast,
+                                ),
+                              ],
+                            ),
+
+                            // 2. Main Remote Transport Deck (Prev Episode / -15s / Play-Pause / +15s / Next Episode)
+                            Padding(
+                              padding: EdgeInsets.symmetric(
+                                vertical: expandedRemote ? (tight ? 2 : 6) : 0,
+                              ),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                children: [
+                                  if (expandedRemote)
+                                    _RemoteCircleBtn(
+                                      key: const Key('ios-cast-prev-episode'),
+                                      icon: CupertinoIcons.backward_end_fill,
+                                      label: '上一集',
+                                      size: sideBtnSize,
+                                      enabled: widget.onPreviousEpisode != null,
+                                      onTap: widget.onPreviousEpisode ?? () {},
+                                    )
+                                  else
+                                    _RemoteCircleBtn(
+                                      icon: CupertinoIcons.speaker_1_fill,
+                                      label: '音量-',
+                                      size: sideBtnSize,
+                                      onTap: () => controller.adjustVolume(-8),
+                                    ),
+                                  _RemoteCircleBtn(
+                                    key: const Key('ios-cast-seek-back'),
+                                    icon: CupertinoIcons.gobackward_15,
+                                    label: '快退15s',
+                                    size: sideBtnSize,
+                                    onTap: () => controller.seek(
+                                      controller.position - const Duration(seconds: 15),
+                                    ),
+                                  ),
+                                  GestureDetector(
+                                    key: const Key('ios-cast-play-pause'),
+                                    onTap: () {
+                                      HapticFeedback.mediumImpact();
+                                      controller.togglePlayPause();
+                                    },
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Container(
+                                          width: centerSize,
+                                          height: centerSize,
+                                          decoration: BoxDecoration(
+                                            gradient: LinearGradient(
+                                              begin: Alignment.topLeft,
+                                              end: Alignment.bottomRight,
+                                              colors: [
+                                                AppleColors.systemBlue,
+                                                AppleColors.systemBlue.withValues(alpha: 0.78),
+                                              ],
+                                            ),
+                                            shape: BoxShape.circle,
+                                            border: Border.all(
+                                              color: Colors.white.withValues(alpha: 0.28),
+                                              width: 1.0,
+                                            ),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: AppleColors.systemBlue
+                                                    .withValues(alpha: 0.42),
+                                                blurRadius: 20,
+                                                spreadRadius: 1,
+                                              ),
+                                            ],
+                                          ),
+                                          child: Icon(
+                                            isPlaying
+                                                ? CupertinoIcons.pause_fill
+                                                : CupertinoIcons.play_fill,
+                                            color: Colors.white,
+                                            size: expandedRemote ? 30 : 24,
+                                          ),
+                                        ),
+                                        if (expandedRemote) ...[
+                                          const SizedBox(height: 5),
+                                          Text(
+                                            isPlaying ? '暂停' : '播放',
+                                            style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 10.5,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                  ),
+                                  _RemoteCircleBtn(
+                                    key: const Key('ios-cast-seek-forward'),
+                                    icon: CupertinoIcons.goforward_15,
+                                    label: '快进15s',
+                                    size: sideBtnSize,
+                                    onTap: () => controller.seek(
+                                      controller.position + const Duration(seconds: 15),
+                                    ),
+                                  ),
+                                  if (expandedRemote)
+                                    _RemoteCircleBtn(
+                                      key: const Key('ios-cast-next-episode'),
+                                      icon: CupertinoIcons.forward_end_fill,
+                                      label: '下一集',
+                                      size: sideBtnSize,
+                                      enabled: widget.onNextEpisode != null,
+                                      onTap: widget.onNextEpisode ?? () {},
+                                    )
+                                  else
+                                    _RemoteCircleBtn(
+                                      icon: CupertinoIcons.speaker_3_fill,
+                                      label: '音量+',
+                                      size: sideBtnSize,
+                                      onTap: () => controller.adjustVolume(8),
+                                    ),
+                                ],
+                              ),
+                            ),
+
+                            // 3. Smooth Scrubber Progress Bar
+                            Row(
+                              children: [
+                                SizedBox(
+                                  width: 44,
+                                  child: Text(
+                                    _fmt(displayPos),
+                                    style: const TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w500,
+                                      fontFeatures: [FontFeature.tabularFigures()],
+                                    ),
+                                  ),
+                                ),
+                                Expanded(
+                                  child: SliderTheme(
+                                    data: SliderTheme.of(context).copyWith(
+                                      trackHeight: expandedRemote ? 4.5 : 3.5,
+                                      thumbShape: RoundSliderThumbShape(
+                                        enabledThumbRadius: expandedRemote ? 7.5 : 6,
+                                      ),
+                                      overlayShape: const RoundSliderOverlayShape(
+                                        overlayRadius: 15,
+                                      ),
+                                      activeTrackColor: AppleColors.systemBlue,
+                                      inactiveTrackColor:
+                                          Colors.white.withValues(alpha: 0.2),
+                                      thumbColor: Colors.white,
+                                    ),
+                                    child: Slider(
+                                      key: const Key('ios-cast-progress-slider'),
+                                      value: sliderProgress,
+                                      onChangeStart: (v) {
+                                        setState(() => _draggingProgress = v);
+                                      },
+                                      onChanged: (v) {
+                                        setState(() => _draggingProgress = v);
+                                      },
+                                      onChangeEnd: (v) {
+                                        setState(() => _draggingProgress = null);
+                                        if (controller.duration > Duration.zero) {
+                                          controller.seek(
+                                            Duration(
+                                              milliseconds:
+                                                  (controller.duration.inMilliseconds * v)
+                                                      .round(),
+                                            ),
+                                          );
+                                        }
+                                      },
+                                    ),
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: 44,
+                                  child: Text(
+                                    _fmt(controller.duration),
+                                    textAlign: TextAlign.right,
+                                    style: const TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 11.5,
+                                      fontFeatures: [FontFeature.tabularFigures()],
                                     ),
                                   ),
                                 ),
                               ],
                             ),
-                            if (episodeLabel.isNotEmpty)
-                              Text(
-                                episodeLabel,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Colors.white54,
-                                  fontSize: 11,
+
+                            // 4. Playback Speed Strip (`0.75x / 1.0x / 1.25x / 1.5x / 2.0x`)
+                            if (expandedRemote)
+                              Container(
+                                key: const Key('ios-cast-speed-strip'),
+                                padding: const EdgeInsets.all(3.5),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.08),
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: Colors.white.withValues(alpha: 0.11),
+                                    width: 0.7,
+                                  ),
                                 ),
+                                child: Row(
+                                  children: [
+                                    const Padding(
+                                      padding: EdgeInsets.symmetric(horizontal: 9),
+                                      child: Text(
+                                        '倍速',
+                                        style: TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                    for (final s in _speedOptions)
+                                      Expanded(
+                                        child: GestureDetector(
+                                          key: Key(
+                                            'ios-cast-speed-${_formatSpeedLabel(s)}',
+                                          ),
+                                          onTap: () {
+                                            HapticFeedback.selectionClick();
+                                            controller.setSpeed(s);
+                                          },
+                                          child: AnimatedContainer(
+                                            duration: const Duration(milliseconds: 180),
+                                            padding: const EdgeInsets.symmetric(vertical: 6.5),
+                                            decoration: BoxDecoration(
+                                              color: (controller.speed - s).abs() < 0.01
+                                                  ? AppleColors.systemBlue
+                                                  : Colors.transparent,
+                                              borderRadius: BorderRadius.circular(10),
+                                            ),
+                                            child: Text(
+                                              _formatSpeedLabel(s),
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(
+                                                color: (controller.speed - s).abs() < 0.01
+                                                    ? Colors.white
+                                                    : Colors.white70,
+                                                fontSize: 11.5,
+                                                fontWeight: (controller.speed - s).abs() < 0.01
+                                                    ? FontWeight.w700
+                                                    : FontWeight.w500,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+
+                            // 5. Bottom Remote Utility Bar: TV Volume Rocker + Quick Episodes / Lines
+                            if (expandedRemote)
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Container(
+                                      key: const Key('ios-cast-volume-capsule'),
+                                      height: 38,
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withValues(alpha: 0.09),
+                                        borderRadius: BorderRadius.circular(13),
+                                        border: Border.all(
+                                          color: Colors.white.withValues(alpha: 0.12),
+                                          width: 0.7,
+                                        ),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Expanded(
+                                            child: GestureDetector(
+                                              key: const Key('ios-cast-vol-down'),
+                                              behavior: HitTestBehavior.opaque,
+                                              onTap: () {
+                                                HapticFeedback.selectionClick();
+                                                controller.adjustVolume(-8);
+                                              },
+                                              child: const Center(
+                                                child: Icon(
+                                                  CupertinoIcons.speaker_1_fill,
+                                                  color: Colors.white70,
+                                                  size: 16,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          Container(
+                                            width: 0.6,
+                                            height: 18,
+                                            color: Colors.white.withValues(alpha: 0.14),
+                                          ),
+                                          Expanded(
+                                            flex: 2,
+                                            child: GestureDetector(
+                                              key: const Key('ios-cast-mute-toggle'),
+                                              behavior: HitTestBehavior.opaque,
+                                              onTap: () {
+                                                HapticFeedback.selectionClick();
+                                                controller.toggleMute();
+                                              },
+                                              child: Row(
+                                                mainAxisAlignment: MainAxisAlignment.center,
+                                                children: [
+                                                  Icon(
+                                                    controller.muted
+                                                        ? CupertinoIcons.speaker_slash_fill
+                                                        : CupertinoIcons.speaker_2_fill,
+                                                    color: controller.muted
+                                                        ? AppleColors.systemOrange
+                                                        : Colors.white70,
+                                                    size: 14,
+                                                  ),
+                                                  const SizedBox(width: 4),
+                                                  Text(
+                                                    controller.muted
+                                                        ? '已静音'
+                                                        : '${controller.volume}%',
+                                                    style: TextStyle(
+                                                      color: controller.muted
+                                                          ? AppleColors.systemOrange
+                                                          : Colors.white70,
+                                                      fontSize: 11.5,
+                                                      fontWeight: FontWeight.w600,
+                                                      fontFeatures: const [
+                                                        FontFeature.tabularFigures(),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                          Container(
+                                            width: 0.6,
+                                            height: 18,
+                                            color: Colors.white.withValues(alpha: 0.14),
+                                          ),
+                                          Expanded(
+                                            child: GestureDetector(
+                                              key: const Key('ios-cast-vol-up'),
+                                              behavior: HitTestBehavior.opaque,
+                                              onTap: () {
+                                                HapticFeedback.selectionClick();
+                                                controller.adjustVolume(8);
+                                              },
+                                              child: const Center(
+                                                child: Icon(
+                                                  CupertinoIcons.speaker_3_fill,
+                                                  color: Colors.white70,
+                                                  size: 16,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  if (widget.onOpenEpisodes != null) ...[
+                                    const SizedBox(width: 8),
+                                    _RemoteActionChip(
+                                      key: const Key('ios-cast-open-episodes'),
+                                      icon: CupertinoIcons.square_grid_2x2_fill,
+                                      label: '选集',
+                                      onTap: widget.onOpenEpisodes!,
+                                    ),
+                                  ],
+                                  if (widget.onOpenLines != null) ...[
+                                    const SizedBox(width: 8),
+                                    _RemoteActionChip(
+                                      key: const Key('ios-cast-open-lines'),
+                                      icon: CupertinoIcons.layers_alt_fill,
+                                      label: '换线路',
+                                      onTap: widget.onOpenLines!,
+                                    ),
+                                  ],
+                                ],
                               ),
                           ],
                         ),
                       ),
-                      _CastPillButton(
-                        key: const Key('ios-cast-switch-device'),
-                        label: '换设备',
-                        onTap: onSwitchDevice,
-                      ),
-                      const SizedBox(width: 6),
-                      _CastPillButton(
-                        key: const Key('ios-cast-exit-button'),
-                        label: '退出投屏',
-                        danger: true,
-                        onTap: onExitCast,
-                      ),
-                    ],
-                  ),
-
-                  // Center remote controls
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      _RemoteCircleBtn(
-                        icon: CupertinoIcons.speaker_1_fill,
-                        label: '音量-',
-                        onTap: () => controller.adjustVolume(-8),
-                      ),
-                      const SizedBox(width: 14),
-                      _RemoteCircleBtn(
-                        icon: CupertinoIcons.gobackward_15,
-                        label: '-15s',
-                        onTap: () => controller.seek(
-                          controller.position - const Duration(seconds: 15),
-                        ),
-                      ),
-                      const SizedBox(width: 18),
-                      GestureDetector(
-                        key: const Key('ios-cast-play-pause'),
-                        onTap: () {
-                          HapticFeedback.lightImpact();
-                          controller.togglePlayPause();
-                        },
-                        child: Container(
-                          width: compact ? 52 : 62,
-                          height: compact ? 52 : 62,
-                          decoration: BoxDecoration(
-                            color: AppleColors.systemBlue.withValues(alpha: 0.92),
-                            shape: BoxShape.circle,
-                            boxShadow: [
-                              BoxShadow(
-                                color: AppleColors.systemBlue.withValues(alpha: 0.35),
-                                blurRadius: 18,
-                              ),
-                            ],
-                          ),
-                          child: Icon(
-                            isPlaying
-                                ? CupertinoIcons.pause_fill
-                                : CupertinoIcons.play_fill,
-                            color: Colors.white,
-                            size: compact ? 24 : 28,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 18),
-                      _RemoteCircleBtn(
-                        icon: CupertinoIcons.goforward_15,
-                        label: '+15s',
-                        onTap: () => controller.seek(
-                          controller.position + const Duration(seconds: 15),
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      _RemoteCircleBtn(
-                        icon: CupertinoIcons.speaker_3_fill,
-                        label: '音量+',
-                        onTap: () => controller.adjustVolume(8),
-                      ),
-                    ],
-                  ),
-
-                  // Bottom progress scrubber + quick episode/line chips
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
-                        children: [
-                          Text(
-                            _fmt(controller.position),
-                            style: const TextStyle(
-                              color: Colors.white70,
-                              fontSize: 11,
-                              fontFeatures: [FontFeature.tabularFigures()],
-                            ),
-                          ),
-                          Expanded(
-                            child: SliderTheme(
-                              data: SliderTheme.of(context).copyWith(
-                                trackHeight: 3.5,
-                                thumbShape: const RoundSliderThumbShape(
-                                  enabledThumbRadius: 6,
-                                ),
-                                overlayShape: const RoundSliderOverlayShape(
-                                  overlayRadius: 14,
-                                ),
-                                activeTrackColor: AppleColors.systemBlue,
-                                inactiveTrackColor:
-                                    Colors.white.withValues(alpha: 0.2),
-                                thumbColor: Colors.white,
-                              ),
-                              child: Slider(
-                                value: progress,
-                                onChanged: (v) {
-                                  if (controller.duration > Duration.zero) {
-                                    controller.seek(
-                                      Duration(
-                                        milliseconds:
-                                            (controller.duration.inMilliseconds * v)
-                                                .round(),
-                                      ),
-                                    );
-                                  }
-                                },
-                              ),
-                            ),
-                          ),
-                          Text(
-                            _fmt(controller.duration),
-                            style: const TextStyle(
-                              color: Colors.white54,
-                              fontSize: 11,
-                              fontFeatures: [FontFeature.tabularFigures()],
-                            ),
-                          ),
-                        ],
-                      ),
-                      if (!compact && (onOpenEpisodes != null || onOpenLines != null))
-                        Padding(
-                          padding: const EdgeInsets.only(top: 2),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              if (onOpenEpisodes != null)
-                                _CastPillButton(
-                                  label: '选集',
-                                  onTap: onOpenEpisodes!,
-                                ),
-                              if (onOpenEpisodes != null && onOpenLines != null)
-                                const SizedBox(width: 10),
-                              if (onOpenLines != null)
-                                _CastPillButton(
-                                  label: '切换线路',
-                                  onTap: onOpenLines!,
-                                ),
-                              const SizedBox(width: 10),
-                              Text(
-                                '电视音量 ${controller.volume}%',
-                                style: const TextStyle(
-                                  color: Colors.white38,
-                                  fontSize: 11,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
-                ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
+    );
+  }
+}
+
+class _RemoteActionChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _RemoteActionChip({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.selectionClick();
+        onTap();
+      },
+      child: Container(
+        height: 38,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(13),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.14),
+            width: 0.7,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: Colors.white),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -702,43 +1097,57 @@ class _CastPillButton extends StatelessWidget {
 class _RemoteCircleBtn extends StatelessWidget {
   final IconData icon;
   final String label;
+  final double size;
+  final bool enabled;
   final VoidCallback onTap;
 
   const _RemoteCircleBtn({
+    super.key,
     required this.icon,
     required this.label,
+    this.size = 42,
+    this.enabled = true,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: () {
-        HapticFeedback.selectionClick();
-        onTap();
-      },
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.11),
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: Colors.white.withValues(alpha: 0.14),
-                width: 0.8,
+      onTap: enabled
+          ? () {
+              HapticFeedback.selectionClick();
+              onTap();
+            }
+          : null,
+      child: Opacity(
+        opacity: enabled ? 1.0 : 0.34,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: size,
+              height: size,
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.11),
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.15),
+                  width: 0.8,
+                ),
+              ),
+              child: Icon(icon, color: Colors.white, size: size * 0.44),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white60,
+                fontSize: 10.5,
+                fontWeight: FontWeight.w500,
               ),
             ),
-            child: Icon(icon, color: Colors.white, size: 18),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            label,
-            style: const TextStyle(color: Colors.white54, fontSize: 10),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

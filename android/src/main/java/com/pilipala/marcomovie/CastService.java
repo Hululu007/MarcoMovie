@@ -90,6 +90,8 @@ final class CastService implements Closeable {
 
         void setMuted(boolean muted);
 
+        default void setSpeed(float speed) {}
+
         default void onStatusChanged(String message) {}
 
         default void onClosed() {}
@@ -725,6 +727,7 @@ final class CastService implements Closeable {
             return;
         }
         if ("Play".equalsIgnoreCase(action)) {
+            float speed = parseDlnaSpeed(args.get("Speed"));
             if (!mediaOpened && !currentUri.isEmpty()) {
                 mediaOpened = true;
                 bridge.openMedia(
@@ -735,6 +738,7 @@ final class CastService implements Closeable {
             } else {
                 bridge.resume();
             }
+            if (speed > 0f) bridge.setSpeed(speed);
             replySoap(out, NT_AV_TRANSPORT, "Play", "");
             return;
         }
@@ -936,6 +940,28 @@ final class CastService implements Closeable {
             return Math.max(0, (int) Math.round(Double.parseDouble(s) * 1000.0));
         } catch (NumberFormatException bad) {
             return -1;
+        }
+    }
+
+    static float parseDlnaSpeed(String raw) {
+        if (raw == null) return -1f;
+        String s = raw.trim();
+        if (s.isEmpty()) return -1f;
+        try {
+            int slash = s.indexOf('/');
+            float val;
+            if (slash > 0 && slash < s.length() - 1) {
+                float num = Float.parseFloat(s.substring(0, slash).trim());
+                float den = Float.parseFloat(s.substring(slash + 1).trim());
+                if (den <= 0f) return -1f;
+                val = num / den;
+            } else {
+                val = Float.parseFloat(s);
+            }
+            if (!Float.isFinite(val) || val <= 0f) return -1f;
+            return Math.max(0.5f, Math.min(3.0f, val));
+        } catch (NumberFormatException bad) {
+            return -1f;
         }
     }
 
@@ -1848,6 +1874,21 @@ final class CastService implements Closeable {
                                                         : android.media.AudioManager.ADJUST_UNMUTE,
                                                 android.media.AudioManager.FLAG_SHOW_UI);
                                     } catch (Exception ignored) {
+                                    }
+                                });
+                    }
+
+                    @Override
+                    public void setSpeed(float speed) {
+                        float clamped = Math.max(0.5f, Math.min(3.0f, speed));
+                        a.ui.post(
+                                () -> {
+                                    if (a.player != null) {
+                                        try {
+                                            a.player.setSpeed(clamped);
+                                            if (a.playerChrome != null) a.playerChrome.update();
+                                        } catch (Exception ignored) {
+                                        }
                                     }
                                 });
                     }

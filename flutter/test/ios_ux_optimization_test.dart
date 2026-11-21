@@ -441,25 +441,56 @@ void main() {
       await tester.pumpAndSettle();
       expect(selected?.id, 'uuid:mitv-01');
 
-      // 3. Active Casting Remote Stage renders controls cleanly
+      // 3. Active Half-Screen Casting Remote Stage renders full TV remote controls cleanly
       var exited = false;
+      var prevTapped = false;
+      var nextTapped = false;
+      var episodesTapped = false;
+      var linesTapped = false;
       await tester.pumpWidget(
         MaterialApp(
           theme: ThemeData.dark(),
           home: Scaffold(
-            body: IosCastingRemoteStage(
-              controller: controller,
-              episodeLabel: 'S01E01 · 百度网盘 1',
-              onBack: () {},
-              onSwitchDevice: () {},
-              onExitCast: () => exited = true,
+            body: Center(
+              child: SizedBox(
+                width: 390,
+                height: 428,
+                child: IosCastingRemoteStage(
+                  controller: controller,
+                  episodeLabel: 'S01E01 · 百度网盘 1',
+                  halfScreen: true,
+                  onBack: () {},
+                  onSwitchDevice: () {},
+                  onExitCast: () => exited = true,
+                  onPreviousEpisode: () => prevTapped = true,
+                  onNextEpisode: () => nextTapped = true,
+                  onOpenEpisodes: () => episodesTapped = true,
+                  onOpenLines: () => linesTapped = true,
+                ),
+              ),
             ),
           ),
         ),
       );
       await tester.pump();
       expect(find.byKey(const Key('ios-casting-remote-stage')), findsOneWidget);
+      expect(find.byKey(const Key('ios-cast-speed-strip')), findsOneWidget);
+      expect(find.byKey(const Key('ios-cast-volume-capsule')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('ios-cast-speed-1.5x')));
+      await tester.pump();
+      expect(controller.speed, 1.5);
+      await tester.tap(find.byKey(const Key('ios-cast-mute-toggle')));
+      await tester.pump();
+      expect(controller.muted, isTrue);
+      await tester.tap(find.byKey(const Key('ios-cast-prev-episode')));
+      await tester.tap(find.byKey(const Key('ios-cast-next-episode')));
+      await tester.tap(find.byKey(const Key('ios-cast-open-episodes')));
+      await tester.tap(find.byKey(const Key('ios-cast-open-lines')));
       await tester.tap(find.byKey(const Key('ios-cast-exit-button')));
+      expect(prevTapped, isTrue);
+      expect(nextTapped, isTrue);
+      expect(episodesTapped, isTrue);
+      expect(linesTapped, isTrue);
       expect(exited, isTrue);
     },
   );
@@ -543,6 +574,7 @@ void main() {
 
       String? capturedUri;
       String? capturedMeta;
+      String? capturedSpeed;
       String? capturedReferer;
       final mockTv = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       final mockUpstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -574,6 +606,8 @@ void main() {
           if (body.contains('SetAVTransportURI')) {
             capturedUri = CastController.extractXmlTag(body, 'CurrentURI');
             capturedMeta = CastController.extractXmlTag(body, 'CurrentURIMetaData');
+          } else if (body.contains('<u:Play')) {
+            capturedSpeed = CastController.extractXmlTag(body, 'Speed');
           }
           req.response.statusCode = 200;
           req.response.write('<s:Envelope><s:Body/></s:Envelope>');
@@ -623,6 +657,11 @@ void main() {
       final bytes = await utf8.decoder.bind(relayResp).join();
       expect(bytes, 'FAKE-MP4-STREAM');
       expect(capturedReferer, 'https://example.test/watch');
+
+      // Verify TV playback speed SOAP command (`Play` with `<Speed>1.5</Speed>`)
+      await controller.setSpeed(1.5);
+      expect(controller.speed, 1.5);
+      expect(capturedSpeed, '1.5');
 
       await controller.stopCasting();
     },

@@ -3037,6 +3037,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     setState(() => _normalSpeed = clamped);
     _player.setRate(clamped);
+    if (_castController.isCasting) {
+      unawaited(_castController.setSpeed(clamped));
+    }
     widget.storage.setPlaySpeed(clamped);
     final speedLabel = clamped.toString().replaceAll(RegExp(r'\.0$'), '');
     _showHud('倍速 ${speedLabel}x');
@@ -4165,10 +4168,23 @@ class _PlayerScreenState extends State<PlayerScreen>
                     color: Colors.black,
                   ),
                 if (showPortraitCompanion)
-                  SizedBox(
+                  AnimatedContainer(
                     key: const Key('ios-portrait-video-box'),
+                    duration: const Duration(milliseconds: 300),
+                    curve: Curves.easeOutCubic,
                     width: screenSize.width,
-                    height: screenSize.width * 9 / 16,
+                    height: _castController.isCasting
+                        ? math.min(
+                            math.max(
+                              (screenSize.height - viewPadding.top) * 0.54,
+                              376.0,
+                            ),
+                            math.max(
+                              screenSize.height - viewPadding.top - 180.0,
+                              360.0,
+                            ),
+                          )
+                        : screenSize.width * 9 / 16,
                     child: KeyedSubtree(
                       key: _playerStageKey,
                       child: PlayerInteractionLayers(
@@ -4310,13 +4326,28 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   controller: _castController,
                                   episodeLabel:
                                       '${_currentEpisode.name} · ${_currentLine.name}',
-                                  compact: true,
+                                  posterUrl: widget.video.poster,
+                                  halfScreen: true,
                                   onBack: () async {
                                     await _saveProgress(immediate: true);
                                     if (context.mounted) _exitPlayer();
                                   },
                                   onSwitchDevice: () => _handleCastTap(null),
                                   onExitCast: _handleExitCast,
+                                  onPreviousEpisode: _episodeIndex > 0
+                                      ? () => _stepEpisode(-1)
+                                      : null,
+                                  onNextEpisode: _episodeIndex <
+                                          _currentLine.episodes.length - 1
+                                      ? () => _stepEpisode(1)
+                                      : null,
+                                  onOpenEpisodes:
+                                      _currentLine.episodes.length > 1
+                                          ? _showEpisodesSheet
+                                          : null,
+                                  onOpenLines: _lines.length > 1
+                                      ? _showLinesSheet
+                                      : null,
                                 ),
                               ),
                           ],
@@ -4664,12 +4695,20 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   controller: _castController,
                                   episodeLabel:
                                       '${_currentEpisode.name} · ${_currentLine.name}',
+                                  posterUrl: widget.video.poster,
                                   onBack: () async {
                                     await _saveProgress(immediate: true);
                                     if (context.mounted) _exitPlayer();
                                   },
                                   onSwitchDevice: () => _handleCastTap(null),
                                   onExitCast: _handleExitCast,
+                                  onPreviousEpisode: _episodeIndex > 0
+                                      ? () => _stepEpisode(-1)
+                                      : null,
+                                  onNextEpisode: _episodeIndex <
+                                          _currentLine.episodes.length - 1
+                                      ? () => _stepEpisode(1)
+                                      : null,
                                   onOpenEpisodes: _showEpisodesSheet,
                                   onOpenLines: _lines.length > 1
                                       ? _showLinesSheet
@@ -4949,8 +4988,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                     const SizedBox(width: 8),
                     _CompanionActionChip(
                       icon: CupertinoIcons.speedometer,
-                      label: IosPlayerChrome.formatSpeedBadge(_normalSpeed),
-                      active: (_normalSpeed - 1.0).abs() > 0.01,
+                      label: IosPlayerChrome.formatSpeedBadge(
+                        _castController.isCasting
+                            ? _castController.speed
+                            : _normalSpeed,
+                      ),
+                      active: ((_castController.isCasting
+                                  ? _castController.speed
+                                  : _normalSpeed) -
+                              1.0)
+                          .abs() >
+                          0.01,
                       activeColor: palette.accent,
                       palette: palette,
                       onTap: () => _showSpeedSheet(),
