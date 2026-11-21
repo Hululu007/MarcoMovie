@@ -178,26 +178,26 @@ class ApplePalette {
 
   static const ApplePalette light = ApplePalette(
     isDark: false,
-    background: Color(0xFFF2F3F7),
-    canvas: Color(0xFFF2F3F7),
-    groupedPrimary: Color(0xFFFFFFFF),
-    groupedSecondary: Color(0xFFF6F7FB),
-    groupedTertiary: Color(0xFFE5E7EE),
+    background: Color(0xFFE9ECF2),
+    canvas: Color(0xFFE9ECF2),
+    groupedPrimary: Color(0xFFF8F9FC),
+    groupedSecondary: Color(0xFFF0F2F7),
+    groupedTertiary: Color(0xFFDFE3EC),
     fill: Color(0x18111318),
     fillStrong: Color(0x2B111318),
-    labelPrimary: Color(0xFF111318),
+    labelPrimary: Color(0xFF141821),
     labelSecondary: Color(0xFF4B5362),
-    labelTertiary: Color(0xFF7C8494),
+    labelTertiary: Color(0xFF767F90),
     separator: Color(0x1C000000),
-    glassBorder: Color(0x1A000000),
-    glassSolid: Color(0xFAFFFFFF),
+    glassBorder: Color(0x18000000),
+    glassSolid: Color(0xF5F7F8FC),
     systemBlue: Color(0xFF007AFF),
   );
 
   Color get accent => systemBlue;
   Color get hairline => separator;
   Color get navBarBg =>
-      isDark ? const Color(0xCC161618) : const Color(0xDCF7F7FA);
+      isDark ? const Color(0xCC161618) : const Color(0xE0EDF0F5);
 
   static bool isDarkOf(BuildContext context) {
     return Theme.of(context).brightness == Brightness.dark;
@@ -991,11 +991,11 @@ class AppleGlassSurface extends StatelessWidget {
                 builder: (context, strength, _) {
                   final s = strength.clamp(0.0, 1.0);
                   return CustomPaint(
-                    foregroundPainter: border == null
+                    foregroundPainter: border == null && isDark
                         ? _LiquidRimPainter(
                             shape: shape,
                             strength: 0.25 + 0.85 * s,
-                            lightMode: !isDark,
+                            lightMode: false,
                           )
                         : null,
                     child: Container(
@@ -1015,16 +1015,16 @@ class AppleGlassSurface extends StatelessWidget {
                                   effectiveColor.withValues(alpha: math.min(effectiveColor.a, .02)),
                                 ]
                               : [
-                                  Color.fromRGBO(255, 255, 255, (0.94 - 0.18 * s).clamp(0.70, 0.96)),
-                                  Color.fromRGBO(248, 250, 254, (0.88 - 0.18 * s).clamp(0.64, 0.92)),
+                                  Color.fromRGBO(249, 250, 253, (0.94 - 0.14 * s).clamp(0.76, 0.96)),
+                                  Color.fromRGBO(243, 245, 250, (0.90 - 0.14 * s).clamp(0.72, 0.93)),
                                 ],
                         ),
                         borderRadius: radius,
                         border: border ??
                             (!isDark
                                 ? Border.all(
-                                    color: Colors.black.withValues(alpha: 0.07),
-                                    width: 0.75,
+                                    color: Colors.white.withValues(alpha: 0.72),
+                                    width: 0.8,
                                   )
                                 : null),
                       ),
@@ -2986,8 +2986,8 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
   Widget build(BuildContext context) {
     final isDark = ApplePalette.isDarkOf(context);
     if (!isDark) {
-      // Refined iOS 26 Light Grouped alabaster canvas with subtle top atmospheric
-      // sheen so elevated pure-white cards & Liquid Glass pills pop clearly.
+      // Soft soothing warm pearl-mist canvas — easy on the eyes instead of
+      // stark clinical white, with subtle atmospheric top sheen.
       return RepaintBoundary(
         child: Stack(
           fit: StackFit.expand,
@@ -2998,11 +2998,11 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
                   colors: [
-                    Color(0xFFF4F5F9),
-                    Color(0xFFEDF0F6),
-                    Color(0xFFE7EBF3),
+                    Color(0xFFEDF0F5),
+                    Color(0xFFE8ECF3),
+                    Color(0xFFE2E6EF),
                   ],
-                  stops: [0.0, 0.45, 1.0],
+                  stops: [0.0, 0.48, 1.0],
                 ),
               ),
             ),
@@ -3018,8 +3018,8 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
                       center: Alignment(0.0, -0.4),
                       radius: 1.05,
                       colors: [
-                        Color(0x14007AFF),
-                        Color(0x0A5E5CE6),
+                        Color(0x16007AFF),
+                        Color(0x0D7C5CE6),
                         Color(0x00FFFFFF),
                       ],
                     ),
@@ -3031,7 +3031,7 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
               Positioned.fill(
                 child: IgnorePointer(
                   child: Opacity(
-                    opacity: 0.08,
+                    opacity: 0.04,
                     child: AuroraBackground(
                       key: const Key('apple-ambient-aurora'),
                       active: widget.animate && widget.showAmbientArtwork,

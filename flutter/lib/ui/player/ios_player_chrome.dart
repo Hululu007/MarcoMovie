@@ -23,7 +23,7 @@ class Ios26PlayerGlassMetrics {
   static const double scrubberTrackIdleHeightPt = 5.0;
   static const double scrubberTrackExpandedHeightPt = 10.0;
   static const double dockCapsuleRadiusPt = 20.0;
-  static const int maxPrimaryDockActions = 7;
+  static const int maxPrimaryDockActions = 8;
 }
 
 /// Unified iOS / iPadOS 26 Concentric Spatial Cinema Player HUD.
@@ -235,7 +235,10 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
         final horizInset =
             widget.isLandscape ? 18.0 : (isUltraCompact ? 10.0 : 14.0);
         final topInset = widget.isLandscape ? 10.0 : 10.0;
-        final bottomInset = widget.isLandscape ? 10.0 : 12.0;
+        final safeBottom = MediaQuery.paddingOf(context).bottom;
+        final bottomInset = widget.isLandscape
+            ? math.max(5.0, safeBottom * 0.28)
+            : math.max(10.0, safeBottom * 0.55);
 
         return SizedBox.expand(
           child: Stack(
@@ -278,6 +281,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
               ),
 
               SafeArea(
+                bottom: false,
                 child: Stack(
                   key: const Key('ios-player-chrome-root'),
                   fit: StackFit.expand,
@@ -335,7 +339,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                       child: Center(
                         child: ConstrainedBox(
                           constraints: BoxConstraints(
-                            maxWidth: widget.isLandscape ? 680.0 : 560.0,
+                            maxWidth: widget.isLandscape ? 736.0 : 560.0,
                           ),
                           child: _buildUnifiedBottomDeck(
                             width: width,
@@ -454,6 +458,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                   iconSize: 15.5,
                   gap: 6,
                   isUltraCompact: false,
+                  includeMore: true,
                   ios26Visual: ios26Visual,
                   reduceTransparency: reduceTransparency,
                   reduceMotion: reduceMotion,
@@ -857,81 +862,70 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
     required double iconSize,
     required double gap,
     required bool isUltraCompact,
+    bool includeMore = false,
     required bool ios26Visual,
     required bool reduceTransparency,
     required bool reduceMotion,
   }) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // 1. 投屏 (Cast)
+    final children = <Widget>[
+      // 1. 投屏 (Cast)
+      _buildTopCircleButton(
+        key: const Key('ios-player-cast-button'),
+        anchorKey: _castAnchorKey,
+        size: buttonSize,
+        iconSize: iconSize,
+        icon: widget.isCasting ? CupertinoIcons.tv_fill : CupertinoIcons.tv,
+        active: widget.isCasting,
+        activeTint: AppleColors.systemBlue,
+        semanticLabel: '投屏',
+        ios26Visual: ios26Visual,
+        reduceTransparency: reduceTransparency,
+        reduceMotion: reduceMotion,
+        onTap: () => _triggerAnchored(_castAnchorKey, widget.onCastTap, null),
+      ),
+      if (!isUltraCompact)
         _buildTopCircleButton(
-          key: const Key('ios-player-cast-button'),
-          anchorKey: _castAnchorKey,
+          key: const Key('ios-player-favorite-button'),
+          anchorKey: _favoriteAnchorKey,
           size: buttonSize,
           iconSize: iconSize,
-          icon: widget.isCasting ? CupertinoIcons.tv_fill : CupertinoIcons.tv,
-          active: widget.isCasting,
-          activeTint: AppleColors.systemBlue,
-          semanticLabel: '投屏',
+          icon: widget.isFavorite
+              ? CupertinoIcons.heart_fill
+              : CupertinoIcons.heart,
+          active: widget.isFavorite,
+          activeTint: AppleColors.systemPink,
+          semanticLabel: widget.isFavorite ? '取消收藏' : '收藏',
           ios26Visual: ios26Visual,
           reduceTransparency: reduceTransparency,
           reduceMotion: reduceMotion,
-          onTap: () => _triggerAnchored(_castAnchorKey, widget.onCastTap, null),
+          onTap: () => _triggerAnchored(
+            _favoriteAnchorKey,
+            widget.onFavoriteTap,
+            null,
+          ),
         ),
-        SizedBox(width: gap),
-
-        // 2. 收藏 (Favorite)
-        if (!isUltraCompact) ...[
-          _buildTopCircleButton(
-            key: const Key('ios-player-favorite-button'),
-            anchorKey: _favoriteAnchorKey,
-            size: buttonSize,
-            iconSize: iconSize,
-            icon: widget.isFavorite
-                ? CupertinoIcons.heart_fill
-                : CupertinoIcons.heart,
-            active: widget.isFavorite,
-            activeTint: AppleColors.systemPink,
-            semanticLabel: widget.isFavorite ? '取消收藏' : '收藏',
-            ios26Visual: ios26Visual,
-            reduceTransparency: reduceTransparency,
-            reduceMotion: reduceMotion,
-            onTap: () => _triggerAnchored(
-              _favoriteAnchorKey,
-              widget.onFavoriteTap,
-              null,
-            ),
+      if (!widget.isLive && !isUltraCompact)
+        _buildTopCircleButton(
+          key: const Key('ios-player-download-button'),
+          anchorKey: _downloadAnchorKey,
+          size: buttonSize,
+          iconSize: iconSize,
+          icon: widget.isDownloading
+              ? CupertinoIcons.arrow_down_circle_fill
+              : CupertinoIcons.arrow_down_circle,
+          active: widget.isDownloading,
+          activeTint: AppleColors.systemGreen,
+          semanticLabel: '下载',
+          ios26Visual: ios26Visual,
+          reduceTransparency: reduceTransparency,
+          reduceMotion: reduceMotion,
+          onTap: () => _triggerAnchored(
+            _downloadAnchorKey,
+            widget.onDownloadTap,
+            null,
           ),
-          SizedBox(width: gap),
-        ],
-
-        // 3. 下载 (Download — hidden for live streams)
-        if (!widget.isLive && !isUltraCompact) ...[
-          _buildTopCircleButton(
-            key: const Key('ios-player-download-button'),
-            anchorKey: _downloadAnchorKey,
-            size: buttonSize,
-            iconSize: iconSize,
-            icon: widget.isDownloading
-                ? CupertinoIcons.arrow_down_circle_fill
-                : CupertinoIcons.arrow_down_circle,
-            active: widget.isDownloading,
-            activeTint: AppleColors.systemGreen,
-            semanticLabel: '下载',
-            ios26Visual: ios26Visual,
-            reduceTransparency: reduceTransparency,
-            reduceMotion: reduceMotion,
-            onTap: () => _triggerAnchored(
-              _downloadAnchorKey,
-              widget.onDownloadTap,
-              null,
-            ),
-          ),
-          SizedBox(width: gap),
-        ],
-
-        // 4. 更多 (More)
+        ),
+      if (includeMore)
         _buildTopCircleButton(
           key: const Key('ios-player-more-button'),
           anchorKey: _moreAnchorKey,
@@ -951,6 +945,15 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
             widget.onMoreTap,
           ),
         ),
+    ];
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var i = 0; i < children.length; i++) ...[
+          if (i > 0) SizedBox(width: gap),
+          children[i],
+        ],
       ],
     );
   }
@@ -1197,6 +1200,19 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
           widget.onInteraction();
           widget.onFullscreenToggle();
         },
+      ),
+      _IosDockAction(
+        key: const Key('ios-player-more-button'),
+        id: 'more',
+        anchorKey: _moreAnchorKey,
+        icon: CupertinoIcons.ellipsis,
+        label: '更多',
+        active: widget.sleepTimerActive,
+        onTap: () => _triggerAnchored(
+          _moreAnchorKey,
+          widget.onMoreAnchoredTap,
+          widget.onMoreTap,
+        ),
       ),
     ];
 

@@ -190,11 +190,13 @@ class _FavoritePostcardAnimationWidgetState
                 cardScale = 1.02 - 0.02 * math.sin(p * math.pi);
                 cardRotateZ = -0.025 + 0.04 * p;
               } else {
-                // Fly along an elevated quadratic Bezier curve into Dynamic Island
+                // Fly along an elevated quadratic Bezier curve directly into
+                // the lower lip of the physical Dynamic Island so the card
+                // remains clearly visible before the island swallows it.
                 final p = Curves.easeInOutCubic
                     .transform(((t - 0.29) / 0.18).clamp(0.0, 1.0));
                 final p0 = Offset(screen.width / 2, screen.height * 0.46);
-                final p2 = islandRect.center;
+                final p2 = Offset(islandRect.center.dx, islandRect.bottom + 6);
                 final p1 = Offset(
                   screen.width * 0.68,
                   math.min(p0.dy, p2.dy) + (p0.dy - p2.dy) * 0.28,
@@ -594,13 +596,18 @@ class _DynamicIslandFeedbackPill extends StatelessWidget {
     final screen = MediaQuery.sizeOf(context);
     final p = expandProgress.clamp(0.0, 1.15);
     final clamped = expandProgress.clamp(0.0, 1.0);
-    final targetW = math.min(286.0, screen.width - 28.0);
-    const targetH = 54.0;
+    // Expand smoothly downward & outward from the physical hardware Dynamic
+    // Island so the content row sits strictly BELOW the TrueDepth cutout
+    // (top = islandRect.height + 6) and is 100% unobstructed on real devices.
+    final targetW = math.min(312.0, screen.width - 24.0);
+    final targetH = islandRect.height + 58.0;
     final currentW = islandRect.width + (targetW - islandRect.width) * p;
     final currentH = islandRect.height + (targetH - islandRect.height) * p;
     final left = (islandRect.center.dx - currentW / 2)
-        .clamp(14.0, screen.width - currentW - 14.0);
+        .clamp(12.0, screen.width - currentW - 12.0);
     final top = islandRect.top;
+    final cornerRadius =
+        (islandRect.height / 2) + (28.0 - islandRect.height / 2) * clamped;
 
     final thumbPlaceholder = Container(
       color: const Color(0xFF23252C),
@@ -612,11 +619,11 @@ class _DynamicIslandFeedbackPill extends StatelessWidget {
       left: left,
       top: top,
       width: currentW.clamp(islandRect.width, screen.width - 20),
-      height: currentH.clamp(islandRect.height, 68),
+      height: currentH.clamp(islandRect.height, islandRect.height + 72),
       child: Container(
         decoration: BoxDecoration(
           color: const Color(0xFF000000),
-          borderRadius: BorderRadius.circular(currentH / 2),
+          borderRadius: BorderRadius.circular(cornerRadius),
           border: Border.all(
             color: Colors.white.withValues(alpha: 0.14 * clamped),
             width: 0.7,
@@ -624,22 +631,23 @@ class _DynamicIslandFeedbackPill extends StatelessWidget {
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: 0.45 * clamped),
-              blurRadius: 22,
-              offset: const Offset(0, 8),
+              blurRadius: 24,
+              offset: const Offset(0, 10),
             ),
           ],
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 10),
+        padding: EdgeInsets.fromLTRB(14, islandRect.height + 4, 14, 10),
         child: Opacity(
           opacity: ((clamped - 0.15) / 0.85).clamp(0.0, 1.0),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Miniature 4:3 postcard thumbnail inside the Dynamic Island
+              // Miniature 4:3 postcard thumbnail strictly below the hardware island
               ClipRRect(
                 borderRadius: BorderRadius.circular(6),
                 child: Container(
-                  width: 36,
-                  height: 27,
+                  width: 40,
+                  height: 30,
                   padding: const EdgeInsets.all(1.5),
                   color: const Color(0xFFFAF6EE),
                   child: ClipRRect(
@@ -661,7 +669,7 @@ class _DynamicIslandFeedbackPill extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(width: 9),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -674,34 +682,35 @@ class _DynamicIslandFeedbackPill extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: Colors.white60,
-                        fontSize: 10,
+                        fontSize: 10.5,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
+                    const SizedBox(height: 1.5),
                     Text(
                       title.isNotEmpty ? title : '已加入我的片库',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Colors.white,
-                        fontSize: 12.5,
+                        fontSize: 13,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 8),
               Container(
-                width: 26,
-                height: 26,
+                width: 28,
+                height: 28,
                 decoration: BoxDecoration(
-                  color: AppleColors.systemPink.withValues(alpha: 0.2),
+                  color: AppleColors.systemPink.withValues(alpha: 0.22),
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(
                   CupertinoIcons.heart_fill,
-                  size: 13.5,
+                  size: 14.5,
                   color: AppleColors.systemPink,
                 ),
               ),

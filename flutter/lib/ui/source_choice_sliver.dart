@@ -61,6 +61,8 @@ class SourceChoiceSliver extends StatelessWidget {
   );
 
   Widget _card(BuildContext context, CmsSite site) {
+    final palette = ApplePalette.of(context);
+    final isDark = palette.isDark;
     final selected = site.key == selectedKey;
     final isSupported = site.supported;
     final color = isSupported ? badgeColor(site) : const Color(0xFF8E8E93);
@@ -87,26 +89,47 @@ class SourceChoiceSliver extends StatelessWidget {
               }
             },
             child: Opacity(
-              opacity: isSupported ? 1.0 : 0.52,
+              opacity: isSupported ? 1.0 : 0.54,
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10.5),
                 decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: selected
-                        ? const [Color(0x4A0A84FF), Color(0x280055B3)]
-                        : (isSupported
-                            ? const [Color(0x36FFFFFF), Color(0x1E1C1C24)]
-                            : const [Color(0x18FFFFFF), Color(0x0E1C1C24)]),
-                  ),
+                  gradient: isDark
+                      ? LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: selected
+                              ? const [Color(0x4A0A84FF), Color(0x280055B3)]
+                              : (isSupported
+                                  ? const [Color(0x36FFFFFF), Color(0x1E1C1C24)]
+                                  : const [Color(0x18FFFFFF), Color(0x0E1C1C24)]),
+                        )
+                      : LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: selected
+                              ? const [Color(0xFFEAF3FF), Color(0xFFDCEBFF)]
+                              : (isSupported
+                                  ? const [Color(0xFFF9FAFD), Color(0xFFF2F4FA)]
+                                  : const [Color(0xFFEAECEF), Color(0xFFE3E6EC)]),
+                        ),
                   borderRadius: BorderRadius.circular(18),
                   border: Border.all(
                     color: selected
-                        ? const Color(0xCC3E9BFF)
-                        : (isSupported ? const Color(0x36FFFFFF) : const Color(0x1AFFFFFF)),
-                    width: selected ? 1.2 : 0.65,
+                        ? (isDark ? const Color(0xCC3E9BFF) : const Color(0xFF007AFF))
+                        : (isDark
+                            ? (isSupported ? const Color(0x36FFFFFF) : const Color(0x1AFFFFFF))
+                            : Colors.black.withValues(alpha: isSupported ? 0.075 : 0.045)),
+                    width: selected ? 1.25 : 0.75,
                   ),
+                  boxShadow: isDark
+                      ? null
+                      : [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: selected ? 0.08 : 0.045),
+                            blurRadius: selected ? 14 : 10,
+                            offset: const Offset(0, 3),
+                          ),
+                        ],
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,

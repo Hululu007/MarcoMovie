@@ -99,9 +99,14 @@ private enum MarcoLiquidGlassSupport {
       style = .unspecified
     }
     interfaceStyle = style
+    let winBg: UIColor = isEffectiveDark
+      ? UIColor.black
+      : UIColor(red: 0.914, green: 0.925, blue: 0.949, alpha: 1.0)
     for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
       for win in scene.windows {
         win.overrideUserInterfaceStyle = style
+        win.backgroundColor = winBg
+        win.rootViewController?.view.backgroundColor = winBg
         restyleNativeViews(in: win, style: style)
         updateNativeGlassIntensity(in: win, intensity: glassIntensity)
         if let marcoVC = win.rootViewController as? MarcoFlutterViewController {

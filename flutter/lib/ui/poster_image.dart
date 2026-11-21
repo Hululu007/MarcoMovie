@@ -2591,12 +2591,14 @@ class PosterLoader {
           }
           // Fallback: Douban Mobile Rexxar subject search (resolves recent
           // 2025/2026 dramas where `subject_suggest` returns `[]`).
+          var rexxarMatchedVariant = false;
+          for (final rexxarEndpoint in <String>[
+            'https://m.douban.com/rexxar/api/v2/search/weixin?q=${Uri.encodeQueryComponent(variant)}&count=6',
+            'https://m.douban.com/rexxar/api/v2/search/subjects?type=movie&q=${Uri.encodeQueryComponent(variant)}',
+          ]) {
           HttpClientRequest? rexxarReq;
           try {
-            final q = Uri.encodeQueryComponent(variant);
-            final rexxarUri = Uri.parse(
-              'https://m.douban.com/rexxar/api/v2/search/subjects?type=movie&q=$q',
-            );
+            final rexxarUri = Uri.parse(rexxarEndpoint);
             rexxarReq = await _client
                 .getUrl(rexxarUri)
                 .timeout(const Duration(milliseconds: 2400));
@@ -2658,7 +2660,10 @@ class PosterLoader {
                       addedRexxar = true;
                     }
                   }
-                  if (addedRexxar) break;
+                  if (addedRexxar) {
+                    rexxarMatchedVariant = true;
+                    break;
+                  }
                 }
               }
             } else {
@@ -2669,6 +2674,9 @@ class PosterLoader {
               rexxarReq?.abort();
             } catch (_) {}
           }
+          if (rexxarMatchedVariant) break;
+          }
+          if (rexxarMatchedVariant) break;
         }
       }(),
 

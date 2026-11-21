@@ -307,7 +307,8 @@ void main() {
       expect(dockRect.contains(lockRect.center), isFalse);
       expect(lockRect.center.dy, closeTo(195.0, 28.0));
 
-      // Req 5: Top-right has Cast, Favorite, Download, More in order
+      // Req 5 & Round 2 Feedback 3: Top-right has Cast, Favorite, Download in order,
+      // while More sits cleanly inside the lowered bottom toolbar dock.
       final castRect = tester.getRect(
         find.byKey(const Key('ios-player-cast-button')),
       );
@@ -322,7 +323,8 @@ void main() {
       );
       expect(castRect.right, lessThan(favRect.left));
       expect(favRect.right, lessThan(dlRect.left));
-      expect(dlRect.right, lessThan(moreRect.left));
+      expect(dockRect.contains(moreRect.center), isTrue);
+      expect(dockRect.bottom, greaterThan(375.0));
 
       // Req 4: Tapping More sends anchorRect to native Liquid Glass popover
       await tester.tap(find.byKey(const Key('ios-player-more-button')));
@@ -615,9 +617,9 @@ void main() {
       expect(storage.appThemeMode, 'light');
       expect(AppleTheme.fromPref(storage.appThemeMode), ThemeMode.light);
 
-      // Verify ApplePalette resolves crisp grouped alabaster canvas + pure white cards in light mode & true black in dark mode
-      expect(ApplePalette.light.background, const Color(0xFFF2F3F7));
-      expect(ApplePalette.light.groupedPrimary, const Color(0xFFFFFFFF));
+      // Verify ApplePalette resolves soft warm pearl-mist canvas + pearl cards in light mode & true black in dark mode
+      expect(ApplePalette.light.background, const Color(0xFFE9ECF2));
+      expect(ApplePalette.light.groupedPrimary, const Color(0xFFF8F9FC));
       expect(ApplePalette.dark.background, const Color(0xFF000000));
 
       // Verify IosNativeSlider responds to tap on track (fixes hard-to-tap bug!)
@@ -738,8 +740,9 @@ void main() {
     'Real-device polish regressions: Light Mode contrast, Douban Rexxar credits items schema, frosted portrait companion, and HUD stays visible while popover is open',
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     (tester) async {
-      // 1. Light Mode palette & AppleGroupedTile render dark legible ink on light alabaster canvas
-      expect(ApplePalette.light.background.computeLuminance(), greaterThan(0.85));
+      // 1. Soft pearl Light Mode palette & AppleGroupedTile render dark legible ink on soothing pearl canvas
+      expect(ApplePalette.light.background.computeLuminance(), greaterThan(0.75));
+      expect(ApplePalette.light.background.computeLuminance(), lessThan(0.92));
       expect(ApplePalette.light.labelPrimary.computeLuminance(), lessThan(0.05));
       await tester.pumpWidget(
         MaterialApp(

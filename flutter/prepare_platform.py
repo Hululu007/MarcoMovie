@@ -214,14 +214,16 @@ final class NetdiskWebAuthController: UIViewController, WKNavigationDelegate, WK
     let nav = UINavigationController(rootViewController: vc)
     nav.modalPresentationStyle = .pageSheet
     nav.presentationController?.delegate = vc
-    nav.overrideUserInterfaceStyle = .dark
+    nav.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     host.present(nav, animated: true, completion: nil)
   }
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    overrideUserInterfaceStyle = .dark
-    view.backgroundColor = UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+    overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    view.backgroundColor = MarcoLiquidGlassSupport.isEffectiveDark
+      ? UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+      : UIColor.systemGroupedBackground
     switch driveKey {
     case "baidu":
       navigationItem.title = "百度网盘登录授权"

@@ -611,34 +611,53 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
     final availableSiteCount =
         snap.visibleSupportedSites.where((s) => s.supported).length;
 
+    final searchPalette = ApplePalette.of(context);
+    final isDarkSearch = searchPalette.isDark;
     return CupertinoPageScaffold(
       resizeToAvoidBottomInset: false,
-      backgroundColor: const Color(0xFF07070A),
+      backgroundColor: searchPalette.background,
       child: Material(
         type: MaterialType.transparency,
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Full-bleed cinema ambient background glow (A).
+            // Full-bleed ambient background glow adaptive to Light / Dark Mode.
             IgnorePointer(
               child: DecoratedBox(
                 decoration: BoxDecoration(
-                  gradient: RadialGradient(
-                    center: const Alignment(0, -1.05),
-                    radius: 1.15,
-                    colors: isPriv
-                        ? const [
-                            Color(0x369B7BFF),
-                            Color(0x146E4AE0),
-                            Color(0xFF07070A),
-                          ]
-                        : const [
-                            Color(0x2AE89B5B),
-                            Color(0x142A68C8),
-                            Color(0xFF07070A),
-                          ],
-                    stops: const [0.0, 0.42, 1.0],
-                  ),
+                  gradient: isDarkSearch
+                      ? RadialGradient(
+                          center: const Alignment(0, -1.05),
+                          radius: 1.15,
+                          colors: isPriv
+                              ? const [
+                                  Color(0x369B7BFF),
+                                  Color(0x146E4AE0),
+                                  Color(0xFF07070A),
+                                ]
+                              : const [
+                                  Color(0x2AE89B5B),
+                                  Color(0x142A68C8),
+                                  Color(0xFF07070A),
+                                ],
+                          stops: const [0.0, 0.42, 1.0],
+                        )
+                      : LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: isPriv
+                              ? const [
+                                  Color(0xFFEDE8F6),
+                                  Color(0xFFE9EBF2),
+                                  Color(0xFFE3E6F0),
+                                ]
+                              : const [
+                                  Color(0xFFEDF0F5),
+                                  Color(0xFFE8ECF3),
+                                  Color(0xFFE2E6EF),
+                                ],
+                          stops: const [0.0, 0.48, 1.0],
+                        ),
                 ),
               ),
             ),

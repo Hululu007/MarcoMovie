@@ -135,7 +135,7 @@ class MarcoMovieApp extends StatelessWidget {
               brightness: Brightness.light,
               primaryColor: ApplePalette.light.accent,
               scaffoldBackgroundColor: ApplePalette.light.background,
-              barBackgroundColor: const Color(0xDCF7F7FA),
+              barBackgroundColor: ApplePalette.light.navBarBg,
               textTheme: CupertinoTextThemeData(
                 primaryColor: ApplePalette.light.labelPrimary,
                 textStyle: TextStyle(
@@ -212,10 +212,10 @@ class MarcoMovieApp extends StatelessWidget {
                     systemNavigationBarColor: AppleColors.background,
                     systemNavigationBarIconBrightness: Brightness.light,
                   )
-                : const SystemUiOverlayStyle(
+                : SystemUiOverlayStyle(
                     statusBarBrightness: Brightness.light,
                     statusBarIconBrightness: Brightness.dark,
-                    systemNavigationBarColor: Color(0xFFFFFFFF),
+                    systemNavigationBarColor: ApplePalette.light.background,
                     systemNavigationBarIconBrightness: Brightness.dark,
                   );
             final wrapped = (!kIsWeb &&

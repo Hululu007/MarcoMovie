@@ -212,14 +212,25 @@ class CastAvatarService {
         },
       ));
     } else if (host.endsWith('bcebos.com')) {
+      final httpsUri = uri.replace(scheme: 'https');
       attempts.add((
-        uri: uri.replace(scheme: 'https'),
+        uri: httpsUri,
         headers: {
           HttpHeaders.userAgentHeader: _mobileUa,
           HttpHeaders.refererHeader: 'https://baike.baidu.com/',
-          HttpHeaders.acceptHeader: 'image/jpeg,image/png,image/*,*/*;q=0.8',
+          HttpHeaders.acceptHeader: 'image/webp,image/jpeg,image/png,image/*,*/*;q=0.8',
         },
       ));
+      if (httpsUri.hasQuery) {
+        attempts.add((
+          uri: httpsUri.replace(query: ''),
+          headers: {
+            HttpHeaders.userAgentHeader: _mobileUa,
+            HttpHeaders.refererHeader: 'https://baike.baidu.com/',
+            HttpHeaders.acceptHeader: 'image/jpeg,image/png,image/*,*/*;q=0.8',
+          },
+        ));
+      }
     } else {
       attempts.add((
         uri: uri,
@@ -335,10 +346,10 @@ class CastAvatarService {
       if (u.endsWith('.webp')) {
         u = '${u.substring(0, u.length - 5)}.jpg';
       }
-    } else if (lower.contains('bkimg.cdn.bcebos.com/pic/')) {
-      final qIdx = u.indexOf('?');
-      final base = qIdx > 0 ? u.substring(0, qIdx) : u;
-      u = '$base?x-bce-process=image/resize,w_280,m_lfit/format,jpg';
+    } else if (lower.contains('bcebos.com')) {
+      if (u.startsWith('http://')) {
+        u = u.replaceFirst('http://', 'https://');
+      }
     }
     return u;
   }
@@ -451,14 +462,33 @@ class CastAvatarService {
     return merged;
   }
 
-  /// Resolves Douban subject ID using `m.douban.com/rexxar/api/v2/search/subjects`
-  /// first (covers 2025/2026 dramas where `subject_suggest` returns `[]`), with
-  /// fallback to `movie.douban.com/j/subject_suggest`.
+  /// Resolves Douban subject ID using `m.douban.com/rexxar/api/v2/search/weixin`
+  /// first (reliable 200 OK even when `search/subjects` rate-limits with 403),
+  /// then `search/subjects`, then `movie.douban.com/j/subject_suggest`.
   static Future<({String id, String kind})?> _lookupDoubanSubject(
     String title,
     String year,
   ) async {
-    // 1. Mobile Rexxar subject search (much higher hit rate for recent dramas)
+    // 1. Mobile Rexxar weixin subject search (high hit rate & low rate-limit)
+    final weixinUri = Uri.https(
+      'm.douban.com',
+      '/rexxar/api/v2/search/weixin',
+      {'q': title, 'count': '6'},
+    );
+    final weixinText = await _getJsonText(
+      weixinUri,
+      referer: 'https://m.douban.com/',
+    );
+    if (weixinText != null && weixinText.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(weixinText);
+        final items = _extractRexxarSearchItems(decoded);
+        final match = _pickBestRexxarSubject(items, title, year);
+        if (match != null) return match;
+      } catch (_) {}
+    }
+
+    // 2. Fallback: Mobile Rexxar subjects search
     final rexxarUri = Uri.https(
       'm.douban.com',
       '/rexxar/api/v2/search/subjects',

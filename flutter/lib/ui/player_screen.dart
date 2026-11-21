@@ -4713,20 +4713,20 @@ class _PlayerScreenState extends State<PlayerScreen>
     final isDark = palette.isDark;
     final glassCardBg = isDark
         ? Colors.white.withValues(alpha: 0.085)
-        : Colors.white.withValues(alpha: 0.58);
+        : const Color(0x96F8F9FC);
     final glassCardBorder = isDark
         ? Colors.white.withValues(alpha: 0.16)
-        : Colors.white.withValues(alpha: 0.82);
+        : Colors.white.withValues(alpha: 0.62);
     final glassChipBg = isDark
         ? Colors.white.withValues(alpha: 0.09)
-        : Colors.white.withValues(alpha: 0.52);
+        : const Color(0xA4F8F9FC);
 
     return ClipRect(
       key: const Key('ios-portrait-companion-sheet'),
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // Base poster-tinted frosted glass backdrop (渐变毛玻璃质感)
+          // Base poster-tinted frosted glass backdrop (柔和渐变毛玻璃质感)
           DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
@@ -4739,9 +4739,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                         Color(0xFF090A0F),
                       ]
                     : const [
-                        Color(0xFFDDE3F0),
-                        Color(0xFFE9EDF6),
-                        Color(0xFFF1F3F8),
+                        Color(0xFFCCD5E6),
+                        Color(0xFFD9E0EC),
+                        Color(0xFFE3E7F0),
                       ],
               ),
             ),
@@ -4751,7 +4751,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             Positioned.fill(
               child: IgnorePointer(
                 child: Opacity(
-                  opacity: isDark ? 0.42 : 0.34,
+                  opacity: isDark ? 0.44 : 0.58,
                   child: ImageFiltered(
                     imageFilter: ImageFilter.blur(
                       sigmaX: 44,
@@ -4774,8 +4774,8 @@ class _PlayerScreenState extends State<PlayerScreen>
             child: IgnorePointer(
               child: BackdropFilter(
                 filter: ImageFilter.blur(
-                  sigmaX: _storageReduceTransparency ? 0.0 : 26.0,
-                  sigmaY: _storageReduceTransparency ? 0.0 : 26.0,
+                  sigmaX: _storageReduceTransparency ? 0.0 : 28.0,
+                  sigmaY: _storageReduceTransparency ? 0.0 : 28.0,
                 ),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
@@ -4789,11 +4789,11 @@ class _PlayerScreenState extends State<PlayerScreen>
                               Color(0xF0090A0F),
                             ]
                           : const [
-                              Color(0xB0DCE2F0),
-                              Color(0xD4E8ECF5),
-                              Color(0xEAF0F2F8),
+                              Color(0x88CED7E8),
+                              Color(0xB5D9DFEC),
+                              Color(0xD8E3E7F0),
                             ],
-                      stops: const [0.0, 0.38, 1.0],
+                      stops: const [0.0, 0.42, 1.0],
                     ),
                   ),
                 ),
@@ -5122,60 +5122,78 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                 ],
                 const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (var i = 0; i < episodes.length; i++)
-                      GestureDetector(
-                        key: Key('ios-portrait-episode-$i'),
-                        onTap: () {
-                          if (i == _episodeIndex) return;
-                          HapticFeedback.selectionClick();
-                          _failedLinesForEpisode.clear();
-                          _saveProgress(immediate: true, syncImmediate: false);
-                          setState(() => _episodeIndex = i);
-                          _openCurrentEpisode(resumeMs: 0);
-                        },
-                        child: Container(
-                          constraints: const BoxConstraints(
-                            minWidth: 68,
-                            maxWidth: 164,
-                          ),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 9,
-                          ),
-                          decoration: BoxDecoration(
-                            color: i == _episodeIndex
-                                ? palette.accent
-                                : glassChipBg,
-                            borderRadius: BorderRadius.circular(11),
-                            border: Border.all(
-                              color: i == _episodeIndex
-                                  ? palette.accent
-                                  : glassCardBorder,
-                              width: 0.85,
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final maxNameLen = episodes.fold<int>(
+                      0,
+                      (prev, ep) => math.max(prev, ep.name.trim().length),
+                    );
+                    const gap = 8.0;
+                    final cols = maxNameLen <= 5
+                        ? (constraints.maxWidth >= 420 ? 6 : 5)
+                        : (maxNameLen <= 8
+                            ? (constraints.maxWidth >= 420 ? 4 : 3)
+                            : (constraints.maxWidth >= 540 ? 3 : 2));
+                    final cellWidth = math.max(
+                      52.0,
+                      (constraints.maxWidth - gap * (cols - 1)) / cols,
+                    );
+                    return Wrap(
+                      spacing: gap,
+                      runSpacing: gap,
+                      children: [
+                        for (var i = 0; i < episodes.length; i++)
+                          GestureDetector(
+                            key: Key('ios-portrait-episode-$i'),
+                            onTap: () {
+                              if (i == _episodeIndex) return;
+                              HapticFeedback.selectionClick();
+                              _failedLinesForEpisode.clear();
+                              _saveProgress(
+                                immediate: true,
+                                syncImmediate: false,
+                              );
+                              setState(() => _episodeIndex = i);
+                              _openCurrentEpisode(resumeMs: 0);
+                            },
+                            child: Container(
+                              width: cellWidth,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 9,
+                              ),
+                              decoration: BoxDecoration(
+                                color: i == _episodeIndex
+                                    ? palette.accent
+                                    : glassChipBg,
+                                borderRadius: BorderRadius.circular(11),
+                                border: Border.all(
+                                  color: i == _episodeIndex
+                                      ? palette.accent
+                                      : glassCardBorder,
+                                  width: 0.85,
+                                ),
+                              ),
+                              child: Text(
+                                episodes[i].name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: i == _episodeIndex
+                                      ? Colors.white
+                                      : palette.labelPrimary,
+                                  fontSize: 12.5,
+                                  fontWeight: i == _episodeIndex
+                                      ? FontWeight.w700
+                                      : FontWeight.w500,
+                                ),
+                              ),
                             ),
                           ),
-                          child: Text(
-                            episodes[i].name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: i == _episodeIndex
-                                  ? Colors.white
-                                  : palette.labelPrimary,
-                              fontSize: 12.5,
-                              fontWeight: i == _episodeIndex
-                                  ? FontWeight.w700
-                                  : FontWeight.w500,
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
+                      ],
+                    );
+                  },
                 ),
               ],
             ),

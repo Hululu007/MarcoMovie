@@ -3,7 +3,7 @@ import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
-import 'package:flutter/material.dart' show Colors, Material, MaterialType;
+import 'package:flutter/material.dart' show Colors, Material;
 import '../core/danmu/danmu_prefs.dart';
 import '../core/ohos_runtime.dart';
 import 'apple_theme.dart';
@@ -363,7 +363,7 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
                   decoration: BoxDecoration(
                     color: ApplePalette.isDarkOf(context)
                         ? const Color(0xEB0A0A0D)
-                        : const Color(0xF2FFFFFF),
+                        : const Color(0xF2EDF0F5),
                     border: Border(
                       bottom: BorderSide(
                         color: ApplePalette.of(context).separator,
@@ -417,11 +417,10 @@ class IosSettingsScaffold extends StatelessWidget {
   Widget build(BuildContext context) {
     final mediaPadding = MediaQuery.paddingOf(context);
     final p = ApplePalette.of(context);
+    final bgColor = p.isDark ? const Color(0xFF000000) : p.canvas;
     return Material(
-      type: MaterialType.transparency,
-      child: ColoredBox(
-        color: p.isDark ? const Color(0xFF000000) : p.canvas,
-        child: Column(
+      color: bgColor,
+      child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             DecoratedBox(
@@ -436,9 +435,9 @@ class IosSettingsScaffold extends StatelessWidget {
                           Color(0x0008080A),
                         ]
                       : const [
-                          Color(0xFAFFFFFF),
-                          Color(0xE8F5F6F8),
-                          Color(0x00F5F6F8),
+                          Color(0xFAEDF0F5),
+                          Color(0xE8E9ECF2),
+                          Color(0x00E9ECF2),
                         ],
                   stops: const [0.0, 0.78, 1.0],
                 ),
@@ -523,7 +522,6 @@ class IosSettingsScaffold extends StatelessWidget {
             ),
           ],
         ),
-      ),
     );
   }
 }
@@ -688,7 +686,7 @@ class IosSettingsGroup extends StatelessWidget {
         final s = strength.clamp(0.0, 1.0);
         final cardBg = p.isDark
             ? Color.fromRGBO(28, 28, 30, (0.98 - 0.30 * s).clamp(0.66, 0.98))
-            : Color.fromRGBO(255, 255, 255, (0.99 - 0.16 * s).clamp(0.82, 0.99));
+            : Color.fromRGBO(248, 249, 252, (0.98 - 0.14 * s).clamp(0.84, 0.99));
         final borderAlpha = p.isDark ? (0.10 + 0.18 * s) : (0.06 + 0.08 * s);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,

@@ -423,8 +423,16 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         decoration: BoxDecoration(
           color: usesWindowsAppearance(context)
               ? winMuted(context).withValues(alpha: .08)
-              : const Color(0xFF2C2C2E),
+              : (ApplePalette.isDarkOf(context)
+                  ? const Color(0xFF2C2C2E)
+                  : ApplePalette.of(context).groupedSecondary),
           borderRadius: BorderRadius.circular(10),
+          border: ApplePalette.isDarkOf(context)
+              ? null
+              : Border.all(
+                  color: Colors.black.withValues(alpha: 0.08),
+                  width: 0.6,
+                ),
         ),
       ),
     );
@@ -692,14 +700,18 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                               minimumSize: const Size(0, 28),
                               color: i == _selectedLanHostIndex
                                   ? AppleColors.systemBlue
-                                  : const Color(0xFF2C2C2E),
+                                  : (ApplePalette.isDarkOf(context)
+                                      ? const Color(0xFF2C2C2E)
+                                      : ApplePalette.of(context).fill),
                               borderRadius: BorderRadius.circular(999),
                               onPressed: () =>
                                   setState(() => _selectedLanHostIndex = i),
                               child: Text(
                                 _lanHosts[i],
                                 style: TextStyle(
-                                  color: Colors.white,
+                                  color: i == _selectedLanHostIndex
+                                      ? Colors.white
+                                      : ApplePalette.of(context).labelPrimary,
                                   fontSize: 12,
                                 ),
                               ),
@@ -714,7 +726,9 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                         vertical: 7,
                       ),
                       minimumSize: const Size(0, 32),
-                      color: const Color(0xFF2C2C2E),
+                      color: ApplePalette.isDarkOf(context)
+                          ? const Color(0xFF2C2C2E)
+                          : ApplePalette.of(context).fill,
                       borderRadius: BorderRadius.circular(999),
                       onPressed: () {
                         Clipboard.setData(ClipboardData(text: receiverUrl));
