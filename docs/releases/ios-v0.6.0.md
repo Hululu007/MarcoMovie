@@ -29,11 +29,11 @@
 
 ## 包信息与构建记录
 
-- **未签名 IPA（iPhone / iPad 通用）**：`MarcoMovie-0.6.0-ios-iphone-ipad-unsigned.ipa`（更新兼容别名 `MarcoMovie-0.6.0-ios-unsigned.ipa`），待 CI 构建完成后补充精确字节数与 SHA-256。
-- **对应源码包**：`MarcoMovie-ios-v0.6.0-source.zip`，待打包后补充精确字节数与 SHA-256。
-- **构建提交与 CI 记录**：待 `main` 流水线完成后填入精确提交与工作流运行链接。
+- **未签名 IPA（iPhone / iPad 通用）**：`MarcoMovie-0.6.0-ios-iphone-ipad-unsigned.ipa`（`63233471` B，更新兼容别名 `MarcoMovie-0.6.0-ios-unsigned.ipa`），SHA-256：`9b85f09f576db844882aef23215e6eabcb560829e423b6567d3f6cccfa1f167e`。
+- **对应源码包**：`MarcoMovie-ios-v0.6.0-source.zip`（`10614440` B），SHA-256：`1f801d5ca4063720073f8277058c119548326b423aea4e73616000a6dc6c6b7f`。
+- **构建提交与 CI 记录**：`26fc68e39483220bc3a290536e9c14e074bdd832`。[iOS / iPadOS 原生构建与全量测试（Job 136914731478 · Run 44926472921）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44926472921/job/136914731478) / [公开守卫与离线校验（Job 136913550751）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44926472921/job/136913550751) / [Public content checks（44926472866）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44926472866) / [跨端源回归（44926472855）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44926472855)。
 
 ## 验证范围与已知限制
 
-- **已完成真机与自动化校验**：本轮各项核心视觉与交互改动（横竖屏播放页 HUD、全能签自签局域网投屏与小米电视端联动、半屏遥控器、沉浸式首页与发现页板块/动效、浅色/深色对比度、收藏明信片与灵动岛提示）已在物理 iPhone 真机经多轮实测迭代；最终零拖影弹簧转场、无分界沉浸海报重构与沉浸专题顶栏已通过全套 Flutter 自动化测试、`flutter/test_ios_package.py`、`scripts/check_public_content.py`、`scripts/sync_readme_versions.py --check` 及 GitHub Actions macOS Xcode `26.6` 原生 Release `.ipa` 打包与二进制校验。
+- **已完成真机与自动化校验**：本轮各项核心视觉与交互改动（横竖屏播放页 HUD、全能签自签局域网投屏与电视端联动、半屏遥控器、沉浸式首页与发现页板块/动效、浅色/深色对比度、收藏明信片与灵动岛提示）已在物理 iPhone 真机经多轮实测迭代；最终零拖影弹簧转场、无分界沉浸海报重构与沉浸专题顶栏在提交 `26fc68e39483220bc3a290536e9c14e074bdd832` 上通过了 macOS 云端 Runner 全套 Flutter 自动化测试（`1211` 项通过、`9` 项非 iOS 专属跳过）、Xcode `26.6`（`iphoneos26.5`）Release `.ipa` 打包与 `Info.plist` 校验、`flutter/test_ios_package.py`、`scripts/check_public_content.py`（`1521` 文件）及 `scripts/sync_readme_versions.py --check`。
 - **已知限制**：未签名 `.ipa` 需通过 TrollStore（巨魔）或个人自签工具安装；普通自签证书下局域网投屏依赖用户首次弹窗授予「本地网络」权限，且无线投屏与第三方片源播放体验仍取决于局域网路由器隔离策略及上游服务端可用性。
