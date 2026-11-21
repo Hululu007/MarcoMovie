@@ -837,12 +837,86 @@ public final class LocalProxy implements Closeable {
         }
     }
 
+    static String encodeDanmakuUrl(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        String sanitized = ProxyAddress.sanitizePathAndQuery(raw.trim());
+        int schemeEnd = sanitized.indexOf("://");
+        if (schemeEnd < 0) return sanitized;
+        int pathStart = sanitized.indexOf('/', schemeEnd + 3);
+        if (pathStart < 0) return sanitized;
+        String prefix = sanitized.substring(0, pathStart);
+        String tail = sanitized.substring(pathStart);
+        StringBuilder sb = new StringBuilder(sanitized.length() + 16);
+        sb.append(prefix);
+        for (int i = 0; i < tail.length(); i++) {
+            char ch = tail.charAt(i);
+            if (ch < 0x80 && ch > 0x20) {
+                sb.append(ch);
+            } else {
+                byte[] utf8 = String.valueOf(ch).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                for (byte b : utf8) {
+                    sb.append(String.format(Locale.ROOT, "%%%02X", b & 0xff));
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    static String decodeDanmakuResponseStream(InputStream rawStream, String encoding)
+            throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        int total = 0, read;
+        while ((read = rawStream.read(chunk)) != -1) {
+            total += read;
+            if (total > 8 * 1024 * 1024) throw new IOException("弹幕文件过大");
+            buffer.write(chunk, 0, read);
+        }
+        byte[] bytes = buffer.toByteArray();
+        if (bytes.length == 0) return "";
+        String enc = encoding == null ? "" : encoding.toLowerCase(Locale.ROOT);
+        if (enc.contains("gzip")
+                || (bytes.length >= 2 && (bytes[0] & 0xff) == 0x1f && (bytes[1] & 0xff) == 0x8b)) {
+            try (InputStream gz =
+                    new java.util.zip.GZIPInputStream(new ByteArrayInputStream(bytes))) {
+                return Cms.read(gz, 8 * 1024 * 1024);
+            } catch (Exception ignored) {
+            }
+        }
+        byte firstNonSpace = 0;
+        for (byte b : bytes) {
+            if (b != ' ' && b != '\t' && b != '\r' && b != '\n') {
+                firstNonSpace = b;
+                break;
+            }
+        }
+        if (enc.contains("deflate")
+                || (firstNonSpace != '<' && firstNonSpace != '{' && firstNonSpace != '[')) {
+            for (boolean nowrap : new boolean[] {true, false}) {
+                try (InputStream inf =
+                        new java.util.zip.InflaterInputStream(
+                                new ByteArrayInputStream(bytes),
+                                new java.util.zip.Inflater(nowrap))) {
+                    String inflated = Cms.read(inf, 8 * 1024 * 1024);
+                    String trimmed = inflated.trim();
+                    if (trimmed.startsWith("<")
+                            || trimmed.startsWith("{")
+                            || trimmed.startsWith("[")) {
+                        return inflated;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return new String(bytes, "UTF-8");
+    }
+
     private static byte[] tryDirectDanmuFallback(String rawUrl) {
         if (rawUrl == null || rawUrl.trim().isEmpty()) return null;
         String candidate = rawUrl.trim();
         if (!Cms.isHttp(candidate)) return null;
         try {
-            URL u = new URL(DanmakuView.encodeDanmakuUrl(candidate));
+            URL u = new URL(encodeDanmakuUrl(candidate));
             if (loopbackHost(u.getHost())) {
                 return null;
             }
@@ -860,7 +934,7 @@ public final class LocalProxy implements Closeable {
                 }
                 String text;
                 try (InputStream in = conn.getInputStream()) {
-                    text = DanmakuView.decodeResponseStream(in, conn.getContentEncoding());
+                    text = decodeDanmakuResponseStream(in, conn.getContentEncoding());
                 }
                 String trimmed = text == null ? "" : text.trim();
                 boolean looksLikeDanmaku =
