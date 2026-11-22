@@ -28,10 +28,10 @@ class _DuoTestCmsClient extends CmsClient {
         CmsLine(
           name: '4K极速线路',
           episodes: [
-            CmsEpisode(name: '第01集', url: 'https://example.com/1.m3u8'),
-            CmsEpisode(name: '第02集', url: 'https://example.com/2.m3u8'),
-            CmsEpisode(name: '第03集', url: 'https://example.com/3.m3u8'),
-            CmsEpisode(name: '第04集', url: 'https://example.com/4.m3u8'),
+            CmsEpisode(name: '第01集', url: 'https://media.example/1.m3u8'),
+            CmsEpisode(name: '第02集', url: 'https://media.example/2.m3u8'),
+            CmsEpisode(name: '第03集', url: 'https://media.example/3.m3u8'),
+            CmsEpisode(name: '第04集', url: 'https://media.example/4.m3u8'),
           ],
         ),
       ],
@@ -91,17 +91,17 @@ class _DuoTestCmsClient extends CmsClient {
           LiveChannel(
             name: 'CCTV1',
             group: '央视',
-            urls: ['https://example.com/cctv1.m3u8'],
+            urls: ['https://live.example/cctv1.m3u8'],
           ),
           LiveChannel(
             name: 'CCTV5',
             group: '央视',
-            urls: ['https://example.com/cctv5.m3u8'],
+            urls: ['https://live.example/cctv5.m3u8'],
           ),
           LiveChannel(
             name: 'CCTV6',
             group: '央视',
-            urls: ['https://example.com/cctv6.m3u8'],
+            urls: ['https://live.example/cctv6.m3u8'],
           ),
         ],
       ),
@@ -317,7 +317,7 @@ void main() {
           key: 'duo_site',
           name: '双屏测试超长片源名称',
           type: 1,
-          api: 'https://example.com/api',
+          api: 'https://source.example/api',
         );
         const video = CmsVideo(
           id: 'duo-1',
@@ -379,7 +379,7 @@ void main() {
           key: 'duo_site',
           name: '双屏测试源',
           type: 1,
-          api: 'https://example.com/api',
+          api: 'https://source.example/api',
         );
         const videos = [
           CmsVideo(id: '1', title: '影片一', year: '2026'),
@@ -506,8 +506,8 @@ void main() {
         final storage = await initTestStorage();
         final client = _DuoTestCmsClient();
         await storage.saveConfig(
-          '{"sites":[{"key":"duo_site","name":"双屏影院源","type":1,"api":"https://example.com/api"}],'
-          '"lives":[{"name":"央视测试","url":"https://example.com/live.m3u"}]}',
+          '{"sites":[{"key":"duo_site","name":"双屏影院源","type":1,"api":"https://source.example/api"}],'
+          '"lives":[{"name":"央视测试","url":"https://live.example/live.m3u"}]}',
         );
 
         final themeMode = ValueNotifier<ThemeMode>(ThemeMode.light);
