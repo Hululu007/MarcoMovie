@@ -17,7 +17,13 @@
   - 打通 `CmsClient` -> `WebMediaResolver` 配置级 `rules` / `ads` 规则透传与 `MarcoWebSnifferAndJsHost.swift`（原生 `WKContentRuleList` 广告拦截、自动点击嗅探与离屏 `WKWebView` 异步 JS / DRPY2 兜底引擎）；
   - 内置 iOS CPython `3.14` 运行时新增锁定官方 `pyquery` + `cssselect` wheel，补齐 TVBox `Spider` / `localProxy` / `getDependence` 兼容垫片，并将并发 Python 会话池扩容至 `4`（LRU 回收）。
 
+## 包信息与构建记录
+
+- **未签名 IPA（iPhone / iPad / iPhone Duo 通用）**：`MarcoMovie-0.7.0-ios-iphone-ipad-unsigned.ipa`（`63924528` B，更新兼容别名 `MarcoMovie-0.7.0-ios-unsigned.ipa`），SHA-256：`d24a947cae3e9d26a536fde11a113bac95a0c5ef986114ce3ecdf1ffbe891e26`。
+- **对应源码包**：`MarcoMovie-ios-v0.7.0-source.zip`（`11341454` B），SHA-256：`2d354caaead240870789f408e22f848bc1cb553ff79fea4c304d4f6bfd7ebb5d`。
+- **构建提交与 CI 记录**：`45b1d3c4a3fe3ea2696ffa3c8e484754b26fa6af`。[iOS / iPadOS 原生构建与全量测试（Job 137341995146 · Run 45065556517）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45065556517/job/137341995146) / [公开守卫与离线校验（Job 137340782837）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45065556517/job/137340782837) / [Public content checks（45065556562）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45065556562)。
+
 ## 验证范围与已知限制
 
-- **自动化与云端构建校验**：通过 `scripts/check_public_content.py`、`scripts/sync_readme_versions.py --check`、iOS CPython 打包与 wheel 完整性测试（`scripts/test_ios_python_packaging.py`）、`flutter analyze` 零告警、全量 Flutter 自动化测试，以及 GitHub Actions Xcode `27.2`（`iphoneos27.2`）Release `.ipa` 打包与全量内嵌 Mach-O `minos <= 15.0` 校验。本轮 `0.7.0` 尚未宣称完成全型号物理 iPhone / iPad 真机安装与实机播放验收。
+- **自动化与云端构建校验**：在提交 `45b1d3c4a3fe3ea2696ffa3c8e484754b26fa6af` 上通过了 GitHub Actions 7 平台全绿构建（Run `45065556517`）、macOS 云端 Runner 全套 Flutter 自动化测试（`1314` 项通过、`15` 项非 iOS 平台专属跳过）、Xcode `27.2`（`iphoneos27.2`）Release `.ipa` 打包与全量内嵌 Mach-O `minos <= 15.0` 校验、`scripts/test_ios_python_packaging.py`、`flutter/test_ios_package.py`、`scripts/check_public_content.py`（`1595` 文件）及 `scripts/sync_readme_versions.py --check`。本轮 `0.7.0` 尚未宣称完成全型号物理 iPhone / iPad 真机安装与实机播放验收。
 - **已知限制**：未签名 `.ipa` 需通过 TrollStore（巨魔）或个人自签工具安装；真系统级 `UIGlassContainerEffect` / `UIButton.Configuration.glass()` 需运行在支持 Liquid Glass 的新系统版本上（iOS 15–18 自动采用高保真磨砂回退）；第三方直播源与片源可用性取决于用户自行导入的上游服务及网络环境。
