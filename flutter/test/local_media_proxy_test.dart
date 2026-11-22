@@ -439,4 +439,75 @@ void main() {
       await lease.close();
     }
   });
+
+  test(
+      'strips cross-domain HLS VOD discontinuity ads while preserving AES keys and leaving live streams untouched',
+      () async {
+    final tsPayload = _buildMpegTsPackets(2);
+    final lease = await LocalMediaLease.open(
+      target: Uri.parse('https://main-cdn.test/vod/movie.m3u8'),
+      stripHlsAds: true,
+      isCancelled: () => false,
+      client: MockClient((request) async {
+        if (request.url.path == '/vod/movie.m3u8') {
+          return http.Response(
+            '#EXTM3U\n'
+            '#EXT-X-VERSION:3\n'
+            '#EXT-X-TARGETDURATION:10\n'
+            '#EXT-X-KEY:METHOD=AES-128,URI="https://main-cdn.test/vod/enc.key"\n'
+            '#EXTINF:30.0,\n'
+            'seg_001.ts\n'
+            '#EXTINF:30.0,\n'
+            'seg_002.ts\n'
+            '#EXT-X-DISCONTINUITY\n'
+            '#EXT-X-KEY:METHOD=NONE\n'
+            '#EXTINF:10.0,\n'
+            'https://ad-insert.other.test/ad_01.ts\n'
+            '#EXTINF:5.0,\n'
+            'https://ad-insert.other.test/ad_02.ts\n'
+            '#EXT-X-DISCONTINUITY\n'
+            '#EXTINF:30.0,\n'
+            'seg_003.ts\n'
+            '#EXT-X-ENDLIST\n',
+            200,
+            headers: {'content-type': 'application/vnd.apple.mpegurl'},
+          );
+        }
+        return http.Response.bytes(tsPayload, 200);
+      }),
+    );
+
+    try {
+      final resp = await http.get(lease.url);
+      expect(resp.statusCode, 200);
+      final rewrittenLines =
+          resp.body.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+      final segmentUrls =
+          rewrittenLines.where((l) => l.startsWith('http://127.0.0.1:')).toList();
+      // 3 main segments kept, 2 ad segments stripped!
+      expect(segmentUrls, hasLength(3));
+      // AES-128 key restored for seg_003 after ad block's METHOD=NONE was removed:
+      final keyLines =
+          rewrittenLines.where((l) => l.startsWith('#EXT-X-KEY:')).toList();
+      expect(keyLines.any((l) => l.contains('METHOD=NONE')), isFalse);
+      expect(keyLines.length, greaterThanOrEqualTo(2));
+    } finally {
+      await lease.close();
+    }
+
+    // Live stream (no #EXT-X-ENDLIST and no VOD) must NEVER be stripped:
+    const livePlaylist = '#EXTM3U\n'
+        '#EXT-X-VERSION:3\n'
+        '#EXT-X-TARGETDURATION:10\n'
+        '#EXTINF:30.0,\n'
+        'https://main-cdn.test/live/1.ts\n'
+        '#EXT-X-DISCONTINUITY\n'
+        '#EXTINF:10.0,\n'
+        'https://ad-insert.other.test/ad.ts\n';
+    final liveAfter = LocalMediaLease.stripVodPlaylistAds(
+      livePlaylist,
+      Uri.parse('https://main-cdn.test/live.m3u8'),
+    );
+    expect(liveAfter, livePlaylist);
+  });
 }
