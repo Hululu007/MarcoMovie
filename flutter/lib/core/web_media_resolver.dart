@@ -27,6 +27,15 @@ typedef WebSnifferInvoker = Future<WebSniffResult?> Function(
   Duration timeout,
 );
 
+typedef WebRuleSnifferInvoker = Future<WebSniffResult?> Function(
+  String url,
+  Map<String, String> headers,
+  Duration timeout, {
+  List<Map<String, dynamic>> rules,
+  List<String> ads,
+  String? clickScript,
+});
+
 typedef ResolverTextFetcher = Future<ResolverHttpDocument> Function(
   String url, {
   Map<String, String> headers,
@@ -73,6 +82,126 @@ class WebMediaResolver {
       '(KHTML, like Gecko) Version/18.0 Safari/605.1.15';
 
   static WebSnifferInvoker? debugSnifferOverride;
+  static WebRuleSnifferInvoker? debugRuleSnifferOverride;
+
+  /// Filters [rules] to those whose `hosts` apply to [uri].
+  /// A rule with empty `hosts` or `*` applies to all hosts.
+  static List<CmsSniffRule> matchRulesForUrl(
+    Uri uri,
+    List<CmsSniffRule> rules,
+  ) {
+    if (rules.isEmpty) return const [];
+    final host = uri.host.toLowerCase();
+    final full = uri.toString().toLowerCase();
+    final matched = <CmsSniffRule>[];
+    for (final rule in rules) {
+      if (rule.hosts.isEmpty) {
+        matched.add(rule);
+        continue;
+      }
+      var hits = false;
+      for (final rawPattern in rule.hosts) {
+        final pattern = rawPattern.trim().toLowerCase();
+        if (pattern.isEmpty) continue;
+        if (pattern == '*' || pattern == 'all') {
+          hits = true;
+          break;
+        }
+        if (host == pattern || host.endsWith('.$pattern') || host.contains(pattern)) {
+          hits = true;
+          break;
+        }
+        if (full.contains(pattern)) {
+          hits = true;
+          break;
+        }
+        try {
+          if (RegExp(rawPattern, caseSensitive: false).hasMatch(uri.toString())) {
+            hits = true;
+            break;
+          }
+        } catch (_) {}
+      }
+      if (hits) {
+        matched.add(rule);
+      }
+    }
+    return matched;
+  }
+
+  /// Returns true if [candidateUrl] is blocked by [ads] or any `exclude`
+  /// rule in [matchedRules].
+  static bool isAdOrExcludedUrl(
+    String candidateUrl, {
+    List<CmsSniffRule> matchedRules = const [],
+    List<String> ads = const [],
+  }) {
+    final trimmed = candidateUrl.trim();
+    if (trimmed.isEmpty) return false;
+    final lower = trimmed.toLowerCase();
+    final host = Uri.tryParse(trimmed)?.host.toLowerCase() ?? '';
+    for (final rawAd in ads) {
+      final ad = rawAd.trim().toLowerCase();
+      if (ad.isEmpty) continue;
+      if (ad.startsWith('regex:')) {
+        final body = rawAd.trim().substring(6);
+        try {
+          if (RegExp(body, caseSensitive: false).hasMatch(trimmed)) return true;
+        } catch (_) {}
+        continue;
+      }
+      if (host.isNotEmpty &&
+          (host == ad || host.endsWith('.$ad') || host.contains(ad))) {
+        return true;
+      }
+      if (lower.contains(ad)) return true;
+    }
+    for (final rule in matchedRules) {
+      for (final rawEx in rule.exclude) {
+        final ex = rawEx.trim();
+        if (ex.isEmpty) continue;
+        try {
+          if (RegExp(ex, caseSensitive: false).hasMatch(trimmed)) return true;
+        } catch (_) {
+          if (lower.contains(ex.toLowerCase())) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /// Returns true if [candidateUrl] matches any custom `regex` in [matchedRules]
+  /// and is not excluded by [isAdOrExcludedUrl].
+  static bool matchesCustomRuleRegex(
+    String candidateUrl, {
+    List<CmsSniffRule> matchedRules = const [],
+    List<String> ads = const [],
+  }) {
+    if (matchedRules.isEmpty) return false;
+    if (isAdOrExcludedUrl(
+      candidateUrl,
+      matchedRules: matchedRules,
+      ads: ads,
+    )) {
+      return false;
+    }
+    for (final rule in matchedRules) {
+      for (final rawRegex in rule.regex) {
+        final pattern = rawRegex.trim();
+        if (pattern.isEmpty) continue;
+        try {
+          if (RegExp(pattern, caseSensitive: false).hasMatch(candidateUrl)) {
+            return true;
+          }
+        } catch (_) {
+          if (candidateUrl.toLowerCase().contains(pattern.toLowerCase())) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
 
   static final RegExp _directMediaExtPattern = RegExp(
     r'\.(?:m3u8?|mp4|flv|mkv|ts|webm|mpd|mov|m4v|avi)(?:$|[?#])',
@@ -233,11 +362,14 @@ class WebMediaResolver {
     required String targetUrl,
     String explicitPlayUrl = '',
     List<CmsParse> parses = const [],
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
     Map<String, String> extraHeaders = const {},
     Uri? sourceOrigin,
     required ResolverTextFetcher fetchDocument,
     bool Function()? isCancelled,
     WebSnifferInvoker? webSniffer,
+    WebRuleSnifferInvoker? webRuleSniffer,
   }) async {
     final trimmedTarget = targetUrl.trim();
     if (trimmedTarget.isEmpty) return null;
@@ -383,7 +515,6 @@ class WebMediaResolver {
     if (cancelled()) return null;
 
     // Stage 3: Native ephemeral WKWebView sniffer (iOS / macOS, or injected test double).
-    final sniffer = webSniffer ?? debugSnifferOverride ?? _invokePlatformSniffer;
     final sniffCandidates = <String>[];
     if (webParsers.isNotEmpty) {
       sniffCandidates.add(
@@ -412,17 +543,72 @@ class WebMediaResolver {
         SourcePlayback.headersForOrigin(site.headers, sourceOrigin, sniffUri),
         SourcePlayback.headersForOrigin(extraHeaders, sourceOrigin, sniffUri),
       ]);
-      final sniffed = await sniffer(
-        sniffUrl,
-        sniffHeaders,
-        const Duration(seconds: 12),
-      );
+      final matchedRules = matchRulesForUrl(sniffUri, rules);
+      final serializedRules =
+          matchedRules.map((rule) => rule.toJson()).toList(growable: false);
+      String? clickScript;
+      for (final rule in matchedRules) {
+        if (rule.effectiveScript.isNotEmpty) {
+          clickScript = rule.effectiveScript;
+          break;
+        }
+      }
+
+      WebSniffResult? sniffed;
+      const sniffTimeout = Duration(seconds: 12);
+      if (webRuleSniffer != null) {
+        sniffed = await webRuleSniffer(
+          sniffUrl,
+          sniffHeaders,
+          sniffTimeout,
+          rules: serializedRules,
+          ads: ads,
+          clickScript: clickScript,
+        );
+      } else if (webSniffer != null) {
+        sniffed = await webSniffer(sniffUrl, sniffHeaders, sniffTimeout);
+      } else if (debugRuleSnifferOverride != null) {
+        sniffed = await debugRuleSnifferOverride!(
+          sniffUrl,
+          sniffHeaders,
+          sniffTimeout,
+          rules: serializedRules,
+          ads: ads,
+          clickScript: clickScript,
+        );
+      } else if (debugSnifferOverride != null) {
+        sniffed = await debugSnifferOverride!(
+          sniffUrl,
+          sniffHeaders,
+          sniffTimeout,
+        );
+      } else {
+        sniffed = await _invokePlatformSniffer(
+          sniffUrl,
+          sniffHeaders,
+          sniffTimeout,
+          rules: serializedRules,
+          ads: ads,
+          clickScript: clickScript,
+        );
+      }
+
       if (sniffed != null &&
-          _isCandidateMediaUrl(
+          !isAdOrExcludedUrl(
             sniffed.url,
-            allowedOrigin: sniffUri,
-            originalPageUrl: sniffUrl,
-          )) {
+            matchedRules: matchedRules,
+            ads: ads,
+          ) &&
+          (_isCandidateMediaUrl(
+                sniffed.url,
+                allowedOrigin: sniffUri,
+                originalPageUrl: sniffUrl,
+              ) ||
+              matchesCustomRuleRegex(
+                sniffed.url,
+                matchedRules: matchedRules,
+                ads: ads,
+              ))) {
         final mediaHeaders = <String, String>{
           'Referer': sniffUrl,
           ...sniffed.headers,
@@ -1057,8 +1243,11 @@ class WebMediaResolver {
   static Future<WebSniffResult?> _invokePlatformSniffer(
     String url,
     Map<String, String> headers,
-    Duration timeout,
-  ) async {
+    Duration timeout, {
+    List<Map<String, dynamic>> rules = const [],
+    List<String> ads = const [],
+    String? clickScript,
+  }) async {
     if (!Platform.isIOS && !Platform.isMacOS) return null;
     try {
       final response = await _channel
@@ -1066,6 +1255,10 @@ class WebMediaResolver {
         'url': url,
         'headers': headers,
         'timeoutMs': timeout.inMilliseconds,
+        if (rules.isNotEmpty) 'rules': rules,
+        if (ads.isNotEmpty) 'ads': ads,
+        if (clickScript != null && clickScript.trim().isNotEmpty)
+          'clickScript': clickScript,
       }).timeout(timeout + const Duration(seconds: 2), onTimeout: () => null);
       if (response == null) return null;
       final mediaUrl = (response['url'] ?? '').toString().trim();

@@ -1,15 +1,19 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'cloud_media_proxy.dart';
 
-enum _TargetKind { auto, playlist, tsSegment, raw }
+enum _TargetKind { auto, playlist, tsSegment, raw, diskCached }
 
 class _RegisteredTarget {
   final Uri uri;
@@ -178,12 +182,763 @@ class _SessionCookieJar {
   }
 }
 
+/// 256 KiB block-aligned disk Range cache (`/kcache/<sid>`) with concurrent
+/// block deduplication, HTTP 206 Partial Content, 416 no-Range retry, and LRU
+/// capacity eviction.
+class DiskBlockCache {
+  DiskBlockCache({
+    Directory? directory,
+    int maxBytes = defaultMaxBytes,
+  })  : _explicitDirectory = directory,
+        _maxBytes = math.max(0, maxBytes);
+
+  static const int blockSize = 256 * 1024; // 256 KiB
+  static const int defaultMaxBytes = 256 * 1024 * 1024; // 256 MB
+  static const int _maxFullResponseCacheBytes = 64 * 1024 * 1024;
+
+  static final DiskBlockCache shared = DiskBlockCache();
+
+  final Directory? _explicitDirectory;
+  int _maxBytes;
+  int _currentBytes = 0;
+  int _generation = 0;
+  int _accessSeq = 0;
+  bool _initialized = false;
+  Future<void>? _initFuture;
+  Directory? _resolvedDir;
+
+  final LinkedHashMap<String, _CachedBlockEntry> _entries =
+      LinkedHashMap<String, _CachedBlockEntry>();
+  final Map<String, _CachedObjectMeta> _metaByKey =
+      <String, _CachedObjectMeta>{};
+  final Map<String, Future<Uint8List>> _inFlightBlocks =
+      <String, Future<Uint8List>>{};
+
+  int get maxBytes => _maxBytes;
+  int get currentBytes => _currentBytes;
+  int get cachedBlockCount => _entries.length;
+  int get inFlightCount => _inFlightBlocks.length;
+
+  static String cacheKeyForUri(Uri uri) =>
+      sha256.convert(utf8.encode(uri.toString())).toString().substring(0, 32);
+
+  Future<Directory> _resolveDirectory() async {
+    if (_resolvedDir != null) return _resolvedDir!;
+    if (_explicitDirectory != null) {
+      await _explicitDirectory.create(recursive: true);
+      _resolvedDir = _explicitDirectory;
+      return _resolvedDir!;
+    }
+    Directory base;
+    try {
+      base = await getApplicationCacheDirectory();
+    } on MissingPluginException {
+      base = Directory(
+        '${Directory.systemTemp.path}/marco_movie_cache',
+      );
+    } catch (_) {
+      base = Directory(
+        '${Directory.systemTemp.path}/marco_movie_cache',
+      );
+    }
+    final dir = Directory('${base.path}/media-cache');
+    await dir.create(recursive: true);
+    _resolvedDir = dir;
+    return dir;
+  }
+
+  Future<void> ensureInitialized() => _initFuture ??= _initialize();
+
+  Future<void> _initialize() async {
+    if (_initialized) return;
+    final dir = await _resolveDirectory();
+    final diskBlocks = <({String id, File file, int size, DateTime modified})>[];
+    if (await dir.exists()) {
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is! File) continue;
+        final name = entity.uri.pathSegments.last;
+        if (name.endsWith('.tmp')) {
+          try {
+            await entity.delete();
+          } catch (_) {}
+          continue;
+        }
+        if (name.endsWith('.blk')) {
+          try {
+            final stat = await entity.stat();
+            final id = name.substring(0, name.length - 4);
+            diskBlocks.add((
+              id: id,
+              file: entity,
+              size: stat.size,
+              modified: stat.modified,
+            ));
+          } catch (_) {}
+        }
+      }
+    }
+    diskBlocks.sort((a, b) => a.modified.compareTo(b.modified));
+    _currentBytes = 0;
+    _entries.clear();
+    for (final item in diskBlocks) {
+      _entries[item.id] = _CachedBlockEntry(
+        id: item.id,
+        file: item.file,
+        size: item.size,
+        accessSeq: ++_accessSeq,
+      );
+      _currentBytes += item.size;
+    }
+    _initialized = true;
+    await _evictToBudget();
+  }
+
+  Future<void> setCapacityBytes(int nextMaxBytes) async {
+    _maxBytes = math.max(0, nextMaxBytes);
+    await ensureInitialized();
+    await _evictToBudget();
+  }
+
+  Future<void> setCapacityMb(int mb) =>
+      setCapacityBytes(mb <= 0 ? 0 : mb * 1024 * 1024);
+
+  Future<void> clear() async {
+    _generation++;
+    _entries.clear();
+    _metaByKey.clear();
+    _currentBytes = 0;
+    final dir = await _resolveDirectory();
+    if (await dir.exists()) {
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is File) {
+          try {
+            await entity.delete();
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
+  Future<void> _evictToBudget() async {
+    while (_currentBytes > _maxBytes && _entries.isNotEmpty) {
+      final oldestKey = _entries.keys.first;
+      final oldest = _entries.remove(oldestKey);
+      if (oldest == null) continue;
+      _currentBytes = math.max(0, _currentBytes - oldest.size);
+      try {
+        if (await oldest.file.exists()) {
+          await oldest.file.delete();
+        }
+      } catch (_) {}
+    }
+  }
+
+  String _blockId(String cacheKey, int blockIndex) => '${cacheKey}_$blockIndex';
+
+  Future<Uint8List?> _readCachedBlock(String cacheKey, int blockIndex) async {
+    await ensureInitialized();
+    if (_maxBytes <= 0) return null;
+    final id = _blockId(cacheKey, blockIndex);
+    final entry = _entries.remove(id);
+    if (entry == null) return null;
+    try {
+      if (!await entry.file.exists()) {
+        _currentBytes = math.max(0, _currentBytes - entry.size);
+        return null;
+      }
+      final bytes = await entry.file.readAsBytes();
+      entry.accessSeq = ++_accessSeq;
+      _entries[id] = entry;
+      return bytes;
+    } catch (_) {
+      _currentBytes = math.max(0, _currentBytes - entry.size);
+      return null;
+    }
+  }
+
+  Future<void> _writeCachedBlock(
+    String cacheKey,
+    int blockIndex,
+    Uint8List bytes,
+    int generation,
+  ) async {
+    await ensureInitialized();
+    if (_maxBytes <= 0 || generation != _generation || bytes.isEmpty) return;
+    if (bytes.length > _maxBytes) return;
+    final dir = await _resolveDirectory();
+    final id = _blockId(cacheKey, blockIndex);
+    final targetFile = File('${dir.path}/$id.blk');
+    final tmpFile = File('${dir.path}/$id.${++_accessSeq}.tmp');
+    try {
+      await tmpFile.writeAsBytes(bytes, flush: true);
+      if (generation != _generation) {
+        try {
+          if (await tmpFile.exists()) await tmpFile.delete();
+        } catch (_) {}
+        return;
+      }
+      await tmpFile.rename(targetFile.path);
+      final old = _entries.remove(id);
+      if (old != null) {
+        _currentBytes = math.max(0, _currentBytes - old.size);
+      }
+      _entries[id] = _CachedBlockEntry(
+        id: id,
+        file: targetFile,
+        size: bytes.length,
+        accessSeq: ++_accessSeq,
+      );
+      _currentBytes += bytes.length;
+      await _evictToBudget();
+    } catch (_) {
+      try {
+        if (await tmpFile.exists()) await tmpFile.delete();
+      } catch (_) {}
+    }
+  }
+
+  Future<_CachedObjectMeta?> _loadMeta(String cacheKey) async {
+    final mem = _metaByKey[cacheKey];
+    if (mem != null) return mem;
+    await ensureInitialized();
+    final dir = await _resolveDirectory();
+    final file = File('${dir.path}/$cacheKey.meta.json');
+    if (!await file.exists()) return null;
+    try {
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is Map && decoded['totalLength'] is int) {
+        final meta = _CachedObjectMeta(
+          totalLength: decoded['totalLength'] as int,
+          contentType: (decoded['contentType'] ?? '').toString(),
+          supportsRanges: decoded['supportsRanges'] != false,
+        );
+        _metaByKey[cacheKey] = meta;
+        return meta;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> _saveMeta(
+    String cacheKey,
+    _CachedObjectMeta meta,
+    int generation,
+  ) async {
+    if (generation != _generation) return;
+    _metaByKey[cacheKey] = meta;
+    if (_maxBytes <= 0) return;
+    await ensureInitialized();
+    if (generation != _generation) return;
+    final dir = await _resolveDirectory();
+    final file = File('${dir.path}/$cacheKey.meta.json');
+    final tmp = File('${dir.path}/$cacheKey.meta.${++_accessSeq}.tmp');
+    try {
+      await tmp.writeAsString(
+        jsonEncode({
+          'totalLength': meta.totalLength,
+          'contentType': meta.contentType,
+          'supportsRanges': meta.supportsRanges,
+        }),
+        flush: true,
+      );
+      await tmp.rename(file.path);
+    } catch (_) {
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
+    }
+  }
+
+  static ({int? start, int? end, int? suffixLength, bool valid}) _parseRange(
+    String? header,
+  ) {
+    if (header == null || header.trim().isEmpty) {
+      return (start: null, end: null, suffixLength: null, valid: true);
+    }
+    final match =
+        RegExp(r'^bytes=(\d*)-(\d*)$', caseSensitive: false).firstMatch(header.trim());
+    if (match == null) {
+      return (start: null, end: null, suffixLength: null, valid: false);
+    }
+    final startStr = match.group(1)!;
+    final endStr = match.group(2)!;
+    if (startStr.isEmpty && endStr.isEmpty) {
+      return (start: null, end: null, suffixLength: null, valid: false);
+    }
+    if (startStr.isEmpty) {
+      final suffix = int.tryParse(endStr);
+      if (suffix == null || suffix <= 0) {
+        return (start: null, end: null, suffixLength: null, valid: false);
+      }
+      return (start: null, end: null, suffixLength: suffix, valid: true);
+    }
+    final start = int.tryParse(startStr);
+    final end = endStr.isEmpty ? null : int.tryParse(endStr);
+    if (start == null || (end != null && end < start)) {
+      return (start: null, end: null, suffixLength: null, valid: false);
+    }
+    return (start: start, end: end, suffixLength: null, valid: true);
+  }
+
+  static int? _parseTotalLengthFromContentRange(String? contentRange) {
+    if (contentRange == null || contentRange.isEmpty) return null;
+    final m = RegExp(r'^bytes\s+\d+-\d+/(\d+)$', caseSensitive: false)
+        .firstMatch(contentRange.trim());
+    if (m != null) return int.tryParse(m.group(1)!);
+    final star = RegExp(r'^bytes\s+\*/(\d+)$', caseSensitive: false)
+        .firstMatch(contentRange.trim());
+    if (star != null) return int.tryParse(star.group(1)!);
+    return null;
+  }
+
+  Future<Uint8List> _readStreamBytes(Stream<List<int>> stream, {int? maxBytes}) async {
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in stream.timeout(const Duration(seconds: 30))) {
+      if (maxBytes != null && builder.length + chunk.length > maxBytes) {
+        throw const FormatException('缓存响应超出单次读取上限');
+      }
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
+
+  Future<void> _cacheFullBodyIntoBlocks(
+    String cacheKey,
+    Uint8List fullBytes,
+    String contentType,
+    bool supportsRanges,
+    int generation,
+  ) async {
+    await _saveMeta(
+      cacheKey,
+      _CachedObjectMeta(
+        totalLength: fullBytes.length,
+        contentType: contentType,
+        supportsRanges: supportsRanges,
+      ),
+      generation,
+    );
+    if (_maxBytes <= 0 || fullBytes.length > _maxFullResponseCacheBytes) {
+      return;
+    }
+    for (var offset = 0, blockIndex = 0;
+        offset < fullBytes.length;
+        offset += blockSize, blockIndex++) {
+      final end = math.min(offset + blockSize, fullBytes.length);
+      final slice = Uint8List.sublistView(fullBytes, offset, end);
+      await _writeCachedBlock(cacheKey, blockIndex, slice, generation);
+    }
+  }
+
+  Future<Uint8List> _getOrFetchBlock({
+    required String cacheKey,
+    required int blockIndex,
+    required Future<(http.StreamedResponse, Uri)> Function({
+      String? range,
+      String? ifRange,
+      required bool allowRange,
+    }) fetchUpstream,
+    required Future<void> Function(
+      Uint8List bytes,
+      String contentType,
+      int totalLength,
+    ) onFullFallback,
+  }) async {
+    final flightKey = '$cacheKey#$blockIndex';
+    final existing = _inFlightBlocks[flightKey];
+    if (existing != null) return existing;
+
+    final generation = _generation;
+    final future = () async {
+      final cached = await _readCachedBlock(cacheKey, blockIndex);
+      if (cached != null) return cached;
+
+      final blockStart = blockIndex * blockSize;
+      final meta = await _loadMeta(cacheKey);
+      final knownTotal = meta?.totalLength;
+      final blockEnd = knownTotal != null
+          ? math.min(knownTotal - 1, blockStart + blockSize - 1)
+          : blockStart + blockSize - 1;
+      if (knownTotal != null && blockStart >= knownTotal) {
+        return Uint8List(0);
+      }
+
+      var (response, _) = await fetchUpstream(
+        range: 'bytes=$blockStart-$blockEnd',
+        allowRange: true,
+      );
+
+      // 416 Range Not Satisfiable -> auto-retry without Range header!
+      if (response.statusCode == HttpStatus.requestedRangeNotSatisfiable) {
+        final crTotal = _parseTotalLengthFromContentRange(
+          response.headers['content-range'],
+        );
+        await response.stream.listen((_) {}).cancel();
+        if (crTotal != null && blockStart >= crTotal) {
+          await _saveMeta(
+            cacheKey,
+            _CachedObjectMeta(
+              totalLength: crTotal,
+              contentType: response.headers['content-type'] ??
+                  meta?.contentType ??
+                  'application/octet-stream',
+              supportsRanges: true,
+            ),
+            generation,
+          );
+          return Uint8List(0);
+        }
+        final (retryRes, _) = await fetchUpstream(
+          range: null,
+          allowRange: false,
+        );
+        if (retryRes.statusCode < 200 || retryRes.statusCode >= 300) {
+          final code = retryRes.statusCode;
+          await retryRes.stream.listen((_) {}).cancel();
+          throw HttpException('Upstream returned HTTP $code after 416 retry');
+        }
+        final retryBytes = await _readStreamBytes(retryRes.stream);
+        final ct = retryRes.headers['content-type'] ??
+            meta?.contentType ??
+            'application/octet-stream';
+        await _cacheFullBodyIntoBlocks(
+          cacheKey,
+          retryBytes,
+          ct,
+          false,
+          generation,
+        );
+        await onFullFallback(retryBytes, ct, retryBytes.length);
+        if (blockStart >= retryBytes.length) return Uint8List(0);
+        final end = math.min(blockStart + blockSize, retryBytes.length);
+        return Uint8List.sublistView(retryBytes, blockStart, end);
+      }
+
+      if (response.statusCode == HttpStatus.ok) {
+        final ct = response.headers['content-type'] ??
+            meta?.contentType ??
+            'application/octet-stream';
+        final bytes = await _readStreamBytes(response.stream);
+        await _cacheFullBodyIntoBlocks(
+          cacheKey,
+          bytes,
+          ct,
+          false,
+          generation,
+        );
+        await onFullFallback(bytes, ct, bytes.length);
+        if (blockStart >= bytes.length) return Uint8List(0);
+        final end = math.min(blockStart + blockSize, bytes.length);
+        return Uint8List.sublistView(bytes, blockStart, end);
+      }
+
+      if (response.statusCode != HttpStatus.partialContent) {
+        final code = response.statusCode;
+        await response.stream.listen((_) {}).cancel();
+        throw HttpException('Upstream returned HTTP $code');
+      }
+
+      final ct = response.headers['content-type'] ??
+          meta?.contentType ??
+          'application/octet-stream';
+      final crHeader = response.headers['content-range'];
+      final totalFromHeader = _parseTotalLengthFromContentRange(crHeader);
+      final blockBytes = await _readStreamBytes(
+        response.stream,
+        maxBytes: blockSize + 1024,
+      );
+      final inferredTotal = totalFromHeader ??
+          (blockBytes.length < blockSize ? blockStart + blockBytes.length : null);
+      if (inferredTotal != null) {
+        await _saveMeta(
+          cacheKey,
+          _CachedObjectMeta(
+            totalLength: inferredTotal,
+            contentType: ct,
+            supportsRanges: true,
+          ),
+          generation,
+        );
+      }
+      if (blockBytes.isNotEmpty) {
+        await _writeCachedBlock(cacheKey, blockIndex, blockBytes, generation);
+      }
+      return blockBytes;
+    }();
+
+    _inFlightBlocks[flightKey] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_inFlightBlocks[flightKey], future)) {
+        _inFlightBlocks.remove(flightKey);
+      }
+    }
+  }
+
+  Future<void> serveRequest(
+    HttpRequest request, {
+    required String cacheKey,
+    required Future<(http.StreamedResponse, Uri)> Function({
+      String? range,
+      String? ifRange,
+      required bool allowRange,
+    }) fetchUpstream,
+    required void Function(int statusCode, String host) onUpstreamStatus,
+  }) async {
+    await ensureInitialized();
+    final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
+    final parsedRange = _parseRange(rangeHeader);
+    if (!parsedRange.valid) {
+      request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+      return;
+    }
+
+    if (_maxBytes <= 0) {
+      final (res, finalTarget) = await fetchUpstream(
+        range: rangeHeader,
+        ifRange: request.headers.value(HttpHeaders.ifRangeHeader),
+        allowRange: true,
+      );
+      onUpstreamStatus(res.statusCode, finalTarget.host);
+      if (res.statusCode == HttpStatus.requestedRangeNotSatisfiable) {
+        await res.stream.listen((_) {}).cancel();
+        final (retryRes, retryTarget) = await fetchUpstream(
+          range: null,
+          allowRange: false,
+        );
+        onUpstreamStatus(retryRes.statusCode, retryTarget.host);
+        request.response.statusCode = retryRes.statusCode;
+        final ct = retryRes.headers['content-type'];
+        if (ct != null && ct.isNotEmpty) {
+          request.response.headers.set(HttpHeaders.contentTypeHeader, ct);
+        }
+        if (request.method == 'HEAD') {
+          await retryRes.stream.listen((_) {}).cancel();
+          return;
+        }
+        await for (final chunk in retryRes.stream) {
+          request.response.add(chunk);
+        }
+        return;
+      }
+      request.response.statusCode = res.statusCode;
+      for (final k in const [
+        'content-type',
+        'content-length',
+        'content-range',
+        'accept-ranges',
+      ]) {
+        final v = res.headers[k];
+        if (v != null && v.isNotEmpty) request.response.headers.set(k, v);
+      }
+      if (request.method == 'HEAD') {
+        await res.stream.listen((_) {}).cancel();
+        return;
+      }
+      await for (final chunk in res.stream) {
+        request.response.add(chunk);
+      }
+      return;
+    }
+
+    var meta = await _loadMeta(cacheKey);
+    Uint8List? preFetchedFullBody;
+
+    // Probe block 0 (or target start block) if total length is not yet cached.
+    if (meta == null) {
+      final probeStart = parsedRange.start ?? 0;
+      final probeBlockIndex = probeStart ~/ blockSize;
+      await _getOrFetchBlock(
+        cacheKey: cacheKey,
+        blockIndex: probeBlockIndex,
+        fetchUpstream: ({range, ifRange, required allowRange}) async {
+          final result = await fetchUpstream(
+            range: range,
+            ifRange: ifRange,
+            allowRange: allowRange,
+          );
+          onUpstreamStatus(result.$1.statusCode, result.$2.host);
+          return result;
+        },
+        onFullFallback: (bytes, ct, total) async {
+          preFetchedFullBody = bytes;
+        },
+      );
+      meta = await _loadMeta(cacheKey);
+    }
+
+    if (meta == null) {
+      // Unknown total length: fall back to direct upstream passthrough.
+      final (res, finalTarget) = await fetchUpstream(
+        range: rangeHeader,
+        ifRange: request.headers.value(HttpHeaders.ifRangeHeader),
+        allowRange: true,
+      );
+      onUpstreamStatus(res.statusCode, finalTarget.host);
+      request.response.statusCode = res.statusCode;
+      for (final k in const [
+        'content-type',
+        'content-length',
+        'content-range',
+        'accept-ranges',
+      ]) {
+        final v = res.headers[k];
+        if (v != null && v.isNotEmpty) request.response.headers.set(k, v);
+      }
+      if (request.method == 'HEAD') {
+        await res.stream.listen((_) {}).cancel();
+        return;
+      }
+      await for (final chunk in res.stream) {
+        request.response.add(chunk);
+      }
+      return;
+    }
+
+    final totalLength = meta.totalLength;
+    if (totalLength == 0) {
+      if (rangeHeader != null) {
+        request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+        request.response.headers.set('content-range', 'bytes */0');
+        return;
+      }
+      request.response.statusCode = HttpStatus.ok;
+      request.response.contentLength = 0;
+      return;
+    }
+
+    int reqStart;
+    int reqEnd;
+    final hasRange = rangeHeader != null && rangeHeader.trim().isNotEmpty;
+    if (!hasRange) {
+      reqStart = 0;
+      reqEnd = totalLength - 1;
+    } else if (parsedRange.suffixLength != null) {
+      final suffix = parsedRange.suffixLength!;
+      reqStart = math.max(0, totalLength - suffix);
+      reqEnd = totalLength - 1;
+    } else {
+      reqStart = parsedRange.start!;
+      reqEnd = math.min(parsedRange.end ?? (totalLength - 1), totalLength - 1);
+    }
+
+    if (reqStart >= totalLength || reqEnd < reqStart) {
+      request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+      request.response.headers.set('content-range', 'bytes */$totalLength');
+      return;
+    }
+
+    final responseLen = reqEnd - reqStart + 1;
+    request.response.bufferOutput = false;
+    request.response.statusCode =
+        hasRange ? HttpStatus.partialContent : HttpStatus.ok;
+    if (meta.contentType.isNotEmpty) {
+      request.response.headers
+          .set(HttpHeaders.contentTypeHeader, meta.contentType);
+    }
+    request.response.headers.set('accept-ranges', 'bytes');
+    request.response.headers.set('cache-control', 'no-store');
+    if (hasRange) {
+      request.response.headers
+          .set('content-range', 'bytes $reqStart-$reqEnd/$totalLength');
+    }
+    request.response.contentLength = responseLen;
+
+    if (request.method == 'HEAD') {
+      return;
+    }
+
+    if (preFetchedFullBody != null) {
+      request.response.add(
+        Uint8List.sublistView(preFetchedFullBody!, reqStart, reqEnd + 1),
+      );
+      return;
+    }
+
+    final firstBlock = reqStart ~/ blockSize;
+    final lastBlock = reqEnd ~/ blockSize;
+    for (var b = firstBlock; b <= lastBlock; b++) {
+      final blockData = await _getOrFetchBlock(
+        cacheKey: cacheKey,
+        blockIndex: b,
+        fetchUpstream: ({range, ifRange, required allowRange}) async {
+          final result = await fetchUpstream(
+            range: range,
+            ifRange: ifRange,
+            allowRange: allowRange,
+          );
+          onUpstreamStatus(result.$1.statusCode, result.$2.host);
+          return result;
+        },
+        onFullFallback: (bytes, ct, total) async {
+          preFetchedFullBody = bytes;
+        },
+      );
+      final blockBase = b * blockSize;
+      final sliceStart = math.max(0, reqStart - blockBase);
+      final sliceEnd = math.min(blockData.length, reqEnd - blockBase + 1);
+      if (sliceEnd > sliceStart) {
+        request.response.add(
+          Uint8List.sublistView(blockData, sliceStart, sliceEnd),
+        );
+      }
+    }
+  }
+}
+
+class _CachedBlockEntry {
+  _CachedBlockEntry({
+    required this.id,
+    required this.file,
+    required this.size,
+    required this.accessSeq,
+  });
+  final String id;
+  final File file;
+  final int size;
+  int accessSeq;
+}
+
+class _CachedObjectMeta {
+  const _CachedObjectMeta({
+    required this.totalLength,
+    required this.contentType,
+    required this.supportsRanges,
+  });
+  final int totalLength;
+  final String contentType;
+  final bool supportsRanges;
+}
+
+class _HlsSegmentEntry {
+  const _HlsSegmentEntry({
+    required this.duration,
+    required this.tagLines,
+    required this.uriLine,
+    required this.resolvedUri,
+    this.keyTag,
+  });
+  final double duration;
+  final List<String> tagLines;
+  final String uriLine;
+  final Uri resolvedUri;
+  final String? keyTag;
+}
+
+class _HlsBlock {
+  _HlsBlock({required this.hasPrecedingDiscontinuity});
+  final bool hasPrecedingDiscontinuity;
+  final List<_HlsSegmentEntry> segments = <_HlsSegmentEntry>[];
+}
+
 /// Session-scoped loopback media gateway (`http://127.0.0.1:<port>/<capability>/...`).
 ///
 /// Handles anti-leech `Referer`/`User-Agent`/`Origin`, dynamic `Set-Cookie` jars,
 /// cross-domain CDN redirects with strict credential-origin boundaries, extensionless
-/// HLS `.m3u8` manifest rewriting, and fake PNG/JPG/GIF header stripping on MPEG-TS
-/// segments so `libmpv` receives a clean local stream.
+/// HLS `.m3u8` manifest rewriting, HLS VOD discontinuity ad removal, `DiskBlockCache`
+/// (`/kcache/<sid>`), and fake PNG/JPG/GIF header stripping on MPEG-TS segments so
+/// `libmpv` / `AVPlayer` receives a clean local stream.
 class LocalMediaLease {
   LocalMediaLease._(
     this._server,
@@ -195,9 +950,20 @@ class LocalMediaLease {
     this._capability,
     this._clock,
     this._isLive,
+    this._removeHlsAds,
+    this._adHosts,
+    this._enableDiskCache,
+    this._diskCache,
   )   : _initialOrigin = _originOf(initialTarget),
         _created = _clock() {
-    _initialUrl = _register(initialTarget, _inferInitialKind(initialTarget));
+    final initialKind = _inferInitialKind(initialTarget);
+    if (_enableDiskCache &&
+        !_isLive &&
+        initialKind != _TargetKind.playlist) {
+      _initialUrl = _registerDiskCached(initialTarget);
+    } else {
+      _initialUrl = _register(initialTarget, initialKind);
+    }
     _server.listen(_serve);
     _timer = Timer.periodic(const Duration(seconds: 2), (_) => _sweep());
   }
@@ -242,6 +1008,10 @@ class LocalMediaLease {
   final String _capability;
   final DateTime Function() _clock;
   final bool _isLive;
+  final bool _removeHlsAds;
+  final List<String> _adHosts;
+  final bool _enableDiskCache;
+  final DiskBlockCache _diskCache;
   final DateTime _created;
   final _cookieJar = _SessionCookieJar();
   final _targets = <String, _RegisteredTarget>{};
@@ -255,12 +1025,17 @@ class LocalMediaLease {
   int? _lastUpstreamStatusCode;
   String? _lastUpstreamHost;
   Object? _lastUpstreamError;
+  int _removedHlsAdSegments = 0;
+  double _removedHlsAdDurationSec = 0.0;
 
   Uri get url => _initialUrl;
   bool get isClosed => _closed;
   int? get lastUpstreamStatusCode => _lastUpstreamStatusCode;
   String? get lastUpstreamHost => _lastUpstreamHost;
   Object? get lastUpstreamError => _lastUpstreamError;
+  int get removedHlsAdSegments => _removedHlsAdSegments;
+  double get removedHlsAdDurationSec => _removedHlsAdDurationSec;
+  DiskBlockCache get diskCache => _diskCache;
 
   /// Registers a companion stream (e.g. separate DASH `.m4s` audio track) onto
   /// this session's loopback gateway so it receives the same anti-leech headers.
@@ -272,7 +1047,11 @@ class LocalMediaLease {
       return null;
     }
     try {
-      return _register(parsed, _inferInitialKind(parsed));
+      final kind = _inferInitialKind(parsed);
+      if (_enableDiskCache && !_isLive && kind != _TargetKind.playlist) {
+        return _registerDiskCached(parsed);
+      }
+      return _register(parsed, kind);
     } catch (_) {
       return null;
     }
@@ -401,6 +1180,10 @@ class LocalMediaLease {
     DateTime Function()? clock,
     http.Client? client,
     bool isLive = false,
+    bool removeHlsAds = true,
+    List<String> adHosts = const [],
+    bool enableDiskCache = false,
+    DiskBlockCache? diskCache,
   }) async {
     if (!shouldProxy(target)) {
       throw const FormatException('本地媒体代理仅接受远程 HTTP/HTTPS 流地址');
@@ -439,6 +1222,10 @@ class LocalMediaLease {
       capability,
       clock ?? DateTime.now,
       isLive,
+      removeHlsAds,
+      List<String>.unmodifiable(adHosts),
+      enableDiskCache,
+      diskCache ?? DiskBlockCache.shared,
     );
   }
 
@@ -506,6 +1293,22 @@ class LocalMediaLease {
     if (_sameOrigin(uri, _initialOrigin)) return true;
     if (isPrivateOrReservedTarget(uri)) return false;
     return uri.host.contains('.') || InternetAddress.tryParse(uri.host) != null;
+  }
+
+  Uri _registerDiskCached(Uri target) {
+    if (_closed || !_canRegisterTarget(target)) {
+      throw const FormatException('媒体分片或重定向目标不受信任');
+    }
+    final key = '${_TargetKind.diskCached.name}|$target';
+    final path = _paths.putIfAbsent(key, () {
+      final sid = _targets.isEmpty
+          ? _capability
+          : '${_capability}_${_targets.length}';
+      final p = '/kcache/$sid';
+      _targets[p] = _RegisteredTarget(target, _TargetKind.diskCached);
+      return p;
+    });
+    return Uri.parse('http://127.0.0.1:${_server.port}$path');
   }
 
   Uri _register(Uri target, _TargetKind kind) {
@@ -833,6 +1636,28 @@ class LocalMediaLease {
 
     _requests.add(request);
     try {
+      if (registered.kind == _TargetKind.diskCached) {
+        await _diskCache.serveRequest(
+          request,
+          cacheKey: DiskBlockCache.cacheKeyForUri(registered.uri),
+          fetchUpstream: ({range, ifRange, required allowRange}) =>
+              _sendWithRedirects(
+            registered.uri,
+            method: request.method == 'HEAD' ? 'HEAD' : 'GET',
+            range: range,
+            ifRange: ifRange,
+            allowRange: allowRange,
+          ),
+          onUpstreamStatus: (status, host) {
+            _lastUpstreamStatusCode = status;
+            _lastUpstreamHost = host;
+            if (status >= 200 && status < 300) {
+              _lastUpstreamError = null;
+            }
+          },
+        );
+        return;
+      }
       final range = request.headers.value(HttpHeaders.rangeHeader);
       final ifRange = request.headers.value(HttpHeaders.ifRangeHeader);
       final isExplicitPlaylist = registered.kind == _TargetKind.playlist ||
@@ -966,9 +1791,287 @@ class LocalMediaLease {
     return builder.takeBytes();
   }
 
+  static final RegExp _adPathPattern = RegExp(
+    r'(?:^|[/_.-])(?:ads?|advert|adjump|adver|guanggao|promo|preroll|pre-roll|midroll|mid-roll|commercial|sponsor)(?:[/_.\-\d]|$)',
+    caseSensitive: false,
+  );
+
+  static bool _matchesAdHeuristic(
+    Uri segmentUri,
+    String primaryHost,
+    List<String> adHosts,
+  ) {
+    final host = segmentUri.host.toLowerCase();
+    if (primaryHost.isNotEmpty && host.isNotEmpty && host != primaryHost) {
+      return true;
+    }
+    for (final raw in adHosts) {
+      final ad = raw.trim().toLowerCase();
+      if (ad.isEmpty) continue;
+      if (host == ad ||
+          host.endsWith('.$ad') ||
+          segmentUri.toString().toLowerCase().contains(ad)) {
+        return true;
+      }
+    }
+    return _adPathPattern.hasMatch(segmentUri.path) ||
+        _adPathPattern.hasMatch(host);
+  }
+
+  /// Heuristic HLS VOD discontinuity ad remover.
+  /// Never triggers on live streams (requires `#EXT-X-ENDLIST` or
+  /// `#EXT-X-PLAYLIST-TYPE:VOD` + `#EXT-X-DISCONTINUITY`, and `!isLive`).
+  static ({String playlist, int removedSegments, double removedDuration})
+      stripHlsAdsIfVod(
+    String text,
+    Uri origin, {
+    bool enabled = true,
+    bool isLive = false,
+    List<String> adHosts = const [],
+  }) {
+    if (!enabled || isLive) {
+      return (playlist: text, removedSegments: 0, removedDuration: 0.0);
+    }
+    final normalizedLines = text.split('\n').map((raw) {
+      return raw.endsWith('\r') ? raw.substring(0, raw.length - 1) : raw;
+    }).toList(growable: false);
+
+    var isMaster = false;
+    var isVod = false;
+    var hasDiscontinuity = false;
+    for (final raw in normalizedLines) {
+      final t = raw.trim();
+      final upper = t.toUpperCase();
+      if (upper.startsWith('#EXT-X-STREAM-INF')) {
+        isMaster = true;
+        break;
+      }
+      if (upper == '#EXT-X-ENDLIST' ||
+          upper.startsWith('#EXT-X-PLAYLIST-TYPE:VOD')) {
+        isVod = true;
+      } else if (upper == '#EXT-X-DISCONTINUITY') {
+        hasDiscontinuity = true;
+      }
+    }
+    if (isMaster || !isVod || !hasDiscontinuity) {
+      return (playlist: text, removedSegments: 0, removedDuration: 0.0);
+    }
+
+    final headerLines = <String>[];
+    final footerLines = <String>[];
+    final blocks = <_HlsBlock>[];
+    var currentBlock = _HlsBlock(hasPrecedingDiscontinuity: false);
+    var seenFirstSegmentOrDiscontinuity = false;
+    final pendingSegTags = <String>[];
+    double? pendingDuration;
+    String? currentKeyTag;
+    var inFooter = false;
+
+    for (final line in normalizedLines) {
+      final trimmed = line.trim();
+      final upper = trimmed.toUpperCase();
+      if (upper == '#EXT-X-ENDLIST') {
+        inFooter = true;
+        footerLines.add(line);
+        continue;
+      }
+      if (inFooter) {
+        footerLines.add(line);
+        continue;
+      }
+      if (trimmed.isEmpty) {
+        if (!seenFirstSegmentOrDiscontinuity && pendingSegTags.isEmpty) {
+          headerLines.add(line);
+        }
+        continue;
+      }
+      if (upper == '#EXT-X-DISCONTINUITY') {
+        if (seenFirstSegmentOrDiscontinuity) {
+          blocks.add(currentBlock);
+          currentBlock = _HlsBlock(hasPrecedingDiscontinuity: true);
+        } else {
+          seenFirstSegmentOrDiscontinuity = true;
+        }
+        pendingSegTags.clear();
+        pendingDuration = null;
+        continue;
+      }
+      if (trimmed.startsWith('#')) {
+        if (upper.startsWith('#EXTINF:')) {
+          seenFirstSegmentOrDiscontinuity = true;
+          final afterColon = trimmed.substring(8);
+          final comma = afterColon.indexOf(',');
+          final numText =
+              (comma >= 0 ? afterColon.substring(0, comma) : afterColon).trim();
+          pendingDuration = double.tryParse(numText) ?? 0.0;
+          pendingSegTags.add(line);
+        } else if (upper.startsWith('#EXT-X-KEY:')) {
+          currentKeyTag = line;
+          if (!seenFirstSegmentOrDiscontinuity) {
+            headerLines.add(line);
+          } else {
+            pendingSegTags.add(line);
+          }
+        } else if (upper.startsWith('#EXT-X-MAP:') ||
+            upper.startsWith('#EXT-X-BYTERANGE:') ||
+            upper.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) {
+          seenFirstSegmentOrDiscontinuity = true;
+          pendingSegTags.add(line);
+        } else if (!seenFirstSegmentOrDiscontinuity) {
+          headerLines.add(line);
+        } else {
+          pendingSegTags.add(line);
+        }
+        continue;
+      }
+
+      seenFirstSegmentOrDiscontinuity = true;
+      Uri resolvedUri;
+      try {
+        resolvedUri = origin.resolve(trimmed);
+      } catch (_) {
+        resolvedUri = origin;
+      }
+      currentBlock.segments.add(
+        _HlsSegmentEntry(
+          duration: pendingDuration ?? 0.0,
+          tagLines: List<String>.from(pendingSegTags),
+          uriLine: line,
+          resolvedUri: resolvedUri,
+          keyTag: currentKeyTag,
+        ),
+      );
+      pendingSegTags.clear();
+      pendingDuration = null;
+    }
+    if (currentBlock.segments.isNotEmpty) {
+      blocks.add(currentBlock);
+    }
+
+    if (blocks.length < 2) {
+      return (playlist: text, removedSegments: 0, removedDuration: 0.0);
+    }
+
+    var totalDuration = 0.0;
+    var totalSegments = 0;
+    final hostDurations = <String, double>{};
+    for (final block in blocks) {
+      for (final seg in block.segments) {
+        totalSegments++;
+        final d = seg.duration > 0 ? seg.duration : 0.0;
+        totalDuration += d;
+        final h = seg.resolvedUri.host.toLowerCase();
+        hostDurations[h] = (hostDurations[h] ?? 0.0) + d;
+      }
+    }
+    if (totalSegments == 0 || totalDuration <= 0.0) {
+      return (playlist: text, removedSegments: 0, removedDuration: 0.0);
+    }
+
+    var primaryHost = origin.host.toLowerCase();
+    var maxHostDur = -1.0;
+    hostDurations.forEach((host, dur) {
+      if (dur > maxHostDur) {
+        maxHostDur = dur;
+        primaryHost = host;
+      }
+    });
+
+    final removeBlock = List<bool>.filled(blocks.length, false);
+    var removedSegments = 0;
+    var removedDuration = 0.0;
+
+    for (var i = 0; i < blocks.length; i++) {
+      final block = blocks[i];
+      if (block.segments.isEmpty || block.segments.length > 20) continue;
+      final blockDuration = block.segments.fold<double>(
+        0.0,
+        (sum, seg) => sum + (seg.duration > 0 ? seg.duration : 0.0),
+      );
+      if (blockDuration / totalDuration > 0.40) continue;
+      final allShortEnough =
+          block.segments.every((seg) => seg.duration > 0 && seg.duration <= 60.0);
+      if (!allShortEnough) continue;
+
+      final hitsHeuristic = block.segments.any(
+        (seg) => _matchesAdHeuristic(seg.resolvedUri, primaryHost, adHosts),
+      );
+      if (hitsHeuristic) {
+        removeBlock[i] = true;
+        removedSegments += block.segments.length;
+        removedDuration += blockDuration;
+      }
+    }
+
+    if (removedSegments == 0 ||
+        removedSegments >= totalSegments ||
+        (removedDuration / totalDuration) > 0.40) {
+      return (playlist: text, removedSegments: 0, removedDuration: 0.0);
+    }
+
+    final out = <String>[...headerLines];
+    var emittedAnyBlock = false;
+    var prevWasRemoved = false;
+    String? lastEmittedKeyTag;
+    for (final line in headerLines) {
+      if (line.trim().toUpperCase().startsWith('#EXT-X-KEY:')) {
+        lastEmittedKeyTag = line;
+      }
+    }
+    for (var i = 0; i < blocks.length; i++) {
+      if (removeBlock[i]) {
+        prevWasRemoved = true;
+        continue;
+      }
+      final block = blocks[i];
+      if (emittedAnyBlock &&
+          block.hasPrecedingDiscontinuity &&
+          !prevWasRemoved) {
+        out.add('#EXT-X-DISCONTINUITY');
+      }
+      prevWasRemoved = false;
+      emittedAnyBlock = true;
+      for (var sIdx = 0; sIdx < block.segments.length; sIdx++) {
+        final seg = block.segments[sIdx];
+        final blockHasOwnKey = seg.tagLines.any(
+          (l) => l.trim().toUpperCase().startsWith('#EXT-X-KEY:'),
+        );
+        if (sIdx == 0 &&
+            !blockHasOwnKey &&
+            seg.keyTag != null &&
+            seg.keyTag != lastEmittedKeyTag) {
+          out.add(seg.keyTag!);
+          lastEmittedKeyTag = seg.keyTag;
+        }
+        for (final tag in seg.tagLines) {
+          if (tag.trim().toUpperCase().startsWith('#EXT-X-KEY:')) {
+            lastEmittedKeyTag = tag;
+          }
+          out.add(tag);
+        }
+        out.add(seg.uriLine);
+      }
+    }
+    out.addAll(footerLines);
+    return (
+      playlist: out.join('\n'),
+      removedSegments: removedSegments,
+      removedDuration: removedDuration,
+    );
+  }
+
   Future<void> _respondPlaylist(
       HttpResponse downstream, String playlistText, Uri playlistOrigin) async {
-    final rewritten = _rewritePlaylist(playlistText, playlistOrigin);
+    final cleaned = stripHlsAdsIfVod(
+      playlistText,
+      playlistOrigin,
+      enabled: _removeHlsAds,
+      isLive: _isLive,
+      adHosts: _adHosts,
+    );
+    _removedHlsAdSegments += cleaned.removedSegments;
+    _removedHlsAdDurationSec += cleaned.removedDuration;
+    final rewritten = _rewritePlaylist(cleaned.playlist, playlistOrigin);
     final encoded = utf8.encode(rewritten);
     downstream.statusCode = HttpStatus.ok;
     downstream.headers.removeAll('content-range');
