@@ -1582,6 +1582,16 @@ def main() -> None:
         ios_podfile.write_text(text, encoding="utf-8")
     # Windows icon, working directory, immediate window show, and title
     win_runner = ROOT / "windows" / "runner"
+    win_native_dir = ROOT / "windows_native"
+    if win_runner.exists() and win_native_dir.exists():
+        for fname in (
+            "marco_webview2_plugin.h",
+            "marco_webview2_plugin.cpp",
+            "CMakeFragment.cmake",
+        ):
+            src_file = win_native_dir / fname
+            if src_file.is_file():
+                shutil.copy2(src_file, win_runner / fname)
     win_ico = win_runner / "resources" / "app_icon.ico"
     if win_ico.parent.exists():
         _write_windows_ico(
@@ -1638,6 +1648,26 @@ def main() -> None:
                 "  void RemoveTrayIcon();\n"
                 "  void RestoreFromTray();\n"
                 "  void ShowTrayContextMenu(HWND hwnd);",
+                1,
+            )
+            h_changed = True
+        if h_changed:
+            win_fw_h.write_text(h_text, encoding="utf-8")
+    if win_fw_h.exists():
+        h_text = win_fw_h.read_text(encoding="utf-8")
+        h_changed = False
+        if '#include "marco_webview2_plugin.h"' not in h_text and '#include "win32_window.h"' in h_text:
+            h_text = h_text.replace(
+                '#include "win32_window.h"',
+                '#include "win32_window.h"\n#include "marco_webview2_plugin.h"',
+                1,
+            )
+            h_changed = True
+        if "webview2_plugin_" not in h_text and "flutter_controller_;" in h_text:
+            h_text = h_text.replace(
+                "  std::unique_ptr<flutter::FlutterViewController> flutter_controller_;",
+                "  std::unique_ptr<flutter::FlutterViewController> flutter_controller_;\n"
+                "  std::unique_ptr<marco::MarcoWebview2Plugin> webview2_plugin_;",
                 1,
             )
             h_changed = True
@@ -1849,17 +1879,43 @@ def main() -> None:
                 1,
             )
             changed = True
+        if "webview2_plugin_ = " not in text and "RegisterPlugins(flutter_controller_->engine());" in text:
+            text = text.replace(
+                "RegisterPlugins(flutter_controller_->engine());",
+                "RegisterPlugins(flutter_controller_->engine());\n"
+                "  webview2_plugin_ = std::make_unique<marco::MarcoWebview2Plugin>(\n"
+                "      flutter_controller_->engine()->messenger(), GetHandle());",
+                1,
+            )
+            changed = True
+        if "webview2_plugin_->Shutdown()" not in text and "void FlutterWindow::OnDestroy()" in text:
+            text = text.replace(
+                "void FlutterWindow::OnDestroy() {",
+                "void FlutterWindow::OnDestroy() {\n"
+                "  if (webview2_plugin_) {\n"
+                "    webview2_plugin_->Shutdown();\n"
+                "    webview2_plugin_.reset();\n"
+                "  }",
+                1,
+            )
+            changed = True
         if changed:
             win_fw.write_text(text, encoding="utf-8")
     win_runner_cmake = win_runner / "CMakeLists.txt"
     if win_runner_cmake.exists():
         cmake_text = win_runner_cmake.read_text(encoding="utf-8")
+        cmake_changed = False
         if '"shell32.lib"' not in cmake_text and '"dwmapi.lib"' in cmake_text:
             cmake_text = cmake_text.replace(
                 'target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")',
                 'target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib" "shell32.lib")',
                 1,
             )
+            cmake_changed = True
+        if "CMakeFragment.cmake" not in cmake_text and (win_runner / "CMakeFragment.cmake").is_file():
+            cmake_text = cmake_text.rstrip() + "\n\ninclude(CMakeFragment.cmake)\n"
+            cmake_changed = True
+        if cmake_changed:
             win_runner_cmake.write_text(cmake_text, encoding="utf-8")
 
 if __name__ == "__main__":

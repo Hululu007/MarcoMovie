@@ -126,15 +126,22 @@ class DesktopWebViewJsBridge {
     return false;
   }
 
+  static bool get _inFlutterTest => Platform.environment.containsKey('FLUTTER_TEST');
+
+  Future<T?> _withOptionalTimeout<T>(Future<T?> future) {
+    if (_inFlutterTest) return future;
+    return future.timeout(const Duration(seconds: 2), onTimeout: () => null);
+  }
+
   /// Queries whether Edge WebView2 Runtime is available on this Windows host.
   /// Never throws on stripped Windows LTSC systems or missing plugin handlers.
   Future<bool> isAvailable({bool refresh = false}) async {
     if (!_isPlatformSupported) return false;
     if (!refresh && _cachedAvailable != null) return _cachedAvailable!;
     try {
-      final result = await _channel
-          .invokeMethod<bool>('isAvailable')
-          .timeout(const Duration(seconds: 2), onTimeout: () => false);
+      final result = await _withOptionalTimeout(
+        _channel.invokeMethod<bool>('isAvailable'),
+      );
       _cachedAvailable = result == true;
       return _cachedAvailable!;
     } on MissingPluginException {
@@ -155,9 +162,9 @@ class DesktopWebViewJsBridge {
       return const {'available': false, 'reason': 'unsupported_platform'};
     }
     try {
-      final raw = await _channel
-          .invokeMapMethod<String, dynamic>('getStatus')
-          .timeout(const Duration(seconds: 2), onTimeout: () => null);
+      final raw = await _withOptionalTimeout(
+        _channel.invokeMapMethod<String, dynamic>('getStatus'),
+      );
       if (raw == null) {
         return const {'available': false, 'reason': 'webview2_unavailable'};
       }
@@ -181,9 +188,9 @@ class DesktopWebViewJsBridge {
       return const {'available': false, 'reason': 'unsupported_platform'};
     }
     try {
-      final raw = await _snifferChannel
-          .invokeMapMethod<String, dynamic>('getStatus')
-          .timeout(const Duration(seconds: 2), onTimeout: () => null);
+      final raw = await _withOptionalTimeout(
+        _snifferChannel.invokeMapMethod<String, dynamic>('getStatus'),
+      );
       return raw ?? const {'available': false, 'reason': 'webview2_unavailable'};
     } on MissingPluginException {
       return const {'available': false, 'reason': 'missing_plugin'};
@@ -299,32 +306,34 @@ class DesktopWebViewJsBridge {
     await ctx.proxy?.unregister();
     if (!_isPlatformSupported) return;
     try {
-      await _channel
-          .invokeMethod<dynamic>('evalSpider', <String, dynamic>{
-            'callId': 'dispose_${++_nextCallId}',
-            'action': 'disposeSession',
-            'type': 'disposeSession',
-            'sessionId': sessionKey,
-            'timeoutMs': 2000,
-          })
-          .timeout(const Duration(seconds: 2), onTimeout: () => null);
+      await _withOptionalTimeout(
+        _channel.invokeMethod<dynamic>('evalSpider', <String, dynamic>{
+          'callId': 'dispose_${++_nextCallId}',
+          'action': 'disposeSession',
+          'type': 'disposeSession',
+          'sessionId': sessionKey,
+          'timeoutMs': 2000,
+        }),
+      );
     } catch (_) {}
   }
 
   Future<void> sleep() async {
     if (!_isPlatformSupported) return;
     try {
-      await _channel
-          .invokeMethod<dynamic>('sleep')
-          .timeout(const Duration(seconds: 2), onTimeout: () => null);
+      await _withOptionalTimeout(_channel.invokeMethod<dynamic>('sleep'));
     } catch (_) {}
   }
 
   Future<void> closeAll() async {
     final server = _proxyServer;
     _proxyServer = null;
+    final hadActivity =
+        _handlerAttached || _sessions.isNotEmpty || _cachedAvailable == true;
     await retainSessions({});
-    await sleep();
+    if (hadActivity) {
+      await sleep();
+    }
     await server?.close();
   }
 

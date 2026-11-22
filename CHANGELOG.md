@@ -1,3 +1,17 @@
+## 2026-11-23 Windows x64 0.7.0 专项大版本升级：MPV 三档高画质/HDR 动态色调映射、人声响度增强、内置免安装 Python 3.11 运行时、Edge WebView2 动态嗅探与异步 JS、512 MB 落盘块缓存及蓝光原盘 ISO 流式直播（Windows 0.7.0）
+
+- **MPV 高画质解码、HDR 动态色调映射与 4 档人声响度增强（`WindowsVideoQualityController`）**：
+  - 彻底解除 Windows 播放端硬编码的 `bilinear` / `dither-depth=no` / `hdr-compute-peak=no` 低画质封印，提供 **「省电兼容 / 高画质 HDR 映射（默认：`spline36` + `mitchell` + `tone-mapping` 回退链 + `hdr-compute-peak=yes` + `gamut-mapping-mode=perceptual`）/ 旗舰超清锐利（`ewa_lanczossharp` + `deband`）」** 三档预设与智能硬解联动（开启 Anime4K 或兼容内核自动切换 `d3d11va-copy`，常规播放优先零拷贝硬解）；
+  - 解耦 `Anime4kController` 关闭回退缩放器逻辑，退出超分时自动恢复当前画质档位缩放器；新增 4 档 `dynaudnorm` **音频响度与人声对白增强**（关闭 / 轻度 / 标准 / 影院人声），桌面播放 HUD 与设置页均可实时切换。
+- **内置官方免安装 Python 3.11.9 Embeddable 原生运行时（`DesktopPythonBridge`）**：
+  - 随包组装锁定真实 SHA-256 的官方 Python 3.11.9 Embeddable 与 `requests`、`urllib3`、`certifi`、`idna`、`charset-normalizer`、`beautifulsoup4`、`soupsieve`、`typing-extensions`、`pyquery`、`cssselect`、`pycryptodome`、`lxml`（`-I` 隔离启动防止宿主机环境变量污染）；
+  - 新增常驻 JSON-RPC 子进程池（`maxSessions = 4` LRU 复用、超时强杀重启、退出清理与 TVBox `Spider` 垫片），Windows 端自动启用原生 CPython 3.11 宿主运行社区 `.py` 源；更新 Inno Setup 安装脚本升级前清理 `{app}\data\python`。
+- **轻量原生 Edge WebView2 插件（`MarcoWebview2Plugin`）**：
+  - 零 NuGet / 免捆绑固定内核，动态探测系统 Evergreen Edge WebView2 Runtime（精简系统缺失时安静降级不崩溃），实现静音离屏 **Stage-3 动态网页嗅探**（`marco_movie/web_sniffer`：204 广告拦截、`rules` 正则匹配与请求头/Cookie 提取、`clickScript` 自动点击、超时释放）及懒加载离屏 **异步 JS / DRPY2 兜底引擎**（`marco_movie/webview_js`：QuickJS 遇到 `DOMParser` / `crypto.subtle` / 浏览器 API 缺失时透明回退）；同步完整支持 `CmsSniffRule` 与 `CmsConfig.ads` 解析持久化。
+- **HLS 点播断层去广告、512 MB 落盘块缓存（`DiskBlockCache`）与蓝光原盘 `.iso` 流式代理（`BlurayIsoProxy`）**：
+  - `LocalMediaLease` 新增 HLS 点播 `#EXT-X-DISCONTINUITY` 短广告片段剥离（直播流零误伤）与 `256 KiB` 对齐 `DiskBlockCache`（默认 `512 MB`，支持 `0 / 256 MB / 512 MB / 1 GB / 2 GB` 调节与一键清理）；
+  - 新增 `BlurayIsoProxy` 按需 `2 KiB` Range 解析本地/SMB/WebDAV/AList/网盘 `.iso` 的 ISO-9660 / UDF 2.50 目录树与 `.mpls` 主正片（过滤循环假轨并提取章节），暴露连续 `HTTP 206` Seek 虚拟 `.m2ts` / `.vob` 流并接入桌面进度条章节打点与跳转；全程保留 `winFastGlass` 无模糊快路径与 `185ms` 桌面平滑转场。
+
 ## 2026-11-22 Android 电视 0.6.1 & 手机/平板 0.6.0：MPV 高画质内核、内置 CPython 3.11、HLS 伪装代理/分块缓存、AList 原生引擎与电视端全面体验升级（Android TV 0.6.1 · Android 手机/平板 0.6.0）
 
 - [Android 电视 / 盒子 0.6.1](docs/releases/android-tv-v0.6.1.md) · [Android 手机 / 平板 0.6.0](docs/releases/android-mobile-v0.6.0.md)

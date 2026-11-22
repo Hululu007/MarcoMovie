@@ -775,7 +775,7 @@ void main() {
           'https://vod.example/p/main1.ts\n'
           '#EXT-X-DISCONTINUITY\n'
           '#EXTINF:65.0,\n'
-          'https://ad.other/long_ad.ts\n'
+          'https://ad.invalid/long_ad.ts\n'
           '#EXT-X-DISCONTINUITY\n'
           '#EXTINF:200.0,\n'
           'https://vod.example/p/main2.ts\n'
@@ -792,7 +792,7 @@ void main() {
       for (var i = 0; i < 21; i++) {
         over20Segs
           ..writeln('#EXTINF:1.0,')
-          ..writeln('https://ad.other/s$i.ts');
+          ..writeln('https://ad.invalid/s$i.ts');
       }
       over20Segs
         ..writeln('#EXT-X-DISCONTINUITY')
@@ -810,7 +810,7 @@ void main() {
           'https://vod.example/p/main.ts\n'
           '#EXT-X-DISCONTINUITY\n'
           '#EXTINF:40.0,\n'
-          'https://ad.other/ad.ts\n';
+          'https://ad.invalid/ad.ts\n';
       expect(LocalMediaLease.stripVodPlaylistAds(over40Pct, origin), over40Pct);
 
       // Case D: Valid VOD ad insertion (30s out of 130s = 23% <= 40%, 2 segs <= 20, <= 60s) -> stripped!
@@ -821,14 +821,14 @@ void main() {
           'https://vod.example/p/main1.ts\n'
           '#EXT-X-DISCONTINUITY\n'
           '#EXTINF:15.0,\n'
-          'https://ad.other/ad1.ts\n'
+          'https://ad.invalid/ad1.ts\n'
           '#EXTINF:15.0,\n'
-          'https://ad.other/ad2.ts\n'
+          'https://ad.invalid/ad2.ts\n'
           '#EXT-X-DISCONTINUITY\n'
           '#EXTINF:50.0,\n'
           'https://vod.example/p/main2.ts\n';
       final cleaned = LocalMediaLease.stripVodPlaylistAds(validStrip, origin);
-      expect(cleaned, isNot(contains('ad.other')));
+      expect(cleaned, isNot(contains('ad.invalid')));
       expect(cleaned, contains('main1.ts'));
       expect(cleaned, contains('main2.ts'));
     });

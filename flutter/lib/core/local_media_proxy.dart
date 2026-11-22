@@ -140,7 +140,7 @@ class DiskBlockCache {
   final Directory? _explicitDirectory;
   final DateTime Function() _clock;
   int _maxBytes;
-  Future<void> _ioChain = Future<void>.value();
+  Future<void>? _ioChain;
   int _tmpSeq = 0;
 
   DiskBlockCache({
@@ -159,8 +159,15 @@ class DiskBlockCache {
       sha256.convert(utf8.encode(cacheKey)).toString();
 
   Future<T> _serialized<T>(Future<T> Function() action) {
-    final next = _ioChain.then((_) => action());
-    _ioChain = next.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    final prev = _ioChain;
+    final next = prev == null ? action() : prev.then((_) => action());
+    final settled = next.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    _ioChain = settled;
+    settled.whenComplete(() {
+      if (identical(_ioChain, settled)) {
+        _ioChain = null;
+      }
+    });
     return next;
   }
 
