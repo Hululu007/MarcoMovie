@@ -412,4 +412,134 @@ class Spider:
         ? 'Windows Python 3.11 test runtime not staged'
         : false,
   );
+
+  test(
+    'PythonSourceHost upgrades pool capacity to 4 for desktop runtime and retains 4 concurrent sources',
+    () async {
+      DesktopPythonBridge.executableOverride =
+          '${Directory.systemTemp.path}/nonexistent_marco_python_311.exe';
+      final host = PythonSourceHost();
+      addTearDown(host.close);
+      if (!Platform.isIOS) {
+        expect(host.enabled, isFalse);
+        expect(host.sessionPoolCapacity, 2);
+      }
+
+      DesktopPythonBridge.executableOverride = testPythonExe;
+      DesktopPythonBridge.runnerOverride = testRunner;
+      expect(host.enabled, isTrue);
+      expect(host.isDesktopNativeReady, isTrue);
+      expect(host.sessionPoolCapacity, 4);
+
+      NativePythonPackage pkgFor(String tag) => NativePythonPackage(
+        entry: 'main.py',
+        files: {
+          'main.py': Uint8List.fromList(
+            utf8.encode('''
+class Spider:
+    def init(self, extend=""):
+        self.calls = 0
+    def homeContent(self, filter):
+        self.calls += 1
+        return {'tag': '$tag', 'calls': self.calls}
+    def detailContent(self, ids):
+        self.calls += 1
+        return {'tag': '$tag', 'calls': self.calls}
+'''),
+          ),
+        },
+      );
+
+      for (final tag in ['k1', 'k2', 'k3', 'k4']) {
+        final raw = await host.invoke(
+          sessionKey: tag,
+          expectedGeneration: host.generation,
+          package: pkgFor(tag),
+          method: 'home',
+          arguments: [false],
+        );
+        expect((jsonDecode(raw) as Map)['tag'], tag);
+      }
+
+      // All 4 sessions must remain warm without evicting k1 when k3/k4 opened.
+      final cachedK1 = await host.callCached(
+        sessionKey: 'k1',
+        method: 'detail',
+        arguments: [
+          ['id1'],
+        ],
+      );
+      expect(cachedK1, isNotNull);
+      final k1Map = jsonDecode(cachedK1!) as Map;
+      expect(k1Map['tag'], 'k1');
+      expect(k1Map['calls'], 2);
+    },
+    skip: testPythonExe == null
+        ? 'Windows Python 3.11 test runtime not staged'
+        : false,
+  );
+
+  test(
+    'DesktopPythonBridge preserves /__package__/ __file__ contract across imports, Path, and pkgutil.get_data',
+    () async {
+      final bridge = DesktopPythonBridge(
+        pythonExecutable: testPythonExe,
+        runnerScript: testRunner,
+      );
+      final host = PythonSourceHost(enabled: true, channel: bridge);
+      addTearDown(host.close);
+
+      final package = NativePythonPackage(
+        entry: 'bundle/main.py',
+        files: {
+          'bundle/__init__.py': Uint8List.fromList(utf8.encode('')),
+          'bundle/main.py': Uint8List.fromList(
+            utf8.encode('''
+import json
+import pkgutil
+from pathlib import Path
+from helper import helper_file, helper_title
+
+class Spider:
+    def homeContent(self, filter):
+        assert __file__ == '/__package__/bundle/main.py', __file__
+        assert helper_file == '/__package__/bundle/helper.py', helper_file
+        with open(__file__, encoding='utf-8') as self_file:
+            assert 'class Spider:' in self_file.read()
+        with open(Path(__file__).parent / 'data/metadata.json', encoding='utf-8') as meta_file:
+            via_path = json.load(meta_file)['title']
+        via_pkgutil = json.loads(pkgutil.get_data('bundle', 'data/metadata.json').decode('utf-8'))['title']
+        return {'main_file': __file__, 'helper_file': helper_file, 'titles': [helper_title, via_path, via_pkgutil]}
+'''),
+          ),
+          'bundle/helper.py': Uint8List.fromList(
+            utf8.encode('''
+import json
+helper_file = __file__
+with open(__file__.rsplit('/', 1)[0] + '/data/metadata.json', encoding='utf-8') as f:
+    helper_title = json.load(f)['title']
+'''),
+          ),
+          'bundle/data/metadata.json': Uint8List.fromList(
+            utf8.encode(jsonEncode({'title': '虚拟包契约'})),
+          ),
+        },
+      );
+
+      final raw = await host.invoke(
+        sessionKey: 'pkg-file-contract',
+        expectedGeneration: host.generation,
+        package: package,
+        method: 'home',
+        arguments: [false],
+      );
+      final doc = jsonDecode(raw) as Map<String, dynamic>;
+      expect(doc['main_file'], '/__package__/bundle/main.py');
+      expect(doc['helper_file'], '/__package__/bundle/helper.py');
+      expect(doc['titles'], ['虚拟包契约', '虚拟包契约', '虚拟包契约']);
+    },
+    skip: testPythonExe == null
+        ? 'Windows Python 3.11 test runtime not staged'
+        : false,
+  );
 }

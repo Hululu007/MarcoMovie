@@ -33,12 +33,20 @@ abstract class PythonNativeSession {
 /// never replayed in another interpreter. Production routing must first verify
 /// that the installed native backend implements this ownership contract.
 class PythonSourceSessions {
-  PythonSourceSessions({this.maxSessions = 2, this.maxPendingPerSource = 4}) {
-    if (maxSessions < 1 ||
-        maxSessions > 2 ||
+  PythonSourceSessions({
+    this.maxSessions = 2,
+    this.maxPendingPerSource = 4,
+    int maxAllowedSessions = 2,
+    int initialGeneration = 0,
+  }) : _generation = initialGeneration {
+    if (maxAllowedSessions < 1 ||
+        maxAllowedSessions > 16 ||
+        maxSessions < 1 ||
+        maxSessions > maxAllowedSessions ||
         maxPendingPerSource < 1 ||
-        maxPendingPerSource > 8)
+        maxPendingPerSource > 8) {
       throw ArgumentError('Python capacity');
+    }
   }
 
   final int maxSessions;

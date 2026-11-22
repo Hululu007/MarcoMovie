@@ -408,7 +408,21 @@ void main() {
 
       expect(
         find.descendant(
-          of: find.byKey(const ValueKey('windows-settings-video-quality')),
+          of: find.byKey(const ValueKey('windows-settings-disk-cache')),
+          matching: find.byType(BackdropFilter),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('windows-runtime-python-status')),
+          matching: find.byType(BackdropFilter),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('windows-runtime-webview2-status')),
           matching: find.byType(BackdropFilter),
         ),
         findsNothing,

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'desktop_python_bridge.dart';
@@ -44,19 +45,63 @@ class PythonSourceException implements Exception {
 /// replayed in another engine.
 class PythonSourceHost {
   PythonSourceHost({bool? enabled, PythonSourceChannel? channel})
-    : enabled =
-          enabled ??
-          (Platform.isIOS ||
-              channel is DesktopPythonBridge ||
-              (channel == null && DesktopPythonBridge.isRuntimeAvailable())),
-      _channel = channel;
+    : _explicitEnabled = enabled,
+      _channel = channel {
+    _sessions = _buildSessions(_targetMaxSessions());
+  }
 
   static final instance = PythonSourceHost();
-  final bool enabled;
+  final bool? _explicitEnabled;
   PythonSourceChannel? _channel;
-  final _sessions = PythonSourceSessions();
+  late PythonSourceSessions _sessions;
   Future<void>? _ready;
-  int get generation => _sessions.generation;
+
+  bool get enabled =>
+      _explicitEnabled ??
+      (Platform.isIOS ||
+          _channel is DesktopPythonBridge ||
+          (_channel == null && DesktopPythonBridge.isRuntimeAvailable()));
+
+  int _targetMaxSessions() {
+    if (Platform.isIOS) return 2;
+    final channel = _channel;
+    if (channel is DesktopPythonBridge) return channel.maxSessions;
+    if (_explicitEnabled != false &&
+        channel == null &&
+        DesktopPythonBridge.isRuntimeAvailable()) {
+      return 4;
+    }
+    return 2;
+  }
+
+  static PythonSourceSessions _buildSessions(
+    int capacity, {
+    int initialGeneration = 0,
+  }) => PythonSourceSessions(
+    maxSessions: capacity,
+    maxAllowedSessions: capacity < 2 ? 2 : capacity,
+    initialGeneration: initialGeneration,
+  );
+
+  PythonSourceSessions _ensureSessions() {
+    final target = _targetMaxSessions();
+    if (_sessions.maxSessions != target &&
+        _sessions.allocatedCount == 0 &&
+        _sessions.activeCount == 0) {
+      final previous = _sessions;
+      _sessions = _buildSessions(
+        target,
+        initialGeneration: previous.generation,
+      );
+      unawaited(previous.close());
+    }
+    return _sessions;
+  }
+
+  @visibleForTesting
+  int get sessionPoolCapacity => _ensureSessions().maxSessions;
+
+  int get generation => _ensureSessions().generation;
 
   PythonSourceChannel get _bridge => _channel ??=
       (!Platform.isIOS && DesktopPythonBridge.isRuntimeAvailable())
@@ -71,7 +116,7 @@ class PythonSourceHost {
       !Platform.isIOS &&
       enabled &&
       (_channel is DesktopPythonBridge ||
-          DesktopPythonBridge.isRuntimeAvailable());
+          (_channel == null && DesktopPythonBridge.isRuntimeAvailable()));
 
   Future<PythonRuntimeStatus> runtimeStatus() async {
     if (Platform.isIOS) {
@@ -128,7 +173,7 @@ class PythonSourceHost {
     Completer<void>? cancellation,
   }) => enabled
       ? _explainFailure(
-          () => _sessions.callCached(
+          () => _ensureSessions().callCached(
             sessionKey: sessionKey,
             method: method,
             arguments: arguments,
@@ -147,7 +192,7 @@ class PythonSourceHost {
   }) {
     if (!enabled) throw StateError('此设备未启用原生 Python 运行库');
     return _explainFailure(
-      () => _sessions.invoke(
+      () => _ensureSessions().invoke(
         sessionKey: sessionKey,
         expectedGeneration: expectedGeneration,
         method: method,
@@ -161,13 +206,13 @@ class PythonSourceHost {
     );
   }
 
-  void retainSessions(Set<String> keys) => _sessions.retainSessions(keys);
+  void retainSessions(Set<String> keys) => _ensureSessions().retainSessions(keys);
   Future<void> onAppResumed() =>
-      enabled ? _sessions.onAppResumed() : Future.value();
+      enabled ? _ensureSessions().onAppResumed() : Future.value();
   void Function() pinForPlayback(String key) =>
-      enabled ? _sessions.pinForPlayback(key) : () {};
+      enabled ? _ensureSessions().pinForPlayback(key) : () {};
   bool ownsProxyUrl(String key, Uri uri) =>
-      enabled && _sessions.ownsProxyUrl(key, uri);
+      enabled && _ensureSessions().ownsProxyUrl(key, uri);
   Future<void> close() async {
     await _sessions.close();
     final channel = _channel;

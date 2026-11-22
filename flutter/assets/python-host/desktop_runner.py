@@ -671,13 +671,20 @@ class _MemoryLoader(importlib.abc.SourceLoader):
 
     def get_filename(self, fullname):
         self.source._ensure_open()
-        return self.source.origin + quote(self.path or self.directory + "/__init__.py")
+        rel = self.path or (self.directory + "/__init__.py" if self.directory else "__init__.py")
+        return "/__package__/" + rel
 
     def get_data(self, path):
         self.source._ensure_open()
-        if not isinstance(path, str) or not path.startswith(self.source.origin):
+        if not isinstance(path, str):
             raise SourceContractError("Resource address is outside this source")
-        relative = _path(unquote(path[len(self.source.origin):].replace("\\", "/")))
+        normalized = path.replace("\\", "/")
+        if path.startswith(self.source.origin):
+            relative = _path(unquote(path[len(self.source.origin):].replace("\\", "/")))
+        elif normalized.startswith("/__package__/"):
+            relative = _path(normalized[len("/__package__/"):])
+        else:
+            raise SourceContractError("Resource address is outside this source")
         return self.source._read_file(relative)
 
     def get_code(self, fullname):
@@ -1152,7 +1159,8 @@ class DesktopPythonSource:
             if isinstance(file, int):
                 return original_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
             name = os.fsdecode(os.fspath(file))
-            virtual = name.startswith(("pkg:", "/__package__/"))
+            norm_name = name.replace("\\", "/")
+            virtual = norm_name.startswith(("pkg:", "/__package__/"))
             if os.path.isabs(name) and not virtual:
                 return original_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
             owner._ensure_open()
@@ -1170,9 +1178,9 @@ class DesktopPythonSource:
                 relative = unquote(name[len(owner.origin):])
             elif name.startswith(owner.origin.replace("://", ":/")):
                 relative = unquote(name[len(owner.origin.replace("://", ":/")):])
-            elif name.startswith("/__package__/"):
-                relative = name[len("/__package__/"):]
-            elif name.startswith("pkg:"):
+            elif norm_name.startswith("/__package__/"):
+                relative = norm_name[len("/__package__/"):]
+            elif norm_name.startswith("pkg:"):
                 raise SourceContractError("File belongs to another source")
             else:
                 directory = owner.entry.rpartition("/")[0]
