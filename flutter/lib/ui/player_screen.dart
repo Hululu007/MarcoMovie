@@ -9359,7 +9359,11 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
 
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
-    final crossAxisCount = isLandscape ? 5 : 3;
+    final crossAxisCount = isLandscape
+        ? (screenSize.width >= 820 ? 5 : 4)
+        : (screenSize.width >= 580
+            ? 4
+            : (screenSize.width < 360 ? 2 : 3));
     final safeLineIdx = widget.lines.isEmpty
         ? 0
         : _previewLineIndex.clamp(0, widget.lines.length - 1).toInt();

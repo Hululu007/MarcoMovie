@@ -248,15 +248,30 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
 
       // At top: 4+1 Dock is visible, collapsed logo button is absent.
-      expect(find.byKey(const ValueKey('home-search-button')), findsOneWidget);
+      final searchFinder = find.byKey(const ValueKey('home-search-button'));
+      expect(searchFinder, findsOneWidget);
       expect(find.byKey(const ValueKey('dock-collapsed-logo-button')), findsNothing);
+      final expandedSearchRect = tester.getRect(searchFinder);
+      final expandedDockRect = tester.getRect(find.byType(AppleLiquidGlassDock));
 
       // Scroll Home downward past logo threshold -> collapses into bottom-right brand logo button.
       await tester.drag(find.byType(CustomScrollView).first, const Offset(0, -320));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 350));
-      expect(find.byKey(const ValueKey('dock-collapsed-logo-button')), findsOneWidget);
-      expect(find.byKey(const ValueKey('home-search-button')), findsNothing);
+      final collapsedFinder =
+          find.byKey(const ValueKey('dock-collapsed-logo-button'));
+      expect(collapsedFinder, findsOneWidget);
+      expect(searchFinder, findsNothing);
+
+      // Regression guard for iOS 16.4 (iOS < 26 fallback Dock): collapsed button
+      // MUST stay pinned at the exact same bottom-right anchor as the expanded
+      // search button — NEVER expand Align to full screen height and float to mid-screen!
+      final collapsedRect = tester.getRect(collapsedFinder);
+      final collapsedDockRect = tester.getRect(find.byType(AppleLiquidGlassDock));
+      expect(collapsedDockRect.height, closeTo(expandedDockRect.height, 1.0));
+      expect(collapsedRect.top, closeTo(expandedSearchRect.top, 1.0));
+      expect(collapsedRect.bottom, closeTo(expandedSearchRect.bottom, 1.0));
+      expect(collapsedRect.right, closeTo(expandedSearchRect.right, 1.0));
 
       // Tapping the collapsed logo button opens the vertical glass bubble menu.
       await tester.tap(find.byKey(const ValueKey('dock-collapsed-logo-button')));

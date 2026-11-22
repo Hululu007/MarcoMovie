@@ -15,26 +15,102 @@ OPAQUE_ICON = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
 MACOS_ICON_DIR = ROOT / "brand" / "macos"
 IOS_ICON = ROOT / "brand" / "ios" / "1024.png"
 
-IOS_NETDISK_AUTH_CHANNEL_SNIPPET = r'''
-      let authChannel = FlutterMethodChannel(name: "marco_movie/netdisk_auth", binaryMessenger: controller.binaryMessenger)
-      authChannel.setMethodCallHandler { [weak controller] call, result in
-        if call.method == "startWebAuth", let args = call.arguments as? [String: Any] {
-          let drive = (args["drive"] as? String) ?? ""
-          let urlStr = (args["url"] as? String) ?? ""
-          let qrUrl = (args["qrUrl"] as? String) ?? ""
-          DispatchQueue.main.async {
-            NetdiskWebAuthController.present(
-              from: controller,
-              drive: drive,
-              urlString: urlStr,
-              qrUrlString: qrUrl,
-              completion: result
-            )
-          }
-        } else {
-          result(FlutterMethodNotImplemented)
+IOS_NATIVE_CHANNEL_REGISTRAR_SWIFT = r'''
+
+private enum MarcoNativeChannelRegistrar {
+  private static func activeFlutterController() -> FlutterViewController? {
+    return MarcoLiquidGlassSupport.activeWindow()?.rootViewController as? FlutterViewController
+  }
+
+  static func register(messenger: FlutterBinaryMessenger, pluginRegistry: FlutterPluginRegistry) {
+    let wakelockChannel = FlutterMethodChannel(name: "marco_movie/wakelock", binaryMessenger: messenger)
+    wakelockChannel.setMethodCallHandler { call, result in
+      if call.method == "setEnabled", let enabled = call.arguments as? Bool {
+        DispatchQueue.main.async {
+          UIApplication.shared.isIdleTimerDisabled = enabled
+          result(nil)
         }
-      }'''
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    let systemChromeChannel = FlutterMethodChannel(name: "marco_movie/system_chrome", binaryMessenger: messenger)
+    systemChromeChannel.setMethodCallHandler { call, result in
+      if call.method == "setImmersive", let immersive = call.arguments as? Bool {
+        DispatchQueue.main.async {
+          let controller = activeFlutterController()
+          if let marcoVC = controller as? MarcoFlutterViewController {
+            marcoVC.marcoImmersiveMode = immersive
+          } else {
+            controller?.setNeedsStatusBarAppearanceUpdate()
+            if #available(iOS 11.0, *) {
+              controller?.setNeedsUpdateOfHomeIndicatorAutoHidden()
+              controller?.setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
+            }
+          }
+          result(nil)
+        }
+      } else if call.method == "requestOrientation", let mode = call.arguments as? String {
+        DispatchQueue.main.async {
+          if let marcoVC = activeFlutterController() as? MarcoFlutterViewController {
+            marcoVC.applyRequestedOrientation(mode)
+          }
+          result(nil)
+        }
+      } else if call.method == "setOrientationMonitoring", let enabled = call.arguments as? Bool {
+        DispatchQueue.main.async {
+          if let marcoVC = activeFlutterController() as? MarcoFlutterViewController {
+            marcoVC.setPhysicalOrientationMonitoring(enabled, channel: systemChromeChannel)
+          }
+          result(nil)
+        }
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    let authChannel = FlutterMethodChannel(name: "marco_movie/netdisk_auth", binaryMessenger: messenger)
+    authChannel.setMethodCallHandler { call, result in
+      if call.method == "startWebAuth", let args = call.arguments as? [String: Any] {
+        let drive = (args["drive"] as? String) ?? ""
+        let urlStr = (args["url"] as? String) ?? ""
+        let qrUrl = (args["qrUrl"] as? String) ?? ""
+        DispatchQueue.main.async {
+          NetdiskWebAuthController.present(
+            from: activeFlutterController(),
+            drive: drive,
+            urlString: urlStr,
+            qrUrlString: qrUrl,
+            completion: result
+          )
+        }
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    let snifferChannel = FlutterMethodChannel(name: "marco_movie/web_sniffer", binaryMessenger: messenger)
+    snifferChannel.setMethodCallHandler { call, result in
+      if call.method == "sniffMedia", let args = call.arguments as? [String: Any] {
+        let urlStr = (args["url"] as? String) ?? ""
+        let rawHeaders = (args["headers"] as? [String: Any]) ?? [:]
+        var headers: [String: String] = [:]
+        for (k, v) in rawHeaders {
+          headers[k] = String(describing: v)
+        }
+        let timeoutMs = (args["timeoutMs"] as? Int) ?? 12000
+        HeadlessMediaWebSniffer.sniff(urlString: urlStr, headers: headers, timeoutMs: timeoutMs, completion: result)
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    if let glassRegistrar = pluginRegistry.registrar(forPlugin: "MarcoLiquidGlassPlugin") {
+      MarcoLiquidGlassSupport.register(with: glassRegistrar, messenger: glassRegistrar.messenger())
+    }
+  }
+}'''
 
 IOS_NETDISK_AUTH_CONTROLLER_SWIFT = r'''
 
@@ -196,13 +272,7 @@ final class NetdiskWebAuthController: UIViewController, WKNavigationDelegate, WK
   }
 
   static func present(from root: UIViewController?, drive: String, urlString: String, qrUrlString: String, completion: @escaping FlutterResult) {
-    var presenter = root
-    if presenter == nil {
-      presenter = UIApplication.shared.connectedScenes
-        .compactMap { $0 as? UIWindowScene }
-        .flatMap { $0.windows }
-        .first(where: { $0.isKeyWindow })?.rootViewController
-    }
+    var presenter = root ?? MarcoLiquidGlassSupport.activeWindow()?.rootViewController
     while let presented = presenter?.presentedViewController, !presented.isBeingDismissed {
       presenter = presented
     }
@@ -1189,6 +1259,9 @@ def main() -> None:
                 'CFBundleAllowMixedLocalizations': True,
                 'UIStatusBarStyle': 'UIStatusBarStyleDefault',
                 'UIViewControllerBasedStatusBarAppearance': True,
+                # Unlock iPhone Duo dynamic fold/unfold resizing, Split View multitasking,
+                # and free window sizing on iPadOS / iOS 27.1+.
+                'UIRequiresFullScreen': False,
                 'NSLocalNetworkUsageDescription': '用于发现局域网投屏电视（DLNA/AirPlay）及连接局域网 Emby 服务器与片源。',
                 'NSBonjourServices': [
                     '_marcomovie-cast._tcp',
@@ -1231,6 +1304,38 @@ def main() -> None:
                     'CFBundleURLSchemes': ['marcomovie'],
                 })
             info['CFBundleURLTypes'] = url_types
+            info.setdefault('UILaunchStoryboardName', 'LaunchScreen')
+            info.setdefault('UISupportedInterfaceOrientations', [
+                'UIInterfaceOrientationPortrait',
+                'UIInterfaceOrientationLandscapeLeft',
+                'UIInterfaceOrientationLandscapeRight',
+            ])
+            info.setdefault('UISupportedInterfaceOrientations~ipad', [
+                'UIInterfaceOrientationPortrait',
+                'UIInterfaceOrientationPortraitUpsideDown',
+                'UIInterfaceOrientationLandscapeLeft',
+                'UIInterfaceOrientationLandscapeRight',
+            ])
+            # iOS 27.1 SDK / iPhone Duo mandates UIScene lifecycle; preserve Flutter 3.47+
+            # generated manifests verbatim and provide a valid fallback if absent.
+            scene_delegate_class = (
+                '$(PRODUCT_MODULE_NAME).SceneDelegate'
+                if (ios_runner / 'SceneDelegate.swift').exists()
+                else 'FlutterSceneDelegate'
+            )
+            info.setdefault('UIApplicationSceneManifest', {
+                'UIApplicationSupportsMultipleScenes': False,
+                'UISceneConfigurations': {
+                    'UIWindowSceneSessionRoleApplication': [
+                        {
+                            'UISceneClassName': 'UIWindowScene',
+                            'UISceneConfigurationName': 'flutter',
+                            'UISceneDelegateClassName': scene_delegate_class,
+                            'UISceneStoryboardFile': 'Main',
+                        },
+                    ],
+                },
+            })
             info.setdefault('NSAppTransportSecurity', {})['NSAllowsArbitraryLoads'] = True
             ios_plist.write_bytes(plistlib.dumps(info, sort_keys=False))
         ios_storyboard = ios_runner / "Base.lproj" / "Main.storyboard"
@@ -1252,65 +1357,31 @@ def main() -> None:
             if "import AVKit" not in ad_text and "import UIKit" in ad_text:
                 ad_text = ad_text.replace("import UIKit", "import UIKit\nimport AVKit", 1)
                 ad_changed = True
-            if "marco_movie/wakelock" not in ad_text and "GeneratedPluginRegistrant.register(with: self)" in ad_text:
-                ad_text = ad_text.replace(
-                    "GeneratedPluginRegistrant.register(with: self)",
-                    "GeneratedPluginRegistrant.register(with: self)\n"
-                    "    if let controller = window?.rootViewController as? FlutterViewController {\n"
-                    "      let wakelockChannel = FlutterMethodChannel(name: \"marco_movie/wakelock\", binaryMessenger: controller.binaryMessenger)\n"
-                    "      wakelockChannel.setMethodCallHandler { call, result in\n"
-                    "        if call.method == \"setEnabled\", let enabled = call.arguments as? Bool {\n"
-                    "          DispatchQueue.main.async {\n"
-                    "            UIApplication.shared.isIdleTimerDisabled = enabled\n"
-                    "            result(nil)\n"
-                    "          }\n"
-                    "        } else {\n"
-                    "          result(FlutterMethodNotImplemented)\n"
-                    "        }\n"
-                    "      }\n"
-                    "    }",
-                    1,
-                )
-                ad_changed = True
-            if "marco_movie/system_chrome" not in ad_text and "if let controller = window?.rootViewController as? FlutterViewController {" in ad_text:
-                ad_text = ad_text.replace(
-                    "    if let controller = window?.rootViewController as? FlutterViewController {",
-                    "    if let controller = window?.rootViewController as? FlutterViewController {\n"
-                    "      let systemChromeChannel = FlutterMethodChannel(name: \"marco_movie/system_chrome\", binaryMessenger: controller.binaryMessenger)\n"
-                    "      systemChromeChannel.setMethodCallHandler { [weak controller] call, result in\n"
-                    "        if call.method == \"setImmersive\", let immersive = call.arguments as? Bool {\n"
-                    "          DispatchQueue.main.async {\n"
-                    "            if let marcoVC = controller as? MarcoFlutterViewController {\n"
-                    "              marcoVC.marcoImmersiveMode = immersive\n"
-                    "            } else {\n"
-                    "              controller?.setNeedsStatusBarAppearanceUpdate()\n"
-                    "              if #available(iOS 11.0, *) {\n"
-                    "                controller?.setNeedsUpdateOfHomeIndicatorAutoHidden()\n"
-                    "                controller?.setNeedsUpdateOfScreenEdgesDeferringSystemGestures()\n"
-                    "              }\n"
-                    "            }\n"
-                    "            result(nil)\n"
-                    "          }\n"
-                    "        } else if call.method == \"requestOrientation\", let mode = call.arguments as? String {\n"
-                    "          DispatchQueue.main.async {\n"
-                    "            if let marcoVC = controller as? MarcoFlutterViewController {\n"
-                    "              marcoVC.applyRequestedOrientation(mode)\n"
-                    "            }\n"
-                    "            result(nil)\n"
-                    "          }\n"
-                    "        } else if call.method == \"setOrientationMonitoring\", let enabled = call.arguments as? Bool {\n"
-                    "          DispatchQueue.main.async {\n"
-                    "            if let marcoVC = controller as? MarcoFlutterViewController {\n"
-                    "              marcoVC.setPhysicalOrientationMonitoring(enabled, channel: systemChromeChannel)\n"
-                    "            }\n"
-                    "            result(nil)\n"
-                    "          }\n"
-                    "        } else {\n"
-                    "          result(FlutterMethodNotImplemented)\n"
-                    "        }\n"
-                    "      }",
-                    1,
-                )
+            if "MarcoNativeChannelRegistrar.register(" not in ad_text:
+                if "GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)" in ad_text:
+                    ad_text = ad_text.replace(
+                        "GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)",
+                        "GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)\n"
+                        "    MarcoNativeChannelRegistrar.register(\n"
+                        "      messenger: engineBridge.applicationRegistrar.messenger(),\n"
+                        "      pluginRegistry: engineBridge.pluginRegistry\n"
+                        "    )",
+                        1,
+                    )
+                    ad_changed = True
+                elif "GeneratedPluginRegistrant.register(with: self)" in ad_text:
+                    ad_text = ad_text.replace(
+                        "GeneratedPluginRegistrant.register(with: self)",
+                        "GeneratedPluginRegistrant.register(with: self)\n"
+                        "    if let messenger = (window?.rootViewController as? FlutterViewController)?.binaryMessenger\n"
+                        "      ?? self.registrar(forPlugin: \"MarcoChannelBridge\")?.messenger() {\n"
+                        "      MarcoNativeChannelRegistrar.register(messenger: messenger, pluginRegistry: self)\n"
+                        "    }",
+                        1,
+                    )
+                    ad_changed = True
+            if "private enum MarcoNativeChannelRegistrar" not in ad_text:
+                ad_text = ad_text.rstrip() + "\n" + IOS_NATIVE_CHANNEL_REGISTRAR_SWIFT
                 ad_changed = True
             if "final class MarcoFlutterViewController" not in ad_text:
                 ad_text = (
@@ -1343,6 +1414,20 @@ def main() -> None:
                     "  }\n\n"
                     "  override var supportedInterfaceOrientations: UIInterfaceOrientationMask {\n"
                     "    return marcoOrientationMask ?? super.supportedInterfaceOrientations\n"
+                    "  }\n\n"
+                    "  override func viewWillTransition(\n"
+                    "    to size: CGSize,\n"
+                    "    with coordinator: UIViewControllerTransitionCoordinator\n"
+                    "  ) {\n"
+                    "    super.viewWillTransition(to: size, with: coordinator)\n"
+                    "    MarcoLiquidGlassSupport.notifyWindowGeometryChanged(size: size)\n"
+                    "    coordinator.animate(alongsideTransition: { [weak self] _ in\n"
+                    "      self?.setNeedsStatusBarAppearanceUpdate()\n"
+                    "    }, completion: nil)\n"
+                    "  }\n\n"
+                    "  override func viewSafeAreaInsetsDidChange() {\n"
+                    "    super.viewSafeAreaInsetsDidChange()\n"
+                    "    MarcoLiquidGlassSupport.notifyWindowGeometryChanged(size: view.bounds.size)\n"
                     "  }\n\n"
                     "  func setPhysicalOrientationMonitoring(_ enabled: Bool, channel: FlutterMethodChannel) {\n"
                     "    if let obs = orientationObserver {\n"
@@ -1432,35 +1517,11 @@ def main() -> None:
                     "}\n"
                 )
                 ad_changed = True
-            if "marco_movie/netdisk_auth" not in ad_text and "if let controller = window?.rootViewController as? FlutterViewController {" in ad_text:
-                ad_text = ad_text.replace(
-                    "    if let controller = window?.rootViewController as? FlutterViewController {",
-                    "    if let controller = window?.rootViewController as? FlutterViewController {"
-                    + IOS_NETDISK_AUTH_CHANNEL_SNIPPET,
-                    1,
-                )
+            if "final class NetdiskWebAuthController" not in ad_text:
                 ad_text = ad_text.rstrip() + "\n" + IOS_NETDISK_AUTH_CONTROLLER_SWIFT
-                ad_changed = True
-            if "marco_movie/web_sniffer" not in ad_text and "if let controller = window?.rootViewController as? FlutterViewController {" in ad_text:
-                ad_text = ad_text.replace(
-                    "    if let controller = window?.rootViewController as? FlutterViewController {",
-                    "    if let controller = window?.rootViewController as? FlutterViewController {"
-                    + IOS_WEB_SNIFFER_CHANNEL_SNIPPET,
-                    1,
-                )
                 ad_changed = True
             if "private final class HeadlessMediaWebSniffer" not in ad_text:
                 ad_text = ad_text.rstrip() + "\n" + APPLE_WEB_SNIFFER_SWIFT
-                ad_changed = True
-            if "MarcoLiquidGlassPlugin" not in ad_text and "GeneratedPluginRegistrant.register(with: self)" in ad_text:
-                ad_text = ad_text.replace(
-                    "GeneratedPluginRegistrant.register(with: self)",
-                    "GeneratedPluginRegistrant.register(with: self)\n"
-                    "    if let glassRegistrar = self.registrar(forPlugin: \"MarcoLiquidGlassPlugin\") {\n"
-                    "      MarcoLiquidGlassSupport.register(with: glassRegistrar, messenger: glassRegistrar.messenger())\n"
-                    "    }",
-                    1,
-                )
                 ad_changed = True
             if "private enum MarcoLiquidGlassSupport" not in ad_text and IOS_LIQUID_GLASS_SWIFT_PATH.is_file():
                 ad_text = ad_text.rstrip() + "\n\n" + IOS_LIQUID_GLASS_SWIFT_PATH.read_text(encoding="utf-8")

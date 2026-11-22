@@ -120,15 +120,77 @@ class DeploymentChecks(unittest.TestCase):
             self.assertEqual(swift.count('final class MarcoNativePinSheetController'), 1)
             self.assertEqual(swift.count('case "showPrivacyPin":'), 1)
             self.assertEqual(swift.count('final class MarcoNativeLiquidTabCapsuleView'), 1)
+            self.assertIn('scrubbingLensEffectView', swift)
+            self.assertIn('UIGlassEffect(style: .clear)', swift)
+            self.assertIn('final class MarcoTraitAwareHostView', swift)
+            self.assertIn('static func adaptiveGlassForeground', swift)
+            self.assertIn('static func isNearBlack', swift)
+            self.assertIn('scrubbingLensShadowView.layer.shadowPath', swift)
+            self.assertNotIn('updateNativeGlassIntensity', swift)
+            self.assertNotIn('UIScreen.main.bounds', swift)
+            self.assertIn('static func activeWindowBounds', swift)
             self.assertEqual(swift.count('final class NetdiskWebAuthController'), 1)
             self.assertEqual(swift.count('private final class HeadlessMediaWebSniffer'), 1)
             self.assertEqual(swift.count('case "discoverBonjourDevices":'), 1)
             self.assertEqual(swift.count('private final class MarcoBonjourScanner'), 1)
             self.assertEqual(swift.count('{'), swift.count('}'))
             plist = plistlib.loads((runner / 'Info.plist').read_bytes())
+            self.assertIs(plist['UIRequiresFullScreen'], False)
+            self.assertIn('UIApplicationSceneManifest', plist)
             self.assertEqual(len([u for u in plist['CFBundleURLTypes'] if 'marcomovie' in u.get('CFBundleURLSchemes', [])]), 1)
             for svc in ('_marcomovie-cast._tcp', '_airplay._tcp', '_lelink._tcp', '_googlecast._tcp', '_dlna._tcp', '_upnp._tcp'):
                 self.assertIn(svc, plist['NSBonjourServices'])
+
+    def test_ios_uiscene_implicit_engine_template_for_iphone_duo_idempotently(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runner = root / 'ios/Runner'
+            runner.mkdir(parents=True)
+            (runner / 'Info.plist').write_bytes(plistlib.dumps({'MinimumOSVersion': '15.0'}))
+            (runner / 'SceneDelegate.swift').write_text(
+                'import Flutter\nimport UIKit\n\nclass SceneDelegate: FlutterSceneDelegate {}\n',
+                encoding='utf-8',
+            )
+            app_delegate = runner / 'AppDelegate.swift'
+            app_delegate.write_text(
+                'import Flutter\n'
+                'import UIKit\n\n'
+                '@main\n'
+                '@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {\n'
+                '  override func application(\n'
+                '    _ application: UIApplication,\n'
+                '    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?\n'
+                '  ) -> Bool {\n'
+                '    return super.application(application, didFinishLaunchingWithOptions: launchOptions)\n'
+                '  }\n\n'
+                '  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {\n'
+                '    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)\n'
+                '  }\n'
+                '}\n',
+                encoding='utf-8',
+            )
+            with patch.object(prepare_platform, 'ROOT', root):
+                prepare_platform.main()
+                prepare_platform.main()
+            swift = app_delegate.read_text(encoding='utf-8')
+            self.assertEqual(swift.count('MarcoNativeChannelRegistrar.register('), 1)
+            self.assertIn('engineBridge.applicationRegistrar.messenger()', swift)
+            self.assertEqual(swift.count('marco_movie/wakelock'), 1)
+            self.assertEqual(swift.count('marco_movie/system_chrome'), 1)
+            self.assertEqual(swift.count('marco_movie/netdisk_auth'), 1)
+            self.assertEqual(swift.count('marco_movie/web_sniffer'), 1)
+            self.assertEqual(swift.count('MarcoLiquidGlassPlugin'), 1)
+            self.assertIn('override func viewWillTransition(', swift)
+            self.assertIn('override func viewSafeAreaInsetsDidChange()', swift)
+            self.assertNotIn('UIScreen.main.bounds', swift)
+            self.assertEqual(swift.count('{'), swift.count('}'))
+            plist = plistlib.loads((runner / 'Info.plist').read_bytes())
+            self.assertIs(plist['UIRequiresFullScreen'], False)
+            self.assertEqual(plist['UILaunchStoryboardName'], 'LaunchScreen')
+            scene_cfgs = plist['UIApplicationSceneManifest']['UISceneConfigurations']['UIWindowSceneSessionRoleApplication']
+            self.assertEqual(scene_cfgs[0]['UISceneDelegateClassName'], '$(PRODUCT_MODULE_NAME).SceneDelegate')
+            self.assertIn('UIInterfaceOrientationLandscapeLeft', plist['UISupportedInterfaceOrientations'])
+            self.assertIn('UIInterfaceOrientationPortraitUpsideDown', plist['UISupportedInterfaceOrientations~ipad'])
 
     def test_trollstore_entitlements_include_multicast_for_dlna(self):
         import patch_ios_ipa

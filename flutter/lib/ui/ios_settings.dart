@@ -169,22 +169,22 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
     final p = ApplePalette.of(context);
     return Container(
       key: const ValueKey('ios-settings-search'),
-      height: 36,
+      height: 40,
       decoration: BoxDecoration(
-        color: p.isDark ? const Color(0xEB1C1C1E) : const Color(0x14767680),
-        borderRadius: BorderRadius.circular(18),
+        color: p.isDark ? const Color(0xEB1C1C1E) : const Color(0xFFE1E5EE),
+        borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: p.glassBorder,
           width: 0.6,
         ),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 14),
       child: Row(
         children: [
           Icon(
             CupertinoIcons.search,
-            color: p.labelTertiary,
-            size: 16,
+            color: p.labelSecondary,
+            size: 17,
           ),
           const SizedBox(width: 8),
           Expanded(
@@ -192,12 +192,12 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
               controller: _searchController,
               placeholder: '搜索设置',
               placeholderStyle: TextStyle(
-                color: p.labelTertiary,
-                fontSize: 15,
+                color: p.labelSecondary,
+                fontSize: 16,
               ),
               style: TextStyle(
                 color: p.labelPrimary,
-                fontSize: 15,
+                fontSize: 16,
               ),
               padding: EdgeInsets.zero,
               decoration: null,
@@ -216,8 +216,8 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
                 padding: const EdgeInsets.only(left: 6),
                 child: Icon(
                   CupertinoIcons.clear_circled_solid,
-                  color: p.labelTertiary,
-                  size: 17,
+                  color: p.labelSecondary,
+                  size: 18,
                 ),
               ),
             ),
@@ -232,7 +232,7 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
     final safeBottom = mediaPadding.bottom;
     final screenWidth = MediaQuery.sizeOf(context).width;
     final isWide = screenWidth >= 600;
-    final hPad = isWide ? 24.0 : 16.0;
+    final hPad = screenWidth < 360 ? 12.0 : (isWide ? 24.0 : 16.0);
     final groupGap = isWide ? 22.0 : 16.0;
     final entries = widget.pages(_notifyChanged);
     final grouped = _groupEntries(entries);
@@ -461,7 +461,6 @@ class IosSettingsScaffold extends StatelessWidget {
                           style: 'circle',
                           symbol: 'chevron.backward',
                           symbolSize: 17,
-                          foregroundColor: p.labelPrimary,
                           width: 40,
                           height: 40,
                           accessibilityLabel: backLabel,
@@ -680,74 +679,67 @@ class IosSettingsGroup extends StatelessWidget {
         );
       }
     }
-    return ValueListenableBuilder<double>(
-      valueListenable: GlassworkBackdrop.intensity,
-      builder: (context, strength, _) {
-        final s = strength.clamp(0.0, 1.0);
-        final cardBg = p.isDark
-            ? Color.fromRGBO(28, 28, 30, (0.98 - 0.30 * s).clamp(0.66, 0.98))
-            : Color.fromRGBO(248, 249, 252, (0.98 - 0.14 * s).clamp(0.84, 0.99));
-        final borderAlpha = p.isDark ? (0.10 + 0.18 * s) : (0.06 + 0.08 * s);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (header != null && header!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(left: 16, right: 16, bottom: 7),
-                child: Text(
-                  header!,
-                  style: TextStyle(
-                    color: p.labelSecondary,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    letterSpacing: 0.1,
-                  ),
-                ),
-              ),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(22),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: cardBg,
-                  borderRadius: BorderRadius.circular(22),
-                  border: Border.all(
-                    color: p.isDark
-                        ? Colors.white.withValues(alpha: borderAlpha)
-                        : Colors.black.withValues(alpha: borderAlpha),
-                    width: 0.6,
-                  ),
-                  boxShadow: p.isDark
-                      ? null
-                      : const [
-                          BoxShadow(
-                            color: Color(0x0A000000),
-                            blurRadius: 12,
-                            offset: Offset(0, 3),
-                          ),
-                        ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: separated,
-                ),
+    final cardBg = p.isDark
+        ? const Color(0xFF1C1C1E)
+        : Colors.white;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (header != null && header!.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 18, right: 18, bottom: 9),
+            child: Text(
+              header!,
+              style: TextStyle(
+                color: p.labelSecondary,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.1,
               ),
             ),
-            if (footer != null && footer!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(left: 16, right: 16, top: 8),
-                child: Text(
-                  footer!,
-                  style: TextStyle(
-                    color: p.labelTertiary,
-                    fontSize: 12.5,
-                    height: 1.45,
-                  ),
-                ),
+          ),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(22),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: cardBg,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(
+                color: p.isDark
+                    ? Colors.white.withValues(alpha: 0.10)
+                    : Colors.black.withValues(alpha: 0.06),
+                width: 0.65,
               ),
-          ],
-        );
-      },
+              boxShadow: p.isDark
+                  ? null
+                  : const [
+                      BoxShadow(
+                        color: Color(0x0C0F172A),
+                        blurRadius: 12,
+                        offset: Offset(0, 3),
+                      ),
+                    ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: separated,
+            ),
+          ),
+        ),
+        if (footer != null && footer!.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 18, right: 18, top: 9),
+            child: Text(
+              footer!,
+              style: TextStyle(
+                color: p.labelSecondary,
+                fontSize: 13.5,
+                height: 1.5,
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -799,11 +791,11 @@ class _IosSettingsRowState extends State<IosSettingsRow> {
     final p = ApplePalette.of(context);
     final hasSubtitle = widget.subtitle != null && widget.subtitle!.isNotEmpty;
     final minHeight = hasSubtitle
-        ? 58.0
-        : (widget.compact ? 46.0 : 50.0);
+        ? 64.0
+        : (widget.compact ? 52.0 : 56.0);
     final vPad = hasSubtitle
-        ? 10.5
-        : (widget.compact ? 8.5 : 10.5);
+        ? 12.5
+        : (widget.compact ? 11.0 : 12.5);
     final row = ColoredBox(
       color: _pressed
           ? (p.isDark ? const Color(0xFF2C2C2E) : const Color(0x14000000))
@@ -832,7 +824,7 @@ class _IosSettingsRowState extends State<IosSettingsRow> {
                       ],
                     ),
                     shape: RoundedSuperellipseBorder(
-                      borderRadius: BorderRadius.circular(7.5),
+                      borderRadius: BorderRadius.circular(8),
                       side: const BorderSide(
                         color: Color(0x28FFFFFF),
                         width: 0.5,
@@ -840,12 +832,12 @@ class _IosSettingsRowState extends State<IosSettingsRow> {
                     ),
                   ),
                   child: SizedBox(
-                    width: 30,
-                    height: 30,
-                    child: Icon(widget.icon, color: Colors.white, size: 16.5),
+                    width: 32,
+                    height: 32,
+                    child: Icon(widget.icon, color: Colors.white, size: 17.5),
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 13),
               ],
               Expanded(
                 child: Column(
@@ -856,21 +848,21 @@ class _IosSettingsRowState extends State<IosSettingsRow> {
                       widget.title,
                       style: TextStyle(
                         color: widget.titleColor ?? p.labelPrimary,
-                        fontSize: 16.5,
-                        fontWeight: FontWeight.w400,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w500,
                         letterSpacing: -0.2,
                       ),
                     ),
                     if (hasSubtitle) ...[
-                      const SizedBox(height: 2.5),
+                      const SizedBox(height: 3.5),
                       Text(
                         widget.subtitle!,
                         maxLines: widget.subtitleMaxLines,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: p.labelSecondary,
-                          fontSize: 12.5,
-                          height: 1.35,
+                          fontSize: 13.5,
+                          height: 1.4,
                         ),
                       ),
                     ],
@@ -883,14 +875,17 @@ class _IosSettingsRowState extends State<IosSettingsRow> {
                 Flexible(
                   flex: 0,
                   child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 148),
+                    constraints: BoxConstraints(
+                      maxWidth:
+                          MediaQuery.sizeOf(context).width < 360 ? 108 : 152,
+                    ),
                     child: Text(
                       widget.trailingText!,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: p.labelSecondary,
-                        fontSize: 15,
+                        fontSize: 15.5,
                         fontWeight: FontWeight.w400,
                       ),
                     ),
@@ -1002,9 +997,9 @@ class _IosSettingsChoiceTileState extends State<IosSettingsChoiceTile> {
               ? (p.isDark ? const Color(0xFF2C2C2E) : const Color(0x14000000))
               : const Color(0x00000000),
           child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 50),
+            constraints: const BoxConstraints(minHeight: 54),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
               child: Row(
                 children: [
                   Expanded(
@@ -1012,8 +1007,8 @@ class _IosSettingsChoiceTileState extends State<IosSettingsChoiceTile> {
                       widget.label,
                       style: TextStyle(
                         color: p.labelPrimary,
-                        fontSize: 16.5,
-                        fontWeight: FontWeight.w400,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w500,
                         letterSpacing: -0.2,
                       ),
                     ),

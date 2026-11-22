@@ -207,6 +207,110 @@ class ApplePalette {
       isDarkOf(context) ? dark : light;
 }
 
+/// Window-geometry classifier supporting standard iPhone, iPhone Duo (5.4" outer
+/// `466×678 pt` portrait / `678×466 pt` landscape, 7.6" unfolded inner
+/// `669×951 pt` portrait / `951×669 pt` landscape, and Split View `~320 pt`),
+/// iPadOS, and desktop displays without device-model hardcoding.
+class AppleViewportLayout {
+  final Size size;
+
+  const AppleViewportLayout(this.size);
+
+  factory AppleViewportLayout.of(BuildContext context) =>
+      AppleViewportLayout(MediaQuery.sizeOf(context));
+
+  double get width => size.width;
+  double get height => size.height;
+
+  bool get isLandscape => width > height;
+
+  /// Narrow Split View / Slide Over window (e.g. `~320 × 951 pt`).
+  bool get isCompactSplit => width < 360;
+
+  /// Shorter-than-standard portrait display such as iPhone Duo 5.4" outer
+  /// cover (`466 × 678 pt`) or compact phones (`height < 730 pt`).
+  bool get isShortPortrait => !isLandscape && height < 730;
+
+  /// Compact landscape viewport such as iPhone Duo outer cover landscape
+  /// (`678 × 466 pt`) or standard phone landscape (`height < 520 pt`).
+  bool get isShortLandscape => isLandscape && height < 520;
+
+  /// Wide unfolded portrait display such as iPhone Duo 7.6" inner display
+  /// (`669 × 951 pt`) or iPad portrait (`width >= 580 pt`, `height >= width`).
+  bool get isExpandedPortrait => !isLandscape && width >= 580;
+
+  /// Wide landscape display (`678 × 466 pt`, `951 × 669 pt`, iPad, desktop).
+  bool get isWideLandscape => isLandscape && width >= 600;
+
+  /// Whether [DetailScreen] should use the side-by-side cinema showcase layout.
+  bool get prefersWideDetail =>
+      width >= 720 || (width >= 600 && isLandscape);
+
+  /// Adaptive horizontal margin for content columns across all window sizes.
+  double horizontalPadding({required bool useSidebar}) {
+    if (useSidebar || isExpandedPortrait) return 24.0;
+    if (isCompactSplit) return 12.0;
+    return 16.0;
+  }
+
+  /// Adaptive poster card maximum cross-axis extent for catalog / library grids.
+  double posterGridExtent({
+    required bool useSidebar,
+    String density = 'normal',
+  }) {
+    if (useSidebar) {
+      return switch (density) {
+        'comfortable' => 210.0,
+        'compact' => 148.0,
+        _ => 176.0,
+      };
+    }
+    if (isExpandedPortrait) {
+      return switch (density) {
+        'comfortable' => 196.0,
+        'compact' => 138.0,
+        _ => 162.0,
+      };
+    }
+    if (isCompactSplit) {
+      return switch (density) {
+        'comfortable' => 168.0,
+        'compact' => 124.0,
+        _ => 148.0,
+      };
+    }
+    if (width >= 440) {
+      // iPhone Duo 5.4" outer cover (`466pt`): keep crisp 3-column card sizing
+      // matching standard iPhones rather than squeezing 4 narrow columns.
+      return switch (density) {
+        'comfortable' => 172.0,
+        'compact' => 116.0,
+        _ => 144.0,
+      };
+    }
+    return switch (density) {
+      'comfortable' => 162.0,
+      'compact' => 108.0,
+      _ => 132.0,
+    };
+  }
+
+  /// Adaptive immersive hero height on iOS Home across cover, unfolded, Split
+  /// View, and standard iPhone heights.
+  double iosHomeHeroHeight(double maxH) {
+    if (isShortPortrait) {
+      return (maxH * 0.62).clamp(360.0, 470.0);
+    }
+    if (isExpandedPortrait) {
+      return (maxH * 0.60).clamp(500.0, 600.0);
+    }
+    if (isCompactSplit) {
+      return (maxH * 0.56).clamp(420.0, 520.0);
+    }
+    return (maxH * 0.69).clamp(500.0, 620.0);
+  }
+}
+
 /// Apple iOS 27 Liquid Glass design tokens (iOS / iPadOS / macOS dark appearance):
 /// deep obsidian canvas, refractive translucent glass materials, specular rims.
 class AppleColors {
@@ -244,12 +348,14 @@ class MarcoBrandLogo extends StatelessWidget {
   final double fontSize;
   final bool showWordmark;
   final bool stacked;
+  final bool forceLightInk;
   const MarcoBrandLogo({
     super.key,
     this.iconSize = 32,
     this.fontSize = 17,
     this.showWordmark = true,
     this.stacked = false,
+    this.forceLightInk = false,
   });
   @override
   Widget build(BuildContext context) {
@@ -266,26 +372,35 @@ class MarcoBrandLogo extends StatelessWidget {
       ),
     );
     if (!showWordmark) return iconWidget;
-    final isDark = ApplePalette.isDarkOf(context);
+    final useLightInk = forceLightInk || ApplePalette.isDarkOf(context);
     final wordmark = Text.rich(
       TextSpan(
         style: TextStyle(
           fontSize: fontSize,
           letterSpacing: -0.4,
           height: 1.1,
+          shadows: forceLightInk
+              ? const [
+                  Shadow(
+                    color: Color(0x88000000),
+                    blurRadius: 8,
+                    offset: Offset(0, 1),
+                  ),
+                ]
+              : null,
         ),
         children: [
           TextSpan(
             text: 'Marco',
             style: TextStyle(
-              color: isDark ? const Color(0xFFF8FAFC) : const Color(0xFF111114),
+              color: useLightInk ? const Color(0xFFF8FAFC) : const Color(0xFF111114),
               fontWeight: FontWeight.w700,
             ),
           ),
           TextSpan(
             text: ' Movie',
             style: TextStyle(
-              color: isDark ? const Color(0xFFB8C2D4) : const Color(0xFF63636C),
+              color: useLightInk ? const Color(0xFFD8E0EE) : const Color(0xFF63636C),
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -1185,6 +1300,8 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           return placeholder;
         }
 
+        final viewport = AppleViewportLayout.of(context);
+        final portraitSideMargin = viewport.isCompactSplit ? 10.0 : 16.0;
         final margin = widget.isLandscape
             ? EdgeInsets.only(
                 right: safe.right > 0 ? safe.right + 4 : 10,
@@ -1192,21 +1309,27 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
                 bottom: 12,
               )
             : EdgeInsets.only(
-                left: 16,
-                right: 16,
+                left: portraitSideMargin,
+                right: portraitSideMargin,
                 bottom: portraitBottom,
               );
+        final double portraitBarH = viewport.width < 340
+            ? 56.0
+            : AppleLiquidGlassDock._itemH + AppleLiquidGlassDock._pad * 2;
         Widget content = Padding(
           padding: margin,
           child: widget.isLandscape
               ? _buildVertical()
-              : AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 260),
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeInCubic,
-                  child: widget.collapsed
-                      ? _buildCollapsedLogoButton(context)
-                      : _buildHorizontal(),
+              : SizedBox(
+                  height: portraitBarH,
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 260),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    child: widget.collapsed
+                        ? _buildCollapsedLogoButton(context, barH: portraitBarH)
+                        : _buildHorizontal(barH: portraitBarH),
+                  ),
                 ),
         );
         if (widget.hidden) {
@@ -1221,7 +1344,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
   }
 
   Widget _buildIos26TransitionDockPlaceholder(BuildContext context) {
-    const totalH = 72.0;
+    const totalH = 76.0;
     const dockSize = 62.0;
     const outerMargin = 16.0;
     const gap = 10.0;
@@ -1270,23 +1393,28 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           final totalW = constraints.maxWidth.isFinite
               ? constraints.maxWidth
               : MediaQuery.sizeOf(context).width;
-          final maxRowWidth = math.min(totalW, 440.0);
+          final isCompactSplit = totalW < 360.0;
+          final effOuterMargin = isCompactSplit ? 10.0 : outerMargin;
+          final effGap = isCompactSplit ? 8.0 : gap;
+          final effDockSize = totalW < 340.0 ? 56.0 : dockSize;
+          final maxCap = totalW >= 600.0 ? 468.0 : 440.0;
+          final maxRowWidth = math.min(totalW, maxCap);
           final rowX = (totalW - maxRowWidth) * 0.5;
 
           if (widget.collapsed) {
             final rightInset = math.max(
-              outerMargin,
-              totalW - (rowX + maxRowWidth - outerMargin),
+              effOuterMargin,
+              totalW - (rowX + maxRowWidth - effOuterMargin),
             );
             return Align(
               alignment: Alignment.centerRight,
               child: Padding(
                 padding: EdgeInsets.only(right: rightInset),
                 child: SizedBox(
-                  width: dockSize,
-                  height: dockSize,
+                  width: effDockSize,
+                  height: effDockSize,
                   child: DecoratedBox(
-                    decoration: glassDeco(dockSize * 0.5),
+                    decoration: glassDeco(effDockSize * 0.5),
                     child: const Center(
                       child: MarcoBrandLogo(
                         iconSize: 32,
@@ -1299,31 +1427,32 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             );
           }
 
-          final tabW = hasSearch
-              ? math.max(
-                  maxRowWidth - outerMargin * 2 - dockSize - gap,
-                  180.0,
-                )
-              : math.max(maxRowWidth - outerMargin * 2, 180.0);
+          final availTabW = hasSearch
+              ? maxRowWidth - effOuterMargin * 2 - effDockSize - effGap
+              : maxRowWidth - effOuterMargin * 2;
+          final tabW = math.max(
+            availTabW,
+            math.min(180.0, math.max(availTabW, 132.0)),
+          );
           final innerW = tabW - inset * 2;
           final slotW = innerW / n;
-          const lensH = dockSize - inset * 2;
+          final lensH = effDockSize - inset * 2;
 
           return Center(
             child: SizedBox(
               width: maxRowWidth,
               height: totalH,
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: outerMargin),
+                padding: EdgeInsets.symmetric(horizontal: effOuterMargin),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     SizedBox(
                       width: tabW,
-                      height: dockSize,
+                      height: effDockSize,
                       child: DecoratedBox(
-                        decoration: glassDeco(dockSize * 0.5),
+                        decoration: glassDeco(effDockSize * 0.5),
                         child: Stack(
                           children: [
                             Positioned(
@@ -1394,12 +1523,12 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
                       ),
                     ),
                     if (hasSearch) ...[
-                      const SizedBox(width: gap),
+                      SizedBox(width: effGap),
                       SizedBox(
-                        width: dockSize,
-                        height: dockSize,
+                        width: effDockSize,
+                        height: effDockSize,
                         child: DecoratedBox(
-                          decoration: glassDeco(dockSize * 0.5),
+                          decoration: glassDeco(effDockSize * 0.5),
                           child: Center(
                             child: Icon(
                               CupertinoIcons.search,
@@ -1422,32 +1551,49 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
     );
   }
 
-  Widget _buildCollapsedLogoButton(BuildContext context) {
-    const size = 62.0;
-    return Align(
+  Widget _buildCollapsedLogoButton(BuildContext context, {double? barH}) {
+    final size = barH ??
+        (AppleLiquidGlassDock._itemH + AppleLiquidGlassDock._pad * 2);
+    final isDark = ApplePalette.isDarkOf(context);
+    return LayoutBuilder(
       key: const ValueKey('dock-collapsed-logo-wrap'),
-      alignment: Alignment.centerRight,
-      child: GestureDetector(
-        key: const ValueKey('dock-collapsed-logo-button'),
-        behavior: HitTestBehavior.opaque,
-        onTap: () => _showFallbackCollapsedBubble(context),
-        child: RepaintBoundary(
-          child: LiquidGlass(
-            width: size,
-            height: size,
-            borderRadius: size * 0.5,
-            tint: const Color(0x56161414),
-            blur: 20,
-            saturation: 1.8,
-            child: const Center(
-              child: MarcoBrandLogo(
-                iconSize: 32,
-                showWordmark: false,
+      builder: (context, constraints) {
+        final available =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 360.0;
+        final maxCap = available >= 560.0 ? 456.0 : 420.0;
+        final rowWidth = math.min(available, maxCap);
+        return SizedBox(
+          width: rowWidth,
+          height: size,
+          child: Align(
+            alignment: Alignment.centerRight,
+            heightFactor: 1,
+            child: GestureDetector(
+              key: const ValueKey('dock-collapsed-logo-button'),
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _showFallbackCollapsedBubble(context),
+              child: RepaintBoundary(
+                child: LiquidGlass(
+                  width: size,
+                  height: size,
+                  borderRadius: size * 0.5,
+                  tint: isDark
+                      ? const Color(0x56161414)
+                      : const Color(0xD8FFFFFF),
+                  blur: 20,
+                  saturation: 1.8,
+                  child: const Center(
+                    child: MarcoBrandLogo(
+                      iconSize: 32,
+                      showWordmark: false,
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -1475,7 +1621,9 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
                   key: const ValueKey('dock-collapsed-bubble-menu'),
                   width: 176,
                   borderRadius: 24,
-                  tint: const Color(0xA616161C),
+                  tint: ApplePalette.isDarkOf(dialogCtx)
+                      ? const Color(0xA616161C)
+                      : const Color(0xF0FFFFFF),
                   padding: const EdgeInsets.symmetric(vertical: 6),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -1488,10 +1636,10 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
                           selected: false,
                           onTap: () => Navigator.of(dialogCtx).pop('search'),
                         ),
-                        const Divider(
+                        Divider(
                           height: 1,
                           thickness: 0.5,
-                          color: Color(0x26FFFFFF),
+                          color: ApplePalette.of(dialogCtx).separator,
                         ),
                       ],
                       for (var i = 0; i < widget.items.length; i++)
@@ -1504,10 +1652,10 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
                           onTap: () => Navigator.of(dialogCtx).pop('tab:$i'),
                         ),
                       if (widget.onScrollToTop != null) ...[
-                        const Divider(
+                        Divider(
                           height: 1,
                           thickness: 0.5,
-                          color: Color(0x26FFFFFF),
+                          color: ApplePalette.of(dialogCtx).separator,
                         ),
                         _bubbleMenuRow(
                           icon: CupertinoIcons.arrow_up_to_line,
@@ -1597,10 +1745,11 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
   }
 
   Widget _shell({required Widget child, double? radius}) {
+    final isDark = ApplePalette.isDarkOf(context);
     return RepaintBoundary(
       child: LiquidGlass(
         borderRadius: radius ?? AppleLiquidGlassDock._dockRadius,
-        tint: const Color(0x56161414),
+        tint: isDark ? const Color(0x56161414) : const Color(0xD8FFFFFF),
         blur: 20,
         saturation: 1.8,
         child: child,
@@ -1608,31 +1757,34 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
     );
   }
 
-  Widget _buildHorizontal() {
+  Widget _buildHorizontal({double? barH}) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final n = math.max(widget.items.length, 1);
         final available =
             constraints.maxWidth.isFinite ? constraints.maxWidth : 360.0;
         final hasSearch = widget.onSearch != null;
-        const barH =
-            AppleLiquidGlassDock._itemH + AppleLiquidGlassDock._pad * 2;
-        final maxRowWidth = math.min(available, 420.0);
+        final effBarH = barH ??
+            (AppleLiquidGlassDock._itemH + AppleLiquidGlassDock._pad * 2);
+        final effGap =
+            available < 330.0 ? 8.0 : AppleLiquidGlassDock._searchGap;
+        final maxCap = available >= 560.0 ? 456.0 : 420.0;
+        final maxRowWidth = math.min(available, maxCap);
+        final maxSearchPill =
+            math.max(120.0, maxRowWidth - effBarH - effGap);
         final pillWidth = hasSearch
-            ? math.max(
-                192.0,
-                math.min(
-                  maxRowWidth - barH - AppleLiquidGlassDock._searchGap,
-                  348.0,
-                ),
+            ? math.min(
+                maxSearchPill,
+                available >= 560.0 ? 384.0 : 348.0,
               )
-            : math.min(maxRowWidth, 320.0).clamp(220.0, 320.0);
+            : math.min(maxRowWidth, available >= 560.0 ? 360.0 : 320.0);
         final itemW = (pillWidth - AppleLiquidGlassDock._pad * 2) / n;
+        final itemH = effBarH - AppleLiquidGlassDock._pad * 2;
         final isSliding = _dragLensSlot != null;
         final lensSlot = _dragLensSlot ?? _safeIndex.toDouble();
 
         final pill = _shell(
-          radius: barH * 0.5,
+          radius: effBarH * 0.5,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onHorizontalDragStart: (d) =>
@@ -1643,7 +1795,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             onHorizontalDragCancel: () => _endSlide(cancelled: true),
             child: SizedBox(
               width: pillWidth,
-              height: barH,
+              height: effBarH,
               child: Stack(
                 children: [
                   AnimatedPositioned(
@@ -1656,7 +1808,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
                     left: AppleLiquidGlassDock._pad + itemW * lensSlot,
                     top: AppleLiquidGlassDock._pad,
                     width: itemW,
-                    height: AppleLiquidGlassDock._itemH,
+                    height: itemH,
                     child: AnimatedScale(
                       scale: isSliding ? 1.05 : 1.0,
                       duration: const Duration(milliseconds: 140),
@@ -1688,9 +1840,9 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             pill,
-            const SizedBox(width: AppleLiquidGlassDock._searchGap),
+            SizedBox(width: effGap),
             _DockSearchCircleButton(
-              size: barH,
+              size: effBarH,
               onTap: widget.onSearch!,
             ),
           ],
@@ -1704,10 +1856,12 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
       builder: (context) {
         final n = math.max(widget.items.length, 1);
         final screenH = MediaQuery.sizeOf(context).height;
+        final safeV = MediaQuery.paddingOf(context).vertical;
         final hasSearch = widget.onSearch != null;
-        const searchSize = 54.0;
+        final searchSize = screenH < 480 ? 48.0 : 54.0;
         final searchReserve = hasSearch ? (searchSize + 10.0) : 0.0;
-        final maxAvailableH = math.max(196.0, screenH - 28.0 - searchReserve);
+        final maxAvailableH =
+            math.max(188.0, screenH - safeV - 28.0 - searchReserve);
         final idealMin = math.min(
           maxAvailableH,
           AppleLiquidGlassDock._itemH * n + AppleLiquidGlassDock._pad * 2 + 12.0,
@@ -2238,6 +2392,7 @@ class AppleCapsuleButton extends StatelessWidget {
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
           if (icon != null) ...[
             Icon(icon, size: compact ? 14.5 : 17, color: fg),
@@ -2247,6 +2402,7 @@ class AppleCapsuleButton extends StatelessWidget {
             child: Text(
               label,
               maxLines: 1,
+              textAlign: TextAlign.center,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: fg,
@@ -2258,6 +2414,11 @@ class AppleCapsuleButton extends StatelessWidget {
           ),
         ],
       ),
+    );
+    final centeredLabelRow = Center(
+      widthFactor: 1.0,
+      heightFactor: 1.0,
+      child: labelRow,
     );
     final Widget buttonBody;
     if (primary) {
@@ -2287,10 +2448,10 @@ class AppleCapsuleButton extends StatelessWidget {
             ),
           ],
         ),
-        child: labelRow,
+        child: centeredLabelRow,
       );
     } else {
-      final rimShape = const StadiumBorder();
+      const rimShape = StadiumBorder();
       final surface = CustomPaint(
         foregroundPainter: _LiquidRimPainter(
           shape: rimShape,
@@ -2330,7 +2491,7 @@ class AppleCapsuleButton extends StatelessWidget {
                             ])),
             ),
           ),
-          child: labelRow,
+          child: centeredLabelRow,
         ),
       );
       buttonBody = (_isWindowsDesktop || !useBackdrop)
@@ -2779,13 +2940,16 @@ Future<T?> showAppleModalSheet<T>({
                 clipBehavior: Clip.antiAlias,
                 child: Stack(
                   children: [
-                    const Positioned.fill(
+                    Positioned.fill(
                       child: IgnorePointer(
                         child: RepaintBoundary(
                           child: LiquidGlass(
                             borderRadius: 28,
                             rimStrength: 1.0,
-                            child: SizedBox.expand(),
+                            tint: ApplePalette.isDarkOf(ctx)
+                                ? const Color(0x001E1E22)
+                                : const Color(0xE8F2F2F7),
+                            child: const SizedBox.expand(),
                           ),
                         ),
                       ),

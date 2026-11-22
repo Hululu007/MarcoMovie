@@ -41,7 +41,10 @@ class PosterExpandRegistry {
 }
 
 /// Wraps a clickable poster card so it hides cleanly without collapsing layout
-/// space while its [PosterExpandRoute] is actively flying or open.
+/// space strictly while its [PosterExpandRoute] is actively flying away from
+/// rest (`activeProgress > 0.035`), keeping the real card painted underneath at
+/// frame 0 of push and during the final landing frames of pop so there is NEVER
+/// a 1-frame white hole flash or jump.
 class PosterExpandSourceCard extends StatelessWidget {
   final String cardId;
   final Widget child;
@@ -52,13 +55,21 @@ class PosterExpandSourceCard extends StatelessWidget {
     required this.child,
   });
 
+  static final Listenable _registryListenable = Listenable.merge([
+    PosterExpandRegistry.activeCardId,
+    PosterExpandRegistry.activeProgress,
+  ]);
+
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<String?>(
-      valueListenable: PosterExpandRegistry.activeCardId,
+    return AnimatedBuilder(
+      animation: _registryListenable,
       child: child,
-      builder: (context, activeId, cardChild) {
-        final hidden = activeId != null && activeId == cardId;
+      builder: (context, cardChild) {
+        final activeId = PosterExpandRegistry.activeCardId.value;
+        final progress = PosterExpandRegistry.activeProgress.value;
+        final hidden =
+            activeId != null && activeId == cardId && progress > 0.035;
         return Visibility(
           visible: !hidden,
           maintainSize: true,
@@ -103,7 +114,9 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   final String year;
   final bool isFullBleedHero;
   final bool strictHighResPoster;
+  final bool forBackdrop;
   final Alignment posterAlignment;
+  final Color ambientColor;
 
   /// Critically smooth, zero-overshoot continuous curve keeping an even,
   /// linear-feeling glide across the middle of the flight with soft cushions
@@ -127,7 +140,9 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   // between settled full-screen and active transition frames, compositing one
   // crisp GPU layer at 120Hz without re-rasterizing blur.
   final GlobalKey _pageBoundaryKey = GlobalKey();
+  final GlobalKey _sharedPosterKey = GlobalKey();
   Widget? _cachedPage;
+  Widget? _cachedSharedPoster;
   bool _claimedRegistry = false;
   bool _listenerAttached = false;
 
@@ -149,7 +164,9 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     this.year = '',
     this.isFullBleedHero = false,
     this.strictHighResPoster = false,
+    this.forBackdrop = false,
     this.posterAlignment = Alignment.center,
+    this.ambientColor = const Color(0xFF0E1016),
     super.settings,
   });
 
@@ -369,8 +386,23 @@ class PosterExpandRoute<T> extends PageRoute<T> {
         live.overlaps((Offset.zero & screen).inflate(80))) {
       return (rect: live, hasLiveAnchor: true);
     }
-    if (initialSourceRect.width >= 8 && initialSourceRect.height >= 8) {
-      return (rect: initialSourceRect, hasLiveAnchor: true);
+    if (initialSourceRect.width >= 8 &&
+        initialSourceRect.height >= 8 &&
+        initialSourceRect.overlaps((Offset.zero & screen).inflate(80))) {
+      // Clamp fallback rect inside the current viewport so live fold/unfold
+      // (e.g. iPhone Duo 466×678 ↔ 669×951) never flies back off-screen.
+      final clampedW = initialSourceRect.width.clamp(8.0, screen.width).toDouble();
+      final clampedH = initialSourceRect.height.clamp(8.0, screen.height).toDouble();
+      final clampedLeft = initialSourceRect.left
+          .clamp(0.0, math.max<double>(0.0, screen.width - clampedW))
+          .toDouble();
+      final clampedTop = initialSourceRect.top
+          .clamp(0.0, math.max<double>(0.0, screen.height - clampedH))
+          .toDouble();
+      return (
+        rect: Rect.fromLTWH(clampedLeft, clampedTop, clampedW, clampedH),
+        hasLiveAnchor: true,
+      );
     }
     final w = screen.width * 0.28;
     final h = w * 1.48;
@@ -461,6 +493,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
         final backdropDim =
             ((effectiveFullBleedHero ? 0.24 : 0.36) * p).clamp(0.0, 0.36);
 
+        final isReversing = animation.status == AnimationStatus.reverse;
         if (effectiveFullBleedHero) {
           return _buildFullBleedHeroStage(
             screen: screen,
@@ -471,6 +504,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
             p: p,
             rawT: rawT,
             hasLiveAnchor: target.hasLiveAnchor,
+            isReversing: isReversing,
             pageChild: pageChild!,
           );
         }
@@ -483,19 +517,36 @@ class PosterExpandRoute<T> extends PageRoute<T> {
           p: p,
           rawT: rawT,
           hasLiveAnchor: target.hasLiveAnchor,
+          isReversing: isReversing,
           pageChild: pageChild!,
         );
       },
     );
   }
 
+  Widget _sharedPosterLayer() {
+    return _cachedSharedPoster ??= RepaintBoundary(
+      key: _sharedPosterKey,
+      child: PosterImage(
+        url: posterUrl,
+        title: title,
+        year: year,
+        highRes: true,
+        strictHighRes: strictHighResPoster,
+        forBackdrop: forBackdrop,
+        fadeIn: false,
+        fit: BoxFit.cover,
+        alignment: posterAlignment,
+        placeholder: ColoredBox(color: ambientColor),
+      ),
+    );
+  }
+
   /// Seamless full-bleed Hero <-> DetailScreen transition:
-  /// - Zero artificial rounded box or horizontal shadow cutting across the
-  ///   middle of the screen.
-  /// - Softly feathers the moving bottom boundary from the Home Hero's exact
-  ///   bottom dissolve (`0.76..1.00`) smoothly to solid `1.0` at full screen.
-  /// - Keeps the shared HD poster continuously visible underneath while
-  ///   [DetailScreen] chrome dissolves linearly on top.
+  /// - Zero white alpha cutout (`ShaderMask`) and zero vertical alignment jump
+  ///   so pushing from and popping back to Home never flashes white or jitters.
+  /// - Preserves the exact poster ambient color gradient from the title zone
+  ///   downward while [DetailScreen] dissolves cleanly over the shared HD poster.
   Widget _buildFullBleedHeroStage({
     required Size screen,
     required Rect currentRect,
@@ -505,11 +556,11 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     required double p,
     required double rawT,
     required bool hasLiveAnchor,
+    required bool isReversing,
     required Widget pageChild,
   }) {
     final detailOpacity =
         _hasSharedPoster ? ((p - 0.08) / 0.46).clamp(0.0, 1.0) : 1.0;
-    final alignedPosterY = lerpDouble(posterAlignment.y, -0.32, p) ?? -0.22;
 
     final Widget detailLayer = SizedBox(
       width: screen.width,
@@ -517,21 +568,42 @@ class PosterExpandRoute<T> extends PageRoute<T> {
       child: pageChild,
     );
 
-    Widget content = Stack(
+    final Widget content = Stack(
       fit: StackFit.expand,
       children: [
-        if (_hasSharedPoster && detailOpacity < 0.999)
+        ColoredBox(color: ambientColor),
+        if (_hasSharedPoster)
           Positioned.fill(
-            child: PosterImage(
-              url: posterUrl,
-              title: title,
-              year: year,
-              highRes: true,
-              strictHighRes: strictHighResPoster,
-              fadeIn: false,
-              fit: BoxFit.cover,
-              alignment: Alignment(posterAlignment.x, alignedPosterY),
-              placeholder: const ColoredBox(color: Color(0xFF0E1016)),
+            child: _sharedPosterLayer(),
+          ),
+        // Match the Home Hero's smooth ambient-color fade below the title zone
+        // while fading out as DetailScreen's own ambient surface takes over.
+        if (detailOpacity < 0.98)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: currentRect.height * 0.48,
+            child: IgnorePointer(
+              child: Opacity(
+                opacity: (1.0 - detailOpacity).clamp(0.0, 1.0),
+                child: DecoratedBox(
+                  key: const Key('poster-expand-hero-ambient-blend'),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        ambientColor.withValues(alpha: 0.0),
+                        ambientColor.withValues(alpha: 0.58),
+                        ambientColor.withValues(alpha: 0.92),
+                        ambientColor,
+                      ],
+                      stops: const [0.0, 0.36, 0.72, 1.0],
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         FadeTransition(
@@ -547,34 +619,6 @@ class PosterExpandRoute<T> extends PageRoute<T> {
         ),
       ],
     );
-
-    // Apply soft bottom-edge alpha feather whenever the hero bottom sits
-    // mid-screen so there is NEVER a harsh horizontal chop line.
-    if (p < 0.99 && gestureRadiusOffset < 0.5) {
-      final featherStart = (lerpDouble(0.76, 0.98, p) ?? 0.85).clamp(0.76, 0.98);
-      final bottomAlpha = ((p - 0.52) / 0.48).clamp(0.0, 1.0);
-      final midAlpha = lerpDouble(0.46, 1.0, bottomAlpha)!.clamp(0.0, 1.0);
-      final lowAlpha = lerpDouble(0.14, 1.0, bottomAlpha)!.clamp(0.0, 1.0);
-      final midStop = featherStart + (1.0 - featherStart) * 0.52;
-      final lowStop = featherStart + (1.0 - featherStart) * 0.80;
-      content = ShaderMask(
-        key: const Key('poster-expand-hero-feather'),
-        blendMode: BlendMode.dstIn,
-        shaderCallback: (rect) => LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            const Color(0xFFFFFFFF),
-            const Color(0xFFFFFFFF),
-            Colors.white.withValues(alpha: midAlpha),
-            Colors.white.withValues(alpha: lowAlpha),
-            Colors.white.withValues(alpha: bottomAlpha),
-          ],
-          stops: [0.0, featherStart, midStop, lowStop, 1.0],
-        ).createShader(rect),
-        child: content,
-      );
-    }
 
     Widget stageCard = currentRadius > 0.25
         ? DecoratedBox(
@@ -595,9 +639,11 @@ class PosterExpandRoute<T> extends PageRoute<T> {
           )
         : ClipRect(child: content);
 
-    if (!hasLiveAnchor) {
-      final fallbackOpacity = (rawT / 0.16).clamp(0.0, 1.0);
-      stageCard = Opacity(opacity: fallbackOpacity, child: stageCard);
+    final double edgeOpacity = !hasLiveAnchor
+        ? (rawT / 0.16).clamp(0.0, 1.0)
+        : (isReversing && p < 0.04 ? (p / 0.04).clamp(0.0, 1.0) : 1.0);
+    if (edgeOpacity < 0.999) {
+      stageCard = Opacity(opacity: edgeOpacity, child: stageCard);
     }
 
     return Stack(
@@ -617,8 +663,8 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     );
   }
 
-  /// Linear zero-ghosting card-to-screen container morph for every poster card
-  /// across Home, Discovery, Search, Continue Watching, Favorites, and History.
+  /// Linear zero-ghosting, zero-flash card-to-screen container morph for every
+  /// poster card across Home, Discovery, Search, Continue Watching, and Library.
   Widget _buildPosterCardStage({
     required Size screen,
     required Rect currentRect,
@@ -627,6 +673,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     required double p,
     required double rawT,
     required bool hasLiveAnchor,
+    required bool isReversing,
     required Widget pageChild,
   }) {
     final detailOpacity =
@@ -646,19 +693,10 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     final Widget innerContent = Stack(
       fit: StackFit.expand,
       children: [
-        if (_hasSharedPoster && detailOpacity < 0.999)
+        ColoredBox(color: ambientColor),
+        if (_hasSharedPoster)
           Positioned.fill(
-            child: PosterImage(
-              url: posterUrl,
-              title: title,
-              year: year,
-              highRes: true,
-              strictHighRes: strictHighResPoster,
-              fadeIn: false,
-              fit: BoxFit.cover,
-              alignment: posterAlignment,
-              placeholder: const ColoredBox(color: Color(0xFF16171C)),
-            ),
+            child: _sharedPosterLayer(),
           ),
         FadeTransition(
           opacity: AlwaysStoppedAnimation<double>(detailOpacity),
@@ -684,9 +722,15 @@ class PosterExpandRoute<T> extends PageRoute<T> {
       ),
     );
 
-    if (!hasLiveAnchor) {
-      final fallbackOpacity = (rawT / 0.16).clamp(0.0, 1.0);
-      flyingCard = Opacity(opacity: fallbackOpacity, child: flyingCard);
+    // During the final landing frames (`p < 0.04` on reverse), the originating
+    // `PosterExpandSourceCard` is already visible pixel-for-pixel underneath,
+    // so gently dissolving `flyingCard` into it eliminates any 1-frame flash or
+    // aspect-ratio snap on return.
+    final double edgeOpacity = !hasLiveAnchor
+        ? (rawT / 0.16).clamp(0.0, 1.0)
+        : (isReversing && p < 0.04 ? (p / 0.04).clamp(0.0, 1.0) : 1.0);
+    if (edgeOpacity < 0.999) {
+      flyingCard = Opacity(opacity: edgeOpacity, child: flyingCard);
     }
 
     return Stack(

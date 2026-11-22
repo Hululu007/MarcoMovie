@@ -266,9 +266,12 @@ class _SourceVerificationDialogState extends State<SourceVerificationDialog> {
                       alignment: Alignment.centerRight,
                       child: CupertinoButton(
                         onPressed: _busy ? null : _refresh,
-                        child: const Text(
+                        child: Text(
                           '刷新图片',
-                          style: TextStyle(color: Colors.white),
+                          style: TextStyle(
+                            color: ApplePalette.of(context).accent,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ),
@@ -284,14 +287,25 @@ class _SourceVerificationDialogState extends State<SourceVerificationDialog> {
                         placeholder: '输入图片中的字符',
                         padding: const EdgeInsets.all(14),
                         style: CupertinoTheme.of(context).textTheme.textStyle
-                            .copyWith(color: Colors.white, fontSize: 18),
+                            .copyWith(
+                              color: ApplePalette.of(context).labelPrimary,
+                              fontSize: 18,
+                            ),
                         placeholderStyle: CupertinoTheme.of(context)
                             .textTheme
                             .textStyle
-                            .copyWith(color: const Color(0xFFD0D0D5)),
+                            .copyWith(
+                              color: ApplePalette.of(context).labelTertiary,
+                            ),
                         decoration: BoxDecoration(
-                          color: const Color(0x33000000),
+                          color: ApplePalette.isDarkOf(context)
+                              ? const Color(0x33000000)
+                              : Colors.white,
                           borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: ApplePalette.of(context).separator,
+                            width: 0.7,
+                          ),
                         ),
                         inputFormatters: [
                           FilteringTextInputFormatter.allow(

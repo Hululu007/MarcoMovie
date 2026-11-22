@@ -31,6 +31,7 @@ import 'package:marco_movie/ui/player/start_spec_overlay.dart';
 import 'package:marco_movie/ui/player_screen.dart';
 import 'package:marco_movie/ui/poster_expand_route.dart';
 import 'package:marco_movie/ui/poster_image.dart';
+import 'package:marco_movie/ui/spider_extensions_panel.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1654,35 +1655,50 @@ void main() {
       expect(heroPosterImage.highRes, isTrue);
       expect(heroPosterImage.strictHighRes, isTrue);
 
-      // Unobstructed bottom text scrim must stay compact (<= 160pt, down from 280pt)
-      final scrimFinder = find.byKey(const ValueKey('ios-hero-bottom-text-scrim'));
-      expect(scrimFinder, findsOneWidget);
-      expect(tester.getSize(scrimFinder).height, lessThanOrEqualTo(160.0));
-      expect(find.byKey(const ValueKey('ios-hero-poster-feather')), findsOneWidget);
+      // Unobstructed poster with ambient color gradient below title (NO white
+      // ShaderMask cutout that caused white flash & jarring top/bottom fade!)
+      expect(
+        find.byKey(const ValueKey('ios-hero-bottom-ambient-gradient')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('ios-hero-poster-feather')),
+        findsNothing,
+      );
+      expect(
+        find.descendant(of: heroFinder, matching: find.byType(ShaderMask)),
+        findsNothing,
+      );
 
       // Tap Home Hero -> launches full-bleed linear PosterExpandRoute with
-      // sourceBorderRadius == 0.0, isFullBleedHero == true, and feathered return!
+      // sourceBorderRadius == 0.0, isFullBleedHero == true, and ambient blend!
       observedRoutes.clear();
       await tester.tap(find.text('立即观看').first);
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 140));
+      await tester.pump(const Duration(milliseconds: 40));
       expect(observedRoutes.whereType<PosterExpandRoute<void>>(), isNotEmpty);
       final heroRoute = observedRoutes.whereType<PosterExpandRoute<void>>().last;
       expect(heroRoute.isFullBleedHero, isTrue);
       expect(heroRoute.sourceBorderRadius, 0.0);
       expect(heroRoute.sourceCardId, isNotNull);
-      expect(find.byKey(const Key('poster-expand-hero-feather')), findsOneWidget);
+      expect(
+        find.byKey(const Key('poster-expand-hero-ambient-blend')),
+        findsOneWidget,
+      );
       expect(PosterExpandRegistry.activeProgress.value, greaterThan(0.0));
-      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(const Duration(milliseconds: 360));
       await tester.pump(const Duration(milliseconds: 120));
 
-      // Return from DetailScreen -> feathered linear hero collapse & clean release
+      // Return from DetailScreen -> seamless ambient hero collapse & clean release
       final nav = tester.state<NavigatorState>(find.byType(Navigator).first);
       nav.pop();
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 140));
+      await tester.pump(const Duration(milliseconds: 180));
       expect(find.byKey(const Key('poster-expand-transition-stage')), findsOneWidget);
-      expect(find.byKey(const Key('poster-expand-hero-feather')), findsOneWidget);
+      expect(
+        find.byKey(const Key('poster-expand-hero-ambient-blend')),
+        findsOneWidget,
+      );
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pump(const Duration(milliseconds: 120));
       expect(PosterExpandRegistry.activeCardId.value, isNull);
@@ -1890,6 +1906,220 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
       await tester.pump(const Duration(milliseconds: 650));
+    },
+  );
+
+  testWidgets(
+    'iOS Light Mode readability, PosterExpand zero-flash landing, Live import sheet & Search glass bar',
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      SharedPreferences.setMockInitialValues({});
+      final storage = await StorageService.init();
+      await storage.saveConfig(
+        '{"sites":[{"key":"demo","name":"玩偶哥哥 4K","type":1,"api":"https://source.example/api"}],'
+        '"lives":[{"name":"综合","url":"https://live.example/main.m3u"}]}',
+      );
+      final demoSite = const CmsSite(
+        key: 'demo',
+        name: '玩偶哥哥 4K',
+        type: 1,
+        api: 'https://source.example/api',
+      );
+      final demoVideo = const CmsVideo(
+        id: 'v1',
+        title: '裙下之臣',
+        year: '2026',
+        remarks: '更新至第13集',
+      );
+
+      // 1. DetailScreen in Light Mode forces dark frosted glass + white icons
+      //    so top-bar buttons never render white-on-white over dark posters.
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.light(),
+          home: DetailScreen(
+            site: demoSite,
+            initialVideo: demoVideo,
+            client: _IosHomeRedesignClient(),
+            storage: storage,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      final glassButtons = tester
+          .widgetList<IosNativeGlassButton>(find.byType(IosNativeGlassButton))
+          .toList();
+      expect(glassButtons, isNotEmpty);
+      expect(glassButtons.every((b) => b.forceDark), isTrue);
+      final glassPills = tester
+          .widgetList<IosNativeGlassPill>(find.byType(IosNativeGlassPill))
+          .toList();
+      expect(glassPills, isNotEmpty);
+      expect(glassPills.every((p) => p.forceDark), isTrue);
+
+      // 2. PosterExpandSourceCard stays visible at progress <= 0.035 (prevents
+      //    1-frame white hole on push frame 0 and return landing) and hides in flight.
+      PosterExpandRegistry.activeCardId.value = 'card-1';
+      PosterExpandRegistry.activeProgress.value = 0.0;
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: PosterExpandSourceCard(
+              cardId: 'card-1',
+              child: SizedBox(width: 120, height: 180),
+            ),
+          ),
+        ),
+      );
+      expect(
+        tester.widget<Visibility>(find.byType(Visibility)).visible,
+        isTrue,
+      );
+      PosterExpandRegistry.activeProgress.value = 0.5;
+      await tester.pump();
+      expect(
+        tester.widget<Visibility>(find.byType(Visibility)).visible,
+        isFalse,
+      );
+      PosterExpandRegistry.activeProgress.value = 0.02;
+      await tester.pump();
+      expect(
+        tester.widget<Visibility>(find.byType(Visibility)).visible,
+        isTrue,
+      );
+      PosterExpandRegistry.activeCardId.value = null;
+      PosterExpandRegistry.activeProgress.value = 0.0;
+
+      // 3. SpiderExtensionsPanel & GuidePage use dark readable text in Light Mode.
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.light(),
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: SpiderExtensionsPanel(
+                storage: storage,
+                client: _IosHomeRedesignClient(),
+                sites: [demoSite],
+                onChanged: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      for (final t in tester.widgetList<Text>(find.byType(Text))) {
+        final color = t.style?.color;
+        if (color != null) {
+          expect(color.toARGB32(), isNot(0x99EBEBF5));
+          expect(color.toARGB32(), isNot(0xD8EBEBF5));
+        }
+      }
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.light(),
+          home: SpiderExtensionsGuidePage(onNotice: (_, __) {}),
+        ),
+      );
+      await tester.pumpAndSettle();
+      for (final t in tester.widgetList<Text>(find.byType(Text))) {
+        final color = t.style?.color;
+        if (color != null) {
+          expect(color.toARGB32(), isNot(0xD8EBEBF5));
+        }
+      }
+
+      // 4 & 5. Full AdaptiveShell testing live Light <-> Dark mode switching:
+      //   - Global Search floating bar adapts dynamically in Light AND Dark Mode
+      //   - Live TV tab + redesigned breathable Import modal with compact
+      //     centered Save CTA button (width 200..256) work cleanly in BOTH modes
+      //   - Settings subpage back button keeps foregroundColor == null for live native adaptation
+      final themeMode = ValueNotifier<ThemeMode>(ThemeMode.light);
+      addTearDown(themeMode.dispose);
+      await tester.pumpWidget(
+        ValueListenableBuilder<ThemeMode>(
+          valueListenable: themeMode,
+          builder: (_, mode, __) => MaterialApp(
+            theme: ThemeData.light(),
+            darkTheme: ThemeData.dark(),
+            themeMode: mode,
+            home: AdaptiveShell(
+              storage: storage,
+              client: CmsClient(
+                client: MockClient((req) async {
+                  if (req.url.toString() == 'https://live.example/main.m3u') {
+                    return http.Response.bytes(
+                      utf8.encode(
+                        '#EXTM3U\n#EXTINF:-1 group-title="央视",CCTV1\nhttps://stream.example/cctv1.m3u8\n',
+                      ),
+                      200,
+                    );
+                  }
+                  return http.Response('{"class":[],"list":[]}', 200);
+                }),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+
+      // Open Search in Light Mode -> switch live to Dark Mode -> verify both palettes!
+      await tester.tap(find.byKey(const ValueKey('home-search-button')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.byType(IosGlobalSearchPage), findsOneWidget);
+      expect(
+        tester.widget<CupertinoTextField>(find.byType(CupertinoTextField).first).style?.color,
+        equals(ApplePalette.light.labelPrimary),
+      );
+      themeMode.value = ThemeMode.dark;
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<CupertinoTextField>(find.byType(CupertinoTextField).first).style?.color,
+        equals(ApplePalette.dark.labelPrimary),
+      );
+      themeMode.value = ThemeMode.light;
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('search-close-button')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+
+      // Switch to Live TV tab and open redesigned Import Live Source sheet in Light + Dark.
+      await tester.tap(find.text('直播').last);
+      await tester.pumpAndSettle();
+      expect(find.text('导入'), findsOneWidget);
+      await tester.tap(find.text('导入'));
+      await tester.pumpAndSettle();
+      expect(find.text('独立导入直播源'), findsOneWidget);
+      expect(find.text('高级选项（User-Agent / 台标模板）'), findsOneWidget);
+      final saveBtnFinder = find.byKey(const ValueKey('live-import-save-btn'));
+      expect(saveBtnFinder, findsOneWidget);
+      final saveWidth = tester.getSize(saveBtnFinder).width;
+      expect(saveWidth, greaterThanOrEqualTo(200.0));
+      expect(saveWidth, lessThanOrEqualTo(256.0));
+      themeMode.value = ThemeMode.dark;
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      Navigator.of(tester.element(saveBtnFinder)).pop();
+      await tester.pumpAndSettle();
+
+      // Settings -> 外观 back button uses native auto-adaptive foregroundColor (null).
+      await tester.tap(find.text('设置').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-category-appearance')));
+      await tester.pumpAndSettle();
+      final backBtn = tester.widget<IosNativeGlassButton>(
+        find.byKey(const ValueKey('settings-drawer-back')),
+      );
+      expect(backBtn.foregroundColor, isNull);
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
     },
   );
 }

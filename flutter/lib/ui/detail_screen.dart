@@ -7,6 +7,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, visibleForTesting;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import '../core/cms_client.dart';
 import '../core/cms_parser.dart';
 import '../core/csp_bridge.dart';
@@ -1211,7 +1212,8 @@ class _DetailScreenState extends State<DetailScreen> {
       final hasWindowsAppearance =
           isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null;
       final hasIndependentPosterCard =
-          hasWindowsAppearance || MediaQuery.sizeOf(context).width >= 720;
+          hasWindowsAppearance ||
+          AppleViewportLayout.of(context).prefersWideDetail;
       final reduceMotion = MediaQuery.disableAnimationsOf(context);
       final activeProgram = widget.debugTransitionShaderProgram ??
           PlayerEnterTransition.cachedProgram;
@@ -1343,164 +1345,196 @@ class _DetailScreenState extends State<DetailScreen> {
     showAppleModalSheet<void>(
       context: context,
       title: totalSeasons > 1 ? '选择季数（共 $totalSeasons 季）' : '选择季数',
-      builder: (ctx) => ListView(
-        shrinkWrap: true,
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(left: 4, bottom: 10),
-            child: Row(
-              children: [
-                const Icon(
-                  CupertinoIcons.rectangle_stack_fill,
-                  color: AppleColors.systemBlue,
-                  size: 15,
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    totalSeasons > 1
-                        ? '连续剧集选季 · 点击切换对应季'
-                        : (_discoveringSeasons
-                            ? '正在检索同系列其他季…'
-                            : '当前仅检索到单季资源'),
-                    style: const TextStyle(
-                      color: AppleColors.labelSecondary,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
+      builder: (ctx) {
+        final palette = ApplePalette.of(ctx);
+        final isDark = palette.isDark;
+        final tileBg = isDark ? const Color(0xFF242429) : Colors.white;
+        final tileBorder = isDark
+            ? const Color(0x22FFFFFF)
+            : Colors.black.withValues(alpha: 0.08);
+        return ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(left: 4, bottom: 10),
+              child: Row(
+                children: [
+                  const Icon(
+                    CupertinoIcons.rectangle_stack_fill,
+                    color: AppleColors.systemBlue,
+                    size: 15,
                   ),
-                ),
-                if (_discoveringSeasons)
-                  const CupertinoActivityIndicator(radius: 7)
-                else
-                  CupertinoButton(
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    minSize: 24,
-                    onPressed: () {
-                      Navigator.of(ctx).pop();
-                      _discoveredFranchiseKey = '';
-                      unawaited(_discoverRelatedSeasons(_video.title));
-                      _toast('正在重新检索同系列季数…');
-                    },
-                    child: const Text(
-                      '重新检索',
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      totalSeasons > 1
+                          ? '连续剧集选季 · 点击切换对应季'
+                          : (_discoveringSeasons
+                              ? '正在检索同系列其他季…'
+                              : '当前仅检索到单季资源'),
                       style: TextStyle(
-                        color: AppleColors.systemBlue,
-                        fontSize: 12.5,
+                        color: palette.labelSecondary,
+                        fontSize: 13.5,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
-              ],
-            ),
-          ),
-          if (hasInLineSeasons)
-            Column(
-              children: [
-                for (int idx = 0; idx < inLineSeasons.length; idx++) ...[
-                  if (idx > 0) const SizedBox(height: 8),
-                  Builder(
-                    builder: (_) {
-                      final s = inLineSeasons[idx];
-                      final isSelected =
-                          s.seasonNumber == activeInLineSeasonNum;
-                      return Container(
-                        decoration: BoxDecoration(
-                          color: isSelected
-                              ? const Color(0x330A84FF)
-                              : AppleColors.groupedSecondary,
-                          borderRadius: BorderRadius.circular(12),
+                  if (_discoveringSeasons)
+                    const CupertinoActivityIndicator(radius: 7)
+                  else
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      minimumSize: const Size(24, 24),
+                      onPressed: () {
+                        Navigator.of(ctx).pop();
+                        _discoveredFranchiseKey = '';
+                        unawaited(_discoverRelatedSeasons(_video.title));
+                        _toast('正在重新检索同系列季数…');
+                      },
+                      child: const Text(
+                        '重新检索',
+                        style: TextStyle(
+                          color: AppleColors.systemBlue,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
                         ),
-                        child: AppleGroupedTile(
-                          icon: CupertinoIcons.tv_fill,
-                          iconBgColor: isSelected
-                              ? AppleColors.systemBlue
-                              : AppleColors.groupedTertiary,
-                          title: s.seasonLabel,
-                          subtitle:
-                              '共 ${s.episodeIndexes.length} 集 · ${currentLine.name}',
-                          trailing: isSelected
-                              ? const Icon(
-                                  CupertinoIcons.checkmark_alt,
-                                  color: AppleColors.systemBlue,
-                                  size: 18,
-                                )
-                              : const Icon(
-                                  CupertinoIcons.chevron_right,
-                                  color: AppleColors.labelTertiary,
-                                  size: 15,
-                                ),
-                          onTap: () {
-                            Navigator.of(ctx).pop();
-                            setState(() {
-                              _selectedInLineSeason = s.seasonNumber;
-                              _selectedPage = 0;
-                            });
-                          },
-                        ),
-                      );
-                    },
-                  ),
+                      ),
+                    ),
                 ],
-              ],
-            )
-          else
-            Column(
-              children: [
-                for (int idx = 0; idx < _relatedSeasons.length; idx++) ...[
-                  if (idx > 0) const SizedBox(height: 8),
-                  Builder(
-                    builder: (_) {
-                      final opt = _relatedSeasons[idx];
-                      final isCurrentSeason =
-                          (opt.video.id == _video.id &&
-                                  opt.site.key == _activeSite.key) ||
-                              opt.seasonNumber == curSeasonInfo.seasonNumber;
-                      final subParts = <String>[
-                        opt.video.title,
-                        if (opt.video.remarks.trim().isNotEmpty)
-                          opt.video.remarks.trim(),
-                        opt.site.name,
-                      ];
-                      return Container(
-                        decoration: BoxDecoration(
-                          color: isCurrentSeason
-                              ? const Color(0x330A84FF)
-                              : AppleColors.groupedSecondary,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: AppleGroupedTile(
-                          icon: CupertinoIcons.tv_fill,
-                          iconBgColor: isCurrentSeason
-                              ? AppleColors.systemBlue
-                              : AppleColors.groupedTertiary,
-                          title: opt.seasonLabel,
-                          subtitle: subParts.join(' · '),
-                          trailing: isCurrentSeason
-                              ? const Icon(
-                                  CupertinoIcons.checkmark_alt,
-                                  color: AppleColors.systemBlue,
-                                  size: 18,
-                                )
-                              : const Icon(
-                                  CupertinoIcons.chevron_right,
-                                  color: AppleColors.labelTertiary,
-                                  size: 15,
-                                ),
-                          onTap: () {
-                            Navigator.of(ctx).pop();
-                            _switchToRelatedSeason(opt);
-                          },
-                        ),
-                      );
-                    },
-                  ),
-                ],
-              ],
+              ),
             ),
-        ],
-      ),
+            if (hasInLineSeasons)
+              Column(
+                children: [
+                  for (int idx = 0; idx < inLineSeasons.length; idx++) ...[
+                    if (idx > 0) const SizedBox(height: 8),
+                    Builder(
+                      builder: (_) {
+                        final s = inLineSeasons[idx];
+                        final isSelected =
+                            s.seasonNumber == activeInLineSeasonNum;
+                        return Container(
+                          decoration: BoxDecoration(
+                            color: isSelected
+                                ? AppleColors.systemBlue.withValues(
+                                    alpha: isDark ? 0.24 : 0.12,
+                                  )
+                                : tileBg,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color: isSelected
+                                  ? AppleColors.systemBlue.withValues(
+                                      alpha: 0.45,
+                                    )
+                                  : tileBorder,
+                              width: 0.65,
+                            ),
+                          ),
+                          child: AppleGroupedTile(
+                            icon: CupertinoIcons.tv_fill,
+                            iconBgColor: isSelected
+                                ? AppleColors.systemBlue
+                                : (isDark
+                                    ? const Color(0xFF3A3A3F)
+                                    : const Color(0xFF8E8E93)),
+                            title: s.seasonLabel,
+                            subtitle:
+                                '共 ${s.episodeIndexes.length} 集 · ${currentLine.name}',
+                            trailing: isSelected
+                                ? const Icon(
+                                    CupertinoIcons.checkmark_alt,
+                                    color: AppleColors.systemBlue,
+                                    size: 18,
+                                  )
+                                : Icon(
+                                    CupertinoIcons.chevron_right,
+                                    color: palette.labelTertiary,
+                                    size: 15,
+                                  ),
+                            onTap: () {
+                              Navigator.of(ctx).pop();
+                              setState(() {
+                                _selectedInLineSeason = s.seasonNumber;
+                                _selectedPage = 0;
+                              });
+                            },
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ],
+              )
+            else
+              Column(
+                children: [
+                  for (int idx = 0; idx < _relatedSeasons.length; idx++) ...[
+                    if (idx > 0) const SizedBox(height: 8),
+                    Builder(
+                      builder: (_) {
+                        final opt = _relatedSeasons[idx];
+                        final isCurrentSeason =
+                            (opt.video.id == _video.id &&
+                                    opt.site.key == _activeSite.key) ||
+                                opt.seasonNumber == curSeasonInfo.seasonNumber;
+                        final subParts = <String>[
+                          opt.video.title,
+                          if (opt.video.remarks.trim().isNotEmpty)
+                            opt.video.remarks.trim(),
+                          opt.site.name,
+                        ];
+                        return Container(
+                          decoration: BoxDecoration(
+                            color: isCurrentSeason
+                                ? AppleColors.systemBlue.withValues(
+                                    alpha: isDark ? 0.24 : 0.12,
+                                  )
+                                : tileBg,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color: isCurrentSeason
+                                  ? AppleColors.systemBlue.withValues(
+                                      alpha: 0.45,
+                                    )
+                                  : tileBorder,
+                              width: 0.65,
+                            ),
+                          ),
+                          child: AppleGroupedTile(
+                            icon: CupertinoIcons.tv_fill,
+                            iconBgColor: isCurrentSeason
+                                ? AppleColors.systemBlue
+                                : (isDark
+                                    ? const Color(0xFF3A3A3F)
+                                    : const Color(0xFF8E8E93)),
+                            title: opt.seasonLabel,
+                            subtitle: subParts.join(' · '),
+                            trailing: isCurrentSeason
+                                ? const Icon(
+                                    CupertinoIcons.checkmark_alt,
+                                    color: AppleColors.systemBlue,
+                                    size: 18,
+                                  )
+                                : Icon(
+                                    CupertinoIcons.chevron_right,
+                                    color: palette.labelTertiary,
+                                    size: 15,
+                                  ),
+                            onTap: () {
+                              Navigator.of(ctx).pop();
+                              _switchToRelatedSeason(opt);
+                            },
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ],
+              ),
+          ],
+        );
+      },
     );
   }
 
@@ -1514,92 +1548,130 @@ class _DetailScreenState extends State<DetailScreen> {
     showAppleModalSheet<void>(
       context: context,
       title: '切换播放源 (${_video.lines.length})',
-      builder: (ctx) => StatefulBuilder(builder: (ctx, updateSheet) => ListView(
-        shrinkWrap: true,
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(left: 4, bottom: 10),
-            child: Row(
-              children: [
-                const Icon(
-                  CupertinoIcons.layers_alt_fill,
-                  color: AppleColors.systemBlue,
-                  size: 15,
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    '当前站点：${_activeSite.name} · 共 ${_video.lines.length} 条播放线路',
-                    style: const TextStyle(
-                      color: AppleColors.labelSecondary,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, updateSheet) {
+          final palette = ApplePalette.of(ctx);
+          final isDark = palette.isDark;
+          final tileBg = isDark ? const Color(0xFF242429) : Colors.white;
+          final tileBorder = isDark
+              ? const Color(0x22FFFFFF)
+              : Colors.black.withValues(alpha: 0.08);
+          return ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(left: 4, bottom: 10),
+                child: Row(
+                  children: [
+                    const Icon(
+                      CupertinoIcons.layers_alt_fill,
+                      color: AppleColors.systemBlue,
+                      size: 15,
                     ),
-                  ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        '当前站点：${_activeSite.name} · 共 ${_video.lines.length} 条播放线路',
+                        style: TextStyle(
+                          color: palette.labelSecondary,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              for (int i = 0; i < _video.lines.length; i++) ...[
+                if (i > 0) const SizedBox(height: 8),
+                Builder(
+                  builder: (_) {
+                    final line = _video.lines[i];
+                    final selected = i == safeLineIdx;
+                    final lineReason = _lineUnavailableReason(line);
+                    final lineSpec = OhosRuntime.isOhos
+                        ? ''
+                        : MediaBadges.formatDotJoined(
+                            _specBadgesForLineOnly(line),
+                            maxBadges: 3,
+                          );
+                    final baseSubtitle = lineReason != null
+                        ? '共 ${line.episodes.length} 集 · $lineReason'
+                        : '共 ${line.episodes.length} 集 · ${_activeSite.name}';
+                    final tile = Container(
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? AppleColors.systemBlue.withValues(
+                                alpha: isDark ? 0.24 : 0.12,
+                              )
+                            : tileBg,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: selected
+                              ? AppleColors.systemBlue.withValues(alpha: 0.45)
+                              : tileBorder,
+                          width: 0.65,
+                        ),
+                      ),
+                      child: AppleGroupedTile(
+                        icon: CupertinoIcons.layers_alt_fill,
+                        iconBgColor: selected
+                            ? AppleColors.systemBlue
+                            : (isDark
+                                ? const Color(0xFF3A3A3F)
+                                : const Color(0xFF8E8E93)),
+                        title: line.name,
+                        subtitle: lineSpec.isEmpty
+                            ? baseSubtitle
+                            : '$baseSubtitle · $lineSpec',
+                        trailing: _activeSite.isEffectivelyPrivate
+                            ? null
+                            : IconButton(
+                                tooltip:
+                                    widget.storage.preferredLineName ==
+                                            line.name
+                                        ? '取消默认播放线路'
+                                        : '设为默认播放线路',
+                                icon: Icon(
+                                  widget.storage.preferredLineName == line.name
+                                      ? Icons.star_rounded
+                                      : Icons.star_border_rounded,
+                                  color: widget.storage.preferredLineName ==
+                                          line.name
+                                      ? Colors.amber
+                                      : palette.labelSecondary,
+                                ),
+                                onPressed: () async {
+                                  await widget.storage.setPreferredLineName(
+                                    widget.storage.preferredLineName ==
+                                            line.name
+                                        ? ''
+                                        : line.name,
+                                  );
+                                  if (ctx.mounted) updateSheet(() {});
+                                },
+                              ),
+                        onTap: () {
+                          Navigator.of(ctx).pop();
+                          setState(() {
+                            _selectedLine = i;
+                            _selectedPage = 0;
+                            _selectedInLineSeason = null;
+                          });
+                        },
+                      ),
+                    );
+                    return lineReason != null
+                        ? Opacity(opacity: 0.52, child: tile)
+                        : tile;
+                  },
                 ),
               ],
-            ),
-          ),
-          for (int i = 0; i < _video.lines.length; i++) ...[
-            if (i > 0) const SizedBox(height: 8),
-            Builder(
-              builder: (_) {
-                final line = _video.lines[i];
-                final selected = i == safeLineIdx;
-                final lineReason = _lineUnavailableReason(line);
-                final lineSpec = OhosRuntime.isOhos
-                    ? ''
-                    : MediaBadges.formatDotJoined(
-                        _specBadgesForLineOnly(line),
-                        maxBadges: 3,
-                      );
-                final baseSubtitle = lineReason != null
-                    ? '共 ${line.episodes.length} 集 · $lineReason'
-                    : '共 ${line.episodes.length} 集 · ${_activeSite.name}';
-                final tile = Container(
-                  decoration: BoxDecoration(
-                    color: selected
-                        ? const Color(0x330A84FF)
-                        : AppleColors.groupedSecondary,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: AppleGroupedTile(
-                    icon: CupertinoIcons.layers_alt_fill,
-                    iconBgColor: selected
-                        ? AppleColors.systemBlue
-                        : AppleColors.groupedTertiary,
-                    title: line.name,
-                    subtitle: lineSpec.isEmpty
-                        ? baseSubtitle
-                        : '$baseSubtitle · $lineSpec',
-                    trailing: _activeSite.isEffectivelyPrivate ? null : IconButton(
-                      tooltip: widget.storage.preferredLineName == line.name ? '取消默认播放线路' : '设为默认播放线路',
-                      icon: Icon(widget.storage.preferredLineName == line.name ? Icons.star_rounded : Icons.star_border_rounded,
-                        color: widget.storage.preferredLineName == line.name ? Colors.amber : AppleColors.labelSecondary),
-                      onPressed: () async {
-                        await widget.storage.setPreferredLineName(widget.storage.preferredLineName == line.name ? '' : line.name);
-                        if (ctx.mounted) updateSheet(() {});
-                      },
-                    ),
-                    onTap: () {
-                      Navigator.of(ctx).pop();
-                      setState(() {
-                        _selectedLine = i;
-                        _selectedPage = 0;
-                        _selectedInLineSeason = null;
-                      });
-                    },
-                  ),
-                );
-                return lineReason != null
-                    ? Opacity(opacity: 0.52, child: tile)
-                    : tile;
-              },
-            ),
-          ],
-        ],
-      )),
+            ],
+          );
+        },
+      ),
     );
   }
 
@@ -1675,34 +1747,40 @@ class _DetailScreenState extends State<DetailScreen> {
               Navigator.of(ctx).pop();
               _openPlayer(safeLineIdx, originalIdx);
             },
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              decoration: BoxDecoration(
-                color: isBookmarked
-                    ? AppleColors.labelPrimary
-                    : AppleColors.groupedSecondary,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: isBookmarked
-                      ? AppleColors.labelPrimary
-                      : AppleColors.glassBorder,
-                  width: isBookmarked ? 1.2 : 0.5,
-                ),
-              ),
-              alignment: Alignment.center,
-              child: Text(
-                isUnavailable ? '${ep.name} (不可解析)' : ep.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: isBookmarked
-                      ? const Color(0xFF111114)
-                      : AppleColors.labelPrimary,
-                  fontSize: 13,
-                  fontWeight:
-                      isBookmarked ? FontWeight.w700 : FontWeight.w500,
-                ),
-              ),
+            child: Builder(
+              builder: (cellCtx) {
+                final palette = ApplePalette.of(cellCtx);
+                final isDark = palette.isDark;
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  decoration: BoxDecoration(
+                    color: isBookmarked
+                        ? AppleColors.systemBlue
+                        : (isDark ? const Color(0xFF28282E) : Colors.white),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: isBookmarked
+                          ? AppleColors.systemBlue
+                          : (isDark
+                              ? const Color(0x26FFFFFF)
+                              : Colors.black.withValues(alpha: 0.09)),
+                      width: isBookmarked ? 1.2 : 0.65,
+                    ),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    isUnavailable ? '${ep.name} (不可解析)' : ep.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: isBookmarked ? Colors.white : palette.labelPrimary,
+                      fontSize: 13.5,
+                      fontWeight:
+                          isBookmarked ? FontWeight.w700 : FontWeight.w500,
+                    ),
+                  ),
+                );
+              },
             ),
           );
           return isUnavailable ? Opacity(opacity: 0.48, child: cell) : cell;
@@ -1729,6 +1807,8 @@ class _DetailScreenState extends State<DetailScreen> {
       title: '下载 · ${line.name}',
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheet) {
+          final palette = ApplePalette.of(ctx);
+          final isDark = palette.isDark;
           final total = line.episodes.length;
           final downloadable = <int>[
             for (int i = 0; i < total; i++)
@@ -1750,16 +1830,16 @@ class _DetailScreenState extends State<DetailScreen> {
                         downloadable.isEmpty
                             ? '本线路的剧集都已在下载列表中'
                             : '选择要下载的剧集 · 已选 ${selected.length}',
-                        style: const TextStyle(
-                          color: AppleColors.labelSecondary,
-                          fontSize: 13,
+                        style: TextStyle(
+                          color: palette.labelSecondary,
+                          fontSize: 13.5,
                         ),
                       ),
                     ),
                     if (downloadable.isNotEmpty)
                       CupertinoButton(
                         padding: const EdgeInsets.symmetric(horizontal: 8),
-                        minSize: 28,
+                        minimumSize: const Size(28, 28),
                         onPressed: () => setSheet(() {
                           if (allSelected) {
                             selected.clear();
@@ -1814,15 +1894,21 @@ class _DetailScreenState extends State<DetailScreen> {
                       child: DecoratedBox(
                         decoration: ShapeDecoration(
                           color: isSelected
-                              ? const Color(0x2E0A84FF)
-                              : AppleColors.fill,
+                              ? AppleColors.systemBlue.withValues(
+                                  alpha: isDark ? 0.28 : 0.14,
+                                )
+                              : (isDark
+                                  ? const Color(0xFF28282E)
+                                  : Colors.white),
                           shape: RoundedSuperellipseBorder(
                             borderRadius: BorderRadius.circular(11),
                             side: BorderSide(
                               color: isSelected
                                   ? AppleColors.systemBlue
-                                  : AppleColors.glassBorder,
-                              width: isSelected ? 1.2 : 0.5,
+                                  : (isDark
+                                      ? const Color(0x26FFFFFF)
+                                      : Colors.black.withValues(alpha: 0.09)),
+                              width: isSelected ? 1.2 : 0.65,
                             ),
                           ),
                         ),
@@ -1839,7 +1925,7 @@ class _DetailScreenState extends State<DetailScreen> {
                                   size: 13,
                                   color: done
                                       ? AppleColors.systemGreen
-                                      : AppleColors.labelSecondary,
+                                      : palette.labelSecondary,
                                 ),
                                 const SizedBox(width: 4),
                               ],
@@ -1850,9 +1936,11 @@ class _DetailScreenState extends State<DetailScreen> {
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     color: exists
-                                        ? AppleColors.labelTertiary
-                                        : AppleColors.labelPrimary,
-                                    fontSize: 13,
+                                        ? palette.labelTertiary
+                                        : (isSelected && !isDark
+                                            ? AppleColors.systemBlue
+                                            : palette.labelPrimary),
+                                    fontSize: 13.5,
                                     fontWeight: isSelected
                                         ? FontWeight.w600
                                         : FontWeight.w500,
@@ -1910,16 +1998,21 @@ class _DetailScreenState extends State<DetailScreen> {
     if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
       screen = _buildWindowsDetail(context);
     } else {
-      final width = MediaQuery.sizeOf(context).width;
-      final wideLayout = width >= 720;
+      final wideLayout = AppleViewportLayout.of(context).prefersWideDetail;
       screen = wideLayout
           ? _buildWideDesktopScreen(context)
           : _buildPortraitImmersiveScreen(context);
     }
     if (OhosRuntime.isOhos) return screen;
+    final wrapped = isWindowsDesktopUi
+        ? screen
+        : AnnotatedRegion<SystemUiOverlayStyle>(
+            value: SystemUiOverlayStyle.light,
+            child: screen,
+          );
     return RepaintBoundary(
       key: _transitionBackdropKey,
-      child: screen,
+      child: wrapped,
     );
   }
 
@@ -1936,10 +2029,27 @@ class _DetailScreenState extends State<DetailScreen> {
       MediaQuery.paddingOf(context).top,
       defaultTargetPlatform == TargetPlatform.macOS ? 28.0 : 0.0,
     );
-    final screenHeight = MediaQuery.sizeOf(context).height;
-    final posterWindowHeight = (screenHeight * 0.77).clamp(590.0, 740.0);
-    final foregroundHeroHeight =
-        (posterWindowHeight * 0.74).clamp(430.0, 535.0);
+    final viewport = AppleViewportLayout.of(context);
+    final screenHeight = viewport.height;
+    final double posterWindowHeight;
+    final double foregroundHeroHeight;
+    if (viewport.isShortPortrait) {
+      // iPhone Duo 5.4" outer cover (`466×678 pt`) & compact phones:
+      // keep title, badges, synopsis, and Play CTA visible above the fold.
+      posterWindowHeight = (screenHeight * 0.72).clamp(390.0, 540.0);
+      foregroundHeroHeight = (posterWindowHeight * 0.68).clamp(280.0, 390.0);
+    } else if (viewport.isExpandedPortrait) {
+      // iPhone Duo 7.6" unfolded inner portrait (`669×951 pt`) & iPad portrait:
+      // balance full-bleed cinema poster with immediate episode/cast access.
+      posterWindowHeight = (screenHeight * 0.62).clamp(540.0, 640.0);
+      foregroundHeroHeight = (posterWindowHeight * 0.72).clamp(390.0, 470.0);
+    } else {
+      posterWindowHeight = (screenHeight * 0.77).clamp(590.0, 740.0);
+      foregroundHeroHeight = (posterWindowHeight * 0.74).clamp(430.0, 535.0);
+    }
+    final double portraitContentPad = viewport.isExpandedPortrait
+        ? 28.0
+        : (viewport.isCompactSplit ? 14.0 : 18.0);
 
     return TweenAnimationBuilder<Color?>(
       tween: ColorTween(begin: targetBg, end: targetBg),
@@ -2152,75 +2262,86 @@ class _DetailScreenState extends State<DetailScreen> {
                           context,
                           heroHeight: foregroundHeroHeight,
                         ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 18),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              _buildPortraitSynopsis(),
-                              const SizedBox(height: 14),
-                              _buildPortraitActionRow(bookmark),
-                              if (bookmark != null) ...[
-                                const SizedBox(height: 10),
-                                _buildPortraitBookmarkProgress(bookmark),
-                              ],
-                              const SizedBox(height: 18),
-                              CastAvatarSection(
-                                title: _video.title,
-                                actorRaw: _video.actor,
-                                year: _video.year,
-                                forceDark: true,
-                                padding: EdgeInsets.zero,
+                        Center(
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: viewport.isExpandedPortrait
+                                  ? 640.0
+                                  : double.infinity,
+                            ),
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: portraitContentPad,
                               ),
-                              const SizedBox(height: 18),
-                              if (!_loading && _video.sourceWarnings.isNotEmpty)
-                                _buildSourceWarningsSection(),
-                              if (!_loading &&
-                                  _activeSite.playbackHint.isNotEmpty &&
-                                  _configuredParses.isEmpty)
-                                _buildPlaybackHintBanner(),
-                              if (_loading)
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 32),
-                                  child: Center(
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const CupertinoActivityIndicator(radius: 14),
-                                        if (CuratedDiscoveryService.isCuratedSite(
-                                            _activeSite)) ...[
-                                          const SizedBox(height: 10),
-                                          const Text(
-                                            '正在您添加的片源中匹配播放资源…',
-                                            style: TextStyle(
-                                              color: AppleColors.labelSecondary,
-                                              fontSize: 13,
-                                            ),
-                                          ),
-                                        ],
-                                      ],
-                                    ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  _buildPortraitSynopsis(),
+                                  const SizedBox(height: 14),
+                                  _buildPortraitActionRow(bookmark),
+                                  if (bookmark != null) ...[
+                                    const SizedBox(height: 10),
+                                    _buildPortraitBookmarkProgress(bookmark),
+                                  ],
+                                  const SizedBox(height: 18),
+                                  CastAvatarSection(
+                                    title: _video.title,
+                                    actorRaw: _video.actor,
+                                    year: _video.year,
+                                    forceDark: true,
+                                    padding: EdgeInsets.zero,
                                   ),
-                                )
-                              else if (_curatedUnavailableMessage != null)
-                                _buildCuratedUnavailableCard()
-                              else if (_error != null)
-                                _buildDetailError()
-                              else if (_video.lines.isEmpty)
-                                const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 20),
-                                  child: Text(
-                                    '当前片源未提供可播放剧集，请重试或手动切换片源',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      color: AppleColors.labelSecondary,
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                )
-                              else
-                                _buildPortraitEpisodesSection(bookmark),
-                            ],
+                                  const SizedBox(height: 18),
+                                  if (!_loading && _video.sourceWarnings.isNotEmpty)
+                                    _buildSourceWarningsSection(),
+                                  if (!_loading &&
+                                      _activeSite.playbackHint.isNotEmpty &&
+                                      _configuredParses.isEmpty)
+                                    _buildPlaybackHintBanner(),
+                                  if (_loading)
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(vertical: 32),
+                                      child: Center(
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            const CupertinoActivityIndicator(radius: 14),
+                                            if (CuratedDiscoveryService.isCuratedSite(
+                                                _activeSite)) ...[
+                                              const SizedBox(height: 10),
+                                              const Text(
+                                                '正在您添加的片源中匹配播放资源…',
+                                                style: TextStyle(
+                                                  color: AppleColors.labelSecondary,
+                                                  fontSize: 13,
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                      ),
+                                    )
+                                  else if (_curatedUnavailableMessage != null)
+                                    _buildCuratedUnavailableCard()
+                                  else if (_error != null)
+                                    _buildDetailError()
+                                  else if (_video.lines.isEmpty)
+                                    const Padding(
+                                      padding: EdgeInsets.symmetric(vertical: 20),
+                                      child: Text(
+                                        '当前片源未提供可播放剧集，请重试或手动切换片源',
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(
+                                          color: AppleColors.labelSecondary,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    )
+                                  else
+                                    _buildPortraitEpisodesSection(bookmark),
+                                ],
+                              ),
+                            ),
                           ),
                         ),
                       ],
@@ -2232,16 +2353,23 @@ class _DetailScreenState extends State<DetailScreen> {
               // 4. Floating Liquid Glass Top Navigation Bar (Back on Left, Source Picker + Download/Favorite on Right)
               Positioned(
                 top: topPad + 8,
-                left: 16,
-                right: 16,
+                left: viewport.isCompactSplit ? 12 : 16,
+                right: viewport.isCompactSplit ? 12 : 16,
                 child: Row(
                   children: [
                     _buildFloatingGlassCircleButton(
                       icon: CupertinoIcons.chevron_back,
                       onTap: () => Navigator.of(context).maybePop(),
                     ),
-                    const Spacer(),
-                    _buildFloatingSourceButton(),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: _buildFloatingSourceButton(
+                          maxWidth: viewport.isCompactSplit ? 112.0 : 168.0,
+                        ),
+                      ),
+                    ),
                     const SizedBox(width: 8),
                     _buildFloatingTopRightPill(),
                   ],
@@ -2405,6 +2533,8 @@ class _DetailScreenState extends State<DetailScreen> {
       style: 'circle',
       symbol: symbol,
       symbolSize: 17,
+      foregroundColor: Colors.white,
+      forceDark: true,
       width: 40,
       height: 40,
       accessibilityLabel: accessibilityLabel,
@@ -2415,7 +2545,7 @@ class _DetailScreenState extends State<DetailScreen> {
 
   /// Top-right floating Liquid Glass source selector button (`选源`):
   /// Displays the active playback source/line name and opens `_showSourcePickerSheet`.
-  Widget _buildFloatingSourceButton() {
+  Widget _buildFloatingSourceButton({double maxWidth = 168.0}) {
     final hasLines = _video.lines.isNotEmpty;
     final safeLineIdx = hasLines
         ? _selectedLine.clamp(0, _video.lines.length - 1)
@@ -2428,7 +2558,7 @@ class _DetailScreenState extends State<DetailScreen> {
       key: const ValueKey('source_picker_button'),
       onTap: _showSourcePickerSheet,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 168),
+        constraints: BoxConstraints(maxWidth: maxWidth),
         child: LiquidGlass(
           height: 40,
           borderRadius: 999,
@@ -2475,7 +2605,9 @@ class _DetailScreenState extends State<DetailScreen> {
       trailingSymbol: 'chevron.down',
       label: activeLineName,
       symbolSize: 14,
-      maxWidth: 168,
+      foregroundColor: Colors.white,
+      forceDark: true,
+      maxWidth: maxWidth,
       height: 40,
       accessibilityLabel: '切换片源 $activeLineName',
       onTap: _showSourcePickerSheet,
@@ -2588,22 +2720,23 @@ class _DetailScreenState extends State<DetailScreen> {
 
     return IosNativeGlassPill(
       height: 40,
+      forceDark: true,
       actions: [
         IosNativeGlassPillAction(
           symbol: 'qrcode.viewfinder',
-          color: AppleColors.labelPrimary,
+          color: Colors.white,
           accessibilityLabel: '网盘扫码',
           onTap: onOpenNetdisk,
         ),
         IosNativeGlassPillAction(
           symbol: 'arrow.down.to.line',
-          color: AppleColors.labelPrimary,
+          color: Colors.white,
           accessibilityLabel: '离线下载',
           onTap: _showDownloadSheet,
         ),
         IosNativeGlassPillAction(
           symbol: _isFavorite ? 'heart.fill' : 'heart',
-          color: _isFavorite ? AppleColors.systemRed : AppleColors.labelPrimary,
+          color: _isFavorite ? AppleColors.systemRed : Colors.white,
           accessibilityLabel: _isFavorite ? '取消收藏' : '收藏',
           onTap: () => unawaited(onToggleFavorite()),
         ),
@@ -3737,12 +3870,19 @@ class _DetailScreenState extends State<DetailScreen> {
     final targetBg = _resolveBaseAmbientColor();
     final bookmark = _findBookmark();
     final size = MediaQuery.sizeOf(context);
+    final safePad = MediaQuery.paddingOf(context);
     final topPad = math.max(
-      MediaQuery.paddingOf(context).top,
+      safePad.top,
       defaultTargetPlatform == TargetPlatform.macOS ? 28.0 : 0.0,
     );
     final horizontalPad = (size.width * 0.045).clamp(24.0, 56.0);
-    final heroStageHeight = (size.height * 0.58).clamp(380.0, 500.0);
+    final compactWideH = size.height < 520;
+    final heroStageHeight = compactWideH
+        ? (size.height * 0.68).clamp(290.0, 360.0)
+        : (size.height * 0.58).clamp(380.0, 500.0);
+    final posterCardW = compactWideH
+        ? (heroStageHeight * 0.43).clamp(132.0, 176.0)
+        : (heroStageHeight * 0.48).clamp(168.0, 224.0);
 
     return TweenAnimationBuilder<Color?>(
       tween: ColorTween(begin: targetBg, end: targetBg),
@@ -3932,24 +4072,25 @@ class _DetailScreenState extends State<DetailScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        SizedBox(
-                          height: heroStageHeight + topPad,
+                        ConstrainedBox(
+                          constraints: BoxConstraints(
+                            minHeight: heroStageHeight + topPad,
+                          ),
                           child: Padding(
                             padding: EdgeInsets.fromLTRB(
-                              horizontalPad,
+                              horizontalPad + safePad.left,
                               topPad + 58,
-                              horizontalPad,
+                              horizontalPad + safePad.right,
                               18,
                             ),
                             child: Row(
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
                                 SizedBox(
-                                  width: (heroStageHeight * 0.48)
-                                      .clamp(168.0, 224.0),
+                                  width: posterCardW,
                                   child: _buildPosterCard(bgColor),
                                 ),
-                                const SizedBox(width: 28),
+                                SizedBox(width: compactWideH ? 20 : 28),
                                 Expanded(
                                   child: _buildWideHeroShowcaseColumn(bookmark),
                                 ),
@@ -4015,8 +4156,8 @@ class _DetailScreenState extends State<DetailScreen> {
               // 4. Floating Liquid Glass Top Navigation Bar (Back on Left, Source Picker + Download/Favorite on Right)
               Positioned(
                 top: topPad + 10,
-                left: horizontalPad,
-                right: horizontalPad,
+                left: horizontalPad + safePad.left,
+                right: horizontalPad + safePad.right,
                 child: Row(
                   children: [
                     _buildFloatingGlassCircleButton(

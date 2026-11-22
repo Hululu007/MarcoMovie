@@ -377,10 +377,8 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
           Text(
             label,
             style: TextStyle(
-              color: usesWindowsAppearance(context)
-                  ? settingsMuted(context)
-                  : const Color(0x99EBEBF5),
-              fontSize: 12.5,
+              color: settingsMuted(context),
+              fontSize: 13.5,
               fontWeight: FontWeight.w500,
             ),
           ),
@@ -604,7 +602,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                         ? CupertinoIcons.eye_slash_fill
                         : CupertinoIcons.eye_fill,
                     size: 17,
-                    color: const Color(0x99EBEBF5),
+                    color: settingsMuted(context),
                   ),
                 ),
               ),
@@ -679,8 +677,10 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                       receiverUrl,
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        color: AppleColors.systemCyan,
-                        fontSize: 13,
+                        color: ApplePalette.isDarkOf(context)
+                            ? AppleColors.systemCyan
+                            : AppleColors.systemBlue,
+                        fontSize: 13.5,
                         fontWeight: FontWeight.w600,
                       ),
                     ),

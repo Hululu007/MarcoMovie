@@ -265,12 +265,13 @@ void main() {
       await tester.tap(find.text('设置').last);
       await tester.pumpAndSettle();
       await tapKey(tester, 'settings-category-appearance');
-      await tapKey(tester, 'settings-open-glass');
-      await tapKey(tester, 'choice-玻璃预设-solid');
-      expect(storage.glassBlurStrength, 0);
-      await capture(tester, 'settings-glass-${size.width.toInt()}');
+      // Ineffective liquid glass adjustment pane & slider must be removed.
+      expect(find.byKey(const ValueKey('settings-open-glass')), findsNothing);
+      expect(find.byKey(const ValueKey('ios-glass-slider')), findsNothing);
+      await tapKey(tester, 'choice-主题模式-light');
+      expect(storage.appThemeMode, 'light');
+      await capture(tester, 'settings-appearance-${size.width.toInt()}');
       await tapKey(tester, 'settings-drawer-back');
-      await tapKey(tester, 'settings-open-wallpaper');
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));

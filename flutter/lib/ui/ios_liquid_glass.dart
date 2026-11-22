@@ -4,7 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart' show Colors;
+import 'package:flutter/material.dart' show Colors, Theme;
 import 'package:flutter/services.dart';
 
 /// Runtime bridge to Apple's true iOS 26+ Liquid Glass UIKit primitives
@@ -465,7 +465,7 @@ class IosNativeDockView extends StatefulWidget {
     this.showSearch = true,
     this.hidden = false,
     this.collapsed = false,
-    this.height = 72,
+    this.height = 76,
   });
 
   @override
@@ -594,6 +594,7 @@ class IosNativeGlassButton extends StatefulWidget {
   final double symbolSize;
   final Color? foregroundColor;
   final Color? tintColor;
+  final bool forceDark;
   final String? accessibilityLabel;
   final double? width;
   final double maxWidth;
@@ -613,6 +614,7 @@ class IosNativeGlassButton extends StatefulWidget {
     this.symbolSize = 17,
     this.foregroundColor,
     this.tintColor,
+    this.forceDark = false,
     this.accessibilityLabel,
     this.width,
     this.maxWidth = 168,
@@ -632,11 +634,14 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
   MethodChannel? _channel;
   Brightness? _lastBrightness;
 
-  Color _effectiveForegroundColor() {
+  bool _isDarkSurface(BuildContext ctx) =>
+      widget.forceDark || Theme.of(ctx).brightness == Brightness.dark;
+
+  Color _effectiveForegroundColor([BuildContext? ctx]) {
     if (widget.foregroundColor != null) return widget.foregroundColor!;
-    if (widget.tintColor != null) return Colors.white;
-    final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
-    return isDark ? Colors.white : const Color(0xFF111318);
+    if (widget.forceDark || widget.tintColor != null) return Colors.white;
+    final dark = _isDarkSurface(ctx ?? context);
+    return dark ? Colors.white : const Color(0xFF14171F);
   }
 
   Map<String, dynamic> _buildParams({double? initialWidth}) => <String, dynamic>{
@@ -646,7 +651,9 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
           'trailingSymbol': widget.trailingSymbol,
         'label': widget.label,
         'symbolSize': widget.symbolSize,
-        'foregroundColor': _effectiveForegroundColor().toARGB32(),
+        'forceDark': widget.forceDark,
+        if (widget.foregroundColor != null)
+          'foregroundColor': widget.foregroundColor!.toARGB32(),
         if (widget.tintColor != null)
           'tintColor': widget.tintColor!.toARGB32(),
         'accessibilityLabel': widget.accessibilityLabel ?? widget.label,
@@ -660,7 +667,7 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final brightness = CupertinoTheme.brightnessOf(context);
+    final brightness = Theme.of(context).brightness;
     if (_lastBrightness != null &&
         _lastBrightness != brightness &&
         _channel != null) {
@@ -695,6 +702,7 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
         oldWidget.symbolSize != widget.symbolSize ||
         oldWidget.foregroundColor != widget.foregroundColor ||
         oldWidget.tintColor != widget.tintColor ||
+        oldWidget.forceDark != widget.forceDark ||
         oldWidget.accessibilityLabel != widget.accessibilityLabel ||
         oldWidget.menuTitle != widget.menuTitle ||
         !listEquals(oldWidget.menuItems, widget.menuItems)) {
@@ -751,8 +759,9 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
               trailingSymbol: widget.trailingSymbol,
               label: widget.label,
               symbolSize: widget.symbolSize,
-              foregroundColor: _effectiveForegroundColor(),
+              foregroundColor: _effectiveForegroundColor(context),
               tintColor: widget.tintColor,
+              forceDark: widget.forceDark,
               width: _resolvedWidth(context),
               height: widget.height,
               onTap: widget.onTap,
@@ -780,20 +789,20 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
 
 class IosNativeGlassPillAction {
   final String symbol;
-  final Color color;
+  final Color? color;
   final String accessibilityLabel;
   final VoidCallback onTap;
 
   const IosNativeGlassPillAction({
     required this.symbol,
-    this.color = Colors.white,
+    this.color,
     required this.accessibilityLabel,
     required this.onTap,
   });
 
   Map<String, dynamic> toMap() => <String, dynamic>{
         'symbol': symbol,
-        'color': color.toARGB32(),
+        if (color != null) 'color': color!.toARGB32(),
         'accessibilityLabel': accessibilityLabel,
       };
 }
@@ -803,12 +812,14 @@ class IosNativeGlassPillAction {
 class IosNativeGlassPill extends StatefulWidget {
   final List<IosNativeGlassPillAction> actions;
   final double height;
+  final bool forceDark;
   final Widget fallback;
 
   const IosNativeGlassPill({
     super.key,
     required this.actions,
     this.height = 40,
+    this.forceDark = false,
     required this.fallback,
   });
 
@@ -818,12 +829,26 @@ class IosNativeGlassPill extends StatefulWidget {
 
 class _IosNativeGlassPillState extends State<IosNativeGlassPill> {
   MethodChannel? _channel;
+  Brightness? _lastBrightness;
 
   Map<String, dynamic> _buildParams({double? initialWidth}) => <String, dynamic>{
         'items': [for (final a in widget.actions) a.toMap()],
+        'forceDark': widget.forceDark,
         if (initialWidth != null) 'initialWidth': initialWidth,
         'initialHeight': widget.height,
       };
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final brightness = Theme.of(context).brightness;
+    if (_lastBrightness != null &&
+        _lastBrightness != brightness &&
+        _channel != null) {
+      unawaited(_safeUpdate(_channel!));
+    }
+    _lastBrightness = brightness;
+  }
 
   void _onViewCreated(int id) {
     _channel?.setMethodCallHandler(null);
@@ -858,7 +883,8 @@ class _IosNativeGlassPillState extends State<IosNativeGlassPill> {
     super.didUpdateWidget(oldWidget);
     final ch = _channel;
     if (ch == null) return;
-    if (_actionsChanged(oldWidget.actions)) {
+    if (oldWidget.forceDark != widget.forceDark ||
+        _actionsChanged(oldWidget.actions)) {
       unawaited(_safeUpdate(ch));
     }
   }
@@ -886,6 +912,7 @@ class _IosNativeGlassPillState extends State<IosNativeGlassPill> {
           if (IosLiquidGlassBridge.isAvailable) {
             return _Ios26GlassPillPlaceholder(
               actions: widget.actions,
+              forceDark: widget.forceDark,
               width: width,
               height: widget.height,
             );
@@ -1257,7 +1284,7 @@ class _IosNativeSliderState extends State<IosNativeSlider> {
 }
 
 IconData _cupertinoIconForSfSymbol(String? symbol) => switch (symbol) {
-      'chevron.backward' => CupertinoIcons.back,
+      'chevron.backward' || 'chevron.left' => CupertinoIcons.back,
       'chevron.down' => CupertinoIcons.chevron_down,
       'archivebox.fill' || 'archivebox' => CupertinoIcons.archivebox_fill,
       'square.3.layers.3d' ||
@@ -1297,6 +1324,7 @@ class _Ios26GlassButtonPlaceholder extends StatelessWidget {
   final double symbolSize;
   final Color foregroundColor;
   final Color? tintColor;
+  final bool forceDark;
   final double width;
   final double height;
   final VoidCallback onTap;
@@ -1309,6 +1337,7 @@ class _Ios26GlassButtonPlaceholder extends StatelessWidget {
     required this.symbolSize,
     required this.foregroundColor,
     required this.tintColor,
+    this.forceDark = false,
     required this.width,
     required this.height,
     required this.onTap,
@@ -1316,22 +1345,23 @@ class _Ios26GlassButtonPlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final dark = forceDark || Theme.of(context).brightness == Brightness.dark;
     final isCapsule = style == 'capsule' &&
         (label.isNotEmpty ||
             (trailingSymbol != null && trailingSymbol!.isNotEmpty));
     final radius = BorderRadius.circular(height * 0.5);
-        final baseBg = tintColor != null
-            ? Color.alphaBlend(
-                tintColor!.withValues(alpha: 0.78),
-                const Color(0xFF28282E),
-              )
-            : const Color(0x6E3A3A42);
-        final topBg = tintColor != null
-            ? Color.alphaBlend(
-                const Color(0x2EFFFFFF),
-                baseBg,
-              )
-            : const Color(0x8250505A);
+    final baseBg = tintColor != null
+        ? Color.alphaBlend(
+            tintColor!.withValues(alpha: 0.78),
+            const Color(0xFF28282E),
+          )
+        : (dark ? const Color(0x8824252C) : const Color(0xE8F6F8FC));
+    final topBg = tintColor != null
+        ? Color.alphaBlend(
+            const Color(0x2EFFFFFF),
+            baseBg,
+          )
+        : (dark ? const Color(0x9C34353E) : const Color(0xF5FFFFFF));
 
     return GestureDetector(
       key: const ValueKey('ios26-glass-button-transition-placeholder'),
@@ -1351,14 +1381,16 @@ class _Ios26GlassButtonPlaceholder extends StatelessWidget {
             border: Border.all(
               color: tintColor != null
                   ? Colors.white.withValues(alpha: 0.28)
-                  : Colors.white.withValues(alpha: 0.18),
+                  : (dark
+                      ? Colors.white.withValues(alpha: 0.20)
+                      : Colors.black.withValues(alpha: 0.10)),
               width: 0.65,
             ),
-            boxShadow: const [
+            boxShadow: [
               BoxShadow(
-                color: Color(0x38000000),
+                color: dark ? const Color(0x38000000) : const Color(0x160F172A),
                 blurRadius: 10,
-                offset: Offset(0, 3),
+                offset: const Offset(0, 3),
               ),
             ],
           ),
@@ -1419,17 +1451,21 @@ class _Ios26GlassButtonPlaceholder extends StatelessWidget {
 
 class _Ios26GlassPillPlaceholder extends StatelessWidget {
   final List<IosNativeGlassPillAction> actions;
+  final bool forceDark;
   final double width;
   final double height;
 
   const _Ios26GlassPillPlaceholder({
     required this.actions,
+    this.forceDark = false,
     required this.width,
     required this.height,
   });
 
   @override
   Widget build(BuildContext context) {
+    final dark = forceDark || Theme.of(context).brightness == Brightness.dark;
+    final defaultInk = dark ? Colors.white : const Color(0xFF14171F);
     return SizedBox(
       key: const ValueKey('ios26-glass-pill-transition-placeholder'),
       width: width,
@@ -1437,13 +1473,17 @@ class _Ios26GlassPillPlaceholder extends StatelessWidget {
       child: DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(height * 0.5),
-          gradient: const LinearGradient(
+          gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [Color(0x8250505A), Color(0x6E3A3A42)],
+            colors: dark
+                ? const [Color(0x9C34353E), Color(0x8824252C)]
+                : const [Color(0xF5FFFFFF), Color(0xE8F6F8FC)],
           ),
           border: Border.all(
-            color: Colors.white.withValues(alpha: 0.24),
+            color: dark
+                ? Colors.white.withValues(alpha: 0.24)
+                : Colors.black.withValues(alpha: 0.10),
             width: 0.65,
           ),
         ),
@@ -1457,7 +1497,9 @@ class _Ios26GlassPillPlaceholder extends StatelessWidget {
                   Container(
                     width: 0.6,
                     height: 18,
-                    color: Colors.white.withValues(alpha: 0.24),
+                    color: dark
+                        ? Colors.white.withValues(alpha: 0.24)
+                        : Colors.black.withValues(alpha: 0.12),
                   ),
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
@@ -1469,7 +1511,7 @@ class _Ios26GlassPillPlaceholder extends StatelessWidget {
                       child: Icon(
                         _cupertinoIconForSfSymbol(actions[i].symbol),
                         size: 17.5,
-                        color: actions[i].color,
+                        color: actions[i].color ?? defaultInk,
                       ),
                     ),
                   ),
@@ -1505,6 +1547,7 @@ class _Ios26SegmentedPlaceholder extends StatelessWidget {
     final count = segments.length;
     if (count == 0) return SizedBox(width: double.infinity, height: height);
     final safeIdx = selectedIndex.clamp(0, count - 1);
+    final dark = Theme.of(context).brightness == Brightness.dark;
     return SizedBox(
       key: const ValueKey('ios26-segmented-transition-placeholder'),
       width: double.infinity,
@@ -1512,9 +1555,11 @@ class _Ios26SegmentedPlaceholder extends StatelessWidget {
       child: DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(height * 0.5),
-          color: const Color(0x6634343C),
+          color: dark ? const Color(0x6634343C) : const Color(0x18111318),
           border: Border.all(
-            color: Colors.white.withValues(alpha: 0.18),
+            color: dark
+                ? Colors.white.withValues(alpha: 0.18)
+                : Colors.black.withValues(alpha: 0.08),
             width: 0.6,
           ),
         ),
@@ -1534,13 +1579,17 @@ class _Ios26SegmentedPlaceholder extends StatelessWidget {
                     child: DecoratedBox(
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(segH * 0.5),
-                        gradient: const LinearGradient(
+                        gradient: LinearGradient(
                           begin: Alignment.topCenter,
                           end: Alignment.bottomCenter,
-                          colors: [Color(0xFF5D5D64), Color(0xFF4A4A50)],
+                          colors: dark
+                              ? const [Color(0xFF5D5D64), Color(0xFF4A4A50)]
+                              : const [Color(0xFFFFFFFF), Color(0xFFF4F6FA)],
                         ),
                         border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.22),
+                          color: dark
+                              ? Colors.white.withValues(alpha: 0.22)
+                              : Colors.black.withValues(alpha: 0.08),
                           width: 0.5,
                         ),
                       ),
@@ -1560,8 +1609,12 @@ class _Ios26SegmentedPlaceholder extends StatelessWidget {
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
                                   color: i == safeIdx
-                                      ? Colors.white
-                                      : Colors.white.withValues(alpha: 0.76),
+                                      ? (dark
+                                          ? Colors.white
+                                          : const Color(0xFF14171F))
+                                      : (dark
+                                          ? Colors.white.withValues(alpha: 0.76)
+                                          : const Color(0xB814171F)),
                                   fontSize: 13,
                                   fontWeight: FontWeight.w600,
                                 ),

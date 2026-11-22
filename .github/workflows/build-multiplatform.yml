@@ -301,19 +301,33 @@ jobs:
 
   build-ios:
     if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'ios'
-    name: Build iOS & iPadOS (.ipa unsigned, iOS 26 Liquid Glass SDK)
+    name: Build iOS & iPadOS (.ipa unsigned, iOS 27.1 / iPhone Duo & Liquid Glass SDK)
     needs: [verify-and-checks]
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Select newest installed Xcode 27 (iOS 27.1+ SDK for iPhone Duo)
+        run: |
+          BEST_XCODE=""
+          for candidate in $(ls -d /Applications/Xcode_27*.app /Applications/Xcode.app 2>/dev/null | sort -V); do
+            if [ -x "$candidate/Contents/Developer/usr/bin/xcodebuild" ]; then
+              BEST_XCODE="$candidate"
+            fi
+          done
+          if [ -n "$BEST_XCODE" ]; then
+            echo "Selecting Xcode toolchain: $BEST_XCODE"
+            sudo xcode-select -s "$BEST_XCODE/Contents/Developer"
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
       - uses: actions/setup-node@v4
         with:
           node-version: "22.22.3"
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
-          flutter-version: "3.38.9"
+          flutter-version: "3.47.9"
       - name: Fetch verified iOS runtime inputs
         env:
           GH_TOKEN: ${{ github.token }}

@@ -7,35 +7,84 @@ private enum MarcoLiquidGlassSupport {
   static var glassIntensity: CGFloat = 0.68
   static let appearanceChangedNotification = Notification.Name("MarcoLiquidGlassAppearanceChanged")
   static let glassIntensityChangedNotification = Notification.Name("MarcoLiquidGlassIntensityChanged")
+  static let windowGeometryChangedNotification = Notification.Name("MarcoWindowGeometryChanged")
   private static var accessibilityObservers: [NSObjectProtocol] = []
   private static var hiddenAirPlayPicker: AVRoutePickerView?
 
+  /// Resolves the active UIWindow across UIScene / iPhone Duo fold-unfold / Split View
+  /// without touching the deprecated `UIScreen.main` global.
+  static func activeWindow(for view: UIView? = nil) -> UIWindow? {
+    if let win = view?.window {
+      return win
+    }
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let activeScene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
+    if let keyWin = activeScene?.windows.first(where: { $0.isKeyWindow }) {
+      return keyWin
+    }
+    if let anyKey = scenes.flatMap({ $0.windows }).first(where: { $0.isKeyWindow }) {
+      return anyKey
+    }
+    return activeScene?.windows.first ?? scenes.flatMap({ $0.windows }).first
+  }
+
+  static func activeWindowBounds(for view: UIView? = nil) -> CGRect {
+    if let win = activeWindow(for: view), win.bounds.width > 0, win.bounds.height > 0 {
+      return win.bounds
+    }
+    if let v = view, v.bounds.width > 0, v.bounds.height > 0 {
+      return v.bounds
+    }
+    return CGRect(x: 0.0, y: 0.0, width: 390.0, height: 844.0)
+  }
+
+  static func notifyWindowGeometryChanged(size: CGSize) {
+    NotificationCenter.default.post(
+      name: windowGeometryChangedNotification,
+      object: nil,
+      userInfo: ["width": size.width, "height": size.height]
+    )
+  }
+
   static var isEffectiveDark: Bool {
+    return isEffectiveDark(for: nil)
+  }
+
+  static func isEffectiveDark(for view: UIView?) -> Bool {
     switch interfaceStyle {
     case .dark:
       return true
     case .light:
       return false
     default:
-      if let win = UIApplication.shared.connectedScenes
-        .compactMap({ $0 as? UIWindowScene })
-        .flatMap({ $0.windows })
-        .first {
+      if let v = view, v.traitCollection.userInterfaceStyle != .unspecified {
+        return v.traitCollection.userInterfaceStyle != .light
+      }
+      if let win = activeWindow() {
         return win.traitCollection.userInterfaceStyle != .light
       }
       return UITraitCollection.current.userInterfaceStyle != .light
     }
   }
 
+  static func adaptiveGlassForeground(for view: UIView?, forceDark: Bool = false) -> UIColor {
+    let dark = forceDark || isEffectiveDark(for: view)
+    return dark ? .white : UIColor(red: 0.08, green: 0.09, blue: 0.12, alpha: 0.94)
+  }
+
   private static func restyleNativeViews(in view: UIView, style: UIUserInterfaceStyle) {
-    if view.overrideUserInterfaceStyle != style && view.tag != 99001 {
+    if view.tag == 99001 {
+      // Forced-dark media overlay subtree (Detail / Hero / Player): keep .dark intact.
+      return
+    }
+    if view.overrideUserInterfaceStyle != style {
       view.overrideUserInterfaceStyle = style
     }
     if let seg = view as? UISegmentedControl {
-      let dark = isEffectiveDark
+      let dark = isEffectiveDark(for: seg)
       seg.setTitleTextAttributes(
         [
-          .foregroundColor: dark ? UIColor.white.withAlphaComponent(0.76) : UIColor.label.withAlphaComponent(0.72),
+          .foregroundColor: dark ? UIColor.white.withAlphaComponent(0.76) : UIColor.label.withAlphaComponent(0.74),
           .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
         ],
         for: .normal
@@ -50,41 +99,6 @@ private enum MarcoLiquidGlassSupport {
     }
     for sub in view.subviews {
       restyleNativeViews(in: sub, style: style)
-    }
-  }
-
-  private static func updateNativeGlassIntensity(in view: UIView, intensity: CGFloat) {
-    if let effectView = view as? UIVisualEffectView {
-      let solid = intensity <= 0.02 || UIAccessibility.isReduceTransparencyEnabled
-      let dark = isEffectiveDark
-      if solid {
-        effectView.effect = nil
-        effectView.backgroundColor = dark
-          ? UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 0.96)
-          : UIColor(red: 0.98, green: 0.98, blue: 0.99, alpha: 0.98)
-      } else {
-        effectView.backgroundColor = dark
-          ? UIColor(white: 0.10, alpha: max(0.0, (1.0 - intensity) * 0.62))
-          : UIColor(white: 1.0, alpha: max(0.0, (1.0 - intensity) * 0.56))
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-          let glass = UIGlassEffect(style: .regular)
-          glass.isInteractive = true
-          let veilAlpha = max(0.0, (1.0 - intensity) * (dark ? 0.56 : 0.48))
-          glass.tintColor = dark
-            ? UIColor(white: 0.12, alpha: veilAlpha)
-            : UIColor(white: 1.0, alpha: veilAlpha)
-          effectView.effect = glass
-        } else {
-          effectView.effect = UIBlurEffect(style: dark ? .systemChromeMaterialDark : .systemChromeMaterialLight)
-        }
-        #else
-        effectView.effect = UIBlurEffect(style: dark ? .systemChromeMaterialDark : .systemChromeMaterialLight)
-        #endif
-      }
-    }
-    for sub in view.subviews {
-      updateNativeGlassIntensity(in: sub, intensity: intensity)
     }
   }
 
@@ -108,7 +122,6 @@ private enum MarcoLiquidGlassSupport {
         win.backgroundColor = winBg
         win.rootViewController?.view.backgroundColor = winBg
         restyleNativeViews(in: win, style: style)
-        updateNativeGlassIntensity(in: win, intensity: glassIntensity)
         if let marcoVC = win.rootViewController as? MarcoFlutterViewController {
           marcoVC.marcoPreferredInterfaceStyle = style
         }
@@ -118,13 +131,9 @@ private enum MarcoLiquidGlassSupport {
   }
 
   static func applyGlassIntensity(_ value: Double) {
+    // Native iOS 26 UIGlassEffect manages optical refraction & legibility natively;
+    // avoid tinting or adding opaque milky backgrounds over UIGlassEffect views.
     glassIntensity = CGFloat(min(max(value, 0.0), 1.0))
-    for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
-      for win in scene.windows {
-        updateNativeGlassIntensity(in: win, intensity: glassIntensity)
-      }
-    }
-    NotificationCenter.default.post(name: glassIntensityChangedNotification, object: nil)
   }
 
   static func presentNativeAirPlayPicker() {
@@ -145,12 +154,14 @@ private enum MarcoLiquidGlassSupport {
   }
 
   static func triggerFavoriteDynamicIslandFeedback(phase: String) -> [String: Any] {
-    let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first
-    let win = scene?.windows.first(where: { $0.isKeyWindow }) ?? scene?.windows.first
+    let win = activeWindow()
+    let winBounds = activeWindowBounds()
     let topInset = win?.safeAreaInsets.top ?? 0.0
-    let screenW = win?.bounds.width ?? UIScreen.main.bounds.width
+    let screenW = winBounds.width
     let isPhone = UIDevice.current.userInterfaceIdiom == .phone
-    let hasIsland = isPhone && topInset >= 52.0
+    // Guard against iPhone Duo unfolded inner display (669pt+) where there is no
+    // centered Dynamic Island cutout.
+    let hasIsland = isPhone && topInset >= 52.0 && screenW < 520.0
     if phase == "shutter" {
       let medium = UIImpactFeedbackGenerator(style: .medium)
       medium.prepare()
@@ -411,6 +422,17 @@ private enum MarcoLiquidGlassSupport {
     return true
   }
 
+  static func isNearBlack(_ color: UIColor) -> Bool {
+    var r: CGFloat = 0
+    var g: CGFloat = 0
+    var b: CGFloat = 0
+    var a: CGFloat = 1
+    if color.getRed(&r, green: &g, blue: &b, alpha: &a) {
+      return r < 0.22 && g < 0.22 && b < 0.22
+    }
+    return false
+  }
+
   static func withoutAnimations(_ block: () -> Void) {
     UIView.performWithoutAnimation {
       CATransaction.begin()
@@ -489,11 +511,7 @@ private enum MarcoLiquidGlassSupport {
   }
 
   static func topPresenter() -> UIViewController? {
-    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-    let keyWindow = scenes
-      .flatMap { $0.windows }
-      .first(where: { $0.isKeyWindow }) ?? scenes.flatMap { $0.windows }.first
-    var presenter = keyWindow?.rootViewController
+    var presenter = activeWindow()?.rootViewController
     while let presented = presenter?.presentedViewController, !presented.isBeingDismissed {
       presenter = presented
     }
@@ -869,11 +887,42 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   private var navIdentity: ObjectIdentifier?
 
   private var isOpaqueMode: Bool {
-    return forceOpaque || UIAccessibility.isReduceTransparencyEnabled || MarcoLiquidGlassSupport.glassIntensity <= 0.02
+    return forceOpaque || UIAccessibility.isReduceTransparencyEnabled
   }
 
   private var useDarkColors: Bool {
-    return forceDarkSurface || MarcoLiquidGlassSupport.isEffectiveDark
+    return forceDarkSurface || MarcoLiquidGlassSupport.isEffectiveDark(for: isViewLoaded ? view : nil)
+  }
+
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
+      let dark = useDarkColors
+      tableView.separatorColor = dark
+        ? UIColor.white.withAlphaComponent(0.12)
+        : UIColor.black.withAlphaComponent(0.10)
+      tableView.reloadData()
+    }
+  }
+
+  override func viewWillTransition(
+    to size: CGSize,
+    with coordinator: UIViewControllerTransitionCoordinator
+  ) {
+    super.viewWillTransition(to: size, with: coordinator)
+    coordinator.animate(alongsideTransition: { [weak self] _ in
+      guard let self = self else { return }
+      if self.isPopoverPresentation, let nav = self.navigationController {
+        let maxW = min(Double(size.width) - 24.0, 278.0)
+        let maxH = min(Double(size.height) * 0.72, 340.0)
+        nav.preferredContentSize = CGSize(
+          width: max(220.0, min(Double(nav.preferredContentSize.width), maxW)),
+          height: min(Double(nav.preferredContentSize.height), max(maxH, 160.0))
+        )
+      }
+      self.view.setNeedsLayout()
+      self.view.layoutIfNeeded()
+    }, completion: nil)
   }
 
   func adaptivePresentationStyle(
@@ -1626,7 +1675,7 @@ private final class MarcoNativePinSheetController: UIViewController {
     let vc = MarcoNativePinSheetController(args: args, completion: completion)
     vc.modalPresentationStyle = .overFullScreen
     vc.modalTransitionStyle = .crossDissolve
-    vc.overrideUserInterfaceStyle = .dark
+    vc.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     host.present(vc, animated: false, completion: nil)
   }
 
@@ -1669,12 +1718,69 @@ private final class MarcoNativePinSheetController: UIViewController {
     return cmds
   }
 
+  private var isDarkPin: Bool {
+    return MarcoLiquidGlassSupport.isEffectiveDark(for: isViewLoaded ? view : nil)
+  }
+
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
+      applyPinTheme()
+      refreshUI(animatedDotIndex: nil)
+    }
+  }
+
+  private func applyPinTheme() {
+    let dark = isDarkPin
+    let style = MarcoLiquidGlassSupport.interfaceStyle
+    overrideUserInterfaceStyle = style
+    cardEffectView.overrideUserInterfaceStyle = style
+    backdropControl.backgroundColor = dark
+      ? UIColor.black.withAlphaComponent(0.58)
+      : UIColor.black.withAlphaComponent(0.32)
+    cardShadowView.layer.shadowOpacity = dark ? 0.45 : 0.22
+    cardEffectView.layer.borderColor = (dark
+      ? UIColor.white.withAlphaComponent(0.18)
+      : UIColor.black.withAlphaComponent(0.10)).cgColor
+    titleLabel.textColor = dark ? .white : UIColor.label
+    for btn in digitButtons {
+      btn.overrideUserInterfaceStyle = style
+      if var cfg = btn.configuration {
+        cfg.baseForegroundColor = dark ? .white : UIColor.label
+        if #unavailable(iOS 26.0) {
+          cfg.baseBackgroundColor = dark
+            ? UIColor(white: 0.22, alpha: 0.85)
+            : UIColor.secondarySystemFill
+        }
+        btn.configuration = cfg
+      }
+    }
+    cancelButton.overrideUserInterfaceStyle = style
+    if var cfg = cancelButton.configuration {
+      cfg.baseForegroundColor = dark
+        ? UIColor.white.withAlphaComponent(0.78)
+        : UIColor.secondaryLabel
+      cancelButton.configuration = cfg
+    }
+    backspaceButton.overrideUserInterfaceStyle = style
+    if var cfg = backspaceButton.configuration {
+      cfg.baseForegroundColor = dark
+        ? UIColor.white.withAlphaComponent(0.84)
+        : UIColor.label
+      backspaceButton.configuration = cfg
+    }
+  }
+
   override func viewDidLoad() {
     super.viewDidLoad()
-    overrideUserInterfaceStyle = .dark
+    let style = MarcoLiquidGlassSupport.interfaceStyle
+    let dark = isDarkPin
+    overrideUserInterfaceStyle = style
     view.backgroundColor = .clear
 
-    backdropControl.backgroundColor = UIColor.black.withAlphaComponent(0.58)
+    backdropControl.backgroundColor = dark
+      ? UIColor.black.withAlphaComponent(0.58)
+      : UIColor.black.withAlphaComponent(0.32)
     backdropControl.translatesAutoresizingMaskIntoConstraints = false
     backdropControl.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
     view.addSubview(backdropControl)
@@ -1682,7 +1788,7 @@ private final class MarcoNativePinSheetController: UIViewController {
     cardShadowView.backgroundColor = .clear
     cardShadowView.translatesAutoresizingMaskIntoConstraints = false
     cardShadowView.layer.shadowColor = UIColor.black.cgColor
-    cardShadowView.layer.shadowOpacity = 0.45
+    cardShadowView.layer.shadowOpacity = dark ? 0.45 : 0.22
     cardShadowView.layer.shadowRadius = 28.0
     cardShadowView.layer.shadowOffset = CGSize(width: 0, height: 14)
     view.addSubview(cardShadowView)
@@ -1692,18 +1798,20 @@ private final class MarcoNativePinSheetController: UIViewController {
       let glass = UIGlassEffect(style: .regular)
       cardEffectView = UIVisualEffectView(effect: glass)
     } else {
-      cardEffectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+      cardEffectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
     }
     #else
-    cardEffectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+    cardEffectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
     #endif
-    cardEffectView.overrideUserInterfaceStyle = .dark
+    cardEffectView.overrideUserInterfaceStyle = style
     cardEffectView.translatesAutoresizingMaskIntoConstraints = false
     cardEffectView.layer.cornerRadius = 34.0
     cardEffectView.layer.cornerCurve = .continuous
     cardEffectView.clipsToBounds = true
     cardEffectView.layer.borderWidth = 0.65
-    cardEffectView.layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
+    cardEffectView.layer.borderColor = (dark
+      ? UIColor.white.withAlphaComponent(0.18)
+      : UIColor.black.withAlphaComponent(0.10)).cgColor
     cardShadowView.addSubview(cardEffectView)
 
     scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -1748,14 +1856,14 @@ private final class MarcoNativePinSheetController: UIViewController {
 
     // Title & subtitle
     titleLabel.font = UIFont.systemFont(ofSize: 19.0, weight: .bold)
-    titleLabel.textColor = .white
+    titleLabel.textColor = dark ? .white : UIColor.label
     titleLabel.textAlignment = .center
     titleLabel.numberOfLines = 1
     titleLabel.translatesAutoresizingMaskIntoConstraints = false
     contentView.addSubview(titleLabel)
 
     subtitleLabel.font = UIFont.systemFont(ofSize: 12.5, weight: .regular)
-    subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.74)
+    subtitleLabel.textColor = dark ? UIColor.white.withAlphaComponent(0.74) : UIColor.secondaryLabel
     subtitleLabel.textAlignment = .center
     subtitleLabel.numberOfLines = 2
     subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -1780,11 +1888,13 @@ private final class MarcoNativePinSheetController: UIViewController {
     }
     contentView.addSubview(dotsStack)
 
-    // 3x4 Liquid Glass Keypad
-    let isCompactHeight = UIScreen.main.bounds.height < 680.0
-    let keySize: CGFloat = isCompactHeight ? 62.0 : 68.0
-    let rowSpacing: CGFloat = isCompactHeight ? 10.0 : 12.0
-    let colSpacing: CGFloat = isCompactHeight ? 16.0 : 20.0
+    // 3x4 Liquid Glass Keypad — adapt smoothly to iPhone Duo 5.4" outer display (678pt),
+    // inner/outer landscape, and narrow Split View panes (< 360pt) without UIScreen.main.
+    let winBounds = MarcoLiquidGlassSupport.activeWindowBounds(for: view)
+    let isCompactSize = winBounds.height < 690.0 || winBounds.width < 360.0
+    let keySize: CGFloat = isCompactSize ? 60.0 : 68.0
+    let rowSpacing: CGFloat = isCompactSize ? 10.0 : 12.0
+    let colSpacing: CGFloat = isCompactSize ? 14.0 : 20.0
 
     keypadStack.axis = .vertical
     keypadStack.alignment = .center
@@ -1918,10 +2028,22 @@ private final class MarcoNativePinSheetController: UIViewController {
     badgeGradient.frame = badgeView.bounds
   }
 
+  override func viewWillTransition(
+    to size: CGSize,
+    with coordinator: UIViewControllerTransitionCoordinator
+  ) {
+    super.viewWillTransition(to: size, with: coordinator)
+    coordinator.animate(alongsideTransition: { [weak self] _ in
+      self?.view.setNeedsLayout()
+      self?.view.layoutIfNeeded()
+    }, completion: nil)
+  }
+
   private func makeDigitButton(digit: String, size: CGFloat) -> UIButton {
+    let dark = isDarkPin
     let btn = UIButton(type: .system)
     btn.translatesAutoresizingMaskIntoConstraints = false
-    btn.overrideUserInterfaceStyle = .dark
+    btn.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     btn.tag = Int(digit) ?? 0
     btn.accessibilityLabel = digit
     var titleAttr = AttributedString(digit)
@@ -1930,15 +2052,17 @@ private final class MarcoNativePinSheetController: UIViewController {
     if #available(iOS 26.0, *) {
       var cfg = UIButton.Configuration.glass()
       cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = .white
+      cfg.baseForegroundColor = dark ? .white : UIColor.label
       cfg.cornerStyle = .capsule
       cfg.contentInsets = .zero
       btn.configuration = cfg
     } else {
       var cfg = UIButton.Configuration.filled()
       cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = .white
-      cfg.baseBackgroundColor = UIColor(white: 0.22, alpha: 0.85)
+      cfg.baseForegroundColor = dark ? .white : UIColor.label
+      cfg.baseBackgroundColor = dark
+        ? UIColor(white: 0.22, alpha: 0.85)
+        : UIColor.secondarySystemFill
       cfg.cornerStyle = .capsule
       cfg.contentInsets = .zero
       btn.configuration = cfg
@@ -1946,8 +2070,10 @@ private final class MarcoNativePinSheetController: UIViewController {
     #else
     var cfg = UIButton.Configuration.filled()
     cfg.attributedTitle = titleAttr
-    cfg.baseForegroundColor = .white
-    cfg.baseBackgroundColor = UIColor(white: 0.22, alpha: 0.85)
+    cfg.baseForegroundColor = dark ? .white : UIColor.label
+    cfg.baseBackgroundColor = dark
+      ? UIColor(white: 0.22, alpha: 0.85)
+      : UIColor.secondarySystemFill
     cfg.cornerStyle = .capsule
     cfg.contentInsets = .zero
     btn.configuration = cfg
@@ -1961,14 +2087,17 @@ private final class MarcoNativePinSheetController: UIViewController {
   }
 
   private func configureCancelButton(size: CGFloat) {
+    let dark = isDarkPin
     cancelButton.translatesAutoresizingMaskIntoConstraints = false
-    cancelButton.overrideUserInterfaceStyle = .dark
+    cancelButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     cancelButton.accessibilityLabel = "取消"
     var titleAttr = AttributedString("取消")
     titleAttr.font = UIFont.systemFont(ofSize: 16.0, weight: .semibold)
     var cfg = UIButton.Configuration.plain()
     cfg.attributedTitle = titleAttr
-    cfg.baseForegroundColor = UIColor.white.withAlphaComponent(0.78)
+    cfg.baseForegroundColor = dark
+      ? UIColor.white.withAlphaComponent(0.78)
+      : UIColor.secondaryLabel
     cfg.contentInsets = .zero
     cancelButton.configuration = cfg
     cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
@@ -1979,13 +2108,16 @@ private final class MarcoNativePinSheetController: UIViewController {
   }
 
   private func configureBackspaceButton(size: CGFloat) {
+    let dark = isDarkPin
     backspaceButton.translatesAutoresizingMaskIntoConstraints = false
-    backspaceButton.overrideUserInterfaceStyle = .dark
+    backspaceButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     backspaceButton.accessibilityLabel = "删除"
     let symCfg = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .medium)
     var cfg = UIButton.Configuration.plain()
     cfg.image = UIImage(systemName: "delete.left.fill", withConfiguration: symCfg)
-    cfg.baseForegroundColor = UIColor.white.withAlphaComponent(0.84)
+    cfg.baseForegroundColor = dark
+      ? UIColor.white.withAlphaComponent(0.84)
+      : UIColor.label
     cfg.contentInsets = .zero
     backspaceButton.configuration = cfg
     backspaceButton.addTarget(self, action: #selector(backspaceTapped), for: .touchUpInside)
@@ -1996,17 +2128,19 @@ private final class MarcoNativePinSheetController: UIViewController {
   }
 
   private func refreshUI(animatedDotIndex: Int?) {
+    let dark = isDarkPin
     titleLabel.text = (mode == "set" && confirming) ? confirmTitle : initialTitle
+    titleLabel.textColor = dark ? .white : UIColor.label
     let hasError = !(errorMessage?.isEmpty ?? true)
     if isBusy {
       subtitleLabel.text = loadingText
-      subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.92)
+      subtitleLabel.textColor = dark ? UIColor.white.withAlphaComponent(0.92) : UIColor.label
     } else if hasError {
       subtitleLabel.text = errorMessage
       subtitleLabel.textColor = UIColor.systemRed
     } else {
       subtitleLabel.text = (mode == "set" && confirming) ? confirmSubtitle : initialSubtitle
-      subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.72)
+      subtitleLabel.textColor = dark ? UIColor.white.withAlphaComponent(0.72) : UIColor.secondaryLabel
     }
 
     badgeIconView.isHidden = isBusy
@@ -2018,12 +2152,20 @@ private final class MarcoNativePinSheetController: UIViewController {
 
     let filledColor = hasError
       ? UIColor.systemRed
-      : UIColor(red: 0.769, green: 0.710, blue: 0.992, alpha: 1.0)
+      : (dark
+          ? UIColor(red: 0.769, green: 0.710, blue: 0.992, alpha: 1.0)
+          : UIColor(red: 0.486, green: 0.227, blue: 0.929, alpha: 1.0))
     let filledBorder = hasError
       ? UIColor.systemRed
-      : UIColor(red: 0.655, green: 0.545, blue: 0.980, alpha: 1.0)
-    let emptyFill = UIColor.white.withAlphaComponent(0.12)
-    let emptyBorder = UIColor.white.withAlphaComponent(0.32)
+      : (dark
+          ? UIColor(red: 0.655, green: 0.545, blue: 0.980, alpha: 1.0)
+          : UIColor(red: 0.427, green: 0.157, blue: 0.851, alpha: 1.0))
+    let emptyFill = dark
+      ? UIColor.white.withAlphaComponent(0.12)
+      : UIColor.black.withAlphaComponent(0.06)
+    let emptyBorder = dark
+      ? UIColor.white.withAlphaComponent(0.32)
+      : UIColor.black.withAlphaComponent(0.24)
 
     for (idx, dot) in dotViews.enumerated() {
       let filled = idx < enteredPin.count
@@ -2234,9 +2376,21 @@ private final class MarcoNativeDockFactory: NSObject, FlutterPlatformViewFactory
   }
 }
 
+private final class MarcoTraitAwareHostView: UIView {
+  var onTraitChanged: (() -> Void)?
+
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
+      onTraitChanged?()
+    }
+  }
+}
+
 /// Full-height (62pt) native iOS 26 Liquid Glass 4-tab capsule using `UIGlassEffect`
 /// directly so it matches the 62pt trailing search circle and Apple's iOS 26
-/// floating tab bar proportions (instead of standalone `UITabBar`'s 48pt cap).
+/// floating tab bar proportions, complete with an elevated refractive
+/// `UIGlassEffect(style: .clear)` press-and-slide optical lens bubble.
 private final class MarcoNativeLiquidTabCapsuleView: UIView {
   struct TabSpec {
     let label: String
@@ -2289,12 +2443,17 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   private let effectView: UIVisualEffectView
   private let selectionLensView = UIView()
   private let slotsStack = UIStackView()
+  private let scrubbingLensShadowView = UIView()
+  private let scrubbingLensEffectView: UIVisualEffectView
   private var slotViews: [SlotView] = []
   private var specs: [TabSpec] = []
   private(set) var selectedIndex: Int = 0
   private var highlightedIndex: Int = 0
   private var isScrubbing: Bool = false
   private var scrubContinuousSlot: CGFloat?
+  private var lastScrubX: CGFloat?
+  private var lastScrubTimestamp: TimeInterval = 0
+  private var scrubVelocityX: CGFloat = 0
   private let selectionFeedback = UISelectionFeedbackGenerator()
 
   var onSelect: ((Int) -> Void)?
@@ -2305,11 +2464,17 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       let glass = UIGlassEffect(style: .regular)
       glass.isInteractive = true
       effectView = UIVisualEffectView(effect: glass)
+
+      let lensGlass = UIGlassEffect(style: .clear)
+      lensGlass.isInteractive = true
+      scrubbingLensEffectView = UIVisualEffectView(effect: lensGlass)
     } else {
-      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+      scrubbingLensEffectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
     }
     #else
-    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+    scrubbingLensEffectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
     #endif
     super.init(frame: frame)
     backgroundColor = .clear
@@ -2320,6 +2485,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
     effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    effectView.backgroundColor = .clear
     effectView.isUserInteractionEnabled = false
     effectView.translatesAutoresizingMaskIntoConstraints = false
     #if compiler(>=6.2)
@@ -2350,6 +2516,39 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     slotsStack.translatesAutoresizingMaskIntoConstraints = false
     effectView.contentView.addSubview(slotsStack)
 
+    // Elevated native iOS 26 refractive Liquid Glass scrubbing bubble sitting
+    // above the tab icons & outer capsule so holding and dragging physically
+    // lifts and refracts the icons beneath the finger like system UITabBar.
+    scrubbingLensShadowView.backgroundColor = .clear
+    scrubbingLensShadowView.isOpaque = false
+    scrubbingLensShadowView.clipsToBounds = false
+    scrubbingLensShadowView.isUserInteractionEnabled = false
+    scrubbingLensShadowView.alpha = 0.0
+    scrubbingLensShadowView.layer.shadowColor = UIColor.black.cgColor
+    scrubbingLensShadowView.layer.shadowOpacity = 0.18
+    scrubbingLensShadowView.layer.shadowRadius = 14.0
+    scrubbingLensShadowView.layer.shadowOffset = CGSize(width: 0, height: 5)
+    addSubview(scrubbingLensShadowView)
+
+    scrubbingLensEffectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    scrubbingLensEffectView.backgroundColor = .clear
+    scrubbingLensEffectView.isUserInteractionEnabled = false
+    scrubbingLensEffectView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      scrubbingLensEffectView.cornerConfiguration = .capsule()
+    } else {
+      scrubbingLensEffectView.layer.cornerCurve = .continuous
+      scrubbingLensEffectView.clipsToBounds = true
+      scrubbingLensEffectView.layer.borderWidth = 0.85
+    }
+    #else
+    scrubbingLensEffectView.layer.cornerCurve = .continuous
+    scrubbingLensEffectView.clipsToBounds = true
+    scrubbingLensEffectView.layer.borderWidth = 0.85
+    #endif
+    scrubbingLensShadowView.addSubview(scrubbingLensEffectView)
+
     NSLayoutConstraint.activate([
       effectView.topAnchor.constraint(equalTo: topAnchor),
       effectView.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -2366,6 +2565,13 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   @available(*, unavailable)
   required init?(coder: NSCoder) {
     fatalError("init(coder:) has not been implemented")
+  }
+
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
+      refreshAppearance()
+    }
   }
 
   func setItems(_ items: [TabSpec]) {
@@ -2402,16 +2608,30 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   }
 
   private func applySlotAppearances(activeIndex: Int) {
-    let dark = MarcoLiquidGlassSupport.isEffectiveDark
+    let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
     let normalCfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: .medium)
     let selectedCfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: .semibold)
     let activeColor: UIColor = dark ? .white : UIColor.systemBlue
     let inactiveColor: UIColor = dark
       ? UIColor.white.withAlphaComponent(0.84)
-      : UIColor(red: 0.14, green: 0.15, blue: 0.18, alpha: 0.82)
+      : UIColor(red: 0.12, green: 0.13, blue: 0.17, alpha: 0.86)
     selectionLensView.layer.borderColor = (dark
       ? UIColor.white.withAlphaComponent(0.18)
       : UIColor.black.withAlphaComponent(0.06)).cgColor
+    scrubbingLensShadowView.layer.shadowOpacity = dark ? 0.34 : 0.16
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      // Native UIGlassEffect draws its own optical specular border.
+    } else {
+      scrubbingLensEffectView.layer.borderColor = (dark
+        ? UIColor.white.withAlphaComponent(0.32)
+        : UIColor.white.withAlphaComponent(0.75)).cgColor
+    }
+    #else
+    scrubbingLensEffectView.layer.borderColor = (dark
+      ? UIColor.white.withAlphaComponent(0.32)
+      : UIColor.white.withAlphaComponent(0.75)).cgColor
+    #endif
     for (idx, slot) in slotViews.enumerated() where idx < specs.count {
       let spec = specs[idx]
       let isSelected = idx == activeIndex
@@ -2427,6 +2647,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   func refreshAppearance() {
     overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    scrubbingLensEffectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     applySlotAppearances(activeIndex: isScrubbing ? highlightedIndex : selectedIndex)
     let slotPos = scrubContinuousSlot ?? CGFloat(selectedIndex)
     positionLens(slotPosition: slotPos, animated: false, lifted: isScrubbing)
@@ -2448,23 +2669,50 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   private func positionLens(slotPosition: CGFloat, animated: Bool, lifted: Bool) {
     guard let metrics = lensMetrics(for: slotPosition) else { return }
     selectionLensView.layer.cornerRadius = metrics.bounds.height * 0.5
+    let liftedBounds = CGRect(
+      x: 0,
+      y: 0,
+      width: metrics.bounds.width + 10.0,
+      height: bounds.height + 6.0
+    )
+    let speedNorm = min(abs(scrubVelocityX) / 1400.0, 1.0)
+    let stretchX: CGFloat = lifted ? (1.03 + speedNorm * 0.08) : 0.90
+    let stretchY: CGFloat = lifted ? (1.04 - speedNorm * 0.03) : 0.88
     let apply = {
       self.selectionLensView.bounds = metrics.bounds
       self.selectionLensView.center = metrics.center
-      self.selectionLensView.transform = lifted
-        ? CGAffineTransform(scaleX: 1.045, y: 1.045)
-        : .identity
-      let dark = MarcoLiquidGlassSupport.isEffectiveDark
+      self.selectionLensView.transform = .identity
+      let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
       self.selectionLensView.backgroundColor = dark
-        ? UIColor.white.withAlphaComponent(lifted ? 0.22 : 0.16)
-        : UIColor.black.withAlphaComponent(lifted ? 0.12 : 0.08)
+        ? UIColor.white.withAlphaComponent(0.18)
+        : UIColor.black.withAlphaComponent(0.08)
+      self.selectionLensView.alpha = lifted ? 0.0 : 1.0
+
+      self.scrubbingLensShadowView.bounds = liftedBounds
+      self.scrubbingLensShadowView.center = metrics.center
+      self.scrubbingLensShadowView.layer.shadowPath = UIBezierPath(
+        roundedRect: liftedBounds,
+        cornerRadius: liftedBounds.height * 0.5
+      ).cgPath
+      self.scrubbingLensEffectView.frame = liftedBounds
+      #if compiler(>=6.2)
+      if #available(iOS 26.0, *) {
+        // Handled natively via cornerConfiguration = .capsule().
+      } else {
+        self.scrubbingLensEffectView.layer.cornerRadius = liftedBounds.height * 0.5
+      }
+      #else
+      self.scrubbingLensEffectView.layer.cornerRadius = liftedBounds.height * 0.5
+      #endif
+      self.scrubbingLensShadowView.transform = CGAffineTransform(scaleX: stretchX, y: stretchY)
+      self.scrubbingLensShadowView.alpha = lifted ? 1.0 : 0.0
     }
     if animated {
       UIView.animate(
-        withDuration: lifted ? 0.14 : 0.34,
+        withDuration: lifted ? 0.20 : 0.34,
         delay: 0,
-        usingSpringWithDamping: lifted ? 0.85 : 0.78,
-        initialSpringVelocity: 0.6,
+        usingSpringWithDamping: lifted ? 0.78 : 0.76,
+        initialSpringVelocity: 0.7,
         options: [.beginFromCurrentState, .allowUserInteraction],
         animations: apply,
         completion: nil
@@ -2509,6 +2757,9 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     isScrubbing = true
     highlightedIndex = idx
     scrubContinuousSlot = CGFloat(idx)
+    lastScrubX = pt.x
+    lastScrubTimestamp = touch.timestamp
+    scrubVelocityX = 0
     applySlotAppearances(activeIndex: idx)
     positionLens(slotPosition: CGFloat(idx), animated: true, lifted: true)
   }
@@ -2517,6 +2768,13 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     super.touchesMoved(touches, with: event)
     guard isScrubbing, let touch = touches.first, !specs.isEmpty else { return }
     let pt = touch.location(in: self)
+    if let prevX = lastScrubX {
+      let dt = max(touch.timestamp - lastScrubTimestamp, 0.008)
+      let instantV = (pt.x - prevX) / CGFloat(dt)
+      scrubVelocityX = scrubVelocityX * 0.6 + instantV * 0.4
+    }
+    lastScrubX = pt.x
+    lastScrubTimestamp = touch.timestamp
     let (idx, continuous) = indexForX(pt.x)
     scrubContinuousSlot = continuous
     if idx != highlightedIndex {
@@ -2533,6 +2791,8 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     let target = highlightedIndex
     isScrubbing = false
     scrubContinuousSlot = nil
+    lastScrubX = nil
+    scrubVelocityX = 0
     let changed = target != selectedIndex
     selectedIndex = target
     applySlotAppearances(activeIndex: target)
@@ -2548,6 +2808,8 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     guard isScrubbing else { return }
     isScrubbing = false
     scrubContinuousSlot = nil
+    lastScrubX = nil
+    scrubVelocityX = 0
     highlightedIndex = selectedIndex
     applySlotAppearances(activeIndex: selectedIndex)
     positionLens(slotPosition: CGFloat(selectedIndex), animated: true, lifted: false)
@@ -2573,10 +2835,10 @@ private final class MarcoInteractiveCircleGlassControl: UIControl {
       glass.isInteractive = true
       effectView = UIVisualEffectView(effect: glass)
     } else {
-      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
     }
     #else
-    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
     #endif
     super.init(frame: frame)
     backgroundColor = .clear
@@ -2661,20 +2923,26 @@ private final class MarcoInteractiveCircleGlassControl: UIControl {
     foregroundColor: UIColor,
     tintColor: UIColor?,
     tintARGB: UInt64?,
-    menu: UIMenu?
+    menu: UIMenu?,
+    forceDark: Bool = false
   ) {
     MarcoLiquidGlassSupport.withoutAnimations {
-      self.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-      self.effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-      self.menuOverlayButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      let targetStyle: UIUserInterfaceStyle = forceDark ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+      self.tag = forceDark ? 99001 : 0
+      self.overrideUserInterfaceStyle = targetStyle
+      self.effectView.overrideUserInterfaceStyle = targetStyle
+      self.effectView.backgroundColor = .clear
+      self.menuOverlayButton.overrideUserInterfaceStyle = targetStyle
+      let resolvedTint = tintColor ?? (forceDark ? UIColor(white: 0.08, alpha: 0.28) : nil)
+      let resolvedTintKey: UInt64? = tintARGB ?? (forceDark ? 0xFE080808 : nil)
       #if compiler(>=6.2)
       if #available(iOS 26.0, *) {
-        if !self.hasConfiguredEffect || self.configuredTintARGB != tintARGB {
+        if !self.hasConfiguredEffect || self.configuredTintARGB != resolvedTintKey {
           self.hasConfiguredEffect = true
-          self.configuredTintARGB = tintARGB
+          self.configuredTintARGB = resolvedTintKey
           let glass = UIGlassEffect(style: .regular)
           glass.isInteractive = true
-          glass.tintColor = tintColor
+          glass.tintColor = resolvedTint
           self.effectView.effect = glass
         }
       }
@@ -2744,6 +3012,13 @@ private final class MarcoDockContainerView: UIView {
     NotificationCenter.default.removeObserver(self)
   }
 
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
+      handleAppearanceChanged()
+    }
+  }
+
   @objc private func handleAppearanceChanged() {
     overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     tabCapsule.refreshAppearance()
@@ -2761,9 +3036,7 @@ private final class MarcoDockContainerView: UIView {
   private func configureSearchButton() {
     let symbolConfig = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .medium)
     let icon = UIImage(systemName: "magnifyingglass", withConfiguration: symbolConfig)
-    let fg: UIColor = MarcoLiquidGlassSupport.isEffectiveDark
-      ? .white
-      : UIColor(red: 0.09, green: 0.10, blue: 0.14, alpha: 0.92)
+    let fg: UIColor = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: self)
     searchButton.configure(
       image: icon,
       foregroundColor: fg,
@@ -2775,9 +3048,7 @@ private final class MarcoDockContainerView: UIView {
 
   private func configureLogoButton() {
     let logo = MarcoLiquidGlassSupport.brandLogoImage
-    let fg: UIColor = MarcoLiquidGlassSupport.isEffectiveDark
-      ? .white
-      : UIColor(red: 0.09, green: 0.10, blue: 0.14, alpha: 0.92)
+    let fg: UIColor = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: self)
     logoButton.configure(
       image: logo,
       foregroundColor: fg,
@@ -2839,10 +3110,12 @@ private final class MarcoDockContainerView: UIView {
     let totalH = bounds.height
     guard totalW > 0, totalH > 0 else { return }
 
-    let outerMargin: CGFloat = 16.0
-    let gap: CGFloat = 10.0
-    // Match V1's full 62pt search button & Apple's iOS 26 floating tab bar height.
-    let dockSize: CGFloat = min(62.0, totalH)
+    let isCompactSplit = totalW < 360.0
+    let outerMargin: CGFloat = isCompactSplit ? 10.0 : 16.0
+    let gap: CGFloat = isCompactSplit ? 8.0 : 10.0
+    // Match V1's full 62pt search button & Apple's iOS 26/27 floating tab bar height,
+    // scaling down slightly on narrow Split View windows so capsules never overlap.
+    let dockSize: CGFloat = min(totalW < 340.0 ? 56.0 : 62.0, totalH)
 
     // When collapsed into the narrow right-aligned container, keep logoButton anchored
     // at the trailing edge without disturbing tabCapsule's untransformed geometry.
@@ -2853,7 +3126,10 @@ private final class MarcoDockContainerView: UIView {
       return
     }
 
-    let maxRowWidth: CGFloat = min(totalW, 440.0)
+    // On iPhone Duo unfolded inner display (669pt+) / iPad portrait, center a slightly
+    // roomier floating glass dock while keeping standard iPhone widths unchanged.
+    let maxCap: CGFloat = totalW >= 600.0 ? 468.0 : 440.0
+    let maxRowWidth: CGFloat = min(totalW, maxCap)
     let rowX = (totalW - maxRowWidth) * 0.5
     let centerY = totalH * 0.5
 
@@ -2867,12 +3143,14 @@ private final class MarcoDockContainerView: UIView {
       searchButton.center = CGPoint(x: rightCenterX, y: centerY)
 
       let tabX = rowX + outerMargin
-      let tabW = max((rightCenterX - dockSize * 0.5 - gap) - tabX, 180.0)
+      let availTabW = (rightCenterX - dockSize * 0.5 - gap) - tabX
+      let tabW = max(availTabW, min(180.0, max(availTabW, 132.0)))
       tabCapsule.bounds = CGRect(x: 0, y: 0, width: tabW, height: dockSize)
       tabCapsule.center = CGPoint(x: tabX + tabW * 0.5, y: centerY)
     } else {
       let tabX = rowX + outerMargin
-      let tabW = max(maxRowWidth - outerMargin * 2.0, 180.0)
+      let availTabW = maxRowWidth - outerMargin * 2.0
+      let tabW = max(availTabW, min(180.0, max(availTabW, 132.0)))
       tabCapsule.bounds = CGRect(x: 0, y: 0, width: tabW, height: dockSize)
       tabCapsule.center = CGPoint(x: tabX + tabW * 0.5, y: centerY)
     }
@@ -2897,8 +3175,8 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
     let initialFrame = MarcoLiquidGlassSupport.resolvedInitialFrame(
       frame,
       args: args,
-      defaultWidth: UIScreen.main.bounds.width,
-      defaultHeight: 72.0
+      defaultWidth: MarcoLiquidGlassSupport.activeWindowBounds().width,
+      defaultHeight: 76.0
     )
     self.container = MarcoDockContainerView(frame: initialFrame)
     self.channel = FlutterMethodChannel(
@@ -3106,10 +3384,10 @@ private final class MarcoInteractiveCapsuleGlassControl: UIControl {
       glass.isInteractive = true
       effectView = UIVisualEffectView(effect: glass)
     } else {
-      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
     }
     #else
-    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
     #endif
     super.init(frame: frame)
     backgroundColor = .clear
@@ -3218,20 +3496,26 @@ private final class MarcoInteractiveCapsuleGlassControl: UIControl {
     tintColor: UIColor?,
     tintARGB: UInt64?,
     symbolSize: CGFloat,
-    menu: UIMenu?
+    menu: UIMenu?,
+    forceDark: Bool = false
   ) {
     MarcoLiquidGlassSupport.withoutAnimations {
-      self.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-      self.effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-      self.menuOverlayButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      let targetStyle: UIUserInterfaceStyle = forceDark ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+      self.tag = forceDark ? 99001 : 0
+      self.overrideUserInterfaceStyle = targetStyle
+      self.effectView.overrideUserInterfaceStyle = targetStyle
+      self.effectView.backgroundColor = .clear
+      self.menuOverlayButton.overrideUserInterfaceStyle = targetStyle
+      let resolvedTint = tintColor ?? (forceDark ? UIColor(white: 0.08, alpha: 0.28) : nil)
+      let resolvedTintKey: UInt64? = tintARGB ?? (forceDark ? 0xFE080808 : nil)
       #if compiler(>=6.2)
       if #available(iOS 26.0, *) {
-        if !self.hasConfiguredEffect || self.configuredTintARGB != tintARGB {
+        if !self.hasConfiguredEffect || self.configuredTintARGB != resolvedTintKey {
           self.hasConfiguredEffect = true
-          self.configuredTintARGB = tintARGB
+          self.configuredTintARGB = resolvedTintKey
           let glass = UIGlassEffect(style: .regular)
           glass.isInteractive = true
-          glass.tintColor = tintColor
+          glass.tintColor = resolvedTint
           self.effectView.effect = glass
         }
       }
@@ -3276,11 +3560,13 @@ private final class MarcoInteractiveCapsuleGlassControl: UIControl {
 }
 
 private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatformView {
-  private let hostView = UIView(frame: .zero)
+  private let hostView = MarcoTraitAwareHostView(frame: .zero)
   private let circleControl = MarcoInteractiveCircleGlassControl(frame: .zero)
   private let capsuleControl = MarcoInteractiveCapsuleGlassControl(frame: .zero)
   private let channel: FlutterMethodChannel
   private var isCapsuleMode = false
+  private var lastArgs: [String: Any] = [:]
+  private var appearanceObserver: NSObjectProtocol?
 
   init(
     frame: CGRect,
@@ -3332,6 +3618,19 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
       self.hostView.layoutIfNeeded()
     }
 
+    self.hostView.onTraitChanged = { [weak self] in
+      guard let self = self, !self.lastArgs.isEmpty else { return }
+      self.apply(self.lastArgs)
+    }
+    appearanceObserver = NotificationCenter.default.addObserver(
+      forName: MarcoLiquidGlassSupport.appearanceChangedNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      guard let self = self, !self.lastArgs.isEmpty else { return }
+      self.apply(self.lastArgs)
+    }
+
     channel.setMethodCallHandler { [weak self] call, result in
       guard let self = self else {
         result(nil)
@@ -3349,6 +3648,9 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
   }
 
   deinit {
+    if let obs = appearanceObserver {
+      NotificationCenter.default.removeObserver(obs)
+    }
     channel.setMethodCallHandler(nil)
   }
 
@@ -3357,14 +3659,37 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
   }
 
   private func apply(_ args: [String: Any]) {
+    lastArgs = args
     let style = (args["style"] as? String) ?? "circle"
     let symbol = args["symbol"] as? String
     let trailingSymbol = args["trailingSymbol"] as? String
     let label = (args["label"] as? String) ?? ""
     let symbolSize = CGFloat((args["symbolSize"] as? NSNumber)?.doubleValue ?? 17.0)
-    let fgColor = MarcoLiquidGlassSupport.colorFromARGB(args["foregroundColor"]) ?? .white
+    let forceDark = (args["forceDark"] as? Bool) ?? false
     let tintARGB = (args["tintColor"] as? NSNumber)?.uint64Value
     let tintColor = MarcoLiquidGlassSupport.colorFromARGB(args["tintColor"])
+    let explicitFg = MarcoLiquidGlassSupport.colorFromARGB(args["foregroundColor"])
+    let effectiveDark = forceDark || MarcoLiquidGlassSupport.isEffectiveDark(for: hostView)
+    let fgColor: UIColor
+    if let explicit = explicitFg {
+      // Bidirectional readability guard: prevent white-on-light AND black-on-dark
+      // across live Light <-> Dark mode transitions.
+      if tintColor == nil && !effectiveDark && MarcoLiquidGlassSupport.isNearWhite(explicit) {
+        fgColor = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: hostView, forceDark: false)
+      } else if tintColor == nil && effectiveDark && MarcoLiquidGlassSupport.isNearBlack(explicit) {
+        fgColor = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: hostView, forceDark: true)
+      } else {
+        fgColor = explicit
+      }
+    } else if tintColor != nil {
+      fgColor = .white
+    } else {
+      fgColor = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: hostView, forceDark: forceDark)
+    }
+    let targetStyle: UIUserInterfaceStyle = forceDark ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+    hostView.tag = forceDark ? 99001 : 0
+    hostView.overrideUserInterfaceStyle = targetStyle
+
     let a11yLabel = (args["accessibilityLabel"] as? String) ?? label
     let menuTitle = (args["menuTitle"] as? String) ?? ""
     let rawMenuItems = (args["menuItems"] as? [[String: Any]]) ?? []
@@ -3387,7 +3712,8 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
         tintColor: tintColor,
         tintARGB: tintARGB,
         symbolSize: symbolSize,
-        menu: menu
+        menu: menu,
+        forceDark: forceDark
       )
     } else {
       circleControl.accessibilityLabel = a11yLabel
@@ -3399,7 +3725,8 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
         foregroundColor: fgColor,
         tintColor: tintColor,
         tintARGB: tintARGB,
-        menu: menu
+        menu: menu,
+        forceDark: forceDark
       )
     }
   }
@@ -3442,6 +3769,8 @@ private final class MarcoNativeGlassPillFactory: NSObject, FlutterPlatformViewFa
 private final class MarcoGlassPillHostView: UIView {
   let effectView: UIVisualEffectView
   let stack = UIStackView()
+  var onTraitChanged: (() -> Void)?
+  private var lastForceDark: Bool?
 
   override init(frame: CGRect) {
     #if compiler(>=6.2)
@@ -3450,10 +3779,10 @@ private final class MarcoGlassPillHostView: UIView {
       glass.isInteractive = true
       effectView = UIVisualEffectView(effect: glass)
     } else {
-      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
     }
     #else
-    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
     #endif
     super.init(frame: frame)
     backgroundColor = .clear
@@ -3462,6 +3791,7 @@ private final class MarcoGlassPillHostView: UIView {
     overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
     effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    effectView.backgroundColor = .clear
     effectView.translatesAutoresizingMaskIntoConstraints = false
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
@@ -3500,6 +3830,32 @@ private final class MarcoGlassPillHostView: UIView {
     fatalError("init(coder:) has not been implemented")
   }
 
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
+      onTraitChanged?()
+    }
+  }
+
+  func configureAppearance(forceDark: Bool) {
+    let targetStyle: UIUserInterfaceStyle = forceDark ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+    tag = forceDark ? 99001 : 0
+    overrideUserInterfaceStyle = targetStyle
+    effectView.overrideUserInterfaceStyle = targetStyle
+    effectView.backgroundColor = .clear
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      if lastForceDark != forceDark {
+        lastForceDark = forceDark
+        let glass = UIGlassEffect(style: .regular)
+        glass.isInteractive = true
+        glass.tintColor = forceDark ? UIColor(white: 0.08, alpha: 0.28) : nil
+        effectView.effect = glass
+      }
+    }
+    #endif
+  }
+
   override func layoutSubviews() {
     super.layoutSubviews()
     #if compiler(>=6.2)
@@ -3515,6 +3871,9 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
   private let hostView: MarcoGlassPillHostView
   private let channel: FlutterMethodChannel
   private var buttons: [UIButton] = []
+  private var separators: [UIView] = []
+  private var lastArgs: [String: Any] = [:]
+  private var appearanceObserver: NSObjectProtocol?
 
   init(
     frame: CGRect,
@@ -3542,6 +3901,19 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
       }
     }
 
+    self.hostView.onTraitChanged = { [weak self] in
+      guard let self = self, !self.lastArgs.isEmpty else { return }
+      self.apply(self.lastArgs)
+    }
+    appearanceObserver = NotificationCenter.default.addObserver(
+      forName: MarcoLiquidGlassSupport.appearanceChangedNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      guard let self = self, !self.lastArgs.isEmpty else { return }
+      self.apply(self.lastArgs)
+    }
+
     channel.setMethodCallHandler { [weak self] call, result in
       guard let self = self else {
         result(nil)
@@ -3559,6 +3931,9 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
   }
 
   deinit {
+    if let obs = appearanceObserver {
+      NotificationCenter.default.removeObserver(obs)
+    }
     channel.setMethodCallHandler(nil)
   }
 
@@ -3567,27 +3942,36 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
   }
 
   private func apply(_ args: [String: Any]) {
+    lastArgs = args
     guard let items = args["items"] as? [[String: Any]] else { return }
+    let forceDark = (args["forceDark"] as? Bool) ?? false
+    hostView.configureAppearance(forceDark: forceDark)
+    let dark = forceDark || MarcoLiquidGlassSupport.isEffectiveDark(for: hostView)
+    let targetStyle: UIUserInterfaceStyle = forceDark ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+    let sepColor = dark ? UIColor.white.withAlphaComponent(0.24) : UIColor.black.withAlphaComponent(0.14)
+
     if buttons.count != items.count {
       for sub in hostView.stack.arrangedSubviews {
         hostView.stack.removeArrangedSubview(sub)
         sub.removeFromSuperview()
       }
       buttons.removeAll()
+      separators.removeAll()
       for idx in 0..<items.count {
         if idx > 0 {
           let sep = UIView()
-          sep.backgroundColor = UIColor.white.withAlphaComponent(0.24)
+          sep.backgroundColor = sepColor
           sep.translatesAutoresizingMaskIntoConstraints = false
           NSLayoutConstraint.activate([
             sep.widthAnchor.constraint(equalToConstant: 0.6),
             sep.heightAnchor.constraint(equalToConstant: 18.0),
           ])
           hostView.stack.addArrangedSubview(sep)
+          separators.append(sep)
         }
         let btn = UIButton(type: .system)
         btn.tag = idx
-        btn.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+        btn.overrideUserInterfaceStyle = targetStyle
         btn.translatesAutoresizingMaskIntoConstraints = false
         btn.addTarget(self, action: #selector(itemTapped(_:)), for: .touchUpInside)
         NSLayoutConstraint.activate([
@@ -3599,11 +3983,29 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
       }
     }
 
+    for sep in separators {
+      sep.backgroundColor = sepColor
+    }
+
+    let defaultFg = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: hostView, forceDark: forceDark)
     let symCfg = UIImage.SymbolConfiguration(pointSize: 17.5, weight: .medium)
     for (idx, item) in items.enumerated() where idx < buttons.count {
       let btn = buttons[idx]
+      btn.overrideUserInterfaceStyle = targetStyle
       let symbol = (item["symbol"] as? String) ?? "circle"
-      let tint = MarcoLiquidGlassSupport.colorFromARGB(item["color"]) ?? .white
+      let explicitTint = MarcoLiquidGlassSupport.colorFromARGB(item["color"])
+      let tint: UIColor
+      if let c = explicitTint {
+        if !dark && MarcoLiquidGlassSupport.isNearWhite(c) {
+          tint = defaultFg
+        } else if dark && MarcoLiquidGlassSupport.isNearBlack(c) {
+          tint = defaultFg
+        } else {
+          tint = c
+        }
+      } else {
+        tint = defaultFg
+      }
       let label = (item["accessibilityLabel"] as? String) ?? symbol
       btn.setImage(UIImage(systemName: symbol, withConfiguration: symCfg), for: .normal)
       btn.tintColor = tint
@@ -3659,10 +4061,11 @@ private final class MarcoNativeSegmentedControlFactory: NSObject, FlutterPlatfor
 }
 
 private final class MarcoNativeSegmentedControlPlatformView: NSObject, FlutterPlatformView {
-  private let hostView = UIView(frame: .zero)
+  private let hostView = MarcoTraitAwareHostView(frame: .zero)
   private let control = UISegmentedControl(items: [])
   private let channel: FlutterMethodChannel
   private var currentSegments: [String] = []
+  private var appearanceObserver: NSObjectProtocol?
 
   init(
     frame: CGRect,
@@ -3692,21 +4095,7 @@ private final class MarcoNativeSegmentedControlPlatformView: NSObject, FlutterPl
       self.control.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
       self.control.apportionsSegmentWidthsByContent = false
       self.control.translatesAutoresizingMaskIntoConstraints = false
-      let segDark = MarcoLiquidGlassSupport.isEffectiveDark
-      self.control.setTitleTextAttributes(
-        [
-          .foregroundColor: segDark ? UIColor.white.withAlphaComponent(0.76) : UIColor.label.withAlphaComponent(0.72),
-          .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
-        ],
-        for: .normal
-      )
-      self.control.setTitleTextAttributes(
-        [
-          .foregroundColor: segDark ? UIColor.white : UIColor.label,
-          .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
-        ],
-        for: .selected
-      )
+      self.applySegmentTypography()
       self.control.addTarget(self, action: #selector(self.valueChanged), for: .valueChanged)
       self.hostView.addSubview(self.control)
 
@@ -3721,6 +4110,17 @@ private final class MarcoNativeSegmentedControlPlatformView: NSObject, FlutterPl
         self.apply(args)
       }
       self.hostView.layoutIfNeeded()
+    }
+
+    self.hostView.onTraitChanged = { [weak self] in
+      self?.refreshAppearance()
+    }
+    appearanceObserver = NotificationCenter.default.addObserver(
+      forName: MarcoLiquidGlassSupport.appearanceChangedNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      self?.refreshAppearance()
     }
 
     channel.setMethodCallHandler { [weak self] call, result in
@@ -3750,7 +4150,34 @@ private final class MarcoNativeSegmentedControlPlatformView: NSObject, FlutterPl
   }
 
   deinit {
+    if let obs = appearanceObserver {
+      NotificationCenter.default.removeObserver(obs)
+    }
     channel.setMethodCallHandler(nil)
+  }
+
+  private func applySegmentTypography() {
+    let segDark = MarcoLiquidGlassSupport.isEffectiveDark(for: hostView)
+    control.setTitleTextAttributes(
+      [
+        .foregroundColor: segDark ? UIColor.white.withAlphaComponent(0.76) : UIColor.label.withAlphaComponent(0.74),
+        .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
+      ],
+      for: .normal
+    )
+    control.setTitleTextAttributes(
+      [
+        .foregroundColor: segDark ? UIColor.white : UIColor.label,
+        .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
+      ],
+      for: .selected
+    )
+  }
+
+  private func refreshAppearance() {
+    hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    control.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    applySegmentTypography()
   }
 
   func view() -> UIView {
@@ -3809,9 +4236,10 @@ private final class MarcoNativeSwitchFactory: NSObject, FlutterPlatformViewFacto
 }
 
 private final class MarcoNativeSwitchPlatformView: NSObject, FlutterPlatformView {
-  private let hostView = UIView(frame: .zero)
+  private let hostView = MarcoTraitAwareHostView(frame: .zero)
   private let toggle = UISwitch(frame: .zero)
   private let channel: FlutterMethodChannel
+  private var appearanceObserver: NSObjectProtocol?
 
   init(
     frame: CGRect,
@@ -3855,6 +4283,21 @@ private final class MarcoNativeSwitchPlatformView: NSObject, FlutterPlatformView
       self.hostView.layoutIfNeeded()
     }
 
+    self.hostView.onTraitChanged = { [weak self] in
+      guard let self = self else { return }
+      self.hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      self.toggle.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    }
+    appearanceObserver = NotificationCenter.default.addObserver(
+      forName: MarcoLiquidGlassSupport.appearanceChangedNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      guard let self = self else { return }
+      self.hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      self.toggle.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    }
+
     channel.setMethodCallHandler { [weak self] call, result in
       guard let self = self else {
         result(nil)
@@ -3872,6 +4315,9 @@ private final class MarcoNativeSwitchPlatformView: NSObject, FlutterPlatformView
   }
 
   deinit {
+    if let obs = appearanceObserver {
+      NotificationCenter.default.removeObserver(obs)
+    }
     channel.setMethodCallHandler(nil)
   }
 
@@ -3934,7 +4380,7 @@ private final class MarcoHitExpandedSlider: UISlider {
 }
 
 private final class MarcoNativeSliderPlatformView: NSObject, FlutterPlatformView {
-  private let hostView = UIView(frame: .zero)
+  private let hostView = MarcoTraitAwareHostView(frame: .zero)
   private let slider = MarcoHitExpandedSlider(frame: .zero)
   private let channel: FlutterMethodChannel
   private var appearanceObserver: NSObjectProtocol?
@@ -3966,7 +4412,7 @@ private final class MarcoNativeSliderPlatformView: NSObject, FlutterPlatformView
 
       self.slider.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
       self.slider.minimumTrackTintColor = UIColor.systemBlue
-      self.slider.maximumTrackTintColor = MarcoLiquidGlassSupport.isEffectiveDark
+      self.slider.maximumTrackTintColor = MarcoLiquidGlassSupport.isEffectiveDark(for: self.hostView)
         ? UIColor.white.withAlphaComponent(0.24)
         : UIColor.black.withAlphaComponent(0.14)
       self.slider.isContinuous = true
@@ -3991,17 +4437,21 @@ private final class MarcoNativeSliderPlatformView: NSObject, FlutterPlatformView
       self.hostView.layoutIfNeeded()
     }
 
+    let refreshSliderTheme: () -> Void = { [weak self] in
+      guard let self = self else { return }
+      self.hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      self.slider.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      self.slider.maximumTrackTintColor = MarcoLiquidGlassSupport.isEffectiveDark(for: self.hostView)
+        ? UIColor.white.withAlphaComponent(0.24)
+        : UIColor.black.withAlphaComponent(0.14)
+    }
+    self.hostView.onTraitChanged = refreshSliderTheme
     appearanceObserver = NotificationCenter.default.addObserver(
       forName: MarcoLiquidGlassSupport.appearanceChangedNotification,
       object: nil,
       queue: .main
-    ) { [weak self] _ in
-      guard let self = self else { return }
-      self.hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-      self.slider.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-      self.slider.maximumTrackTintColor = MarcoLiquidGlassSupport.isEffectiveDark
-        ? UIColor.white.withAlphaComponent(0.24)
-        : UIColor.black.withAlphaComponent(0.14)
+    ) { _ in
+      refreshSliderTheme()
     }
 
     channel.setMethodCallHandler { [weak self] call, result in

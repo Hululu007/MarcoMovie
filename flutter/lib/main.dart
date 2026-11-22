@@ -52,13 +52,10 @@ Future<void> main() async {
   } catch (_) {}
   final storage = await StorageService.init();
   AppLog.instance.setLogDirectory(Directory('${storage.dataDirectory.path}/logs'));
-  GlassworkBackdrop.reduceTransparency.value = storage.glassBlurLevel == 'solid';
-  GlassworkBackdrop.intensity.value = storage.glassBlurStrength;
+  GlassworkBackdrop.reduceTransparency.value = false;
+  GlassworkBackdrop.intensity.value = 0.68;
   AppleTheme.mode.value = AppleTheme.fromPref(storage.appThemeMode);
   await IosLiquidGlassBridge.setAppearanceMode(storage.appThemeMode);
-  await IosLiquidGlassBridge.setGlassIntensity(
-    storage.glassBlurLevel == 'solid' ? 0.0 : storage.glassBlurStrength,
-  );
   final client = CmsClient();
   try {
     await DownloadService.instance.init(client);
