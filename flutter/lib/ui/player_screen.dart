@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import '../core/anime4k_controller.dart';
 import '../core/cast_service.dart';
+import '../core/catpaw_host.dart';
 import '../core/cms_client.dart';
 import '../core/download_service.dart';
 import '../core/danmu/dandanplay_provider.dart';
@@ -39,6 +40,7 @@ import 'danmu/danmu_settings_sheet.dart';
 import 'favorite_postcard_animation.dart';
 import 'ios_glass_popover.dart';
 import 'ios_liquid_glass.dart';
+import 'live_station_badge.dart';
 import 'motion/brand_logo_loader.dart';
 import 'onboarding/first_play_gesture_hint.dart';
 import 'onboarding/onboarding_prefs.dart';
@@ -77,6 +79,8 @@ class PlayerScreen extends StatefulWidget {
   final int initialPositionMs;
   final StorageService storage;
   final bool isLive;
+  final List<LiveGroup> liveGroups;
+  final LiveChannel? initialLiveChannel;
   final bool embedded;
   final VoidCallback? onEmbeddedClose;
   final VoidCallback? onEmbeddedExpand;
@@ -118,6 +122,8 @@ class PlayerScreen extends StatefulWidget {
     required this.storage,
     this.initialPositionMs = 0,
     this.isLive = false,
+    this.liveGroups = const [],
+    this.initialLiveChannel,
     this.embedded = false,
     this.onEmbeddedClose,
     this.onEmbeddedExpand,
@@ -256,6 +262,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Object? _playbackErrorCause;
   int? _lastLiveUpstreamStatus;
   bool _allowEvents = false;
+  bool _windowsDarkSurfaceApplied = false;
   DesktopPlayerWindow? _desktopWindow;
   final MobilePlayerChrome _mobileChrome = MobilePlayerChrome();
   Future<void> _mediaChanges = Future<void>.value();
@@ -644,7 +651,25 @@ class _PlayerScreenState extends State<PlayerScreen>
   String _videoCodec = '';
   String _audioCodec = '';
   String _activeStreamUrl = '';
+  String _activeQualityLogicalUrl = '';
   String _activeMediaUri = '';
+
+  static String _normalizePlayStreamUrl(String rawUrl) =>
+      (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) &&
+              RegExp(r'[^\x00-\x7F]').hasMatch(rawUrl)
+          ? Uri.encodeFull(rawUrl)
+          : rawUrl;
+
+  bool _matchesActiveQuality(CmsEpisode choice) {
+    if (_normalizePlayStreamUrl(choice.url) == _activeStreamUrl ||
+        choice.url == _activeStreamUrl) {
+      return true;
+    }
+    final logical = choice.playbackSession['catpawLogicalUrl'];
+    return logical is String &&
+        logical.isNotEmpty &&
+        logical == _activeQualityLogicalUrl;
+  }
   bool get _matchesActiveMedia {
     if (_activeMediaUri.isEmpty) return false;
     final playlist = _player.state.playlist;
@@ -669,6 +694,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   final Set<String> _failedQualityUrls = <String>{};
   bool _liveDirectFallbackTried = false;
   bool _activeEpisodeUsedLocalProxy = false;
+  LiveChannel? _activeLiveChannel;
+
+  String get _displayTitle => _activeLiveChannel?.name ?? widget.video.title;
+  bool get _hasLiveChannelCatalog =>
+      _isLiveStream && widget.liveGroups.any((g) => g.channels.isNotEmpty);
 
   CmsLine get _currentLine => _lines[_lineIndex.clamp(0, _lines.length - 1)];
   CmsEpisode get _currentEpisode =>
@@ -697,6 +727,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _lines = List<CmsLine>.of(
       WoggSource.normalizeCachedVideoLabels(widget.site, widget.video).lines,
     );
+    _activeLiveChannel = widget.initialLiveChannel;
     _lineIndex = widget.initialLineIndex.clamp(
       0,
       _lines.length - 1,
@@ -792,6 +823,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_desktop && !widget.embedded) {
       _desktopWindow = DesktopPlayerWindow()..addListener(_windowChanged);
       _desktopWindow!.initialize().catchError(_windowError);
+    }
+    if (!widget.embedded && isWindowsDesktopUi) {
+      scheduleMicrotask(() {
+        if (!mounted || _windowsDarkSurfaceApplied) return;
+        _windowsDarkSurfaceApplied = true;
+        WindowsImmersiveFrame.darkSurfaceDepth.value += 1;
+      });
     }
     _videoKernel = VideoKernel.create(
       debugPlayer: widget.debugPlayer,
@@ -1146,8 +1184,17 @@ class _PlayerScreenState extends State<PlayerScreen>
               lower.contains('cannot open') ||
               lower.contains('unable to open') ||
               lower.contains('connection refused') ||
-              lower.contains('server returned 404') ||
+              lower.contains('connection reset') ||
+              lower.contains('network is unreachable') ||
+              lower.contains('could not resolve') ||
+              lower.contains('timed out') ||
+              lower.contains('broken pipe') ||
+              lower.contains('protocol not found') ||
+              lower.contains('invalid data found') ||
+              lower.contains('server returned 401') ||
               lower.contains('server returned 403') ||
+              lower.contains('server returned 404') ||
+              lower.contains('server returned 410') ||
               lower.contains('server returned 5'));
       if (isFatalStartupError ||
           (!_isLiveStream &&
@@ -1290,12 +1337,14 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   CmsEpisode? _nextFallbackQuality() {
     if (_qualityChoices.length <= 1) return null;
-    final curIdx = _qualityChoices.indexWhere((v) => v.url == _activeStreamUrl);
+    final curIdx = _qualityChoices.indexWhere(_matchesActiveQuality);
     if (curIdx >= 0) {
       for (int i = curIdx + 1; i < _qualityChoices.length; i++) {
         final candidate = _qualityChoices[i];
-        if (candidate.url != _activeStreamUrl &&
-            !_failedQualityUrls.contains(candidate.url)) {
+        final normalized = _normalizePlayStreamUrl(candidate.url);
+        if (!_matchesActiveQuality(candidate) &&
+            !_failedQualityUrls.contains(candidate.url) &&
+            !_failedQualityUrls.contains(normalized)) {
           return candidate;
         }
       }
@@ -1303,8 +1352,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     CmsEpisode? best;
     int bestRank = -1;
     for (final candidate in _qualityChoices) {
-      if (candidate.url == _activeStreamUrl ||
-          _failedQualityUrls.contains(candidate.url)) {
+      final normalized = _normalizePlayStreamUrl(candidate.url);
+      if (_matchesActiveQuality(candidate) ||
+          _failedQualityUrls.contains(candidate.url) ||
+          _failedQualityUrls.contains(normalized)) {
         continue;
       }
       final rank = _rankVariantQuality(candidate);
@@ -1430,20 +1481,29 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     if (_isLiveStream &&
         !_startup.isPastStartupWindow &&
-        !_liveDirectFallbackTried &&
-        (_localMedia.current != null || _activeEpisodeUsedLocalProxy)) {
+        !_liveDirectFallbackTried) {
       _liveDirectFallbackTried = true;
       final scheme = Uri.tryParse(_activeStreamUrl)?.scheme.toLowerCase() ?? '';
-      // On Windows, bundled libmpv uses mbedTLS without a CA bundle, so HTTPS
-      // live streams must stay on LocalMediaLease (which uses Windows' system
-      // CA store) and retry with an alternate browser User-Agent instead of
-      // passing raw HTTPS directly to libmpv.
-      final canBypassProxy = scheme == 'http' || !Platform.isWindows;
-      _showHud(canBypassProxy ? '正在切换直连直播流…' : '正在切换兼容模式重试…');
+      final usedProxy =
+          _localMedia.current != null || _activeEpisodeUsedLocalProxy;
+      // Direct-first live playback on iOS/macOS/Android avoids unnecessary
+      // loopback proxy copying. If direct fails (e.g. PNG-disguised TS or
+      // redirect Set-Cookie), fall back once to LocalMediaLease; if proxy was
+      // used first (e.g. Windows HTTPS), retry with alternate browser UA.
+      final nextForceProxy = !usedProxy &&
+          LocalMediaLease.shouldProxy(Uri.tryParse(_activeStreamUrl));
+      final nextBypassProxy =
+          usedProxy && (scheme == 'http' || !Platform.isWindows);
+      _showHud(
+        nextForceProxy
+            ? '正在切换代理兼容模式…'
+            : (nextBypassProxy ? '正在切换直连直播流…' : '正在切换兼容模式重试…'),
+      );
       unawaited(
         _openCurrentEpisode(
           resumeMs: 0,
-          bypassLocalProxy: canBypassProxy,
+          bypassLocalProxy: nextBypassProxy,
+          forceLiveLocalProxy: nextForceProxy,
           useAlternateLiveUa: true,
         ),
       );
@@ -1452,7 +1512,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_isLiveStream &&
         !_startup.isPastStartupWindow &&
         _currentLine.episodes.length > 1 &&
-        _failedLiveEpisodes.length < 4) {
+        _failedLiveEpisodes.length < 8) {
       _failedLiveEpisodes.add(_episodeIndex);
       final total = _currentLine.episodes.length;
       for (var step = 1; step < total; step++) {
@@ -1546,10 +1606,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     CmsEpisode? quality,
     bool userSelectedQuality = false,
     bool bypassLocalProxy = false,
+    bool forceLiveLocalProxy = false,
     bool useAlternateLiveUa = false,
   }) async {
     _startup.reset();
-    if (!bypassLocalProxy && !useAlternateLiveUa) {
+    if (!bypassLocalProxy && !forceLiveLocalProxy && !useAlternateLiveUa) {
       _liveDirectFallbackTried = false;
       _lastLiveUpstreamStatus = null;
     }
@@ -1687,6 +1748,33 @@ class _PlayerScreenState extends State<PlayerScreen>
           widget.storage.preferredQuality == '4k_netdisk') {
         resolvedEpisode = _selectBestQualityVariant(resolvedEpisode);
       }
+      if (quality != null && widget.site.isCatPaw) {
+        final logicalCatpaw = resolvedEpisode.playbackSession['catpawLogicalUrl'];
+        if (logicalCatpaw is String && CatPawHost.matches(logicalCatpaw)) {
+          final refreshedUri = await CatPawHost.instance.resolve(
+            logicalCatpaw,
+            cancellation: sourceAbort,
+          );
+          final refreshedUrl = refreshedUri.toString();
+          if (refreshedUrl != resolvedEpisode.url) {
+            final updatedVariant = CmsEpisode(
+              name: resolvedEpisode.name,
+              url: refreshedUrl,
+              headers: resolvedEpisode.headers,
+              playbackSession: resolvedEpisode.playbackSession,
+              variants: resolvedEpisode.variants,
+              externalAudioUrl: resolvedEpisode.externalAudioUrl,
+            );
+            resolvedEpisode = updatedVariant;
+            _qualityChoices = [
+              for (final choice in _qualityChoices)
+                choice.playbackSession['catpawLogicalUrl'] == logicalCatpaw
+                    ? updatedVariant
+                    : choice,
+            ];
+          }
+        }
+      }
       EmbyPlaybackSession? report;
       if (widget.site.isEmby && resolvedEpisode.playbackSession.isNotEmpty) {
         report = (await EmbyLibrary.open(widget.site)).track(resolvedEpisode);
@@ -1699,11 +1787,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       _embySession = report;
       if (quality == null) _qualityChoices = resolvedEpisode.variants;
       final rawResolvedUrl = resolvedEpisode.url;
-      final safePlayUrl = (rawResolvedUrl.startsWith('http://') ||
-                  rawResolvedUrl.startsWith('https://')) &&
-              RegExp(r'[^\x00-\x7F]').hasMatch(rawResolvedUrl)
-          ? Uri.encodeFull(rawResolvedUrl)
-          : rawResolvedUrl;
+      final safePlayUrl = _normalizePlayStreamUrl(rawResolvedUrl);
+      final resolvedLogical = resolvedEpisode.playbackSession['catpawLogicalUrl'];
       final baseMedia = widget.mediaForPlayback(
         resolvedEpisode,
         start: _pendingResumeMs > 0
@@ -1726,7 +1811,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       _activeEpisodeUsedLocalProxy = false;
       final forceProxyForWindowsHttps =
           Platform.isWindows && parsedTargetUri?.scheme.toLowerCase() == 'https';
-      if ((!bypassLocalProxy || forceProxyForWindowsHttps) &&
+      // Live streams on iOS/macOS/Android (and HTTP everywhere) play directly
+      // through libmpv first to eliminate extra loopback proxy copying & delay,
+      // falling back to LocalMediaLease automatically only if direct fails.
+      final preferDirectLive =
+          _isLiveStream && !forceLiveLocalProxy && !forceProxyForWindowsHttps;
+      if ((!bypassLocalProxy && !preferDirectLive || forceProxyForWindowsHttps) &&
           pendingLease == null &&
           parsedTargetUri != null &&
           LocalMediaLease.shouldProxy(parsedTargetUri)) {
@@ -1756,6 +1846,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       final effectiveOpenHeaders =
           pendingLocalLease != null ? const <String, String>{} : headers;
       _activeStreamUrl = safePlayUrl;
+      _activeQualityLogicalUrl = resolvedLogical is String ? resolvedLogical : '';
       _activeMediaUri = Media(effectiveOpenUrl).uri;
 
       await _changeMedia(session, () async {
@@ -1765,7 +1856,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final hasFallback = _isLiveStream
             ? (_currentLine.episodes.length > 1 &&
                 _failedLiveEpisodes.length <
-                    math.min(_currentLine.episodes.length - 1, 4))
+                    math.min(_currentLine.episodes.length - 1, 8))
             : (_nextFallbackQuality() != null ||
                 (PlaybackRecoveryPolicy.decide(
                           episode: _currentEpisode,
@@ -1782,18 +1873,17 @@ class _PlayerScreenState extends State<PlayerScreen>
               _changeMedia(session, _player.stop).catchError((_) {});
             }
           },
-          hasFallback: hasFallback ||
-              (_isLiveStream && !_liveDirectFallbackTried && pendingLocalLease != null),
+          hasFallback: hasFallback || (_isLiveStream && !_liveDirectFallbackTried),
           startOffset: _pendingResumeMs > 0
               ? Duration(milliseconds: _pendingResumeMs)
               : Duration.zero,
           timeoutOverride: _isLiveStream
-              ? Duration(seconds: !_liveDirectFallbackTried ? 12 : 14)
+              ? Duration(seconds: !_liveDirectFallbackTried ? 7 : 8)
               : null,
         );
         try {
           final dyn = _player.platform as dynamic;
-          await dyn.setProperty('tls-verify', 'yes');
+          await dyn.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
           final ua = headers.entries
               .firstWhere(
                 (e) => e.key.toLowerCase() == 'user-agent',
@@ -1819,7 +1909,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           unawaited(
             _castController.switchMedia(
               mediaUrl: effectiveOpenUrl,
-              title: '${widget.video.title} · ${_currentEpisode.name}',
+              title: '$_displayTitle · ${_currentEpisode.name}',
               headers: _activeResolvedHeaders,
               totalDuration: _duration,
             ),
@@ -2565,7 +2655,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _applyPlayerKernel(String kernel) async {
     try {
       final dyn = _player.platform as dynamic;
-      await dyn.setProperty('tls-verify', 'yes');
+      await dyn.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
       await dyn.setProperty('hwdec', _hardwareDecoder(kernel));
       await dyn.setProperty('cache-on-disk', 'no');
       await dyn.setProperty('cache-pause', 'yes');
@@ -2594,14 +2684,25 @@ class _PlayerScreenState extends State<PlayerScreen>
       await dyn.setProperty('vid', 'auto');
       await dyn.setProperty('audio-display', 'no');
       if (_isLiveStream) {
+        // Live-tuned libmpv profile: lean 16 MiB/4 MiB ring buffer, fast
+        // stream-layer reconnect + tolerant live TLS, 1s/1MB probe, and smooth
+        // hardware frame queueing for instant channel zapping.
         await dyn.setProperty('cache', 'yes');
-        await dyn.setProperty('demuxer-max-bytes', '67108864');
-        await dyn.setProperty('demuxer-max-back-bytes', '16777216');
-        await dyn.setProperty('demuxer-readahead-secs', '8');
-        await dyn.setProperty('network-timeout', '12');
+        await dyn.setProperty('stream-buffer-size', '4MiB');
+        await dyn.setProperty('demuxer-lavf-buffersize', '4194304');
+        await dyn.setProperty('demuxer-max-bytes', '16777216');
+        await dyn.setProperty('demuxer-max-back-bytes', '4194304');
+        await dyn.setProperty('demuxer-readahead-secs', '5');
+        await dyn.setProperty('hwdec-extra-frames', '8');
+        await dyn.setProperty('vd-lavc-fast', 'yes');
+        await dyn.setProperty('network-timeout', '10');
+        await dyn.setProperty(
+          'stream-lavf-o',
+          'tls_verify=0,reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=2',
+        );
         await dyn.setProperty(
           'demuxer-lavf-o',
-          '$_baseLavfOptions,reconnect=1,reconnect_streamed=1,reconnect_delay_max=3,analyzeduration=1500000,probesize=1500000',
+          '$_baseLavfOptions,tls_verify=0,reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=2,analyzeduration=1000000,probesize=1000000',
         );
         return;
       }
@@ -2720,7 +2821,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       externalAudioUrl: best.externalAudioUrl.isNotEmpty
           ? best.externalAudioUrl
           : resolved.externalAudioUrl,
-      playbackSession: resolved.playbackSession,
+      playbackSession: {
+        ...resolved.playbackSession,
+        ...best.playbackSession,
+      },
     );
   }
 
@@ -2790,6 +2894,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   void dispose() {
     WindowsTrayService.hideToTrayRevision.removeListener(_onHideToTray);
     if (!widget.embedded) WindowsImmersiveFrame.interactionLocked.value = false;
+    if (_windowsDarkSurfaceApplied) {
+      _windowsDarkSurfaceApplied = false;
+      scheduleMicrotask(() {
+        final next = WindowsImmersiveFrame.darkSurfaceDepth.value - 1;
+        WindowsImmersiveFrame.darkSurfaceDepth.value = next < 0 ? 0 : next;
+      });
+    }
     if (!OhosRuntime.isOhos && defaultTargetPlatform == TargetPlatform.iOS) {
       unawaited(IosLiquidGlassBridge.dismissActiveSheets());
     }
@@ -5649,7 +5760,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               _episodeIndex,
             );
       return IosPlayerChrome(
-        title: widget.video.title,
+        title: _displayTitle,
         episodeName: _currentEpisode.name,
         lineName: _currentLine.name,
         isLive: _isLiveStream,
@@ -5674,7 +5785,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             ? widget.danmuEnabled
             : (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled),
         sleepTimerActive: _sleepTimer.isActive,
-        hasMultipleLines: _lines.length > 1,
+        hasMultipleLines: _lines.length > 1 || _hasLiveChannelCatalog,
         isFavorite: _isFavorite,
         isCasting: _castController.isCasting,
         isDownloading: currentDownload != null &&
@@ -6291,7 +6402,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final scale = (width / 1280).clamp(.78, 1.0);
     return DesktopPlayerHud(
       embedded: widget.embedded,
-      title: widget.video.title,
+      title: _displayTitle,
       playing: _playing,
       isLive: _isLiveStream,
       isFullscreen: _desktopWindow?.fullscreen == true,
@@ -7546,7 +7657,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           AppleNativeSheetOption<CmsEpisode>(
             value: choice,
             title: choice.name,
-            isDefault: choice.url == _activeStreamUrl,
+            isDefault: _matchesActiveQuality(choice),
           ),
       ],
       cancelLabel: '取消',
@@ -7554,10 +7665,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!mounted ||
         session != _playSession ||
         selected == null ||
-        selected.url == _activeStreamUrl) {
+        _matchesActiveQuality(selected)) {
       return;
     }
-    _failedQualityUrls.remove(selected.url);
+    _failedQualityUrls
+      ..remove(selected.url)
+      ..remove(_normalizePlayStreamUrl(selected.url));
     final keepPos = _position.inMilliseconds >= 1000
         ? _position.inMilliseconds
         : _lastKnownPositionMs;
@@ -8692,8 +8805,265 @@ class _PlayerScreenState extends State<PlayerScreen>
     return firstReason;
   }
 
+  void _switchLiveChannel(LiveChannel channel, {int lineIdx = 0}) {
+    if (!mounted || channel.episodes.isEmpty) return;
+    _failedLinesForEpisode.clear();
+    _failedLiveEpisodes.clear();
+    _liveDirectFallbackTried = false;
+    _lastLiveUpstreamStatus = null;
+    setState(() {
+      _activeLiveChannel = channel;
+      _lines = [CmsLine(name: channel.group, episodes: channel.episodes)];
+      _lineIndex = 0;
+      _episodeIndex = lineIdx.clamp(0, channel.episodes.length - 1);
+      _lastKnownDurationMs = 0;
+      _duration = Duration.zero;
+    });
+    _showHud('正在切换至 ${channel.name}');
+    unawaited(_openCurrentEpisode(resumeMs: 0));
+  }
+
+  void _showLiveChannelDrawer({Rect? anchorRect}) {
+    final groups = widget.liveGroups.where((g) => g.channels.isNotEmpty).toList();
+    if (groups.isEmpty) return;
+    final activeName = _activeLiveChannel?.name ?? widget.video.title;
+    final activeGroup = _activeLiveChannel?.group ?? _currentLine.name;
+    var selectedGroupIdx = groups.indexWhere((g) => g.name == activeGroup);
+    if (selectedGroupIdx < 0) selectedGroupIdx = 0;
+    var query = '';
+
+    Widget buildContent(BuildContext ctx) => StatefulBuilder(
+      builder: (ctx, setSheetState) {
+        final q = query.trim().toLowerCase();
+        final channels = q.isNotEmpty
+            ? [
+                for (final g in groups)
+                  for (final ch in g.channels)
+                    if (ch.name.toLowerCase().contains(q) ||
+                        g.name.toLowerCase().contains(q))
+                      ch,
+              ]
+            : groups[selectedGroupIdx.clamp(0, groups.length - 1)].channels;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+              child: CupertinoSearchTextField(
+                placeholder: '搜索频道名或分类…',
+                style: const TextStyle(color: Colors.white, fontSize: 13.5),
+                placeholderStyle:
+                    const TextStyle(color: Color(0x88FFFFFF), fontSize: 13),
+                backgroundColor: const Color(0x22FFFFFF),
+                onChanged: (v) => setSheetState(() => query = v),
+              ),
+            ),
+            if (q.isEmpty)
+              SizedBox(
+                height: 32,
+                child: ListView.separated(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  scrollDirection: Axis.horizontal,
+                  itemCount: groups.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  itemBuilder: (_, idx) {
+                    final sel = idx == selectedGroupIdx;
+                    final g = groups[idx];
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => setSheetState(() => selectedGroupIdx = idx),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: sel
+                              ? AppleColors.systemBlue
+                              : const Color(0x22FFFFFF),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        alignment: Alignment.center,
+                        child: Text(
+                          '${g.name} (${g.channels.length})',
+                          style: TextStyle(
+                            color: sel ? Colors.white : const Color(0xCCFFFFFF),
+                            fontSize: 11.5,
+                            fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            const SizedBox(height: 8),
+            Flexible(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 340),
+                child: channels.isEmpty
+                    ? const Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text(
+                          '未找到匹配频道',
+                          style: TextStyle(
+                            color: Color(0x99FFFFFF),
+                            fontSize: 13,
+                          ),
+                        ),
+                      )
+                    : ListView.separated(
+                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+                        itemCount: channels.length,
+                        separatorBuilder: (_, __) => const SizedBox(height: 6),
+                        itemBuilder: (_, idx) {
+                          final ch = channels[idx];
+                          final isCurrent = ch.name == activeName &&
+                              ch.group == activeGroup;
+                          final latencyBadge = LiveHealthVisual.badgeText(ch);
+                          return GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () {
+                              Navigator.of(ctx).pop();
+                              _switchLiveChannel(ch);
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 8,
+                              ),
+                              decoration: BoxDecoration(
+                                color: isCurrent
+                                    ? const Color(0x380A84FF)
+                                    : const Color(0x18FFFFFF),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isCurrent
+                                      ? const Color(0xAA0A84FF)
+                                      : const Color(0x1FFFFFFF),
+                                  width: 0.7,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  LiveStationBadge(
+                                    channel: ch,
+                                    size: 34,
+                                    radius: 9,
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          ch.name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 13.5,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Row(
+                                          children: [
+                                            Container(
+                                              width: 6,
+                                              height: 6,
+                                              decoration: BoxDecoration(
+                                                color: LiveHealthVisual.dotColor(
+                                                  ch.health,
+                                                ),
+                                                shape: BoxShape.circle,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 5),
+                                            Text(
+                                              '${ch.group} · ${ch.episodes.length}路信号',
+                                              style: const TextStyle(
+                                                color: Color(0xAAFFFFFF),
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  if (latencyBadge != null) ...[
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 6,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: LiveHealthVisual.dotColor(
+                                          ch.health,
+                                        ).withValues(alpha: 0.2),
+                                        borderRadius:
+                                            BorderRadius.circular(999),
+                                      ),
+                                      child: Text(
+                                        latencyBadge,
+                                        style: TextStyle(
+                                          color: LiveHealthVisual.dotColor(
+                                            ch.health,
+                                          ),
+                                          fontSize: 10.5,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                  ],
+                                  if (isCurrent)
+                                    const Icon(
+                                      CupertinoIcons.checkmark_alt,
+                                      color: AppleColors.systemBlue,
+                                      size: 16,
+                                    ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (_useIos26PlayerChrome) {
+      showIosGlassPopover<void>(
+        context: context,
+        title: '切换频道',
+        anchorRect: anchorRect,
+        maxWidth: 340,
+        maxHeight: 460,
+        forceDark: true,
+        builder: buildContent,
+      );
+      return;
+    }
+    showAppleModalSheet<void>(
+      context: context,
+      title: '切换频道',
+      maxWidth: 480,
+      builder: buildContent,
+    );
+  }
+
   void _showLinesSheet({Rect? anchorRect}) {
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    if (_hasLiveChannelCatalog) {
+      _showLiveChannelDrawer(anchorRect: anchorRect);
+      return;
+    }
     final parses = widget.storage.loadSavedConfig()?.parses ?? const [];
     final lineReasons = List<String?>.generate(
       _lines.length,

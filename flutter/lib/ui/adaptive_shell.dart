@@ -10,6 +10,7 @@ import 'dart:ui';
 import 'package:flutter/cupertino.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../core/cms_client.dart';
@@ -21,6 +22,7 @@ import '../core/app_update.dart';
 import '../core/csp_bridge.dart';
 import '../core/curated_discovery.dart';
 import '../core/download_service.dart';
+import '../core/live_channel_organizer.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
 import '../core/storage_service.dart';
@@ -38,6 +40,7 @@ import 'ios_liquid_glass.dart';
 import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
+import 'live_station_badge.dart';
 import 'motion/aurora_background.dart';
 import 'motion/player_enter_transition.dart';
 import 'netdisk_sheet.dart';
@@ -261,11 +264,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   bool _liveLoading = false;
   String? _liveError;
   int _liveEpoch = 0;
+  bool _liveProbing = false;
+  LiveProbeProgress? _liveProbeProgress;
+  Completer<void>? _liveProbeAbort;
+  bool _liveHideUnreachable = false;
   // Favorites / History segmented index
   int _librarySegment = 0;
   bool _dockCollapsed = false;
   // Scroll controllers (inline shell views only; sheets own their own)
   final ScrollController _homeScrollController = ScrollController();
+  final ScrollController _windowsDiscoverScrollController = ScrollController();
   final ScrollController _continueWatchingScrollController = ScrollController();
   final ScrollController _categoryPillsScrollController = ScrollController();
   final ScrollController _filterCategoryScrollController = ScrollController();
@@ -308,6 +316,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _homeScrollController.addListener(_onHomeScroll);
     PosterLoader.cacheRevision.addListener(_onPosterCacheUpdated);
     _cachedWatchHistory = widget.storage.getWatchHistory();
+    _liveHideUnreachable = widget.storage.liveHideUnreachable;
     if (!kIsWeb &&
         (Platform.isWindows || Platform.isMacOS || Platform.isLinux) &&
         !Platform.environment.containsKey('FLUTTER_TEST')) {
@@ -529,6 +538,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required String title,
     String poster = '',
     String remarks = '',
+    BuildContext? sourceContext,
+    double sourceRadius = 14.0,
+    String? sourceCardId,
   }) {
     final pool = _visibleSupportedSites;
     CmsSite? matched;
@@ -559,6 +571,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           poster: poster,
           remarks: remarks,
         ),
+        sourceContext: sourceContext,
+        sourceRadius: sourceRadius,
+        sourceCardId: sourceCardId,
       );
       return;
     }
@@ -710,6 +725,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (mounted) {
       setState(() {
         _cachedWatchHistory = widget.storage.getWatchHistory();
+    _liveHideUnreachable = widget.storage.liveHideUnreachable;
       });
     }
   }
@@ -734,6 +750,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _onCredentialMigrationFailure,
       );
       _cachedWatchHistory = widget.storage.getWatchHistory();
+    _liveHideUnreachable = widget.storage.liveHideUnreachable;
       if (widget.storage.isSubscriptionsCorrupted) {
         _onSubscriptionsCorruption();
       }
@@ -780,6 +797,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _installedVersionTimer?.cancel();
     _cancelCatalogue();
     if (_liveAbort != null && !_liveAbort!.isCompleted) _liveAbort!.complete();
+    if (_liveProbeAbort != null && !_liveProbeAbort!.isCompleted) {
+      _liveProbeAbort!.complete();
+    }
     _searchSubscription?.cancel();
     unawaited(CatPawHost.instance.close());
     unawaited(CmsClient.closeScriptSessions());
@@ -789,6 +809,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _homeScrollController.removeListener(_onHomeScroll);
     PosterLoader.cacheRevision.removeListener(_onPosterCacheUpdated);
     _homeScrollController.dispose();
+    _windowsDiscoverScrollController.dispose();
     _iosHeroPageController.dispose();
     _continueWatchingScrollController.dispose();
     _categoryPillsScrollController.dispose();
@@ -804,6 +825,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     // Invalidate them before exposing the new registry, including an empty one.
     _cancelCatalogue();
     if (_liveAbort != null && !_liveAbort!.isCompleted) _liveAbort!.complete();
+    if (_liveProbeAbort != null && !_liveProbeAbort!.isCompleted) {
+      _liveProbeAbort!.complete();
+    }
     ++_homeEpoch;
     ++_categoryEpoch;
     ++_liveEpoch;
@@ -819,6 +843,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final saved = widget.storage.loadSavedConfig();
     _config = saved;
     _cachedWatchHistory = widget.storage.getWatchHistory();
+    _liveHideUnreachable = widget.storage.liveHideUnreachable;
     unawaited(CmsClient.retainScriptSessions(
       (saved?.scriptOwners ?? const <CmsSite>[]).where((site) =>
         _privateSessionUnlocked || !site.isEffectivelyPrivate),
@@ -886,14 +911,24 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       video.poster,
       title: video.title,
       year: video.year,
+      preferHd: true,
     );
     if (bytes == null) return;
+    _updateHeroAmbientFromBytes(video, bytes);
+  }
+
+  void _updateHeroAmbientFromBytes(CmsVideo video, Uint8List bytes) {
+    final key = '${video.poster}|${video.title}|${video.year}';
     final cached = PosterLoader.peekAmbientColor(bytes);
     if (cached != null) {
-      setState(() => _iosHeroAmbientColors[key] = cached);
+      if (_iosHeroAmbientColors[key] != cached && mounted) {
+        setState(() => _iosHeroAmbientColors[key] = cached);
+      } else {
+        _iosHeroAmbientColors[key] = cached;
+      }
       return;
     }
-    _iosHeroAmbientPending.add(key);
+    if (!_iosHeroAmbientPending.add(key)) return;
     unawaited(
       PosterLoader.extractEdgeAmbientColor(bytes).then((color) {
         _iosHeroAmbientPending.remove(key);
@@ -907,6 +942,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
 
+  void _prefetchIosHeroHdPosters(CmsSite site, List<CmsVideo> videos) {
+    if (defaultTargetPlatform != TargetPlatform.iOS ||
+        OhosRuntime.isOhos ||
+        site.isEffectivelyPrivate ||
+        Platform.environment.containsKey('FLUTTER_TEST')) {
+      return;
+    }
+    final candidates = videos
+        .where((v) => !v.id.startsWith('netdisk_qr:') && v.title.trim().isNotEmpty)
+        .take(6);
+    for (final v in candidates) {
+      unawaited(
+        PosterLoader.loadHdByTitle(
+          v.title,
+          rawUrl: v.poster,
+          year: v.year,
+          strictHero: true,
+        ).catchError((_) => Uint8List(0)),
+      );
+    }
+  }
+
   Color _resolveHeroAmbientColor(CmsVideo video, ApplePalette palette) {
     final key = '${video.poster}|${video.title}|${video.year}';
     final existing = _iosHeroAmbientColors[key];
@@ -915,6 +972,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       video.poster,
       title: video.title,
       year: video.year,
+      preferHd: true,
     );
     if (bytes != null) {
       final cached = PosterLoader.peekAmbientColor(bytes);
@@ -990,6 +1048,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _homeError = null;
       _loadMoreError = null;
     });
+    if (hadCached && _windowsRecommendedVideos.isNotEmpty) {
+      _prefetchIosHeroHdPosters(site, _windowsRecommendedVideos);
+    }
     try {
       final homeFuture = widget.client.runSourceOperation(
         () => widget.client.fetchHome(site),
@@ -1028,6 +1089,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _homeRefreshing = false;
         _loadingMore = false;
       });
+      if (_windowsRecommendedVideos.isNotEmpty) {
+        _prefetchIosHeroHdPosters(site, _windowsRecommendedVideos);
+      }
     } catch (e) {
       if (!mounted || epoch != _homeEpoch || _activeSite?.key != site.key) {
         return;
@@ -1463,13 +1527,57 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     return '读取直播源「$sourceName」失败，请稍后重试或切换其他直播源';
   }
 
-  Future<void> _loadLivePlaylist(int sourceIndex) async {
+  void _cancelLiveProbe() {
+    if (_liveProbeAbort != null && !_liveProbeAbort!.isCompleted) {
+      _liveProbeAbort!.complete();
+    }
+    if (_liveProbing && mounted) {
+      setState(() {
+        _liveProbing = false;
+        _liveProbeProgress = null;
+      });
+    }
+  }
+
+  List<LiveGroup> get _displayLiveGroups {
+    if (!_liveHideUnreachable) return _liveGroups;
+    return _liveGroups
+        .where((g) => g.name != LiveChannelOrganizer.failedGroupName)
+        .toList(growable: false);
+  }
+
+  Future<void> _loadLivePlaylist(
+    int sourceIndex, {
+    bool forceRefresh = false,
+    bool autoProbeAfterLoad = false,
+  }) async {
     final lives = _visibleLives;
     if (sourceIndex < 0 || sourceIndex >= lives.length) return;
     if (_liveAbort != null && !_liveAbort!.isCompleted) _liveAbort!.complete();
+    _cancelLiveProbe();
     final abort = _liveAbort = Completer<void>();
     final epoch = ++_liveEpoch;
     final source = lives[sourceIndex];
+    final standalone = widget.storage.findStandaloneLiveSourceForLive(source);
+    final autoCat = standalone?.autoCategorize ?? widget.storage.liveAutoCategorize;
+    final logoTemplate = standalone?.logoTemplate ?? '';
+
+    final cached = !forceRefresh ? widget.storage.loadLiveSnapshot(source) : null;
+    if (cached != null && cached.isNotEmpty) {
+      setState(() {
+        _selectedLiveSource = sourceIndex;
+        _windowsLiveChannel = null;
+        _selectedLiveGroup = 0;
+        _liveGroups = cached;
+        _liveLoading = false;
+        _liveError = null;
+      });
+      if (autoProbeAfterLoad) {
+        unawaited(_probeCurrentLiveGroups());
+      }
+      return;
+    }
+
     setState(() {
       _selectedLiveSource = sourceIndex;
       _windowsLiveChannel = null;
@@ -1479,18 +1587,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _liveError = null;
     });
     try {
-      final groups = await widget.client.runSourceOperation(
-        () => widget.client.fetchLiveGroups(source), cancellation: abort,
+      final rawGroups = await widget.client.runSourceOperation(
+        () => widget.client.fetchLiveGroups(source),
+        cancellation: abort,
       );
       if (!mounted ||
           epoch != _liveEpoch ||
           _selectedLiveSource != sourceIndex) {
         return;
       }
+      final organized = LiveChannelOrganizer.organize(
+        rawGroups,
+        autoCategorize: autoCat,
+        logoTemplate: logoTemplate,
+      );
+      unawaited(widget.storage.saveLiveSnapshot(source, organized));
       setState(() {
-        _liveGroups = groups;
+        _liveGroups = organized;
         _liveLoading = false;
       });
+      if (autoProbeAfterLoad) {
+        unawaited(_probeCurrentLiveGroups());
+      }
     } catch (e) {
       if (!mounted ||
           abort.isCompleted ||
@@ -1505,12 +1623,77 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       });
     }
   }
+
+  Future<void> _probeCurrentLiveGroups() async {
+    final lives = _visibleLives;
+    if (_liveGroups.isEmpty ||
+        _selectedLiveSource < 0 ||
+        _selectedLiveSource >= lives.length) {
+      return;
+    }
+    if (_liveProbing) {
+      _cancelLiveProbe();
+      return;
+    }
+    final source = lives[_selectedLiveSource];
+    final standalone = widget.storage.findStandaloneLiveSourceForLive(source);
+    final autoCat = standalone?.autoCategorize ?? widget.storage.liveAutoCategorize;
+    final logoTemplate = standalone?.logoTemplate ?? '';
+    final epoch = _liveEpoch;
+    final probeAbort = _liveProbeAbort = Completer<void>();
+    final total = _liveGroups.fold<int>(0, (s, g) => s + g.channels.length);
+    setState(() {
+      _liveProbing = true;
+      _liveProbeProgress = LiveProbeProgress(
+        completedChannels: 0,
+        totalChannels: total,
+        reachableChannels: 0,
+        unreachableChannels: 0,
+      );
+    });
+    var lastUiUpdateMs = 0;
+    try {
+      final probed = await LiveStreamProber.probeAndOrganize(
+        _liveGroups,
+        autoCategorize: autoCat,
+        logoTemplate: logoTemplate,
+        cancellation: probeAbort,
+        onProgress: (p) {
+          final now = DateTime.now().millisecondsSinceEpoch;
+          if (!mounted || epoch != _liveEpoch) return;
+          if (now - lastUiUpdateMs >= 180 ||
+              p.completedChannels >= p.totalChannels) {
+            lastUiUpdateMs = now;
+            setState(() => _liveProbeProgress = p);
+          }
+        },
+      );
+      if (!mounted || epoch != _liveEpoch) return;
+      unawaited(widget.storage.saveLiveSnapshot(source, probed));
+      setState(() {
+        _liveGroups = probed;
+        _liveProbing = false;
+        _liveProbeProgress = null;
+        if (_selectedLiveGroup >= _displayLiveGroups.length) {
+          _selectedLiveGroup = 0;
+        }
+      });
+    } catch (_) {
+      if (!mounted || epoch != _liveEpoch) return;
+      setState(() {
+        _liveProbing = false;
+        _liveProbeProgress = null;
+      });
+    }
+  }
   void _openVideoDetail(
     CmsSite site,
     CmsVideo video, {
     BuildContext? sourceContext,
     double sourceRadius = 14.0,
     String? sourceCardId,
+    String? sourcePosterUrl,
+    bool isFullBleedHero = false,
   }) {
     if (!CuratedDiscoveryService.isCuratedSite(site) && !site.supported) {
       _showAppleNotice(site.name, site.unsupportedReason);
@@ -1528,6 +1711,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
       return;
     }
+    FocusManager.instance.primaryFocus?.unfocus();
     if (_searchSubscription != null) {
       _searchEpoch++;
       final activeSub = _searchSubscription;
@@ -1557,16 +1741,30 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         sourceContext != null;
     final initialRect =
         usePosterExpand ? PosterExpandRoute.captureRect(sourceContext) : null;
+    final isLandscapeCuratedCard = initialRect != null &&
+        CuratedDiscoveryService.isCuratedSite(site) &&
+        initialRect.width > initialRect.height * 1.15;
+    final effectivePosterUrl = (sourcePosterUrl != null &&
+            sourcePosterUrl.trim().isNotEmpty)
+        ? sourcePosterUrl.trim()
+        : (isLandscapeCuratedCard
+            ? CuratedDiscoveryService.backdropFor(video)
+            : video.poster);
     final Route<void> route = initialRect != null
         ? PosterExpandRoute<void>(
             initialSourceRect: initialRect,
             sourceRectResolver: () =>
                 PosterExpandRoute.captureRect(sourceContext),
-            sourceBorderRadius: sourceRadius,
+            sourceBorderRadius: isFullBleedHero ? 0.0 : sourceRadius,
             sourceCardId: sourceCardId,
-            posterUrl: video.poster,
-            title: video.title,
-            year: video.year,
+            posterUrl: effectivePosterUrl,
+            title: site.isEffectivelyPrivate ? '' : video.title,
+            year: site.isEffectivelyPrivate ? '' : video.year,
+            isFullBleedHero: isFullBleedHero,
+            strictHighResPoster: isFullBleedHero,
+            posterAlignment: isFullBleedHero
+                ? const Alignment(0.0, -0.22)
+                : Alignment.center,
             builder: detailBuilder,
           )
         : buildApplePageRoute<void>(builder: detailBuilder);
@@ -2670,6 +2868,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               CuratedDiscoveryService.curatedSiteSentinel,
                               video,
                             ),
+                            onOpenVideoFromCard:
+                                (video, cardCtx, radius, cardId) =>
+                                    _openVideoDetail(
+                              CuratedDiscoveryService.curatedSiteSentinel,
+                              video,
+                              sourceContext: cardCtx,
+                              sourceRadius: radius,
+                              sourceCardId: cardId,
+                            ),
                           ),
                         ),
                       ),
@@ -2704,6 +2911,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           onOpenVideo: (video) => _openVideoDetail(
                             CuratedDiscoveryService.curatedSiteSentinel,
                             video,
+                          ),
+                          onOpenVideoFromCard:
+                              (video, cardCtx, radius, cardId) =>
+                                  _openVideoDetail(
+                            CuratedDiscoveryService.curatedSiteSentinel,
+                            video,
+                            sourceContext: cardCtx,
+                            sourceRadius: radius,
+                            sourceCardId: cardId,
                           ),
                         ),
                       ),
@@ -3326,14 +3542,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
   /// Full-bleed elastic-stretch HD cinema Hero Billboard for iOS Home.
   ///
-  /// - Shifts the HD artwork downward below the Dynamic Island while extracting
-  ///   the active poster's edge ambient color to tint the status-bar / island
-  ///   backdrop smoothly upward.
-  /// - Applies a `ShaderMask(BlendMode.dstIn)` directly to the poster so BOTH
-  ///   top and bottom edges dissolve to 0% alpha directly into the live
-  ///   [AppleAmbientBackground] with zero horizontal seam in Dark or Light mode.
-  /// - Stretches and zooms smoothly when the user pulls down to refresh, never
-  ///   hiding the cover during refresh.
+  /// - Aggressively resolves true Retina vertical HD artwork (`strictHighRes: true`)
+  ///   and syncs edge ambient tinting smoothly as HD artwork lands.
+  /// - Uses open, breathable edge-only `ShaderMask(BlendMode.dstIn)` dissolves
+  ///   (reaching 100% clarity right beneath the Dynamic Island and staying
+  ///   unobstructed down to 76% before smoothly feathering into the page canvas)
+  ///   so the poster shines freely with zero seam in Dark or Light mode.
+  /// - Opens & returns via full-bleed linear [PosterExpandRoute] (`sourceRadius: 0`,
+  ///   `isFullBleedHero: true`) with 1:1 lockstep chrome cross-fade via
+  ///   [PosterExpandRegistry.activeProgress] — zero middle split or pop.
   Widget _buildIosImmersiveHeroBillboard(
     BuildContext context, {
     required CmsSite site,
@@ -3353,12 +3570,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         : Color.lerp(rawAmbient, palette.background, 0.42)!;
     final primaryInk = isDark ? Colors.white : const Color(0xFF14161F);
     final secondaryInk = isDark
-        ? Colors.white.withValues(alpha: 0.86)
-        : const Color(0xFF343B49);
+        ? Colors.white.withValues(alpha: 0.90)
+        : const Color(0xFF2B3240);
     final bodyInk = isDark
-        ? Colors.white.withValues(alpha: 0.76)
-        : const Color(0xFF474F5E);
+        ? Colors.white.withValues(alpha: 0.80)
+        : const Color(0xFF424A59);
     final veilColor = isDark ? const Color(0xFF05060A) : palette.background;
+
+    Widget buildHeroChromeFade({required Widget child}) {
+      return ValueListenableBuilder<double>(
+        valueListenable: PosterExpandRegistry.activeProgress,
+        child: child,
+        builder: (context, progress, inner) {
+          final activeId = PosterExpandRegistry.activeCardId.value;
+          final isHeroTransition =
+              activeId != null && activeId.startsWith('ios_hero_');
+          if (!isHeroTransition || progress <= 0.001) {
+            return inner!;
+          }
+          final chromeOpacity = (1.0 - (progress / 0.35)).clamp(0.0, 1.0);
+          return Opacity(opacity: chromeOpacity, child: inner);
+        },
+      );
+    }
 
     return SizedBox(
       key: const ValueKey('ios-home-immersive-hero'),
@@ -3383,14 +3617,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           return Stack(
             clipBehavior: Clip.none,
             children: [
-              // 1. Overflowing poster-extracted ambient aura: extends 280pt above
-              //    screen top (for arbitrary pull-down overscroll) and bleeds 110pt
-              //    past hero bottom to 0% alpha — making any seam impossible.
+              // 1. Subtle overflowing poster-extracted ambient aura behind the
+              //    poster: extends 280pt above screen top for elastic overscroll
+              //    and dissolves cleanly past hero bottom with zero seam.
               Positioned(
                 top: -overscroll - 280.0,
                 left: 0,
                 right: 0,
-                height: stretchedHeight + 390.0,
+                height: stretchedHeight + 360.0,
                 child: IgnorePointer(
                   child: AnimatedContainer(
                     key: const ValueKey('ios-hero-top-ambient-aura'),
@@ -3401,13 +3635,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         begin: Alignment.topCenter,
                         end: Alignment.bottomCenter,
                         colors: [
-                          topAmbientTint.withValues(alpha: isDark ? 0.94 : 0.92),
-                          topAmbientTint.withValues(alpha: isDark ? 0.88 : 0.86),
-                          topAmbientTint.withValues(alpha: isDark ? 0.54 : 0.50),
-                          topAmbientTint.withValues(alpha: isDark ? 0.18 : 0.16),
+                          topAmbientTint.withValues(alpha: isDark ? 0.84 : 0.80),
+                          topAmbientTint.withValues(alpha: isDark ? 0.60 : 0.56),
+                          topAmbientTint.withValues(alpha: isDark ? 0.24 : 0.22),
+                          topAmbientTint.withValues(alpha: isDark ? 0.06 : 0.05),
                           Colors.transparent,
                         ],
-                        stops: const [0.0, 0.36, 0.58, 0.80, 1.0],
+                        stops: const [0.0, 0.34, 0.56, 0.78, 1.0],
                       ),
                     ),
                   ),
@@ -3415,9 +3649,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
 
               // 2. Full-bleed swipeable HD Posters anchored to screen y = 0 on
-              //    overscroll and scrolling smoothly away as a single intact block
-              //    when scrolling down. ShaderMask wraps OUTSIDE ClipRect +
-              //    Transform.scale so neither top nor bottom can EVER show a cut line!
+              //    overscroll and scrolling smoothly away as one intact block.
               Positioned(
                 top: -overscroll,
                 left: 0,
@@ -3435,6 +3667,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   },
                   itemBuilder: (context, index) {
                     final featured = featuredList[index];
+                    final heroCardId =
+                        'ios_hero_${site.key}_${featured.id.isNotEmpty ? featured.id : featured.title}_$index';
                     final metaParts = <String>[
                       if (featured.year.trim().isNotEmpty) featured.year.trim(),
                       if (featured.area.trim().isNotEmpty) featured.area.trim(),
@@ -3453,75 +3687,80 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           site,
                           featured,
                           sourceContext: heroTapCtx,
-                          sourceRadius: 24.0,
+                          sourceRadius: 0.0,
+                          sourceCardId: heroCardId,
+                          isFullBleedHero: true,
                         ),
                         child: Stack(
                           fit: StackFit.expand,
                           children: [
-                            // Outer ShaderMask spans the full stretched height
-                            // [0 .. stretchedHeight] with ultra-wide smoothstep
-                            // top (0% behind Dynamic Island -> 100% over ~145pt)
-                            // and bottom (100% -> 0% over ~265pt) alpha feathers!
+                            // Breathable edge-only ShaderMask: reaches 100%
+                            // clarity right beneath the Dynamic Island (~9%) and
+                            // stays crystal clear all the way down to 76% before
+                            // gently dissolving into the page canvas (76%..100%).
                             Positioned.fill(
-                              child: ShaderMask(
-                                blendMode: BlendMode.dstIn,
-                                shaderCallback: (rect) {
-                                  final h =
-                                      rect.height > 1 ? rect.height : heroHeight;
-                                  final t0 =
-                                      ((topSafePad * 0.55) / h).clamp(0.03, 0.11);
-                                  final t1 = ((topSafePad + 36.0) / h)
-                                      .clamp(t0 + 0.04, 0.22);
-                                  final t2 = ((topSafePad + 88.0) / h)
-                                      .clamp(t1 + 0.05, 0.34);
-                                  final t3 = ((topSafePad + 144.0) / h)
-                                      .clamp(t2 + 0.05, 0.44);
-                                  return LinearGradient(
-                                    begin: Alignment.topCenter,
-                                    end: Alignment.bottomCenter,
-                                    colors: const [
-                                      Color(0x00FFFFFF),
-                                      Color(0x00FFFFFF),
-                                      Color(0x30FFFFFF),
-                                      Color(0xB3FFFFFF),
-                                      Color(0xFFFFFFFF),
-                                      Color(0xFFFFFFFF),
-                                      Color(0xD9FFFFFF),
-                                      Color(0x8CFFFFFF),
-                                      Color(0x3DFFFFFF),
-                                      Color(0x12FFFFFF),
-                                      Color(0x00FFFFFF),
-                                    ],
-                                    stops: [
-                                      0.0,
-                                      t0,
-                                      t1,
-                                      t2,
-                                      t3,
-                                      0.52,
-                                      0.63,
-                                      0.74,
-                                      0.84,
-                                      0.93,
-                                      1.0,
-                                    ],
-                                  ).createShader(rect);
-                                },
-                                child: ClipRect(
-                                  child: Transform.scale(
-                                    key: const ValueKey('ios-hero-stretch-zoom'),
-                                    scale: stretchScale,
-                                    alignment: const Alignment(0.0, -0.08),
-                                    child: PosterImage(
-                                      url: featured.poster,
-                                      title: featured.title,
-                                      year: featured.year,
-                                      highRes: true,
-                                      fit: BoxFit.cover,
-                                      alignment: const Alignment(0.0, -0.22),
-                                      placeholder: Container(
-                                        color: topAmbientTint.withValues(
-                                          alpha: 0.45,
+                              child: PosterExpandSourceCard(
+                                cardId: heroCardId,
+                                child: ShaderMask(
+                                  key: const ValueKey('ios-hero-poster-feather'),
+                                  blendMode: BlendMode.dstIn,
+                                  shaderCallback: (rect) {
+                                    final h = rect.height > 1
+                                        ? rect.height
+                                        : heroHeight;
+                                    final tTop = ((topSafePad * 0.85) / h)
+                                        .clamp(0.05, 0.13);
+                                    return LinearGradient(
+                                      begin: Alignment.topCenter,
+                                      end: Alignment.bottomCenter,
+                                      colors: const [
+                                        Color(0xC7FFFFFF),
+                                        Color(0xFFFFFFFF),
+                                        Color(0xFFFFFFFF),
+                                        Color(0xCCFFFFFF),
+                                        Color(0x70FFFFFF),
+                                        Color(0x24FFFFFF),
+                                        Color(0x00FFFFFF),
+                                      ],
+                                      stops: [
+                                        0.0,
+                                        tTop,
+                                        0.76,
+                                        0.83,
+                                        0.90,
+                                        0.955,
+                                        1.0,
+                                      ],
+                                    ).createShader(rect);
+                                  },
+                                  child: ClipRect(
+                                    child: Transform.scale(
+                                      key: const ValueKey(
+                                        'ios-hero-stretch-zoom',
+                                      ),
+                                      scale: stretchScale,
+                                      alignment: const Alignment(0.0, -0.08),
+                                      child: PosterImage(
+                                        url: featured.poster,
+                                        title: site.isEffectivelyPrivate
+                                            ? ''
+                                            : featured.title,
+                                        year: site.isEffectivelyPrivate
+                                            ? ''
+                                            : featured.year,
+                                        highRes: true,
+                                        strictHighRes: true,
+                                        fit: BoxFit.cover,
+                                        alignment: const Alignment(0.0, -0.22),
+                                        onBytesLoaded: (bytes) =>
+                                            _updateHeroAmbientFromBytes(
+                                          featured,
+                                          bytes,
+                                        ),
+                                        placeholder: Container(
+                                          color: topAmbientTint.withValues(
+                                            alpha: 0.45,
+                                          ),
                                         ),
                                       ),
                                     ),
@@ -3530,34 +3769,87 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ),
                             ),
 
-                            // Airy multi-stop reading scrim strictly behind text
-                            // & CTA — fades smoothly to exact 0% at BOTH top and
-                            // bottom edges so it never creates a dark band seam.
+                            // Whisper-light compact top readability scrim strictly
+                            // behind the status bar & header controls (never
+                            // washes over the poster body).
+                            Positioned(
+                              top: 0,
+                              left: 0,
+                              right: 0,
+                              height: topSafePad + 54,
+                              child: IgnorePointer(
+                                child: buildHeroChromeFade(
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        colors: isDark
+                                            ? [
+                                                Colors.black.withValues(
+                                                  alpha: 0.34,
+                                                ),
+                                                Colors.black.withValues(
+                                                  alpha: 0.14,
+                                                ),
+                                                Colors.transparent,
+                                              ]
+                                            : [
+                                                palette.background.withValues(
+                                                  alpha: 0.46,
+                                                ),
+                                                palette.background.withValues(
+                                                  alpha: 0.18,
+                                                ),
+                                                Colors.transparent,
+                                              ],
+                                        stops: const [0.0, 0.56, 1.0],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+
+                            // Compact lower text-legibility scrim strictly behind
+                            // the bottom title & CTA (152pt vs old 280pt so the
+                            // hero poster stays wide open and unobstructed).
                             Positioned(
                               left: 0,
                               right: 0,
                               bottom: 0,
-                              height: 280,
+                              height: 152,
                               child: IgnorePointer(
-                                child: DecoratedBox(
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      begin: Alignment.topCenter,
-                                      end: Alignment.bottomCenter,
-                                      colors: [
-                                        Colors.transparent,
-                                        veilColor.withValues(
-                                          alpha: isDark ? 0.44 : 0.62,
-                                        ),
-                                        veilColor.withValues(
-                                          alpha: isDark ? 0.34 : 0.54,
-                                        ),
-                                        veilColor.withValues(
-                                          alpha: isDark ? 0.10 : 0.18,
-                                        ),
-                                        Colors.transparent,
-                                      ],
-                                      stops: const [0.0, 0.34, 0.66, 0.88, 1.0],
+                                child: buildHeroChromeFade(
+                                  child: DecoratedBox(
+                                    key: const ValueKey(
+                                      'ios-hero-bottom-text-scrim',
+                                    ),
+                                    decoration: BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        colors: [
+                                          Colors.transparent,
+                                          veilColor.withValues(
+                                            alpha: isDark ? 0.24 : 0.42,
+                                          ),
+                                          veilColor.withValues(
+                                            alpha: isDark ? 0.18 : 0.34,
+                                          ),
+                                          veilColor.withValues(
+                                            alpha: isDark ? 0.05 : 0.10,
+                                          ),
+                                          Colors.transparent,
+                                        ],
+                                        stops: const [
+                                          0.0,
+                                          0.40,
+                                          0.72,
+                                          0.90,
+                                          1.0,
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -3567,154 +3859,186 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             Positioned(
                               left: horizontalPad + 6,
                               right: horizontalPad + 6,
-                              bottom: featuredList.length > 1 ? 40 : 22,
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.center,
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 9,
-                                      vertical: 3.5,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: isDark
-                                          ? Colors.white.withValues(alpha: 0.16)
-                                          : Colors.white.withValues(alpha: 0.80),
-                                      borderRadius: BorderRadius.circular(999),
-                                      border: Border.all(
-                                        color: isDark
-                                            ? Colors.white.withValues(alpha: 0.22)
-                                            : Colors.black.withValues(alpha: 0.08),
-                                        width: 0.6,
+                              bottom: featuredList.length > 1 ? 30 : 16,
+                              child: buildHeroChromeFade(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 9,
+                                        vertical: 3.5,
                                       ),
-                                    ),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          CupertinoIcons.sparkles,
-                                          color: isDark
-                                              ? const Color(0xFF5AC8FA)
-                                              : palette.accent,
-                                          size: 11,
+                                      decoration: BoxDecoration(
+                                        color: isDark
+                                            ? Colors.white.withValues(
+                                                alpha: 0.16,
+                                              )
+                                            : Colors.white.withValues(
+                                                alpha: 0.82,
+                                              ),
+                                        borderRadius: BorderRadius.circular(
+                                          999,
                                         ),
-                                        const SizedBox(width: 4),
-                                        Flexible(
-                                          child: Text(
-                                            '今日首推 · ${site.name}',
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: primaryInk,
-                                              fontSize: 10.5,
-                                              fontWeight: FontWeight.w600,
+                                        border: Border.all(
+                                          color: isDark
+                                              ? Colors.white.withValues(
+                                                  alpha: 0.22,
+                                                )
+                                              : Colors.black.withValues(
+                                                  alpha: 0.08,
+                                                ),
+                                          width: 0.6,
+                                        ),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(
+                                            CupertinoIcons.sparkles,
+                                            color: isDark
+                                                ? const Color(0xFF5AC8FA)
+                                                : palette.accent,
+                                            size: 11,
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Flexible(
+                                            child: Text(
+                                              '今日首推 · ${site.name}',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: primaryInk,
+                                                fontSize: 10.5,
+                                                fontWeight: FontWeight.w600,
+                                              ),
                                             ),
                                           ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    featured.title,
-                                    maxLines: 2,
-                                    textAlign: TextAlign.center,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: primaryInk,
-                                      fontSize: 25,
-                                      fontWeight: FontWeight.w800,
-                                      letterSpacing: -0.5,
-                                      height: 1.15,
-                                      shadows: isDark
-                                          ? const [
-                                              Shadow(
-                                                color: Color(0x88000000),
-                                                blurRadius: 12,
-                                                offset: Offset(0, 2),
-                                              ),
-                                            ]
-                                          : null,
-                                    ),
-                                  ),
-                                  if (metaParts.isNotEmpty) ...[
-                                    const SizedBox(height: 6),
-                                    Text(
-                                      metaParts.join(' · '),
-                                      maxLines: 1,
-                                      textAlign: TextAlign.center,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: secondaryInk,
-                                        fontSize: 12.5,
-                                        fontWeight: FontWeight.w600,
-                                        letterSpacing: 0.1,
+                                        ],
                                       ),
                                     ),
-                                  ],
-                                  if (infoLine.isNotEmpty) ...[
                                     const SizedBox(height: 6),
                                     Text(
-                                      infoLine,
+                                      featured.title,
                                       maxLines: 2,
                                       textAlign: TextAlign.center,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                        color: bodyInk,
-                                        fontSize: 12,
-                                        height: 1.38,
+                                        color: primaryInk,
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: -0.5,
+                                        height: 1.15,
+                                        shadows: isDark
+                                            ? const [
+                                                Shadow(
+                                                  color: Color(0xA6000000),
+                                                  blurRadius: 14,
+                                                  offset: Offset(0, 2),
+                                                ),
+                                              ]
+                                            : null,
+                                      ),
+                                    ),
+                                    if (metaParts.isNotEmpty) ...[
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        metaParts.join(' · '),
+                                        maxLines: 1,
+                                        textAlign: TextAlign.center,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: secondaryInk,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          letterSpacing: 0.1,
+                                          shadows: isDark
+                                              ? const [
+                                                  Shadow(
+                                                    color: Color(0x88000000),
+                                                    blurRadius: 8,
+                                                  ),
+                                                ]
+                                              : null,
+                                        ),
+                                      ),
+                                    ],
+                                    if (infoLine.isNotEmpty) ...[
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        infoLine,
+                                        maxLines: 1,
+                                        textAlign: TextAlign.center,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: bodyInk,
+                                          fontSize: 11.5,
+                                          height: 1.32,
+                                          shadows: isDark
+                                              ? const [
+                                                  Shadow(
+                                                    color: Color(0x7A000000),
+                                                    blurRadius: 8,
+                                                  ),
+                                                ]
+                                              : null,
+                                        ),
+                                      ),
+                                    ],
+                                    const SizedBox(height: 10),
+                                    ApplePressableScale(
+                                      pressedScale: 0.94,
+                                      onTap: () => _openVideoDetail(
+                                        site,
+                                        featured,
+                                        sourceContext: heroTapCtx,
+                                        sourceRadius: 0.0,
+                                        sourceCardId: heroCardId,
+                                        isFullBleedHero: true,
+                                      ),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 18,
+                                          vertical: 8,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: AppleColors.systemBlue,
+                                          borderRadius: BorderRadius.circular(
+                                            999,
+                                          ),
+                                          boxShadow: const [
+                                            BoxShadow(
+                                              color: Color(0x4D0A84FF),
+                                              blurRadius: 14,
+                                              offset: Offset(0, 4),
+                                            ),
+                                          ],
+                                        ),
+                                        child: const Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              CupertinoIcons.play_fill,
+                                              color: Colors.white,
+                                              size: 12.5,
+                                            ),
+                                            SizedBox(width: 5),
+                                            Text(
+                                              '立即观看',
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w700,
+                                                letterSpacing: -0.1,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
                                       ),
                                     ),
                                   ],
-                                  const SizedBox(height: 12),
-                                  ApplePressableScale(
-                                    pressedScale: 0.94,
-                                    onTap: () => _openVideoDetail(
-                                      site,
-                                      featured,
-                                      sourceContext: heroTapCtx,
-                                      sourceRadius: 24.0,
-                                    ),
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 18,
-                                        vertical: 8,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: AppleColors.systemBlue,
-                                        borderRadius: BorderRadius.circular(999),
-                                        boxShadow: const [
-                                          BoxShadow(
-                                            color: Color(0x4D0A84FF),
-                                            blurRadius: 14,
-                                            offset: Offset(0, 4),
-                                          ),
-                                        ],
-                                      ),
-                                      child: const Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(
-                                            CupertinoIcons.play_fill,
-                                            color: Colors.white,
-                                            size: 12.5,
-                                          ),
-                                          SizedBox(width: 5),
-                                          Text(
-                                            '立即观看',
-                                            style: TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 13,
-                                              fontWeight: FontWeight.w700,
-                                              letterSpacing: -0.1,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                                ],
+                                ),
                               ),
                             ),
                           ],
@@ -3733,7 +4057,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 top: topSafePad + 6 - overscroll * 0.82,
                 left: horizontalPad,
                 right: horizontalPad,
-                child: headerOverlay,
+                child: buildHeroChromeFade(child: headerOverlay),
               ),
 
               // 4. Translucent pull-to-refresh pill while pulling/refreshing
@@ -3797,26 +4121,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 Positioned(
                   left: 0,
                   right: 0,
-                  bottom: 16,
+                  bottom: 12,
                   child: IgnorePointer(
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        for (int i = 0; i < featuredList.length; i++)
-                          AnimatedContainer(
-                            duration: const Duration(milliseconds: 220),
-                            curve: Curves.easeOutCubic,
-                            margin: const EdgeInsets.symmetric(horizontal: 3),
-                            width: i == activeIdx ? 18 : 5.5,
-                            height: 5.5,
-                            decoration: BoxDecoration(
-                              color: i == activeIdx
-                                  ? primaryInk
-                                  : primaryInk.withValues(alpha: 0.30),
-                              borderRadius: BorderRadius.circular(999),
+                    child: buildHeroChromeFade(
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          for (int i = 0; i < featuredList.length; i++)
+                            AnimatedContainer(
+                              duration: const Duration(milliseconds: 220),
+                              curve: Curves.easeOutCubic,
+                              margin: const EdgeInsets.symmetric(horizontal: 3),
+                              width: i == activeIdx ? 18 : 5.5,
+                              height: 5.5,
+                              decoration: BoxDecoration(
+                                color: i == activeIdx
+                                    ? primaryInk
+                                    : primaryInk.withValues(alpha: 0.30),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -4142,10 +4468,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final infoLine = featured.description.trim().isNotEmpty
         ? featured.description.trim()
         : (featured.actor.trim().isNotEmpty ? '主演：${featured.actor.trim()}' : '');
+    final cardId =
+        'hero_showcase_${site.key}_${featured.id.isNotEmpty ? featured.id : featured.title}';
+    BuildContext? posterCtx;
+    void openShowcase() => _openVideoDetail(
+          site,
+          featured,
+          sourceContext: posterCtx ?? context,
+          sourceRadius: 18.0,
+          sourceCardId: cardId,
+        );
     return ApplePressableScale(
       pressedScale: 0.965,
       pressedOpacity: 0.92,
-      onTap: () => _openVideoDetail(site, featured),
+      onTap: openShowcase,
       child: SizedBox(
         height: wide ? 256 : 212,
         child: AppleSmoothClipCard(
@@ -4224,25 +4560,40 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   children: [
                     AspectRatio(
                       aspectRatio: 2 / 3,
-                      child: AppleSmoothClipCard(
-                        borderRadius: 18,
-                        backgroundColor: isDark
-                            ? const Color(0xFF1A1A20)
-                            : const Color(0xFFE3E7F0),
-                        rimStrength: isDark ? 0.88 : 0.35,
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: isDark ? 0.28 : 0.16),
-                            blurRadius: 14,
-                            offset: const Offset(0, 6),
-                          ),
-                        ],
-                        child: PosterImage(
-                          url: featured.poster,
-                          title: featured.title,
-                          year: featured.year,
-                          highRes: true,
-                          placeholder: _buildPosterPlaceholder(),
+                      child: PosterExpandSourceCard(
+                        cardId: cardId,
+                        child: Builder(
+                          builder: (ctx) {
+                            posterCtx = ctx;
+                            return AppleSmoothClipCard(
+                              borderRadius: 18,
+                              backgroundColor: isDark
+                                  ? const Color(0xFF1A1A20)
+                                  : const Color(0xFFE3E7F0),
+                              rimStrength: isDark ? 0.88 : 0.35,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(
+                                    alpha: isDark ? 0.28 : 0.16,
+                                  ),
+                                  blurRadius: 14,
+                                  offset: const Offset(0, 6),
+                                ),
+                              ],
+                              child: PosterImage(
+                                url: featured.poster,
+                                title: site.isEffectivelyPrivate
+                                    ? ''
+                                    : featured.title,
+                                year: site.isEffectivelyPrivate
+                                    ? ''
+                                    : featured.year,
+                                highRes: true,
+                                strictHighRes: true,
+                                placeholder: _buildPosterPlaceholder(),
+                              ),
+                            );
+                          },
                         ),
                       ),
                     ),
@@ -4372,7 +4723,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 icon: CupertinoIcons.play_fill,
                                 primary: true,
                                 compact: true,
-                                onPressed: () => _openVideoDetail(site, featured),
+                                onPressed: openShowcase,
                               ),
                             ],
                           ),
@@ -4701,47 +5052,57 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final isDark = palette.isDark;
     final resolvedPoster = _resolveHistoryPoster(entry);
     final pct = (entry.progressFraction * 100).round();
+    final cwCardId = 'cw_${entry.site}_${entry.id}';
+    BuildContext? posterCtx;
     final innerRow = SizedBox(
       width: 228,
       child: Row(
         children: [
-          SizedBox(
-            width: 52,
-            height: 72,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(11),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  PosterImage(
-                    url: resolvedPoster,
-                    title: entry.title,
-                    placeholder: _buildPosterPlaceholder(),
-                  ),
-                  Positioned(
-                    right: 4,
-                    bottom: 4,
-                    child: Container(
-                      width: 18,
-                      height: 18,
-                      decoration: BoxDecoration(
-                        color: const Color(0xB8000000),
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: const Color(0x66FFFFFF),
-                          width: 0.6,
+          PosterExpandSourceCard(
+            cardId: cwCardId,
+            child: Builder(
+              builder: (ctx) {
+                posterCtx = ctx;
+                return SizedBox(
+                  width: 52,
+                  height: 72,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(11),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        PosterImage(
+                          url: resolvedPoster,
+                          title: entry.title,
+                          placeholder: _buildPosterPlaceholder(),
                         ),
-                      ),
-                      alignment: Alignment.center,
-                      child: const Icon(
-                        CupertinoIcons.play_fill,
-                        color: Colors.white,
-                        size: 9.5,
-                      ),
+                        Positioned(
+                          right: 4,
+                          bottom: 4,
+                          child: Container(
+                            width: 18,
+                            height: 18,
+                            decoration: BoxDecoration(
+                              color: const Color(0xB8000000),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: const Color(0x66FFFFFF),
+                                width: 0.6,
+                              ),
+                            ),
+                            alignment: Alignment.center,
+                            child: const Icon(
+                              CupertinoIcons.play_fill,
+                              color: Colors.white,
+                              size: 9.5,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ],
-              ),
+                );
+              },
             ),
           ),
           const SizedBox(width: 11),
@@ -4802,6 +5163,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         videoId: entry.id,
         title: entry.title,
         poster: resolvedPoster,
+        sourceContext: posterCtx ?? context,
+        sourceRadius: 11.0,
+        sourceCardId: cwCardId,
       ),
       child: isDark
           ? AppleGlassSurface(
@@ -5058,23 +5422,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     CmsVideo video, {
     String? badge,
     VoidCallback? onTap,
+    String cardIdPrefix = 'vcard',
+    void Function(BuildContext posterContext, double radius, String cardId)?
+        onTapWithSource,
   }) {
     final cardKey =
-        'vcard_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_${badge ?? ""}';
+        '${cardIdPrefix}_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_${badge ?? ""}';
     BuildContext? posterCtx;
     return RepaintBoundary(
       key: ValueKey(cardKey),
       child: ApplePressableScale(
         pressedScale: 0.945,
         pressedOpacity: 0.90,
-        onTap: onTap ??
-            () => _openVideoDetail(
-                  site,
-                  video,
-                  sourceContext: posterCtx ?? context,
-                  sourceRadius: 20.0,
-                  sourceCardId: cardKey,
-                ),
+        onTap: onTapWithSource != null
+            ? () => onTapWithSource(posterCtx ?? context, 20.0, cardKey)
+            : (onTap ??
+                () => _openVideoDetail(
+                      site,
+                      video,
+                      sourceContext: posterCtx ?? context,
+                      sourceRadius: 20.0,
+                      sourceCardId: cardKey,
+                    )),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -5272,7 +5641,35 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           },
           onRetryVerifiedSearch: _retryVerifiedSearch,
           onOpenVideoDetail: _openVideoDetail,
+          onOpenVideoDetailFromCard: (
+            site,
+            video, {
+            sourceContext,
+            sourceRadius = 14.0,
+            sourceCardId,
+          }) =>
+              _openVideoDetail(
+            site,
+            video,
+            sourceContext: sourceContext,
+            sourceRadius: sourceRadius,
+            sourceCardId: sourceCardId,
+          ),
           buildVideoCard: _buildVideoCard,
+          buildVideoCardWithSource: (
+            site,
+            video, {
+            badge,
+            cardIdPrefix = 'search_card',
+            onTapWithSource,
+          }) =>
+              _buildVideoCard(
+            site,
+            video,
+            badge: badge,
+            cardIdPrefix: cardIdPrefix,
+            onTapWithSource: onTapWithSource,
+          ),
         ),
       ),
     );
@@ -6182,13 +6579,26 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ),
                 const SizedBox(height: 18),
-                AppleCapsuleButton(
-                  label: '导入 M3U / 直播订阅',
-                  icon: CupertinoIcons.add,
-                  primary: true,
-                  compact: true,
-                  onPressed: () =>
-                      _showImportConfigDialog(initialGroup: '电视直播'),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    AppleCapsuleButton(
+                      label: '独立导入直播源',
+                      icon: CupertinoIcons.add,
+                      primary: true,
+                      compact: true,
+                      onPressed: () => _showStandaloneLiveImportSheet(),
+                    ),
+                    AppleCapsuleButton(
+                      label: '从订阅配置导入',
+                      icon: CupertinoIcons.cloud_download,
+                      compact: true,
+                      onPressed: () =>
+                          _showImportConfigDialog(initialGroup: '电视直播'),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -6197,18 +6607,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
     }
 
-    final totalChannelCount = _liveGroups.fold<int>(
+    final displayGroups = _displayLiveGroups;
+    final hasFailedGroup = _liveGroups.any(
+      (g) => g.name == LiveChannelOrganizer.failedGroupName,
+    );
+    final totalChannelCount = displayGroups.fold<int>(
       0,
       (sum, g) => sum + g.channels.length,
     );
-    final safeGroupIdx = _liveGroups.isEmpty
+    final safeGroupIdx = displayGroups.isEmpty
         ? -1
-        : (_selectedLiveGroup >= _liveGroups.length ? 0 : _selectedLiveGroup);
+        : (_selectedLiveGroup >= displayGroups.length ? 0 : _selectedLiveGroup);
     final queryLower = _liveSearchQuery.trim().toLowerCase();
 
     final visibleChannels = <LiveChannel>[];
     if (queryLower.isNotEmpty) {
-      for (final g in _liveGroups) {
+      for (final g in displayGroups) {
         for (final ch in g.channels) {
           if (ch.name.toLowerCase().contains(queryLower) ||
               ch.group.toLowerCase().contains(queryLower)) {
@@ -6217,11 +6631,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         }
       }
     } else if (safeGroupIdx == -1) {
-      for (final g in _liveGroups) {
+      for (final g in displayGroups) {
         visibleChannels.addAll(g.channels);
       }
-    } else if (safeGroupIdx >= 0 && safeGroupIdx < _liveGroups.length) {
-      visibleChannels.addAll(_liveGroups[safeGroupIdx].channels);
+    } else if (safeGroupIdx >= 0 && safeGroupIdx < displayGroups.length) {
+      visibleChannels.addAll(displayGroups[safeGroupIdx].channels);
     }
 
     return SafeArea(
@@ -6303,27 +6717,131 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
             const SizedBox(height: 12),
 
-            // Row 1: Live Subscription Source Pills
-            SizedBox(
-              height: 34,
-              child: DesktopHorizontalScroller(
-                controller: _liveSourcesScrollController,
-                child: ListView.separated(
-                  controller: _liveSourcesScrollController,
-                  scrollDirection: Axis.horizontal,
-                  itemCount: lives.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 8),
-                  itemBuilder: (ctx, i) => _buildCategoryPill(
-                    label: lives[i].name,
-                    selected: i == _selectedLiveSource,
-                    onTap: () => _loadLivePlaylist(i),
+            // Row 1: Live Subscription Source Pills + Standalone Import / Probe Actions
+            Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 34,
+                    child: DesktopHorizontalScroller(
+                      controller: _liveSourcesScrollController,
+                      child: ListView.separated(
+                        controller: _liveSourcesScrollController,
+                        scrollDirection: Axis.horizontal,
+                        itemCount: lives.length,
+                        separatorBuilder: (_, __) => const SizedBox(width: 8),
+                        itemBuilder: (ctx, i) => _buildCategoryPill(
+                          label: lives[i].name,
+                          selected: i == _selectedLiveSource,
+                          onTap: () => _loadLivePlaylist(i),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                _buildLiveToolbarAction(
+                  icon: CupertinoIcons.add,
+                  label: '导入',
+                  onTap: () => _showStandaloneLiveImportSheet(),
+                ),
+                if (widget.storage.getStandaloneLiveSources().isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  _buildLiveToolbarAction(
+                    icon: CupertinoIcons.slider_horizontal_3,
+                    label: '管理',
+                    onTap: _showLiveSourceManagerSheet,
+                  ),
+                ],
+                if (!_liveLoading && _liveGroups.isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  _buildLiveToolbarAction(
+                    icon: _liveProbing
+                        ? CupertinoIcons.stop_circle
+                        : CupertinoIcons.speedometer,
+                    label: _liveProbing ? '停止' : '测速归类',
+                    highlighted: _liveProbing,
+                    onTap: _probeCurrentLiveGroups,
+                  ),
+                ],
+                if (hasFailedGroup) ...[
+                  const SizedBox(width: 6),
+                  _buildLiveToolbarAction(
+                    icon: _liveHideUnreachable
+                        ? CupertinoIcons.eye_slash_fill
+                        : CupertinoIcons.eye,
+                    label: _liveHideUnreachable ? '已隐失效' : '隐失效',
+                    highlighted: _liveHideUnreachable,
+                    onTap: () {
+                      final next = !_liveHideUnreachable;
+                      unawaited(widget.storage.setLiveHideUnreachable(next));
+                      setState(() {
+                        _liveHideUnreachable = next;
+                        if (_selectedLiveGroup >= _displayLiveGroups.length) {
+                          _selectedLiveGroup = 0;
+                        }
+                      });
+                    },
+                  ),
+                ],
+              ],
             ),
 
+            if (_liveProbing && _liveProbeProgress != null) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 7,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0x220A84FF),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: const Color(0x550A84FF),
+                    width: 0.6,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const CupertinoActivityIndicator(radius: 7),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '正在检测通畅度 ${_liveProbeProgress!.completedChannels}/${_liveProbeProgress!.totalChannels} · 通畅 ${_liveProbeProgress!.reachableChannels} · 失效 ${_liveProbeProgress!.unreachableChannels}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelPrimary,
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: LinearProgressIndicator(
+                        value: _liveProbeProgress!.fraction,
+                        minHeight: 3,
+                        backgroundColor: const Color(0x28FFFFFF),
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                          Color(0xFF34D399),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
             // Row 2: Channel Group Pills (`全部` + each group)
-            if (!_liveLoading && _liveError == null && _liveGroups.isNotEmpty) ...[
+            if (!_liveLoading && _liveError == null && displayGroups.isNotEmpty) ...[
               const SizedBox(height: 9),
               SizedBox(
                 height: 32,
@@ -6332,7 +6850,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   child: ListView.separated(
                     controller: _liveGroupsScrollController,
                     scrollDirection: Axis.horizontal,
-                    itemCount: _liveGroups.length + 1,
+                    itemCount: displayGroups.length + 1,
                     separatorBuilder: (_, __) => const SizedBox(width: 7),
                     itemBuilder: (ctx, idx) {
                     if (idx == 0) {
@@ -6351,7 +6869,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       );
                     }
                     final gIdx = idx - 1;
-                    final g = _liveGroups[gIdx];
+                    final g = displayGroups[gIdx];
                     final isSelected =
                         queryLower.isEmpty && safeGroupIdx == gIdx;
                     return _buildCategoryPill(
@@ -6501,6 +7019,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ),
       ],
     );
+    final catalogGroups = _displayLiveGroups;
     if (OhosRuntime.isOhos) {
       Navigator.of(context).push(
         buildApplePageRoute<void>(
@@ -6511,6 +7030,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             initialEpisodeIndex: lineIdx.clamp(0, ch.urls.length - 1),
             storage: widget.storage,
             isLive: true,
+            liveGroups: catalogGroups,
+            initialLiveChannel: ch,
           ),
         ),
       );
@@ -6526,6 +7047,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             initialEpisodeIndex: lineIdx.clamp(0, ch.urls.length - 1),
             storage: widget.storage,
             isLive: true,
+            liveGroups: catalogGroups,
+            initialLiveChannel: ch,
           ),
         ),
       );
@@ -6577,7 +7100,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      '线路 ${idx + 1}',
+                      idx < ch.episodes.length && ch.episodes[idx].name.isNotEmpty
+                          ? ch.episodes[idx].name
+                          : '线路 ${idx + 1}',
                       style: TextStyle(
                         color: ApplePalette.of(context).labelPrimary,
                         fontSize: 14,
@@ -6713,11 +7238,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           width: 6,
                           height: 6,
                           decoration: BoxDecoration(
-                            color: Color(0xFF34D399),
+                            color: LiveHealthVisual.dotColor(channel.health),
                             shape: BoxShape.circle,
                           ),
                         ),
-                        SizedBox(width: 5),
+                        const SizedBox(width: 5),
                         Expanded(
                           child: Text(
                             channel.group,
@@ -6730,6 +7255,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             ),
                           ),
                         ),
+                        if (LiveHealthVisual.badgeText(channel) case final String speedLabel) ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 5.5,
+                              vertical: 1.5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: LiveHealthVisual.dotColor(channel.health)
+                                  .withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text(
+                              speedLabel,
+                              style: TextStyle(
+                                color: LiveHealthVisual.dotColor(channel.health),
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 5),
+                        ],
                         if (channel.urls.length > 1)
                           GestureDetector(
                             behavior: HitTestBehavior.opaque,
@@ -6746,7 +7293,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ),
                               child: Text(
                                 '${channel.urls.length}源 ▾',
-                                style: TextStyle(
+                                style: const TextStyle(
                                   color: Color(0xE6FFFFFF),
                                   fontSize: 10,
                                   fontWeight: FontWeight.w600,
@@ -6775,132 +7322,565 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
 
-  Widget _buildLiveChannelBadge(LiveChannel channel) {
-    final name = channel.name.trim();
-    final upper = name.toUpperCase();
-    List<Color> gradientColors;
-    String topLine = '';
-    String mainText = '';
-
-    final cctvMatch =
-        RegExp(r'CCTV[-\s]*(\d+\+?|[A-Z0-9]+)', caseSensitive: false)
-            .firstMatch(upper);
-    if (cctvMatch != null) {
-      gradientColors = const [Color(0xFFE11D48), Color(0xFF9F1239)];
-      topLine = 'CCTV';
-      mainText = cctvMatch.group(1)!;
-    } else if (name.contains('卫视')) {
-      gradientColors = const [Color(0xFFF59E0B), Color(0xFFB45309)];
-      final prefix = name.replaceAll(RegExp(r'卫视.*$'), '').trim();
-      mainText = prefix.length >= 2
-          ? prefix.substring(0, 2)
-          : (prefix.isNotEmpty ? prefix : '卫视');
-      topLine = '卫视';
-    } else if (RegExp(r'翡翠|明珠|凤凰|TVB|无线|莲花|澳视|香港|台湾|纬来|东森')
-        .hasMatch(name)) {
-      gradientColors = const [Color(0xFF10B981), Color(0xFF047857)];
-      if (upper.contains('TVB') || name.contains('翡翠') || name.contains('明珠')) {
-        topLine = 'TVB';
-        mainText = name.contains('明珠') ? '明珠' : '翡翠';
-      } else if (name.contains('凤凰')) {
-        topLine = 'PHOENIX';
-        mainText = '凤凰';
-      } else {
-        mainText = name.length >= 2 ? name.substring(0, 2) : name;
-      }
-    } else if (upper.contains('4K') || upper.contains('8K')) {
-      gradientColors = const [Color(0xFF8B5CF6), Color(0xFF5B21B6)];
-      topLine = 'UHD';
-      mainText = upper.contains('8K') ? '8K' : '4K';
-    } else if (RegExp(r'体育|足球|篮球|赛事|咪咕|CCTV5').hasMatch(name)) {
-      gradientColors = const [Color(0xFF06B6D4), Color(0xFF0E7490)];
-      topLine = 'SPORT';
-      mainText = name.length >= 2 ? name.substring(0, 2) : '体育';
-    } else {
-      gradientColors = const [Color(0xFF3B82F6), Color(0xFF1D4ED8)];
-      final cleaned = name.replaceAll(RegExp(r'[\[\(（【].*?[\]\)）】]'), '').trim();
-      mainText = cleaned.length >= 2
-          ? cleaned.substring(0, 2)
-          : (cleaned.isNotEmpty ? cleaned : 'TV');
-    }
-
-    final fallbackBadge = Container(
-      width: 42,
-      height: 42,
-      decoration: ShapeDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: gradientColors,
-        ),
-        shape: RoundedSuperellipseBorder(
-          borderRadius: BorderRadius.circular(11),
-          side: const BorderSide(
-            color: Color(0x36FFFFFF),
-            width: 0.5,
+  Widget _buildLiveToolbarAction({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    bool highlighted = false,
+  }) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: highlighted
+              ? const Color(0x380A84FF)
+              : const Color(0x1EFFFFFF),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: highlighted
+                ? const Color(0x880A84FF)
+                : const Color(0x2EFFFFFF),
+            width: 0.6,
           ),
         ),
-      ),
-      alignment: Alignment.center,
-      child: topLine.isNotEmpty
-          ? Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  topLine,
-                  maxLines: 1,
-                  style: const TextStyle(
-                    color: Color(0xCCFFFFFF),
-                    fontSize: 8.0,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.3,
-                    height: 1.05,
-                  ),
-                ),
-                const SizedBox(height: 1),
-                Text(
-                  mainText,
-                  maxLines: 1,
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: mainText.length >= 3 ? 11.0 : 12.5,
-                    fontWeight: FontWeight.w900,
-                    height: 1.1,
-                  ),
-                ),
-              ],
-            )
-          : Text(
-              mainText,
-              maxLines: 1,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-                fontWeight: FontWeight.w900,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 13.5,
+              color: highlighted
+                  ? AppleColors.systemBlue
+                  : ApplePalette.of(context).labelPrimary,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: highlighted
+                    ? AppleColors.systemBlue
+                    : ApplePalette.of(context).labelPrimary,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
               ),
             ),
-    );
-
-    if (channel.logo.isNotEmpty) {
-      return SizedBox(
-        width: 42,
-        height: 42,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(11),
-          child: DecoratedBox(
-            decoration: const BoxDecoration(color: Color(0xFF1E202B)),
-            child: PosterImage(
-              url: channel.logo,
-              fit: BoxFit.contain,
-              fadeIn: false,
-              placeholder: fallbackBadge,
-            ),
-          ),
+          ],
         ),
-      );
-    }
-    return fallbackBadge;
+      ),
+    );
   }
+
+  Future<void> _showStandaloneLiveImportSheet({
+    StandaloneLiveSource? editing,
+  }) async {
+    var mode = (editing != null &&
+            editing.url.isEmpty &&
+            editing.inlineContent.isNotEmpty)
+        ? 2
+        : 0; // 0: URL, 1: Local File, 2: Paste Text
+    final nameCtrl = TextEditingController(text: editing?.name ?? '');
+    final urlCtrl = TextEditingController(text: editing?.url ?? '');
+    final textCtrl = TextEditingController(text: editing?.inlineContent ?? '');
+    final uaCtrl = TextEditingController(text: editing?.userAgent ?? '');
+    final logoCtrl = TextEditingController(text: editing?.logoTemplate ?? '');
+    var autoCategorize =
+        editing?.autoCategorize ?? widget.storage.liveAutoCategorize;
+    var autoProbe = true;
+    var pickedFileName = '';
+    var pickedFileContent = editing?.inlineContent ?? '';
+    String? errorMsg;
+
+    await showAppleModalSheet<void>(
+      context: context,
+      title: editing == null ? '独立导入直播源' : '编辑直播源',
+      maxWidth: 520,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          final palette = ApplePalette.of(ctx);
+          Future<void> pickLocalFile() async {
+            try {
+              final result = await FilePicker.platform.pickFiles(
+                type: FileType.any,
+                withData: true,
+              );
+              if (result == null || result.files.isEmpty) return;
+              final file = result.files.first;
+              String rawText = '';
+              if (file.bytes != null) {
+                if (file.bytes!.length > CmsClient.maxResponseBytes) {
+                  setSheetState(() => errorMsg = '直播源文件超过 6 MB 限制');
+                  return;
+                }
+                rawText = utf8.decode(file.bytes!, allowMalformed: true);
+              } else if (file.path != null && file.path!.isNotEmpty) {
+                final ioFile = File(file.path!);
+                if (await ioFile.length() > CmsClient.maxResponseBytes) {
+                  setSheetState(() => errorMsg = '直播源文件超过 6 MB 限制');
+                  return;
+                }
+                rawText = await ioFile.readAsString();
+              }
+              if (rawText.trim().isEmpty) {
+                setSheetState(() => errorMsg = '所选直播文件内容为空');
+                return;
+              }
+              setSheetState(() {
+                pickedFileName = file.name;
+                pickedFileContent = rawText;
+                errorMsg = null;
+                if (nameCtrl.text.trim().isEmpty) {
+                  nameCtrl.text = file.name.replaceAll(
+                    RegExp(r'\.(?:m3u8?|txt|json)$', caseSensitive: false),
+                    '',
+                  );
+                }
+              });
+            } catch (e) {
+              setSheetState(() => errorMsg = '读取文件失败：$e');
+            }
+          }
+
+          Future<void> submit() async {
+            final url = mode == 0 ? urlCtrl.text.trim() : '';
+            final inline = mode == 1
+                ? pickedFileContent.trim()
+                : (mode == 2 ? textCtrl.text.trim() : '');
+            if (mode == 0) {
+              final parsed = Uri.tryParse(url);
+              if (parsed == null ||
+                  !const {'http', 'https'}.contains(parsed.scheme.toLowerCase()) ||
+                  parsed.host.isEmpty) {
+                setSheetState(() => errorMsg = '请输入有效的 HTTP / HTTPS 直播源地址');
+                return;
+              }
+            } else if (inline.isEmpty) {
+              setSheetState(
+                () => errorMsg =
+                    mode == 1 ? '请先选择一个 M3U / TXT 直播文件' : '请粘贴 M3U 或 TXT 直播列表内容',
+              );
+              return;
+            }
+            if (inline.isNotEmpty) {
+              try {
+                final preview = CmsParser.parseLivePlaylist(inline);
+                if (preview.isEmpty) {
+                  setSheetState(() => errorMsg = '未在内容中解析出有效直播频道');
+                  return;
+                }
+              } catch (e) {
+                setSheetState(() => errorMsg = '解析直播内容失败：$e');
+                return;
+              }
+            }
+            var finalName = nameCtrl.text.trim();
+            if (finalName.isEmpty) {
+              if (url.isNotEmpty) {
+                final uri = Uri.tryParse(url);
+                final seg = uri != null && uri.pathSegments.isNotEmpty
+                    ? uri.pathSegments.last
+                    : (uri?.host ?? '自建直播源');
+                finalName = seg.replaceAll(
+                  RegExp(r'\.(?:m3u8?|txt|json)$', caseSensitive: false),
+                  '',
+                );
+                if (finalName.isEmpty) finalName = uri?.host ?? '自建直播源';
+              } else {
+                finalName = pickedFileName.isNotEmpty ? pickedFileName : '自建直播源';
+              }
+            }
+            final saved = await widget.storage.upsertStandaloneLiveSource(
+              StandaloneLiveSource(
+                id: editing?.id ?? '',
+                name: finalName,
+                url: url,
+                inlineContent: inline,
+                userAgent: uaCtrl.text.trim(),
+                logoTemplate: logoCtrl.text.trim(),
+                autoCategorize: autoCategorize,
+                enabled: true,
+              ),
+            );
+            await widget.storage.clearLiveSnapshot(saved.toLiveSource());
+            if (ctx.mounted) Navigator.of(ctx).pop();
+            if (!mounted) return;
+            _reloadSavedConfig(bypassHomeSnapshot: true);
+            final lives = _visibleLives;
+            final targetIdx = lives.indexWhere(
+              (l) => l.subscriptionId == 'standalone_live:${saved.id}',
+            );
+            if (targetIdx >= 0) {
+              unawaited(
+                _loadLivePlaylist(
+                  targetIdx,
+                  forceRefresh: true,
+                  autoProbeAfterLoad: autoProbe,
+                ),
+              );
+            }
+          }
+
+          return SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                CupertinoSlidingSegmentedControl<int>(
+                  groupValue: mode,
+                  children: const {
+                    0: Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 8),
+                      child: Text('网络地址', style: TextStyle(fontSize: 12.5)),
+                    ),
+                    1: Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 8),
+                      child: Text('本地文件', style: TextStyle(fontSize: 12.5)),
+                    ),
+                    2: Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 8),
+                      child: Text('粘贴内容', style: TextStyle(fontSize: 12.5)),
+                    ),
+                  },
+                  onValueChanged: (v) {
+                    if (v != null) {
+                      setSheetState(() {
+                        mode = v;
+                        errorMsg = null;
+                      });
+                    }
+                  },
+                ),
+                const SizedBox(height: 14),
+                CupertinoTextField(
+                  controller: nameCtrl,
+                  placeholder: '直播源名称（可选，默认自动命名）',
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                  style: TextStyle(color: palette.labelPrimary, fontSize: 14),
+                  decoration: BoxDecoration(
+                    color: palette.fill,
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                if (mode == 0)
+                  CupertinoTextField(
+                    controller: urlCtrl,
+                    placeholder: '输入 M3U / M3U8 / TXT 直播源 URL',
+                    keyboardType: TextInputType.url,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    style: TextStyle(color: palette.labelPrimary, fontSize: 14),
+                    decoration: BoxDecoration(
+                      color: palette.fill,
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                  )
+                else if (mode == 1)
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: palette.fill,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            pickedFileName.isNotEmpty
+                                ? '已选择：$pickedFileName'
+                                : '支持导入 .m3u / .m3u8 / .txt / .json 文件',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: palette.labelSecondary,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        AppleCapsuleButton(
+                          label: '选择文件',
+                          icon: CupertinoIcons.doc_text,
+                          compact: true,
+                          onPressed: pickLocalFile,
+                        ),
+                      ],
+                    ),
+                  )
+                else
+                  CupertinoTextField(
+                    controller: textCtrl,
+                    placeholder: '粘贴 #EXTM3U 或 频道名,播放地址 格式内容…',
+                    maxLines: 5,
+                    minLines: 4,
+                    padding: const EdgeInsets.all(12),
+                    style: TextStyle(color: palette.labelPrimary, fontSize: 13),
+                    decoration: BoxDecoration(
+                      color: palette.fill,
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                  ),
+                const SizedBox(height: 10),
+                CupertinoTextField(
+                  controller: uaCtrl,
+                  placeholder: '自定义 User-Agent（可选，默认 okhttp/4.12.0）',
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 9,
+                  ),
+                  style: TextStyle(color: palette.labelPrimary, fontSize: 13),
+                  decoration: BoxDecoration(
+                    color: palette.fill,
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                CupertinoTextField(
+                  controller: logoCtrl,
+                  placeholder: '自定义台标模板（可选，用 {name} 占位频道名）',
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 9,
+                  ),
+                  style: TextStyle(color: palette.labelPrimary, fontSize: 13),
+                  decoration: BoxDecoration(
+                    color: palette.fill,
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '自动智能归类 & 匹配台标',
+                            style: TextStyle(
+                              color: palette.labelPrimary,
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          Text(
+                            '按央视 / 卫视 / 4K / 港澳台 / 体育 / 影视等自动分组并补全品牌台标',
+                            style: TextStyle(
+                              color: palette.labelSecondary,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    CupertinoSwitch(
+                      value: autoCategorize,
+                      onChanged: (v) => setSheetState(() => autoCategorize = v),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '导入后自动检测通畅度并归类',
+                            style: TextStyle(
+                              color: palette.labelPrimary,
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          Text(
+                            '多路信号按延迟优快排序，不可用频道自动归入「失效频道」',
+                            style: TextStyle(
+                              color: palette.labelSecondary,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    CupertinoSwitch(
+                      value: autoProbe,
+                      onChanged: (v) => setSheetState(() => autoProbe = v),
+                    ),
+                  ],
+                ),
+                if (errorMsg != null) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    errorMsg!,
+                    style: const TextStyle(
+                      color: AppleColors.systemRed,
+                      fontSize: 12.5,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                AppleCapsuleButton(
+                  label: editing == null ? '保存并导入直播源' : '保存修改',
+                  icon: CupertinoIcons.checkmark_alt,
+                  primary: true,
+                  onPressed: submit,
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+    nameCtrl.dispose();
+    urlCtrl.dispose();
+    textCtrl.dispose();
+    uaCtrl.dispose();
+    logoCtrl.dispose();
+  }
+
+  void _showLiveSourceManagerSheet() {
+    showAppleModalSheet<void>(
+      context: context,
+      title: '独立直播源管理',
+      maxWidth: 520,
+      trailingAction: CupertinoButton(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        minSize: 28,
+        onPressed: () {
+          Navigator.of(context).pop();
+          unawaited(_showStandaloneLiveImportSheet());
+        },
+        child: const Text(
+          '新增',
+          style: TextStyle(color: AppleColors.systemBlue, fontSize: 13.5),
+        ),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          final items = widget.storage.getStandaloneLiveSources();
+          if (items.isEmpty) {
+            return Padding(
+              padding: const EdgeInsets.all(32),
+              child: Center(
+                child: Text(
+                  '暂无独立导入的直播源',
+                  style: TextStyle(
+                    color: ApplePalette.of(ctx).labelSecondary,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            );
+          }
+          return ListView.separated(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 22),
+            itemCount: items.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            itemBuilder: (_, idx) {
+              final item = items[idx];
+              return Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0x1EFFFFFF),
+                  borderRadius: BorderRadius.circular(13),
+                  border: Border.all(
+                    color: const Color(0x28FFFFFF),
+                    width: 0.6,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            item.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: ApplePalette.of(ctx).labelPrimary,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            item.url.isNotEmpty ? item.url : '本地/粘贴直播列表',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: ApplePalette.of(ctx).labelSecondary,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      minSize: 28,
+                      onPressed: () {
+                        Navigator.of(ctx).pop();
+                        unawaited(_showStandaloneLiveImportSheet(editing: item));
+                      },
+                      child: const Icon(CupertinoIcons.pencil, size: 17),
+                    ),
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      minSize: 28,
+                      onPressed: () async {
+                        await widget.storage.clearLiveSnapshot(item.toLiveSource());
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                        final lives = _visibleLives;
+                        final i = lives.indexWhere(
+                          (l) => l.subscriptionId == 'standalone_live:${item.id}',
+                        );
+                        if (i >= 0) {
+                          unawaited(_loadLivePlaylist(i, forceRefresh: true));
+                        }
+                      },
+                      child: const Icon(CupertinoIcons.refresh, size: 17),
+                    ),
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      minSize: 28,
+                      onPressed: () async {
+                        await widget.storage.deleteStandaloneLiveSource(item.id);
+                        if (mounted) _reloadSavedConfig(bypassHomeSnapshot: true);
+                        setSheetState(() {});
+                      },
+                      child: const Icon(
+                        CupertinoIcons.trash,
+                        color: AppleColors.systemRed,
+                        size: 17,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildLiveChannelBadge(LiveChannel channel) =>
+      LiveStationBadge(channel: channel);
   void _showWatchHistorySheet() {
     if (_privateSessionUnlocked) return;
     showAppleModalSheet<void>(
@@ -7213,12 +8193,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 poster: fav.poster,
                                 remarks: fav.remarks,
                               ),
-                              onTap: () => _openSyncedMediaEntry(
+                              cardIdPrefix: 'fav_$i',
+                              onTapWithSource: (posterCtx, radius, cardId) =>
+                                  _openSyncedMediaEntry(
                                 siteKey: fav.site,
                                 videoId: fav.id,
                                 title: fav.title,
                                 poster: fav.poster,
                                 remarks: fav.remarks,
+                                sourceContext: posterCtx,
+                                sourceRadius: radius,
+                                sourceCardId: cardId,
                               ),
                             );
                             return (matched != null && !matched.supported)
@@ -7291,15 +8276,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 }
                                 final h = history[idx - 1];
                                 final resolvedPoster = _resolveHistoryPoster(h);
+                                final histCardId =
+                                    'lib_hist_${h.site}_${h.id}_$idx';
                                 return _SwipeToDeleteHistoryTile(
                                   key: ValueKey('lib_hist_${h.site}_${h.id}'),
                                   entry: h,
                                   posterUrl: resolvedPoster,
+                                  sourceCardId: histCardId,
                                   onTap: () => _openSyncedMediaEntry(
                                     siteKey: h.site,
                                     videoId: h.id,
                                     title: h.title,
                                     poster: resolvedPoster,
+                                  ),
+                                  onTapWithSource: (posterCtx, radius, cardId) =>
+                                      _openSyncedMediaEntry(
+                                    siteKey: h.site,
+                                    videoId: h.id,
+                                    title: h.title,
+                                    poster: resolvedPoster,
+                                    sourceContext: posterCtx,
+                                    sourceRadius: radius,
+                                    sourceCardId: cardId,
                                   ),
                                   onDelete: () async {
                                     await widget.storage.removeWatchHistoryItem(
@@ -13867,14 +14865,19 @@ class _IosBackupRestorePanelState extends State<_IosBackupRestorePanel> {
 class _SwipeToDeleteHistoryTile extends StatefulWidget {
   final WatchHistoryEntry entry;
   final String? posterUrl;
+  final String? sourceCardId;
   final VoidCallback onTap;
+  final void Function(BuildContext posterContext, double radius, String cardId)?
+      onTapWithSource;
   final VoidCallback onDelete;
 
   const _SwipeToDeleteHistoryTile({
     super.key,
     required this.entry,
     this.posterUrl,
+    this.sourceCardId,
     required this.onTap,
+    this.onTapWithSource,
     required this.onDelete,
   });
 
@@ -13947,6 +14950,8 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
     final epLabel = h.episode.isEmpty ? '第 ${h.index + 1} 集' : h.episode;
     final revealProgress = (-_dragOffset / _actionWidth).clamp(0.0, 1.0);
     final showDeleteBg = _dragOffset < -0.5;
+    final tileCardId = widget.sourceCardId ?? 'hist_${h.site}_${h.id}';
+    BuildContext? posterCtx;
     return RepaintBoundary(
       child: ClipRRect(
         borderRadius: BorderRadius.circular(18),
@@ -14029,7 +15034,12 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                       _closeIfOpen();
                       return;
                     }
-                    widget.onTap();
+                    final withSource = widget.onTapWithSource;
+                    if (withSource != null) {
+                      withSource(posterCtx ?? context, 12.0, tileCardId);
+                    } else {
+                      widget.onTap();
+                    }
                   },
                   child: AppleSettingsGlassCard(
                     borderRadius: BorderRadius.circular(18),
@@ -14039,46 +15049,54 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                     ),
                     child: Row(
                       children: [
-                        SizedBox(
-                          width: 52,
-                          height: 72,
-                          child: AppleSmoothClipCard(
-                            borderRadius: 12,
-                            backgroundColor: const Color(0xFF1A1A20),
-                            rimStrength: 0.85,
-                            child: Stack(
-                              fit: StackFit.expand,
-                              children: [
-                                PosterImage(
-                                  url: effectivePoster,
-                                  title: h.title,
-                                  placeholder:
-                                      _buildFallbackPosterPlaceholder(),
-                                ),
-                                Positioned(
-                                  right: 4,
-                                  bottom: 4,
-                                  child: Container(
-                                    width: 18,
-                                    height: 18,
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xB8000000),
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                        color: const Color(0x66FFFFFF),
-                                        width: 0.6,
+                        PosterExpandSourceCard(
+                          cardId: tileCardId,
+                          child: Builder(
+                            builder: (ctx) {
+                              posterCtx = ctx;
+                              return SizedBox(
+                                width: 52,
+                                height: 72,
+                                child: AppleSmoothClipCard(
+                                  borderRadius: 12,
+                                  backgroundColor: const Color(0xFF1A1A20),
+                                  rimStrength: 0.85,
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      PosterImage(
+                                        url: effectivePoster,
+                                        title: h.title,
+                                        placeholder:
+                                            _buildFallbackPosterPlaceholder(),
                                       ),
-                                    ),
-                                    alignment: Alignment.center,
-                                    child: const Icon(
-                                      CupertinoIcons.play_fill,
-                                      color: Colors.white,
-                                      size: 9.5,
-                                    ),
+                                      Positioned(
+                                        right: 4,
+                                        bottom: 4,
+                                        child: Container(
+                                          width: 18,
+                                          height: 18,
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xB8000000),
+                                            shape: BoxShape.circle,
+                                            border: Border.all(
+                                              color: const Color(0x66FFFFFF),
+                                              width: 0.6,
+                                            ),
+                                          ),
+                                          alignment: Alignment.center,
+                                          child: const Icon(
+                                            CupertinoIcons.play_fill,
+                                            color: Colors.white,
+                                            size: 9.5,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                              ],
-                            ),
+                              );
+                            },
                           ),
                         ),
                         SizedBox(width: 13),

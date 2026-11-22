@@ -373,4 +373,70 @@ void main() {
       await lease.close();
     }
   });
+
+  test(
+      'preserves Quark __pus/__puus cookies across proxy and CDN redirects while stripping Authorization and portal cookies',
+      () async {
+    final seen = <Uri, Map<String, String>>{};
+    final lease = await LocalMediaLease.open(
+      target: Uri.parse('https://gateway.example/proxy?do=quark&fid=1'),
+      headers: const {
+        'Cookie': '__pus=pus_abc; __puus=puus_xyz; portal_session=secret',
+        'Authorization': 'Bearer gateway-secret',
+        'Referer': 'https://pan.quark.cn/',
+        'User-Agent': 'QuarkPlayer/1.0',
+      },
+      isCancelled: () => false,
+      client: MockClient((request) async {
+        seen[request.url] = Map.fromEntries(
+          request.headers.entries.map((e) => MapEntry(e.key.toLowerCase(), e.value)),
+        );
+        if (request.url.host == 'gateway.example') {
+          return http.Response(
+            '',
+            302,
+            headers: {'location': 'https://drive.quark.cn/file/chunk.mkv'},
+          );
+        }
+        if (request.url.host == 'drive.quark.cn') {
+          return http.Response(
+            '',
+            302,
+            headers: {'location': 'https://drive-pc.quark.cn/edge/chunk.mkv'},
+          );
+        }
+        if (request.url.host == 'drive-pc.quark.cn') {
+          return http.Response.bytes(
+            const [0x1A, 0x45, 0xDF, 0xA3],
+            206,
+            headers: {
+              'content-type': 'video/x-matroska',
+              'content-range': 'bytes 0-3/4',
+            },
+          );
+        }
+        return http.Response('missing', 404);
+      }),
+    );
+
+    try {
+      final res = await http.get(lease.url, headers: const {'Range': 'bytes=0-3'});
+      expect(res.statusCode, 206);
+      expect(res.bodyBytes, const [0x1A, 0x45, 0xDF, 0xA3]);
+
+      for (final target in [
+        Uri.parse('https://drive.quark.cn/file/chunk.mkv'),
+        Uri.parse('https://drive-pc.quark.cn/edge/chunk.mkv'),
+      ]) {
+        final h = seen[target]!;
+        expect(h['authorization'], isNull);
+        expect(h['cookie'], contains('__pus=pus_abc'));
+        expect(h['cookie'], contains('__puus=puus_xyz'));
+        expect(h['cookie'], isNot(contains('portal_session')));
+        expect(h['referer'], 'https://pan.quark.cn/');
+      }
+    } finally {
+      await lease.close();
+    }
+  });
 }

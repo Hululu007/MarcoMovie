@@ -1133,8 +1133,10 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
         _IosDockAction(
           id: 'lines',
           anchorKey: _linesAnchorKey,
-          icon: CupertinoIcons.layers_alt_fill,
-          label: '线路',
+          icon: widget.isLive
+              ? CupertinoIcons.tv_fill
+              : CupertinoIcons.layers_alt_fill,
+          label: widget.isLive ? '频道' : '线路',
           onTap: () => _triggerAnchored(
             _linesAnchorKey,
             widget.onLinesAnchoredTap,

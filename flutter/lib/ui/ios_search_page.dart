@@ -13,6 +13,7 @@ import '../core/storage_service.dart';
 import 'apple_theme.dart';
 import 'desktop_horizontal_scroller.dart';
 import 'ios_liquid_glass.dart';
+import 'poster_expand_route.dart';
 import 'poster_image.dart';
 import 'source_verification_dialog.dart';
 
@@ -444,12 +445,27 @@ class IosGlobalSearchPage extends StatefulWidget {
   final ValueChanged<String> onSiteFilterChanged;
   final Future<void> Function(CmsSite site) onRetryVerifiedSearch;
   final void Function(CmsSite site, CmsVideo video) onOpenVideoDetail;
+  final void Function(
+    CmsSite site,
+    CmsVideo video, {
+    BuildContext? sourceContext,
+    double sourceRadius,
+    String? sourceCardId,
+  })? onOpenVideoDetailFromCard;
   final Widget Function(
     CmsSite site,
     CmsVideo video, {
     String? badge,
     VoidCallback? onTap,
   }) buildVideoCard;
+  final Widget Function(
+    CmsSite site,
+    CmsVideo video, {
+    String? badge,
+    String cardIdPrefix,
+    void Function(BuildContext posterContext, double radius, String cardId)?
+        onTapWithSource,
+  })? buildVideoCardWithSource;
 
   const IosGlobalSearchPage({
     super.key,
@@ -464,7 +480,9 @@ class IosGlobalSearchPage extends StatefulWidget {
     required this.onSiteFilterChanged,
     required this.onRetryVerifiedSearch,
     required this.onOpenVideoDetail,
+    this.onOpenVideoDetailFromCard,
     required this.buildVideoCard,
+    this.buildVideoCardWithSource,
   });
 
   @override
@@ -531,8 +549,25 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
     });
   }
 
-  void _openDetail(CmsSite site, CmsVideo video) {
+  void _openDetail(
+    CmsSite site,
+    CmsVideo video, {
+    BuildContext? sourceContext,
+    double sourceRadius = 14.0,
+    String? sourceCardId,
+  }) {
     FocusScope.of(context).unfocus();
+    final cardOpener = widget.onOpenVideoDetailFromCard;
+    if (cardOpener != null) {
+      cardOpener(
+        site,
+        video,
+        sourceContext: sourceContext,
+        sourceRadius: sourceRadius,
+        sourceCardId: sourceCardId,
+      );
+      return;
+    }
     widget.onOpenVideoDetail(site, video);
   }
 
@@ -1453,6 +1488,22 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                 (ctx, index) {
                   final video = hotVideos[index];
                   final site = snap.activeSite!;
+                  final withSource = widget.buildVideoCardWithSource;
+                  if (withSource != null) {
+                    return withSource(
+                      site,
+                      video,
+                      cardIdPrefix: 'search_hot_$index',
+                      onTapWithSource: (posterCtx, radius, cardId) =>
+                          _openDetail(
+                        site,
+                        video,
+                        sourceContext: posterCtx,
+                        sourceRadius: radius,
+                        sourceCardId: cardId,
+                      ),
+                    );
+                  }
                   return widget.buildVideoCard(
                     site,
                     video,
@@ -1672,6 +1723,7 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
         final expanded = _expandedGroupKeys.contains(group.normalizedKey);
         return _AggregatedSearchCard(
           group: group,
+          cardId: 'search_agg_${group.normalizedKey}_$index',
           isPrivate: isPriv,
           accentColor: accentColor,
           expanded: expanded,
@@ -1684,7 +1736,13 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
               }
             });
           },
-          onOpenMatch: (match) => _openDetail(match.site, match.video),
+          onOpenMatch: (match, posterCtx, radius, cardId) => _openDetail(
+            match.site,
+            match.video,
+            sourceContext: posterCtx,
+            sourceRadius: radius,
+            sourceCardId: cardId,
+          ),
         );
       },
     );
@@ -1717,6 +1775,22 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
       itemCount: results.length,
       itemBuilder: (ctx, i) {
         final (site, video) = results[i];
+        final withSource = widget.buildVideoCardWithSource;
+        if (withSource != null) {
+          return withSource(
+            site,
+            video,
+            badge: widget.sourceLabelOf(site),
+            cardIdPrefix: 'search_grid_$i',
+            onTapWithSource: (posterCtx, radius, cardId) => _openDetail(
+              site,
+              video,
+              sourceContext: posterCtx,
+              sourceRadius: radius,
+              sourceCardId: cardId,
+            ),
+          );
+        }
         return widget.buildVideoCard(
           site,
           video,
@@ -1884,16 +1958,23 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
 
 class _AggregatedSearchCard extends StatelessWidget {
   final AggregatedSearchGroup group;
+  final String cardId;
   final bool isPrivate;
   final Color accentColor;
   final bool expanded;
   final VoidCallback onToggleExpand;
-  final ValueChanged<SearchSourceMatch> onOpenMatch;
+  final void Function(
+    SearchSourceMatch match,
+    BuildContext? posterContext,
+    double radius,
+    String cardId,
+  ) onOpenMatch;
 
   static const int _initialVisiblePills = 6;
 
   const _AggregatedSearchCard({
     required this.group,
+    required this.cardId,
     required this.isPrivate,
     required this.accentColor,
     required this.expanded,
@@ -1914,6 +1995,7 @@ class _AggregatedSearchCard extends StatelessWidget {
         ? group.matches
         : group.matches.take(_initialVisiblePills).toList(growable: false);
     final hiddenCount = group.matches.length - visibleMatches.length;
+    BuildContext? posterCtx;
 
     return RepaintBoundary(
       child: AppleSmoothClipCard(
@@ -1933,13 +2015,21 @@ class _AggregatedSearchCard extends StatelessWidget {
             ApplePressableScale(
               pressedScale: 0.985,
               pressedOpacity: 0.92,
-              onTap: () => onOpenMatch(primary),
+              onTap: () => onOpenMatch(primary, posterCtx, 12.0, cardId),
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _buildPosterThumbnail(context, primary),
+                    PosterExpandSourceCard(
+                      cardId: cardId,
+                      child: Builder(
+                        builder: (ctx) {
+                          posterCtx = ctx;
+                          return _buildPosterThumbnail(ctx, primary);
+                        },
+                      ),
+                    ),
                     SizedBox(width: 12),
                     Expanded(
                       child: Column(
@@ -2075,7 +2165,11 @@ class _AggregatedSearchCard extends StatelessWidget {
                 runSpacing: 7,
                 children: [
                   for (final match in visibleMatches)
-                    _buildSourcePill(context, match),
+                    _buildSourcePill(
+                      context,
+                      match,
+                      onTap: () => onOpenMatch(match, posterCtx, 12.0, cardId),
+                    ),
                   if (hiddenCount > 0)
                     ApplePressableScale(
                       pressedScale: 0.94,
@@ -2217,7 +2311,11 @@ class _AggregatedSearchCard extends StatelessWidget {
     );
   }
 
-  Widget _buildSourcePill(BuildContext context, SearchSourceMatch match) {
+  Widget _buildSourcePill(
+    BuildContext context,
+    SearchSourceMatch match, {
+    required VoidCallback onTap,
+  }) {
     final palette = ApplePalette.of(context);
     final Color bgColor;
     final Color borderColor;
@@ -2249,7 +2347,7 @@ class _AggregatedSearchCard extends StatelessWidget {
 
     return ApplePressableScale(
       pressedScale: 0.93,
-      onTap: () => onOpenMatch(match),
+      onTap: onTap,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 180),
         child: Container(

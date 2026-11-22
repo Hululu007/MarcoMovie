@@ -63,6 +63,10 @@ class StorageService {
   static const String keyDepots = 'saved_depots';
   static const String keyActiveDepotName = 'active_depot_name';
   static const String keySubscriptions = 'saved_subscriptions';
+  static const String keyStandaloneLiveSources = 'standalone_live_sources_v1';
+  static const String keyLiveSnapshotPrefix = 'live_snapshot_cache_v1_';
+  static const String keyLiveAutoCategorize = 'live_auto_categorize_v1';
+  static const String keyLiveHideUnreachable = 'live_hide_unreachable_v1';
   static const String keyPrivacyPassword = 'privacy_password';
   static const String keyWallpaperPreset = 'wallpaper_preset';
   static const String keyAppThemeMode = 'app_theme_mode';
@@ -1843,10 +1847,150 @@ class StorageService {
     _invalidateConfigCache();
   });
 
+  bool get liveAutoCategorize => _prefs.getBool(keyLiveAutoCategorize) ?? true;
+  Future<void> setLiveAutoCategorize(bool value) async {
+    await _prefs.setBool(keyLiveAutoCategorize, value);
+  }
+
+  bool get liveHideUnreachable =>
+      _prefs.getBool(keyLiveHideUnreachable) ?? false;
+  Future<void> setLiveHideUnreachable(bool value) async {
+    await _prefs.setBool(keyLiveHideUnreachable, value);
+  }
+
+  List<StandaloneLiveSource> getStandaloneLiveSources() {
+    final raw = _prefs.getString(keyStandaloneLiveSources);
+    if (raw == null || raw.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      final list = <StandaloneLiveSource>[];
+      for (final item in decoded) {
+        final parsed = StandaloneLiveSource.fromJson(item);
+        if (parsed != null) list.add(parsed);
+      }
+      return list;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  StandaloneLiveSource? findStandaloneLiveSourceForLive(LiveSource live) {
+    const prefix = 'standalone_live:';
+    if (!live.subscriptionId.startsWith(prefix)) return null;
+    final id = live.subscriptionId.substring(prefix.length);
+    for (final s in getStandaloneLiveSources()) {
+      if (s.id == id) return s;
+    }
+    return null;
+  }
+
+  Future<StandaloneLiveSource> upsertStandaloneLiveSource(
+    StandaloneLiveSource source,
+  ) async {
+    final current = List<StandaloneLiveSource>.of(getStandaloneLiveSources());
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final normalized = source.copyWith(
+      id: source.id.trim().isEmpty
+          ? 'live_${now}_${current.length}'
+          : source.id.trim(),
+      name: source.name.trim().isEmpty ? '自建直播源' : source.name.trim(),
+      updatedAt: now,
+    );
+    final idx = current.indexWhere((s) => s.id == normalized.id);
+    if (idx >= 0) {
+      current[idx] = normalized;
+    } else {
+      current.insert(0, normalized);
+    }
+    await _prefs.setString(
+      keyStandaloneLiveSources,
+      jsonEncode([for (final item in current) item.toJson()]),
+    );
+    _invalidateConfigCache();
+    return normalized;
+  }
+
+  Future<void> deleteStandaloneLiveSource(String id) async {
+    final current = getStandaloneLiveSources();
+    final removed = current.where((s) => s.id == id).toList();
+    final next = current.where((s) => s.id != id).toList();
+    await _prefs.setString(
+      keyStandaloneLiveSources,
+      jsonEncode([for (final item in next) item.toJson()]),
+    );
+    for (final item in removed) {
+      await clearLiveSnapshot(item.toLiveSource());
+    }
+    _invalidateConfigCache();
+  }
+
+  String _liveSnapshotKey(LiveSource source) {
+    final digest = sha256
+        .convert(
+          utf8.encode(
+            '${source.subscriptionId}|${source.name}|${source.url}|${source.inlineContent.length}',
+          ),
+        )
+        .toString()
+        .substring(0, 20);
+    return '$keyLiveSnapshotPrefix$digest';
+  }
+
+  List<LiveGroup>? loadLiveSnapshot(LiveSource source) {
+    final raw = _prefs.getString(_liveSnapshotKey(source));
+    if (raw == null || raw.trim().isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      final groupsRaw = decoded['groups'];
+      if (groupsRaw is! List) return null;
+      final groups = <LiveGroup>[];
+      for (final item in groupsRaw) {
+        final g = LiveGroup.fromJson(item);
+        if (g != null) groups.add(g);
+      }
+      return groups.isEmpty ? null : groups;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveLiveSnapshot(
+    LiveSource source,
+    List<LiveGroup> groups,
+  ) async {
+    if (groups.isEmpty) return;
+    try {
+      final encoded = jsonEncode({
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        'groups': [for (final g in groups) g.toJson()],
+      });
+      if (encoded.length > 2 * 1024 * 1024) return;
+      await _prefs.setString(_liveSnapshotKey(source), encoded);
+    } catch (_) {}
+  }
+
+  Future<void> clearLiveSnapshot(LiveSource source) async {
+    await _prefs.remove(_liveSnapshotKey(source));
+  }
+
   CmsConfig? loadSavedConfig() {
     if (_cachedConfig != null) return _cachedConfig;
+    final standaloneLives = getStandaloneLiveSources()
+        .where((s) => s.enabled)
+        .map((s) => s.toLiveSource())
+        .toList(growable: false);
     final config = _loadImportedConfig();
-    if (config == null) return null;
+    if (config == null) {
+      if (standaloneLives.isEmpty) return null;
+      final standaloneOnly = CmsConfig(
+        sites: const [],
+        lives: standaloneLives,
+      );
+      _cachedConfig = standaloneOnly;
+      return standaloneOnly;
+    }
     final identities = _pickerIdentities(config.sites);
     final rawOverrides = _readSiteOverrides();
     final canonicalOverrides = <String, SiteOverride>{
@@ -1868,7 +2012,7 @@ class StorageService {
     }
     final result = CmsConfig(
       sites: [...sites, ...byId.values],
-      lives: config.lives,
+      lives: [...standaloneLives, ...config.lives],
       depots: config.depots,
       parses: config.parses,
       spider: config.spider,

@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import '../core/models.dart';
 import '../core/quark_drive.dart';
@@ -32,12 +35,71 @@ class _QuarkLibrary extends StatefulWidget {
 }
 
 class _QuarkLibraryState extends State<_QuarkLibrary> {
+  static const double _windowsAutoLoadThreshold = 280.0;
+
   final _folders = <(String, String)>[('0', '全部文件')];
   final _scroll = ScrollController();
   List<CmsVideo> _videos = [];
   int _page = 0, _pages = 1, _request = 0;
   bool _loading = false;
+  bool _autoPagingScheduled = false;
   String _error = '';
+
+  bool get _canWindowsAutoLoadMore =>
+      isWindowsDesktopUi &&
+      !_loading &&
+      !_autoPagingScheduled &&
+      _error.isEmpty &&
+      _page > 0 &&
+      _page < _pages;
+
+  void _scheduleWindowsAutoLoadMore() {
+    if (!_canWindowsAutoLoadMore) return;
+    final expectedRequest = _request;
+    final expectedFolder = _folders.last.$1;
+    _autoPagingScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _autoPagingScheduled = false;
+      if (!mounted ||
+          !_canWindowsAutoLoadMore ||
+          _request != expectedRequest ||
+          _folders.last.$1 != expectedFolder) {
+        return;
+      }
+      unawaited(_load(more: true));
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  bool _handleScrollNotification(ScrollNotification notification) {
+    if (!isWindowsDesktopUi ||
+        notification.depth != 0 ||
+        notification.metrics.axis != Axis.vertical) {
+      return false;
+    }
+    final scrollingDown = switch (notification) {
+      ScrollUpdateNotification(:final scrollDelta) => (scrollDelta ?? 0) > 0,
+      OverscrollNotification(:final overscroll) => overscroll > 0,
+      _ => false,
+    };
+    if (scrollingDown &&
+        notification.metrics.extentAfter < _windowsAutoLoadThreshold) {
+      _scheduleWindowsAutoLoadMore();
+    }
+    return false;
+  }
+
+  void _handlePointerSignal(PointerSignalEvent event) {
+    if (!isWindowsDesktopUi ||
+        event is! PointerScrollEvent ||
+        event.scrollDelta.dy <= 0) {
+      return;
+    }
+    if (!_scroll.hasClients || _scroll.positions.length != 1) return;
+    if (_scroll.position.extentAfter <= _windowsAutoLoadThreshold) {
+      _scheduleWindowsAutoLoadMore();
+    }
+  }
 
   @override
   void initState() {
@@ -140,63 +202,84 @@ class _QuarkLibraryState extends State<_QuarkLibrary> {
           ),
         ),
         Expanded(
-          child: ListView(
-            controller: _scroll,
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-            children: [
-              for (final video in _videos)
-                ListTile(
-                  key: ValueKey(video.id),
-                  leading: Icon(
-                    video.id.startsWith('mmquark://folder?')
-                        ? CupertinoIcons.folder
-                        : CupertinoIcons.play_rectangle,
-                    color: AppleColors.systemBlue,
-                  ),
-                  title: Text(
-                    video.title,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  subtitle: video.remarks.isEmpty ? null : Text(video.remarks),
-                  trailing: const Icon(CupertinoIcons.chevron_right, size: 16),
-                  onTap: () => _open(video),
-                ),
-              if (_loading)
-                const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: CupertinoActivityIndicator(),
-                ),
-              if (_error.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      Text(_error, textAlign: TextAlign.center),
-                      const SizedBox(height: 14),
-                      AppleCapsuleButton(
-                        label: '重试',
-                        compact: true,
-                        onPressed: () =>
-                            _load(more: _page > 0 && _videos.isNotEmpty),
+          child: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerSignal: _handlePointerSignal,
+            child: NotificationListener<ScrollNotification>(
+              onNotification: _handleScrollNotification,
+              child: ListView(
+                controller: _scroll,
+                physics: isWindowsDesktopUi
+                    ? const AlwaysScrollableScrollPhysics()
+                    : null,
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+                children: [
+                  for (final video in _videos)
+                    ListTile(
+                      key: ValueKey(video.id),
+                      leading: Icon(
+                        video.id.startsWith('mmquark://folder?')
+                            ? CupertinoIcons.folder
+                            : CupertinoIcons.play_rectangle,
+                        color: AppleColors.systemBlue,
                       ),
-                    ],
-                  ),
-                ),
-              if (!_loading && _error.isEmpty && _videos.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Text('此文件夹暂无视频或子文件夹', textAlign: TextAlign.center),
-                ),
-              if (!_loading && _error.isEmpty && _page < _pages)
-                Center(
-                  child: AppleCapsuleButton(
-                    label: '加载更多',
-                    compact: true,
-                    onPressed: () => _load(more: true),
-                  ),
-                ),
-            ],
+                      title: Text(
+                        video.title,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: video.remarks.isEmpty
+                          ? null
+                          : Text(video.remarks),
+                      trailing: const Icon(
+                        CupertinoIcons.chevron_right,
+                        size: 16,
+                      ),
+                      onTap: () => _open(video),
+                    ),
+                  if (_loading)
+                    const Padding(
+                      padding: EdgeInsets.all(24),
+                      child: CupertinoActivityIndicator(),
+                    ),
+                  if (_error.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        children: [
+                          Text(_error, textAlign: TextAlign.center),
+                          const SizedBox(height: 14),
+                          AppleCapsuleButton(
+                            label: '重试',
+                            compact: true,
+                            onPressed: () =>
+                                _load(more: _page > 0 && _videos.isNotEmpty),
+                          ),
+                        ],
+                      ),
+                    ),
+                  if (!_loading && _error.isEmpty && _videos.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text(
+                        '此文件夹暂无视频或子文件夹',
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  if (!isWindowsDesktopUi &&
+                      !_loading &&
+                      _error.isEmpty &&
+                      _page < _pages)
+                    Center(
+                      child: AppleCapsuleButton(
+                        label: '加载更多',
+                        compact: true,
+                        onPressed: () => _load(more: true),
+                      ),
+                    ),
+                ],
+              ),
+            ),
           ),
         ),
       ],

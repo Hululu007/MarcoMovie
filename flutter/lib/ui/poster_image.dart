@@ -166,6 +166,7 @@ class PosterLoader {
       LruMap(500);
   static final Map<int, Color> _ambientColorCache = LruMap(500);
   static final Map<int, bool> _hdDimensionCache = LruMap(500);
+  static final Map<int, bool> _heroHdDimensionCache = LruMap(500);
   static final Map<int, bool> _landscapeDimensionCache = LruMap(500);
   static final Map<int, bool> _clearDimensionCache = LruMap(500);
   static int _active = 0;
@@ -224,6 +225,7 @@ class PosterLoader {
     _doubanSubjectIdCache.clear();
     _ambientColorCache.clear();
     _hdDimensionCache.clear();
+    _heroHdDimensionCache.clear();
     _landscapeDimensionCache.clear();
     _clearDimensionCache.clear();
     cacheRevision.value++;
@@ -269,6 +271,9 @@ class PosterLoader {
           .replaceFirst('/m_ratio_poster/', '/l_ratio_poster/')
           .replaceFirst('/view/photo/spic/', '/view/photo/lpic/')
           .replaceFirst('/view/photo/mpic/', '/view/photo/lpic/')
+          .replaceFirst('/view/photo/sqxs/', '/view/photo/l/')
+          .replaceFirst('/view/photo/s/', '/view/photo/l/')
+          .replaceFirst('/view/photo/m/', '/view/photo/l/')
           .replaceFirst('/view/subject/s/', '/view/subject/l/')
           .replaceFirst('/view/subject/m/', '/view/subject/l/');
       if (u.endsWith('.webp')) {
@@ -278,14 +283,37 @@ class PosterLoader {
       if (u.startsWith('http://')) {
         u = u.replaceFirst('http://', 'https://');
       }
-      final atResize = RegExp(r'@\d+w_\d+h.*$').firstMatch(u);
+      final atResize = RegExp(
+        r'@(?:\d+[wh]|[^/?#]+\.(?:webp|jpg|jpeg|png|avif)).*$',
+        caseSensitive: false,
+      ).firstMatch(u);
       if (atResize != null) {
         u = u.substring(0, atResize.start);
       }
-    } else if (u.contains('bkimg.cdn.bcebos.com/pic/')) {
+    } else if (u.contains('bkimg.cdn.bcebos.com/pic/') ||
+        (u.contains('bcebos.com') && u.contains('x-bce-process='))) {
       final qIdx = u.indexOf('?');
       if (qIdx > 0) {
         u = u.substring(0, qIdx);
+      }
+    } else {
+      // Strip unsigned OSS / COS / Qiniu thumbnail resize directives so CMS
+      // CDNs return the original full-resolution poster image.
+      final qIdx = u.indexOf('?');
+      if (qIdx > 0) {
+        final query = u.substring(qIdx + 1);
+        final lowerQ = query.toLowerCase();
+        final isResizeOnly = (lowerQ.contains('x-oss-process=image/resize') ||
+                lowerQ.startsWith('imageview2/') ||
+                lowerQ.startsWith('imagemogr2/')) &&
+            !lowerQ.contains('signature') &&
+            !lowerQ.contains('sign=') &&
+            !lowerQ.contains('token=') &&
+            !lowerQ.contains('expires=') &&
+            !lowerQ.contains('ossaccesskeyid=');
+        if (isResizeOnly) {
+          u = u.substring(0, qIdx);
+        }
       }
     }
     return u;
@@ -307,12 +335,17 @@ class PosterLoader {
         .replaceAll(RegExp(r'第[0-9一二三四五六七八九十百零〇]+[季部集期篇章话]'), '')
         .replaceAll(
           RegExp(
-            r'(?<![A-Za-z0-9])(?:4K|2160[pP]|1080[pP]|720[pP]|HD|BD|HDR|SDR)(?![A-Za-z0-9])',
+            r'(?<![A-Za-z0-9])(?:4K|2160[pP]|1080[pP]|720[pP]|HD|BD|HDR|SDR|TC|TS)(?![A-Za-z0-9])',
             caseSensitive: false,
           ),
           '',
         )
-        .replaceAll(RegExp(r'(?:国语|粤语|中字|双语|超清|蓝光|未删减版?)\s*$'), '')
+        .replaceAll(
+          RegExp(
+            r'[\s·\-—:：]*(?:臻彩|杜比视界|杜比|高码|原盘|国粤双语|国语|粤语|中字|双语|超清|高清|蓝光|未删减版?|完整版?|抢先版?)\s*$',
+          ),
+          '',
+        )
         .replaceAll(RegExp(r'(?:19|20)\d{2}\s*$'), '')
         .trim();
     if (_cleanTitleMemo.length > 1024) {
@@ -817,10 +850,9 @@ class PosterLoader {
   }
 
   /// Decodes the image header to verify whether [bytes] is a true high-definition
-  /// vertical poster (`width >= 560 && height >= 760` or `>= 450K` pixels, or `>= 180KB`).
+  /// vertical poster (`width >= 560 && height >= 760` or `>= 450K` pixels).
   static Future<bool> isTrueHdPoster(Uint8List bytes) async {
     if (bytes.length < 28 * 1024) return false;
-    if (bytes.length >= 220 * 1024) return true;
     final fp = _bytesFingerprint(bytes);
     final cached = _hdDimensionCache[fp];
     if (cached != null) return cached;
@@ -836,10 +868,46 @@ class PosterLoader {
     return fallback;
   }
 
+  /// Strict Retina HD verification for full-bleed iOS/iPadOS Home & Detail hero
+  /// billboards (`width >= 640 && height >= 900` vertical poster, or
+  /// `>= 1200x900` ultra-high-res artwork so vertical cropping remains crisp on
+  /// 3x Retina displays).
+  @visibleForTesting
+  static Future<bool> isHeroHdPoster(Uint8List bytes) async {
+    if (bytes.length < 28 * 1024) return false;
+    final fp = _bytesFingerprint(bytes);
+    final cached = _heroHdDimensionCache[fp];
+    if (cached != null) return cached;
+    final dims = await _decodeDimensions(bytes);
+    if (dims != null) {
+      final isVerticalHeroHd =
+          dims.height >= dims.width * 1.05 &&
+          dims.width >= 640 &&
+          dims.height >= 900;
+      final isUltraHighRes = dims.width >= 1200 && dims.height >= 900;
+      final ok = isVerticalHeroHd || isUltraHighRes;
+      _heroHdDimensionCache[fp] = ok;
+      return ok;
+    }
+    final fallback = bytes.length >= 160 * 1024;
+    _heroHdDimensionCache[fp] = fallback;
+    return fallback;
+  }
+
+  /// Decoded pixel area (`width * height`) helper for preferring higher
+  /// resolution artwork over bloated low-res thumbnails regardless of codec.
+  static Future<int> _decodedPixelCount(Uint8List bytes) async {
+    final dims = await _decodeDimensions(bytes);
+    if (dims != null && dims.width > 0 && dims.height > 0) {
+      return dims.width * dims.height;
+    }
+    return bytes.length;
+  }
+
   /// Synchronously peeks in-memory LRU cache so already-loaded posters render
   /// on the very first frame without any async gap.
   /// When [rawUrl] is a live CMS URL, it is NEVER shadowed by unrelated title-only
-  /// fallback entries.
+  /// fallback entries unless [preferHd] finds a verified `title_hd` entry.
   static Uint8List? peekMemory(
     String rawUrl, {
     String title = '',
@@ -860,6 +928,14 @@ class PosterLoader {
         if (hdUrlHit != null) {
           _memory[hdUrlKey] = hdUrlHit;
           return hdUrlHit;
+        }
+        if (scoped.isNotEmpty) {
+          final hdKey = 'title_hd:$scoped';
+          final hdHit = _memory.remove(hdKey);
+          if (hdHit != null) {
+            _memory[hdKey] = hdHit;
+            return hdHit;
+          }
         }
       }
       final hit = _memory.remove(u);
@@ -901,7 +977,6 @@ class PosterLoader {
         _memory[hdUrlKey] = hdUrlHit;
         return hdUrlHit;
       }
-      return null;
     }
     final clean = _cleanTitle(title);
     final scoped = _scopedTitleToken(clean, _extractTargetYear(title, year));
@@ -954,14 +1029,17 @@ class PosterLoader {
   }
 
   /// Explicitly resolves an official 1080p/2K high-definition domestic poster by
-  /// [rawTitle] (via Bangumi `images.large`, film-verified Baidu Baike raw `bcebos`,
-  /// title-verified Bilibili PGC, and title/year-verified Douban `l_ratio_poster`),
-  /// verifying actual pixel resolution before persisting across memory and disk cache.
+  /// [rawTitle] (via Douban official poster gallery `photos?type=R` &
+  /// `l_ratio_poster`, Bangumi `images.large`, film-verified Baidu Baike raw
+  /// `bcebos`, and title-verified Bilibili PGC, plus strictly-verified Bing
+  /// vertical HD `murl` fallback when [strictHero] is enabled), verifying actual
+  /// decoded pixel dimensions before persisting across memory and disk cache.
   /// Never overwrites the raw CMS URL entry itself.
   static Future<Uint8List> loadHdByTitle(
     String rawTitle, {
     String rawUrl = '',
     String year = '',
+    bool strictHero = false,
   }) {
     final clean = _cleanTitle(rawTitle);
     if (clean.isEmpty) {
@@ -970,14 +1048,44 @@ class PosterLoader {
     final targetYear = _extractTargetYear(rawTitle, year);
     final scoped = _scopedTitleToken(clean, targetYear);
     final hdKey = 'title_hd:$scoped';
+    final inflightKey = strictHero ? 'hero:$scoped' : scoped;
     final hit = _memory[hdKey];
-    if (hit != null && hit.length >= 68 * 1024) {
+    if (hit != null && !strictHero) {
+      final u = upgradeUrlToHd(rawUrl);
+      if (u.isNotEmpty && !_isKnownDeadPosterHost(u)) {
+        _remember('hd_url:$u', hit);
+      }
       return SynchronousFuture<Uint8List>(hit);
     }
-    final pending = _inflightHdTitleBytes[scoped];
+    final pending = _inflightHdTitleBytes[inflightKey];
     if (pending != null) return pending;
 
+    Future<bool> meetsQuality(Uint8List b) =>
+        strictHero ? isHeroHdPoster(b) : isTrueHdPoster(b);
+
+    Future<Uint8List?> fetchCandidate(String candidateUrl) async {
+      if (isPersonOrAvatarImageUrl(candidateUrl)) return null;
+      for (final attempt in _attemptsFor(candidateUrl).take(2)) {
+        try {
+          return await _fetch(
+            attempt.$1,
+            attempt.$2,
+            timeout: const Duration(milliseconds: 3600),
+          );
+        } catch (_) {}
+      }
+      return null;
+    }
+
     final future = () async {
+      if (hit != null && await meetsQuality(hit)) {
+        final u = upgradeUrlToHd(rawUrl);
+        if (u.isNotEmpty && !_isKnownDeadPosterHost(u)) {
+          _remember('hd_url:$u', hit);
+        }
+        return hit;
+      }
+
       // If the CMS provided a valid poster URL, check if its upgraded URL is
       // already a true HD poster first!
       final hasValidCmsUrl =
@@ -985,20 +1093,19 @@ class PosterLoader {
       if (hasValidCmsUrl) {
         final upgradedCms = upgradeUrlToHd(rawUrl);
         final inMemCms = _memory[upgradedCms];
-        if (inMemCms != null && await isTrueHdPoster(inMemCms)) {
+        if (inMemCms != null && await meetsQuality(inMemCms)) {
           await _persistHdResult(scoped, rawUrl, inMemCms);
           return inMemCms;
         }
       }
 
-      // Check disk cache for hdKey and verify pixel dimensions
+      // Check disk cache for hdKey and verify actual decoded pixel dimensions
       final hdDisk = await _diskFileFor(hdKey);
       if (hdDisk != null) {
         try {
           if (await hdDisk.exists()) {
             final diskBytes = await hdDisk.readAsBytes();
-            if (_looksLikeImage(diskBytes) &&
-                await isTrueHdPoster(diskBytes)) {
+            if (_looksLikeImage(diskBytes) && await meetsQuality(diskBytes)) {
               await _persistHdResult(scoped, rawUrl, diskBytes);
               return diskBytes;
             }
@@ -1006,54 +1113,107 @@ class PosterLoader {
         } catch (_) {}
       }
 
-      // Resolve candidate URLs: when CMS already has a valid poster URL, ONLY
-      // allow verified film/TV databases (`verifiedOnly: true`) to upgrade it!
-      final urls = await _resolveCoverUrlsByTitle(
+      // Stage 1: Official verified film/TV poster databases (Douban official
+      // poster gallery + l_ratio_poster, Bangumi, Baidu Baike, Bilibili PGC).
+      final resolvedYear =
+          year.isNotEmpty ? year : (targetYear?.toString() ?? '');
+      final verifiedUrls = await _resolveCoverUrlsByTitle(
         clean,
-        year: year.isNotEmpty ? year : (targetYear?.toString() ?? ''),
+        year: resolvedYear,
         forceRefreshHd: true,
-        verifiedOnly: hasValidCmsUrl,
+        verifiedOnly: true,
+        includeDoubanPosterGallery: strictHero,
       );
+
       Uint8List? bestBytes;
       int bestScore = 0;
 
-      for (final candidateUrl in urls) {
-        if (isPersonOrAvatarImageUrl(candidateUrl)) continue;
-        for (final attempt in _attemptsFor(candidateUrl)) {
-          try {
-            final bytes = await _fetch(
-              attempt.$1,
-              attempt.$2,
-              timeout: const Duration(milliseconds: 3800),
-            );
-            final isTrueHd = await isTrueHdPoster(bytes);
-            final score = bytes.length + (isTrueHd ? 500000 : 0);
+      Future<bool> probeBatch(
+        List<String> urls, {
+        required bool requireHeroHd,
+      }) async {
+        for (int offset = 0; offset < urls.length; offset += 4) {
+          final batch = urls.skip(offset).take(4).toList(growable: false);
+          final fetched = await Future.wait(batch.map(fetchCandidate));
+          for (final bytes in fetched) {
+            if (bytes == null) continue;
+            final dims = await _decodeDimensions(bytes);
+            final isHero = await isHeroHdPoster(bytes);
+            final isTrueHd = isHero || await isTrueHdPoster(bytes);
+            if (requireHeroHd && !isHero) continue;
+            final pixels = dims != null ? (dims.width * dims.height) : bytes.length;
+            final isPortrait = dims != null && dims.height >= dims.width * 1.05;
+            final score = pixels +
+                (isHero ? 3000000 : (isTrueHd ? 800000 : 0)) +
+                (isPortrait ? 400000 : 0);
             if (bestBytes == null || score > bestScore) {
               bestBytes = bytes;
               bestScore = score;
             }
-            if (isTrueHd && bytes.length >= 68 * 1024) {
-              await _persistHdResult(scoped, rawUrl, bytes);
-              return bytes;
+          }
+          if (bestBytes != null) {
+            final bestDims = await _decodeDimensions(bestBytes!);
+            final isSharp = strictHero
+                ? (await isHeroHdPoster(bestBytes!) &&
+                    (bestDims == null ||
+                        (bestDims.width >= 720 && bestDims.height >= 1000)))
+                : await isTrueHdPoster(bestBytes!);
+            if (isSharp) {
+              return true;
             }
-          } catch (_) {}
+          }
+        }
+        return bestBytes != null && await meetsQuality(bestBytes!);
+      }
+
+      if (verifiedUrls.isNotEmpty) {
+        final foundOfficial = await probeBatch(
+          verifiedUrls,
+          requireHeroHd: false,
+        );
+        if (foundOfficial && bestBytes != null) {
+          await _persistHdResult(scoped, rawUrl, bestBytes!);
+          return bestBytes!;
         }
       }
-      if (bestBytes != null && await isTrueHdPoster(bestBytes)) {
-        await _persistHdResult(scoped, rawUrl, bestBytes);
-        return bestBytes;
+
+      // Stage 2: When official DBs didn't yield a crisp HD poster (or when the
+      // CMS poster itself was dead/low-res on a full-bleed hero), query
+      // strictly-verified Bing high-res vertical `murl` posters and accept
+      // ONLY images passing strict caption + true portrait HD verification.
+      if (!hasValidCmsUrl || strictHero) {
+        final bingUrls = await _resolveVerifiedBingVerticalPosterUrls(
+          clean,
+          targetYear: targetYear,
+          strictCaptionOnly: hasValidCmsUrl,
+        );
+        if (bingUrls.isNotEmpty) {
+          await probeBatch(
+            bingUrls,
+            requireHeroHd: strictHero && hasValidCmsUrl,
+          );
+        }
       }
-      if (!hasValidCmsUrl && bestBytes != null && bestBytes.length >= 85 * 1024) {
-        await _persistHdResult(scoped, rawUrl, bestBytes);
-        return bestBytes;
+
+      if (bestBytes != null && await meetsQuality(bestBytes!)) {
+        await _persistHdResult(scoped, rawUrl, bestBytes!);
+        return bestBytes!;
+      }
+      if (bestBytes != null && await isTrueHdPoster(bestBytes!)) {
+        await _persistHdResult(scoped, rawUrl, bestBytes!);
+        return bestBytes!;
+      }
+      if (!hasValidCmsUrl && bestBytes != null && bestBytes!.length >= 85 * 1024) {
+        await _persistHdResult(scoped, rawUrl, bestBytes!);
+        return bestBytes!;
       }
       throw Exception('未找到「$clean」高清封面');
     }()
         .whenComplete(() {
-      _inflightHdTitleBytes.remove(scoped);
+      _inflightHdTitleBytes.remove(inflightKey);
     });
 
-    _inflightHdTitleBytes[scoped] = future;
+    _inflightHdTitleBytes[inflightKey] = future;
     return future;
   }
 
@@ -1610,6 +1770,10 @@ class PosterLoader {
   static int _bytesFingerprint(Uint8List b) {
     if (b.isEmpty) return 0;
     int h = b.length;
+    final headerEnd = b.length < 32 ? b.length : 32;
+    for (int i = 0; i < headerEnd; i++) {
+      h = ((h ^ b[i]) * 0x01000193) & 0x7fffffff;
+    }
     final step = (b.length ~/ 16).clamp(1, 4096);
     for (int i = 0; i < b.length; i += step) {
       h = ((h ^ b[i]) * 0x01000193) & 0x7fffffff;
@@ -2723,6 +2887,7 @@ class PosterLoader {
     String year = '',
     bool forceRefreshHd = false,
     bool verifiedOnly = false,
+    bool includeDoubanPosterGallery = false,
   }) async {
     final targetYear = _extractTargetYear(cleanTitle, year);
     final scopedKey = _scopedTitleToken(cleanTitle, targetYear);
@@ -3044,6 +3209,7 @@ class PosterLoader {
           var rexxarMatchedVariant = false;
           for (final rexxarEndpoint in <String>[
             'https://m.douban.com/rexxar/api/v2/search/weixin?q=${Uri.encodeQueryComponent(variant)}&count=6',
+            'https://m.douban.com/rexxar/api/v2/search/subjects?type=tv&q=${Uri.encodeQueryComponent(variant)}',
             'https://m.douban.com/rexxar/api/v2/search/subjects?type=movie&q=${Uri.encodeQueryComponent(variant)}',
           ]) {
           HttpClientRequest? rexxarReq;
@@ -3128,6 +3294,57 @@ class PosterLoader {
           }
           if (rexxarMatchedVariant) break;
         }
+
+        // Official Douban Poster Gallery (`type=R`): delivers true 1080p/2K
+        // theatrical & TV vertical posters (`image.large.url`) sorted by
+        // highest pixel resolution for full-bleed iOS Hero surfaces.
+        if (includeDoubanPosterGallery || forceRefreshHd) {
+          final subject = _doubanSubjectIdCache[scopedKey];
+          if (subject != null) {
+            final kind = subject.isTv ? 'tv' : 'movie';
+            final galleryBody = await _getRatingTextUrl(
+              Uri.parse(
+                'https://m.douban.com/rexxar/api/v2/$kind/${subject.id}/photos?type=R&start=0&count=6',
+              ),
+              headers: {
+                'User-Agent': _mobileSafariUa,
+                'Referer': 'https://m.douban.com/movie/subject/${subject.id}/',
+                'Cookie': bidCookie,
+                'Accept': 'application/json, text/plain, */*',
+              },
+            );
+            if (galleryBody != null) {
+              try {
+                final decoded = jsonDecode(galleryBody);
+                final photos = decoded is Map ? decoded['photos'] : null;
+                if (photos is List) {
+                  final galleryCandidates = <({String url, int pixels})>[];
+                  for (final p in photos.whereType<Map>()) {
+                    final img = p['image'];
+                    if (img is! Map) continue;
+                    final large = img['large'] ?? img['normal'];
+                    if (large is! Map) continue;
+                    final w = (large['width'] as num?)?.toInt() ?? 0;
+                    final h = (large['height'] as num?)?.toInt() ?? 0;
+                    final u = upgradeUrlToHd((large['url'] ?? '').toString());
+                    if (u.startsWith('http') &&
+                        !isPersonOrAvatarImageUrl(u) &&
+                        (w == 0 || (h >= w * 1.05 && w >= 600 && h >= 840))) {
+                      galleryCandidates.add((url: u, pixels: w * h));
+                    }
+                  }
+                  galleryCandidates.sort((a, b) => b.pixels.compareTo(a.pixels));
+                  // Prepend highest-resolution official gallery posters ahead of covers.
+                  for (final entry in galleryCandidates.reversed) {
+                    if (seen.add(entry.url)) {
+                      primaryHdResults.insert(0, entry.url);
+                    }
+                  }
+                }
+              } catch (_) {}
+            }
+          }
+        }
       }(),
 
       // Source 5: Bing China Original High-Res `murl` Vertical Posters + OIP fallback
@@ -3141,7 +3358,7 @@ class PosterLoader {
               '$primary ${yearToken}电视剧 电影 官方海报 竖版 -节气 -二十四节气 -模板 -素材 -主播',
             );
             final uri = Uri.parse(
-              'https://cn.bing.com/images/async?q=$query&first=0&count=12&qft=+filterui:aspect-tall',
+              'https://cn.bing.com/images/async?q=$query&first=0&count=12&qft=+filterui:aspect-tall+filterui:imagesize-large',
             );
             req = await _client
                 .getUrl(uri)
@@ -3225,6 +3442,116 @@ class PosterLoader {
     return results;
   }
 
+  /// Strict caption verifier for vertical HD poster fallback candidates from
+  /// Bing China so homonym titles never pollute official film/TV hero artwork.
+  @visibleForTesting
+  static bool matchesBingPosterCaption(String rawCap, String cleanTitle) {
+    final cap = rawCap.trim();
+    final title = cleanTitle.trim();
+    if (cap.isEmpty || title.isEmpty) return false;
+    if (_isNonEntertainmentBingCaption(cap)) return false;
+    final stripRe = RegExp(r'[\s·:：\-—_《》「」【】“”"\x27!！?？,，.。]');
+    final normCap = cap.toLowerCase().replaceAll(stripRe, '');
+    final normTitle = title.toLowerCase().replaceAll(stripRe, '');
+    if (normTitle.isEmpty || !normCap.contains(normTitle)) return false;
+    final hasFilmContext = RegExp(
+      r'剧|集|电影|电视|海报|定档|官宣|预告|番|动画|动漫|综|主演|饰|导演|影|片|豆瓣|剧照',
+    ).hasMatch(cap);
+    if (title.length <= 2) {
+      if (!hasFilmContext) return false;
+      final explicitlyQuoted = cap.contains('《$title》') ||
+          cap.contains('「$title」') ||
+          cap.contains('【$title】') ||
+          cap.contains('“$title”');
+      if (!explicitlyQuoted) {
+        final escaped = RegExp.escape(title);
+        final standalone = RegExp(
+          '(?<![\\u4e00-\\u9fff])$escaped(?![\\u4e00-\\u9fff])',
+        ).hasMatch(cap);
+        if (!standalone) return false;
+      }
+    }
+    return hasFilmContext || normTitle.length >= 4;
+  }
+
+  /// Resolves strictly caption-verified high-resolution vertical `murl` poster
+  /// URLs from Bing China (`aspect-tall` + `imagesize-large`) when official
+  /// film/TV databases did not already supply a Retina hero poster.
+  static Future<List<String>> _resolveVerifiedBingVerticalPosterUrls(
+    String cleanTitle, {
+    int? targetYear,
+    required bool strictCaptionOnly,
+  }) async {
+    final variants = _queryVariantsForTitle(cleanTitle);
+    final primary = variants.isNotEmpty ? variants.first : cleanTitle;
+    if (primary.isEmpty) return const [];
+    final yearToken = targetYear != null ? '$targetYear ' : '';
+    final query = Uri.encodeQueryComponent(
+      '"$primary" $yearToken官方海报 竖版 电视剧 电影 -节气 -二十四节气 -模板 -素材 -主播',
+    );
+    final uri = Uri.parse(
+      'https://cn.bing.com/images/async?q=$query&first=0&count=16&qft=+filterui:aspect-tall+filterui:imagesize-large',
+    );
+    final out = <String>[];
+    final seen = <String>{};
+    HttpClientRequest? req;
+    try {
+      req = await _client
+          .getUrl(uri)
+          .timeout(const Duration(milliseconds: 2600));
+      req.headers.set('User-Agent', _desktopChromeUa);
+      req.headers.set('Referer', 'https://cn.bing.com/');
+      req.headers.set(
+        'Accept',
+        'text/html,application/xhtml+xml,*/*;q=0.8',
+      );
+      final resp =
+          await req.close().timeout(const Duration(milliseconds: 2600));
+      if (resp.statusCode >= 200 && resp.statusCode < 300) {
+        final html = await utf8.decoder
+            .bind(resp)
+            .join()
+            .timeout(const Duration(milliseconds: 2600));
+        final cardMatches = RegExp(
+          r'm=(?:"|&quot;)(\{[^"]*?\})(?:"|&quot;)',
+        ).allMatches(html);
+        for (final cm in cardMatches) {
+          final cardJsonAttr = cm.group(1) ?? '';
+          final tMatch = RegExp(
+            r't&quot;:&quot;([^&]{2,100})&quot;',
+          ).firstMatch(cardJsonAttr);
+          final rawCap = (tMatch?.group(1) ?? '').trim();
+          if (_isNonEntertainmentBingCaption(rawCap) ||
+              _isNonEntertainmentBingCaption(cardJsonAttr)) {
+            continue;
+          }
+          if (strictCaptionOnly && !matchesBingPosterCaption(rawCap, cleanTitle)) {
+            continue;
+          }
+          final mm = RegExp(
+            r'murl&quot;:&quot;(https?://[^&"\x27]+?)&quot;',
+          ).firstMatch(cardJsonAttr);
+          if (mm != null) {
+            final hd = upgradeUrlToHd(mm.group(1)!);
+            if (hd.startsWith('http') &&
+                !isPersonOrAvatarImageUrl(hd) &&
+                seen.add(hd)) {
+              out.add(hd);
+              if (out.length >= 6) break;
+            }
+          }
+        }
+      } else {
+        await resp.drain<void>();
+      }
+    } catch (_) {
+      try {
+        req?.abort();
+      } catch (_) {}
+    }
+    return out;
+  }
+
   static Future<void> _acquire() async {
     if (_active < _maxConcurrent) {
       _active++;
@@ -3302,6 +3629,7 @@ class PosterLoader {
         if (value.isNotEmpty && !value.contains('\n')) embedded[name] = value;
       }
     }
+    final originalUrl = url.trim();
     url = upgradeUrlToHd(url);
     final uri = Uri.tryParse(url);
     if (uri == null ||
@@ -3423,6 +3751,15 @@ class PosterLoader {
       'User-Agent': _tvBoxUa,
       'Accept': accept,
     });
+    if (originalUrl.isNotEmpty &&
+        originalUrl != url &&
+        (originalUrl.startsWith('http://') ||
+            originalUrl.startsWith('https://'))) {
+      add(
+        originalUrl,
+        {'User-Agent': _mobileSafariUa, 'Referer': origin, 'Accept': accept},
+      );
+    }
     return attempts;
   }
 
@@ -3614,6 +3951,7 @@ class PosterImage extends StatefulWidget {
   final Widget placeholder;
   final bool fadeIn;
   final bool highRes;
+  final bool strictHighRes;
   final bool forBackdrop;
   final ValueChanged<Uint8List>? onBytesLoaded;
 
@@ -3627,6 +3965,7 @@ class PosterImage extends StatefulWidget {
     this.alignment = Alignment.center,
     this.fadeIn = true,
     this.highRes = false,
+    this.strictHighRes = false,
     this.forBackdrop = false,
     this.onBytesLoaded,
   });
@@ -3639,9 +3978,12 @@ class _PosterImageState extends State<PosterImage>
     with AutomaticKeepAliveClientMixin {
   Uint8List? _bytes;
   bool _loadedSync = false;
+  bool _hasVerifiedHd = false;
   int _retryCount = 0;
   Timer? _retryTimer;
   List<String> _subscribedKeys = const [];
+
+  bool get _wantsHd => widget.highRes || widget.strictHighRes;
 
   @override
   bool get wantKeepAlive => _bytes != null;
@@ -3649,15 +3991,20 @@ class _PosterImageState extends State<PosterImage>
   List<String> _computeSubscribedKeys() {
     final raw = widget.url.trim();
     if (EmbyLibrary.isImage(raw)) return [raw];
-    final u = PosterLoader.upgradeUrlToHd(raw);
-    if (u.isNotEmpty && !PosterLoader._isKnownDeadPosterHost(u)) {
-      return widget.highRes ? <String>[u, 'hd_url:$u'] : <String>[u];
-    }
     final clean = PosterLoader._cleanTitle(widget.title);
     final scoped = PosterLoader._scopedTitleToken(
       clean,
       PosterLoader._extractTargetYear(widget.title, widget.year),
     );
+    final u = PosterLoader.upgradeUrlToHd(raw);
+    if (u.isNotEmpty && !PosterLoader._isKnownDeadPosterHost(u)) {
+      if (!_wantsHd) return <String>[u];
+      return <String>[
+        u,
+        'hd_url:$u',
+        if (scoped.isNotEmpty) 'title_hd:$scoped',
+      ];
+    }
     if (scoped.isNotEmpty) {
       return <String>['title:$scoped', 'title_hd:$scoped'];
     }
@@ -3691,13 +4038,15 @@ class _PosterImageState extends State<PosterImage>
     if (!sameIdentity) {
       _retryTimer?.cancel();
       _retryCount = 0;
+      _hasVerifiedHd = false;
       _resubscribeKeys();
       _initLoad();
       return;
     }
-    if (oldWidget.highRes != widget.highRes) {
+    if (oldWidget.highRes != widget.highRes ||
+        oldWidget.strictHighRes != widget.strictHighRes) {
       _resubscribeKeys();
-      if (widget.highRes &&
+      if (_wantsHd &&
           _bytes != null &&
           !widget.forBackdrop &&
           widget.title.trim().isNotEmpty) {
@@ -3725,7 +4074,7 @@ class _PosterImageState extends State<PosterImage>
         widget.url,
         title: widget.title,
         year: widget.year,
-        preferHd: widget.highRes,
+        preferHd: _wantsHd,
       );
       if (hit != null) {
         setState(() {
@@ -3736,7 +4085,7 @@ class _PosterImageState extends State<PosterImage>
       }
       return;
     }
-    if (widget.highRes && widget.title.trim().isNotEmpty) {
+    if (_wantsHd && widget.title.trim().isNotEmpty) {
       final hdHit = PosterLoader.peekHdMemory(
         widget.title,
         rawUrl: widget.url,
@@ -3745,6 +4094,7 @@ class _PosterImageState extends State<PosterImage>
       if (hdHit != null && !identical(hdHit, _bytes)) {
         setState(() {
           _bytes = hdHit;
+          _hasVerifiedHd = true;
         });
         updateKeepAlive();
         _notifyBytes(hdHit);
@@ -3762,18 +4112,27 @@ class _PosterImageState extends State<PosterImage>
   }
 
   void _initLoad() {
-    final immediate = PosterLoader.peekMemory(
-      widget.url,
-      title: widget.title,
-      year: widget.year,
-      preferHd: widget.highRes,
-    );
+    final immediateHd = _wantsHd && widget.title.trim().isNotEmpty
+        ? PosterLoader.peekHdMemory(
+            widget.title,
+            rawUrl: widget.url,
+            year: widget.year,
+          )
+        : null;
+    final immediate = immediateHd ??
+        PosterLoader.peekMemory(
+          widget.url,
+          title: widget.title,
+          year: widget.year,
+          preferHd: _wantsHd,
+        );
     if (immediate != null) {
       _bytes = immediate;
       _loadedSync = true;
+      _hasVerifiedHd = immediateHd != null;
       updateKeepAlive();
       _notifyBytes(immediate);
-      if (widget.highRes &&
+      if (_wantsHd &&
           !widget.forBackdrop &&
           widget.title.trim().isNotEmpty) {
         unawaited(_verifyAndUpgradeIfLowRes(immediate, widget.title.trim()));
@@ -3782,8 +4141,15 @@ class _PosterImageState extends State<PosterImage>
     }
     _bytes = null;
     _loadedSync = false;
+    _hasVerifiedHd = false;
     updateKeepAlive();
     _fetchBytes();
+    if (widget.strictHighRes &&
+        !widget.forBackdrop &&
+        widget.title.trim().isNotEmpty &&
+        !EmbyLibrary.isImage(widget.url)) {
+      unawaited(_tryUpgradeToHd(widget.title.trim(), null));
+    }
   }
 
   Future<void> _verifyAndUpgradeIfLowRes(
@@ -3792,20 +4158,24 @@ class _PosterImageState extends State<PosterImage>
   ) async {
     final hasLiveCmsUrl = widget.url.trim().isNotEmpty &&
         !PosterLoader._isKnownDeadPosterHost(widget.url);
-    // Detail hero (`highRes: true`) fills the full screen width and MUST be a
-    // true HD poster (>= 560x760); never settle for blurry CMS thumbnails.
-    final alreadyGood = (hasLiveCmsUrl && !widget.highRes)
-        ? await PosterLoader.isClearPosterBytes(currentBytes)
-        : await PosterLoader.isTrueHdPoster(currentBytes);
+    // Home & Detail heroes (`strictHighRes: true`) fill the full Retina screen
+    // width and MUST resolve a true vertical HD poster (>= 640x900).
+    final alreadyGood = widget.strictHighRes
+        ? await PosterLoader.isHeroHdPoster(currentBytes)
+        : ((hasLiveCmsUrl && !_wantsHd)
+            ? await PosterLoader.isClearPosterBytes(currentBytes)
+            : await PosterLoader.isTrueHdPoster(currentBytes));
     if (!mounted || widget.title.trim() != requestedTitle) return;
-    if (!alreadyGood) {
-      await _tryUpgradeToHd(requestedTitle, currentBytes.length);
+    if (alreadyGood) {
+      _hasVerifiedHd = true;
+      return;
     }
+    await _tryUpgradeToHd(requestedTitle, currentBytes);
   }
 
   Future<void> _tryUpgradeToHd(
     String requestedTitle,
-    int currentBytesLen,
+    Uint8List? currentBytes,
   ) async {
     if (EmbyLibrary.isImage(widget.url)) return;
     try {
@@ -3813,13 +4183,26 @@ class _PosterImageState extends State<PosterImage>
         requestedTitle,
         rawUrl: widget.url,
         year: widget.year,
+        strictHero: widget.strictHighRes,
       );
       if (!mounted || widget.title.trim() != requestedTitle) return;
-      final isHd = await PosterLoader.isTrueHdPoster(hdBytes);
+      final isHeroHd = await PosterLoader.isHeroHdPoster(hdBytes);
+      final isHd = isHeroHd || await PosterLoader.isTrueHdPoster(hdBytes);
       if (!mounted) return;
-      if (isHd || hdBytes.length > currentBytesLen) {
+      final cur = _bytes ?? currentBytes;
+      final curPixels =
+          cur != null ? await PosterLoader._decodedPixelCount(cur) : 0;
+      final hdPixels = await PosterLoader._decodedPixelCount(hdBytes);
+      if (!mounted) return;
+      final curIsHeroHd = cur != null && await PosterLoader.isHeroHdPoster(cur);
+      if (!mounted) return;
+      final shouldReplace = cur == null ||
+          (isHeroHd && (!curIsHeroHd || hdPixels > curPixels)) ||
+          (!curIsHeroHd && (isHd || hdPixels > curPixels));
+      if (shouldReplace) {
         setState(() {
           _bytes = hdBytes;
+          _hasVerifiedHd = widget.strictHighRes ? isHeroHd : isHd;
         });
         updateKeepAlive();
         _notifyBytes(hdBytes);
@@ -3844,26 +4227,34 @@ class _PosterImageState extends State<PosterImage>
           widget.year.trim() != requestedYear) {
         return;
       }
-      if (_bytes == null || data.length > _bytes!.length) {
-        setState(() {
-          _bytes = data;
-        });
-        updateKeepAlive();
-        _notifyBytes(data);
+      // Never let a lower-resolution CMS fetch overwrite an already-verified HD poster.
+      if (!_hasVerifiedHd) {
+        final cur = _bytes;
+        final shouldSet = cur == null ||
+            (await PosterLoader._decodedPixelCount(data) >
+                await PosterLoader._decodedPixelCount(cur));
+        if (!mounted) return;
+        if (shouldSet) {
+          setState(() {
+            _bytes = data;
+          });
+          updateKeepAlive();
+          _notifyBytes(data);
+        }
       }
-      if (widget.highRes &&
+      if (_wantsHd &&
           !widget.forBackdrop &&
           requestedTitle.isNotEmpty &&
           !EmbyLibrary.isImage(requestedUrl)) {
-        unawaited(_verifyAndUpgradeIfLowRes(data, requestedTitle));
+        unawaited(_verifyAndUpgradeIfLowRes(_bytes ?? data, requestedTitle));
       }
     } catch (_) {
       if (!mounted) return;
-      if (widget.highRes &&
+      if (_wantsHd &&
           requestedTitle.isNotEmpty &&
           !EmbyLibrary.isImage(requestedUrl) &&
           _bytes == null) {
-        unawaited(_tryUpgradeToHd(requestedTitle, 0));
+        unawaited(_tryUpgradeToHd(requestedTitle, null));
       }
       if (_retryCount < 2) {
         _retryCount++;
@@ -3916,7 +4307,7 @@ class _PosterImageState extends State<PosterImage>
         }
         final dpr = (MediaQuery.maybeDevicePixelRatioOf(context) ?? 2.0)
             .clamp(1.25, 3.0);
-        final isLargeSurface = widget.highRes ||
+        final isLargeSurface = _wantsHd ||
             (constraints.maxWidth.isFinite && constraints.maxWidth >= 210) ||
             (constraints.maxHeight.isFinite && constraints.maxHeight >= 260);
         int? cacheWidth;

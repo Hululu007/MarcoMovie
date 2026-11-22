@@ -7,6 +7,8 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
+import 'cloud_media_proxy.dart';
+
 enum _TargetKind { auto, playlist, tsSegment, raw }
 
 class _RegisteredTarget {
@@ -447,8 +449,12 @@ class LocalMediaLease {
     final io = HttpClient()
       ..autoUncompress = true
       ..maxConnectionsPerHost = 12
-      ..connectionTimeout = Duration(seconds: isLive ? 12 : 15)
+      ..connectionTimeout = Duration(seconds: isLive ? 8 : 15)
       ..idleTimeout = const Duration(seconds: 30);
+    if (isLive) {
+      // Many public IPTV HTTPS edges use self-signed or incomplete cert chains.
+      io.badCertificateCallback = (_, __, ___) => true;
+    }
     if (directOnly) {
       io.findProxy = (_) => 'DIRECT';
     }
@@ -503,7 +509,21 @@ class LocalMediaLease {
   }
 
   Uri _register(Uri target, _TargetKind kind) {
-    if (_closed || !_canRegisterTarget(target) || _targets.length >= 65536) {
+    if (_closed || !_canRegisterTarget(target)) {
+      throw const FormatException('媒体分片或重定向目标不受信任');
+    }
+    if (_isLive && _targets.length >= 512) {
+      final keepPath = _targets.isNotEmpty ? _targets.keys.first : '';
+      final removableKeys = _paths.keys
+          .where((k) => _paths[k] != keepPath)
+          .take(128)
+          .toList(growable: false);
+      for (final oldKey in removableKeys) {
+        final oldPath = _paths.remove(oldKey);
+        if (oldPath != null) _targets.remove(oldPath);
+      }
+    }
+    if (_targets.length >= 65536) {
       throw const FormatException('媒体分片或重定向目标不受信任');
     }
     final key = '${kind.name}|$target';
@@ -582,6 +602,35 @@ class LocalMediaLease {
     return true;
   }
 
+  Map<String, String> _providerScopedRedirectCookies(Uri target) {
+    final rawCookie = _headers.entries
+        .firstWhere(
+          (e) => e.key.toLowerCase() == 'cookie',
+          orElse: () => const MapEntry('', ''),
+        )
+        .value;
+    if (rawCookie.isEmpty) return const {};
+    Set<String>? allowedKeys;
+    if (CloudMediaLease.isTrustedQuarkMedia(target)) {
+      allowedKeys = const {'__pus', '__puus'};
+    } else if (CloudMediaLease.isTrustedUcMedia(target)) {
+      allowedKeys = const {'__pus', '__puus', '__pugs'};
+    }
+    if (allowedKeys == null) return const {};
+    final scoped = <String, String>{};
+    for (final pair in rawCookie.split(';')) {
+      final trimmed = pair.trim();
+      final eq = trimmed.indexOf('=');
+      if (eq <= 0) continue;
+      final name = trimmed.substring(0, eq).trim();
+      final value = trimmed.substring(eq + 1).trim();
+      if (allowedKeys.contains(name) && value.isNotEmpty) {
+        scoped[name] = value;
+      }
+    }
+    return scoped;
+  }
+
   Map<String, String> _buildUpstreamHeaders(
     Uri target, {
     String? range,
@@ -618,6 +667,11 @@ class LocalMediaLease {
               trimmed.substring(eq + 1).trim();
         }
       }
+    } else if (!sameOrigin) {
+      // Cloud media CDN redirects (e.g. Quark *.quark.cn edge redirect or a
+      // T4/Gateway proxy 302 to *.quark.cn) require the provider's own session
+      // cookie without leaking unrelated portal cookies or Authorization.
+      mergedCookies.addAll(_providerScopedRedirectCookies(target));
     }
     mergedCookies.addAll(_cookieJar.matchingCookies(target, _clock()));
     if (mergedCookies.isNotEmpty) {

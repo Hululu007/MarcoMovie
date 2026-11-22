@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +10,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:marco_movie/core/cast_avatar_service.dart';
 import 'package:marco_movie/core/cast_service.dart';
+import 'package:marco_movie/core/catpaw_host.dart';
 import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/core/curated_discovery.dart';
 import 'package:marco_movie/core/models.dart';
@@ -20,6 +22,7 @@ import 'package:marco_movie/ui/curated_discovery_section.dart';
 import 'package:marco_movie/ui/detail_screen.dart';
 import 'package:marco_movie/ui/favorite_postcard_animation.dart';
 import 'package:marco_movie/ui/ios_liquid_glass.dart';
+import 'package:marco_movie/ui/ios_search_page.dart';
 import 'package:marco_movie/ui/mobile_player_chrome.dart';
 import 'package:marco_movie/ui/player/ios_cast_panel.dart';
 import 'package:marco_movie/ui/player/ios_player_chrome.dart';
@@ -27,6 +30,7 @@ import 'package:marco_movie/ui/player/player_hud_prefs.dart';
 import 'package:marco_movie/ui/player/start_spec_overlay.dart';
 import 'package:marco_movie/ui/player_screen.dart';
 import 'package:marco_movie/ui/poster_expand_route.dart';
+import 'package:marco_movie/ui/poster_image.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -118,6 +122,7 @@ class _FakePlayerStream extends Fake implements PlayerStream {
 class _FakePlayer extends Fake implements Player {
   final _FakePlayerState _state = _FakePlayerState();
   final _FakePlayerStream _stream = _FakePlayerStream();
+  final List<Media> openedMedia = <Media>[];
   bool disposed = false;
 
   @override
@@ -129,7 +134,10 @@ class _FakePlayer extends Fake implements Player {
 
   @override
   Future<void> open(Playable playable, {bool play = true}) async {
-    if (playable is Media) _state.playlistValue = Playlist([playable]);
+    if (playable is Media) {
+      openedMedia.add(playable);
+      _state.playlistValue = Playlist([playable]);
+    }
     _state.playingValue = play;
     _state.bufferingValue = false;
     if (!disposed) {
@@ -1413,9 +1421,530 @@ void main() {
       await tester.pump();
     },
   );
+
+  testWidgets(
+    'iOS Hero HD poster resolution, unobstructed edge-only transitions, zero-split hero return & linear card routes across Home/Search/Library',
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    (tester) async {
+      // --- 1. HD Poster URL upgrades, title cleanup & Retina pixel verification ---
+      expect(
+        PosterLoader.upgradeUrlToHd(
+          'https://img1.doubanio.com/view/photo/m_ratio_poster/public/p12345.webp',
+        ),
+        'https://img1.doubanio.com/view/photo/l_ratio_poster/public/p12345.jpg',
+      );
+      expect(
+        PosterLoader.upgradeUrlToHd(
+          'https://img1.doubanio.com/view/photo/sqxs/public/p999.jpg',
+        ),
+        'https://img1.doubanio.com/view/photo/l/public/p999.jpg',
+      );
+      expect(
+        PosterLoader.upgradeUrlToHd(
+          'https://i0.hdslb.com/bfs/bangumi/demo.jpg@320w_428h.webp',
+        ),
+        'https://i0.hdslb.com/bfs/bangumi/demo.jpg',
+      );
+      expect(
+        PosterLoader.upgradeUrlToHd(
+          'https://cdn.example/poster.jpg?x-oss-process=image/resize,w_300',
+        ),
+        'https://cdn.example/poster.jpg',
+      );
+      // Preserves signed URLs untouched.
+      expect(
+        PosterLoader.upgradeUrlToHd(
+          'https://cdn.example/poster.jpg?x-oss-process=image/resize,w_300&Signature=abc',
+        ),
+        contains('Signature=abc'),
+      );
+      expect(PosterLoader.cleanTitleForQuery('兰香如故 4K 臻彩'), '兰香如故');
+      expect(PosterLoader.cleanTitleForQuery('星海漫游 杜比视界'), '星海漫游');
+      expect(
+        PosterLoader.matchesBingPosterCaption('《谷雨》2026电视剧官方海报', '谷雨'),
+        isTrue,
+      );
+      expect(
+        PosterLoader.matchesBingPosterCaption('二十四节气谷雨海报模板素材', '谷雨'),
+        isFalse,
+      );
+
+      Uint8List buildValidTestPng(int w, int h, {int minBytes = 32 * 1024}) {
+        // Minimal valid 8-bit grayscale PNG (`IHDR` + `IDAT` + `IEND`) with
+        // real width/height header decoded cleanly by `ui.ImageDescriptor`
+        // without invoking `Picture.toImage()` inside a widget test zone.
+        int crc32(List<int> data) {
+          var crc = 0xFFFFFFFF;
+          for (final b in data) {
+            crc ^= b;
+            for (int i = 0; i < 8; i++) {
+              crc = (crc & 1) != 0 ? (0xEDB88320 ^ (crc >>> 1)) : (crc >>> 1);
+            }
+          }
+          return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
+        }
+
+        List<int> chunk(String type, List<int> payload) {
+          final typeBytes = ascii.encode(type);
+          final out = BytesBuilder(copy: false);
+          final lenBuf = ByteData(4)..setUint32(0, payload.length);
+          out.add(lenBuf.buffer.asUint8List());
+          out.add(typeBytes);
+          out.add(payload);
+          final crcInput = <int>[...typeBytes, ...payload];
+          final crcBuf = ByteData(4)..setUint32(0, crc32(crcInput));
+          out.add(crcBuf.buffer.asUint8List());
+          return out.takeBytes();
+        }
+
+        final ihdr = ByteData(13)
+          ..setUint32(0, w)
+          ..setUint32(4, h)
+          ..setUint8(8, 8) // bit depth
+          ..setUint8(9, 0) // grayscale
+          ..setUint8(10, 0)
+          ..setUint8(11, 0)
+          ..setUint8(12, 0);
+        // 1 filter byte + w bytes per scanline (all zeros compresses in ~1ms)
+        final rawScanlines = Uint8List(h * (1 + w));
+        final compressed = zlib.encode(rawScanlines);
+        final out = BytesBuilder(copy: false)
+          ..add(const [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+          ..add(chunk('IHDR', ihdr.buffer.asUint8List()))
+          ..add(chunk('IDAT', compressed));
+        // Add a valid PNG `tEXt` padding chunk if below minBytes so the PNG
+        // stays 100% spec-compliant while exceeding the 28KB size threshold.
+        if (out.length + 12 < minBytes) {
+          final padLen = minBytes - out.length;
+          out.add(
+            chunk('tEXt', <int>[0x70, 0x61, 0x64, 0x00, ...List<int>.filled(padLen, 0x41)]),
+          );
+        }
+        out.add(chunk('IEND', const []));
+        return out.takeBytes();
+      }
+
+      final lowResPortrait = buildValidTestPng(320, 460);
+      final lowResWide = buildValidTestPng(800, 450);
+      final trueHeroHd = buildValidTestPng(720, 1080);
+      expect(
+        await tester.runAsync(() => PosterLoader.isHeroHdPoster(lowResPortrait)),
+        isFalse,
+      );
+      expect(
+        await tester.runAsync(() => PosterLoader.isHeroHdPoster(lowResWide)),
+        isFalse,
+      );
+      expect(
+        await tester.runAsync(() => PosterLoader.isHeroHdPoster(trueHeroHd)),
+        isTrue,
+      );
+
+      // Verified title_hd is returned synchronously by peekMemory(preferHd: true)
+      // even when a live CMS thumbnail URL exists for the same title!
+      await tester.runAsync(() => PosterLoader.clearCache());
+      PosterLoader.seedMemoryForTest(
+        'https://cms.example/small-thumb.jpg',
+        lowResPortrait,
+        title: '罪蓝之路',
+        year: '2026',
+        asHd: false,
+      );
+      PosterLoader.seedMemoryForTest(
+        '',
+        trueHeroHd,
+        title: '罪蓝之路',
+        year: '2026',
+        asHd: true,
+      );
+      final peekedHd = PosterLoader.peekMemory(
+        'https://cms.example/small-thumb.jpg',
+        title: '罪蓝之路',
+        year: '2026',
+        preferHd: true,
+      );
+      expect(identical(peekedHd, trueHeroHd), isTrue);
+
+      // --- 2. Strictly monotonic, zero-overshoot symmetric linear kinematics ---
+      double prevFwd = -1.0;
+      double prevRev = -1.0;
+      for (int i = 0; i <= 20; i++) {
+        final t = i / 20.0;
+        final fwd = PosterExpandRoute.evaluateTransitionProgress(t, reversing: false);
+        final rev = PosterExpandRoute.evaluateTransitionProgress(t, reversing: true);
+        expect(fwd, inInclusiveRange(0.0, 1.0));
+        expect(rev, inInclusiveRange(0.0, 1.0));
+        expect(fwd, greaterThanOrEqualTo(prevFwd));
+        expect(rev, greaterThanOrEqualTo(prevRev));
+        // Exact forward/reverse symmetry: rev(t) == 1 - fwd(1 - t)
+        final mirrored =
+            1.0 - PosterExpandRoute.evaluateTransitionProgress(1.0 - t, reversing: false);
+        expect(rev, closeTo(mirrored, 1e-6));
+        prevFwd = fwd;
+        prevRev = rev;
+      }
+
+      // --- 3. Home Hero: strictHighRes PosterImage, compact unobstructed scrim,
+      //        zero-split full-bleed Hero expand & return ---
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 844);
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() async {
+        await tester.binding.setSurfaceSize(null);
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+        await tester.runAsync(() => PosterLoader.clearCache());
+      });
+
+      final storage = await initTestStorage();
+      const demoSite = CmsSite(
+        key: 'ios_home_demo',
+        name: '示例高清源',
+        type: 1,
+        api: 'https://demo.invalid/api',
+      );
+      await storage.saveConfig(
+        '{"sites":[{"key":"ios_home_demo","name":"示例高清源","type":1,"api":"https://demo.invalid/api"}]}',
+      );
+      await storage.upsertWatchHistory(
+        const WatchHistoryEntry(
+          site: 'ios_home_demo',
+          id: 'hero-1',
+          title: '罪蓝之路',
+          episode: '第01集',
+          line: '主线路',
+          index: 0,
+          position: 120000,
+          duration: 2400000,
+          updated: 1730000000000,
+        ),
+        immediate: true,
+      );
+      await storage.setShowContinueWatching(true);
+      await storage.toggleFavorite(
+        demoSite,
+        const CmsVideo(
+          id: 'hero-2',
+          title: '星海漫游',
+          remarks: '4K HDR',
+        ),
+      );
+
+      final observedRoutes = <Route<dynamic>>[];
+      final observer = _RecordingNavigatorObserver(observedRoutes);
+      final fakeClient = _IosHomeRedesignClient();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          navigatorObservers: [observer],
+          home: AdaptiveShell(storage: storage, client: fakeClient),
+        ),
+      );
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 260));
+
+      final heroFinder = find.byKey(const ValueKey('ios-home-immersive-hero'));
+      expect(heroFinder, findsOneWidget);
+      final heroPosterImage = tester.widget<PosterImage>(
+        find
+            .descendant(of: heroFinder, matching: find.byType(PosterImage))
+            .first,
+      );
+      expect(heroPosterImage.highRes, isTrue);
+      expect(heroPosterImage.strictHighRes, isTrue);
+
+      // Unobstructed bottom text scrim must stay compact (<= 160pt, down from 280pt)
+      final scrimFinder = find.byKey(const ValueKey('ios-hero-bottom-text-scrim'));
+      expect(scrimFinder, findsOneWidget);
+      expect(tester.getSize(scrimFinder).height, lessThanOrEqualTo(160.0));
+      expect(find.byKey(const ValueKey('ios-hero-poster-feather')), findsOneWidget);
+
+      // Tap Home Hero -> launches full-bleed linear PosterExpandRoute with
+      // sourceBorderRadius == 0.0, isFullBleedHero == true, and feathered return!
+      observedRoutes.clear();
+      await tester.tap(find.text('立即观看').first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(observedRoutes.whereType<PosterExpandRoute<void>>(), isNotEmpty);
+      final heroRoute = observedRoutes.whereType<PosterExpandRoute<void>>().last;
+      expect(heroRoute.isFullBleedHero, isTrue);
+      expect(heroRoute.sourceBorderRadius, 0.0);
+      expect(heroRoute.sourceCardId, isNotNull);
+      expect(find.byKey(const Key('poster-expand-hero-feather')), findsOneWidget);
+      expect(PosterExpandRegistry.activeProgress.value, greaterThan(0.0));
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(const Duration(milliseconds: 120));
+
+      // Return from DetailScreen -> feathered linear hero collapse & clean release
+      final nav = tester.state<NavigatorState>(find.byType(Navigator).first);
+      nav.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(find.byKey(const Key('poster-expand-transition-stage')), findsOneWidget);
+      expect(find.byKey(const Key('poster-expand-hero-feather')), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(const Duration(milliseconds: 120));
+      expect(PosterExpandRegistry.activeCardId.value, isNull);
+      expect(PosterExpandRegistry.activeProgress.value, 0.0);
+
+      // --- 4. Every series card across Continue Watching, Search & Library uses
+      //        linear PosterExpandRoute ---
+      // 4a. Continue Watching shelf card
+      observedRoutes.clear();
+      final cwCard = find.byKey(const ValueKey('cw_ios_home_demo_hero-1'));
+      await tester.ensureVisible(cwCard);
+      await tester.pump();
+      await tester.tap(cwCard);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(observedRoutes.whereType<PosterExpandRoute<void>>(), isNotEmpty);
+      expect(
+        observedRoutes.whereType<PosterExpandRoute<void>>().last.isFullBleedHero,
+        isFalse,
+      );
+      await tester.pump(const Duration(milliseconds: 350));
+      nav.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 420));
+      await tester.pump(const Duration(milliseconds: 60));
+      expect(PosterExpandRegistry.activeCardId.value, isNull);
+
+      // Scroll back to top so the floating dock expands before opening Search & Library
+      final homeScrollCtrl =
+          tester.widget<CustomScrollView>(find.byType(CustomScrollView).first).controller!;
+      homeScrollCtrl.jumpTo(0.0);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      // 4b. Global Search Hot Picks card
+      await tester.tap(find.byKey(const ValueKey('home-search-button')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(IosGlobalSearchPage), findsOneWidget);
+      observedRoutes.clear();
+      final searchHotItem = find
+          .descendant(
+            of: find.byType(IosGlobalSearchPage),
+            matching: find.text('星海漫游'),
+          )
+          .first;
+      await tester.tap(searchHotItem);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(observedRoutes.whereType<PosterExpandRoute<void>>(), isNotEmpty);
+      await tester.pump(const Duration(milliseconds: 350));
+      nav.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 420));
+      await tester.pump(const Duration(milliseconds: 60));
+      expect(PosterExpandRegistry.activeCardId.value, isNull);
+      await tester.tap(find.byKey(const ValueKey('search-close-button')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // 4c. Library Tab Favorites card
+      await tester.tap(find.text('片库').last);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      observedRoutes.clear();
+      final favCard = find.text('星海漫游').first;
+      await tester.tap(favCard);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(observedRoutes.whereType<PosterExpandRoute<void>>(), isNotEmpty);
+      await tester.pump(const Duration(milliseconds: 350));
+      nav.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 420));
+      await tester.pump(const Duration(milliseconds: 60));
+      expect(PosterExpandRegistry.activeCardId.value, isNull);
+
+      // 4d. Library Tab Watch History tile
+      await tester.tap(find.text('观看历史').last);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+      observedRoutes.clear();
+      final histTile = find.byKey(const ValueKey('lib_hist_ios_home_demo_hero-1'));
+      expect(histTile, findsOneWidget);
+      await tester.tap(histTile);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(observedRoutes.whereType<PosterExpandRoute<void>>(), isNotEmpty);
+      await tester.pump(const Duration(milliseconds: 350));
+      nav.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 420));
+      await tester.pump(const Duration(milliseconds: 60));
+      expect(PosterExpandRegistry.activeCardId.value, isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump();
+    },
+  );
+
+  testWidgets(
+    'iOS PlayerScreen switches Quark CatPaw quality to proxy, re-resolves live port and preserves Quark Cookie',
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    (tester) async {
+      final hash = List.filled(64, 'b').join();
+      final fakeHost = _FakeQuarkCatPawHost(hash);
+      final previousHost = CatPawHost.instance;
+      CatPawHost.instance = fakeHost;
+      addTearDown(() => CatPawHost.instance = previousHost);
+
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      final seenActionTitles = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(IosLiquidGlassBridge.channel, (call) async {
+        if (call.method == 'showOptionSheet') {
+          final args = Map<String, dynamic>.from(call.arguments as Map);
+          final options = (args['items'] as List).cast<Map>();
+          final idx = options.indexWhere(
+            (o) => '${o['title']}'.startsWith('切换画质'),
+          );
+          return idx >= 0 ? '$idx' : null;
+        }
+        if (call.method == 'showActionSheet') {
+          final args = Map<String, dynamic>.from(call.arguments as Map);
+          final actions = (args['actions'] as List).cast<Map>();
+          seenActionTitles
+            ..clear()
+            ..addAll(actions.map((a) => '${a['title']}'));
+          return '1'; // Select 原画代理
+        }
+        return null;
+      });
+
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(844, 390);
+      await tester.binding.setSurfaceSize(const Size(844, 390));
+      addTearDown(() async {
+        await tester.binding.setSurfaceSize(null);
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final storage = await initTestStorage();
+      final prefs = PlayerHudPrefs.inMemory(isDesktop: false);
+      addTearDown(prefs.dispose);
+      final player = _FakePlayer();
+
+      final catpawSite = CmsSite(
+        key: 'paw_quark_test',
+        name: '夸克猫爪测试',
+        type: 4,
+        api: 'catpaw://$hash/api/spider/quark/3',
+      );
+      const catpawVideo = CmsVideo(
+        id: 'quark_ep_1',
+        title: '夸克4K测试',
+        lines: [
+          CmsLine(
+            name: '夸克原画',
+            episodes: [
+              CmsEpisode(name: '第01集', url: 'mmpaw://play?id=ep1&flag=quark'),
+            ],
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: PlayerScreen(
+            site: catpawSite,
+            video: catpawVideo,
+            initialLineIndex: 0,
+            initialEpisodeIndex: 0,
+            storage: storage,
+            debugPlayer: player,
+            debugVideoSurface: const ColoredBox(color: Colors.black),
+            debugHudPrefs: prefs,
+          ),
+        ),
+      );
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 120)));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(player.openedMedia, isNotEmpty);
+
+      // Simulate iOS loopback rebind onto a new CatPaw port before switching to proxy.
+      fakeHost.port = 52345;
+
+      // Open iOS More menu -> 切换画质 (2) -> 原画代理.
+      final moreButton = find.byKey(const Key('ios-player-more-button'));
+      expect(moreButton, findsOneWidget);
+      await tester.tap(moreButton);
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 160)));
+      await tester.pump(const Duration(milliseconds: 250));
+
+      expect(seenActionTitles, ['原画', '原画代理']);
+      expect(player.openedMedia.length, greaterThanOrEqualTo(2));
+      final switched = player.openedMedia.last;
+      expect(switched.uri, contains('http://127.0.0.1:52345/secret/$hash/spider/quark/3/proxy/'));
+      expect(switched.uri, contains('st%2B1%2F2%3D%3D'));
+      expect(switched.httpHeaders?['Cookie'], '__pus=pus_ios; __puus=puus_ios');
+      expect(switched.httpHeaders?['Referer'], 'https://pan.quark.cn/');
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await tester.pump(const Duration(milliseconds: 650));
+    },
+  );
+}
+
+class _FakeQuarkCatPawHost extends CatPawHost {
+  _FakeQuarkCatPawHost(this.hash);
+
+  final String hash;
+  int port = 51111;
+
+  @override
+  Future<String> read(String address, {String method = 'GET'}) async {
+    return jsonEncode({
+      'parse': 0,
+      'url': [
+        '原画',
+        'https://drive.quark.cn/file/ep1.mkv',
+        '原画代理',
+        'catpaw://$hash/spider/quark/3/proxy/st%2B1%2F2%3D%3D/ep1%20%5B4K%5D.mkv?fid=1',
+      ],
+      'header': {
+        'Cookie': '__pus=pus_ios; __puus=puus_ios',
+        'Referer': 'https://pan.quark.cn/',
+      },
+    });
+  }
+
+  @override
+  Future<Uri> resolve(String address, {Completer<void>? cancellation}) async {
+    final uri = Uri.parse(address);
+    return Uri(
+      scheme: 'http',
+      host: '127.0.0.1',
+      port: port,
+      path: '/secret/$hash${uri.path}',
+      query: uri.hasQuery ? uri.query : null,
+    );
+  }
+}
+
+class _RecordingNavigatorObserver extends NavigatorObserver {
+  final List<Route<dynamic>> pushed;
+  _RecordingNavigatorObserver(this.pushed);
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    pushed.add(route);
+    super.didPush(route, previousRoute);
+  }
 }
 
 class _IosHomeRedesignClient extends CmsClient {
+  @override
+  Future<CmsVideo> fetchDetail(CmsSite site, CmsVideo video) async => video;
+
   @override
   Future<(List<CmsCategory>, CmsListing)> fetchHome(CmsSite site) async {
     return (

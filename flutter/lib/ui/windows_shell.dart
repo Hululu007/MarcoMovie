@@ -701,125 +701,303 @@ extension _WindowsShell on _AdaptiveShellState {
                 backgroundColor: Colors.white24)),
       ]));
 
+  static const double _windowsDiscoverAutoLoadThreshold = 420.0;
+
+  bool get _canWindowsDiscoverAutoLoadMore =>
+      _windowsPage == 'discover' &&
+      _activeSite != null &&
+      !_homeLoading &&
+      !_loadingMore &&
+      !_autoPagingScheduled &&
+      _homeError == null &&
+      _loadMoreError == null &&
+      _currentPage < _pageCount;
+
+  void _scheduleWindowsDiscoverAutoLoadMore() {
+    if (!_canWindowsDiscoverAutoLoadMore) return;
+    final expectedSiteKey = _activeSite?.key;
+    final expectedHomeEpoch = _homeEpoch;
+    final expectedCategoryEpoch = _categoryEpoch;
+    final nextPage = _currentPage + 1;
+    _autoPagingScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _autoPagingScheduled = false;
+      if (!mounted ||
+          !_canWindowsDiscoverAutoLoadMore ||
+          _activeSite?.key != expectedSiteKey ||
+          _homeEpoch != expectedHomeEpoch ||
+          _categoryEpoch != expectedCategoryEpoch ||
+          _currentPage + 1 != nextPage) {
+        return;
+      }
+      unawaited(_reloadFilteredListing(page: nextPage));
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  bool _handleWindowsDiscoverScrollNotification(
+    ScrollNotification notification,
+  ) {
+    if (notification.depth != 0 ||
+        notification.metrics.axis != Axis.vertical) {
+      return false;
+    }
+    final scrollingDown = switch (notification) {
+      ScrollUpdateNotification(:final scrollDelta) => (scrollDelta ?? 0) > 0,
+      OverscrollNotification(:final overscroll) => overscroll > 0,
+      _ => false,
+    };
+    if (scrollingDown &&
+        notification.metrics.extentAfter < _windowsDiscoverAutoLoadThreshold) {
+      _scheduleWindowsDiscoverAutoLoadMore();
+    }
+    return false;
+  }
+
+  void _handleWindowsDiscoverPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent || event.scrollDelta.dy <= 0) return;
+    if (!_windowsDiscoverScrollController.hasClients ||
+        _windowsDiscoverScrollController.positions.length != 1) {
+      return;
+    }
+    final pos = _windowsDiscoverScrollController.position;
+    if (pos.extentAfter <= _windowsDiscoverAutoLoadThreshold) {
+      _scheduleWindowsDiscoverAutoLoadMore();
+    }
+  }
+
   Widget _windowsDiscover(double pad) {
     final activeFilterCount = _currentFilter.activeDimensionCount +
         (_filterSubCategoryId.isNotEmpty ? 1 : 0);
-    return ListView(padding: EdgeInsets.fromLTRB(pad, 8, pad, 30), children: [
-      _windowsHeading('发现', actions: [
-        Tooltip(
-            message: _activeSite?.name ?? '选择片源',
-            child: WinButton(_activeSite?.name ?? '选择片源',
-                onPressed: _showSitePickerDialog,
-                icon: CupertinoIcons.chevron_down)),
-        if ((_config?.depots ?? []).isNotEmpty)
-          WinButton('切换仓库', onPressed: _showDepotPickerDialog)
-      ]),
-      Wrap(spacing: 8, runSpacing: 8, children: [
-        for (final item in [
-          ('recommend', '全部'),
-          ('movie', '电影'),
-          ('series', '剧集'),
-          ('variety', '综艺'),
-          ('anime', '动漫')
-        ])
-          WinButton(item.$2,
-              selected: _primaryTab == item.$1,
-              onPressed: () => _selectPrimaryTab(item.$1)),
-        WinButton(
-            activeFilterCount > 0 ? '筛选 · $activeFilterCount' : '筛选',
-            selected: _filterExpanded || activeFilterCount > 0,
-            icon: CupertinoIcons.slider_horizontal_3,
-            onPressed: () => _updateWindowsState(
-                () => _filterExpanded = !_filterExpanded)),
-        WinButton('刷新',
-            icon: CupertinoIcons.refresh, onPressed: _refreshCurrentHomeView)
-      ]),
-      AnimatedSize(
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOutCubic,
-        alignment: Alignment.topCenter,
-        child: _filterExpanded
-            ? Padding(
-                padding: const EdgeInsets.only(top: 16),
-                child: _windowsFilterPanel(),
-              )
-            : const SizedBox.shrink(),
-      ),
-      const SizedBox(height: 22),
-      if (_homeLoading)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(999),
-                child: LinearProgressIndicator(
-                  minHeight: 2.5,
-                  color: winAccent(context),
-                  backgroundColor: winMuted(context).withValues(alpha: .12),
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerSignal: _handleWindowsDiscoverPointerSignal,
+      child: NotificationListener<ScrollNotification>(
+        onNotification: _handleWindowsDiscoverScrollNotification,
+        child: CustomScrollView(
+          key: const PageStorageKey('windows-discover-list'),
+          controller: _windowsDiscoverScrollController,
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
+            SliverPadding(
+              padding: EdgeInsets.fromLTRB(pad, 8, pad, 0),
+              sliver: SliverToBoxAdapter(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _windowsHeading('发现', actions: [
+                      Tooltip(
+                          message: _activeSite?.name ?? '选择片源',
+                          child: WinButton(_activeSite?.name ?? '选择片源',
+                              onPressed: _showSitePickerDialog,
+                              icon: CupertinoIcons.chevron_down)),
+                      if ((_config?.depots ?? []).isNotEmpty)
+                        WinButton('切换仓库', onPressed: _showDepotPickerDialog)
+                    ]),
+                    Wrap(spacing: 8, runSpacing: 8, children: [
+                      for (final item in [
+                        ('recommend', '全部'),
+                        ('movie', '电影'),
+                        ('series', '剧集'),
+                        ('variety', '综艺'),
+                        ('anime', '动漫')
+                      ])
+                        WinButton(item.$2,
+                            selected: _primaryTab == item.$1,
+                            onPressed: () => _selectPrimaryTab(item.$1)),
+                      WinButton(
+                          activeFilterCount > 0
+                              ? '筛选 · $activeFilterCount'
+                              : '筛选',
+                          selected: _filterExpanded || activeFilterCount > 0,
+                          icon: CupertinoIcons.slider_horizontal_3,
+                          onPressed: () => _updateWindowsState(
+                              () => _filterExpanded = !_filterExpanded)),
+                      WinButton('刷新',
+                          icon: CupertinoIcons.refresh,
+                          onPressed: _refreshCurrentHomeView)
+                    ]),
+                    AnimatedSize(
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOutCubic,
+                      alignment: Alignment.topCenter,
+                      child: _filterExpanded
+                          ? Padding(
+                              padding: const EdgeInsets.only(top: 16),
+                              child: _windowsFilterPanel(),
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                    const SizedBox(height: 22),
+                    if (_homeLoading)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(999),
+                              child: LinearProgressIndicator(
+                                minHeight: 2.5,
+                                color: winAccent(context),
+                                backgroundColor:
+                                    winMuted(context).withValues(alpha: .12),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Text(
+                              activeFilterCount > 0
+                                  ? '正在按筛选条件加载影片…'
+                                  : '正在加载片库…',
+                              style: TextStyle(
+                                  color: winMuted(context), fontSize: 12.5),
+                            ),
+                          ],
+                        ),
+                      ),
+                    if (_homeError != null) _windowsHomeError(),
+                  ],
                 ),
               ),
-              const SizedBox(height: 10),
-              Text(
-                activeFilterCount > 0 ? '正在按筛选条件加载影片…' : '正在加载片库…',
-                style: TextStyle(color: winMuted(context), fontSize: 12.5),
+            ),
+            if (_activeSite != null && _homeVideos.isNotEmpty)
+              SliverPadding(
+                padding: EdgeInsets.symmetric(horizontal: pad),
+                sliver: SliverLayoutBuilder(builder: (_, constraints) {
+                  final extent = switch (widget.storage.gridDensity) {
+                    'compact' => 150.0,
+                    'comfortable' => 245.0,
+                    _ => 195.0
+                  };
+                  final count =
+                      (constraints.crossAxisExtent / extent).floor().clamp(2, 9);
+                  final cardWidth = math.max(
+                    0.0,
+                    (constraints.crossAxisExtent - (count - 1) * 23) / count,
+                  );
+                  final rowCount = (_homeVideos.length + count - 1) ~/ count;
+                  return SliverIgnorePointer(
+                    ignoring: _homeLoading,
+                    sliver: SliverAnimatedOpacity(
+                      duration: const Duration(milliseconds: 160),
+                      opacity: _homeLoading ? 0.38 : 1.0,
+                      sliver: SliverList.builder(
+                        itemCount: rowCount,
+                        itemBuilder: (_, rowIndex) {
+                          final start = rowIndex * count;
+                          final end =
+                              math.min(start + count, _homeVideos.length);
+                          return Padding(
+                            padding: EdgeInsets.only(
+                                bottom: rowIndex < rowCount - 1 ? 28 : 0),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                for (var i = start; i < end; i++) ...[
+                                  if (i > start) const SizedBox(width: 23),
+                                  SizedBox(
+                                    width: cardWidth,
+                                    child: _windowsVideoCard(
+                                        _homeVideos[i], _activeSite!),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  );
+                }),
               ),
-            ],
-          ),
+            SliverPadding(
+              padding: EdgeInsets.fromLTRB(pad, 0, pad, 30),
+              sliver: SliverToBoxAdapter(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (!_homeLoading &&
+                        _homeError == null &&
+                        _homeVideos.isEmpty &&
+                        _config != null)
+                      _windowsEmpty(
+                          '没有符合筛选条件的影片', '试试调整地区/年份组合，或切换其他分类片源。',
+                          button: '清除筛选', action: () {
+                        _updateWindowsState(() {
+                          _primaryTab = 'recommend';
+                          _filterSubCategoryId = '';
+                          _filterGenreLabel = '';
+                          _filterArea = '';
+                          _filterYear = '';
+                        });
+                        _reloadFilteredListing(page: 1);
+                      }),
+                    if (_loadingMore)
+                      Padding(
+                        key: const ValueKey('windows-discover-loading-more'),
+                        padding: const EdgeInsets.only(top: 24),
+                        child: Center(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: winAccent(context),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Text(
+                                '正在加载更多…',
+                                style: TextStyle(
+                                  color: winMuted(context),
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )
+                    else if (_loadMoreError != null &&
+                        _currentPage < _pageCount)
+                      Padding(
+                        key: const ValueKey('windows-discover-load-more-error'),
+                        padding: const EdgeInsets.only(top: 20),
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                _loadMoreError!,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: winMuted(context),
+                                  fontSize: 12.5,
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              WinButton(
+                                '重试加载更多',
+                                icon: CupertinoIcons.refresh,
+                                onPressed: () => _reloadFilteredListing(
+                                  page: _currentPage + 1,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    if (_config == null) _windowsWelcome(),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
-      if (_homeError != null) _windowsHomeError(),
-      if (_activeSite != null && _homeVideos.isNotEmpty)
-        IgnorePointer(
-          ignoring: _homeLoading,
-          child: AnimatedOpacity(
-            duration: const Duration(milliseconds: 160),
-            opacity: _homeLoading ? 0.38 : 1.0,
-            child: LayoutBuilder(builder: (_, box) {
-              final extent = switch (widget.storage.gridDensity) {
-                'compact' => 150.0,
-                'comfortable' => 245.0,
-                _ => 195.0
-              };
-              final count = (box.maxWidth / extent).floor().clamp(2, 9);
-              return Wrap(spacing: 23, runSpacing: 28, children: [
-                for (final video in _homeVideos)
-                  SizedBox(
-                      width: (box.maxWidth - (count - 1) * 23) / count,
-                      child: _windowsVideoCard(video, _activeSite!))
-              ]);
-            }),
-          ),
-        ),
-      if (!_homeLoading &&
-          _homeError == null &&
-          _homeVideos.isEmpty &&
-          _config != null)
-        _windowsEmpty('没有符合筛选条件的影片', '试试调整地区/年份组合，或切换其他分类片源。', button: '清除筛选',
-            action: () {
-          _updateWindowsState(() {
-            _primaryTab = 'recommend';
-            _filterSubCategoryId = '';
-            _filterGenreLabel = '';
-            _filterArea = '';
-            _filterYear = '';
-          });
-          _reloadFilteredListing(page: 1);
-        }),
-      if (_currentPage < _pageCount)
-        Padding(
-            padding: const EdgeInsets.only(top: 24),
-            child: Center(
-                child: WinButton(_loadingMore ? '正在加载…' : '加载更多',
-                    selected: true,
-                    onPressed: _loadingMore
-                        ? null
-                        : () =>
-                            _reloadFilteredListing(page: _currentPage + 1)))),
-      if (_loadMoreError != null)
-        Text(_loadMoreError!, style: TextStyle(color: winMuted(context))),
-      if (_config == null) _windowsWelcome(),
-    ]);
+      ),
+    );
   }
 
   Widget _windowsFilterPanel() {
@@ -1352,18 +1530,19 @@ extension _WindowsShell on _AdaptiveShellState {
   Widget _windowsLive(double pad) {
     final sources = _visibleLives;
     if (sources.isEmpty)
-      return _windowsEmpty('添加你的直播频道', '导入直播来源后，可以在这里浏览频道、切换线路。',
-          action: _showImportConfigDialog);
+      return _windowsEmpty('添加你的直播频道', '支持独立导入 M3U / TXT 直播源，自动归类、测速并匹配台标。',
+          action: () => _showStandaloneLiveImportSheet());
+    final displayGroups = _displayLiveGroups;
     final query = _liveSearchQuery.trim().toLowerCase();
     final channels = <LiveChannel>[
-      for (var i = 0; i < _liveGroups.length; i++)
+      for (var i = 0; i < displayGroups.length; i++)
         if (query.isNotEmpty ||
             _selectedLiveGroup < 0 ||
             i == _selectedLiveGroup)
-          for (final channel in _liveGroups[i].channels)
+          for (final channel in displayGroups[i].channels)
             if (query.isEmpty ||
                 channel.name.toLowerCase().contains(query) ||
-                _liveGroups[i].name.toLowerCase().contains(query))
+                displayGroups[i].name.toLowerCase().contains(query))
               channel,
     ];
     final selected = _windowsLiveChannel;
@@ -1396,6 +1575,8 @@ extension _WindowsShell on _AdaptiveShellState {
                             initialEpisodeIndex: _windowsLiveLine,
                             storage: widget.storage,
                             isLive: true,
+                            liveGroups: displayGroups,
+                            initialLiveChannel: selected,
                             embedded: true,
                             onEmbeddedClose: () => _updateWindowsState(
                                 () => _windowsLiveChannel = null),
@@ -1445,16 +1626,22 @@ extension _WindowsShell on _AdaptiveShellState {
                       itemCount: channels.length,
                       itemBuilder: (_, i) {
                         final ch = channels[i];
+                        final speedBadge = LiveHealthVisual.badgeText(ch);
                         return ListTile(
                             selected: ch == selected,
                             shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(14)),
+                            leading: LiveStationBadge(
+                              channel: ch,
+                              size: 36,
+                              radius: 9,
+                            ),
                             title: Text(ch.name,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(color: winInk(context))),
                             subtitle: Text(
-                                '${ch.group} · ${ch.urls.length} 条线路',
+                                '${ch.group} · ${ch.urls.length} 条线路${speedBadge != null ? ' · $speedBadge' : ''}',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(color: winMuted(context))),
@@ -1471,7 +1658,13 @@ extension _WindowsShell on _AdaptiveShellState {
                                               line++)
                                             PopupMenuItem(
                                                 value: line,
-                                                child: Text('线路 ${line + 1}'))
+                                                child: Text(
+                                                  line < ch.episodes.length &&
+                                                          ch.episodes[line].name
+                                                              .isNotEmpty
+                                                      ? ch.episodes[line].name
+                                                      : '线路 ${line + 1}',
+                                                ))
                                         ]));
                       })),
         ]));
@@ -1479,7 +1672,12 @@ extension _WindowsShell on _AdaptiveShellState {
         padding: EdgeInsets.fromLTRB(pad, 8, pad, 20),
         child: Column(children: [
           _windowsHeading('直播', actions: [
-            WinButton('管理来源', onPressed: _showSubscriptionManagerSheet)
+            WinButton('独立导入', onPressed: () => _showStandaloneLiveImportSheet()),
+            if (_liveGroups.isNotEmpty)
+              WinButton(_liveProbing ? '停止测速' : '测速归类',
+                  selected: _liveProbing,
+                  onPressed: _probeCurrentLiveGroups),
+            WinButton('管理来源', onPressed: _showLiveSourceManagerSheet),
           ]),
           SizedBox(
               height: 48,
@@ -1498,8 +1696,8 @@ extension _WindowsShell on _AdaptiveShellState {
                     selected: _selectedLiveGroup < 0,
                     onPressed: () =>
                         _updateWindowsState(() => _selectedLiveGroup = -1)),
-                for (int i = 0; i < _liveGroups.length; i++)
-                  WinButton(_liveGroups[i].name,
+                for (int i = 0; i < displayGroups.length; i++)
+                  WinButton('${displayGroups[i].name} (${displayGroups[i].channels.length})',
                       selected: _selectedLiveGroup == i,
                       onPressed: () =>
                           _updateWindowsState(() => _selectedLiveGroup = i)),
