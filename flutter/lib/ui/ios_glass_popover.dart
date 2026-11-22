@@ -1,7 +1,9 @@
 import 'dart:math' as math;
+import 'dart:ui' show lerpDouble;
 import 'package:flutter/material.dart';
 import 'apple_theme.dart';
 import 'ios_liquid_glass.dart';
+import 'motion/ios27_springs.dart';
 
 /// Resolves the global screen [Rect] of a widget attached to [key], or `null`
 /// if it is not yet laid out or mounted.
@@ -19,13 +21,14 @@ Rect? rectForGlobalKey(GlobalKey? key) {
 /// displayed.
 final ValueNotifier<int> activeIosGlassPopoverCount = ValueNotifier<int>(0);
 
-/// Shows a compact, native-style Liquid Glass bubble popover anchored to
-/// [anchorRect] rather than a full-screen covering modal sheet.
+/// Shows an iOS 27 arrowless fluid morphing Liquid Glass menu anchored to
+/// [anchorRect].
 ///
-/// The bubble automatically opens below or above [anchorRect] depending on
-/// available viewport space, stays clamped inside the screen safe area, paints
-/// a crisp directional pointer notch aimed at the trigger button, and animates
-/// with a spring scale-from-anchor reveal.
+/// Morphs seamlessly out of [anchorRect] using [Ios27Spring.bouncy]
+/// (`Spring(duration: 0.44, bounce: 0.24)`) into a continuous `24pt` rounded
+/// glass capsule menu with specular rim optics, and collapses back toward
+/// [anchorRect] on dismissal. Automatically degrades to a `150ms` opacity fade
+/// when `MediaQuery.disableAnimationsOf(context)` is enabled.
 Future<T?> showIosGlassPopover<T>({
   required BuildContext context,
   required Rect? anchorRect,
@@ -37,61 +40,104 @@ Future<T?> showIosGlassPopover<T>({
   Widget? trailing,
   EdgeInsetsGeometry contentPadding = const EdgeInsets.fromLTRB(12, 6, 12, 12),
 }) {
-  return showGeneralDialog<T>(
-    context: context,
-    barrierDismissible: true,
-    barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
-    barrierColor: forceDark
-        ? Colors.black.withValues(alpha: 0.16)
-        : Colors.black.withValues(alpha: 0.08),
-    transitionDuration: const Duration(milliseconds: 220),
-    pageBuilder: (dialogContext, animation, secondaryAnimation) {
-      return _IosGlassPopoverOverlay(
-        anchorRect: anchorRect,
-        title: title,
-        maxWidth: maxWidth,
-        maxHeight: maxHeight,
-        forceDark: forceDark,
-        trailing: trailing,
-        contentPadding: contentPadding,
-        builder: builder,
-      );
-    },
-    transitionBuilder: (dialogContext, animation, secondaryAnimation, child) {
-      if (MediaQuery.disableAnimationsOf(dialogContext)) {
-        return child;
-      }
-      final curved = CurvedAnimation(
-        parent: animation,
-        curve: const Cubic(0.2, 1.08, 0.32, 1.0),
-        reverseCurve: Curves.easeInCubic,
-      );
-      return FadeTransition(
-        opacity: CurvedAnimation(
-          parent: animation,
-          curve: Curves.easeOutCubic,
-          reverseCurve: Curves.easeInCubic,
-        ),
-        child: ScaleTransition(
-          scale: Tween<double>(begin: 0.88, end: 1.0).animate(curved),
-          alignment: _popoverScaleAlignment(dialogContext, anchorRect),
-          child: child,
-        ),
-      );
-    },
+  return Navigator.of(context, rootNavigator: false).push<T>(
+    _Ios27MorphingPopoverRoute<T>(
+      anchorRect: anchorRect,
+      title: title,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      forceDark: forceDark,
+      trailing: trailing,
+      contentPadding: contentPadding,
+      builder: builder,
+      barrierLabelText:
+          MaterialLocalizations.of(context).modalBarrierDismissLabel,
+    ),
   );
 }
 
-Alignment _popoverScaleAlignment(BuildContext context, Rect? anchorRect) {
-  if (anchorRect == null) return Alignment.center;
-  final size = MediaQuery.sizeOf(context);
-  if (size.width <= 0 || size.height <= 0) return Alignment.center;
-  final ax = ((anchorRect.center.dx / size.width) * 2 - 1).clamp(-1.0, 1.0);
-  final ay = ((anchorRect.center.dy / size.height) * 2 - 1).clamp(-1.0, 1.0);
-  return Alignment(ax, ay);
+class _Ios27MorphingPopoverRoute<T> extends PopupRoute<T> {
+  final Rect? anchorRect;
+  final String title;
+  final double maxWidth;
+  final double maxHeight;
+  final bool forceDark;
+  final Widget? trailing;
+  final EdgeInsetsGeometry contentPadding;
+  final WidgetBuilder builder;
+  final String barrierLabelText;
+
+  _Ios27MorphingPopoverRoute({
+    required this.anchorRect,
+    required this.title,
+    required this.maxWidth,
+    required this.maxHeight,
+    required this.forceDark,
+    required this.trailing,
+    required this.contentPadding,
+    required this.builder,
+    required this.barrierLabelText,
+  });
+
+  @override
+  Color? get barrierColor => forceDark
+      ? Colors.black.withValues(alpha: 0.16)
+      : Colors.black.withValues(alpha: 0.08);
+
+  @override
+  bool get barrierDismissible => true;
+
+  @override
+  String? get barrierLabel => barrierLabelText;
+
+  @override
+  Duration get transitionDuration => Ios27Spring.bouncy.nominalDuration;
+
+  @override
+  Duration get reverseTransitionDuration => Ios27Spring.smooth.nominalDuration;
+
+  @override
+  Widget buildPage(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+  ) {
+    return _IosGlassPopoverOverlay(
+      routeAnimation: animation,
+      anchorRect: anchorRect,
+      title: title,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      forceDark: forceDark,
+      trailing: trailing,
+      contentPadding: contentPadding,
+      builder: builder,
+    );
+  }
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    if (Ios27ConcentricGeometry.isReduceMotion(context)) {
+      return FadeTransition(
+        opacity: CurvedAnimation(
+          parent: animation,
+          curve: Curves.linear,
+          reverseCurve: Curves.linear,
+        ),
+        child: child,
+      );
+    }
+    return child;
+  }
 }
 
 class _IosGlassPopoverOverlay extends StatefulWidget {
+  final Animation<double> routeAnimation;
   final Rect? anchorRect;
   final String title;
   final double maxWidth;
@@ -102,6 +148,7 @@ class _IosGlassPopoverOverlay extends StatefulWidget {
   final WidgetBuilder builder;
 
   const _IosGlassPopoverOverlay({
+    required this.routeAnimation,
     required this.anchorRect,
     required this.title,
     required this.maxWidth,
@@ -117,15 +164,62 @@ class _IosGlassPopoverOverlay extends StatefulWidget {
       _IosGlassPopoverOverlayState();
 }
 
-class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay> {
+class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _morphCtrl;
+  bool _startedEnter = false;
+  bool _reversing = false;
+
   @override
   void initState() {
     super.initState();
     activeIosGlassPopoverCount.value++;
+    _morphCtrl = AnimationController.unbounded(vsync: this, value: 0.0);
+    widget.routeAnimation.addStatusListener(_onRouteStatus);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_startedEnter) {
+      _startedEnter = true;
+      final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+      Ios27Spring.animate(
+        _morphCtrl,
+        spring: Ios27Spring.bouncy,
+        target: 1.0,
+        disableAnimations: reduceMotion,
+      );
+    }
+  }
+
+  void _onRouteStatus(AnimationStatus status) {
+    if (!mounted) return;
+    if (status == AnimationStatus.reverse && !_reversing) {
+      _reversing = true;
+      final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+      Ios27Spring.animate(
+        _morphCtrl,
+        spring: Ios27Spring.smooth,
+        target: 0.0,
+        disableAnimations: reduceMotion,
+      );
+    } else if (status == AnimationStatus.forward && _reversing) {
+      _reversing = false;
+      final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+      Ios27Spring.animate(
+        _morphCtrl,
+        spring: Ios27Spring.bouncy,
+        target: 1.0,
+        disableAnimations: reduceMotion,
+      );
+    }
   }
 
   @override
   void dispose() {
+    widget.routeAnimation.removeStatusListener(_onRouteStatus);
+    _morphCtrl.dispose();
     if (activeIosGlassPopoverCount.value > 0) {
       activeIosGlassPopoverCount.value--;
     }
@@ -145,14 +239,17 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay> {
     final media = MediaQuery.of(context);
     final screen = media.size;
     final safe = media.padding;
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
     const edgeGap = 12.0;
-    const arrowHeight = 8.0;
     const anchorGap = 8.0;
+    const menuRadius = 24.0;
 
     final safeLeft = safe.left + edgeGap;
-    final safeRight = math.max(safeLeft + 180.0, screen.width - safe.right - edgeGap);
+    final safeRight =
+        math.max(safeLeft + 180.0, screen.width - safe.right - edgeGap);
     final safeTop = safe.top + edgeGap;
-    final safeBottom = math.max(safeTop + 140.0, screen.height - safe.bottom - edgeGap);
+    final safeBottom =
+        math.max(safeTop + 140.0, screen.height - safe.bottom - edgeGap);
 
     final availableW = (safeRight - safeLeft).clamp(180.0, screen.width);
     final bubbleW = math.min(maxWidth, availableW);
@@ -165,11 +262,10 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay> {
 
     final spaceBelow = safeBottom - (anchor.bottom + anchorGap);
     final spaceAbove = (anchor.top - anchorGap) - safeTop;
-    final showBelow = spaceBelow >= math.min(maxHeight, 210) ||
-        spaceBelow >= spaceAbove;
+    final showBelow =
+        spaceBelow >= math.min(maxHeight, 210) || spaceBelow >= spaceAbove;
 
-    final maxAvailableH =
-        (showBelow ? spaceBelow : spaceAbove) - arrowHeight;
+    final maxAvailableH = showBelow ? spaceBelow : spaceAbove;
     final bubbleMaxH = math.min(
       maxHeight,
       maxAvailableH.clamp(120.0, screen.height * 0.72),
@@ -177,7 +273,13 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay> {
 
     final rawLeft = anchor.center.dx - bubbleW / 2;
     final left = rawLeft.clamp(safeLeft, safeRight - bubbleW);
-    final arrowX = (anchor.center.dx - left).clamp(24.0, bubbleW - 24.0);
+    final anchorNormalizedX =
+        (((anchor.center.dx - left) / math.max(bubbleW, 1.0)) * 2.0 - 1.0)
+            .clamp(-1.0, 1.0);
+    final morphAlignment = Alignment(
+      anchorNormalizedX,
+      showBelow ? -1.0 : 1.0,
+    );
 
     final isDark = forceDark || ApplePalette.isDarkOf(context);
     final reduce = IosLiquidGlassBridge.reduceTransparency ||
@@ -185,16 +287,13 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay> {
         GlassworkBackdrop.intensity.value <= 0.02 ||
         MediaQuery.highContrastOf(context);
 
-    final fillColor = isDark
-        ? (reduce ? const Color(0xF51C1C1F) : const Color(0xC218181D))
-        : (reduce ? const Color(0xFAFFFFFF) : const Color(0xDCFFFFFF));
-    final borderColor = isDark
-        ? Colors.white.withValues(alpha: 0.22)
-        : Colors.black.withValues(alpha: 0.09);
     final titleColor = isDark ? Colors.white : const Color(0xFF111114);
     final dividerColor = isDark
         ? Colors.white.withValues(alpha: 0.12)
         : Colors.black.withValues(alpha: 0.08);
+    final specularBorderColor = isDark
+        ? Colors.white.withValues(alpha: 0.24)
+        : Colors.black.withValues(alpha: 0.09);
 
     final bubble = Theme(
       data: Theme.of(context).copyWith(
@@ -208,103 +307,140 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay> {
             maxWidth: bubbleW,
             maxHeight: bubbleMaxH,
           ),
-          child: Container(
-            key: const Key('ios-glass-popover-bubble'),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(20),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: isDark ? 0.45 : 0.16),
-                  blurRadius: 28,
-                  spreadRadius: -4,
-                  offset: const Offset(0, 12),
-                ),
-              ],
-            ),
-            child: LiquidGlass(
-              borderRadius: 20,
-              blur: 24,
-              tint: isDark ? const Color(0x001E1E22) : const Color(0x00FFFFFF),
-              rimStrength: 1.0,
-              elevated: false,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: reduce
-                      ? Colors.transparent
-                      : (isDark
-                          ? const Color(0x8A15161B)
-                          : const Color(0x9EFFFFFF)),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (title.isNotEmpty || trailing != null) ...[
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(14, 11, 10, 8),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: titleColor,
-                                  fontSize: 13.5,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: -0.1,
-                                ),
-                              ),
+          child: AnimatedBuilder(
+            animation: _morphCtrl,
+            builder: (context, menuChild) {
+              final rawT = _morphCtrl.value;
+              final clampedT = rawT.clamp(0.0, 1.0);
+              final opacity = reduceMotion
+                  ? clampedT
+                  : (rawT / 0.34).clamp(0.0, 1.0);
+              final scale = reduceMotion
+                  ? 1.0
+                  : lerpDouble(0.32, 1.0, rawT)!.clamp(0.25, 1.12);
+              final currentRadius = reduceMotion
+                  ? menuRadius
+                  : lerpDouble(
+                      math.min(anchor.height * 0.5, menuRadius),
+                      menuRadius,
+                      clampedT,
+                    )!;
+              final translateDy = reduceMotion
+                  ? 0.0
+                  : (showBelow ? -anchorGap : anchorGap) * (1.0 - clampedT);
+
+              return Opacity(
+                opacity: opacity,
+                child: Transform.translate(
+                  offset: Offset(0.0, translateDy),
+                  child: Transform.scale(
+                    scale: scale,
+                    alignment: morphAlignment,
+                    child: DecoratedBox(
+                      key: const Key('ios-glass-popover-bubble'),
+                      decoration: ShapeDecoration(
+                        shape: Ios27ConcentricGeometry.continuousShape(
+                          radius: currentRadius,
+                          side: BorderSide(
+                            color: specularBorderColor,
+                            width: 0.75,
+                          ),
+                        ),
+                        shadows: [
+                          BoxShadow(
+                            color: Colors.black.withValues(
+                              alpha: (isDark ? 0.44 : 0.16) * clampedT,
                             ),
-                            if (trailing != null) trailing,
-                          ],
+                            blurRadius: 28,
+                            spreadRadius: -4,
+                            offset: const Offset(0, 12),
+                          ),
+                        ],
+                      ),
+                      child: ClipPath(
+                        clipper: ShapeBorderClipper(
+                          shape: Ios27ConcentricGeometry.continuousShape(
+                            radius: currentRadius,
+                          ),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: LiquidGlass(
+                          borderRadius: currentRadius,
+                          blur: 24,
+                          tint: isDark
+                              ? const Color(0x001E1E22)
+                              : const Color(0x00FFFFFF),
+                          rimStrength: 1.0,
+                          elevated: false,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: reduce
+                                  ? Colors.transparent
+                                  : (isDark
+                                      ? const Color(0x8A15161B)
+                                      : const Color(0x9EFFFFFF)),
+                            ),
+                            child: menuChild,
+                          ),
                         ),
                       ),
-                      Divider(height: 1, thickness: 0.6, color: dividerColor),
-                    ],
-                    Flexible(
-                      child: Padding(
-                        padding: contentPadding,
-                        child: Builder(builder: builder),
-                      ),
                     ),
-                  ],
+                  ),
                 ),
-              ),
+              );
+            },
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (title.isNotEmpty || trailing != null) ...[
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 11, 10, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: titleColor,
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: -0.1,
+                            ),
+                          ),
+                        ),
+                        if (trailing != null) trailing,
+                      ],
+                    ),
+                  ),
+                  Divider(height: 1, thickness: 0.6, color: dividerColor),
+                ],
+                Flexible(
+                  child: Padding(
+                    padding: contentPadding,
+                    child: Builder(builder: builder),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
       ),
     );
 
-    final pointer = CustomPaint(
-      size: Size(bubbleW, arrowHeight),
-      painter: _PopoverArrowPainter(
-        tipX: arrowX,
-        pointsUp: showBelow,
-        fillColor: fillColor,
-        borderColor: borderColor,
-      ),
-    );
-
-    final column = Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: showBelow ? [pointer, bubble] : [bubble, pointer],
-    );
-
     final positioned = showBelow
         ? Positioned(
             left: left,
             top: (anchor.bottom + anchorGap).clamp(safeTop, safeBottom - 120),
-            child: column,
+            child: bubble,
           )
         : Positioned(
             left: left,
             bottom: (screen.height - (anchor.top - anchorGap))
                 .clamp(safe.bottom + edgeGap, screen.height - safeTop - 120),
-            child: column,
+            child: bubble,
           );
 
     return Stack(
@@ -320,67 +456,4 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay> {
       ],
     );
   }
-}
-
-class _PopoverArrowPainter extends CustomPainter {
-  final double tipX;
-  final bool pointsUp;
-  final Color fillColor;
-  final Color borderColor;
-
-  const _PopoverArrowPainter({
-    required this.tipX,
-    required this.pointsUp,
-    required this.fillColor,
-    required this.borderColor,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    const halfBase = 8.5;
-    final path = Path();
-    if (pointsUp) {
-      path.moveTo(tipX - halfBase, size.height);
-      path.lineTo(tipX, 1.0);
-      path.lineTo(tipX + halfBase, size.height);
-    } else {
-      path.moveTo(tipX - halfBase, 0.0);
-      path.lineTo(tipX, size.height - 1.0);
-      path.lineTo(tipX + halfBase, 0.0);
-    }
-    path.close();
-
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = fillColor
-        ..style = PaintingStyle.fill,
-    );
-
-    final strokePath = Path();
-    if (pointsUp) {
-      strokePath.moveTo(tipX - halfBase, size.height);
-      strokePath.lineTo(tipX, 1.0);
-      strokePath.lineTo(tipX + halfBase, size.height);
-    } else {
-      strokePath.moveTo(tipX - halfBase, 0.0);
-      strokePath.lineTo(tipX, size.height - 1.0);
-      strokePath.lineTo(tipX + halfBase, 0.0);
-    }
-    canvas.drawPath(
-      strokePath,
-      Paint()
-        ..color = borderColor
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 0.9
-        ..strokeJoin = StrokeJoin.round,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _PopoverArrowPainter old) =>
-      old.tipX != tipX ||
-      old.pointsUp != pointsUp ||
-      old.fillColor != fillColor ||
-      old.borderColor != borderColor;
 }

@@ -13,6 +13,7 @@ import '../core/storage_service.dart';
 import 'apple_theme.dart';
 import 'desktop_horizontal_scroller.dart';
 import 'ios_liquid_glass.dart';
+import 'motion/ios27_springs.dart';
 import 'poster_expand_route.dart';
 import 'poster_image.dart';
 import 'source_verification_dialog.dart';
@@ -391,10 +392,10 @@ class _IosSearchOverlayRoute<T> extends PopupRoute<T> {
   String? get barrierLabel => '全站搜索';
 
   @override
-  Duration get transitionDuration => const Duration(milliseconds: 220);
+  Duration get transitionDuration => Ios27Spring.bouncy.nominalDuration;
 
   @override
-  Duration get reverseTransitionDuration => const Duration(milliseconds: 180);
+  Duration get reverseTransitionDuration => Ios27Spring.smooth.nominalDuration;
 
   @override
   Widget buildPage(
@@ -412,14 +413,34 @@ class _IosSearchOverlayRoute<T> extends PopupRoute<T> {
     Animation<double> secondaryAnimation,
     Widget child,
   ) {
+    if (Ios27ConcentricGeometry.isReduceMotion(context)) {
+      return FadeTransition(
+        opacity: CurvedAnimation(
+          parent: animation,
+          curve: Curves.linear,
+          reverseCurve: Curves.linear,
+        ),
+        child: child,
+      );
+    }
+    final springCurve = Ios27Spring.bouncy.curve;
+    final reverseCurve = Ios27Spring.smooth.curve.flipped;
     final curved = CurvedAnimation(
       parent: animation,
-      curve: Curves.easeOutCubic,
-      reverseCurve: Curves.easeInCubic,
+      curve: springCurve,
+      reverseCurve: reverseCurve,
     );
     return FadeTransition(
-      opacity: curved,
-      child: child,
+      opacity: CurvedAnimation(
+        parent: animation,
+        curve: Ios27Spring.smooth.curve,
+        reverseCurve: reverseCurve,
+      ),
+      child: ScaleTransition(
+        scale: Tween<double>(begin: 0.96, end: 1.0).animate(curved),
+        alignment: Alignment.bottomCenter,
+        child: child,
+      ),
     );
   }
 }
@@ -492,7 +513,9 @@ class IosGlobalSearchPage extends StatefulWidget {
 class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
   final ScrollController _siteFilterScrollCtrl = ScrollController();
   final ScrollController _noticeScrollCtrl = ScrollController();
+  final FocusNode _searchFocusNode = FocusNode();
   final Set<String> _expandedGroupKeys = <String>{};
+  bool _searchFocused = false;
 
   /// `0` = 智能聚合 (Smart Aggregated Cinema Cards), `1` = 全部海报 (Poster Grid).
   int _viewMode = 0;
@@ -501,6 +524,14 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
   void initState() {
     super.initState();
     widget.stateRevision.addListener(_onRevisionChanged);
+    _searchFocusNode.addListener(_onSearchFocusChanged);
+  }
+
+  void _onSearchFocusChanged() {
+    final focused = _searchFocusNode.hasFocus;
+    if (focused != _searchFocused && mounted) {
+      setState(() => _searchFocused = focused);
+    }
   }
 
   @override
@@ -518,6 +549,8 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
 
   @override
   void dispose() {
+    _searchFocusNode.removeListener(_onSearchFocusChanged);
+    _searchFocusNode.dispose();
     widget.stateRevision.removeListener(_onRevisionChanged);
     _siteFilterScrollCtrl.dispose();
     _noticeScrollCtrl.dispose();
@@ -985,8 +1018,9 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
             Builder(
               builder: (btnCtx) {
                 final bp = ApplePalette.of(btnCtx);
-                return ApplePressableScale(
-                  pressedScale: 0.94,
+                return Ios27Pressable(
+                  pressedScale: Ios27Spring.pressSwellScale,
+                  borderRadius: 999,
                   onTap: () => _handleClearHistory(isPriv),
                   child: Container(
                     padding: EdgeInsets.symmetric(
@@ -1103,8 +1137,9 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                       final selected = activeSiteFilterKey == key;
                       final titleText =
                           isAll ? '全部' : widget.sourceLabelOf(site!);
-                      return ApplePressableScale(
-                        pressedScale: 0.94,
+                      return Ios27Pressable(
+                        pressedScale: Ios27Spring.pressSwellScale,
+                        borderRadius: 999,
                         onTap: () {
                           HapticFeedback.selectionClick();
                           final nextKey = (selected && !isAll) ? '' : key;
@@ -1112,7 +1147,10 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                           if (mounted) setState(() {});
                         },
                         child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
+                          duration: Ios27ConcentricGeometry.isReduceMotion(ctx)
+                              ? Ios27ConcentricGeometry.reducedMotionDuration
+                              : Ios27Spring.snappy.nominalDuration,
+                          curve: Ios27Spring.snappy.curve,
                           padding: const EdgeInsets.symmetric(
                             horizontal: 11,
                             vertical: 5,
@@ -1231,8 +1269,10 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                   setState(() => _viewMode = i);
                 },
                 child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  curve: Curves.easeOutCubic,
+                  duration: Ios27ConcentricGeometry.isReduceMotion(context)
+                      ? Ios27ConcentricGeometry.reducedMotionDuration
+                      : Ios27Spring.snappy.nominalDuration,
+                  curve: Ios27Spring.snappy.curve,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
                     color: _viewMode == i
@@ -1861,108 +1901,131 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
   }) {
     final palette = ApplePalette.of(context);
     final isDark = palette.isDark;
-    final searchCapsule = ClipRRect(
-      borderRadius: BorderRadius.circular(999),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
-        child: Container(
-          key: const ValueKey('search-floating-glass-capsule'),
-          height: barHeight,
-          padding: EdgeInsets.fromLTRB(
-            compactLandscape ? 10 : 12,
-            0,
-            compactLandscape ? 6 : 8,
-            0,
-          ),
-          decoration: BoxDecoration(
-            color: isDark
-                ? const Color(0xC21D1D24)
-                : Colors.white.withValues(alpha: 0.92),
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(
-              color: isDark
-                  ? const Color(0x42FFFFFF)
-                  : Colors.black.withValues(alpha: 0.10),
-              width: 0.85,
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+    final focusDuration = reduceMotion
+        ? Ios27ConcentricGeometry.reducedMotionDuration
+        : Ios27Spring.bouncy.nominalDuration;
+    final focusCurve =
+        reduceMotion ? Curves.linear : Ios27Spring.bouncy.curve;
+
+    final searchCapsule = AnimatedScale(
+      scale: (!reduceMotion && _searchFocused) ? 1.012 : 1.0,
+      duration: focusDuration,
+      curve: focusCurve,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(999),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
+          child: AnimatedContainer(
+            key: const ValueKey('search-floating-glass-capsule'),
+            duration: focusDuration,
+            curve: focusCurve,
+            height: barHeight,
+            padding: EdgeInsets.fromLTRB(
+              compactLandscape ? 10 : 12,
+              0,
+              compactLandscape ? 6 : 8,
+              0,
             ),
-            boxShadow: [
-              BoxShadow(
-                color: isDark
-                    ? const Color(0x66000000)
-                    : const Color(0x240F172A),
-                blurRadius: 22,
-                offset: const Offset(0, 8),
+            decoration: BoxDecoration(
+              color: isDark
+                  ? (_searchFocused
+                      ? const Color(0xD423232C)
+                      : const Color(0xC21D1D24))
+                  : Colors.white.withValues(alpha: _searchFocused ? 0.96 : 0.92),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: _searchFocused
+                    ? accentColor.withValues(alpha: isDark ? 0.58 : 0.45)
+                    : (isDark
+                        ? const Color(0x42FFFFFF)
+                        : Colors.black.withValues(alpha: 0.10)),
+                width: _searchFocused ? 1.15 : 0.85,
               ),
-            ],
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: AppleSearchField(
-                  controller: widget.controller,
-                  autofocus: true,
-                  borderless: true,
-                  placeholder: '搜索片名、演员或导演…',
-                  onSuffixTap: () {
-                    widget.controller.clear();
-                    widget.onResetSearch();
-                    if (mounted) setState(() {});
-                  },
-                  onSubmitted: _submitQuery,
+              boxShadow: [
+                BoxShadow(
+                  color: _searchFocused
+                      ? accentColor.withValues(alpha: isDark ? 0.24 : 0.16)
+                      : (isDark
+                          ? const Color(0x66000000)
+                          : const Color(0x240F172A)),
+                  blurRadius: _searchFocused ? 26 : 22,
+                  offset: const Offset(0, 8),
                 ),
-              ),
-              const SizedBox(width: 6),
-              ApplePressableScale(
-                pressedScale: 0.93,
-                onTap: () => _submitQuery(widget.controller.text),
-                child: Container(
-                  height: compactLandscape ? 32 : 36,
-                  padding: EdgeInsets.symmetric(
-                    horizontal: compactLandscape ? 13 : 15,
+              ],
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: AppleSearchField(
+                    controller: widget.controller,
+                    focusNode: _searchFocusNode,
+                    autofocus: true,
+                    borderless: true,
+                    placeholder: '搜索片名、演员或导演…',
+                    onSuffixTap: () {
+                      widget.controller.clear();
+                      widget.onResetSearch();
+                      if (mounted) setState(() {});
+                    },
+                    onSubmitted: _submitQuery,
                   ),
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        accentColor.withValues(alpha: 0.95),
-                        accentColor,
+                ),
+                const SizedBox(width: 6),
+                Ios27Pressable(
+                  pressedScale: Ios27Spring.pressSwellScale,
+                  borderRadius: 999,
+                  onTap: () => _submitQuery(widget.controller.text),
+                  child: Container(
+                    height: compactLandscape ? 32 : 36,
+                    padding: EdgeInsets.symmetric(
+                      horizontal: compactLandscape ? 13 : 15,
+                    ),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          accentColor.withValues(alpha: 0.95),
+                          accentColor,
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: const Color(0x55FFFFFF),
+                        width: 0.6,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: accentColor.withValues(alpha: 0.35),
+                          blurRadius: 10,
+                          offset: const Offset(0, 3),
+                        ),
                       ],
                     ),
-                    borderRadius: BorderRadius.circular(999),
-                    border: Border.all(
-                      color: const Color(0x55FFFFFF),
-                      width: 0.6,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: accentColor.withValues(alpha: 0.35),
-                        blurRadius: 10,
-                        offset: const Offset(0, 3),
+                    child: Text(
+                      '搜索',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: compactLandscape ? 12.5 : 13.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.1,
+                        height: 1.0,
                       ),
-                    ],
-                  ),
-                  child: Text(
-                    '搜索',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: compactLandscape ? 12.5 : 13.5,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: -0.1,
-                      height: 1.0,
                     ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
     );
 
-    final closeFallback = ApplePressableScale(
-      pressedScale: 0.92,
+    final closeFallback = Ios27Pressable(
+      pressedScale: Ios27Spring.pressSwellScale,
+      borderRadius: barHeight * 0.5,
       onTap: () => Navigator.of(context).maybePop(),
       child: ClipOval(
         child: BackdropFilter(
@@ -2429,8 +2492,9 @@ class _AggregatedSearchCard extends StatelessWidget {
       icon = null;
     }
 
-    return ApplePressableScale(
-      pressedScale: 0.93,
+    return Ios27Pressable(
+      pressedScale: Ios27Spring.pressSwellScale,
+      borderRadius: 999,
       onTap: onTap,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 180),

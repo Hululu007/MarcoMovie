@@ -19,6 +19,7 @@ import 'apple_theme.dart';
 import 'ios_liquid_glass.dart';
 import 'ios_settings.dart';
 import 'local_qr_code.dart';
+import 'motion/ios27_springs.dart';
 import 'quark_library_sheet.dart';
 import 'windows_appearance.dart';
 
@@ -63,7 +64,7 @@ Future<void> showNetdiskAccountSheet(
     );
     return;
   }
-  await showAppleModalSheet<void>(
+  await showIos27LiquidSheet<void>(
     context: context,
     title: '我的云盘 · 扫码与账号配置',
     builder: (ctx) => _NetdiskAccountSheet(
@@ -515,108 +516,124 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
     );
     var saving = false;
     var error = '';
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, update) => Dialog(
-          backgroundColor: Colors.transparent,
-          child: AppleGlassSurface(
-            padding: const EdgeInsets.all(22),
-            borderRadius: BorderRadius.circular(26),
-            child: TextSelectionMouseGuard(
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${drive.providerName} · 账号配置',
-                      style: const TextStyle(
-                        fontSize: 19,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    TextSelectionMouseGuard(
-                      child: TextField(
-                        controller: controller,
-                        maxLines: 3,
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        decoration: const InputDecoration(
-                          hintText: '粘贴 Cookie 或 Token…',
-                        ),
-                      ),
-                    ),
-                    if (error.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      Text(
-                        error,
-                        style: const TextStyle(color: AppleColors.systemRed),
-                      ),
-                    ],
-                    const SizedBox(height: 18),
-                    Wrap(
-                      spacing: 12,
-                      runSpacing: 10,
-                      children: [
-                        AppleCapsuleButton(
-                          label: '取消',
-                          compact: true,
-                          onPressed: () => Navigator.of(ctx).pop(),
-                        ),
-                        AppleCapsuleButton(
-                          label: saving
-                              ? '正在验证…'
-                              : driveKey == 'quark'
-                                  ? '验证并保存'
-                                  : '保存配置',
-                          primary: true,
-                          compact: true,
-                          onPressed: () async {
-                            if (saving) return;
-                            update(() {
-                              saving = true;
-                              error = '';
-                            });
-                            try {
-                              var credential = controller.text.trim();
-                              if (driveKey == 'quark' &&
-                                  credential.isNotEmpty) {
-                                credential = (await widget.storage.quarkAccounts
-                                        .validateCredential(credential))
-                                    .toCredential();
-                              }
-                              if (!mounted ||
-                                  !ctx.mounted ||
-                                  ModalRoute.of(ctx)?.isCurrent == false)
-                                return;
-                              await widget.storage.setNetdiskCredential(
-                                driveKey,
-                                credential,
-                              );
-                              widget.onChanged?.call();
-                              if (ctx.mounted) Navigator.of(ctx).pop();
-                              if (mounted) setState(() {});
-                            } catch (_) {
-                              if (ctx.mounted)
-                                update(() {
-                                  saving = false;
-                                  error = '账户验证失败，请检查凭据或重新扫码';
-                                });
-                            }
-                          },
-                        ),
-                      ],
-                    ),
-                  ],
+    Widget buildManualForm(BuildContext ctx, StateSetter update) => Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 22),
+      child: TextSelectionMouseGuard(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (usesWindowsAppearance(ctx)) ...[
+                Text(
+                  '${drive.providerName} · 账号配置',
+                  style: const TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 14),
+              ],
+              TextSelectionMouseGuard(
+                child: TextField(
+                  controller: controller,
+                  maxLines: 3,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: const InputDecoration(
+                    hintText: '粘贴 Cookie 或 Token…',
+                  ),
                 ),
               ),
-            ),
+              if (error.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  error,
+                  style: const TextStyle(color: AppleColors.systemRed),
+                ),
+              ],
+              const SizedBox(height: 18),
+              Wrap(
+                spacing: 12,
+                runSpacing: 10,
+                children: [
+                  AppleCapsuleButton(
+                    label: '取消',
+                    compact: true,
+                    onPressed: () => Navigator.of(ctx).pop(),
+                  ),
+                  AppleCapsuleButton(
+                    label: saving
+                        ? '正在验证…'
+                        : driveKey == 'quark'
+                            ? '验证并保存'
+                            : '保存配置',
+                    primary: true,
+                    compact: true,
+                    onPressed: () async {
+                      if (saving) return;
+                      update(() {
+                        saving = true;
+                        error = '';
+                      });
+                      try {
+                        var credential = controller.text.trim();
+                        if (driveKey == 'quark' && credential.isNotEmpty) {
+                          credential = (await widget.storage.quarkAccounts
+                                  .validateCredential(credential))
+                              .toCredential();
+                        }
+                        if (!mounted ||
+                            !ctx.mounted ||
+                            ModalRoute.of(ctx)?.isCurrent == false) return;
+                        await widget.storage.setNetdiskCredential(
+                          driveKey,
+                          credential,
+                        );
+                        widget.onChanged?.call();
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                        if (mounted) setState(() {});
+                      } catch (_) {
+                        if (ctx.mounted) {
+                          update(() {
+                            saving = false;
+                            error = '账户验证失败，请检查凭据或重新扫码';
+                          });
+                        }
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
       ),
     );
+    if (usesWindowsAppearance(context)) {
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, update) => Dialog(
+            backgroundColor: Colors.transparent,
+            child: AppleGlassSurface(
+              padding: const EdgeInsets.all(2),
+              borderRadius: BorderRadius.circular(26),
+              child: buildManualForm(ctx, update),
+            ),
+          ),
+        ),
+      );
+    } else {
+      await showIos27LiquidSheet<void>(
+        context: context,
+        title: '${drive.providerName} · 账号配置',
+        maxWidth: 460,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, update) => buildManualForm(ctx, update),
+        ),
+      );
+    }
     // Dialog exit animations may still use its controller on this frame.
     await Future<void>.delayed(const Duration(milliseconds: 300));
     controller.dispose();
@@ -873,10 +890,15 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
         children: [
           for (var i = 0; i < labels.length; i++)
             Expanded(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
+              child: Ios27Pressable(
+                pressedScale: Ios27Spring.pressSwellScale,
+                borderRadius: 15.5,
                 onTap: () => setState(() => _selectedDriveFilter = i),
-                child: Container(
+                child: AnimatedContainer(
+                  duration: Ios27ConcentricGeometry.isReduceMotion(context)
+                      ? Ios27ConcentricGeometry.reducedMotionDuration
+                      : Ios27Spring.snappy.nominalDuration,
+                  curve: Ios27Spring.snappy.curve,
                   alignment: Alignment.center,
                   decoration: i == _selectedDriveFilter
                       ? BoxDecoration(

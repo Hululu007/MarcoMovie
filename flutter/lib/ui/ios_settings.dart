@@ -9,6 +9,7 @@ import '../core/ohos_runtime.dart';
 import 'apple_theme.dart';
 import 'danmu/danmu_settings_sheet.dart';
 import 'ios_liquid_glass.dart';
+import 'motion/ios27_springs.dart';
 import 'player/player_hud_prefs.dart';
 
 class SettingsPane {
@@ -56,13 +57,23 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
   final ValueNotifier<int> _revision = ValueNotifier<int>(0);
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
   String _searchQuery = '';
   bool _showCompactNavBar = false;
+  bool _searchFocused = false;
 
   @override
   void initState() {
     super.initState();
     _scrollController.addListener(_handleScroll);
+    _searchFocusNode.addListener(_handleSearchFocus);
+  }
+
+  void _handleSearchFocus() {
+    final focused = _searchFocusNode.hasFocus;
+    if (focused != _searchFocused && mounted) {
+      setState(() => _searchFocused = focused);
+    }
   }
 
   void _handleScroll() {
@@ -75,6 +86,8 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
 
   @override
   void dispose() {
+    _searchFocusNode.removeListener(_handleSearchFocus);
+    _searchFocusNode.dispose();
     _scrollController.removeListener(_handleScroll);
     _scrollController.dispose();
     _searchController.dispose();
@@ -167,61 +180,83 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
 
   Widget _buildIos26SearchPill(BuildContext context) {
     final p = ApplePalette.of(context);
-    return Container(
-      key: const ValueKey('ios-settings-search'),
-      height: 40,
-      decoration: BoxDecoration(
-        color: p.isDark ? const Color(0xEB1C1C1E) : const Color(0xFFE1E5EE),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: p.glassBorder,
-          width: 0.6,
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+    final duration = reduceMotion
+        ? Ios27ConcentricGeometry.reducedMotionDuration
+        : Ios27Spring.bouncy.nominalDuration;
+    final curve = reduceMotion ? Curves.linear : Ios27Spring.bouncy.curve;
+    return AnimatedScale(
+      scale: (!reduceMotion && _searchFocused) ? 1.012 : 1.0,
+      duration: duration,
+      curve: curve,
+      child: AnimatedContainer(
+        key: const ValueKey('ios-settings-search'),
+        duration: duration,
+        curve: curve,
+        height: 40,
+        decoration: BoxDecoration(
+          color: p.isDark
+              ? (_searchFocused
+                  ? const Color(0xF525252A)
+                  : const Color(0xEB1C1C1E))
+              : (_searchFocused
+                  ? const Color(0xFFF4F6FB)
+                  : const Color(0xFFE1E5EE)),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: _searchFocused
+                ? p.systemBlue.withValues(alpha: p.isDark ? 0.55 : 0.42)
+                : p.glassBorder,
+            width: _searchFocused ? 1.0 : 0.6,
+          ),
         ),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      child: Row(
-        children: [
-          Icon(
-            CupertinoIcons.search,
-            color: p.labelSecondary,
-            size: 17,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: CupertinoTextField(
-              controller: _searchController,
-              placeholder: '搜索设置',
-              placeholderStyle: TextStyle(
-                color: p.labelSecondary,
-                fontSize: 16,
-              ),
-              style: TextStyle(
-                color: p.labelPrimary,
-                fontSize: 16,
-              ),
-              padding: EdgeInsets.zero,
-              decoration: null,
-              clearButtonMode: OverlayVisibilityMode.never,
-              onChanged: (v) => setState(() => _searchQuery = v),
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        child: Row(
+          children: [
+            Icon(
+              CupertinoIcons.search,
+              color: _searchFocused ? p.systemBlue : p.labelSecondary,
+              size: 17,
             ),
-          ),
-          if (_searchQuery.isNotEmpty)
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () {
-                _searchController.clear();
-                setState(() => _searchQuery = '');
-              },
-              child: Padding(
-                padding: const EdgeInsets.only(left: 6),
-                child: Icon(
-                  CupertinoIcons.clear_circled_solid,
+            const SizedBox(width: 8),
+            Expanded(
+              child: CupertinoTextField(
+                controller: _searchController,
+                focusNode: _searchFocusNode,
+                placeholder: '搜索设置',
+                placeholderStyle: TextStyle(
                   color: p.labelSecondary,
-                  size: 18,
+                  fontSize: 16,
+                ),
+                style: TextStyle(
+                  color: p.labelPrimary,
+                  fontSize: 16,
+                ),
+                padding: EdgeInsets.zero,
+                decoration: null,
+                clearButtonMode: OverlayVisibilityMode.never,
+                onChanged: (v) => setState(() => _searchQuery = v),
+              ),
+            ),
+            if (_searchQuery.isNotEmpty)
+              Ios27Pressable(
+                pressedScale: Ios27Spring.pressSwellScale,
+                borderRadius: 999,
+                onTap: () {
+                  _searchController.clear();
+                  setState(() => _searchQuery = '');
+                },
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: Icon(
+                    CupertinoIcons.clear_circled_solid,
+                    color: p.labelSecondary,
+                    size: 18,
+                  ),
                 ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -356,8 +391,10 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
             child: IgnorePointer(
               ignoring: true,
               child: AnimatedOpacity(
-                duration: const Duration(milliseconds: 180),
-                curve: Curves.easeOut,
+                duration: Ios27ConcentricGeometry.isReduceMotion(context)
+                    ? Ios27ConcentricGeometry.reducedMotionDuration
+                    : Ios27Spring.smooth.nominalDuration,
+                curve: Ios27Spring.smooth.curve,
                 opacity: _showCompactNavBar ? 1.0 : 0.0,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
@@ -465,8 +502,9 @@ class IosSettingsScaffold extends StatelessWidget {
                           height: 40,
                           accessibilityLabel: backLabel,
                           onTap: () => Navigator.of(context).maybePop(),
-                          fallback: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
+                          fallback: Ios27Pressable(
+                            pressedScale: Ios27Spring.pressSwellScale,
+                            borderRadius: 20,
                             onTap: () => Navigator.of(context).maybePop(),
                             child: LiquidGlass(
                               width: 40,
@@ -698,19 +736,24 @@ class IosSettingsGroup extends StatelessWidget {
               ),
             ),
           ),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(22),
+        ClipPath(
+          clipper: ShapeBorderClipper(
+            shape: Ios27ConcentricGeometry.continuousShape(radius: 22),
+          ),
+          clipBehavior: Clip.antiAlias,
           child: DecoratedBox(
-            decoration: BoxDecoration(
+            decoration: ShapeDecoration(
               color: cardBg,
-              borderRadius: BorderRadius.circular(22),
-              border: Border.all(
-                color: p.isDark
-                    ? Colors.white.withValues(alpha: 0.10)
-                    : Colors.black.withValues(alpha: 0.06),
-                width: 0.65,
+              shape: Ios27ConcentricGeometry.continuousShape(
+                radius: 22,
+                side: BorderSide(
+                  color: p.isDark
+                      ? Colors.white.withValues(alpha: 0.10)
+                      : Colors.black.withValues(alpha: 0.06),
+                  width: 0.65,
+                ),
               ),
-              boxShadow: p.isDark
+              shadows: p.isDark
                   ? null
                   : const [
                       BoxShadow(
@@ -796,7 +839,12 @@ class _IosSettingsRowState extends State<IosSettingsRow> {
     final vPad = hasSubtitle
         ? 12.5
         : (widget.compact ? 11.0 : 12.5);
-    final row = ColoredBox(
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+    final row = AnimatedContainer(
+      duration: reduceMotion
+          ? Ios27ConcentricGeometry.reducedMotionDuration
+          : Ios27Spring.snappy.nominalDuration,
+      curve: reduceMotion ? Curves.linear : Ios27Spring.snappy.curve,
       color: _pressed
           ? (p.isDark ? const Color(0xFF2C2C2E) : const Color(0x14000000))
           : const Color(0x00000000),
@@ -992,7 +1040,13 @@ class _IosSettingsChoiceTileState extends State<IosSettingsChoiceTile> {
         onTapUp: (_) => setState(() => _pressed = false),
         onTapCancel: () => setState(() => _pressed = false),
         onTap: widget.onTap,
-        child: ColoredBox(
+        child: AnimatedContainer(
+          duration: Ios27ConcentricGeometry.isReduceMotion(context)
+              ? Ios27ConcentricGeometry.reducedMotionDuration
+              : Ios27Spring.snappy.nominalDuration,
+          curve: Ios27ConcentricGeometry.isReduceMotion(context)
+              ? Curves.linear
+              : Ios27Spring.snappy.curve,
           color: _pressed
               ? (p.isDark ? const Color(0xFF2C2C2E) : const Color(0x14000000))
               : const Color(0x00000000),

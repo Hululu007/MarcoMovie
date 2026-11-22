@@ -3,15 +3,16 @@ import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/material.dart';
 
+import 'motion/ios27_springs.dart';
 import 'poster_image.dart';
 
-/// Tracks the currently expanding/collapsing poster card ID and its live linear
+/// Tracks the currently expanding/collapsing poster card ID and its live
 /// transition progress (`0.0` at rest -> `1.0` fully open) so:
 /// - The originating poster card on Home / Discovery / Search / Library hides
 ///   cleanly without collapsing its layout [RenderBox], eliminating duplicate
 ///   stationary ghosting behind the flying container.
 /// - Full-bleed Home Hero chrome (floating top header, title, CTA, dots) can
-///   cross-fade in exact 1:1 linear lockstep with the route animation.
+///   cross-fade in exact lockstep with the route animation.
 class PosterExpandRegistry {
   PosterExpandRegistry._();
 
@@ -82,27 +83,22 @@ class PosterExpandSourceCard extends StatelessWidget {
   }
 }
 
-/// Smooth, strictly monotonic linear-fluid shared-container route for every
-/// series/show card AND full-bleed Home Hero on iOS / iPadOS:
+/// iOS 27 Fluid `.zoom` shared-container route for every series/show card AND
+/// full-bleed Home Hero on iOS / iPadOS:
 ///
-/// - **Unified Linear Kinematics**: Uses a single zero-overshoot, symmetric
-///   linear-fluid curve (`Cubic(0.28, 0.16, 0.24, 1.0)`) driving rect, corner
-///   radius, backdrop dim, shadow, and poster-to-detail cross-morph off one
-///   shared progress scalar `p` — eliminating spring overshoot, mid-flight
-///   speed cliffs, and double-eased visual mismatches.
+/// - **iOS 27 Second-Order Spring (`Ios27Spring.smooth`)**: Driven by
+///   `Spring(duration: 0.38, bounce: 0.0)` with zero overshoot, continuous
+///   concentric corners (`RoundedSuperellipseBorder`), and exact forward/reverse
+///   symmetry.
+/// - **Interactive Pull-Down & Left-Edge Swipe-Back**: Tracks finger translation,
+///   scale, and rounded corner growth (`32pt`) 1:1 in real time, and hands off
+///   on release to a velocity-inherited [SpringSimulation] (`Ios27Spring.smooth`)
+///   to smoothly fly back to the source card or re-expand to full screen.
 /// - **Zero Ghosting & Zero Hard-Cut Swap**: Hides the originating card via
-///   [PosterExpandRegistry] and paints a 100% opaque shared poster base inside
-///   the morphing container with the cached [DetailScreen] dissolving cleanly
-///   over it, so composite alpha is always `1.0` and frame `0` matches the
-///   tapped card pixel-for-pixel on both open and return.
-/// - **Seamless Full-Bleed Hero Mode (`isFullBleedHero`)**: Eliminates the
-///   horizontal middle split ("中间割裂感") when opening/returning from the
-///   Home immersive hero by preserving `0pt` edge-to-edge corners, removing
-///   floating card shadows, and dynamically feathering the bottom edge into
-///   Home content while smoothly aligning the shared HD poster.
-/// - **Continuous Interactive Edge Swipe-Back**: Left-edge swipe tracks the
-///   finger 1:1 and hands off on release from the exact position and corner
-///   radius with zero 1-frame jump.
+///   [PosterExpandRegistry] and paints an opaque shared poster base inside the
+///   morphing container while [DetailScreen] dissolves cleanly over it.
+/// - **Reduce Motion Accessibility**: Automatically degrades to a `150ms` pure
+///   opacity fade when `MediaQuery.disableAnimationsOf(context)` is enabled.
 class PosterExpandRoute<T> extends PageRoute<T> {
   final WidgetBuilder builder;
   final Rect initialSourceRect;
@@ -118,10 +114,8 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   final Alignment posterAlignment;
   final Color ambientColor;
 
-  /// Critically smooth, zero-overshoot continuous curve keeping an even,
-  /// linear-feeling glide across the middle of the flight with soft cushions
-  /// at takeoff and landing.
-  static const Curve _linearFluidCurve = Cubic(0.28, 0.16, 0.24, 1.0);
+  /// Critically damped zero-overshoot iOS 27 smooth spring curve.
+  static final Curve _smoothSpringCurve = Ios27Spring.smooth.curve;
 
   @visibleForTesting
   static double evaluateTransitionProgress(
@@ -130,15 +124,11 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   }) {
     final t = rawT.clamp(0.0, 1.0);
     if (reversing) {
-      return (1.0 - _linearFluidCurve.transform(1.0 - t)).clamp(0.0, 1.0);
+      return (1.0 - _smoothSpringCurve.transform(1.0 - t)).clamp(0.0, 1.0);
     }
-    return _linearFluidCurve.transform(t).clamp(0.0, 1.0);
+    return _smoothSpringCurve.transform(t).clamp(0.0, 1.0);
   }
 
-  // Cached per-route destination page wrapped in a single keyed RepaintBoundary
-  // so Flutter reparents DetailScreen's Element/State with zero dispose/re-init
-  // between settled full-screen and active transition frames, compositing one
-  // crisp GPU layer at 120Hz without re-rasterizing blur.
   final GlobalKey _pageBoundaryKey = GlobalKey();
   final GlobalKey _sharedPosterKey = GlobalKey();
   Widget? _cachedPage;
@@ -146,12 +136,16 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   bool _claimedRegistry = false;
   bool _listenerAttached = false;
 
-  // Tracks exact release state after an interactive left-edge swipe so post-
-  // release continuation starts from the exact finger position and radius with
-  // zero visual jump.
+  // Tracks exact release state after interactive pull-down or left-edge swipe
+  // so post-release continuation runs via a velocity-inherited SpringSimulation
+  // from the exact finger position, translation offset, and corner radius.
   double? _gestureReleaseRawT;
   double _gestureReleaseRadiusOffset = 0.0;
+  Offset _gestureDragOffset = Offset.zero;
+  Offset _gestureReleaseOffset = Offset.zero;
   bool _gestureReleasePopping = false;
+  bool _gestureUsingSpringSimulation = false;
+  bool _routeDisposed = false;
 
   PosterExpandRoute({
     required this.builder,
@@ -235,6 +229,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
 
   @override
   void dispose() {
+    _routeDisposed = true;
     if (_listenerAttached && animation != null) {
       animation!.removeListener(_handleAnimationTick);
       _listenerAttached = false;
@@ -259,23 +254,32 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   bool get maintainState => true;
 
   @override
-  Duration get transitionDuration => const Duration(milliseconds: 340);
+  Duration get transitionDuration => Ios27Spring.smooth.nominalDuration;
 
   @override
-  Duration get reverseTransitionDuration => const Duration(milliseconds: 310);
+  Duration get reverseTransitionDuration => Ios27Spring.smooth.nominalDuration;
 
   double _gestureRadiusBumpFor(double p, {required bool fullBleed}) {
-    final lift = fullBleed ? 24.0 : 12.0;
+    final lift = fullBleed ? 32.0 : 20.0;
     return lift * math.sin(math.pi * p.clamp(0.0, 1.0));
   }
 
-  void _setSwipeProgress(double value) {
+  void _setInteractiveZoomProgress(
+    double value, {
+    Offset dragOffset = Offset.zero,
+  }) {
     _gestureReleaseRawT = null;
     _gestureReleaseRadiusOffset = 0.0;
+    _gestureReleaseOffset = Offset.zero;
+    _gestureUsingSpringSimulation = false;
+    _gestureDragOffset = dragOffset;
     controller?.value = value.clamp(0.0, 1.0);
   }
 
-  void _endSwipeGesture({required double velocity}) {
+  void _endInteractiveZoom({
+    required double velocity,
+    required double referenceExtent,
+  }) {
     final ctrl = controller;
     final nav = navigator;
     if (ctrl == null || nav == null) return;
@@ -286,16 +290,42 @@ class PosterExpandRoute<T> extends PageRoute<T> {
       releaseVal,
       fullBleed: isFullBleedHero,
     );
+    _gestureReleaseOffset = _gestureDragOffset;
     _gestureReleasePopping = shouldPop;
+    _gestureUsingSpringSimulation = true;
+
+    final safeExtent = math.max(1.0, referenceExtent);
+    // Positive finger swipe velocity decreases progress `p` (toward pop=0.0).
+    final normalizedVelocity = (-velocity / safeExtent).clamp(-8.0, 8.0);
+
     if (shouldPop) {
       nav.pop();
+      ctrl
+          .animateWith(
+            Ios27Spring.smooth.simulation(
+              start: releaseVal,
+              end: 0.0,
+              velocity: normalizedVelocity,
+            ),
+          )
+          .whenComplete(() {
+        if (!_routeDisposed && ctrl.status != AnimationStatus.dismissed) {
+          ctrl.reverse(from: 0.0);
+        }
+      });
     } else {
-      ctrl.forward();
+      ctrl.animateWith(
+        Ios27Spring.smooth.simulation(
+          start: releaseVal,
+          end: 1.0,
+          velocity: normalizedVelocity,
+        ),
+      );
     }
     nav.didStopUserGesture();
   }
 
-  void _cancelSwipeGesture() {
+  void _cancelInteractiveZoom() {
     final ctrl = controller;
     if (ctrl != null) {
       final releaseVal = ctrl.value.clamp(0.0, 1.0);
@@ -304,8 +334,15 @@ class PosterExpandRoute<T> extends PageRoute<T> {
         releaseVal,
         fullBleed: isFullBleedHero,
       );
+      _gestureReleaseOffset = _gestureDragOffset;
       _gestureReleasePopping = false;
-      ctrl.forward();
+      _gestureUsingSpringSimulation = true;
+      ctrl.animateWith(
+        Ios27Spring.smooth.simulation(
+          start: releaseVal,
+          end: 1.0,
+        ),
+      );
     }
     navigator?.didStopUserGesture();
   }
@@ -316,21 +353,45 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     required bool isGesture,
   }) {
     if (isGesture) return rawT;
+    if (_gestureUsingSpringSimulation) {
+      // Controller is already driven directly by SpringSimulation.
+      return rawT;
+    }
     final isReversing = status == AnimationStatus.reverse;
     final releaseT = _gestureReleaseRawT;
     if (releaseT != null && _gestureReleasePopping && isReversing) {
       final span = releaseT.clamp(0.001, 1.0);
       final u = ((releaseT - rawT) / span).clamp(0.0, 1.0);
-      return (releaseT * (1.0 - _linearFluidCurve.transform(u)))
+      return (releaseT * (1.0 - _smoothSpringCurve.transform(u)))
           .clamp(0.0, 1.0);
     }
     if (releaseT != null && !_gestureReleasePopping && !isReversing) {
       final span = (1.0 - releaseT).clamp(0.001, 1.0);
       final u = ((rawT - releaseT) / span).clamp(0.0, 1.0);
-      return (releaseT + (1.0 - releaseT) * _linearFluidCurve.transform(u))
+      return (releaseT + (1.0 - releaseT) * _smoothSpringCurve.transform(u))
           .clamp(0.0, 1.0);
     }
     return evaluateTransitionProgress(rawT, reversing: isReversing);
+  }
+
+  double _releaseDecayFactor({
+    required double rawT,
+    required AnimationStatus status,
+  }) {
+    final releaseT = _gestureReleaseRawT;
+    if (releaseT == null) return 0.0;
+    final isReversing = _gestureUsingSpringSimulation
+        ? _gestureReleasePopping
+        : (status == AnimationStatus.reverse);
+    if (_gestureReleasePopping && isReversing) {
+      final span = releaseT.clamp(0.001, 1.0);
+      return (rawT / span).clamp(0.0, 1.0);
+    }
+    if (!_gestureReleasePopping && !isReversing) {
+      final span = (1.0 - releaseT).clamp(0.001, 1.0);
+      return ((1.0 - rawT) / span).clamp(0.0, 1.0);
+    }
+    return 0.0;
   }
 
   double _computeGestureRadiusOffset({
@@ -343,24 +404,41 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     if (isGesture) {
       return _gestureRadiusBumpFor(p, fullBleed: fullBleed);
     }
-    final releaseT = _gestureReleaseRawT;
-    if (releaseT == null || _gestureReleaseRadiusOffset <= 0.01) {
+    if (_gestureReleaseRawT == null || _gestureReleaseRadiusOffset <= 0.01) {
       return 0.0;
     }
+    if (_gestureUsingSpringSimulation) {
+      return _gestureReleaseRadiusOffset *
+          _releaseDecayFactor(rawT: rawT, status: status);
+    }
+    final releaseT = _gestureReleaseRawT!;
     final isReversing = status == AnimationStatus.reverse;
     if (_gestureReleasePopping && isReversing) {
       final span = releaseT.clamp(0.001, 1.0);
       final u = ((releaseT - rawT) / span).clamp(0.0, 1.0);
       return _gestureReleaseRadiusOffset *
-          (1.0 - _linearFluidCurve.transform(u));
+          (1.0 - _smoothSpringCurve.transform(u));
     }
     if (!_gestureReleasePopping && !isReversing) {
       final span = (1.0 - releaseT).clamp(0.001, 1.0);
       final u = ((rawT - releaseT) / span).clamp(0.0, 1.0);
       return _gestureReleaseRadiusOffset *
-          (1.0 - _linearFluidCurve.transform(u));
+          (1.0 - _smoothSpringCurve.transform(u));
     }
     return 0.0;
+  }
+
+  Offset _computeCurrentDragOffset({
+    required double rawT,
+    required AnimationStatus status,
+    required bool isGesture,
+  }) {
+    if (isGesture) return _gestureDragOffset;
+    if (_gestureReleaseRawT == null || _gestureReleaseOffset == Offset.zero) {
+      return Offset.zero;
+    }
+    final decay = _releaseDecayFactor(rawT: rawT, status: status);
+    return _gestureReleaseOffset * decay;
   }
 
   @override
@@ -371,7 +449,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   ) {
     return _cachedPage ??= RepaintBoundary(
       key: _pageBoundaryKey,
-      child: _PosterExpandSwipeBackWrapper<T>(
+      child: _PosterExpandZoomGestureWrapper<T>(
         route: this,
         child: builder(context),
       ),
@@ -389,10 +467,10 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     if (initialSourceRect.width >= 8 &&
         initialSourceRect.height >= 8 &&
         initialSourceRect.overlaps((Offset.zero & screen).inflate(80))) {
-      // Clamp fallback rect inside the current viewport so live fold/unfold
-      // (e.g. iPhone Duo 466×678 ↔ 669×951) never flies back off-screen.
-      final clampedW = initialSourceRect.width.clamp(8.0, screen.width).toDouble();
-      final clampedH = initialSourceRect.height.clamp(8.0, screen.height).toDouble();
+      final clampedW =
+          initialSourceRect.width.clamp(8.0, screen.width).toDouble();
+      final clampedH =
+          initialSourceRect.height.clamp(8.0, screen.height).toDouble();
       final clampedLeft = initialSourceRect.left
           .clamp(0.0, math.max<double>(0.0, screen.width - clampedW))
           .toDouble();
@@ -426,8 +504,15 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     Animation<double> secondaryAnimation,
     Widget child,
   ) {
-    if (MediaQuery.disableAnimationsOf(context)) {
-      return FadeTransition(opacity: animation, child: child);
+    if (Ios27ConcentricGeometry.isReduceMotion(context)) {
+      return FadeTransition(
+        opacity: CurvedAnimation(
+          parent: animation,
+          curve: Curves.linear,
+          reverseCurve: Curves.linear,
+        ),
+        child: child,
+      );
     }
 
     final screen = MediaQuery.sizeOf(context);
@@ -440,14 +525,22 @@ class PosterExpandRoute<T> extends PageRoute<T> {
         final rawT = animation.value.clamp(0.0, 1.0);
 
         // Settled fully open: paint directly with zero clipping or transform overhead.
-        if (animation.status == AnimationStatus.completed && rawT >= 0.999) {
+        if (animation.status == AnimationStatus.completed &&
+            rawT >= 0.999 &&
+            !(navigator?.userGestureInProgress ?? false)) {
           _gestureReleaseRawT = null;
           _gestureReleaseRadiusOffset = 0.0;
+          _gestureDragOffset = Offset.zero;
+          _gestureReleaseOffset = Offset.zero;
+          _gestureUsingSpringSimulation = false;
           return pageChild!;
         }
         if (animation.status == AnimationStatus.dismissed) {
           _gestureReleaseRawT = null;
           _gestureReleaseRadiusOffset = 0.0;
+          _gestureDragOffset = Offset.zero;
+          _gestureReleaseOffset = Offset.zero;
+          _gestureUsingSpringSimulation = false;
         }
 
         final isGesture = navigator?.userGestureInProgress ?? false;
@@ -472,10 +565,20 @@ class PosterExpandRoute<T> extends PageRoute<T> {
           fullBleed: effectiveFullBleedHero,
         );
 
-        final lerpedLeft = lerpDouble(sourceRect.left, fullRect.left, p)!;
-        final lerpedTop = lerpDouble(sourceRect.top, fullRect.top, p)!;
-        final lerpedRight = lerpDouble(sourceRect.right, fullRect.right, p)!;
-        final lerpedBottom = lerpDouble(sourceRect.bottom, fullRect.bottom, p)!;
+        final dragOffset = _computeCurrentDragOffset(
+          rawT: rawT,
+          status: animation.status,
+          isGesture: isGesture,
+        );
+
+        final lerpedLeft = lerpDouble(sourceRect.left, fullRect.left, p)! +
+            dragOffset.dx;
+        final lerpedTop = lerpDouble(sourceRect.top, fullRect.top, p)! +
+            dragOffset.dy;
+        final lerpedRight = lerpDouble(sourceRect.right, fullRect.right, p)! +
+            dragOffset.dx;
+        final lerpedBottom = lerpDouble(sourceRect.bottom, fullRect.bottom, p)! +
+            dragOffset.dy;
         final currentRect = Rect.fromLTRB(
           lerpedLeft,
           lerpedTop,
@@ -486,20 +589,19 @@ class PosterExpandRoute<T> extends PageRoute<T> {
         final baseRadius = effectiveFullBleedHero
             ? 0.0
             : (lerpDouble(sourceBorderRadius, 0.0, p) ?? 0.0);
-        final currentRadius =
-            (baseRadius + gestureRadiusOffset).clamp(0.0, 32.0);
+        final currentRadius = (baseRadius + gestureRadiusOffset)
+            .clamp(0.0, Ios27ConcentricGeometry.sheetOuterRadiusPt);
 
-        // Linear backdrop dimming strictly proportional to p (zero double-easing).
         final backdropDim =
             ((effectiveFullBleedHero ? 0.24 : 0.36) * p).clamp(0.0, 0.36);
 
-        final isReversing = animation.status == AnimationStatus.reverse;
+        final isReversing = animation.status == AnimationStatus.reverse ||
+            (_gestureUsingSpringSimulation && _gestureReleasePopping);
         if (effectiveFullBleedHero) {
           return _buildFullBleedHeroStage(
             screen: screen,
             currentRect: currentRect,
             currentRadius: currentRadius,
-            gestureRadiusOffset: gestureRadiusOffset,
             backdropDim: backdropDim,
             p: p,
             rawT: rawT,
@@ -542,16 +644,23 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     );
   }
 
-  /// Seamless full-bleed Hero <-> DetailScreen transition:
-  /// - Zero white alpha cutout (`ShaderMask`) and zero vertical alignment jump
-  ///   so pushing from and popping back to Home never flashes white or jitters.
-  /// - Preserves the exact poster ambient color gradient from the title zone
-  ///   downward while [DetailScreen] dissolves cleanly over the shared HD poster.
+  Widget _clipWithContinuousCorners(double radius, Widget child) {
+    if (radius <= 0.25) {
+      return ClipRect(child: child);
+    }
+    return ClipPath(
+      clipper: ShapeBorderClipper(
+        shape: Ios27ConcentricGeometry.continuousShape(radius: radius),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: child,
+    );
+  }
+
   Widget _buildFullBleedHeroStage({
     required Size screen,
     required Rect currentRect,
     required double currentRadius,
-    required double gestureRadiusOffset,
     required double backdropDim,
     required double p,
     required double rawT,
@@ -576,8 +685,6 @@ class PosterExpandRoute<T> extends PageRoute<T> {
           Positioned.fill(
             child: _sharedPosterLayer(),
           ),
-        // Match the Home Hero's smooth ambient-color fade below the title zone
-        // while fading out as DetailScreen's own ambient surface takes over.
         if (detailOpacity < 0.98)
           Positioned(
             left: 0,
@@ -622,9 +729,11 @@ class PosterExpandRoute<T> extends PageRoute<T> {
 
     Widget stageCard = currentRadius > 0.25
         ? DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(currentRadius),
-              boxShadow: [
+            decoration: ShapeDecoration(
+              shape: Ios27ConcentricGeometry.continuousShape(
+                radius: currentRadius,
+              ),
+              shadows: [
                 BoxShadow(
                   color: Colors.black.withValues(alpha: 0.26 * (1.0 - p)),
                   blurRadius: 20,
@@ -632,10 +741,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
                 ),
               ],
             ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(currentRadius),
-              child: content,
-            ),
+            child: _clipWithContinuousCorners(currentRadius, content),
           )
         : ClipRect(child: content);
 
@@ -663,8 +769,6 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     );
   }
 
-  /// Linear zero-ghosting, zero-flash card-to-screen container morph for every
-  /// poster card across Home, Discovery, Search, Continue Watching, and Library.
   Widget _buildPosterCardStage({
     required Size screen,
     required Rect currentRect,
@@ -706,9 +810,11 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     );
 
     Widget flyingCard = DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(currentRadius),
-        boxShadow: [
+      decoration: ShapeDecoration(
+        shape: Ios27ConcentricGeometry.continuousShape(
+          radius: currentRadius,
+        ),
+        shadows: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.28 * (1.0 - p)),
             blurRadius: 22.0 * (1.0 - p),
@@ -716,16 +822,9 @@ class PosterExpandRoute<T> extends PageRoute<T> {
           ),
         ],
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(currentRadius),
-        child: innerContent,
-      ),
+      child: _clipWithContinuousCorners(currentRadius, innerContent),
     );
 
-    // During the final landing frames (`p < 0.04` on reverse), the originating
-    // `PosterExpandSourceCard` is already visible pixel-for-pixel underneath,
-    // so gently dissolving `flyingCard` into it eliminates any 1-frame flash or
-    // aspect-ratio snap on return.
     final double edgeOpacity = !hasLiveAnchor
         ? (rawT / 0.16).clamp(0.0, 1.0)
         : (isReversing && p < 0.04 ? (p / 0.04).clamp(0.0, 1.0) : 1.0);
@@ -751,82 +850,195 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   }
 }
 
-/// Interactive left-edge horizontal swipe-back gesture detector so iOS users
-/// can swipe back from the screen edge and watch [DetailScreen] detach and
-/// glide smoothly back into the originating poster card in real time.
-class _PosterExpandSwipeBackWrapper<T> extends StatefulWidget {
+/// Interactive iOS 27 `.zoom` gesture wrapper supporting both:
+/// 1. Left-edge horizontal swipe-back (`dx <= 28pt`)
+/// 2. Vertical pull-down `.zoom` dismiss (on non-scrollable content or when a
+///    scrollable child overscrolls past top `-36pt`)
+/// Both track finger translation & concentric corner rounding 1:1 and hand off
+/// to a velocity-inherited [SpringSimulation] (`Ios27Spring.smooth`).
+class _PosterExpandZoomGestureWrapper<T> extends StatefulWidget {
   final PosterExpandRoute<T> route;
   final Widget child;
 
-  const _PosterExpandSwipeBackWrapper({
+  const _PosterExpandZoomGestureWrapper({
     required this.route,
     required this.child,
   });
 
   @override
-  State<_PosterExpandSwipeBackWrapper<T>> createState() =>
-      _PosterExpandSwipeBackWrapperState<T>();
+  State<_PosterExpandZoomGestureWrapper<T>> createState() =>
+      _PosterExpandZoomGestureWrapperState<T>();
 }
 
-class _PosterExpandSwipeBackWrapperState<T>
-    extends State<_PosterExpandSwipeBackWrapper<T>> {
-  bool _dragging = false;
-  double _dragDistance = 0.0;
+class _PosterExpandZoomGestureWrapperState<T>
+    extends State<_PosterExpandZoomGestureWrapper<T>> {
+  bool _edgeDragging = false;
+  double _edgeDragDx = 0.0;
+  double _edgeDragDy = 0.0;
+
+  bool _pullDragging = false;
+  double _pullDragDy = 0.0;
+  double _pullDragDx = 0.0;
+  double _lastPullSampleDy = 0.0;
+  int _lastPullSampleMicros = 0;
+  double _pullEstimatedVy = 0.0;
+  bool _atScrollTop = true;
+
+  bool get _canStartGesture {
+    if (widget.route.isFirst || !widget.route.isCurrent) return false;
+    final nav = widget.route.navigator;
+    return nav != null && !nav.userGestureInProgress;
+  }
 
   void _onHorizontalDragStart(DragStartDetails details) {
-    if (widget.route.isFirst ||
-        !widget.route.isCurrent ||
-        widget.route.navigator == null ||
-        widget.route.navigator!.userGestureInProgress) {
-      return;
-    }
+    if (!_canStartGesture) return;
     if (details.globalPosition.dx > 28.0) return;
-    _dragging = true;
-    _dragDistance = 0.0;
+    _edgeDragging = true;
+    _edgeDragDx = 0.0;
+    _edgeDragDy = 0.0;
     widget.route.navigator!.didStartUserGesture();
   }
 
   void _onHorizontalDragUpdate(DragUpdateDetails details) {
-    if (!_dragging) return;
-    final width = MediaQuery.sizeOf(context).width;
-    if (width <= 0) return;
-    _dragDistance = (_dragDistance + details.delta.dx).clamp(0.0, width);
-    final progress = (1.0 - (_dragDistance / width)).clamp(0.0, 1.0);
-    widget.route._setSwipeProgress(progress);
+    if (!_edgeDragging) return;
+    final size = MediaQuery.sizeOf(context);
+    if (size.width <= 0) return;
+    _edgeDragDx = (_edgeDragDx + details.delta.dx).clamp(0.0, size.width);
+    _edgeDragDy += details.delta.dy * 0.25;
+    final progress = (1.0 - (_edgeDragDx / size.width)).clamp(0.0, 1.0);
+    widget.route._setInteractiveZoomProgress(
+      progress,
+      dragOffset: Offset(0.0, _edgeDragDy.clamp(-40.0, 80.0)),
+    );
   }
 
   void _onHorizontalDragEnd(DragEndDetails details) {
-    if (!_dragging) return;
-    _dragging = false;
-    widget.route._endSwipeGesture(velocity: details.primaryVelocity ?? 0.0);
+    if (!_edgeDragging) return;
+    _edgeDragging = false;
+    widget.route._endInteractiveZoom(
+      velocity: details.primaryVelocity ?? 0.0,
+      referenceExtent: MediaQuery.sizeOf(context).width,
+    );
   }
 
   void _onHorizontalDragCancel() {
-    if (!_dragging) return;
-    _dragging = false;
-    widget.route._cancelSwipeGesture();
+    if (!_edgeDragging) return;
+    _edgeDragging = false;
+    widget.route._cancelInteractiveZoom();
+  }
+
+  void _onVerticalDragStart(DragStartDetails details) {
+    if (!_canStartGesture || !_atScrollTop) return;
+    _pullDragging = true;
+    _pullDragDy = 0.0;
+    _pullDragDx = 0.0;
+    _pullEstimatedVy = 0.0;
+    _lastPullSampleDy = 0.0;
+    _lastPullSampleMicros = DateTime.now().microsecondsSinceEpoch;
+    widget.route.navigator!.didStartUserGesture();
+  }
+
+  void _applyPullDelta(double dx, double dy) {
+    final size = MediaQuery.sizeOf(context);
+    if (size.height <= 0) return;
+    _pullDragDy = math.max(0.0, _pullDragDy + dy);
+    _pullDragDx += dx * 0.35;
+    final nowMicros = DateTime.now().microsecondsSinceEpoch;
+    final dtSec = (nowMicros - _lastPullSampleMicros) / 1000000.0;
+    if (dtSec > 0.002 && dtSec < 0.2) {
+      _pullEstimatedVy = (_pullDragDy - _lastPullSampleDy) / dtSec;
+      _lastPullSampleDy = _pullDragDy;
+      _lastPullSampleMicros = nowMicros;
+    }
+    final extent = size.height * 0.52;
+    final progress = (1.0 - (_pullDragDy / extent) * 0.78).clamp(0.14, 1.0);
+    widget.route._setInteractiveZoomProgress(
+      progress,
+      dragOffset: Offset(
+        _pullDragDx.clamp(-48.0, 48.0),
+        (_pullDragDy * 0.36).clamp(0.0, 140.0),
+      ),
+    );
+  }
+
+  void _onVerticalDragUpdate(DragUpdateDetails details) {
+    if (!_pullDragging) return;
+    _applyPullDelta(details.delta.dx, details.delta.dy);
+  }
+
+  void _finishPullDrag(double velocity) {
+    if (!_pullDragging) return;
+    _pullDragging = false;
+    widget.route._endInteractiveZoom(
+      velocity: velocity,
+      referenceExtent: MediaQuery.sizeOf(context).height * 0.52,
+    );
+  }
+
+  void _cancelPullDrag() {
+    if (!_pullDragging) return;
+    _pullDragging = false;
+    widget.route._cancelInteractiveZoom();
+  }
+
+  bool _handleScrollNotification(ScrollNotification notification) {
+    if (notification.metrics.axis != Axis.vertical) return false;
+    _atScrollTop = notification.metrics.pixels <= 0.5;
+    if (notification is ScrollUpdateNotification) {
+      if (!_pullDragging &&
+          _canStartGesture &&
+          notification.metrics.pixels < -36.0 &&
+          notification.dragDetails != null) {
+        _pullDragging = true;
+        _pullDragDy = (-notification.metrics.pixels - 36.0).clamp(0.0, 120.0);
+        _pullDragDx = 0.0;
+        _pullEstimatedVy = 0.0;
+        _lastPullSampleDy = _pullDragDy;
+        _lastPullSampleMicros = DateTime.now().microsecondsSinceEpoch;
+        widget.route.navigator!.didStartUserGesture();
+      } else if (_pullDragging && notification.dragDetails != null) {
+        _applyPullDelta(
+          notification.dragDetails!.delta.dx,
+          notification.dragDetails!.delta.dy,
+        );
+      }
+    } else if (notification is ScrollEndNotification && _pullDragging) {
+      final vy = notification.dragDetails?.primaryVelocity ?? _pullEstimatedVy;
+      _finishPullDrag(vy);
+    }
+    return false;
   }
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        widget.child,
-        Positioned(
-          left: 0,
-          top: 0,
-          bottom: 0,
-          width: 24,
-          child: GestureDetector(
-            behavior: HitTestBehavior.translucent,
-            onHorizontalDragStart: _onHorizontalDragStart,
-            onHorizontalDragUpdate: _onHorizontalDragUpdate,
-            onHorizontalDragEnd: _onHorizontalDragEnd,
-            onHorizontalDragCancel: _onHorizontalDragCancel,
-          ),
+    return NotificationListener<ScrollNotification>(
+      onNotification: _handleScrollNotification,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onVerticalDragStart: _onVerticalDragStart,
+        onVerticalDragUpdate: _onVerticalDragUpdate,
+        onVerticalDragEnd: (d) => _finishPullDrag(d.primaryVelocity ?? 0.0),
+        onVerticalDragCancel: _cancelPullDrag,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            widget.child,
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: 24,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onHorizontalDragStart: _onHorizontalDragStart,
+                onHorizontalDragUpdate: _onHorizontalDragUpdate,
+                onHorizontalDragEnd: _onHorizontalDragEnd,
+                onHorizontalDragCancel: _onHorizontalDragCancel,
+              ),
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
 }
