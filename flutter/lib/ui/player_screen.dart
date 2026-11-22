@@ -350,6 +350,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       !kIsWeb &&
       defaultTargetPlatform == TargetPlatform.iOS &&
       !OhosRuntime.isOhos;
+  bool get _isWindowsPlayerPlatform =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.windows &&
+      !OhosRuntime.isOhos;
   bool get _canUseIosAvPlayerEngine =>
       _isIosPlayerPlatform &&
       widget.debugPlayer == null &&
@@ -830,7 +834,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           windowsBaseScalerResolver: () =>
               _winQualityController.activeBaseScalers,
         );
-    if (widget.debugAnime4kController == null && Platform.isWindows) {
+    if (widget.debugAnime4kController == null && _isWindowsPlayerPlatform) {
       _anime4kController.setWindowsBaseScalerResolver(
         () => _winQualityController.activeBaseScalers,
       );
@@ -3208,11 +3212,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   static String _hardwareDecoder(String kernel) {
-    if (Platform.isIOS || Platform.isMacOS) {
-      return kernel == 'exo' ? 'videotoolbox' : 'auto-safe';
-    }
-    if (Platform.isWindows) {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
       return kernel == 'ijk' ? 'd3d11va-copy' : 'auto-safe';
+    }
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.iOS ||
+            defaultTargetPlatform == TargetPlatform.macOS)) {
+      return kernel == 'exo' ? 'videotoolbox' : 'auto-safe';
     }
     return switch (kernel) {
       'ijk' => 'auto-copy',
@@ -3237,11 +3243,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         'cache-pause-wait',
         _isLiveStream ? '1' : (kernel == 'mpv' ? '5' : '4'),
       );
-      if (Platform.isWindows) {
+      if (_isWindowsPlayerPlatform) {
         await dyn.setProperty('vd-lavc-threads', '0');
         await dyn.setProperty('vd-lavc-dr', 'yes');
-        if (!OhosRuntime.isOhos &&
-            _winQualityController.isAvailableForPlayer(_player)) {
+        if (_winQualityController.isAvailableForPlayer(_player)) {
           await _winQualityController.loadSaved();
           final anime4kActive =
               _anime4kController.isAvailableForPlayer(_player) &&
@@ -3252,8 +3257,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             playerKernel: kernel,
           );
         }
-        if (!OhosRuntime.isOhos &&
-            _anime4kController.isAvailableForPlayer(_player) &&
+        if (_anime4kController.isAvailableForPlayer(_player) &&
             _anime4kController.preset != Anime4kPreset.off) {
           await _anime4kController.reapplyActivePreset(_player);
         }
@@ -3271,7 +3275,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           vocalLoudness: _vocalLoudness,
           hwdec: _hardwareDecoder(kernel),
         );
-      } else if (!Platform.isWindows &&
+      } else if (!_isWindowsPlayerPlatform &&
           _vocalLoudness != VocalLoudnessPreset.off) {
         await IosMpvProfile.applyVocalLoudness(_player, _vocalLoudness);
       }
@@ -3980,7 +3984,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (!mounted) return;
         if (_anime4kController.preset != Anime4kPreset.off) {
           await _anime4kController.reapplyActivePreset(_player);
-          if (Platform.isWindows &&
+          if (_isWindowsPlayerPlatform &&
               _winQualityController.isAvailableForPlayer(_player)) {
             await _winQualityController.syncHardwareDecoder(
               _player,
@@ -4304,8 +4308,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       preset,
                     );
                     if (!mounted || session != _playSession) return;
-                    if (Platform.isWindows &&
-                        !OhosRuntime.isOhos &&
+                    if (_isWindowsPlayerPlatform &&
                         _winQualityController.isAvailableForPlayer(_player)) {
                       await _winQualityController.syncHardwareDecoder(
                         _player,
@@ -6907,8 +6910,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final danmuEnabled = widget.onToggleDanmu != null
         ? widget.danmuEnabled
         : (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled);
-    final winQualityAvailable = Platform.isWindows &&
-        !OhosRuntime.isOhos &&
+    final winQualityAvailable = _isWindowsPlayerPlatform &&
         _winQualityController.isAvailableForPlayer(_player);
     final visibility = DesktopHudBarVisibility.forWidth(
       width,
@@ -7199,8 +7201,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Widget _buildWindowsChrome(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
     final scale = (width / 1280).clamp(.78, 1.0);
-    final winQualityAvailable = Platform.isWindows &&
-        !OhosRuntime.isOhos &&
+    final winQualityAvailable = _isWindowsPlayerPlatform &&
         _winQualityController.isAvailableForPlayer(_player);
     return DesktopPlayerHud(
       embedded: widget.embedded,

@@ -57,7 +57,8 @@ class DesktopWebViewJsBridge {
   final _playbackPins = <String, Set<Object>>{};
 
   static bool get _isPlatformSupported =>
-      debugForcePlatformSupported ?? Platform.isWindows;
+      debugForcePlatformSupported ??
+      (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows);
 
   /// Returns `true` when [error] from QuickJS indicates a missing browser API
   /// (`window`, `document`, `DOMParser`, `crypto.subtle`, `fetch`, `TextEncoder`,
