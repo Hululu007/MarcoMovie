@@ -191,6 +191,10 @@ class PackagingTests(unittest.TestCase):
         import sys
         app_dir = self.root / "staged-app"
         app_dir.mkdir()
+        packages_dir = self.root / "staged-packages"
+        packages_dir.mkdir()
+        cache_dir = Path(tempfile.gettempdir()) / "marco-ios-wheel-cache"
+        package.native.stage_wheels(packages_dir, cache_dir)
         shutil.copyfile(package.HOST / "host.py", app_dir / "native_source_host.py")
         shutil.copyfile(package.ADAPTER, app_dir / "requests_adapter.py")
         shutil.copytree(package.HOST / "base", app_dir / "base", ignore=shutil.ignore_patterns("__pycache__"))
@@ -205,7 +209,7 @@ import sys
 import threading
 from urllib.parse import urlsplit
 
-sys.path.insert(0, sys.argv[1])
+sys.path[:0] = [sys.argv[1], sys.argv[2]]
 import native_source_entry
 
 class Handler(BaseHTTPRequestHandler):
@@ -285,7 +289,7 @@ finally:
 print("SHIM_OK")
 """
         proc = subprocess.run(
-            [sys.executable, "-c", script, str(app_dir)],
+            [sys.executable, "-I", "-c", script, str(app_dir), str(packages_dir)],
             capture_output=True,
             text=True,
             timeout=20,
