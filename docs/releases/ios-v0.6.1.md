@@ -26,9 +26,11 @@
 
 ## 包信息与构建记录
 
-- 待云端 Release 构建校验完成后补齐正式 SHA-256、文件字节数与 GitHub Actions 构建记录。
+- **未签名 IPA（iPhone / iPad / iPhone Duo 通用）**：`MarcoMovie-0.6.1-ios-iphone-ipad-unsigned.ipa`（`63543076` B，更新兼容别名 `MarcoMovie-0.6.1-ios-unsigned.ipa`），SHA-256：`8f1616c93d7f837929f931b033134d591e4c78fd5727e344419ec078d1f32c08`。
+- **对应源码包**：`MarcoMovie-ios-v0.6.1-source.zip`（`10857248` B），SHA-256：`958a57ae4d600685a072d558a1d956b1a71b3d746a9c499a650365b664e63bde`。
+- **构建提交与 CI 记录**：`40795cc8490c19b0ef60430d36bfe46cecde5392`。[iOS / iPadOS 原生构建与全量测试（Job 137202221820 · Run 45018299947）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45018299947/job/137202221820) / [公开守卫与离线校验（Job 137202253551）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45018299947/job/137202253551) / [Public content checks（45018299860）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45018299860) / [跨端源回归（45018299853）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45018299853) / [iOS 内嵌源运行时回归（45018299948）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45018299948)。
 
 ## 验证范围与已知限制
 
-- **已完成真机与自动化校验**：本轮各项核心视觉与交互改动（首页连续氛围过渡、底部四按钮重绘与动效、独立直播源导入归类与流畅播放、夸克代理切换、日间/夜间模式对比度及 iOS 16.4 巨魔兼容）已在物理 iPhone 真机经多轮实测验收，并通过本地与云端 Flutter 自动化测试、`flutter/test_ios_package.py`、`scripts/check_public_content.py` 及 `scripts/sync_readme_versions.py --check`。
+- **已完成真机与自动化校验**：本轮各项核心视觉与交互改动（首页连续氛围过渡、底部四按钮重绘与动效、独立直播源导入归类与流畅播放、夸克代理切换、日间/夜间模式对比度及 iOS 16.4 巨魔兼容）已在物理 iPhone 真机经多轮实测验收；在提交 `40795cc8490c19b0ef60430d36bfe46cecde5392` 上通过了 GitHub Actions 7 平台全绿构建（Run `45018299947`）、macOS 云端 Runner 全套 Flutter 自动化测试（`1234` 项通过、`9` 项非 iOS 专属跳过）、Xcode `27.2`（`iphoneos27.2`）Release `.ipa` 打包与 140 个 Mach-O `minos <= 15.0` 校验、`flutter/test_ios_package.py`、`scripts/check_public_content.py`（`1531` 文件）及 `scripts/sync_readme_versions.py --check`。
 - **已知限制**：未签名 `.ipa` 需通过 TrollStore（巨魔）或个人自签工具安装；第三方直播源与片源可用性取决于用户自行导入的上游服务及网络环境。
