@@ -1334,10 +1334,21 @@ final class SourcePicker {
                         String active = ConfigLibrary.identity(previousOrigin, previous.raw);
                         String[] names = new String[entries.size()];
                         int selected = -1;
+                        final java.util.List<ConfigLibrary.Entry> mergeable =
+                                new java.util.ArrayList<>();
                         for (int i = 0; i < names.length; i++) {
                             ConfigLibrary.Entry entry = entries.get(i);
-                            names[i] = entry.name + "（订阅 " + (i + 1) + "）";
+                            String stamp = SourceController.formatShortTimestamp(entry.updated);
+                            names[i] =
+                                    entry.name
+                                            + "（订阅 "
+                                            + (i + 1)
+                                            + (stamp.isEmpty() ? "" : " · 更新 " + stamp)
+                                            + "）";
                             if (entry.id.equals(active)) selected = i;
+                            if (!SubscriptionManager.isMergedOrigin(entry.origin)) {
+                                mergeable.add(entry);
+                            }
                         }
                         final int checked = selected;
                         a.ui.post(
@@ -1399,8 +1410,21 @@ final class SourcePicker {
                                                                             }
                                                                         });
                                                             })
-                                                    .setNegativeButton("关闭", null);
-                                    if (entries.size() > 1) {
+                                                    .setNegativeButton("关闭", null)
+                                                    .setPositiveButton(
+                                                            "立即刷新订阅",
+                                                            (dialog, which) ->
+                                                                    SourceController
+                                                                            .runDailyAutoUpdateIfNeeded(
+                                                                                    a, true));
+                                    if (mergeable.size() >= 2) {
+                                        builder.setNeutralButton(
+                                                "多源合并 / 删除",
+                                                (dialog, which) ->
+                                                        showSavedConfigsActionsDialog(
+                                                                a, library, entries, mergeable,
+                                                                active));
+                                    } else if (entries.size() > 1) {
                                         builder.setNeutralButton(
                                                 "删除订阅",
                                                 (dialog, which) ->
@@ -1413,6 +1437,63 @@ final class SourcePicker {
                         a.ui.post(() -> a.notice("无法读取已添加源，原订阅文件已保留"));
                     }
                 });
+    }
+
+    private static void showSavedConfigsActionsDialog(
+            final MainActivity a,
+            final ConfigLibrary library,
+            final java.util.List<ConfigLibrary.Entry> entries,
+            final java.util.List<ConfigLibrary.Entry> mergeable,
+            final String activeId) {
+        String[] actions =
+                new String[] {
+                    "⚡ 合并多个已添加源并自动分组（" + mergeable.size() + " 个可选）", "↻ 立即刷新全部在线订阅源", "删除不再使用的订阅源"
+                };
+        new AppDialog.Builder(a)
+                .wrapChoices()
+                .setTitle("订阅源管理")
+                .setItems(
+                        actions,
+                        (d, idx) -> {
+                            if (idx == 0) {
+                                showMergeSavedConfigsDialog(a, mergeable);
+                            } else if (idx == 1) {
+                                SourceController.runDailyAutoUpdateIfNeeded(a, true);
+                            } else {
+                                showDeleteSavedConfigDialog(a, library, entries, activeId);
+                            }
+                        })
+                .setNegativeButton("返回", (d, w) -> showSavedConfigs(a))
+                .show();
+    }
+
+    private static void showMergeSavedConfigsDialog(
+            final MainActivity a, final java.util.List<ConfigLibrary.Entry> mergeable) {
+        String[] labels = new String[mergeable.size()];
+        final boolean[] checked = new boolean[mergeable.size()];
+        for (int i = 0; i < mergeable.size(); i++) {
+            labels[i] = mergeable.get(i).name;
+            checked[i] = true;
+        }
+        new AppDialog.Builder(a)
+                .setTitle("勾选要合并自动分组的订阅源")
+                .setView(buildMultiSelectListView(a, labels, checked))
+                .setNegativeButton("返回", (d, w) -> showSavedConfigs(a))
+                .setPositiveButton(
+                        "合并并自动分组",
+                        (d, w) -> {
+                            java.util.List<ConfigLibrary.Entry> chosen =
+                                    new java.util.ArrayList<>();
+                            for (int i = 0; i < checked.length; i++) {
+                                if (checked[i]) chosen.add(mergeable.get(i));
+                            }
+                            if (chosen.size() < 2) {
+                                a.notice("请至少勾选 2 个订阅源进行合并分组");
+                                return;
+                            }
+                            SourceController.mergeSavedSubscriptions(a, chosen);
+                        })
+                .show();
     }
 
     private static void showDeleteSavedConfigDialog(
@@ -1469,15 +1550,26 @@ final class SourcePicker {
     static void showWarehouses(MainActivity a) {
         Cms.Config previous = a.config;
         org.json.JSONArray rows = previous.depots;
-        String[] names = new String[rows.length()];
-        for (int i = 0; i < names.length; i++) names[i] = rows.optJSONObject(i).optString("name");
+        boolean canMergeAll = rows.length() >= 2;
+        String[] names = new String[rows.length() + (canMergeAll ? 1 : 0)];
+        if (canMergeAll) {
+            names[0] = "⚡ 勾选多个子仓库合并并自动分组…";
+        }
+        for (int i = 0; i < rows.length(); i++) {
+            names[i + (canMergeAll ? 1 : 0)] = rows.optJSONObject(i).optString("name");
+        }
         new AppDialog.Builder(a)
                 .wrapChoices()
                 .setTitle("切换子仓库")
                 .setItems(
                         names,
                         (dialog, index) -> {
-                            String url = rows.optJSONObject(index).optString("url");
+                            if (canMergeAll && index == 0) {
+                                showMergeWarehousesDialog(a, rows);
+                                return;
+                            }
+                            int rowIdx = index - (canMergeAll ? 1 : 0);
+                            String url = rows.optJSONObject(rowIdx).optString("url");
                             a.toast("正在读取子仓库…");
                             a.worker.execute(
                                     () -> {
@@ -1513,6 +1605,76 @@ final class SourcePicker {
                                                     () -> {
                                                         if (!a.isFinishing())
                                                             a.notice("子仓库读取失败，已保留原线路");
+                                                    });
+                                        }
+                                    });
+                        })
+                .show();
+    }
+
+    private static void showMergeWarehousesDialog(
+            final MainActivity a, final org.json.JSONArray rows) {
+        int count = Math.min(SubscriptionManager.MAX_BATCH_SOURCES, rows.length());
+        String[] labels = new String[count];
+        final boolean[] checked = new boolean[count];
+        for (int i = 0; i < count; i++) {
+            org.json.JSONObject r = rows.optJSONObject(i);
+            labels[i] = r == null ? ("子仓库 " + (i + 1)) : r.optString("name", "子仓库 " + (i + 1));
+            checked[i] = i < 4;
+        }
+        new AppDialog.Builder(a)
+                .setTitle("勾选要合并自动分组的子仓库")
+                .setView(buildMultiSelectListView(a, labels, checked))
+                .setNegativeButton("取消", null)
+                .setPositiveButton(
+                        "合并并自动分组",
+                        (d, w) -> {
+                            final java.util.List<SubscriptionManager.ImportSpec> specs =
+                                    new java.util.ArrayList<>();
+                            for (int i = 0; i < count; i++) {
+                                if (!checked[i]) continue;
+                                org.json.JSONObject r = rows.optJSONObject(i);
+                                if (r == null) continue;
+                                String u = r.optString("url", "").trim();
+                                String n = r.optString("name", "").trim();
+                                if (Cms.isHttp(u)) {
+                                    specs.add(new SubscriptionManager.ImportSpec(n, u));
+                                }
+                            }
+                            if (specs.size() < 2) {
+                                a.notice("请至少勾选 2 个子仓库");
+                                return;
+                            }
+                            a.toast("正在读取 " + specs.size() + " 个子仓库并自动分组…");
+                            a.worker.execute(
+                                    () -> {
+                                        try {
+                                            final SubscriptionManager.MergedResult merged =
+                                                    SourceController.fetchAndMergeImportSpecs(
+                                                            a, specs, false);
+                                            a.ui.post(
+                                                    () -> {
+                                                        if (a.isFinishing()) return;
+                                                        try {
+                                                            SourceController.saveConfig(
+                                                                    a,
+                                                                    merged.config,
+                                                                    merged.origin);
+                                                            a.toast(
+                                                                    "已合并 "
+                                                                            + merged.sourceCount
+                                                                            + " 个子仓库并自动分组");
+                                                            show(a);
+                                                        } catch (Exception e) {
+                                                            a.notice("合并子仓库保存失败：" + a.message(e));
+                                                        }
+                                                    });
+                                        } catch (Exception e) {
+                                            a.ui.post(
+                                                    () -> {
+                                                        if (!a.isFinishing()) {
+                                                            a.notice("子仓库合并失败：" + a.message(e));
+                                                        }
                                                     });
                                         }
                                     });

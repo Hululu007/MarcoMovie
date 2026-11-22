@@ -171,6 +171,7 @@ jobs:
           python android/tests/run_api23_callback_checks.py
           python android/tests/run_hq_upgrade_checks.py
           python android/tests/run_tv_ux_optimization_checks.py
+          python android/tests/run_tv_061_feedback_checks.py
           python android/tests/run_checks.py
           python android/tests/run_guard_checks.py
           python android/tests/run_conformance_checks.py

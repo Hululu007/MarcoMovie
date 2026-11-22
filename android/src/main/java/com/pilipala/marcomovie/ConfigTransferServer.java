@@ -15,6 +15,10 @@ final class ConfigTransferServer implements Closeable {
         void apply(String address) throws Exception;
     }
 
+    interface BatchImporter {
+        void apply(String address, boolean appendMerge) throws Exception;
+    }
+
     interface SyncHandler {
         String sync(String remotePayloadJson) throws Exception;
     }
@@ -22,7 +26,7 @@ final class ConfigTransferServer implements Closeable {
     final ServerSocket socket;
     final String path;
     final long expires;
-    final Importer importer;
+    final BatchImporter importer;
     final SyncHandler syncHandler;
     volatile boolean closed;
     final AtomicBoolean importing = new AtomicBoolean(), applied = new AtomicBoolean();
@@ -39,19 +43,59 @@ final class ConfigTransferServer implements Closeable {
                         return t;
                     });
 
+    private static BatchImporter wrapImporter(final Importer handler) {
+        if (handler == null) return null;
+        return new BatchImporter() {
+            @Override
+            public void apply(String address, boolean appendMerge) throws Exception {
+                handler.apply(address);
+            }
+        };
+    }
+
     ConfigTransferServer(Importer handler) throws IOException {
-        this(handler, null, TimeUnit.MINUTES.toMillis(5), new InetSocketAddress("0.0.0.0", 0));
+        this(
+                wrapImporter(handler),
+                null,
+                TimeUnit.MINUTES.toMillis(5),
+                new InetSocketAddress("0.0.0.0", 0),
+                true);
     }
 
     ConfigTransferServer(Importer handler, SyncHandler sync) throws IOException {
-        this(handler, sync, TimeUnit.MINUTES.toMillis(5), new InetSocketAddress("0.0.0.0", 0));
+        this(
+                wrapImporter(handler),
+                sync,
+                TimeUnit.MINUTES.toMillis(5),
+                new InetSocketAddress("0.0.0.0", 0),
+                true);
+    }
+
+    static ConfigTransferServer withBatchImporter(BatchImporter handler, SyncHandler sync)
+            throws IOException {
+        return new ConfigTransferServer(
+                handler,
+                sync,
+                TimeUnit.MINUTES.toMillis(5),
+                new InetSocketAddress("0.0.0.0", 0),
+                true);
     }
 
     ConfigTransferServer(Importer handler, long ttl, InetSocketAddress bind) throws IOException {
-        this(handler, null, ttl, bind);
+        this(wrapImporter(handler), null, ttl, bind, true);
     }
 
     ConfigTransferServer(Importer handler, SyncHandler sync, long ttl, InetSocketAddress bind)
+            throws IOException {
+        this(wrapImporter(handler), sync, ttl, bind, true);
+    }
+
+    private ConfigTransferServer(
+            BatchImporter handler,
+            SyncHandler sync,
+            long ttl,
+            InetSocketAddress bind,
+            boolean internal)
             throws IOException {
         importer = handler;
         syncHandler = sync;
@@ -195,19 +239,24 @@ final class ConfigTransferServer implements Closeable {
                 n += got;
             }
             String address = "";
+            boolean appendMerge = false;
             for (String pair : new String(body, "UTF-8").split("&")) {
                 String[] p = pair.split("=", 2);
-                if (URLDecoder.decode(p[0], "UTF-8").equals("address") && p.length == 2)
+                String field = URLDecoder.decode(p[0], "UTF-8");
+                if (field.equals("address") && p.length == 2) {
                     address = URLDecoder.decode(p[1], "UTF-8").trim();
+                } else if (field.equals("merge") && p.length == 2) {
+                    String mv = URLDecoder.decode(p[1], "UTF-8").trim();
+                    appendMerge =
+                            "1".equals(mv)
+                                    || "true".equalsIgnoreCase(mv)
+                                    || "on".equalsIgnoreCase(mv);
+                }
             }
             try {
-                URL url = new URL(address);
-                if (address.length() > 8192
-                        || (!url.getProtocol().equals("http") && !url.getProtocol().equals("https"))
-                        || address.indexOf('\r') >= 0
-                        || address.indexOf('\n') >= 0) throw new IOException();
+                address = SubscriptionManager.validateTransferAddressInput(address);
             } catch (Exception bad) {
-                reply(out, 400, "text/html", page("请输入有效的 HTTP 或 HTTPS 配置地址"));
+                reply(out, 400, "text/html", page("请输入有效的 HTTP 或 HTTPS 配置地址（多源请每行粘贴一个地址）"));
                 return;
             }
             if (applied.get()) {
@@ -224,7 +273,7 @@ final class ConfigTransferServer implements Closeable {
                     return;
                 }
                 if (expired()) throw new IOException();
-                importer.apply(address);
+                importer.apply(address, appendMerge);
                 applied.set(true);
                 reply(out, 200, "text/html", page("配置已导入电视，可以关闭此页面"));
             } catch (Exception error) {
@@ -342,9 +391,9 @@ final class ConfigTransferServer implements Closeable {
     }
 
     static String page(String note) {
-        return "<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Marco Movie 配置</title><style>body{margin:0;background:#101013;color:#f5f5f7;font:17px system-ui;padding:28px}main{max-width:520px;margin:8vh auto}h1{font-size:30px}p{line-height:1.7;color:#bfbfc7}input,button{box-sizing:border-box;width:100%;border:0;border-radius:18px;padding:18px;font:inherit;margin:10px 0}input{background:#292930;color:white}button{background:#f5f5f7;color:#101013;font-weight:600}.note{color:#d8e8ff}</style><main><h1>Marco Movie</h1><p>将你自行获取的配置地址粘贴到下方，导入到同一网络中的电视。请保持电视配置页面打开。</p><p class=note>"
+        return "<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Marco Movie 配置</title><style>body{margin:0;background:#101013;color:#f5f5f7;font:17px system-ui;padding:28px}main{max-width:520px;margin:8vh auto}h1{font-size:30px}p{line-height:1.7;color:#bfbfc7}textarea,button{box-sizing:border-box;width:100%;border:0;border-radius:18px;padding:16px;font:inherit;margin:10px 0}textarea{background:#292930;color:white;min-height:124px;resize:vertical}button{background:#f5f5f7;color:#101013;font-weight:600}label.opt{display:flex;align-items:center;gap:10px;color:#d8e8ff;font-size:15px;margin:6px 2px 12px}label.opt input{width:20px;height:20px}.note{color:#d8e8ff}</style><main><h1>Marco Movie</h1><p>粘贴 1 个或多个自行获取的配置地址到下方（每行一个，可选「分组名,网址」格式），多源导入将自动按源分组。</p><p class=note>"
                 + note
-                + "</p><form method=post accept-charset=UTF-8><input name=address type=url required maxlength=8192 autocomplete=off autocapitalize=off spellcheck=false placeholder='粘贴配置地址'><button>导入到电视</button></form><p>本产品仅为工具，不内置影视资源。此页面只在本次扫码配置期间可用。</p></main></html>";
+                + "</p><form method=post accept-charset=UTF-8><textarea name=address required maxlength=16384 autocomplete=off autocapitalize=off spellcheck=false placeholder='粘贴配置地址，支持多行导入多个源，如：&#10;源A,https://source-a.example/a.json&#10;源B,https://source-b.example/b.json'></textarea><label class=opt><input type=checkbox name=merge value=1>追加到电视已有片源并按源自动分组</label><button>导入到电视</button></form><p>本产品仅为工具，不内置影视资源。此页面只在本次扫码配置期间可用。</p></main></html>";
     }
 
     public void close() {

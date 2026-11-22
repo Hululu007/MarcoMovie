@@ -101,12 +101,129 @@ public final class MpvPlayer extends MoviePlayer {
         return (hdrToneMapping || anime4k) ? "gpu-next" : "gpu";
     }
 
+    static int mpvBufferBytes(long maxHeapBytes, boolean is64Bit) {
+        int base = safeBufferBytes(maxHeapBytes);
+        if (is64Bit) return base;
+        int cap = maxHeapBytes <= 256L * 1024L * 1024L ? 32 * 1024 * 1024 : 48 * 1024 * 1024;
+        return Math.min(base, cap);
+    }
+
+    private static boolean is64BitProcess() {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 23) {
+                return android.os.Process.is64Bit();
+            }
+        } catch (Throwable ignored) {
+        }
+        String arch = System.getProperty("os.arch", "");
+        return arch != null && arch.contains("64");
+    }
+
+    static boolean isHdrGammaOrCodec(String videoGamma, String videoCodec) {
+        String g = videoGamma == null ? "" : videoGamma.trim().toLowerCase(Locale.ROOT);
+        if (g.contains("pq")
+                || g.contains("smpte2084")
+                || g.contains("st2084")
+                || g.contains("hlg")
+                || g.contains("arib-std-b67")) {
+            return true;
+        }
+        String vc = videoCodec == null ? "" : videoCodec.trim().toLowerCase(Locale.ROOT);
+        return vc.contains("dolby")
+                || vc.contains("dovi")
+                || vc.contains("dvhe")
+                || vc.contains("dvh1");
+    }
+
+    static String normalizeVideoMime(String videoCodec) {
+        if (videoCodec == null || videoCodec.trim().isEmpty()) return "";
+        String c = videoCodec.trim().toLowerCase(Locale.ROOT);
+        if (c.contains("dolby") || c.contains("dovi") || c.contains("dvhe") || c.contains("dvh1")) {
+            return "video/dolby-vision";
+        }
+        if (c.contains("hevc") || c.contains("h.265") || c.contains("h265")) return "video/hevc";
+        if (c.contains("h.264") || c.contains("h264") || c.contains("avc")) return "video/avc";
+        if (c.contains("av1") || c.contains("av01")) return "video/av01";
+        if (c.contains("vp9")) return "video/x-vnd.on2.vp9";
+        if (c.contains("mpeg4") || c.contains("mp4v")) return "video/mp4v-es";
+        return "";
+    }
+
+    static List<String> buildMediaBadges(
+            int width,
+            int height,
+            String videoCodec,
+            String audioCodec,
+            String videoGamma,
+            String hwdecCurrent,
+            boolean anime4kActive) {
+        List<String> out = new ArrayList<>(4);
+        int longEdge = Math.max(width, height);
+        String tier =
+                longEdge >= 3800
+                        ? "4K"
+                        : longEdge >= 2500
+                                ? "2K"
+                                : longEdge >= 1900
+                                        ? "1080P"
+                                        : longEdge >= 1200
+                                                ? "720P"
+                                                : (width > 0 && height > 0 ? height + "P" : "");
+        if (!tier.isEmpty()) out.add(tier);
+
+        String vc = videoCodec == null ? "" : videoCodec.trim().toLowerCase(Locale.ROOT);
+        String g = videoGamma == null ? "" : videoGamma.trim().toLowerCase(Locale.ROOT);
+        if (vc.contains("dolby")
+                || vc.contains("dovi")
+                || vc.contains("dvhe")
+                || vc.contains("dvh1")) {
+            out.add("DOLBY VISION");
+        } else if (g.contains("hlg") || g.contains("arib-std-b67")) {
+            out.add("HLG HDR");
+        } else if (g.contains("pq") || g.contains("smpte2084") || g.contains("st2084")) {
+            out.add("HDR10");
+        } else if (vc.contains("hevc") || vc.contains("h.265") || vc.contains("h265")) {
+            out.add("HEVC");
+        } else if (vc.contains("h.264") || vc.contains("h264") || vc.contains("avc")) {
+            out.add("H.264");
+        } else if (vc.contains("av1") || vc.contains("av01")) {
+            out.add("AV1");
+        } else if (vc.contains("vp9")) {
+            out.add("VP9");
+        } else if (vc.contains("mpeg4") || vc.contains("mp4v")) {
+            out.add("MPEG4");
+        }
+
+        String ac = audioCodec == null ? "" : audioCodec.trim().toLowerCase(Locale.ROOT);
+        if (ac.contains("eac3") || ac.contains("ec-3")) out.add("DD+");
+        else if (ac.contains("ac3") || ac.contains("ac-3")) out.add("DOLBY AUDIO");
+        else if (ac.contains("truehd")) out.add("TRUEHD");
+        else if (ac.contains("dts-hd") || ac.contains("dtshd")) out.add("DTS-HD");
+        else if (ac.contains("dts")) out.add("DTS");
+        else if (ac.contains("flac")) out.add("FLAC");
+        else if (ac.contains("opus")) out.add("OPUS");
+        else if (ac.contains("aac") || ac.contains("mp4a")) out.add("AAC");
+        else if (ac.contains("mp3")) out.add("MP3");
+
+        String hw = hwdecCurrent == null ? "" : hwdecCurrent.trim().toLowerCase(Locale.ROOT);
+        if (anime4kActive) {
+            out.add("MPV Anime4K");
+        } else if ("no".equals(hw)) {
+            out.add("MPV 软解");
+        } else {
+            out.add("MPV 播放");
+        }
+        return out;
+    }
+
     private final Context context;
     private final SharedPreferences prefs;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final AudioManager audio;
+    private boolean nativeCreated;
     private boolean initialized;
     private boolean surfaceAttached;
+    private Surface attachedSurface;
     private boolean focusHeld;
     private boolean repeatOne;
     private boolean wantPlay;
@@ -125,6 +242,7 @@ public final class MpvPlayer extends MoviePlayer {
     private volatile double durationSec;
     private volatile String videoCodec = "";
     private volatile String audioCodec = "";
+    private volatile String videoGamma = "";
     private volatile String hwdecCurrent = "";
     private volatile String lastError = "";
     private volatile long prepareStarted;
@@ -136,6 +254,9 @@ public final class MpvPlayer extends MoviePlayer {
     private OnCompletionListener completionListener;
     private OnVideoSizeChangedListener sizeListener;
     private OnErrorListener errorListener;
+    private OnHdrChangedListener hdrChangedListener;
+    private OnTextTracksChangedListener textTracksChangedListener;
+    private OnAudioTracksChangedListener audioTracksChangedListener;
     private SubtitleListener subtitleListener;
 
     private final AudioManager.OnAudioFocusChangeListener focusChange =
@@ -204,6 +325,20 @@ public final class MpvPlayer extends MoviePlayer {
                         videoCodec = text;
                     } else if ("audio-codec-name".equals(property)) {
                         audioCodec = text;
+                    } else if ("video-params/gamma".equals(property)) {
+                        boolean wasHdr = isHdrGammaOrCodec(videoGamma, videoCodec);
+                        videoGamma = text;
+                        boolean nowHdr = isHdrGammaOrCodec(videoGamma, videoCodec);
+                        if (nowHdr != wasHdr) {
+                            final OnHdrChangedListener listener = hdrChangedListener;
+                            if (listener != null) {
+                                final boolean hdrFlag = nowHdr;
+                                main.post(
+                                        () -> {
+                                            if (!released) listener.onHdrChanged(hdrFlag);
+                                        });
+                            }
+                        }
                     } else if ("hwdec-current".equals(property)) {
                         hwdecCurrent = text;
                     } else if ("sub-text".equals(property)) {
@@ -251,81 +386,93 @@ public final class MpvPlayer extends MoviePlayer {
 
     private void initNativeMpv() {
         MPVLib.create(context);
-        int decoderMode = prefs.getInt(Prefs.DECODER_MODE, 0);
-        anime4kActive = prefs.getBoolean(Prefs.ANIME4K_ENABLED, false);
-        hdrToneMappingActive = prefs.getBoolean(Prefs.HDR_TONE_MAPPING, true);
-        boolean displayHdr = DecoderRenderersFactory.hasDisplayHdrSupport(context);
-        String unsafeCsv = prefs.getString(Prefs.MPV_UNSAFE_DIRECT_CODECS, "");
-        configuredVo = selectVo(hdrToneMappingActive, anime4kActive);
-        configuredHwdec =
-                selectHwdecMode(
-                        decoderMode,
-                        anime4kActive,
-                        hdrToneMappingActive,
-                        displayHdr,
-                        unsafeCsv,
-                        "");
-        int bufferSeconds = Math.max(15, Math.min(60, prefs.getInt(Prefs.BUFFER_SECONDS, 30)));
-        int maxBytes = safeBufferBytes(Runtime.getRuntime().maxMemory());
-        int backBytes = Math.min(32 * 1024 * 1024, maxBytes / 3);
+        nativeCreated = true;
+        try {
+            int decoderMode = prefs.getInt(Prefs.DECODER_MODE, 0);
+            anime4kActive = prefs.getBoolean(Prefs.ANIME4K_ENABLED, false);
+            hdrToneMappingActive = prefs.getBoolean(Prefs.HDR_TONE_MAPPING, true);
+            boolean displayHdr = DecoderRenderersFactory.hasDisplayHdrSupport(context);
+            boolean is64Bit = is64BitProcess();
+            String unsafeCsv = prefs.getString(Prefs.MPV_UNSAFE_DIRECT_CODECS, "");
+            configuredVo = selectVo(hdrToneMappingActive, anime4kActive);
+            configuredHwdec =
+                    selectHwdecMode(
+                            decoderMode,
+                            anime4kActive,
+                            hdrToneMappingActive,
+                            displayHdr,
+                            unsafeCsv,
+                            "");
+            int bufferSeconds = Math.max(15, Math.min(60, prefs.getInt(Prefs.BUFFER_SECONDS, 30)));
+            int maxBytes = mpvBufferBytes(Runtime.getRuntime().maxMemory(), is64Bit);
+            int backBytes = Math.min(16 * 1024 * 1024, maxBytes / 4);
 
-        MPVLib.setOptionString("vo", configuredVo);
-        MPVLib.setOptionString("gpu-context", "android");
-        MPVLib.setOptionString("opengl-es", "yes");
-        MPVLib.setOptionString("ao", "audiotrack,opensles");
-        MPVLib.setOptionString("hwdec", configuredHwdec);
-        MPVLib.setOptionString("hwdec-codecs", "all");
-        MPVLib.setOptionString("vd-lavc-threads", "0");
-        MPVLib.setOptionString("cache", "yes");
-        MPVLib.setOptionString("cache-pause", "yes");
-        MPVLib.setOptionString("cache-pause-wait", "1");
-        MPVLib.setOptionString("demuxer-max-bytes", String.valueOf(maxBytes));
-        MPVLib.setOptionString("demuxer-max-back-bytes", String.valueOf(backBytes));
-        MPVLib.setOptionString("demuxer-readahead-secs", String.valueOf(bufferSeconds));
-        MPVLib.setOptionString("network-timeout", "20");
-        MPVLib.setOptionString("hls-bitrate", "max");
-        MPVLib.setOptionString("deinterlace", "auto");
-        MPVLib.setOptionString("hr-seek", "yes");
-        MPVLib.setOptionString("hr-seek-framedrop", "yes");
-        MPVLib.setOptionString("sub-auto", "no");
-        MPVLib.setOptionString("sub-ass", "yes");
-        MPVLib.setOptionString("sub-ass-override", "scale");
-        MPVLib.setOptionString("embeddedfonts", "yes");
-        MPVLib.setOptionString("sub-font-size", "44");
-        MPVLib.setOptionString("keep-open", "no");
-        MPVLib.setOptionString("idle", "yes");
-        MPVLib.setOptionString("force-window", "yes");
-        MPVLib.setOptionString("save-position-on-quit", "no");
-        MPVLib.setOptionString("volume-max", "200");
-        MPVLib.setOptionString("pause", "yes");
-        if (hdrToneMappingActive) {
-            MPVLib.setOptionString("tone-mapping", "auto");
-            MPVLib.setOptionString("hdr-compute-peak", "yes");
-            MPVLib.setOptionString("gamut-mapping-mode", "auto");
-            MPVLib.setOptionString("target-colorspace-hint", displayHdr ? "yes" : "no");
-        }
-        if (anime4kActive) {
-            File shader = extractAnime4kShader(context);
-            if (shader != null && shader.isFile()) {
-                MPVLib.setOptionString("glsl-shaders", shader.getAbsolutePath());
-                MPVLib.setOptionString("scale", "bilinear");
-                MPVLib.setOptionString("cscale", "bilinear");
-                MPVLib.setOptionString("dscale", "mitchell");
+            // Start with vo=null until an Android Surface is attached; enabling gpu/gpu-next with
+            // wid=0 before attachSurface() can trigger EGL/libplacebo aborts on TV Mali drivers.
+            MPVLib.setOptionString("vo", "null");
+            MPVLib.setOptionString("gpu-context", "android");
+            MPVLib.setOptionString("opengl-es", "yes");
+            MPVLib.setOptionString("ao", "audiotrack,opensles");
+            MPVLib.setOptionString("hwdec", configuredHwdec);
+            MPVLib.setOptionString("hwdec-codecs", "all");
+            MPVLib.setOptionString("vd-lavc-threads", is64Bit ? "0" : "4");
+            MPVLib.setOptionString("cache", "yes");
+            MPVLib.setOptionString("cache-pause", "yes");
+            MPVLib.setOptionString("cache-pause-wait", "1");
+            MPVLib.setOptionString("demuxer-max-bytes", String.valueOf(maxBytes));
+            MPVLib.setOptionString("demuxer-max-back-bytes", String.valueOf(backBytes));
+            MPVLib.setOptionString("demuxer-readahead-secs", String.valueOf(bufferSeconds));
+            MPVLib.setOptionString("network-timeout", "20");
+            MPVLib.setOptionString("hls-bitrate", "max");
+            MPVLib.setOptionString("deinterlace", "auto");
+            MPVLib.setOptionString("hr-seek", "yes");
+            MPVLib.setOptionString("hr-seek-framedrop", "yes");
+            MPVLib.setOptionString("sub-auto", "no");
+            MPVLib.setOptionString("sub-ass", "yes");
+            MPVLib.setOptionString("sub-ass-override", "scale");
+            MPVLib.setOptionString("embeddedfonts", "yes");
+            MPVLib.setOptionString("sub-font-size", "44");
+            MPVLib.setOptionString("keep-open", "no");
+            MPVLib.setOptionString("idle", "yes");
+            MPVLib.setOptionString("force-window", "no");
+            MPVLib.setOptionString("save-position-on-quit", "no");
+            MPVLib.setOptionString("volume-max", "200");
+            MPVLib.setOptionString("pause", "yes");
+            if (hdrToneMappingActive) {
+                MPVLib.setOptionString("tone-mapping", "auto");
+                // Compute-shader peak detection can abort under 32-bit Android TV GLES drivers.
+                MPVLib.setOptionString("hdr-compute-peak", is64Bit ? "auto" : "no");
+                MPVLib.setOptionString("gamut-mapping-mode", "auto");
+                MPVLib.setOptionString("target-colorspace-hint", displayHdr ? "yes" : "no");
             }
+            if (anime4kActive) {
+                File shader = extractAnime4kShader(context);
+                if (shader != null && shader.isFile()) {
+                    MPVLib.setOptionString("glsl-shaders", shader.getAbsolutePath());
+                    MPVLib.setOptionString("scale", "bilinear");
+                    MPVLib.setOptionString("cscale", "bilinear");
+                    MPVLib.setOptionString("dscale", "mitchell");
+                }
+            }
+            MPVLib.init();
+            initialized = true;
+            MPVLib.addObserver(observer);
+            MPVLib.observeProperty("time-pos", MPVLib.MPV_FORMAT_DOUBLE);
+            MPVLib.observeProperty("duration", MPVLib.MPV_FORMAT_DOUBLE);
+            MPVLib.observeProperty("pause", MPVLib.MPV_FORMAT_FLAG);
+            MPVLib.observeProperty("eof-reached", MPVLib.MPV_FORMAT_FLAG);
+            MPVLib.observeProperty("dwidth", MPVLib.MPV_FORMAT_INT64);
+            MPVLib.observeProperty("dheight", MPVLib.MPV_FORMAT_INT64);
+            MPVLib.observeProperty("video-codec", MPVLib.MPV_FORMAT_STRING);
+            MPVLib.observeProperty("audio-codec-name", MPVLib.MPV_FORMAT_STRING);
+            MPVLib.observeProperty("video-params/gamma", MPVLib.MPV_FORMAT_STRING);
+            MPVLib.observeProperty("hwdec-current", MPVLib.MPV_FORMAT_STRING);
+            MPVLib.observeProperty("sub-text", MPVLib.MPV_FORMAT_STRING);
+        } catch (Throwable error) {
+            releaseInternal();
+            if (error instanceof RuntimeException) throw (RuntimeException) error;
+            throw new IllegalStateException("MPV initialization failed", error);
         }
-        MPVLib.init();
-        initialized = true;
-        MPVLib.addObserver(observer);
-        MPVLib.observeProperty("time-pos", MPVLib.MPV_FORMAT_DOUBLE);
-        MPVLib.observeProperty("duration", MPVLib.MPV_FORMAT_DOUBLE);
-        MPVLib.observeProperty("pause", MPVLib.MPV_FORMAT_FLAG);
-        MPVLib.observeProperty("eof-reached", MPVLib.MPV_FORMAT_FLAG);
-        MPVLib.observeProperty("dwidth", MPVLib.MPV_FORMAT_INT64);
-        MPVLib.observeProperty("dheight", MPVLib.MPV_FORMAT_INT64);
-        MPVLib.observeProperty("video-codec", MPVLib.MPV_FORMAT_STRING);
-        MPVLib.observeProperty("audio-codec-name", MPVLib.MPV_FORMAT_STRING);
-        MPVLib.observeProperty("hwdec-current", MPVLib.MPV_FORMAT_STRING);
-        MPVLib.observeProperty("sub-text", MPVLib.MPV_FORMAT_STRING);
     }
 
     private static File extractAnime4kShader(Context context) {
@@ -410,6 +557,12 @@ public final class MpvPlayer extends MoviePlayer {
         if (preparedListener != null) {
             preparedListener.onPrepared(MpvPlayer.this);
         }
+        if (audioTracksChangedListener != null) {
+            audioTracksChangedListener.onAudioTracksChanged();
+        }
+        if (textTracksChangedListener != null) {
+            textTracksChangedListener.onTextTracksChanged();
+        }
     }
 
     private void handleEndFile() {
@@ -462,13 +615,24 @@ public final class MpvPlayer extends MoviePlayer {
                 () -> {
                     if (released || !initialized) return null;
                     if (surface != null && surface.isValid()) {
+                        if (surfaceAttached && attachedSurface == surface) {
+                            return null;
+                        }
+                        if (surfaceAttached) {
+                            MPVLib.setPropertyString("vo", "null");
+                            MPVLib.detachSurface();
+                            surfaceAttached = false;
+                            attachedSurface = null;
+                        }
                         MPVLib.attachSurface(surface);
+                        attachedSurface = surface;
                         surfaceAttached = true;
                         MPVLib.setPropertyString("vo", configuredVo);
                     } else if (surfaceAttached) {
                         MPVLib.setPropertyString("vo", "null");
                         MPVLib.detachSurface();
                         surfaceAttached = false;
+                        attachedSurface = null;
                     }
                     return null;
                 });
@@ -520,6 +684,46 @@ public final class MpvPlayer extends MoviePlayer {
                     errorListener = listener;
                     return null;
                 });
+    }
+
+    @Override
+    public void setOnHdrChangedListener(OnHdrChangedListener listener) {
+        onMain(
+                () -> {
+                    hdrChangedListener = listener;
+                    if (listener != null && isHdrVideo()) {
+                        listener.onHdrChanged(true);
+                    }
+                    return null;
+                });
+    }
+
+    @Override
+    public void setOnTextTracksChangedListener(OnTextTracksChangedListener listener) {
+        onMain(
+                () -> {
+                    textTracksChangedListener = listener;
+                    return null;
+                });
+    }
+
+    @Override
+    public void setOnAudioTracksChangedListener(OnAudioTracksChangedListener listener) {
+        onMain(
+                () -> {
+                    audioTracksChangedListener = listener;
+                    return null;
+                });
+    }
+
+    @Override
+    public boolean isHdrVideo() {
+        return !released && isHdrGammaOrCodec(videoGamma, videoCodec);
+    }
+
+    @Override
+    public String activeVideoMimeType() {
+        return released ? "" : normalizeVideoMime(videoCodec);
     }
 
     @Override
@@ -724,6 +928,13 @@ public final class MpvPlayer extends MoviePlayer {
     }
 
     @Override
+    public List<String> mediaBadges() {
+        if (released) return Collections.emptyList();
+        return buildMediaBadges(
+                width, height, videoCodec, audioCodec, videoGamma, hwdecCurrent, anime4kActive);
+    }
+
+    @Override
     public JSONObject decoderDiagnostics() {
         JSONObject info = new JSONObject();
         try {
@@ -912,13 +1123,25 @@ public final class MpvPlayer extends MoviePlayer {
                 MPVLib.removeObserver(observer);
             } catch (Throwable ignored) {
             }
+            try {
+                MPVLib.setPropertyBoolean("pause", Boolean.TRUE);
+            } catch (Throwable ignored) {
+            }
             if (surfaceAttached) {
                 surfaceAttached = false;
+                attachedSurface = null;
+                try {
+                    MPVLib.setPropertyString("vo", "null");
+                } catch (Throwable ignored) {
+                }
                 try {
                     MPVLib.detachSurface();
                 } catch (Throwable ignored) {
                 }
             }
+        }
+        if (nativeCreated) {
+            nativeCreated = false;
             try {
                 MPVLib.destroy();
             } catch (Throwable ignored) {

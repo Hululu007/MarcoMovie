@@ -818,20 +818,50 @@ final class SettingsScreen {
                                     });
                             return;
                         }
+                        String targetApi =
+                                targetSite.api == null
+                                        ? ""
+                                        : targetSite.api.toLowerCase(java.util.Locale.ROOT);
+                        String targetKey =
+                                targetSite.key == null
+                                        ? ""
+                                        : targetSite.key.toLowerCase(java.util.Locale.ROOT);
+                        final boolean isMyDriveSpider =
+                                targetApi.contains("mydrive") || targetKey.contains("mydrive");
                         a.ui.post(
                                 () -> {
                                     if (a.isFinishing() || ticket != a.generation) return;
-                                    PluginDialogStyler.armDirectDriveForward(
-                                            a, driveKey, toggleEnableOnly);
-                                    a.sourceAction(targetSite, "LoginShow");
+                                    if (isMyDriveSpider) {
+                                        PluginDialogStyler.armDirectDriveForward(
+                                                a, driveKey, toggleEnableOnly);
+                                        a.sourceAction(targetSite, "LoginShow");
+                                    } else {
+                                        PluginDialogStyler.clearDirectDriveForward();
+                                        openDynamicConfigSiteAction(targetSite, "LoginShow");
+                                    }
                                 });
                     } catch (Throwable error) {
+                        String targetApi =
+                                targetSite.api == null
+                                        ? ""
+                                        : targetSite.api.toLowerCase(java.util.Locale.ROOT);
+                        String targetKey =
+                                targetSite.key == null
+                                        ? ""
+                                        : targetSite.key.toLowerCase(java.util.Locale.ROOT);
+                        final boolean isMyDriveSpider =
+                                targetApi.contains("mydrive") || targetKey.contains("mydrive");
                         a.ui.post(
                                 () -> {
                                     if (a.isFinishing() || ticket != a.generation) return;
-                                    PluginDialogStyler.armDirectDriveForward(
-                                            a, driveKey, toggleEnableOnly);
-                                    a.sourceAction(targetSite, "LoginShow");
+                                    if (isMyDriveSpider) {
+                                        PluginDialogStyler.armDirectDriveForward(
+                                                a, driveKey, toggleEnableOnly);
+                                        a.sourceAction(targetSite, "LoginShow");
+                                    } else {
+                                        PluginDialogStyler.clearDirectDriveForward();
+                                        openConfigSiteHome(targetSite);
+                                    }
                                 });
                     }
                 });
@@ -992,15 +1022,24 @@ final class SettingsScreen {
     }
 
     void accountAction(String action) {
+        accountAction(action, null);
+    }
+
+    void accountAction(String action, Cms.Site explicitConfigSite) {
         if (a.config != null) {
-            Cms.Site fallback = null;
-            String currentKey = a.prefs.getString(Prefs.SELECTED_SITE, "");
-            if (currentKey != null && !currentKey.isEmpty()) {
-                for (Cms.Site site : a.config.sites) {
-                    if (currentKey.equals(site.key)
-                            && SourceController.isDedicatedConfigSite(site)) {
-                        fallback = site;
-                        break;
+            Cms.Site fallback = explicitConfigSite;
+            if (fallback == null) {
+                fallback = AccountPanel.findConfigCenterSite(a);
+            }
+            if (fallback == null) {
+                String currentKey = a.prefs.getString(Prefs.SELECTED_SITE, "");
+                if (currentKey != null && !currentKey.isEmpty()) {
+                    for (Cms.Site site : a.config.sites) {
+                        if (currentKey.equals(site.key)
+                                && SourceController.isDedicatedConfigSite(site)) {
+                            fallback = site;
+                            break;
+                        }
                     }
                 }
             }
@@ -2580,13 +2619,19 @@ final class SettingsScreen {
         link(
                 "导入或更新配置源",
                 a.isTvDevice()
-                        ? "手机扫码、遥控输入或本地包 (.json/.js/.py/.zip)"
+                        ? "手机扫码、遥控输入或本地包（支持多行地址自动分组）"
                         : "剪贴板粘贴、网址输入或本地包 (.json/.js/.py/.zip)",
                 "settings-import",
                 a::importDialog);
         if (a.isTvDevice()) {
-            link("已添加源与线路管理", "切换订阅、管理线路或添加新源", "settings-source-manager", a::chooseOrImport);
+            link("已添加源与线路管理", "切换订阅、多源合并自动分组或管理线路", "settings-source-manager", a::chooseOrImport);
         }
+        toggle("导入的订阅源每天自动更新", Prefs.SUBSCRIPTION_AUTO_UPDATE, true, null);
+        link(
+                "立即刷新全部订阅源",
+                SourceController.subscriptionAutoUpdateSummary(a),
+                "settings-refresh-subs",
+                () -> SourceController.runDailyAutoUpdateIfNeeded(a, true));
         link(
                 "导入或管理电视直播源",
                 "支持叠加多份 M3U / TXT / JSON 源与组播单播配置",

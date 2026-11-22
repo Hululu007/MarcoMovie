@@ -130,6 +130,10 @@ final class Prefs {
     static final String WEBVIEW_JS_FALLBACK = "webview_js_fallback";
     static final String NATIVE_PYTHON_ENABLED = "native_python_enabled";
     static final String MPV_UNSAFE_DIRECT_CODECS = "mpv_unsafe_direct_codecs";
+    static final String SUBSCRIPTION_AUTO_UPDATE = "subscription_auto_update";
+    static final String SUBSCRIPTION_LAST_AUTO_UPDATE = "subscription_last_auto_update";
+    static final String SUBSCRIPTION_LAST_AUTO_STATUS = "subscription_last_auto_status";
+    static final String ACCOUNT_CONFIG_CENTER_KEY = "account_config_center_key";
 
     // Appearance & playback settings exported/restored in backups; update the Prefs.KEYS.length
     // assertion in ReviewFixChecks.java whenever keys are added or removed.
@@ -205,7 +209,8 @@ final class Prefs {
                                     HLS_PROXY_ENABLED,
                                     HLS_AD_STRIP,
                                     WEBVIEW_JS_FALLBACK,
-                                    NATIVE_PYTHON_ENABLED)));
+                                    NATIVE_PYTHON_ENABLED,
+                                    SUBSCRIPTION_AUTO_UPDATE)));
 
     private static final Map<String, int[]> INT_RANGES;
 

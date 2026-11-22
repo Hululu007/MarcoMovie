@@ -1238,10 +1238,17 @@ final class PlaybackController {
                                             Cms.inheritedHeaders(s.api, ep.url, s.headers);
                                     Cms.mergeHeaders(mediaHeaders, ep.headers);
                                     int engPref = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+                                    JSONObject drmObj = ep.media.optJSONObject("drm");
+                                    String drmScheme =
+                                            drmObj == null
+                                                    ? ep.media.optString("drmScheme", "")
+                                                    : drmObj.optString(
+                                                            "scheme", drmObj.optString("type", ""));
                                     boolean useMpv =
                                             !ep.media.optBoolean("_systemFallback")
                                                     && !ep.media.optBoolean("_softwareFallback")
                                                     && !ep.media.optBoolean("_mpvFallback")
+                                                    && drmScheme.isEmpty()
                                                     && engPref == 3
                                                     && MpvPlayer.isAvailable();
                                     boolean preferIjk =
@@ -1251,23 +1258,29 @@ final class PlaybackController {
                                                                     || ep.media.optInt(
                                                                                     "playerType", 0)
                                                                             == 2));
-                                    candidate =
-                                            ep.media.optBoolean("_systemFallback") || engPref == 1
-                                                    ? new SystemPlayer(a)
-                                                    : useMpv
-                                                            ? new MpvPlayer(a)
-                                                            : ep.media.optBoolean(
-                                                                            "_softwareFallback")
-                                                                    ? new MoviePlayer(
-                                                                            a,
-                                                                            ep.media.optInt(
-                                                                                    "_fallbackMode",
-                                                                                    2),
-                                                                            preferIjk)
-                                                                    : preferIjk
-                                                                            ? MoviePlayer.createIjk(
-                                                                                    a)
-                                                                            : new MoviePlayer(a);
+                                    if (ep.media.optBoolean("_systemFallback") || engPref == 1) {
+                                        candidate = new SystemPlayer(a);
+                                    } else if (useMpv) {
+                                        try {
+                                            candidate = new MpvPlayer(a);
+                                        } catch (Throwable mpvInitErr) {
+                                            AppLog.w(
+                                                    "PlaybackController",
+                                                    "MPV init failed, falling back to Media3",
+                                                    mpvInitErr);
+                                            candidate = new MoviePlayer(a);
+                                        }
+                                    } else if (ep.media.optBoolean("_softwareFallback")) {
+                                        candidate =
+                                                new MoviePlayer(
+                                                        a,
+                                                        ep.media.optInt("_fallbackMode", 2),
+                                                        preferIjk);
+                                    } else if (preferIjk) {
+                                        candidate = MoviePlayer.createIjk(a);
+                                    } else {
+                                        candidate = new MoviePlayer(a);
+                                    }
                                     String rawPlayUrl =
                                             Cms.isHttp(ep.url) ? Cms.normalizeHttp(ep.url) : ep.url;
                                     String playUrl = rawPlayUrl;

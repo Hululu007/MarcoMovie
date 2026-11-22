@@ -77,40 +77,117 @@ final class AccountPanel {
         new DriveSpec("ali", "我的阿狸", "阿里云盘", "对应线路：阿狸原画 / 阿里4K", "LoginShow", "aliyuntoken")
     };
 
+    private static final DriveSpec[] EXTENDED_DRIVES = {
+        new DriveSpec("115", "115网盘", "115网盘", "115 扫码 / Cookie 登录", "pan115", "115pancookie"),
+        new DriveSpec("189", "天翼云盘", "天翼189", "天翼云盘扫码 / 账号登录", "pan189", "tianyilogin"),
+        new DriveSpec("139", "移动云盘", "移动139", "移动云盘扫码 / Cookie 登录", "pan139", "ydyuncookie"),
+        new DriveSpec("123", "123云盘", "123网盘", "123云盘账号 / 凭据登录", "pan123manual", "pan123login"),
+        new DriveSpec("thunder", "迅雷云盘", "迅雷网盘", "迅雷云盘扫码 / 账号登录", "thunder", "panxunleiuser")
+    };
+
     private AccountPanel() {}
 
+    static boolean isLikelyConfigCenterSite(Cms.Site site) {
+        if (site == null) return false;
+        if (SourceController.isDedicatedConfigSite(site)) return true;
+        String api = site.api == null ? "" : site.api.toLowerCase(Locale.ROOT);
+        String key = site.key == null ? "" : site.key.toLowerCase(Locale.ROOT);
+        String name = site.name == null ? "" : site.name;
+        return api.contains("mydrive")
+                || key.contains("mydrive")
+                || api.contains("configcenter")
+                || api.contains("localconfig")
+                || api.contains("panconfig")
+                || api.contains("wexconfig")
+                || api.contains("wexokconfig")
+                || key.contains("configcenter")
+                || key.contains("panconfig")
+                || key.contains("wexconfig")
+                || name.contains("我的云盘")
+                || name.contains("我的网盘")
+                || name.contains("我的┃网盘")
+                || name.contains("配置中心");
+    }
+
+    /**
+     * Collects all compatible Config Center sites across single or merged multi-source configs,
+     * prioritizing: (1) explicitly selected Config Center key, (2) Config Center in the active
+     * site's group, and (3) all other Config Centers in subscription order.
+     */
+    static java.util.List<Cms.Site> collectConfigCenterSites(
+            java.util.List<Cms.Site> sites, String activeGroup, String preferredKey) {
+        java.util.List<Cms.Site> primary = new java.util.ArrayList<Cms.Site>();
+        java.util.List<Cms.Site> fallback = new java.util.ArrayList<Cms.Site>();
+        if (sites == null || sites.isEmpty()) return primary;
+        for (Cms.Site site : sites) {
+            if (site == null) continue;
+            if (isLikelyConfigCenterSite(site)) {
+                primary.add(site);
+            } else {
+                String api = site.api == null ? "" : site.api.toLowerCase(Locale.ROOT);
+                String name = site.name == null ? "" : site.name;
+                if (api.contains("wogg")
+                        || api.contains("mogg")
+                        || name.contains("玩偶")
+                        || name.contains("木偶")) {
+                    fallback.add(site);
+                }
+            }
+        }
+        java.util.List<Cms.Site> candidates = primary.isEmpty() ? fallback : primary;
+        if (candidates.size() <= 1) return candidates;
+        java.util.List<Cms.Site> ordered = new java.util.ArrayList<Cms.Site>(candidates.size());
+        java.util.Set<String> added = new java.util.HashSet<String>();
+        String cleanPref = preferredKey == null ? "" : preferredKey.trim();
+        String cleanGroup = activeGroup == null ? "" : activeGroup.trim();
+        if (!cleanPref.isEmpty()) {
+            for (Cms.Site s : candidates) {
+                if (cleanPref.equals(s.key) && added.add(s.key)) {
+                    ordered.add(s);
+                }
+            }
+        }
+        if (!cleanGroup.isEmpty()) {
+            for (Cms.Site s : candidates) {
+                if (cleanGroup.equals(SourcePicker.siteGroup(s)) && added.add(s.key)) {
+                    ordered.add(s);
+                }
+            }
+        }
+        for (Cms.Site s : candidates) {
+            if (added.add(s.key)) ordered.add(s);
+        }
+        return ordered;
+    }
+
+    static java.util.List<Cms.Site> findAllConfigCenterSites(MainActivity a) {
+        if (a == null || a.config == null) return java.util.Collections.emptyList();
+        String activeGroup = "";
+        String selectedKey = a.prefs != null ? a.prefs.getString(Prefs.SELECTED_SITE, "") : "";
+        if (!selectedKey.isEmpty()) {
+            for (Cms.Site s : a.config.sites) {
+                if (s != null && selectedKey.equals(s.key)) {
+                    activeGroup = SourcePicker.siteGroup(s);
+                    break;
+                }
+            }
+        }
+        String preferredCenter =
+                a.prefs != null ? a.prefs.getString(Prefs.ACCOUNT_CONFIG_CENTER_KEY, "") : "";
+        return collectConfigCenterSites(a.config.sites, activeGroup, preferredCenter);
+    }
+
     static Cms.Site findConfigCenterSite(MainActivity a) {
-        if (a == null || a.config == null) return null;
-        for (Cms.Site site : a.config.sites) {
-            String api = site.api == null ? "" : site.api.toLowerCase(Locale.ROOT);
-            String key = site.key == null ? "" : site.key.toLowerCase(Locale.ROOT);
-            String name = site.name == null ? "" : site.name;
-            if (api.contains("mydrive")
-                    || key.contains("mydrive")
-                    || api.contains("configcenter")
-                    || api.contains("localconfig")
-                    || api.contains("panconfig")
-                    || api.contains("wexconfig")
-                    || api.contains("wexokconfig")
-                    || key.contains("configcenter")
-                    || key.contains("panconfig")
-                    || key.contains("wexconfig")
-                    || name.contains("我的云盘")
-                    || name.contains("配置中心")) {
-                return site;
-            }
-        }
-        for (Cms.Site site : a.config.sites) {
-            String api = site.api == null ? "" : site.api.toLowerCase(Locale.ROOT);
-            String name = site.name == null ? "" : site.name;
-            if (api.contains("wogg")
-                    || api.contains("mogg")
-                    || name.contains("玩偶")
-                    || name.contains("木偶")) {
-                return site;
-            }
-        }
-        return null;
+        java.util.List<Cms.Site> all = findAllConfigCenterSites(a);
+        return all.isEmpty() ? null : all.get(0);
+    }
+
+    private static String configScopePrefix(MainActivity a) {
+        Cms.Site site = findConfigCenterSite(a);
+        String origin = a != null && a.configOrigin != null ? a.configOrigin : "";
+        String siteId = site != null && site.key != null ? site.key : "";
+        String raw = origin + "|" + siteId;
+        return Integer.toHexString(raw.hashCode()) + "_";
     }
 
     static boolean isAvailable(MainActivity a) {
@@ -144,12 +221,14 @@ final class AccountPanel {
 
         int nextLogin = loggedIn ? 1 : 0;
         int nextEnabled = enabled ? 1 : 0;
-        int prevLogin = a.prefs.getInt(PREF_LOGIN_PREFIX + key, -1);
-        int prevEnabled = a.prefs.getInt(PREF_ENABLED_PREFIX + key, -1);
+        String scopedLoginKey = PREF_LOGIN_PREFIX + configScopePrefix(a) + key;
+        String scopedEnabledKey = PREF_ENABLED_PREFIX + configScopePrefix(a) + key;
+        int prevLogin = a.prefs.getInt(scopedLoginKey, -1);
+        int prevEnabled = a.prefs.getInt(scopedEnabledKey, -1);
         if (prevLogin != nextLogin || prevEnabled != nextEnabled) {
             SharedPreferences.Editor ed = a.prefs.edit();
-            ed.putInt(PREF_LOGIN_PREFIX + key, nextLogin);
-            ed.putInt(PREF_ENABLED_PREFIX + key, nextEnabled);
+            ed.putInt(scopedLoginKey, nextLogin);
+            ed.putInt(scopedEnabledKey, nextEnabled);
             ed.apply();
             Runnable refresh = activePageRefresh;
             if (refresh != null) {
@@ -161,7 +240,7 @@ final class AccountPanel {
     static boolean isDriveLoggedIn(MainActivity a, String driveKey) {
         if (a == null || driveKey == null) return false;
         if (a.prefs != null) {
-            int obs = a.prefs.getInt(PREF_LOGIN_PREFIX + driveKey, -1);
+            int obs = a.prefs.getInt(PREF_LOGIN_PREFIX + configScopePrefix(a) + driveKey, -1);
             if (obs >= 0) return obs == 1;
         }
         return hasNonEmptyCookieFile(a, driveKey);
@@ -169,7 +248,7 @@ final class AccountPanel {
 
     static boolean isDriveEnabled(MainActivity a, String driveKey) {
         if (a == null || a.prefs == null || driveKey == null) return false;
-        return a.prefs.getInt(PREF_ENABLED_PREFIX + driveKey, 0) == 1;
+        return a.prefs.getInt(PREF_ENABLED_PREFIX + configScopePrefix(a) + driveKey, 0) == 1;
     }
 
     static int loggedDriveCount(MainActivity a) {
@@ -192,16 +271,45 @@ final class AccountPanel {
             String[] names;
             switch (driveKey) {
                 case "quark":
-                    names = new String[] {"quark.txt", ".quark", "quark_cookie.txt"};
+                    names =
+                            new String[] {
+                                "quark.txt", ".quark", "quark_cookie.txt", "quark_cookie"
+                            };
                     break;
                 case "uc":
-                    names = new String[] {"uc.txt", ".uc", "uc_cookie.txt"};
+                    names =
+                            new String[] {
+                                "uc.txt", ".uc", "uc_cookie.txt", "uc_cookie", "uc_token.txt"
+                            };
                     break;
                 case "baidu":
-                    names = new String[] {"baidu.txt", ".baidu", "bd_cookie.txt"};
+                    names =
+                            new String[] {
+                                "baidu.txt", ".baidu", "bd_cookie.txt", "baidu_cookie.txt"
+                            };
                     break;
                 case "ali":
-                    names = new String[] {"ali.txt", ".ali", "aliyundrive.txt"};
+                    names =
+                            new String[] {
+                                "ali.txt",
+                                ".ali",
+                                "aliyundrive.txt",
+                                "ali_token.txt",
+                                "token.txt",
+                                "alipan.txt"
+                            };
+                    break;
+                case "115":
+                    names = new String[] {"115.txt", "115_cookie.txt", "pan115.txt"};
+                    break;
+                case "189":
+                    names = new String[] {"189.txt", "tianyi.txt", "cloud189.txt"};
+                    break;
+                case "139":
+                    names = new String[] {"139.txt", "ydyun.txt", "yun139.txt"};
+                    break;
+                case "123":
+                    names = new String[] {"123.txt", "pan123.txt"};
                     break;
                 default:
                     return false;
@@ -295,7 +403,8 @@ final class AccountPanel {
         if (dialog.getWindow() != null) {
             dialog.getWindow().getDecorView().setTag("app-dialog");
         }
-        final Cms.Site configSite = findConfigCenterSite(a);
+        final java.util.List<Cms.Site> allConfigCenters = findAllConfigCenterSites(a);
+        final Cms.Site configSite = allConfigCenters.isEmpty() ? null : allConfigCenters.get(0);
         LinearLayout panel = a.vertical();
         panel.setTag("account-panel");
         panel.setPadding(a.dp(24), a.dp(20), a.dp(24), a.dp(16));
@@ -314,7 +423,17 @@ final class AccountPanel {
         TextView heading = a.text("网盘与账号", 22, MainActivity.WHITE);
         heading.setTypeface(null, Typeface.BOLD);
         titleCol.addView(heading);
-        TextView note = a.text("点击下方任意网盘直接弹出二维码登录；长按可切换启用状态。", 12.5f, MainActivity.MUTED);
+        String subtitleText =
+                configSite != null
+                        ? ("当前绑定配置中心：["
+                                + SourcePicker.siteGroup(configSite)
+                                + "] "
+                                + configSite.name
+                                + " · 点击直接扫码，长按切换启用")
+                        : "当前订阅未内置配置中心 · 可在下方挂载 AList 或切换到含配置中心的订阅源";
+        TextView note = a.text(subtitleText, 12.5f, MainActivity.MUTED);
+        note.setSingleLine(true);
+        note.setEllipsize(TextUtils.TruncateAt.END);
         note.setPadding(0, a.dp(2), 0, 0);
         titleCol.addView(note);
         headRow.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
@@ -448,7 +567,7 @@ final class AccountPanel {
                                         () -> {
                                             PluginDialogStyler.clearDirectDriveForward();
                                             PluginDialogStyler.watch(a);
-                                            new SettingsScreen(a).accountAction(action);
+                                            new SettingsScreen(a).accountAction(action, configSite);
                                         });
                             });
             UiCompat.setDefaultFocusHighlightEnabled(item, false);
@@ -478,6 +597,60 @@ final class AccountPanel {
             actRow.addView(item, aLp);
         }
         body.addView(actRow, new LinearLayout.LayoutParams(-1, -2));
+
+        // Config Center Compatibility Row: extended drives + open full Config Center + switcher
+        if (configSite != null) {
+            LinearLayout compatRow = a.row();
+            compatRow.setClipChildren(false);
+            boolean hasMultipleCenters = allConfigCenters.size() > 1;
+            int compatCols = hasMultipleCenters ? 3 : 2;
+            compatRow.setWeightSum(compatCols);
+
+            final android.widget.Button moreDrivesBtn =
+                    a.button(
+                            "更多网盘 (115/天翼…)",
+                            "account-action:more-drives",
+                            () -> {
+                                dialog.dismiss();
+                                showExtendedDrivesPicker(a, configSite, anchor);
+                            });
+            styleTvCompatPill(a, moreDrivesBtn, 0x1effffff, MainActivity.WHITE);
+            LinearLayout.LayoutParams mdLp = new LinearLayout.LayoutParams(0, a.dp(40), 1f);
+            mdLp.rightMargin = a.dp(10);
+            mdLp.bottomMargin = a.dp(8);
+            compatRow.addView(moreDrivesBtn, mdLp);
+
+            final android.widget.Button openCenterBtn =
+                    a.button(
+                            "打开当前配置中心",
+                            "account-action:open-config-center",
+                            () -> {
+                                dialog.dismiss();
+                                new SettingsScreen(a).openConfigSiteHome(configSite);
+                            });
+            styleTvCompatPill(a, openCenterBtn, 0x1effffff, MainActivity.WHITE);
+            LinearLayout.LayoutParams ocLp = new LinearLayout.LayoutParams(0, a.dp(40), 1f);
+            if (hasMultipleCenters) ocLp.rightMargin = a.dp(10);
+            ocLp.bottomMargin = a.dp(8);
+            compatRow.addView(openCenterBtn, ocLp);
+
+            if (hasMultipleCenters) {
+                final android.widget.Button switchCenterBtn =
+                        a.button(
+                                "切换配置中心 (" + allConfigCenters.size() + ")",
+                                "account-action:switch-config-center",
+                                () -> {
+                                    dialog.dismiss();
+                                    showConfigCenterSwitcher(
+                                            a, allConfigCenters, configSite, anchor);
+                                });
+                styleTvCompatPill(a, switchCenterBtn, 0x265ac8fa, 0xffd8f3ff);
+                LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(0, a.dp(40), 1f);
+                scLp.bottomMargin = a.dp(8);
+                compatRow.addView(switchCenterBtn, scLp);
+            }
+            body.addView(compatRow, new LinearLayout.LayoutParams(-1, -2));
+        }
 
         final android.widget.Button alistBtn =
                 a.button(
@@ -599,6 +772,95 @@ final class AccountPanel {
                 });
     }
 
+    private static void styleTvCompatPill(
+            MainActivity a, android.widget.Button item, int normalBg, int normalFg) {
+        UiCompat.setDefaultFocusHighlightEnabled(item, false);
+        item.setMinWidth(0);
+        item.setMinimumWidth(0);
+        item.setSingleLine(true);
+        item.setEllipsize(TextUtils.TruncateAt.END);
+        item.setTextSize(13f);
+        item.setPadding(a.dp(10), 0, a.dp(10), 0);
+        item.setBackground(a.bg(normalBg, 14));
+        item.setTextColor(normalFg);
+        item.setOnFocusChangeListener(
+                (v, f) ->
+                        FocusMotion.style(
+                                a,
+                                item,
+                                f,
+                                normalBg,
+                                MainActivity.WHITE,
+                                14,
+                                normalFg,
+                                MainActivity.DARK,
+                                false,
+                                1.015f));
+    }
+
+    private static void showExtendedDrivesPicker(
+            final MainActivity a, final Cms.Site configSite, final View anchor) {
+        String[] labels = new String[EXTENDED_DRIVES.length + 1];
+        for (int i = 0; i < EXTENDED_DRIVES.length; i++) {
+            DriveSpec d = EXTENDED_DRIVES[i];
+            boolean logged = isDriveLoggedIn(a, d.key);
+            labels[i] = d.tvAlias + " · " + (logged ? "已检测凭据" : d.lineSubtitle);
+        }
+        labels[EXTENDED_DRIVES.length] = "打开完整配置中心 (" + configSite.name + ")";
+        new AppDialog.Builder(a)
+                .wrapChoices()
+                .setTitle("更多网盘 · " + configSite.name)
+                .setItems(
+                        labels,
+                        (d, idx) -> {
+                            if (idx == EXTENDED_DRIVES.length) {
+                                new SettingsScreen(a).openConfigSiteHome(configSite);
+                            } else if (idx >= 0 && idx < EXTENDED_DRIVES.length) {
+                                final DriveSpec chosen = EXTENDED_DRIVES[idx];
+                                a.ensureStoragePermissionForNetdisk(
+                                        () ->
+                                                dispatchDriveLoginAction(
+                                                        a, configSite, chosen, false));
+                            }
+                        })
+                .setNegativeButton("返回", (d, w) -> show(a, anchor))
+                .show();
+    }
+
+    private static void showConfigCenterSwitcher(
+            final MainActivity a,
+            final java.util.List<Cms.Site> centers,
+            final Cms.Site activeCenter,
+            final View anchor) {
+        String[] labels = new String[centers.size()];
+        int checked = 0;
+        for (int i = 0; i < centers.size(); i++) {
+            Cms.Site c = centers.get(i);
+            labels[i] = "[" + SourcePicker.siteGroup(c) + "] " + c.name;
+            if (activeCenter != null && activeCenter.key.equals(c.key)) checked = i;
+        }
+        new AppDialog.Builder(a)
+                .wrapChoices()
+                .setTitle("切换当前绑定的配置中心")
+                .setSingleChoiceItems(
+                        labels,
+                        checked,
+                        (d, idx) -> {
+                            d.dismiss();
+                            Cms.Site picked = centers.get(idx);
+                            if (a.prefs != null) {
+                                a.prefs
+                                        .edit()
+                                        .putString(Prefs.ACCOUNT_CONFIG_CENTER_KEY, picked.key)
+                                        .apply();
+                            }
+                            a.toast("已绑定配置中心：" + picked.name);
+                            show(a, anchor);
+                        })
+                .setNegativeButton("返回", (d, w) -> show(a, anchor))
+                .show();
+    }
+
     private static void runSafeAccountAction(final MainActivity a, final String action) {
         a.ensureStoragePermissionForNetdisk(
                 () -> {
@@ -606,7 +868,7 @@ final class AccountPanel {
                         CspEngine.syncAllPluginActivities(a);
                         PluginDialogStyler.clearDirectDriveForward();
                         PluginDialogStyler.watch(a);
-                        new SettingsScreen(a).accountAction(action);
+                        new SettingsScreen(a).accountAction(action, findConfigCenterSite(a));
                     } catch (Throwable t) {
                         AppLog.w("AccountPanel", "accountAction failed: " + action, t);
                         a.notice(a.message(t));
@@ -621,10 +883,19 @@ final class AccountPanel {
     static String resolveDirectDriveRoute(Cms.Site configSite, String driveKey) {
         DriveSpec matched = null;
         if (driveKey != null) {
+            String clean = driveKey.trim();
             for (DriveSpec d : DRIVES) {
-                if (d.key.equalsIgnoreCase(driveKey.trim())) {
+                if (d.key.equalsIgnoreCase(clean)) {
                     matched = d;
                     break;
+                }
+            }
+            if (matched == null) {
+                for (DriveSpec d : EXTENDED_DRIVES) {
+                    if (d.key.equalsIgnoreCase(clean)) {
+                        matched = d;
+                        break;
+                    }
                 }
             }
         }

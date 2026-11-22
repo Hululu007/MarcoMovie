@@ -61,12 +61,45 @@ final class PhoneConfigDialog {
         try {
             String ip = lanAddress();
             server =
-                    new ConfigTransferServer(
-                            address -> {
-                                Cms.Config config =
-                                        Cms.parseConfig(
-                                                SourceController.fetchImport(a, address),
-                                                SourceController.importOrigin(address));
+                    ConfigTransferServer.withBatchImporter(
+                            (address, appendMerge) -> {
+                                List<SubscriptionManager.ImportSpec> specs =
+                                        SubscriptionManager.parseImportSpecsStrict(address);
+                                if (specs.size() == 1 && !appendMerge) {
+                                    String onlyUrl = specs.get(0).url;
+                                    Cms.Config config =
+                                            Cms.parseConfig(
+                                                    SourceController.fetchImport(a, onlyUrl),
+                                                    SourceController.importOrigin(onlyUrl));
+                                    CountDownLatch applied = new CountDownLatch(1);
+                                    AtomicReference<Exception> failure = new AtomicReference<>();
+                                    a.ui.post(
+                                            () -> {
+                                                try {
+                                                    if (server.closed
+                                                            || a.isFinishing()
+                                                            || a.phoneConfig != this)
+                                                        throw new java.io.IOException(
+                                                                "Session closed");
+                                                    a.saveConfig(
+                                                            config,
+                                                            SourceController.importOrigin(onlyUrl));
+                                                    finished = true;
+                                                    if (dialog != null) dialog.dismiss();
+                                                } catch (Exception e) {
+                                                    failure.set(e);
+                                                } finally {
+                                                    applied.countDown();
+                                                }
+                                            });
+                                    if (!applied.await(20, TimeUnit.SECONDS))
+                                        throw new java.io.IOException("Apply timeout");
+                                    if (failure.get() != null) throw failure.get();
+                                    return;
+                                }
+                                SubscriptionManager.MergedResult merged =
+                                        SourceController.fetchAndMergeImportSpecs(
+                                                a, specs, appendMerge);
                                 CountDownLatch applied = new CountDownLatch(1);
                                 AtomicReference<Exception> failure = new AtomicReference<>();
                                 a.ui.post(
@@ -76,9 +109,13 @@ final class PhoneConfigDialog {
                                                         || a.isFinishing()
                                                         || a.phoneConfig != this)
                                                     throw new java.io.IOException("Session closed");
-                                                a.saveConfig(
-                                                        config,
-                                                        SourceController.importOrigin(address));
+                                                a.saveConfig(merged.config, merged.origin);
+                                                a.toast(
+                                                        "已导入 "
+                                                                + merged.sourceCount
+                                                                + " 个源并自动分组（共 "
+                                                                + merged.config.sites.size()
+                                                                + " 条线路）");
                                                 finished = true;
                                                 if (dialog != null) dialog.dismiss();
                                             } catch (Exception e) {
@@ -96,7 +133,10 @@ final class PhoneConfigDialog {
             LinearLayout panel = a.vertical();
             panel.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
             TextView note =
-                    a.text("手机与电视连接同一网络，扫码粘贴配置地址。新源会单独保存，旧源可在「已添加源」中切换。", 15, MainActivity.MUTED);
+                    a.text(
+                            "手机与电视连接同一网络，扫码可粘贴 1 个或多个配置地址（每行一个，支持 分组名,网址），多源导入将自动按源分组。",
+                            15,
+                            MainActivity.MUTED);
             panel.addView(note);
             a.gap(panel, 12);
             int qrSize =

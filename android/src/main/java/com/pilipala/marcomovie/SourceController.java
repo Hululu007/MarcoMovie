@@ -232,12 +232,25 @@ final class SourceController {
         String name = site.name == null ? "" : site.name;
         return api.contains("mydrive")
                 || api.contains("config")
+                || api.contains("panconfig")
+                || api.contains("wexconfig")
+                || api.contains("wexokconfig")
+                || api.contains("pconfig")
+                || api.contains("localconfig")
+                || api.contains("csp_pan")
+                || api.contains("csp_token")
                 || key.contains("mydrive")
                 || key.contains("config")
+                || key.contains("panconfig")
+                || key.contains("wexconfig")
+                || key.contains("pconfig")
                 || name.contains("配置中心")
                 || name.contains("配置┃中心")
-                || (name.contains("云盘") && name.contains("配置"))
-                || (name.contains("网盘") && name.contains("配置"));
+                || name.contains("设置中心")
+                || name.contains("账号配置")
+                || name.contains("玩偶配置")
+                || (name.contains("云盘") && (name.contains("配置") || name.contains("设置")))
+                || (name.contains("网盘") && (name.contains("配置") || name.contains("设置")));
     }
 
     static boolean isConfigOrNetdiskSite(Cms.Site site) {
@@ -250,7 +263,8 @@ final class SourceController {
                 || key.contains("mypan")
                 || name.contains("我的云盘")
                 || name.contains("我的网盘")
-                || name.contains("我的┃网盘");
+                || name.contains("我的┃网盘")
+                || name.contains("我的┃云盘");
     }
 
     static boolean isConfigOrNetdiskActionCard(Cms.Site site, Cms.Video v) {
@@ -960,12 +974,27 @@ final class SourceController {
     }
 
     static void addressImportDialog(MainActivity a) {
+        String existingOrigin = a.prefs.getString(Prefs.ORIGIN, "");
+        if (SubscriptionManager.isMergedOrigin(existingOrigin)) existingOrigin = "";
         AddressInput input =
-                new AddressInput(a, "https://…/config.json", a.prefs.getString(Prefs.ORIGIN, ""));
+                new AddressInput(a, "https://…/config.json（支持每行一个，多源自动分组）", existingOrigin, true);
+        LinearLayout container = a.vertical();
+        container.addView(input, new LinearLayout.LayoutParams(-1, -2));
+        final android.widget.CheckBox appendCheck = new android.widget.CheckBox(a);
+        boolean hasExisting = a.config != null && !a.config.sites.isEmpty();
+        if (hasExisting) {
+            appendCheck.setText("追加到现有片源并按源自动分组（多行地址始终自动分组）");
+            appendCheck.setTextColor(MainActivity.WHITE);
+            appendCheck.setTextSize(13f);
+            appendCheck.setChecked(false);
+            LinearLayout.LayoutParams chkLp = new LinearLayout.LayoutParams(-1, -2);
+            chkLp.topMargin = a.dp(8);
+            container.addView(appendCheck, chkLp);
+        }
         AppDialog d =
                 new AppDialog.Builder(a)
                         .setTitle("导入配置")
-                        .setView(input)
+                        .setView(container)
                         .setNegativeButton("取消", null)
                         .setNeutralButton("选择本地文件", (x, y) -> a.pickConfig())
                         .setPositiveButton("导入地址", null)
@@ -975,39 +1004,397 @@ final class SourceController {
                         d.getButton(-1)
                                 .setOnClickListener(
                                         view -> {
-                                            String address = input.value();
-                                            if (!Cms.isHttp(address)) {
-                                                input.invalid("请输入 HTTP(S) 配置地址");
+                                            String rawAddress = input.value();
+                                            final List<SubscriptionManager.ImportSpec> specs;
+                                            try {
+                                                specs =
+                                                        SubscriptionManager.parseImportSpecsStrict(
+                                                                rawAddress);
+                                            } catch (Exception err) {
+                                                input.invalid(
+                                                        err.getMessage() != null
+                                                                ? err.getMessage()
+                                                                : "请输入 HTTP(S) 配置地址");
                                                 return;
                                             }
+                                            final boolean appendMerge =
+                                                    hasExisting && appendCheck.isChecked();
                                             d.dismiss();
+                                            if (specs.size() == 1 && !appendMerge) {
+                                                final String onlyUrl = specs.get(0).url;
+                                                a.open(
+                                                        new MainActivity.Screen(
+                                                                () -> {
+                                                                    a.renderPage(
+                                                                            "正在导入",
+                                                                            "IMPORT CONFIGURATION");
+                                                                    a.load(
+                                                                            "连接配置并读取来源…",
+                                                                            () -> {
+                                                                                String raw =
+                                                                                        fetchImport(
+                                                                                                a,
+                                                                                                onlyUrl);
+                                                                                return Cms
+                                                                                        .parseConfig(
+                                                                                                raw,
+                                                                                                importOrigin(
+                                                                                                        onlyUrl));
+                                                                            },
+                                                                            c ->
+                                                                                    a.saveConfig(
+                                                                                            c,
+                                                                                            importOrigin(
+                                                                                                    onlyUrl)));
+                                                                }),
+                                                        true);
+                                                return;
+                                            }
                                             a.open(
                                                     new MainActivity.Screen(
                                                             () -> {
                                                                 a.renderPage(
-                                                                        "正在导入",
-                                                                        "IMPORT CONFIGURATION");
+                                                                        "多源分组导入",
+                                                                        "MULTI-SOURCE IMPORT");
                                                                 a.load(
-                                                                        "连接配置并读取来源…",
-                                                                        () -> {
-                                                                            String raw =
-                                                                                    fetchImport(
-                                                                                            a,
-                                                                                            address);
-                                                                            return Cms.parseConfig(
-                                                                                    raw,
-                                                                                    importOrigin(
-                                                                                            address));
-                                                                        },
-                                                                        c ->
-                                                                                a.saveConfig(
-                                                                                        c,
-                                                                                        importOrigin(
-                                                                                                address)));
+                                                                        "正在读取 "
+                                                                                + specs.size()
+                                                                                + " 个订阅源并自动分组…",
+                                                                        () ->
+                                                                                fetchAndMergeImportSpecs(
+                                                                                        a,
+                                                                                        specs,
+                                                                                        appendMerge),
+                                                                        merged -> {
+                                                                            a.saveConfig(
+                                                                                    merged.config,
+                                                                                    merged.origin);
+                                                                            a.toast(
+                                                                                    "已导入 "
+                                                                                            + merged.sourceCount
+                                                                                            + " 个源并自动分组（共 "
+                                                                                            + merged
+                                                                                                    .config
+                                                                                                    .sites
+                                                                                                    .size()
+                                                                                            + " 条线路）");
+                                                                        });
                                                             }),
                                                     true);
                                         }));
         d.show();
+    }
+
+    /**
+     * Fetches one or more subscription URLs (optionally appending onto the currently active
+     * config), persists each individual HTTP subscription in {@link ConfigLibrary}, and merges all
+     * bundles into an auto-grouped {@link Cms.Config}.
+     */
+    static SubscriptionManager.MergedResult fetchAndMergeImportSpecs(
+            MainActivity a, List<SubscriptionManager.ImportSpec> specs, boolean appendToExisting)
+            throws Exception {
+        if (specs == null || specs.isEmpty()) {
+            throw new IOException("请至少提供一个有效的订阅地址");
+        }
+        ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
+        long now = System.currentTimeMillis();
+        java.util.LinkedHashMap<String, SubscriptionManager.SourceBundle> ordered =
+                new java.util.LinkedHashMap<String, SubscriptionManager.SourceBundle>();
+
+        if (appendToExisting
+                && a.config != null
+                && a.config.raw != null
+                && !a.config.raw.trim().isEmpty()) {
+            List<SubscriptionManager.MultiSourceMeta> existingMeta =
+                    SubscriptionManager.readMultiSourceMeta(a.config.raw);
+            if (!existingMeta.isEmpty()) {
+                java.util.Map<String, ConfigLibrary.Entry> byOrigin =
+                        new java.util.HashMap<String, ConfigLibrary.Entry>();
+                try {
+                    for (ConfigLibrary.Entry e : library.entries()) {
+                        if (e != null && e.origin != null && !e.origin.isEmpty()) {
+                            byOrigin.put(e.origin.trim(), e);
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+                for (SubscriptionManager.MultiSourceMeta m : existingMeta) {
+                    ConfigLibrary.Entry saved = byOrigin.get(m.url);
+                    if (saved != null) {
+                        try {
+                            String raw = library.raw(saved);
+                            String mapKey =
+                                    m.url.isEmpty() ? ("existing:" + ordered.size()) : m.url;
+                            ordered.put(
+                                    mapKey,
+                                    new SubscriptionManager.SourceBundle(
+                                            m.name, m.url, raw, saved.updated));
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            }
+            if (ordered.isEmpty()) {
+                String prevOrigin = a.configOrigin == null ? "" : a.configOrigin.trim();
+                String prevName = configName(a.config);
+                String mapKey = prevOrigin.isEmpty() ? "existing:0" : prevOrigin;
+                ordered.put(
+                        mapKey,
+                        new SubscriptionManager.SourceBundle(
+                                prevName, prevOrigin, a.config.raw, now));
+            }
+        }
+
+        int succeeded = 0;
+        Exception lastError = null;
+        for (SubscriptionManager.ImportSpec spec : specs) {
+            try {
+                String origin = importOrigin(spec.url);
+                String fetched = fetchImport(a, spec.url);
+                Cms.Config parsed = Cms.parseConfig(fetched, origin);
+                String effectiveOrigin =
+                        !parsed.warehouse.isEmpty()
+                                ? parsed.warehouse
+                                : (!parsed.origin.isEmpty() ? parsed.origin : origin);
+                String savedName = !spec.name.isEmpty() ? spec.name : configName(parsed);
+                if (Cms.isHttp(effectiveOrigin)) {
+                    try {
+                        library.remember(parsed.raw, effectiveOrigin, savedName, "", now);
+                    } catch (Exception ignored) {
+                    }
+                }
+                String mapKey =
+                        effectiveOrigin.isEmpty() ? ("spec:" + ordered.size()) : effectiveOrigin;
+                ordered.put(
+                        mapKey,
+                        new SubscriptionManager.SourceBundle(
+                                spec.name.isEmpty() ? savedName : spec.name,
+                                effectiveOrigin,
+                                parsed.raw,
+                                now));
+                succeeded++;
+            } catch (Exception err) {
+                lastError = err;
+                AppLog.w("SourceController", "Batch import source failed: " + spec.url, err);
+            }
+        }
+        if (succeeded == 0) {
+            if (lastError != null) throw lastError;
+            throw new IOException("未能成功读取任何订阅源，请检查地址与网络");
+        }
+        return SubscriptionManager.mergeSources(
+                new ArrayList<SubscriptionManager.SourceBundle>(ordered.values()));
+    }
+
+    /** Merges user-selected saved subscriptions from {@link ConfigLibrary} into auto-grouped tabs. */
+    static void mergeSavedSubscriptions(
+            final MainActivity a, final List<ConfigLibrary.Entry> chosen) {
+        if (a == null || chosen == null || chosen.isEmpty()) return;
+        final ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
+        a.toast("正在合并 " + chosen.size() + " 个订阅并自动分组…");
+        a.worker.execute(
+                () -> {
+                    try {
+                        List<SubscriptionManager.SourceBundle> bundles =
+                                new ArrayList<SubscriptionManager.SourceBundle>();
+                        for (ConfigLibrary.Entry entry : chosen) {
+                            if (entry == null) continue;
+                            String raw = library.raw(entry);
+                            bundles.add(
+                                    new SubscriptionManager.SourceBundle(
+                                            entry.name, entry.origin, raw, entry.updated));
+                        }
+                        final SubscriptionManager.MergedResult merged =
+                                SubscriptionManager.mergeSources(bundles);
+                        a.ui.post(
+                                () -> {
+                                    if (a.isFinishing() || a.isDestroyed()) return;
+                                    try {
+                                        saveConfig(a, merged.config, merged.origin);
+                                        a.toast(
+                                                "已合并 "
+                                                        + merged.sourceCount
+                                                        + " 个订阅并自动分组（共 "
+                                                        + merged.config.sites.size()
+                                                        + " 条线路）");
+                                        SourcePicker.show(a);
+                                    } catch (Exception err) {
+                                        a.notice("合并保存失败：" + a.message(err));
+                                    }
+                                });
+                    } catch (Exception err) {
+                        a.ui.post(
+                                () -> {
+                                    if (!a.isFinishing()) {
+                                        a.notice("合并订阅失败：" + a.message(err));
+                                    }
+                                });
+                    }
+                });
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean AUTO_UPDATE_RUNNING =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    static String subscriptionAutoUpdateSummary(MainActivity a) {
+        if (a == null || a.prefs == null) return "每天自动检查并更新导入的 HTTP 订阅源";
+        String lastStatus = a.prefs.getString(Prefs.SUBSCRIPTION_LAST_AUTO_STATUS, "");
+        if (!lastStatus.isEmpty()) return lastStatus;
+        long lastTs = a.prefs.getLong(Prefs.SUBSCRIPTION_LAST_AUTO_UPDATE, 0L);
+        if (lastTs > 0L) {
+            return "上次检查：" + formatShortTimestamp(lastTs) + " · 点击立即刷新全部订阅";
+        }
+        return "每天自动更新已导入的订阅源 · 点击立即刷新";
+    }
+
+    static String formatShortTimestamp(long epochMs) {
+        if (epochMs <= 1L) return "";
+        try {
+            return new java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.ROOT)
+                    .format(new java.util.Date(epochMs));
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    /**
+     * Checks imported HTTP(S) subscriptions daily (every 24h) or on explicit manual request,
+     * refreshes stale configs atomically without interrupting active video playback, and preserves
+     * user site edits and multi-source groups.
+     */
+    static void runDailyAutoUpdateIfNeeded(final MainActivity a, final boolean force) {
+        if (a == null
+                || a.privateMode
+                || a.prefs == null
+                || a.configStore == null
+                || a.isFinishing()
+                || a.isDestroyed()) {
+            return;
+        }
+        if (!force && !a.prefs.getBoolean(Prefs.SUBSCRIPTION_AUTO_UPDATE, true)) {
+            return;
+        }
+        final long now = System.currentTimeMillis();
+        if (!force) {
+            long lastGlobal = a.prefs.getLong(Prefs.SUBSCRIPTION_LAST_AUTO_UPDATE, 0L);
+            if (lastGlobal > 0L && !SubscriptionManager.isDueForDailyUpdate(lastGlobal, now)) {
+                return;
+            }
+        }
+        if (!AUTO_UPDATE_RUNNING.compareAndSet(false, true)) {
+            if (force) a.toast("正在刷新订阅源，请稍候…");
+            return;
+        }
+        if (force) {
+            a.toast("正在检查并更新全部订阅源…");
+        }
+        final String snapshotOrigin = a.configOrigin == null ? "" : a.configOrigin;
+        final String snapshotRaw = a.config != null && a.config.raw != null ? a.config.raw : "";
+        final ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
+        a.worker.execute(
+                () -> {
+                    try {
+                        final SubscriptionManager.RefreshSummary summary =
+                                SubscriptionManager.refreshDueSubscriptions(
+                                        library,
+                                        snapshotOrigin,
+                                        snapshotRaw,
+                                        now,
+                                        force,
+                                        url -> fetchImport(a, url));
+                        String stamp = formatShortTimestamp(now);
+                        String statusText;
+                        if (summary.checkedCount == 0) {
+                            statusText = stamp + " · 暂无需要更新的在线订阅";
+                        } else if (summary.updatedCount > 0) {
+                            statusText =
+                                    stamp
+                                            + " · 已更新 "
+                                            + summary.updatedCount
+                                            + "/"
+                                            + summary.checkedCount
+                                            + " 个订阅";
+                        } else if (summary.failedCount == summary.checkedCount) {
+                            statusText = stamp + " · 检查失败（请检查网络）";
+                        } else {
+                            statusText = stamp + " · 已检查 " + summary.checkedCount + " 个订阅，均为最新";
+                        }
+                        if (summary.checkedCount == 0
+                                || summary.failedCount < summary.checkedCount) {
+                            a.prefs
+                                    .edit()
+                                    .putLong(Prefs.SUBSCRIPTION_LAST_AUTO_UPDATE, now)
+                                    .putString(Prefs.SUBSCRIPTION_LAST_AUTO_STATUS, statusText)
+                                    .apply();
+                        } else {
+                            a.prefs
+                                    .edit()
+                                    .putString(Prefs.SUBSCRIPTION_LAST_AUTO_STATUS, statusText)
+                                    .apply();
+                        }
+
+                        if (summary.activeChanged && !summary.updatedActiveRaw.isEmpty()) {
+                            final Cms.Config fresh =
+                                    Cms.parseConfig(
+                                            summary.updatedActiveRaw, summary.updatedActiveOrigin);
+                            a.configStore.write(fresh.raw);
+                            a.ui.post(
+                                    () -> {
+                                        if (a.isFinishing() || a.isDestroyed()) return;
+                                        boolean playingNow =
+                                                a.player != null
+                                                        || (a.current != null && a.current.player);
+                                        if (!playingNow) {
+                                            SourcePicker.applyEdits(
+                                                    a, fresh, summary.updatedActiveOrigin);
+                                            closeEngines(a);
+                                            a.config = fresh;
+                                            a.configOrigin = summary.updatedActiveOrigin;
+                                            if (a.current != null && a.current.home) {
+                                                a.refresh();
+                                            }
+                                            a.toast("已自动更新 " + summary.updatedCount + " 个订阅源");
+                                        } else {
+                                            AppLog.i(
+                                                    "SourceController",
+                                                    "Daily subscription update saved; deferring live reload during playback");
+                                        }
+                                    });
+                        } else if (force) {
+                            final String msg =
+                                    summary.checkedCount == 0
+                                            ? "当前没有可在线刷新的 HTTP 订阅源"
+                                            : summary.updatedCount > 0
+                                                    ? ("已更新 " + summary.updatedCount + " 个订阅源")
+                                                    : summary.failedCount == summary.checkedCount
+                                                            ? "订阅刷新失败，原配置已保留"
+                                                            : "全部订阅源已是最新（共检查 "
+                                                                    + summary.checkedCount
+                                                                    + " 个）";
+                            a.ui.post(
+                                    () -> {
+                                        if (!a.isFinishing()) {
+                                            a.toast(msg);
+                                            if (a.current != null && !a.current.player) {
+                                                a.refresh();
+                                            }
+                                        }
+                                    });
+                        }
+                    } catch (Throwable err) {
+                        AppLog.w("SourceController", "Subscription auto-update failed", err);
+                        if (force) {
+                            a.ui.post(
+                                    () -> {
+                                        if (!a.isFinishing()) {
+                                            a.toast("订阅刷新失败：" + a.message(err));
+                                        }
+                                    });
+                        }
+                    } finally {
+                        AUTO_UPDATE_RUNNING.set(false);
+                    }
+                });
     }
 
     static void onActivityResult(MainActivity a, int request, int result, Intent data) {
@@ -2001,7 +2388,19 @@ final class SourceController {
     }
 
     static String configName(Cms.Config config) {
-        if (config.sites.isEmpty()) return "我的订阅";
+        if (config == null || config.sites.isEmpty()) return "我的订阅";
+        List<SubscriptionManager.MultiSourceMeta> multi =
+                SubscriptionManager.readMultiSourceMeta(config.raw);
+        if (multi.size() >= 2) {
+            List<String> names = new ArrayList<String>(multi.size());
+            for (SubscriptionManager.MultiSourceMeta m : multi) {
+                if (!m.name.isEmpty()) names.add(m.name);
+            }
+            return SubscriptionManager.mergedSubscriptionName(names)
+                    + " · "
+                    + config.sites.size()
+                    + " 个片源";
+        }
         return config.sites.get(0).name
                 + (config.sites.size() > 1 ? " · " + config.sites.size() + " 个片源" : "");
     }

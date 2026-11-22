@@ -1155,6 +1155,15 @@ public final class MainActivity extends Activity {
                                     if (!privateMode) {
                                         CloudSyncDialog.pullOnStartup(MainActivity.this);
                                         CrashReportDialog.maybePromptOnStartup(MainActivity.this);
+                                        if (priorBootCrashes < 2) {
+                                            ui.postDelayed(
+                                                    () ->
+                                                            SourceController
+                                                                    .runDailyAutoUpdateIfNeeded(
+                                                                            MainActivity.this,
+                                                                            false),
+                                                    3800);
+                                        }
                                     }
                                     if (recoveredFromCrash) {
                                         toast("上次加载该片源时异常退出，已自动重置片源选择");
@@ -3256,6 +3265,9 @@ public final class MainActivity extends Activity {
         CspEngine.syncAllPluginActivities(this);
         syncCastService();
         syncSpiderGateway();
+        if (layoutReady && !privateMode) {
+            SourceController.runDailyAutoUpdateIfNeeded(this, false);
+        }
     }
 
     @Override

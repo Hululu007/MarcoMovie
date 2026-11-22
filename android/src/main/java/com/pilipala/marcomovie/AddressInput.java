@@ -12,6 +12,10 @@ final class AddressInput extends LinearLayout {
     final TextView error;
 
     AddressInput(MainActivity host, String hint, String value) {
+        this(host, hint, value, false);
+    }
+
+    AddressInput(MainActivity host, String hint, String value, boolean allowMultiline) {
         super(host);
         a = host;
         setOrientation(VERTICAL);
@@ -19,12 +23,22 @@ final class AddressInput extends LinearLayout {
         setClipToPadding(false);
         input = new EditText(a);
         input.setTag("address-input");
-        input.setSingleLine(true);
+        if (allowMultiline) {
+            input.setSingleLine(false);
+            input.setMinLines(1);
+            input.setMaxLines(4);
+            input.setInputType(
+                    android.text.InputType.TYPE_CLASS_TEXT
+                            | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                            | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        } else {
+            input.setSingleLine(true);
+            input.setInputType(17);
+        }
         input.setTextSize(16);
         input.setTextColor(MainActivity.WHITE);
         input.setHintTextColor(MainActivity.MUTED);
         input.setHint(hint);
-        input.setInputType(17);
         UiCompat.setShowSoftInputOnFocus(input, !a.isTvDevice());
         input.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
         input.setBackground(a.bg(0xff36363e, 16));
@@ -44,20 +58,23 @@ final class AddressInput extends LinearLayout {
         input.setText(value);
         input.setSelection(input.length());
         error = a.text("", 12, 0xffffb4ad);
-        String qrLabel = hint != null && hint.contains("wallpaper") ? "壁纸图片地址" : "配置地址";
+        String qrLabel = hint != null && hint.contains("wallpaper") ? "壁纸图片地址" : "配置地址（支持多行）";
         View inputRow =
                 TvQrInputHelper.wrap(
-                        a, input, qrLabel, false, false, false, () -> error.setText(""));
+                        a, input, qrLabel, allowMultiline, false, false, () -> error.setText(""));
         addView(
                 inputRow,
                 new LinearLayout.LayoutParams(
-                        -1, a.isTvDevice() ? ViewGroup.LayoutParams.WRAP_CONTENT : a.dp(48)));
+                        -1,
+                        (a.isTvDevice() || allowMultiline)
+                                ? ViewGroup.LayoutParams.WRAP_CONTENT
+                                : a.dp(48)));
         input.setLongClickable(!a.isTvDevice());
         input.setTextIsSelectable(!a.isTvDevice());
         addView(error);
         keys = a.vertical();
         addView(keys);
-        rebuild();
+        rebuild(allowMultiline);
     }
 
     String value() {
@@ -76,6 +93,10 @@ final class AddressInput extends LinearLayout {
     }
 
     void rebuild() {
+        rebuild(false);
+    }
+
+    void rebuild(boolean allowMultiline) {
         keys.removeAllViews();
         if (a.isTvDevice()) {
             String chars =
@@ -99,11 +120,14 @@ final class AddressInput extends LinearLayout {
                     "大小写",
                     () -> {
                         upper = !upper;
-                        rebuild();
+                        rebuild(allowMultiline);
                         keys.getChildAt(0).requestFocus();
                     });
         }
         key(row, "https://", () -> insert("https://"));
+        if (allowMultiline) {
+            key(row, "换行", () -> insert("\n"));
+        }
         key(
                 row,
                 "删除",

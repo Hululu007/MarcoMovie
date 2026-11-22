@@ -1091,7 +1091,7 @@ public class MoviePlayer {
     public void pause() {
         onMain(
                 () -> {
-                    if (!released) exo.pause();
+                    if (!released && exo != null) exo.pause();
                     return null;
                 });
     }
@@ -1106,11 +1106,11 @@ public class MoviePlayer {
     }
 
     public boolean isPlaying() {
-        return onMain(() -> !released && exo.isPlaying());
+        return onMain(() -> !released && exo != null && exo.isPlaying());
     }
 
     public int getCurrentPosition() {
-        return onMain(() -> released ? 0 : milliseconds(exo.getCurrentPosition()));
+        return onMain(() -> released || exo == null ? 0 : milliseconds(exo.getCurrentPosition()));
     }
 
     private int maxKnownDurationMs = 0;
@@ -1118,7 +1118,7 @@ public class MoviePlayer {
     public int getDuration() {
         return onMain(
                 () -> {
-                    if (released) return 0;
+                    if (released || exo == null) return 0;
                     long raw = exo.getDuration();
                     if (raw == C.TIME_UNSET || raw <= 0) {
                         raw = exo.getContentDuration();
@@ -1134,7 +1134,7 @@ public class MoviePlayer {
     public int getVideoWidth() {
         return onMain(
                 () ->
-                        released
+                        released || exo == null
                                 ? 0
                                 : Math.round(
                                         exo.getVideoSize().width
@@ -1232,7 +1232,7 @@ public class MoviePlayer {
     public String videoResolution() {
         return onMain(
                 () -> {
-                    if (released) return "分辨率未知";
+                    if (released || exo == null) return "分辨率未知";
                     androidx.media3.common.Format format = exo.getVideoFormat();
                     androidx.media3.common.Format audioFormat = exo.getAudioFormat();
                     int w =
@@ -1276,7 +1276,7 @@ public class MoviePlayer {
         return onMain(
                 () -> {
                     java.util.List<String> out = new java.util.ArrayList<>(4);
-                    if (released) return out;
+                    if (released || exo == null) return out;
                     androidx.media3.common.Format vf = exo.getVideoFormat();
                     androidx.media3.common.Format af = exo.getAudioFormat();
                     int w = vf != null && vf.width > 0 ? vf.width : exo.getVideoSize().width;
@@ -1370,7 +1370,7 @@ public class MoviePlayer {
     }
 
     public int getVideoHeight() {
-        return onMain(() -> released ? 0 : exo.getVideoSize().height);
+        return onMain(() -> released || exo == null ? 0 : exo.getVideoSize().height);
     }
 
     public String getLastError() {
@@ -1392,7 +1392,7 @@ public class MoviePlayer {
                             new org.json.JSONObject()
                                     .put("video_decoder", videoDecoder)
                                     .put("audio_decoder", audioDecoder);
-                    if (released) return info;
+                    if (released || exo == null) return info;
                     androidx.media3.common.Format vf = exo.getVideoFormat(),
                             af = exo.getAudioFormat();
                     if (vf != null) {
@@ -1446,7 +1446,7 @@ public class MoviePlayer {
     }
 
     public int getAudioSessionId() {
-        return onMain(() -> released ? 0 : exo.getAudioSessionId());
+        return onMain(() -> released || exo == null ? 0 : exo.getAudioSessionId());
     }
 
     public long getFirstFrameMs() {
@@ -1613,7 +1613,7 @@ public class MoviePlayer {
     }
 
     public float getSpeed() {
-        return onMain(() -> exo.getPlaybackParameters().speed);
+        return onMain(() -> released || exo == null ? 1.0f : exo.getPlaybackParameters().speed);
     }
 
     public void setRepeatOne(boolean repeat) {
@@ -1663,6 +1663,7 @@ public class MoviePlayer {
         return onMain(
                 () -> {
                     java.util.List<String> out = new java.util.ArrayList<>();
+                    if (released || exo == null) return out;
                     for (androidx.media3.common.Tracks.Group group :
                             exo.getCurrentTracks().getGroups())
                         if (group.getType() == type)
@@ -1741,7 +1742,7 @@ public class MoviePlayer {
                         preparation++;
                         RequestScope current = probeScope;
                         if (current != null) current.cancel();
-                        exo.release();
+                        if (exo != null) exo.release();
                     }
                     return null;
                 });
@@ -1752,7 +1753,7 @@ public class MoviePlayer {
     }
 
     private void check() {
-        if (released) throw new IllegalStateException("Player released");
+        if (released || exo == null) throw new IllegalStateException("Player released");
     }
 
     private <T> T onMain(Callable<T> work) {
