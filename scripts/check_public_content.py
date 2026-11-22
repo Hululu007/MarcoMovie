@@ -145,6 +145,17 @@ for p in files:
     if relative.as_posix() in CONFORMANCE_INPUT_SHA256:
         if hashlib.sha256(p.read_bytes()).hexdigest()!=CONFORMANCE_INPUT_SHA256[relative.as_posix()]:issues.append(f'{relative}: unreviewed conformance fixture')
         continue
+    if relative.as_posix() in {
+        'docs/images/donate-alipay.jpg': '2c231a2f751c9640f9271da3941114967e1a78cc75d02919f6e5c3e4345a12a9',
+        'docs/images/donate-wechat.jpg': 'bdd17706be7c0925cec3a93c3a5484a82a4a2cf2c1231ab23204b89254d0c045',
+    }:
+        expected_qr = {
+            'docs/images/donate-alipay.jpg': '2c231a2f751c9640f9271da3941114967e1a78cc75d02919f6e5c3e4345a12a9',
+            'docs/images/donate-wechat.jpg': 'bdd17706be7c0925cec3a93c3a5484a82a4a2cf2c1231ab23204b89254d0c045',
+        }[relative.as_posix()]
+        if hashlib.sha256(p.read_bytes()).hexdigest() != expected_qr:
+            issues.append(f'{relative}: unreviewed image asset')
+        continue
     vendor_dart = relative.as_posix().startswith((
         'flutter/lib/',
         'flutter/packages/quickjs_engine/lib/',
