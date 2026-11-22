@@ -327,5 +327,168 @@ const dp = new DPlayer({
     expect(resolved.url, 'https://dynamic-cdn.test/runtime/index.m3u8?sig=ok');
     expect(resolved.headers['Cookie'], 'wasm_token=verified');
     expect(resolved.headers['Referer'], 'https://web-jx.test/render');
+    WebMediaResolver.debugSnifferOverride = null;
+  });
+
+  test(
+      'passes host-matched rules, ads, and clickScript to Stage 3 webRuleSniffer and accepts custom regex stream',
+      () async {
+    addTearDown(() {
+      WebMediaResolver.debugSnifferOverride = null;
+      WebMediaResolver.debugRuleSnifferOverride = null;
+    });
+
+    List<Map<String, dynamic>>? capturedRules;
+    List<String>? capturedAds;
+    String? capturedClick;
+
+    final rules = <CmsSniffRule>[
+      const CmsSniffRule(
+        name: 'target-site',
+        hosts: ['player.example.com'],
+        regex: [r'/manifest/\d+\?token='],
+        exclude: [r'preview_ad'],
+        click: 'document.querySelector(".play-btn")?.click();',
+      ),
+      const CmsSniffRule(
+        name: 'other-site',
+        hosts: ['unrelated.example.org'],
+        regex: [r'\.mp4'],
+        click: 'window.other();',
+      ),
+    ];
+    const ads = ['ad.doubleclick.net', 'mimg.0c1q0l.cn'];
+
+    WebMediaResolver.debugRuleSnifferOverride = (
+      url,
+      headers,
+      timeout, {
+      List<Map<String, dynamic>> rules = const [],
+      List<String> ads = const [],
+      String? clickScript,
+    }) async {
+      capturedRules = rules;
+      capturedAds = ads;
+      capturedClick = clickScript;
+      return const WebSniffResult(
+        url: 'https://cdn.example.com/manifest/42?token=abc',
+        headers: {'User-Agent': 'CustomWebKit/18.0'},
+      );
+    };
+
+    final result = await WebMediaResolver.resolve(
+      site: const CmsSite(
+        key: 'web_rule_test',
+        name: 'Rule Test',
+        type: 3,
+        api: 'csp_RuleTest',
+      ),
+      targetUrl: 'https://player.example.com/watch/99',
+      rules: rules,
+      ads: ads,
+      fetchDocument: (url, {headers = const {}, timeout}) async {
+        return ResolverHttpDocument(
+          finalUri: Uri.parse(url),
+          statusCode: 200,
+          responseHeaders: const {'content-type': 'text/html'},
+          effectiveRequestHeaders: headers,
+          body: '<html><body><div id="player"></div></body></html>',
+        );
+      },
+    );
+
+    expect(result, isNotNull);
+    expect(result!['url'], 'https://cdn.example.com/manifest/42?token=abc');
+    expect(capturedRules, hasLength(1));
+    expect(capturedRules!.single['name'], 'target-site');
+    expect(capturedAds, ads);
+    expect(capturedClick, 'document.querySelector(".play-btn")?.click();');
+  });
+
+  test('rejects sniffer candidates matching ads domains or rule exclude regexes',
+      () async {
+    addTearDown(() {
+      WebMediaResolver.debugSnifferOverride = null;
+      WebMediaResolver.debugRuleSnifferOverride = null;
+    });
+
+    const rules = <CmsSniffRule>[
+      CmsSniffRule(
+        name: 'filter-test',
+        hosts: ['watch.example.com'],
+        exclude: [r'/promo/intro\.m3u8'],
+      ),
+    ];
+    const ads = ['mimg.0c1q0l.cn'];
+
+    WebMediaResolver.debugRuleSnifferOverride = (
+      url,
+      headers,
+      timeout, {
+      List<Map<String, dynamic>> rules = const [],
+      List<String> ads = const [],
+      String? clickScript,
+    }) async {
+      return const WebSniffResult(
+        url: 'https://mimg.0c1q0l.cn/video/ad_clip.m3u8',
+      );
+    };
+
+    final blockedByAd = await WebMediaResolver.resolve(
+      site: const CmsSite(
+        key: 'ad_block',
+        name: 'Ad Block',
+        type: 1,
+        api: 'https://cms.test/vod',
+      ),
+      targetUrl: 'https://watch.example.com/play/1',
+      rules: rules,
+      ads: ads,
+      fetchDocument: (url, {headers = const {}, timeout}) async {
+        return ResolverHttpDocument(
+          finalUri: Uri.parse(url),
+          statusCode: 200,
+          responseHeaders: const {'content-type': 'text/html'},
+          effectiveRequestHeaders: headers,
+          body: '<html><body></body></html>',
+        );
+      },
+    );
+    expect(blockedByAd, isNull);
+
+    WebMediaResolver.debugRuleSnifferOverride = (
+      url,
+      headers,
+      timeout, {
+      List<Map<String, dynamic>> rules = const [],
+      List<String> ads = const [],
+      String? clickScript,
+    }) async {
+      return const WebSniffResult(
+        url: 'https://watch.example.com/promo/intro.m3u8',
+      );
+    };
+
+    final blockedByExclude = await WebMediaResolver.resolve(
+      site: const CmsSite(
+        key: 'exclude_block',
+        name: 'Exclude Block',
+        type: 1,
+        api: 'https://cms.test/vod',
+      ),
+      targetUrl: 'https://watch.example.com/play/1',
+      rules: rules,
+      ads: ads,
+      fetchDocument: (url, {headers = const {}, timeout}) async {
+        return ResolverHttpDocument(
+          finalUri: Uri.parse(url),
+          statusCode: 200,
+          responseHeaders: const {'content-type': 'text/html'},
+          effectiveRequestHeaders: headers,
+          body: '<html><body></body></html>',
+        );
+      },
+    );
+    expect(blockedByExclude, isNull);
   });
 }

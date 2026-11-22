@@ -48,6 +48,7 @@ class PythonSourceHost {
   final _sessions = PythonSourceSessions();
   Future<void>? _ready;
   int get generation => _sessions.generation;
+  int get maxSessions => _sessions.maxSessions;
 
   PythonSourceChannel get _bridge => _channel ??= PythonSourceChannel();
 
@@ -64,16 +65,25 @@ class PythonSourceHost {
   }
 
   Future<void> _ensureReady() => _ready ??= () async {
-    final reply = await _bridge.channel.invokeMapMethod<String, Object?>(
-      'python.capabilities',
-    );
-    if (reply?['version'] != 1 ||
-        reply?['runtime'] is! String ||
-        !(reply!['runtime'] as String).startsWith('3.14.') ||
-        reply['maxSessions'] != 2 ||
-        reply['hardCancel'] != false ||
-        reply['sourceThreads'] != false) {
-      throw const FormatException('Python 运行库版本不匹配，请更新安装包');
+    try {
+      final reply = await _bridge.channel.invokeMapMethod<String, Object?>(
+        'python.capabilities',
+      );
+      final capMax = reply?['maxSessions'];
+      if (reply?['version'] != 1 ||
+          reply?['runtime'] is! String ||
+          !(reply!['runtime'] as String).startsWith('3.14.') ||
+          capMax is! int ||
+          capMax < 1 ||
+          capMax > 8 ||
+          reply['hardCancel'] != false ||
+          reply['sourceThreads'] != false) {
+        throw const FormatException('Python 运行库版本不匹配，请更新安装包');
+      }
+      _sessions.configureMaxSessions(capMax);
+    } catch (_) {
+      _ready = null;
+      rethrow;
     }
   }();
 
@@ -102,8 +112,12 @@ class PythonSourceHost {
     Completer<void>? cancellation,
   }) {
     if (!enabled) throw StateError('此设备未启用原生 Python 运行库');
-    return _explainFailure(
-      () => _sessions.invoke(
+    return _explainFailure(() async {
+      if (expectedGeneration == _sessions.generation &&
+          cancellation?.isCompleted != true) {
+        await _ensureReady();
+      }
+      return _sessions.invoke(
         sessionKey: sessionKey,
         expectedGeneration: expectedGeneration,
         method: method,
@@ -113,8 +127,8 @@ class PythonSourceHost {
           await _ensureReady();
           return _bridge.open(package, proxy, request);
         },
-      ),
-    );
+      );
+    });
   }
 
   void retainSessions(Set<String> keys) => _sessions.retainSessions(keys);

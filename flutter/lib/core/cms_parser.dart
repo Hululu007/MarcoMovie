@@ -1384,6 +1384,38 @@ class CmsParser {
           subscriptionId: subscriptionId));
       }
     }
+    final rules = <CmsSniffRule>[];
+    if (decoded['rules'] is List) {
+      for (final rawRule in decoded['rules'] as List) {
+        if (rawRule is! Map) continue;
+        final rule = CmsSniffRule.fromJson(Map<String, dynamic>.from(rawRule));
+        if (rule.name.isNotEmpty ||
+            rule.hosts.isNotEmpty ||
+            rule.regex.isNotEmpty ||
+            rule.exclude.isNotEmpty ||
+            rule.effectiveScript.isNotEmpty) {
+          rules.add(rule);
+        }
+      }
+    }
+    final ads = <String>[];
+    final seenAds = <String>{};
+    final rawAds = decoded['ads'];
+    if (rawAds is List) {
+      for (final entry in rawAds) {
+        final item = (entry ?? '').toString().trim();
+        if (item.isNotEmpty && seenAds.add(item)) {
+          ads.add(item);
+        }
+      }
+    } else if (rawAds is String && rawAds.trim().isNotEmpty) {
+      for (final part in rawAds.split(RegExp(r'[\s,;]+'))) {
+        final item = part.trim();
+        if (item.isNotEmpty && seenAds.add(item)) {
+          ads.add(item);
+        }
+      }
+    }
     if (sites.isEmpty && lives.isEmpty && depots.isEmpty) {
       final liveCatalogCfg = _tryParseM3uOrTxtConfig(
         cleaned,
@@ -1402,6 +1434,8 @@ class CmsParser {
       depots: depots,
       parses: parses,
       spider: spider,
+      rules: rules,
+      ads: ads,
     );
   }
 
