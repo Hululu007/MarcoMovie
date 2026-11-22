@@ -4,6 +4,7 @@ import 'dart:ui';
 import '../core/ohos_runtime.dart';
 import 'ios_liquid_glass.dart';
 import 'motion/aurora_background.dart';
+import 'motion/ios27_springs.dart';
 import 'motion/motion_tokens.dart';
 import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
@@ -58,8 +59,11 @@ class WindowsSmoothPageTransitionsBuilder extends PageTransitionsBuilder {
   }
 }
 
-/// Platform-adaptive route builder: preserves native [CupertinoPageRoute] on
-/// iOS / iPadOS / macOS while using a crisp 185ms GPU-friendly transition on Windows.
+/// Platform-adaptive route builder: uses [Ios27PageRoute] (second-order
+/// `Ios27Spring.smooth` physics & swipe-back velocity inheritance, preserving
+/// [CupertinoPageTransition]) on iOS / iPadOS / macOS, preserves
+/// [CupertinoPageRoute] on Android / HarmonyOS, and uses the crisp 185ms
+/// GPU-friendly transition on Windows.
 PageRoute<T> buildApplePageRoute<T>({
   required WidgetBuilder builder,
   RouteSettings? settings,
@@ -67,6 +71,18 @@ PageRoute<T> buildApplePageRoute<T>({
   bool maintainState = true,
 }) {
   if (!isWindowsDesktopUi) {
+    final isApple = !OhosRuntime.isOhos &&
+        !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.iOS ||
+            defaultTargetPlatform == TargetPlatform.macOS);
+    if (isApple) {
+      return Ios27PageRoute<T>(
+        builder: builder,
+        settings: settings,
+        fullscreenDialog: fullscreenDialog,
+        maintainState: maintainState,
+      );
+    }
     return CupertinoPageRoute<T>(
       builder: builder,
       settings: settings,
@@ -92,6 +108,212 @@ PageRoute<T> buildApplePageRoute<T>({
       );
     },
   );
+}
+
+/// iOS 27 spring-physics [CupertinoPageRoute] driven by [Ios27Spring.smooth]
+/// with velocity-inherited left-edge swipe-back and Reduce Motion `150ms`
+/// opacity fade fallback.
+class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
+  bool _routeDisposed = false;
+
+  Ios27PageRoute({
+    required super.builder,
+    super.settings,
+    super.fullscreenDialog = false,
+    super.maintainState = true,
+  });
+
+  @override
+  void dispose() {
+    _routeDisposed = true;
+    super.dispose();
+  }
+
+  @override
+  Duration get transitionDuration => Ios27Spring.smooth.nominalDuration;
+
+  @override
+  Duration get reverseTransitionDuration => Ios27Spring.smooth.nominalDuration;
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    if (Ios27ConcentricGeometry.isReduceMotion(context)) {
+      return FadeTransition(
+        opacity: CurvedAnimation(
+          parent: animation,
+          curve: Curves.linear,
+          reverseCurve: Curves.linear,
+        ),
+        child: child,
+      );
+    }
+    final isGesture = navigator?.userGestureInProgress ?? false;
+    final springCurve = Ios27Spring.smooth.curve;
+    final primaryAnim = isGesture
+        ? animation
+        : CurvedAnimation(
+            parent: animation,
+            curve: springCurve,
+            reverseCurve: springCurve.flipped,
+          );
+    final secondaryAnim = CurvedAnimation(
+      parent: secondaryAnimation,
+      curve: springCurve,
+      reverseCurve: springCurve.flipped,
+    );
+    final transition = CupertinoPageTransition(
+      primaryRouteAnimation: primaryAnim,
+      secondaryRouteAnimation: secondaryAnim,
+      linearTransition: true,
+      child: child,
+    );
+    if (fullscreenDialog || !popGestureEnabled) {
+      return transition;
+    }
+    return _Ios27SwipeBackWrapper<T>(
+      route: this,
+      child: transition,
+    );
+  }
+
+  void _updateEdgeSwipeProgress(double value) {
+    controller?.value = value.clamp(0.0, 1.0);
+  }
+
+  void _finishEdgeSwipeWithVelocity({
+    required double velocityPxPerSec,
+    required double width,
+  }) {
+    final ctrl = controller;
+    final nav = navigator;
+    if (ctrl == null || nav == null) return;
+    final safeW = math.max(1.0, width);
+    final releaseVal = ctrl.value.clamp(0.0, 1.0);
+    final shouldPop = velocityPxPerSec > 360.0 || releaseVal < 0.62;
+    final normalizedVel = (-velocityPxPerSec / safeW).clamp(-8.0, 8.0);
+    if (shouldPop) {
+      nav.pop();
+      ctrl
+          .animateWith(
+            Ios27Spring.smooth.simulation(
+              start: releaseVal,
+              end: 0.0,
+              velocity: normalizedVel,
+            ),
+          )
+          .whenComplete(() {
+        if (!_routeDisposed && ctrl.status != AnimationStatus.dismissed) {
+          ctrl.reverse(from: 0.0);
+        }
+      });
+    } else {
+      ctrl.animateWith(
+        Ios27Spring.smooth.simulation(
+          start: releaseVal,
+          end: 1.0,
+          velocity: normalizedVel,
+        ),
+      );
+    }
+    nav.didStopUserGesture();
+  }
+
+  void _cancelEdgeSwipe() {
+    final ctrl = controller;
+    if (ctrl != null) {
+      ctrl.animateWith(
+        Ios27Spring.smooth.simulation(
+          start: ctrl.value.clamp(0.0, 1.0),
+          end: 1.0,
+        ),
+      );
+    }
+    navigator?.didStopUserGesture();
+  }
+}
+
+class _Ios27SwipeBackWrapper<T> extends StatefulWidget {
+  final Ios27PageRoute<T> route;
+  final Widget child;
+
+  const _Ios27SwipeBackWrapper({
+    required this.route,
+    required this.child,
+  });
+
+  @override
+  State<_Ios27SwipeBackWrapper<T>> createState() =>
+      _Ios27SwipeBackWrapperState<T>();
+}
+
+class _Ios27SwipeBackWrapperState<T> extends State<_Ios27SwipeBackWrapper<T>> {
+  bool _dragging = false;
+  double _dragDx = 0.0;
+
+  void _onDragStart(DragStartDetails details) {
+    final nav = widget.route.navigator;
+    if (widget.route.isFirst ||
+        !widget.route.isCurrent ||
+        nav == null ||
+        nav.userGestureInProgress) {
+      return;
+    }
+    if (details.globalPosition.dx > 28.0) return;
+    _dragging = true;
+    _dragDx = 0.0;
+    nav.didStartUserGesture();
+  }
+
+  void _onDragUpdate(DragUpdateDetails details) {
+    if (!_dragging) return;
+    final w = MediaQuery.sizeOf(context).width;
+    if (w <= 0) return;
+    _dragDx = (_dragDx + details.delta.dx).clamp(0.0, w);
+    widget.route._updateEdgeSwipeProgress(1.0 - (_dragDx / w));
+  }
+
+  void _onDragEnd(DragEndDetails details) {
+    if (!_dragging) return;
+    _dragging = false;
+    widget.route._finishEdgeSwipeWithVelocity(
+      velocityPxPerSec: details.primaryVelocity ?? 0.0,
+      width: MediaQuery.sizeOf(context).width,
+    );
+  }
+
+  void _onDragCancel() {
+    if (!_dragging) return;
+    _dragging = false;
+    widget.route._cancelEdgeSwipe();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        widget.child,
+        Positioned(
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: 24,
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onHorizontalDragStart: _onDragStart,
+            onHorizontalDragUpdate: _onDragUpdate,
+            onHorizontalDragEnd: _onDragEnd,
+            onHorizontalDragCancel: _onDragCancel,
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 /// Runtime theme mode controller supporting automatic system light/dark
@@ -1195,8 +1417,8 @@ class AppleLiquidGlassDock extends StatefulWidget {
   static const double _itemH = 52;
   static const double _itemW = 60;
   static const double _searchGap = 10;
-  static const Duration _motion = Duration(milliseconds: 420);
-  static const Curve _curve = Cubic(0.2, 1.15, 0.36, 1.0);
+  static const Duration _motion = Duration(milliseconds: 440);
+  static final Curve _curve = Ios27Spring.bouncy.curve;
 
   /// Width a landscape dock occupies (including its outer margin).
   static double landscapeFootprint(BuildContext context) {
@@ -1687,14 +1909,20 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           ],
         );
       },
-      transitionBuilder: (_, anim, __, child) {
+      transitionBuilder: (dialogContext, anim, __, child) {
+        if (Ios27ConcentricGeometry.isReduceMotion(dialogContext)) {
+          return FadeTransition(opacity: anim, child: child);
+        }
         final curved = CurvedAnimation(
           parent: anim,
-          curve: Curves.easeOutBack,
-          reverseCurve: Curves.easeInCubic,
+          curve: Ios27Spring.bouncy.curve,
+          reverseCurve: Ios27Spring.smooth.curve.flipped,
         );
         return FadeTransition(
-          opacity: curved,
+          opacity: CurvedAnimation(
+            parent: anim,
+            curve: Ios27Spring.smooth.curve,
+          ),
           child: ScaleTransition(
             scale: Tween<double>(begin: 0.86, end: 1.0).animate(curved),
             alignment: Alignment.bottomRight,
@@ -1978,8 +2206,8 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
   }
 }
 
-/// Detached circular Liquid Glass search button paired beside the iOS 26 Dock.
-class _DockSearchCircleButton extends StatefulWidget {
+/// Detached circular Liquid Glass search button paired beside the iOS 27 Dock.
+class _DockSearchCircleButton extends StatelessWidget {
   final double size;
   final VoidCallback onTap;
 
@@ -1989,46 +2217,31 @@ class _DockSearchCircleButton extends StatefulWidget {
   });
 
   @override
-  State<_DockSearchCircleButton> createState() =>
-      _DockSearchCircleButtonState();
-}
-
-class _DockSearchCircleButtonState extends State<_DockSearchCircleButton> {
-  bool _pressed = false;
-
-  @override
   Widget build(BuildContext context) {
     final palette = ApplePalette.of(context);
-    return GestureDetector(
+    return Ios27Pressable(
       key: const ValueKey('home-search-button'),
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapCancel: () => setState(() => _pressed = false),
-      onTapUp: (_) => setState(() => _pressed = false),
+      pressedScale: Ios27Spring.pressSwellScale,
+      borderRadius: size * 0.5,
       onTap: () {
         HapticFeedback.lightImpact();
-        widget.onTap();
+        onTap();
       },
-      child: AnimatedScale(
-        scale: _pressed ? 0.90 : 1.0,
-        duration: const Duration(milliseconds: 160),
-        curve: Curves.easeOutCubic,
-        child: RepaintBoundary(
-          child: LiquidGlass(
-            width: widget.size,
-            height: widget.size,
-            borderRadius: widget.size * 0.5,
-            tint: palette.isDark
-                ? const Color(0x56161414)
-                : const Color(0xD8FFFFFF),
-            blur: 20,
-            saturation: 1.8,
-            child: Center(
-              child: Icon(
-                CupertinoIcons.search,
-                size: 22,
-                color: palette.labelPrimary,
-              ),
+      child: RepaintBoundary(
+        child: LiquidGlass(
+          width: size,
+          height: size,
+          borderRadius: size * 0.5,
+          tint: palette.isDark
+              ? const Color(0x56161414)
+              : const Color(0xD8FFFFFF),
+          blur: 20,
+          saturation: 1.8,
+          child: Center(
+            child: Icon(
+              CupertinoIcons.search,
+              size: 22,
+              color: palette.labelPrimary,
             ),
           ),
         ),
@@ -2886,12 +3099,13 @@ class _DockItem extends StatefulWidget {
 }
 
 class _DockItemState extends State<_DockItem> {
-  bool _pressed = false;
   int _pulseTick = 0;
 
   @override
   Widget build(BuildContext context) {
-    const duration = Duration(milliseconds: 240);
+    final duration = Ios27ConcentricGeometry.isReduceMotion(context)
+        ? Ios27ConcentricGeometry.reducedMotionDuration
+        : const Duration(milliseconds: 240);
     final palette = ApplePalette.of(context);
     final selected = widget.selected;
     final labelColor = palette.isDark
@@ -2901,61 +3115,53 @@ class _DockItemState extends State<_DockItem> {
         : (selected
             ? AppleColors.systemBlue
             : const Color(0xFF2C303A).withValues(alpha: 0.76));
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapCancel: () => setState(() => _pressed = false),
-      onTapUp: (_) => setState(() => _pressed = false),
+    return Ios27Pressable(
+      pressedScale: Ios27Spring.pressSwellScale,
+      borderRadius: 24,
+      enableHaptic: false,
       onTap: () {
         if (selected) {
           setState(() => _pulseTick++);
         }
         widget.onTap();
       },
-      child: AnimatedScale(
-        scale: _pressed ? 0.90 : 1.0,
-        duration: const Duration(milliseconds: 150),
-        curve: Curves.easeOutCubic,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            MarcoAnimatedDockIcon(
-              kind: widget.kind,
-              fallbackIcon: selected ? widget.selectedIcon : widget.icon,
-              selected: selected,
-              size: 24,
-              pulseTick: _pulseTick,
-            ),
-            const SizedBox(height: 2.5),
-            AnimatedDefaultTextStyle(
-              duration: duration,
-              curve: Curves.easeOut,
-              style: DefaultTextStyle.of(context).style.merge(
-                TextStyle(
-                  color: labelColor,
-                  fontSize: 10.5,
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                  letterSpacing: 0.1,
-                ),
-              ),
-              child: Text(
-                widget.label,
-                maxLines: 1,
-                overflow: TextOverflow.clip,
-                textScaler: TextScaler.noScaling,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          MarcoAnimatedDockIcon(
+            kind: widget.kind,
+            fallbackIcon: selected ? widget.selectedIcon : widget.icon,
+            selected: selected,
+            size: 24,
+            pulseTick: _pulseTick,
+          ),
+          const SizedBox(height: 2.5),
+          AnimatedDefaultTextStyle(
+            duration: duration,
+            curve: Ios27Spring.snappy.curve,
+            style: DefaultTextStyle.of(context).style.merge(
+              TextStyle(
+                color: labelColor,
+                fontSize: 10.5,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                letterSpacing: 0.1,
               ),
             ),
-          ],
-        ),
+            child: Text(
+              widget.label,
+              maxLines: 1,
+              overflow: TextOverflow.clip,
+              textScaler: TextScaler.noScaling,
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-/// Tactile iOS 27 spring-physics press animation wrapper (`整体点击动效`):
-/// smoothly compresses on touch-down, holds briefly even on quick taps so the
-/// depression is always perceptible, and rebounds with an authentic Apple
-/// spring overshoot curve (`Cubic(0.22, 1.38, 0.36, 1.0)`).
+/// Tactile iOS 27 second-order spring press animation wrapper (`Ios27Spring.snappy`):
+/// supports mid-flight interruption momentum inheritance and Reduce Motion fallback.
 class ApplePressableScale extends StatefulWidget {
   final Widget child;
   final VoidCallback? onTap;
@@ -2987,10 +3193,8 @@ class _ApplePressableScaleState extends State<ApplePressableScale>
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
+    _controller = AnimationController.unbounded(
       vsync: this,
-      duration: const Duration(milliseconds: 110),
-      reverseDuration: const Duration(milliseconds: 280),
       value: 0.0,
     );
   }
@@ -3003,50 +3207,27 @@ class _ApplePressableScaleState extends State<ApplePressableScale>
 
   void _handleTapDown(TapDownDetails _) {
     if (widget.onTap == null && widget.onLongPress == null) return;
-    _controller.animateTo(
-      1.0,
-      duration: const Duration(milliseconds: 105),
-      curve: Curves.easeOutCubic,
+    Ios27Spring.animate(
+      _controller,
+      spring: Ios27Spring.snappy,
+      target: 1.0,
+      disableAnimations: Ios27ConcentricGeometry.isReduceMotion(context),
     );
   }
 
   void _rebound() {
     if (!mounted) return;
-    if (_controller.value < 0.48) {
-      _controller
-          .animateTo(
-            0.82,
-            duration: const Duration(milliseconds: 55),
-            curve: Curves.easeOut,
-          )
-          .then((_) {
-            if (mounted) {
-              _controller.animateTo(
-                0.0,
-                duration: const Duration(milliseconds: 290),
-                curve: const Cubic(0.22, 1.38, 0.36, 1.0),
-              );
-            }
-          });
-    } else {
-      _controller.animateTo(
-        0.0,
-        duration: const Duration(milliseconds: 290),
-        curve: const Cubic(0.22, 1.38, 0.36, 1.0),
-      );
-    }
+    Ios27Spring.animate(
+      _controller,
+      spring: Ios27Spring.snappy,
+      target: 0.0,
+      disableAnimations: Ios27ConcentricGeometry.isReduceMotion(context),
+    );
   }
 
   void _handleTapUp(TapUpDetails _) => _rebound();
 
-  void _handleTapCancel() {
-    if (!mounted) return;
-    _controller.animateTo(
-      0.0,
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOutCubic,
-    );
-  }
+  void _handleTapCancel() => _rebound();
 
   void _handleTap() {
     if (widget.onTap == null) return;
@@ -3061,6 +3242,7 @@ class _ApplePressableScaleState extends State<ApplePressableScale>
     if (widget.onTap == null && widget.onLongPress == null) {
       return widget.child;
     }
+    final disableAnim = Ios27ConcentricGeometry.isReduceMotion(context);
     return GestureDetector(
       behavior: widget.behavior,
       onTapDown: _handleTapDown,
@@ -3071,8 +3253,10 @@ class _ApplePressableScaleState extends State<ApplePressableScale>
       child: AnimatedBuilder(
         animation: _controller,
         builder: (context, child) {
-          final t = _controller.value.clamp(0.0, 1.2);
-          final scale = 1.0 - (1.0 - widget.pressedScale) * t;
+          final t = _controller.value.clamp(-0.2, 1.3);
+          final scale = disableAnim
+              ? 1.0
+              : 1.0 - (1.0 - widget.pressedScale) * t;
           final opacity =
               (1.0 - (1.0 - widget.pressedOpacity) * t.clamp(0.0, 1.0))
                   .clamp(0.0, 1.0);
@@ -3323,9 +3507,10 @@ class AppleCapsuleButton extends StatelessWidget {
           ? surface
           : GlassworkBackdrop(radius: 999, child: surface);
     }
-    return ApplePressableScale(
-      pressedScale: compact ? 0.93 : 0.95,
-      pressedOpacity: 0.86,
+    return Ios27Pressable(
+      pressedScale: _isWindowsDesktop ? 1.0 : Ios27Spring.pressSwellScale,
+      pressedOpacity: 0.92,
+      borderRadius: 999,
       onTap: onPressed,
       child: ConstrainedBox(
         constraints: BoxConstraints(minHeight: compact ? 32 : 42),
@@ -3695,8 +3880,7 @@ class _ModalSheetOverlayScopeState extends State<_ModalSheetOverlayScope> {
   Widget build(BuildContext context) => widget.child;
 }
 
-/// iOS 27 Liquid Glass modal sheet: deep optical blur, specular rim, grabber, and close button.
-Future<T?> showAppleModalSheet<T>({
+Future<T?> _showWindowsModalDialog<T>({
   required BuildContext context,
   required String title,
   required Widget Function(BuildContext) builder,
@@ -3704,160 +3888,513 @@ Future<T?> showAppleModalSheet<T>({
   double? maxWidth,
   bool ignoreKeyboardInsets = false,
 }) {
-  if (usesWindowsAppearance(context)) {
-    // Legacy account/maintenance forms use light text. Keep a readable dark
-    // surface while giving Windows sheets the same spacing and controls.
-    return showDialog<T>(context: context, barrierColor: Colors.black26,
-      builder: (dialogContext) => _ModalSheetOverlayScope(child: WindowsPanelTone(dark: true,
-        child: WindowsSettingsRegion(child: Builder(builder: (ctx) {
-          final size = MediaQuery.sizeOf(ctx);
-          return Dialog(backgroundColor: Colors.transparent, elevation: 0,
-            insetPadding: const EdgeInsets.all(24),
-            child: ConstrainedBox(constraints: BoxConstraints(
-              maxWidth: math.min(maxWidth ?? 760, size.width - 48),
-              maxHeight: size.height - 48 - (ignoreKeyboardInsets ? 0 : MediaQuery.viewInsetsOf(ctx).bottom)),
-              child: WinPanel(dark: true, padding: EdgeInsets.zero, child: Column(
-                mainAxisSize: MainAxisSize.min, children: [
-                  Padding(padding: const EdgeInsets.fromLTRB(24, 14, 14, 14), child: Row(children: [
-                    Expanded(child: Text(title, style: TextStyle(color: winInk(ctx), fontSize: 19, fontWeight: FontWeight.w600))),
-                    if (trailingAction != null) trailingAction,
-                    IconButton(tooltip: '关闭', icon: Icon(CupertinoIcons.xmark, color: winMuted(ctx), size: 18),
-                      onPressed: () => Navigator.of(ctx).pop()),
-                  ])),
-                  Divider(height: 1, color: winMuted(ctx).withValues(alpha: .15)),
-                  Flexible(child: TextSelectionMouseGuard(child: builder(ctx))),
-                ])),
-            ));
-        })))),
-    );
-  }
-  return showCupertinoModalPopup<T>(
+  // Legacy account/maintenance forms use light text. Keep a readable dark
+  // surface while giving Windows sheets the same spacing and controls.
+  return showDialog<T>(
     context: context,
-    builder: (ctx) {
-      final viewInsets = MediaQuery.viewInsetsOf(ctx);
-      final safe = MediaQuery.paddingOf(ctx);
-      final screenSize = MediaQuery.sizeOf(ctx);
-      final isLandscape = screenSize.width > screenSize.height;
-      final effectiveMaxWidth =
-          maxWidth ?? (isLandscape ? math.min(screenSize.width - 28, 720.0) : 560.0);
-      final sheetContent = Padding(
-        padding: EdgeInsets.only(
-          bottom: ignoreKeyboardInsets
-              ? math.max(safe.bottom, 12.0)
-              : (viewInsets.bottom > 0
-                  ? viewInsets.bottom
-                  : (isLandscape ? math.max(safe.bottom, 8.0) : 0)),
-          left: math.max(10.0, safe.left),
-          right: math.max(10.0, safe.right),
-          top: ignoreKeyboardInsets
-              ? math.max(safe.top, 12.0)
-              : (isLandscape ? math.max(8.0, safe.top) : 0),
-        ),
-        child: Center(
-          child: RepaintBoundary(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                maxWidth: effectiveMaxWidth,
-                maxHeight: screenSize.height * 0.88,
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(28),
-                clipBehavior: Clip.antiAlias,
-                child: Stack(
-                  children: [
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: RepaintBoundary(
-                          child: LiquidGlass(
-                            borderRadius: 28,
-                            rimStrength: 1.0,
-                            tint: ApplePalette.isDarkOf(ctx)
-                                ? const Color(0x001E1E22)
-                                : const Color(0xE8F2F2F7),
-                            child: const SizedBox.expand(),
-                          ),
-                        ),
-                      ),
-                    ),
-                    RepaintBoundary(
-                      child: Material(
-                        color: Colors.transparent,
-                        child: SafeArea(
-                          top: false,
-                          left: false,
-                          right: false,
-                          bottom: !isLandscape && !ignoreKeyboardInsets,
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
+    barrierColor: Colors.black26,
+    builder: (dialogContext) => _ModalSheetOverlayScope(
+      child: WindowsPanelTone(
+        dark: true,
+        child: WindowsSettingsRegion(
+          child: Builder(
+            builder: (ctx) {
+              final size = MediaQuery.sizeOf(ctx);
+              return Dialog(
+                backgroundColor: Colors.transparent,
+                elevation: 0,
+                insetPadding: const EdgeInsets.all(24),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: math.min(maxWidth ?? 760, size.width - 48),
+                    maxHeight: size.height -
+                        48 -
+                        (ignoreKeyboardInsets
+                            ? 0
+                            : MediaQuery.viewInsetsOf(ctx).bottom),
+                  ),
+                  child: WinPanel(
+                    dark: true,
+                    padding: EdgeInsets.zero,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(24, 14, 14, 14),
+                          child: Row(
                             children: [
-                              const SizedBox(height: 9),
-                              Container(
-                                width: 40,
-                                height: 4.5,
-                                decoration: BoxDecoration(
-                                  color: ApplePalette.isDarkOf(ctx)
-                                      ? const Color(0x66EBEBF5)
-                                      : const Color(0x33000000),
-                                  borderRadius: BorderRadius.circular(999),
+                              Expanded(
+                                child: Text(
+                                  title,
+                                  style: TextStyle(
+                                    color: winInk(ctx),
+                                    fontSize: 19,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                               ),
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(20, 10, 12, 10),
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        title,
-                                        style: TextStyle(
-                                          color: ApplePalette.of(ctx).labelPrimary,
-                                          fontSize: 17.5,
-                                          fontWeight: FontWeight.w700,
-                                          letterSpacing: -0.35,
-                                        ),
-                                      ),
-                                    ),
-                                    if (trailingAction != null) trailingAction,
-                                    CupertinoButton(
-                                      padding: const EdgeInsets.all(6),
-                                      minSize: 30,
-                                      onPressed: () => Navigator.of(ctx).pop(),
-                                      child: Icon(
-                                        CupertinoIcons.xmark_circle_fill,
-                                        color: ApplePalette.of(ctx).labelTertiary,
-                                        size: 26,
-                                      ),
-                                    ),
-                                  ],
+                              if (trailingAction != null) trailingAction,
+                              IconButton(
+                                tooltip: '关闭',
+                                icon: Icon(
+                                  CupertinoIcons.xmark,
+                                  color: winMuted(ctx),
+                                  size: 18,
                                 ),
-                              ),
-                              Container(height: 0.5, color: ApplePalette.of(ctx).separator),
-                              Flexible(
-                                child: TextSelectionMouseGuard(child: builder(ctx)),
+                                onPressed: () => Navigator.of(ctx).pop(),
                               ),
                             ],
                           ),
                         ),
-                      ),
+                        Divider(
+                          height: 1,
+                          color: winMuted(ctx).withValues(alpha: .15),
+                        ),
+                        Flexible(
+                          child: TextSelectionMouseGuard(child: builder(ctx)),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
           ),
         ),
-      );
-      final wrapped = _ModalSheetOverlayScope(child: sheetContent);
-      if (ignoreKeyboardInsets) {
-        return MediaQuery.removeViewInsets(
-          context: ctx,
-          removeBottom: true,
-          child: wrapped,
-        );
-      }
-      return wrapped;
-    },
+      ),
+    ),
   );
 }
+
+/// iOS 27 Floating Inset Concentric Liquid Glass Sheet:
+/// - 4-side floating inset margins (`10pt` sides/bottom on phone via
+///   [Ios27ConcentricGeometry.sheetInsets], centered floating panel on iPad)
+/// - `32pt` continuous concentric superellipse corners
+/// - Native-sized top Grabber (`36 × 5pt`)
+/// - Interactive rubber-band drag dismiss with velocity-inherited
+///   [Ios27Spring] physics (`smooth` dismiss, `bouncy` rebound)
+/// - Automatic `150ms` opacity fade fallback under Reduce Motion
+Future<T?> showIos27LiquidSheet<T>({
+  required BuildContext context,
+  required String title,
+  required Widget Function(BuildContext) builder,
+  Widget? trailingAction,
+  double? maxWidth,
+  bool ignoreKeyboardInsets = false,
+  bool showGrabber = true,
+  bool isDismissible = true,
+  bool enableDrag = true,
+}) {
+  if (usesWindowsAppearance(context)) {
+    return _showWindowsModalDialog<T>(
+      context: context,
+      title: title,
+      builder: builder,
+      trailingAction: trailingAction,
+      maxWidth: maxWidth,
+      ignoreKeyboardInsets: ignoreKeyboardInsets,
+    );
+  }
+  return Navigator.of(context, rootNavigator: false).push<T>(
+    _Ios27LiquidSheetRoute<T>(
+      title: title,
+      builder: builder,
+      trailingAction: trailingAction,
+      maxWidth: maxWidth,
+      ignoreKeyboardInsets: ignoreKeyboardInsets,
+      showGrabber: showGrabber,
+      isDismissible: isDismissible,
+      enableDrag: enableDrag,
+    ),
+  );
+}
+
+class _Ios27LiquidSheetRoute<T> extends PopupRoute<T> {
+  final String title;
+  final Widget Function(BuildContext) builder;
+  final Widget? trailingAction;
+  final double? maxWidth;
+  final bool ignoreKeyboardInsets;
+  final bool showGrabber;
+  final bool isDismissible;
+  final bool enableDrag;
+
+  _Ios27LiquidSheetRoute({
+    required this.title,
+    required this.builder,
+    this.trailingAction,
+    this.maxWidth,
+    this.ignoreKeyboardInsets = false,
+    this.showGrabber = true,
+    this.isDismissible = true,
+    this.enableDrag = true,
+  });
+
+  @override
+  Color? get barrierColor => Colors.black.withValues(alpha: 0.34);
+
+  @override
+  bool get barrierDismissible => isDismissible;
+
+  @override
+  String? get barrierLabel => '关闭浮层面板';
+
+  @override
+  Duration get transitionDuration => Ios27Spring.smooth.nominalDuration;
+
+  @override
+  Duration get reverseTransitionDuration => Ios27Spring.smooth.nominalDuration;
+
+  @override
+  Widget buildPage(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+  ) {
+    final sheet = _Ios27LiquidSheetContainer(
+      title: title,
+      builder: builder,
+      trailingAction: trailingAction,
+      maxWidth: maxWidth,
+      ignoreKeyboardInsets: ignoreKeyboardInsets,
+      showGrabber: showGrabber,
+      enableDrag: enableDrag,
+      onDismissRequested: () => Navigator.of(context).maybePop(),
+    );
+    final wrapped = _ModalSheetOverlayScope(child: sheet);
+    if (ignoreKeyboardInsets) {
+      return MediaQuery.removeViewInsets(
+        context: context,
+        removeBottom: true,
+        child: wrapped,
+      );
+    }
+    return wrapped;
+  }
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    if (Ios27ConcentricGeometry.isReduceMotion(context)) {
+      return FadeTransition(
+        opacity: CurvedAnimation(
+          parent: animation,
+          curve: Curves.linear,
+          reverseCurve: Curves.linear,
+        ),
+        child: child,
+      );
+    }
+    final centered = Ios27ConcentricGeometry.isCenteredFloatingPanel(context);
+    final springCurve = Ios27Spring.smooth.curve;
+    final curved = CurvedAnimation(
+      parent: animation,
+      curve: springCurve,
+      reverseCurve: springCurve.flipped,
+    );
+    return FadeTransition(
+      opacity: curved,
+      child: SlideTransition(
+        position: Tween<Offset>(
+          begin: Offset(0.0, centered ? 0.05 : 0.14),
+          end: Offset.zero,
+        ).animate(curved),
+        child: ScaleTransition(
+          scale: Tween<double>(
+            begin: centered ? 0.94 : 0.97,
+            end: 1.0,
+          ).animate(curved),
+          alignment: centered ? Alignment.center : Alignment.bottomCenter,
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+class _Ios27LiquidSheetContainer extends StatefulWidget {
+  final String title;
+  final Widget Function(BuildContext) builder;
+  final Widget? trailingAction;
+  final double? maxWidth;
+  final bool ignoreKeyboardInsets;
+  final bool showGrabber;
+  final bool enableDrag;
+  final VoidCallback onDismissRequested;
+
+  const _Ios27LiquidSheetContainer({
+    required this.title,
+    required this.builder,
+    required this.onDismissRequested,
+    this.trailingAction,
+    this.maxWidth,
+    this.ignoreKeyboardInsets = false,
+    this.showGrabber = true,
+    this.enableDrag = true,
+  });
+
+  @override
+  State<_Ios27LiquidSheetContainer> createState() =>
+      _Ios27LiquidSheetContainerState();
+}
+
+class _Ios27LiquidSheetContainerState extends State<_Ios27LiquidSheetContainer>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _dragCtrl;
+  bool _dismissing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _dragCtrl = AnimationController.unbounded(vsync: this, value: 0.0);
+  }
+
+  @override
+  void dispose() {
+    _dragCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onDragUpdate(DragUpdateDetails details) {
+    if (!widget.enableDrag || _dismissing) return;
+    final current = _dragCtrl.value + details.delta.dy;
+    _dragCtrl.value = current;
+  }
+
+  void _onDragEnd(DragEndDetails details) {
+    if (!widget.enableDrag || _dismissing) return;
+    final offset = _dragCtrl.value;
+    final velocity = details.primaryVelocity ?? 0.0;
+    final disableAnim = Ios27ConcentricGeometry.isReduceMotion(context);
+    final screenH = MediaQuery.sizeOf(context).height;
+    final dismissThreshold = math.min(130.0, screenH * 0.24);
+    if (velocity > 420.0 || offset > dismissThreshold) {
+      _dismissing = true;
+      if (disableAnim) {
+        widget.onDismissRequested();
+        return;
+      }
+      final target = math.max(offset + 140.0, screenH * 0.42);
+      _dragCtrl
+          .animateWith(
+            Ios27Spring.smooth.simulation(
+              start: offset,
+              end: target,
+              velocity: velocity,
+              tolerance: const Tolerance(velocity: 5.0, distance: 2.0),
+            ),
+          )
+          .whenComplete(() {
+        if (mounted) widget.onDismissRequested();
+      });
+      return;
+    }
+    Ios27Spring.animate(
+      _dragCtrl,
+      spring: Ios27Spring.bouncy,
+      target: 0.0,
+      initialVelocity: velocity,
+      disableAnimations: disableAnim,
+      tolerance: const Tolerance(velocity: 1.0, distance: 0.5),
+    );
+  }
+
+  void _onDragCancel() {
+    if (!widget.enableDrag || _dismissing) return;
+    Ios27Spring.animate(
+      _dragCtrl,
+      spring: Ios27Spring.bouncy,
+      target: 0.0,
+      disableAnimations: Ios27ConcentricGeometry.isReduceMotion(context),
+      tolerance: const Tolerance(velocity: 1.0, distance: 0.5),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final screenSize = MediaQuery.sizeOf(context);
+    final isLandscape = screenSize.width > screenSize.height;
+    final centered = Ios27ConcentricGeometry.isCenteredFloatingPanel(context);
+    final insets = Ios27ConcentricGeometry.sheetInsets(
+      context,
+      ignoreKeyboardInsets: widget.ignoreKeyboardInsets,
+    );
+    final effectiveMaxWidth = widget.maxWidth ??
+        (centered
+            ? math.min(screenSize.width - insets.horizontal, 580.0)
+            : (isLandscape
+                ? math.min(screenSize.width - insets.horizontal, 680.0)
+                : 540.0));
+    const outerRadius = Ios27ConcentricGeometry.sheetOuterRadiusPt;
+    final continuousShape = Ios27ConcentricGeometry.continuousShape(
+      radius: outerRadius,
+    );
+
+    final headerBar = GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onVerticalDragUpdate: widget.enableDrag ? _onDragUpdate : null,
+      onVerticalDragEnd: widget.enableDrag ? _onDragEnd : null,
+      onVerticalDragCancel: widget.enableDrag ? _onDragCancel : null,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (widget.showGrabber) ...[
+            const SizedBox(height: 8),
+            Container(
+              key: const ValueKey('ios27-liquid-sheet-grabber'),
+              width: 36,
+              height: 5,
+              decoration: BoxDecoration(
+                color: ApplePalette.isDarkOf(context)
+                    ? const Color(0x66EBEBF5)
+                    : const Color(0x36000000),
+                borderRadius: BorderRadius.circular(999),
+              ),
+            ),
+          ],
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 10, 12, 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.title,
+                    style: TextStyle(
+                      color: ApplePalette.of(context).labelPrimary,
+                      fontSize: 17.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.35,
+                    ),
+                  ),
+                ),
+                if (widget.trailingAction != null) widget.trailingAction!,
+                Ios27Pressable(
+                  pressedScale: Ios27Spring.pressSwellScale,
+                  borderRadius: 999,
+                  onTap: () => Navigator.of(context).maybePop(),
+                  child: Padding(
+                    padding: const EdgeInsets.all(6),
+                    child: Icon(
+                      CupertinoIcons.xmark_circle_fill,
+                      color: ApplePalette.of(context).labelTertiary,
+                      size: 26,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(height: 0.5, color: ApplePalette.of(context).separator),
+        ],
+      ),
+    );
+
+    final sheetSurface = RepaintBoundary(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: effectiveMaxWidth,
+          maxHeight: screenSize.height * (centered ? 0.84 : 0.88),
+        ),
+        child: ClipPath(
+          key: const ValueKey('ios27-liquid-sheet-container'),
+          clipper: ShapeBorderClipper(shape: continuousShape),
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: RepaintBoundary(
+                    child: LiquidGlass(
+                      borderRadius: outerRadius,
+                      rimStrength: 1.0,
+                      tint: ApplePalette.isDarkOf(context)
+                          ? const Color(0x001E1E22)
+                          : const Color(0xE8F2F2F7),
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+              ),
+              RepaintBoundary(
+                child: Material(
+                  color: Colors.transparent,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      headerBar,
+                      Flexible(
+                        child: TextSelectionMouseGuard(
+                          child: widget.builder(context),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    return Padding(
+      padding: insets,
+      child: Align(
+        alignment: centered ? Alignment.center : Alignment.bottomCenter,
+        child: AnimatedBuilder(
+          animation: _dragCtrl,
+          child: sheetSurface,
+          builder: (context, child) {
+            final raw = _dragCtrl.value;
+            final dy = raw < 0
+                ? Ios27RubberBand.apply(raw, dimension: 140.0)
+                : raw;
+            final scale = raw > 0
+                ? (1.0 - (raw / 1800.0).clamp(0.0, 0.045))
+                : (1.0 + ((-dy) / 2800.0).clamp(0.0, 0.02));
+            final fade = raw > 0
+                ? (1.0 - (raw / (screenSize.height * 0.55)).clamp(0.0, 0.85))
+                : 1.0;
+            return Transform.translate(
+              offset: Offset(0.0, dy),
+              child: Transform.scale(
+                scale: scale,
+                alignment: centered ? Alignment.center : Alignment.bottomCenter,
+                child: Opacity(
+                  opacity: fade.clamp(0.0, 1.0),
+                  child: child,
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// iOS 27 Liquid Glass modal sheet: delegates to [showIos27LiquidSheet] on
+/// iOS / iPadOS / macOS / Android and keeps [WinPanel] dialogs on Windows.
+Future<T?> showAppleModalSheet<T>({
+  required BuildContext context,
+  required String title,
+  required Widget Function(BuildContext) builder,
+  Widget? trailingAction,
+  double? maxWidth,
+  bool ignoreKeyboardInsets = false,
+}) =>
+    showIos27LiquidSheet<T>(
+      context: context,
+      title: title,
+      builder: builder,
+      trailingAction: trailingAction,
+      maxWidth: maxWidth,
+      ignoreKeyboardInsets: ignoreKeyboardInsets,
+    );
 
 /// iOS 27 Liquid Glass ambient app background: deep obsidian or themed canvas with
 /// breathing dynamic flowing-light aurora orbs (`呼吸式动态流光氛围`), optional custom

@@ -25,6 +25,7 @@ import 'desktop_horizontal_scroller.dart';
 import 'favorite_postcard_animation.dart';
 import 'ios_liquid_glass.dart';
 import 'media_badge.dart';
+import 'motion/ios27_springs.dart';
 import 'motion/player_enter_transition.dart';
 import 'netdisk_sheet.dart';
 import 'player_screen.dart';
@@ -1342,7 +1343,7 @@ class _DetailScreenState extends State<DetailScreen> {
         ? inLineSeasons.length
         : _relatedSeasons.length;
 
-    showAppleModalSheet<void>(
+    showIos27LiquidSheet<void>(
       context: context,
       title: totalSeasons > 1 ? '选择季数（共 $totalSeasons 季）' : '选择季数',
       builder: (ctx) {
@@ -1545,7 +1546,7 @@ class _DetailScreenState extends State<DetailScreen> {
     }
     final safeLineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
 
-    showAppleModalSheet<void>(
+    showIos27LiquidSheet<void>(
       context: context,
       title: '切换播放源 (${_video.lines.length})',
       builder: (ctx) => StatefulBuilder(
@@ -1682,7 +1683,7 @@ class _DetailScreenState extends State<DetailScreen> {
     final cleanedQuery = CspBridge.cleanNetdiskSearchTitle(_video.title);
     final query = cleanedQuery.isNotEmpty ? cleanedQuery : _video.title;
     final results = widget.client.searchAcrossSites(widget.storage.prioritizeSites(candidates), query);
-    final pick = await showAppleModalSheet<(CmsSite, CmsVideo)>(
+    final pick = await showIos27LiquidSheet<(CmsSite, CmsVideo)>(
       context: context,
       title: '在其他片源搜索《$query》',
       builder: (_) => _OtherSourceResults(
@@ -1702,7 +1703,7 @@ class _DetailScreenState extends State<DetailScreen> {
     final line = _video.lines[safeLineIdx];
     final activeIndices = _activeEpisodeIndicesFor(line);
     final total = activeIndices.length;
-    showAppleModalSheet<void>(
+    showIos27LiquidSheet<void>(
       context: context,
       title: '全部剧集 · ${_currentSeasonLabel(line)} · ${line.name} ($total)',
       builder: (ctx) => GridView.builder(
@@ -1802,7 +1803,7 @@ class _DetailScreenState extends State<DetailScreen> {
     final line = _video.lines[lineIdx];
     final service = DownloadService.instance;
     final selected = <int>{};
-    showAppleModalSheet<void>(
+    showIos27LiquidSheet<void>(
       context: context,
       title: '下载 · ${line.name}',
       builder: (ctx) => StatefulBuilder(
@@ -2053,8 +2054,10 @@ class _DetailScreenState extends State<DetailScreen> {
 
     return TweenAnimationBuilder<Color?>(
       tween: ColorTween(begin: targetBg, end: targetBg),
-      duration: const Duration(milliseconds: 360),
-      curve: Curves.easeOutCubic,
+      duration: Ios27ConcentricGeometry.isReduceMotion(context)
+          ? Ios27ConcentricGeometry.reducedMotionDuration
+          : Ios27Spring.smooth.nominalDuration,
+      curve: Ios27Spring.smooth.curve,
       builder: (context, animatedBg, _) {
         final bgColor = animatedBg ?? targetBg;
         return Scaffold(
@@ -2512,7 +2515,9 @@ class _DetailScreenState extends State<DetailScreen> {
     String symbol = 'chevron.backward',
     String accessibilityLabel = '返回',
   }) {
-    final fallback = GestureDetector(
+    final fallback = Ios27Pressable(
+      pressedScale: Ios27Spring.pressSwellScale,
+      borderRadius: 20,
       onTap: onTap,
       child: LiquidGlass(
         width: 40,
@@ -2554,8 +2559,10 @@ class _DetailScreenState extends State<DetailScreen> {
         ? _video.lines[safeLineIdx].name
         : (_loading ? '加载片源…' : _activeSite.name);
 
-    final fallback = GestureDetector(
+    final fallback = Ios27Pressable(
       key: const ValueKey('source_picker_button'),
+      pressedScale: Ios27Spring.pressSwellScale,
+      borderRadius: 999,
       onTap: _showSourcePickerSheet,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxWidth),
@@ -2669,15 +2676,21 @@ class _DetailScreenState extends State<DetailScreen> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CupertinoButton(
+          Ios27Pressable(
             key: const ValueKey('detail-netdisk-qr-button'),
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            minSize: 32,
-            onPressed: onOpenNetdisk,
-            child: const Icon(
-              CupertinoIcons.qrcode_viewfinder,
-              color: AppleColors.labelPrimary,
-              size: 19,
+            pressedScale: Ios27Spring.pressSwellScale,
+            borderRadius: 999,
+            onTap: onOpenNetdisk,
+            child: const SizedBox(
+              width: 38,
+              height: 36,
+              child: Center(
+                child: Icon(
+                  CupertinoIcons.qrcode_viewfinder,
+                  color: AppleColors.labelPrimary,
+                  size: 19,
+                ),
+              ),
             ),
           ),
           Container(
@@ -2685,14 +2698,20 @@ class _DetailScreenState extends State<DetailScreen> {
             height: 18,
             color: const Color(0x36FFFFFF),
           ),
-          CupertinoButton(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            minSize: 32,
-            onPressed: _showDownloadSheet,
-            child: const Icon(
-              CupertinoIcons.arrow_down_to_line,
-              color: AppleColors.labelPrimary,
-              size: 19,
+          Ios27Pressable(
+            pressedScale: Ios27Spring.pressSwellScale,
+            borderRadius: 999,
+            onTap: _showDownloadSheet,
+            child: const SizedBox(
+              width: 38,
+              height: 36,
+              child: Center(
+                child: Icon(
+                  CupertinoIcons.arrow_down_to_line,
+                  color: AppleColors.labelPrimary,
+                  size: 19,
+                ),
+              ),
             ),
           ),
           Container(
@@ -2700,18 +2719,24 @@ class _DetailScreenState extends State<DetailScreen> {
             height: 18,
             color: const Color(0x36FFFFFF),
           ),
-          CupertinoButton(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            minSize: 32,
-            onPressed: onToggleFavorite,
-            child: Icon(
-              _isFavorite
-                  ? CupertinoIcons.heart_fill
-                  : CupertinoIcons.heart,
-              color: _isFavorite
-                  ? AppleColors.systemRed
-                  : AppleColors.labelPrimary,
-              size: 19,
+          Ios27Pressable(
+            pressedScale: Ios27Spring.pressSwellScale,
+            borderRadius: 999,
+            onTap: () => unawaited(onToggleFavorite()),
+            child: SizedBox(
+              width: 38,
+              height: 36,
+              child: Center(
+                child: Icon(
+                  _isFavorite
+                      ? CupertinoIcons.heart_fill
+                      : CupertinoIcons.heart,
+                  color: _isFavorite
+                      ? AppleColors.systemRed
+                      : AppleColors.labelPrimary,
+                  size: 19,
+                ),
+              ),
             ),
           ),
         ],
@@ -3110,8 +3135,10 @@ class _DetailScreenState extends State<DetailScreen> {
       }
     }
 
-    return GestureDetector(
+    return Ios27Pressable(
       key: const Key('detail-primary-play-button'),
+      pressedScale: Ios27Spring.pressSwellScale,
+      borderRadius: 999,
       onTap: hasLines
           ? () => _playPrimaryAction(selectedBookmark)
           : (_loading || curatedBlocked ? null : _searchOtherSources),
@@ -3409,8 +3436,10 @@ class _DetailScreenState extends State<DetailScreen> {
                 if (hasInLineSeasons) {
                   final s = inLineSeasons[sIdx];
                   final isSelected = s.seasonNumber == activeInLineSeasonNum;
-                  return GestureDetector(
+                  return Ios27Pressable(
                     key: ValueKey('season_pill_inline_${s.seasonNumber}'),
+                    pressedScale: Ios27Spring.pressSwellScale,
+                    borderRadius: 999,
                     onTap: () {
                       setState(() {
                         _selectedInLineSeason = s.seasonNumber;
@@ -3418,7 +3447,10 @@ class _DetailScreenState extends State<DetailScreen> {
                       });
                     },
                     child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 160),
+                      duration: Ios27ConcentricGeometry.isReduceMotion(ctx)
+                          ? Ios27ConcentricGeometry.reducedMotionDuration
+                          : Ios27Spring.snappy.nominalDuration,
+                      curve: Ios27Spring.snappy.curve,
                       padding: const EdgeInsets.symmetric(
                         horizontal: 14,
                         vertical: 5,
@@ -3454,11 +3486,16 @@ class _DetailScreenState extends State<DetailScreen> {
                 final isSelected = (opt.video.id == _video.id &&
                         opt.site.key == _activeSite.key) ||
                     opt.seasonNumber == curSeasonInfo.seasonNumber;
-                return GestureDetector(
+                return Ios27Pressable(
                   key: ValueKey('season_pill_${opt.seasonNumber}'),
+                  pressedScale: Ios27Spring.pressSwellScale,
+                  borderRadius: 999,
                   onTap: () => _switchToRelatedSeason(opt),
                   child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 160),
+                    duration: Ios27ConcentricGeometry.isReduceMotion(ctx)
+                        ? Ios27ConcentricGeometry.reducedMotionDuration
+                        : Ios27Spring.snappy.nominalDuration,
+                    curve: Ios27Spring.snappy.curve,
                     padding: const EdgeInsets.symmetric(
                       horizontal: 14,
                       vertical: 5,
@@ -3533,10 +3570,15 @@ class _DetailScreenState extends State<DetailScreen> {
                   _episodeUnavailableReason(line.episodes[originalIdx]);
               final isUnavailable = unavailReason != null;
               final isCurrent = !isUnavailable && originalIdx == currentActiveEpIdx;
-              final pill = GestureDetector(
+              final pill = Ios27Pressable(
+                pressedScale: Ios27Spring.pressSwellScale,
+                borderRadius: 999,
                 onTap: () => _openPlayer(safeLineIdx, originalIdx),
                 child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 160),
+                  duration: Ios27ConcentricGeometry.isReduceMotion(ctx)
+                      ? Ios27ConcentricGeometry.reducedMotionDuration
+                      : Ios27Spring.snappy.nominalDuration,
+                  curve: Ios27Spring.snappy.curve,
                   constraints: const BoxConstraints(minWidth: 34),
                   padding: const EdgeInsets.symmetric(horizontal: 10),
                   decoration: BoxDecoration(
@@ -3886,8 +3928,10 @@ class _DetailScreenState extends State<DetailScreen> {
 
     return TweenAnimationBuilder<Color?>(
       tween: ColorTween(begin: targetBg, end: targetBg),
-      duration: const Duration(milliseconds: 360),
-      curve: Curves.easeOutCubic,
+      duration: Ios27ConcentricGeometry.isReduceMotion(context)
+          ? Ios27ConcentricGeometry.reducedMotionDuration
+          : Ios27Spring.smooth.nominalDuration,
+      curve: Ios27Spring.smooth.curve,
       builder: (context, animatedBg, _) {
         final bgColor = animatedBg ?? targetBg;
         return Scaffold(

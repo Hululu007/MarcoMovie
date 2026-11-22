@@ -37,30 +37,14 @@ class DanmuSettingsSheet extends StatefulWidget {
     required ValueChanged<DanmuSettings> onChanged,
   }) async {
     if (OhosRuntime.isOhos) return;
-    await showModalBottomSheet<void>(
+    await showIos27LiquidSheet<void>(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: resolveSurfaceColor(context),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      title: '弹幕设置',
+      maxWidth: 540,
+      builder: (ctx) => DanmuSettingsSheet(
+        initialSettings: initialSettings,
+        onChanged: onChanged,
       ),
-      builder: (ctx) {
-        final keyboardInset = MediaQuery.viewInsetsOf(ctx).bottom;
-        return Padding(
-          padding: EdgeInsets.only(bottom: keyboardInset),
-          child: SafeArea(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                maxHeight: MediaQuery.of(ctx).size.height * 0.85,
-              ),
-              child: DanmuSettingsSheet(
-                initialSettings: initialSettings,
-                onChanged: onChanged,
-              ),
-            ),
-          ),
-        );
-      },
     );
   }
 

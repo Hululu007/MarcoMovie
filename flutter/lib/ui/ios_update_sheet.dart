@@ -10,10 +10,39 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/app_update.dart';
 import 'apple_theme.dart';
 import 'ios_settings.dart';
+import 'motion/ios27_springs.dart';
 import 'release_notes_view.dart';
 
 typedef IosUpdateCheck = Future<AppUpdate> Function(
     UpdateCancellation cancellation, void Function(String) onStage);
+
+/// Presents [IosUpdateSheet] inside an iOS 27 floating inset concentric
+/// Liquid Glass sheet (`showIos27LiquidSheet`).
+Future<void> showIosUpdateLiquidSheet(
+  BuildContext context, {
+  String installedVersion = '',
+  bool autoCheck = true,
+  Future<String> Function()? readVersion,
+  IosUpdateCheck? check,
+  Future<File> Function(AppUpdate, UpdateCancellation, void Function(int, int))?
+      download,
+  Future<ShareResult> Function(File, Rect)? shareFile,
+  Future<bool> Function(Uri)? openTrollStore,
+}) {
+  return showIos27LiquidSheet<void>(
+    context: context,
+    title: '软件更新',
+    builder: (_) => IosUpdateSheet(
+      installedVersion: installedVersion,
+      autoCheck: autoCheck,
+      readVersion: readVersion,
+      check: check,
+      download: download,
+      shareFile: shareFile,
+      openTrollStore: openTrollStore,
+    ),
+  );
+}
 
 /// Owns the entire sheet lifecycle. Closing / retrying invalidates every late
 /// platform-channel or network result from the previous attempt.
@@ -480,20 +509,33 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
           const SizedBox(height: 8),
         ],
         if (busy) ...[
-          LinearProgressIndicator(
+          const SizedBox(height: 4),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
               key: const ValueKey('ios-update-progress'),
-              value: _downloading ? _progress : null),
-          SizedBox(height: 12),
+              minHeight: 5,
+              value: _downloading ? _progress : null,
+            ),
+          ),
+          const SizedBox(height: 12),
         ],
         // Keep status visible even after an error or handoff.
         if (release == null ||
             _downloading ||
             _saved ||
             (!_checking && !_status.startsWith('正在连接'))) ...[
-          Text(_status,
-              key: const ValueKey('ios-update-status'),
-              style: TextStyle(
-                  color: ApplePalette.of(context).labelSecondary, height: 1.5)),
+          AnimatedSize(
+            duration: Ios27ConcentricGeometry.isReduceMotion(context)
+                ? Ios27ConcentricGeometry.reducedMotionDuration
+                : Ios27Spring.smooth.nominalDuration,
+            curve: Ios27Spring.smooth.curve,
+            alignment: Alignment.topLeft,
+            child: Text(_status,
+                key: const ValueKey('ios-update-status'),
+                style: TextStyle(
+                    color: ApplePalette.of(context).labelSecondary, height: 1.5)),
+          ),
           const SizedBox(height: 16),
         ],
         Wrap(spacing: 10, runSpacing: 10, children: [
