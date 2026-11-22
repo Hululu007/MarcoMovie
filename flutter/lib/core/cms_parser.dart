@@ -1166,6 +1166,8 @@ class CmsParser {
         (decoded['name'] != null || decoded['key'] != null)) {
       decoded = <String, dynamic>{
         'spider': decoded['spider'] ?? decoded['jar'] ?? '',
+        if (decoded['rules'] != null) 'rules': decoded['rules'],
+        if (decoded['ads'] != null) 'ads': decoded['ads'],
         'sites': [decoded],
       };
     }
@@ -1228,6 +1230,28 @@ class CmsParser {
           if (defaultJsonParseUrl.isEmpty && (pType == 1 || pType == 2 || pType == 3)) {
             defaultJsonParseUrl = pUrl;
           }
+        }
+      }
+    }
+    final rules = <CmsSniffRule>[];
+    if (decoded['rules'] is List) {
+      for (final r in decoded['rules'] as List) {
+        if (r is! Map) continue;
+        final rule = CmsSniffRule.fromJson(Map<String, dynamic>.from(r));
+        if (!rule.isEmpty) {
+          rules.add(rule);
+        }
+      }
+    }
+    final ads = <String>[];
+    final seenAds = <String>{};
+    if (decoded['ads'] is List) {
+      for (final rawAd in decoded['ads'] as List) {
+        final ad = (rawAd ?? '').toString().trim();
+        if (ad.isEmpty) continue;
+        final lower = ad.toLowerCase();
+        if (seenAds.add(lower)) {
+          ads.add(ad);
         }
       }
     }
@@ -1401,6 +1425,8 @@ class CmsParser {
       lives: lives,
       depots: depots,
       parses: parses,
+      rules: List<CmsSniffRule>.unmodifiable(rules),
+      ads: List<String>.unmodifiable(ads),
       spider: spider,
     );
   }

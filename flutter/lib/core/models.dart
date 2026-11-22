@@ -1,6 +1,8 @@
 /// Core domain models shared across macOS, iOS, iPadOS, Windows, and Android backup schemas.
 library;
 
+import 'dart:convert';
+
 import 'csp_bridge.dart';
 import 'live_catalog_parser.dart';
 import 'spider_plugin_registry.dart';
@@ -697,19 +699,147 @@ class CmsParse {
   });
 }
 
+class CmsSniffRule {
+  final String name;
+  final List<String> hosts;
+  final List<String> regex;
+  final List<String> exclude;
+  final String script;
+  final String click;
+
+  const CmsSniffRule({
+    this.name = '',
+    this.hosts = const [],
+    this.regex = const [],
+    this.exclude = const [],
+    this.script = '',
+    this.click = '',
+  });
+
+  bool get isEmpty =>
+      hosts.isEmpty &&
+      regex.isEmpty &&
+      exclude.isEmpty &&
+      script.trim().isEmpty &&
+      click.trim().isEmpty;
+
+  String get combinedClickScript {
+    final s = script.trim();
+    final c = click.trim();
+    final normalizedClick = c.isEmpty ? '' : _normalizeClickSnippet(c);
+    if (s.isNotEmpty && normalizedClick.isNotEmpty) {
+      return s == normalizedClick ? s : '$s\n$normalizedClick';
+    }
+    return s.isNotEmpty ? s : normalizedClick;
+  }
+
+  static String _normalizeClickSnippet(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return '';
+    final looksLikeJs = trimmed.contains('(') ||
+        trimmed.contains(';') ||
+        trimmed.contains('=') ||
+        trimmed.contains('{') ||
+        trimmed.contains('=>') ||
+        trimmed.contains('\n');
+    if (looksLikeJs) return trimmed;
+    final quoted = jsonEncode(trimmed);
+    return 'try{var _el=document.querySelector($quoted);if(_el)_el.click();}catch(_){}';
+  }
+
+  bool matchesHost(String host) {
+    final normalizedHost = host.trim().toLowerCase();
+    if (normalizedHost.isEmpty || hosts.isEmpty) return false;
+    for (final rawPattern in hosts) {
+      final pattern = rawPattern.trim().toLowerCase();
+      if (pattern.isEmpty) continue;
+      if (pattern == '*') return true;
+      if (pattern.startsWith('*.')) {
+        final suffix = pattern.substring(2);
+        if (suffix.isNotEmpty &&
+            (normalizedHost == suffix || normalizedHost.endsWith('.$suffix'))) {
+          return true;
+        }
+        continue;
+      }
+      if (pattern.startsWith('.')) {
+        final suffix = pattern.substring(1);
+        if (suffix.isNotEmpty &&
+            (normalizedHost == suffix || normalizedHost.endsWith('.$suffix'))) {
+          return true;
+        }
+        continue;
+      }
+      if (pattern.contains('*')) {
+        final escaped = RegExp.escape(pattern).replaceAll(r'\*', '.*');
+        if (RegExp('^$escaped\$', caseSensitive: false).hasMatch(normalizedHost)) {
+          return true;
+        }
+        continue;
+      }
+      if (normalizedHost == pattern || normalizedHost.endsWith('.$pattern')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static List<String> _stringList(dynamic raw) {
+    if (raw is List) {
+      return List<String>.unmodifiable(
+        raw
+            .map((e) => (e ?? '').toString().trim())
+            .where((e) => e.isNotEmpty),
+      );
+    }
+    if (raw is String) {
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) return const [];
+      return List<String>.unmodifiable([trimmed]);
+    }
+    return const [];
+  }
+
+  Map<String, dynamic> toJson() => {
+        if (name.isNotEmpty) 'name': name,
+        if (hosts.isNotEmpty) 'hosts': hosts,
+        if (regex.isNotEmpty) 'regex': regex,
+        if (exclude.isNotEmpty) 'exclude': exclude,
+        if (script.isNotEmpty) 'script': script,
+        if (click.isNotEmpty) 'click': click,
+      };
+
+  factory CmsSniffRule.fromJson(Map<String, dynamic> json) {
+    return CmsSniffRule(
+      name: (json['name'] ?? '').toString().trim(),
+      hosts: _stringList(json['hosts']),
+      regex: _stringList(json['regex']),
+      exclude: _stringList(json['exclude'] ?? json['excludes']),
+      script: (json['script'] ?? '').toString().trim(),
+      click: (json['click'] ?? '').toString().trim(),
+    );
+  }
+}
+
 class CmsConfig {
   final List<CmsSite> sites;
   final List<LiveSource> lives;
   final List<CmsDepot> depots;
   final List<CmsParse> parses;
+  final List<CmsSniffRule> rules;
+  final List<String> ads;
   final String spider;
   const CmsConfig({
     this.sites = const [],
     this.lives = const [],
     this.depots = const [],
     this.parses = const [],
+    this.rules = const [],
+    this.ads = const [],
     this.spider = '',
   });
+  List<CmsSniffRule> sniffRulesForHost(String host) =>
+      rules.where((r) => r.matchesHost(host)).toList(growable: false);
   List<CmsSite> get supportedSites => List<CmsSite>.unmodifiable(sites);
   List<CmsSite> get publicSupportedSites => sites
       .where((s) => !s.isEffectivelyPrivate)

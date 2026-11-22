@@ -62,9 +62,9 @@ class ResolverHttpDocument {
 ///    JS player configs (`DPlayer`, `Artplayer`, `Aliplayer`, `Hls.js`),
 ///    `atob` / `decodeURIComponent` literals, and up to 2 hops of `<iframe>`
 ///    wrappers while preserving `Referer` and `Set-Cookie`.
-/// 3. **Stage 3 (Native Ephemeral `WKWebView` Sniffer)**: Invokes
-///    `marco_movie/web_sniffer` on iOS and macOS when dynamic JS execution is
-///    required to materialize the stream URL.
+/// 3. **Stage 3 (Native Ephemeral WebView Sniffer)**: Invokes
+///    `marco_movie/web_sniffer` on Windows (`Edge WebView2`), iOS, and macOS
+///    (`WKWebView`) when dynamic JS execution is required to materialize the stream URL.
 class WebMediaResolver {
   static const MethodChannel _channel = MethodChannel('marco_movie/web_sniffer');
 
@@ -73,14 +73,16 @@ class WebMediaResolver {
       '(KHTML, like Gecko) Version/18.0 Safari/605.1.15';
 
   static WebSnifferInvoker? debugSnifferOverride;
+  static List<CmsSniffRule> defaultSniffRules = const [];
+  static List<String> defaultAdRules = const [];
 
   static final RegExp _directMediaExtPattern = RegExp(
     r'\.(?:m3u8?|mp4|flv|mkv|ts|webm|mpd|mov|m4v|avi)(?:$|[?#])',
     caseSensitive: false,
   );
 
-  static final RegExp _directMediaHintPattern = RegExp(
-    r'(?:\.(?:m3u8?|mp4|flv|mkv|webm|mpd|m4v)(?:$|[?#])|[?&](?:type|format|mime)=[^&#]*(?:m3u8|mp4|flv|mpegurl|video))',
+  static final RegExp _directMediaQueryHintPattern = RegExp(
+    r'(?:^|&)(?:type|format|mime)=[^&]*(?:m3u8|mp4|flv|mpegurl|video)',
     caseSensitive: false,
   );
 
@@ -93,6 +95,109 @@ class WebMediaResolver {
     r'(?:\.(?:s?html?|php|asp|aspx|jsp)(?:$|[?#])|/(?:vodplay|play|share|video|watch|v_show|x/cover|x/page|bangumi/play)(?:/|$|[?#]))',
     caseSensitive: false,
   );
+
+  static const Set<String> _wrapperQueryKeys = {
+    'url',
+    'v',
+    'u',
+    'src',
+    'play',
+    'playurl',
+    'link',
+    'target',
+    'redirect',
+    'next',
+    'jump',
+    'ref',
+    'video',
+  };
+
+  static const List<String> _builtinAdPatterns = [
+    'googletagmanager.com',
+    'google-analytics.com',
+    'hm.baidu.com',
+    'doubleclick.net',
+    'googlesyndication.com',
+    'googleadservices.com',
+    'adservice.google.',
+    '/ads/',
+  ];
+
+  static bool isAdUrl(String rawUrl, {List<String> ads = const []}) {
+    final trimmed = rawUrl.trim();
+    if (trimmed.isEmpty) return false;
+    final lower = trimmed.toLowerCase();
+    final uri = Uri.tryParse(trimmed);
+    final host = (uri?.host ?? '').toLowerCase();
+
+    bool matchSingleRule(String rawRule) {
+      final pat = rawRule.trim().toLowerCase();
+      if (pat.isEmpty) return false;
+      if (!pat.contains('/') && !pat.contains('?') && !pat.contains(':')) {
+        if (host.isEmpty) return false;
+        if (pat.startsWith('*.')) {
+          final suffix = pat.substring(2);
+          return suffix.isNotEmpty &&
+              (host == suffix || host.endsWith('.$suffix'));
+        }
+        if (pat.startsWith('.')) {
+          final suffix = pat.substring(1);
+          return suffix.isNotEmpty &&
+              (host == suffix || host.endsWith('.$suffix'));
+        }
+        if (pat.contains('*')) {
+          final escaped = RegExp.escape(pat).replaceAll(r'\*', '.*');
+          return RegExp('^$escaped\$', caseSensitive: false).hasMatch(host);
+        }
+        return host == pat || host.endsWith('.$pat');
+      }
+      if (pat.contains('*')) {
+        final escaped = RegExp.escape(pat).replaceAll(r'\*', '.*');
+        return RegExp(escaped, caseSensitive: false).hasMatch(lower);
+      }
+      return lower.contains(pat);
+    }
+
+    for (final builtin in _builtinAdPatterns) {
+      if (matchSingleRule(builtin)) return true;
+    }
+    for (final ad in ads) {
+      if (matchSingleRule(ad)) return true;
+    }
+    return false;
+  }
+
+  static bool isDisguisedWrapperUrl(Uri uri) {
+    if (_directMediaExtPattern.hasMatch(uri.path)) {
+      return false;
+    }
+    if (uri.query.isEmpty) return false;
+    final rawLower = uri.query.toLowerCase();
+    for (final entry in uri.queryParameters.entries) {
+      if (!_wrapperQueryKeys.contains(entry.key.toLowerCase())) continue;
+      var val = entry.value.trim();
+      for (var i = 0; i < 2; i++) {
+        try {
+          val = Uri.decodeComponent(val);
+        } catch (_) {
+          break;
+        }
+      }
+      final valLower = val.trim().toLowerCase();
+      if (valLower.startsWith('http://') ||
+          valLower.startsWith('https://') ||
+          valLower.startsWith('//')) {
+        return true;
+      }
+    }
+    if (RegExp(
+      r'(?:^|&)(?:url|v|src|play|playurl|target|redirect|next|jump)\s*=\s*(?:https?(?::|%3a)//|%2f%2f)',
+      caseSensitive: false,
+    ).hasMatch(rawLower)) {
+      return true;
+    }
+    return false;
+  }
 
   static bool isDirectStreamUrl(String value) {
     final uri = Uri.tryParse(value.trim());
@@ -160,6 +265,8 @@ class WebMediaResolver {
     String rawCandidate, {
     Uri? allowedOrigin,
     String? originalPageUrl,
+    List<String> ads = const [],
+    List<CmsSniffRule> matchedRules = const [],
   }) {
     final cleaned = rawCandidate.trim();
     if (cleaned.isEmpty ||
@@ -188,6 +295,27 @@ class WebMediaResolver {
     if (_ignoredAssetExtPattern.hasMatch(uri.path)) {
       return false;
     }
+    if (isAdUrl(cleaned, ads: ads)) {
+      return false;
+    }
+    if ((scheme == 'http' || scheme == 'https') && isDisguisedWrapperUrl(uri)) {
+      return false;
+    }
+    for (final rule in matchedRules) {
+      for (final rawExcl in rule.exclude) {
+        final excl = rawExcl.trim();
+        if (excl.isEmpty) continue;
+        try {
+          if (RegExp(excl, caseSensitive: false).hasMatch(cleaned)) {
+            return false;
+          }
+        } catch (_) {
+          if (cleaned.toLowerCase().contains(excl.toLowerCase())) {
+            return false;
+          }
+        }
+      }
+    }
     return true;
   }
 
@@ -195,18 +323,23 @@ class WebMediaResolver {
     String rawCandidate, {
     Uri? allowedOrigin,
     String? originalPageUrl,
+    List<String> ads = const [],
+    List<CmsSniffRule> matchedRules = const [],
   }) {
     if (!_isCandidateMediaUrl(
       rawCandidate,
       allowedOrigin: allowedOrigin,
       originalPageUrl: originalPageUrl,
+      ads: ads,
+      matchedRules: matchedRules,
     )) {
       return false;
     }
     final uri = Uri.parse(rawCandidate.trim());
     final scheme = uri.scheme.toLowerCase();
     if (scheme == 'rtsp' || scheme == 'rtmp') return true;
-    return _directMediaHintPattern.hasMatch('${uri.path}?${uri.query}');
+    return _directMediaExtPattern.hasMatch(uri.path) ||
+        _directMediaQueryHintPattern.hasMatch(uri.query);
   }
 
   static bool _sameOrigin(Uri? a, Uri? b) {
@@ -233,6 +366,8 @@ class WebMediaResolver {
     required String targetUrl,
     String explicitPlayUrl = '',
     List<CmsParse> parses = const [],
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
     Map<String, String> extraHeaders = const {},
     Uri? sourceOrigin,
     required ResolverTextFetcher fetchDocument,
@@ -243,6 +378,12 @@ class WebMediaResolver {
     if (trimmedTarget.isEmpty) return null;
 
     bool cancelled() => isCancelled?.call() == true;
+
+    final effectiveRules = rules.isNotEmpty ? rules : defaultSniffRules;
+    final effectiveAds = <String>{
+      ...defaultAdRules,
+      ...ads,
+    }.toList(growable: false);
 
     final jsonParsers = <CmsParse>[];
     final webParsers = <CmsParse>[];
@@ -291,6 +432,7 @@ class WebMediaResolver {
       sourceOrigin: sourceOrigin,
       fetchDocument: fetchDocument,
       cancelled: cancelled,
+      ads: effectiveAds,
     );
     if (stage1 != null) return stage1;
     if (cancelled()) return null;
@@ -312,6 +454,7 @@ class WebMediaResolver {
         fetchDocument: fetchDocument,
         cancelled: cancelled,
         maxIframeDepth: 2,
+        ads: effectiveAds,
       );
       if (extracted != null) return extracted;
       innerChainTarget = nestedTarget;
@@ -331,6 +474,7 @@ class WebMediaResolver {
         sourceOrigin: sourceOrigin,
         fetchDocument: fetchDocument,
         cancelled: cancelled,
+        ads: effectiveAds,
       );
       if (chainedJson != null) return chainedJson;
 
@@ -338,7 +482,11 @@ class WebMediaResolver {
       if (innerUri != null &&
           (innerUri.scheme == 'http' || innerUri.scheme == 'https') &&
           innerUri.host.isNotEmpty &&
-          _isCandidateMediaUrl(innerChainTarget, allowedOrigin: targetUri)) {
+          _isCandidateMediaUrl(
+            innerChainTarget,
+            allowedOrigin: targetUri,
+            ads: effectiveAds,
+          )) {
         final (innerExtracted, _) = await _extractFromWebPage(
           pageUrl: innerChainTarget,
           site: site,
@@ -350,6 +498,7 @@ class WebMediaResolver {
           fetchDocument: fetchDocument,
           cancelled: cancelled,
           maxIframeDepth: 1,
+          ads: effectiveAds,
         );
         if (innerExtracted != null) return innerExtracted;
       }
@@ -377,13 +526,14 @@ class WebMediaResolver {
         cancelled: cancelled,
         maxIframeDepth: 1,
         originalTargetUrl: effectiveTargetForWebParser,
+        ads: effectiveAds,
       );
       if (extracted != null) return extracted;
     }
     if (cancelled()) return null;
 
-    // Stage 3: Native ephemeral WKWebView sniffer (iOS / macOS, or injected test double).
-    final sniffer = webSniffer ?? debugSnifferOverride ?? _invokePlatformSniffer;
+    // Stage 3: Native ephemeral WebView sniffer (Windows WebView2 / iOS / macOS, or test double).
+    final customSniffer = webSniffer ?? debugSnifferOverride;
     final sniffCandidates = <String>[];
     if (webParsers.isNotEmpty) {
       sniffCandidates.add(
@@ -408,20 +558,33 @@ class WebMediaResolver {
       if (cancelled()) return null;
       final sniffUri = Uri.tryParse(sniffUrl);
       if (sniffUri == null) continue;
+      final matchedRules = effectiveRules
+          .where((r) => r.matchesHost(sniffUri.host))
+          .toList(growable: false);
       final sniffHeaders = _mergeHeaders([
         SourcePlayback.headersForOrigin(site.headers, sourceOrigin, sniffUri),
         SourcePlayback.headersForOrigin(extraHeaders, sourceOrigin, sniffUri),
       ]);
-      final sniffed = await sniffer(
-        sniffUrl,
-        sniffHeaders,
-        const Duration(seconds: 12),
-      );
+      final sniffed = customSniffer != null
+          ? await customSniffer(
+              sniffUrl,
+              sniffHeaders,
+              const Duration(seconds: 12),
+            )
+          : await _invokePlatformSniffer(
+              sniffUrl,
+              sniffHeaders,
+              const Duration(seconds: 12),
+              rules: matchedRules,
+              ads: effectiveAds,
+            );
       if (sniffed != null &&
           _isCandidateMediaUrl(
             sniffed.url,
             allowedOrigin: sniffUri,
             originalPageUrl: sniffUrl,
+            ads: effectiveAds,
+            matchedRules: matchedRules,
           )) {
         final mediaHeaders = <String, String>{
           'Referer': sniffUrl,
@@ -447,6 +610,7 @@ class WebMediaResolver {
     required Uri? sourceOrigin,
     required ResolverTextFetcher fetchDocument,
     required bool Function() cancelled,
+    List<String> ads = const [],
   }) async {
     for (final parser in parsers) {
       if (cancelled()) return null;
@@ -469,6 +633,7 @@ class WebMediaResolver {
               doc.finalUri.toString(),
               allowedOrigin: parserUri,
               originalPageUrl: targetUrl,
+              ads: ads,
             )) {
           return _buildResolvedMap(
             mediaUrl: doc.finalUri.toString(),
@@ -480,6 +645,7 @@ class WebMediaResolver {
           doc.body,
           allowedOrigin: doc.finalUri,
           originalTargetUrl: targetUrl,
+          ads: ads,
         );
         if (fromJson != null) return fromJson;
 
@@ -489,6 +655,7 @@ class WebMediaResolver {
           pageUri: doc.finalUri,
           effectiveRequestHeaders: doc.effectiveRequestHeaders,
           originalTargetUrl: targetUrl,
+          ads: ads,
         );
         if (fromHtml != null) return fromHtml;
       } catch (_) {
@@ -502,6 +669,7 @@ class WebMediaResolver {
     String rawBody, {
     required Uri allowedOrigin,
     required String originalTargetUrl,
+    List<String> ads = const [],
   }) {
     final trimmed = rawBody.trim();
     if (!trimmed.startsWith('{')) return null;
@@ -528,6 +696,7 @@ class WebMediaResolver {
         mediaUrl,
         allowedOrigin: allowedOrigin,
         originalPageUrl: originalTargetUrl,
+        ads: ads,
       )) {
         return null;
       }
@@ -591,6 +760,7 @@ class WebMediaResolver {
     required bool Function() cancelled,
     required int maxIframeDepth,
     String? originalTargetUrl,
+    List<String> ads = const [],
   }) async {
     var currentUrl = pageUrl;
     var refererHeader = extraHeaders['Referer'] ?? extraHeaders['referer'];
@@ -624,6 +794,7 @@ class WebMediaResolver {
             doc.finalUri.toString(),
             allowedOrigin: currentUri,
             originalPageUrl: originalTargetUrl,
+            ads: ads,
           )) {
         return (
           _buildResolvedMap(
@@ -639,6 +810,7 @@ class WebMediaResolver {
         doc.body,
         allowedOrigin: doc.finalUri,
         originalTargetUrl: originalTargetUrl ?? pageUrl,
+        ads: ads,
       );
       if (fromJson != null) return (fromJson, null);
 
@@ -647,6 +819,7 @@ class WebMediaResolver {
         pageUri: doc.finalUri,
         effectiveRequestHeaders: doc.effectiveRequestHeaders,
         originalTargetUrl: originalTargetUrl ?? pageUrl,
+        ads: ads,
       );
       if (fromHtml != null) return (fromHtml, null);
       if (nestedTarget != null && nestedTarget.isNotEmpty) {
@@ -654,7 +827,8 @@ class WebMediaResolver {
       }
 
       if (depth >= maxIframeDepth) break;
-      final iframeUrl = _extractFirstPlayerIframe(doc.body, doc.finalUri);
+      final iframeUrl =
+          _extractFirstPlayerIframe(doc.body, doc.finalUri, ads: ads);
       if (iframeUrl == null || iframeUrl == currentUrl) break;
       refererHeader = doc.finalUri.toString();
       currentUrl = iframeUrl;
@@ -668,6 +842,7 @@ class WebMediaResolver {
     required Uri pageUri,
     required Map<String, String> effectiveRequestHeaders,
     String? originalTargetUrl,
+    List<String> ads = const [],
   }) {
     if (html.trim().isEmpty) return (null, null);
 
@@ -683,6 +858,7 @@ class WebMediaResolver {
           candidateUrl,
           allowedOrigin: pageUri,
           originalPageUrl: originalTargetUrl,
+          ads: ads,
         )) {
           return (
             _buildResolvedMap(
@@ -696,7 +872,8 @@ class WebMediaResolver {
         }
         if (candidateUrl.isNotEmpty &&
             candidateUrl != pageUri.toString() &&
-            candidateUrl != originalTargetUrl) {
+            candidateUrl != originalTargetUrl &&
+            !isAdUrl(candidateUrl, ads: ads)) {
           nestedChainTarget ??= candidateUrl;
         }
       }
@@ -717,6 +894,7 @@ class WebMediaResolver {
               resolved,
               allowedOrigin: pageUri,
               originalPageUrl: originalTargetUrl,
+              ads: ads,
             ) &&
             !looksLikeWebPlayerPageUrl(resolved)) {
           return (
@@ -743,6 +921,7 @@ class WebMediaResolver {
               candidate,
               allowedOrigin: pageUri,
               originalPageUrl: originalTargetUrl,
+              ads: ads,
             )) {
           return (
             _buildResolvedMap(
@@ -767,6 +946,7 @@ class WebMediaResolver {
               candidate,
               allowedOrigin: pageUri,
               originalPageUrl: originalTargetUrl,
+              ads: ads,
             )) {
           return (
             _buildResolvedMap(
@@ -793,6 +973,7 @@ class WebMediaResolver {
             resolved,
             allowedOrigin: pageUri,
             originalPageUrl: originalTargetUrl,
+            ads: ads,
           )) {
         return (
           _buildResolvedMap(
@@ -816,6 +997,7 @@ class WebMediaResolver {
         candidate,
         allowedOrigin: pageUri,
         originalPageUrl: originalTargetUrl,
+        ads: ads,
       )) {
         return (
           _buildResolvedMap(
@@ -938,7 +1120,11 @@ class WebMediaResolver {
     }
   }
 
-  static String? _extractFirstPlayerIframe(String html, Uri pageUri) {
+  static String? _extractFirstPlayerIframe(
+    String html,
+    Uri pageUri, {
+    List<String> ads = const [],
+  }) {
     final iframePattern = RegExp(
       r'<iframe\b[^>]*?\bsrc\s*=\s*["\x27]([^"\x27]+)["\x27]',
       caseSensitive: false,
@@ -955,13 +1141,7 @@ class WebMediaResolver {
       if (resolved == null) continue;
       final uri = Uri.tryParse(resolved);
       if (uri == null || uri.host.isEmpty) continue;
-      final lower = resolved.toLowerCase();
-      if (lower.contains('googletagmanager') ||
-          lower.contains('google-analytics') ||
-          lower.contains('hm.baidu.com') ||
-          lower.contains('doubleclick.net') ||
-          lower.contains('/ads/') ||
-          lower.contains('adservice')) {
+      if (isAdUrl(resolved, ads: ads)) {
         continue;
       }
       if (!_sameOrigin(uri, pageUri) &&
@@ -1057,15 +1237,31 @@ class WebMediaResolver {
   static Future<WebSniffResult?> _invokePlatformSniffer(
     String url,
     Map<String, String> headers,
-    Duration timeout,
-  ) async {
-    if (!Platform.isIOS && !Platform.isMacOS) return null;
+    Duration timeout, {
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
+  }) async {
+    if (!Platform.isIOS && !Platform.isMacOS && !Platform.isWindows) {
+      return null;
+    }
+    final targetHost = Uri.tryParse(url)?.host ?? '';
+    final matchedRules = rules.where((r) => r.matchesHost(targetHost)).toList(growable: false);
+    final rulesPayload = [for (final r in matchedRules) r.toJson()];
+    final clickScripts = [
+      for (final r in matchedRules)
+        if (r.combinedClickScript.isNotEmpty) r.combinedClickScript,
+    ];
+    final clickScript = clickScripts.isEmpty ? null : clickScripts.join('\n');
     try {
       final response = await _channel
           .invokeMapMethod<String, dynamic>('sniffMedia', <String, dynamic>{
         'url': url,
         'headers': headers,
         'timeoutMs': timeout.inMilliseconds,
+        if (rulesPayload.isNotEmpty) 'rules': rulesPayload,
+        if (ads.isNotEmpty) 'ads': ads,
+        if (clickScript != null && clickScript.isNotEmpty)
+          'clickScript': clickScript,
       }).timeout(timeout + const Duration(seconds: 2), onTimeout: () => null);
       if (response == null) return null;
       final mediaUrl = (response['url'] ?? '').toString().trim();

@@ -4,17 +4,484 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
 import 'cloud_media_proxy.dart';
 
-enum _TargetKind { auto, playlist, tsSegment, raw }
+enum _TargetKind { auto, playlist, tsSegment, raw, kcache }
 
 class _RegisteredTarget {
   final Uri uri;
   final _TargetKind kind;
-  const _RegisteredTarget(this.uri, this.kind);
+  final DiskBlockCache? diskCache;
+  final String? cacheKey;
+  const _RegisteredTarget(
+    this.uri,
+    this.kind, {
+    this.diskCache,
+    this.cacheKey,
+  });
+}
+
+class _ByteRangeSpec {
+  final int start;
+  final int? end;
+  final int? suffixLength;
+  const _ByteRangeSpec({
+    required this.start,
+    this.end,
+    this.suffixLength,
+  });
+
+  static _ByteRangeSpec? parse(String? rawHeader) {
+    if (rawHeader == null) return null;
+    final trimmed = rawHeader.trim();
+    if (!trimmed.toLowerCase().startsWith('bytes=')) return null;
+    final spec = trimmed.substring(6).split(',').first.trim();
+    if (spec.isEmpty) return null;
+    final dash = spec.indexOf('-');
+    if (dash < 0) return null;
+    final left = spec.substring(0, dash).trim();
+    final right = spec.substring(dash + 1).trim();
+    if (left.isEmpty) {
+      final suffix = int.tryParse(right);
+      if (suffix == null || suffix <= 0) return null;
+      return _ByteRangeSpec(start: 0, suffixLength: suffix);
+    }
+    final start = int.tryParse(left);
+    if (start == null || start < 0) return null;
+    if (right.isEmpty) {
+      return _ByteRangeSpec(start: start);
+    }
+    final end = int.tryParse(right);
+    if (end == null || end < start) return null;
+    return _ByteRangeSpec(start: start, end: end);
+  }
+}
+
+class DiskCacheEntryMeta {
+  final String cacheKey;
+  final int? totalLength;
+  final String? contentType;
+  final String? etag;
+  final int lastAccessMs;
+
+  const DiskCacheEntryMeta({
+    required this.cacheKey,
+    this.totalLength,
+    this.contentType,
+    this.etag,
+    required this.lastAccessMs,
+  });
+
+  DiskCacheEntryMeta copyWith({
+    int? totalLength,
+    String? contentType,
+    String? etag,
+    int? lastAccessMs,
+  }) {
+    return DiskCacheEntryMeta(
+      cacheKey: cacheKey,
+      totalLength: totalLength ?? this.totalLength,
+      contentType: contentType ?? this.contentType,
+      etag: etag ?? this.etag,
+      lastAccessMs: lastAccessMs ?? this.lastAccessMs,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'cacheKey': cacheKey,
+        if (totalLength != null) 'totalLength': totalLength,
+        if (contentType != null && contentType!.isNotEmpty)
+          'contentType': contentType,
+        if (etag != null && etag!.isNotEmpty) 'etag': etag,
+        'lastAccessMs': lastAccessMs,
+      };
+
+  static DiskCacheEntryMeta? fromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    final key = (raw['cacheKey'] ?? '').toString();
+    if (key.isEmpty) return null;
+    return DiskCacheEntryMeta(
+      cacheKey: key,
+      totalLength: (raw['totalLength'] as num?)?.toInt(),
+      contentType: raw['contentType']?.toString(),
+      etag: raw['etag']?.toString(),
+      lastAccessMs: (raw['lastAccessMs'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+/// 256 KiB aligned block-level disk cache for seekable desktop media streams
+/// (`/kcache/<sid>`), with atomic block writes, ETag invalidation, and LRU eviction.
+class DiskBlockCache {
+  static const int blockSize = 256 * 1024; // 256 KiB
+  static const int defaultMaxBytes = 512 * 1024 * 1024; // 512 MB
+  static const List<int> supportedMaxMbOptions = <int>[0, 256, 512, 1024, 2048];
+
+  static Directory defaultCacheDirectory() {
+    if (Platform.isWindows) {
+      final localAppData = (Platform.environment['LOCALAPPDATA'] ?? '').trim();
+      if (localAppData.isNotEmpty) {
+        return Directory(
+          '$localAppData${Platform.pathSeparator}MarcoMovie${Platform.pathSeparator}cache${Platform.pathSeparator}media-cache',
+        );
+      }
+    }
+    return Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}MarcoMovie${Platform.pathSeparator}cache${Platform.pathSeparator}media-cache',
+    );
+  }
+
+  static final DiskBlockCache instance = DiskBlockCache();
+
+  final Directory? _explicitDirectory;
+  final DateTime Function() _clock;
+  int _maxBytes;
+  Future<void> _ioChain = Future<void>.value();
+  int _tmpSeq = 0;
+
+  DiskBlockCache({
+    Directory? directory,
+    int maxBytes = defaultMaxBytes,
+    DateTime Function()? clock,
+  })  : _explicitDirectory = directory,
+        _maxBytes = maxBytes < 0 ? 0 : maxBytes,
+        _clock = clock ?? DateTime.now;
+
+  Directory get cacheDirectory => _explicitDirectory ?? defaultCacheDirectory();
+  int get maxBytes => _maxBytes;
+  bool get isEnabled => _maxBytes > 0;
+
+  static String hashKey(String cacheKey) =>
+      sha256.convert(utf8.encode(cacheKey)).toString();
+
+  Future<T> _serialized<T>(Future<T> Function() action) {
+    final next = _ioChain.then((_) => action());
+    _ioChain = next.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    return next;
+  }
+
+  Directory _entryDirForHash(String keyHash) =>
+      Directory('${cacheDirectory.path}${Platform.pathSeparator}$keyHash');
+
+  File _metaFileForHash(String keyHash) =>
+      File('${_entryDirForHash(keyHash).path}${Platform.pathSeparator}meta.json');
+
+  File _blockFileForHash(String keyHash, int blockIndex) => File(
+      '${_entryDirForHash(keyHash).path}${Platform.pathSeparator}$blockIndex.blk');
+
+  Future<void> setMaxBytes(int bytes) => _serialized(() async {
+        _maxBytes = bytes < 0 ? 0 : bytes;
+        if (_maxBytes == 0) {
+          await _clearAllInternal();
+          return;
+        }
+        await _evictLruInternal();
+      });
+
+  Future<void> setMaxMegabytes(int mb) =>
+      setMaxBytes(mb <= 0 ? 0 : mb * 1024 * 1024);
+
+  Future<int> currentCacheBytes() => _serialized(() async {
+        return _computeCurrentBytesSync();
+      });
+
+  Future<void> flush() => _serialized(() async {});
+
+  int _computeCurrentBytesSync() {
+    final root = cacheDirectory;
+    if (!root.existsSync()) return 0;
+    var total = 0;
+    for (final entry in root.listSync(followLinks: false)) {
+      if (entry is! Directory) continue;
+      for (final file in entry.listSync(followLinks: false)) {
+        if (file is File && file.path.endsWith('.blk')) {
+          try {
+            total += file.lengthSync();
+          } catch (_) {}
+        }
+      }
+    }
+    return total;
+  }
+
+  Future<void> clearDiskCache() => _serialized(_clearAllInternal);
+
+  Future<void> _clearAllInternal() async {
+    final root = cacheDirectory;
+    if (!root.existsSync()) return;
+    for (final entity in root.listSync(followLinks: false)) {
+      try {
+        await entity.delete(recursive: true);
+      } catch (_) {}
+    }
+  }
+
+  DiskCacheEntryMeta? _readMetaSync(String keyHash) {
+    final f = _metaFileForHash(keyHash);
+    if (!f.existsSync()) return null;
+    try {
+      return DiskCacheEntryMeta.fromJson(jsonDecode(f.readAsStringSync()));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _writeMetaAtomic(String keyHash, DiskCacheEntryMeta meta) async {
+    final dir = _entryDirForHash(keyHash);
+    if (!dir.existsSync()) {
+      await dir.create(recursive: true);
+    }
+    final tmp = File(
+      '${dir.path}${Platform.pathSeparator}meta.${++_tmpSeq}.tmp',
+    );
+    await tmp.writeAsString(jsonEncode(meta.toJson()), flush: true);
+    final dest = _metaFileForHash(keyHash);
+    if (dest.existsSync()) {
+      try {
+        await dest.delete();
+      } catch (_) {}
+    }
+    await tmp.rename(dest.path);
+  }
+
+  Future<DiskCacheEntryMeta?> getMeta(String cacheKey) => _serialized(() async {
+        if (_maxBytes <= 0) return null;
+        return _readMetaSync(hashKey(cacheKey));
+      });
+
+  Future<void> updateMeta(
+    String cacheKey, {
+    int? totalLength,
+    String? contentType,
+    String? etag,
+  }) =>
+      _serialized(() async {
+        if (_maxBytes <= 0) return;
+        final keyHash = hashKey(cacheKey);
+        final existing = _readMetaSync(keyHash);
+        if (existing != null &&
+            etag != null &&
+            etag.isNotEmpty &&
+            existing.etag != null &&
+            existing.etag!.isNotEmpty &&
+            existing.etag != etag) {
+          final dir = _entryDirForHash(keyHash);
+          if (dir.existsSync()) {
+            try {
+              await dir.delete(recursive: true);
+            } catch (_) {}
+          }
+        }
+        final nowMs = _clock().millisecondsSinceEpoch;
+        final base = _readMetaSync(keyHash) ??
+            DiskCacheEntryMeta(cacheKey: cacheKey, lastAccessMs: nowMs);
+        await _writeMetaAtomic(
+          keyHash,
+          base.copyWith(
+            totalLength: totalLength,
+            contentType: contentType,
+            etag: etag,
+            lastAccessMs: nowMs,
+          ),
+        );
+      });
+
+  Future<Uint8List?> readBlock(String cacheKey, int blockIndex) =>
+      _serialized(() async {
+        if (_maxBytes <= 0 || blockIndex < 0) return null;
+        final keyHash = hashKey(cacheKey);
+        final f = _blockFileForHash(keyHash, blockIndex);
+        if (!f.existsSync()) return null;
+        try {
+          final bytes = await f.readAsBytes();
+          if (bytes.isEmpty || bytes.length > blockSize) return null;
+          final now = _clock();
+          try {
+            await f.setLastModified(now);
+          } catch (_) {}
+          final meta = _readMetaSync(keyHash);
+          if (meta != null) {
+            await _writeMetaAtomic(
+              keyHash,
+              meta.copyWith(lastAccessMs: now.millisecondsSinceEpoch),
+            );
+          }
+          return bytes;
+        } catch (_) {
+          return null;
+        }
+      });
+
+  Future<bool> hasBlock(String cacheKey, int blockIndex) =>
+      _serialized(() async {
+        if (_maxBytes <= 0 || blockIndex < 0) return false;
+        return _blockFileForHash(hashKey(cacheKey), blockIndex).existsSync();
+      });
+
+  Future<void> writeBlock(
+    String cacheKey,
+    int blockIndex,
+    Uint8List data, {
+    int? totalLength,
+    String? contentType,
+    String? etag,
+  }) =>
+      _serialized(() async {
+        if (_maxBytes <= 0 ||
+            blockIndex < 0 ||
+            data.isEmpty ||
+            data.length > blockSize ||
+            data.length > _maxBytes) {
+          return;
+        }
+        final keyHash = hashKey(cacheKey);
+        final dir = _entryDirForHash(keyHash);
+        if (!dir.existsSync()) {
+          await dir.create(recursive: true);
+        }
+        final existing = _readMetaSync(keyHash);
+        if (existing != null &&
+            etag != null &&
+            etag.isNotEmpty &&
+            existing.etag != null &&
+            existing.etag!.isNotEmpty &&
+            existing.etag != etag) {
+          for (final item in dir.listSync(followLinks: false)) {
+            if (item is File && item.path.endsWith('.blk')) {
+              try {
+                await item.delete();
+              } catch (_) {}
+            }
+          }
+        }
+
+        final tmp = File(
+          '${dir.path}${Platform.pathSeparator}$blockIndex.${++_tmpSeq}.tmp',
+        );
+        await tmp.writeAsBytes(data, flush: true);
+        final dest = _blockFileForHash(keyHash, blockIndex);
+        if (dest.existsSync()) {
+          try {
+            await dest.delete();
+          } catch (_) {}
+        }
+        await tmp.rename(dest.path);
+        final now = _clock();
+        try {
+          await dest.setLastModified(now);
+        } catch (_) {}
+
+        final base = _readMetaSync(keyHash) ??
+            DiskCacheEntryMeta(
+              cacheKey: cacheKey,
+              lastAccessMs: now.millisecondsSinceEpoch,
+            );
+        await _writeMetaAtomic(
+          keyHash,
+          base.copyWith(
+            totalLength: totalLength,
+            contentType: contentType,
+            etag: etag,
+            lastAccessMs: now.millisecondsSinceEpoch,
+          ),
+        );
+
+        await _evictLruInternal(
+          protectedKeyHash: keyHash,
+          protectedBlockIndex: blockIndex,
+        );
+      });
+
+  Future<void> _evictLruInternal({
+    String? protectedKeyHash,
+    int? protectedBlockIndex,
+  }) async {
+    final root = cacheDirectory;
+    if (!root.existsSync()) return;
+    final candidates = <({
+      String keyHash,
+      int blockIndex,
+      int size,
+      int accessMs,
+      File file,
+    })>[];
+    var total = 0;
+
+    for (final entry in root.listSync(followLinks: false)) {
+      if (entry is! Directory) continue;
+      final keyHash = entry.path.split(Platform.pathSeparator).last;
+      final meta = _readMetaSync(keyHash);
+      final metaAccessMs = meta?.lastAccessMs ?? 0;
+      for (final file in entry.listSync(followLinks: false)) {
+        if (file is! File) continue;
+        final name = file.path.split(Platform.pathSeparator).last;
+        if (name.endsWith('.tmp')) {
+          try {
+            await file.delete();
+          } catch (_) {}
+          continue;
+        }
+        if (!name.endsWith('.blk')) continue;
+        final idx = int.tryParse(name.substring(0, name.length - 4));
+        if (idx == null) continue;
+        try {
+          final stat = file.statSync();
+          total += stat.size;
+          final modMs = stat.modified.millisecondsSinceEpoch;
+          // Combine block mtime with entry access time (max ensures entry reads bump priority,
+          // while mtime differentiates blocks inside the same entry).
+          final accessMs = modMs > metaAccessMs ? modMs : metaAccessMs;
+          candidates.add((
+            keyHash: keyHash,
+            blockIndex: idx,
+            size: stat.size,
+            accessMs: accessMs,
+            file: file,
+          ));
+        } catch (_) {}
+      }
+    }
+
+    if (total <= _maxBytes) return;
+
+    candidates.sort((a, b) {
+      final cmp = a.accessMs.compareTo(b.accessMs);
+      if (cmp != 0) return cmp;
+      final kCmp = a.keyHash.compareTo(b.keyHash);
+      if (kCmp != 0) return kCmp;
+      return a.blockIndex.compareTo(b.blockIndex);
+    });
+
+    final touchedDirs = <String>{};
+    for (final c in candidates) {
+      if (total <= _maxBytes) break;
+      if (c.keyHash == protectedKeyHash && c.blockIndex == protectedBlockIndex) {
+        continue;
+      }
+      try {
+        await c.file.delete();
+        total -= c.size;
+        touchedDirs.add(c.keyHash);
+      } catch (_) {}
+    }
+
+    for (final keyHash in touchedDirs) {
+      final dir = _entryDirForHash(keyHash);
+      if (!dir.existsSync()) continue;
+      final hasBlocks = dir
+          .listSync(followLinks: false)
+          .any((f) => f is File && f.path.endsWith('.blk'));
+      if (!hasBlocks) {
+        try {
+          await dir.delete(recursive: true);
+        } catch (_) {}
+      }
+    }
+  }
 }
 
 class _StoredCookie {
@@ -185,6 +652,8 @@ class _SessionCookieJar {
 /// HLS `.m3u8` manifest rewriting, and fake PNG/JPG/GIF header stripping on MPEG-TS
 /// segments so `libmpv` receives a clean local stream.
 class LocalMediaLease {
+  static bool defaultHlsAdStripEnabled = true;
+
   LocalMediaLease._(
     this._server,
     this._client,
@@ -195,9 +664,23 @@ class LocalMediaLease {
     this._capability,
     this._clock,
     this._isLive,
+    this._stripHlsAds,
+    this._adPatterns,
+    this._diskCache,
+    bool enableDiskCache,
+    String? diskCacheKey,
   )   : _initialOrigin = _originOf(initialTarget),
         _created = _clock() {
-    _initialUrl = _register(initialTarget, _inferInitialKind(initialTarget));
+    final initialKind = _inferInitialKind(initialTarget);
+    if (enableDiskCache && !_isLive && initialKind != _TargetKind.playlist) {
+      _initialUrl = registerDiskCacheStream(
+        initialTarget,
+        cacheKey: diskCacheKey,
+        diskCache: _diskCache,
+      );
+    } else {
+      _initialUrl = _register(initialTarget, initialKind);
+    }
     _server.listen(_serve);
     _timer = Timer.periodic(const Duration(seconds: 2), (_) => _sweep());
   }
@@ -242,12 +725,16 @@ class LocalMediaLease {
   final String _capability;
   final DateTime Function() _clock;
   final bool _isLive;
+  final bool _stripHlsAds;
+  final List<String> _adPatterns;
+  final DiskBlockCache _diskCache;
   final DateTime _created;
   final _cookieJar = _SessionCookieJar();
   final _targets = <String, _RegisteredTarget>{};
   final _paths = <String, String>{};
   final _requests = <HttpRequest>{};
   final _upstreams = <StreamSubscription<List<int>>>{};
+  int _kcacheSeq = 0;
   late final Uri _initialUrl;
   http.Client? _directOnlyClient;
   Timer? _timer;
@@ -261,6 +748,34 @@ class LocalMediaLease {
   int? get lastUpstreamStatusCode => _lastUpstreamStatusCode;
   String? get lastUpstreamHost => _lastUpstreamHost;
   Object? get lastUpstreamError => _lastUpstreamError;
+
+  /// Registers a seekable stream on `/kcache/<sid>` backed by [DiskBlockCache].
+  Uri registerDiskCacheStream(
+    Uri target, {
+    String? cacheKey,
+    DiskBlockCache? diskCache,
+  }) {
+    if (_closed || !_canRegisterTarget(target)) {
+      throw const FormatException('媒体分片或重定向目标不受信任');
+    }
+    final resolvedCacheKey =
+        (cacheKey != null && cacheKey.trim().isNotEmpty)
+            ? cacheKey.trim()
+            : target.toString();
+    final key = '${_TargetKind.kcache.name}|$resolvedCacheKey|$target';
+    final path = _paths.putIfAbsent(key, () {
+      final sid = '${_capability}_${_kcacheSeq++}';
+      final p = '/kcache/$sid';
+      _targets[p] = _RegisteredTarget(
+        target,
+        _TargetKind.kcache,
+        diskCache: diskCache ?? _diskCache,
+        cacheKey: resolvedCacheKey,
+      );
+      return p;
+    });
+    return Uri.parse('http://127.0.0.1:${_server.port}$path');
+  }
 
   /// Registers a companion stream (e.g. separate DASH `.m4s` audio track) onto
   /// this session's loopback gateway so it receives the same anti-leech headers.
@@ -401,6 +916,11 @@ class LocalMediaLease {
     DateTime Function()? clock,
     http.Client? client,
     bool isLive = false,
+    bool? stripHlsAds,
+    List<String> adPatterns = const [],
+    bool enableDiskCache = false,
+    DiskBlockCache? diskCache,
+    String? diskCacheKey,
   }) async {
     if (!shouldProxy(target)) {
       throw const FormatException('本地媒体代理仅接受远程 HTTP/HTTPS 流地址');
@@ -439,6 +959,11 @@ class LocalMediaLease {
       capability,
       clock ?? DateTime.now,
       isLive,
+      stripHlsAds ?? defaultHlsAdStripEnabled,
+      List<String>.unmodifiable(adPatterns),
+      diskCache ?? DiskBlockCache.instance,
+      enableDiskCache,
+      diskCacheKey,
     );
   }
 
@@ -833,6 +1358,10 @@ class LocalMediaLease {
 
     _requests.add(request);
     try {
+      if (registered.kind == _TargetKind.kcache) {
+        await _serveKcacheRequest(request, registered);
+        return;
+      }
       final range = request.headers.value(HttpHeaders.rangeHeader);
       final ifRange = request.headers.value(HttpHeaders.ifRangeHeader);
       final isExplicitPlaylist = registered.kind == _TargetKind.playlist ||
@@ -929,6 +1458,770 @@ class LocalMediaLease {
         await request.response.close();
       } catch (_) {}
     }
+  }
+
+  Future<void> _serveKcacheRequest(
+    HttpRequest request,
+    _RegisteredTarget registered,
+  ) async {
+    final cache = registered.diskCache ?? _diskCache;
+    final cacheKey = registered.cacheKey ?? registered.uri.toString();
+    final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
+    final ifRange = request.headers.value(HttpHeaders.ifRangeHeader);
+
+    if (!cache.isEnabled) {
+      final (response, finalTarget) = await _sendWithRedirects(
+        registered.uri,
+        method: request.method,
+        range: rangeHeader,
+        ifRange: ifRange,
+        allowRange: true,
+      );
+      if (response.statusCode == 416) {
+        await response.stream.listen((_) {}).cancel();
+        final (fallbackResp, _) = await _sendWithRedirects(
+          registered.uri,
+          method: request.method,
+          allowRange: false,
+        );
+        _copyResponseHeaders(fallbackResp, request.response);
+        request.response.statusCode = fallbackResp.statusCode;
+        if (request.method == 'HEAD') {
+          await fallbackResp.stream.listen((_) {}).cancel();
+          return;
+        }
+        await _pipeMediaStream(fallbackResp.stream, request.response);
+        return;
+      }
+      _lastUpstreamStatusCode = response.statusCode;
+      _lastUpstreamHost = finalTarget.host;
+      _copyResponseHeaders(response, request.response);
+      request.response.statusCode = response.statusCode;
+      if (request.method == 'HEAD') {
+        await response.stream.listen((_) {}).cancel();
+        return;
+      }
+      await _pipeMediaStream(response.stream, request.response);
+      return;
+    }
+
+    if (request.method == 'HEAD') {
+      final meta = await cache.getMeta(cacheKey);
+      if (meta?.totalLength != null) {
+        request.response.statusCode = HttpStatus.ok;
+        request.response.headers.set('accept-ranges', 'bytes');
+        request.response.headers.set(
+          'content-type',
+          meta!.contentType ?? 'application/octet-stream',
+        );
+        request.response.headers.set('cache-control', 'no-store');
+        request.response.contentLength = meta.totalLength!;
+        return;
+      }
+      final (response, finalTarget) = await _sendWithRedirects(
+        registered.uri,
+        method: 'HEAD',
+        allowRange: false,
+      );
+      _lastUpstreamStatusCode = response.statusCode;
+      _lastUpstreamHost = finalTarget.host;
+      await response.stream.listen((_) {}).cancel();
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final len = int.tryParse(response.headers['content-length'] ?? '');
+        if (len != null && len >= 0) {
+          await cache.updateMeta(
+            cacheKey,
+            totalLength: len,
+            contentType: response.headers['content-type'],
+            etag: response.headers['etag'],
+          );
+        }
+      }
+      _copyResponseHeaders(response, request.response);
+      request.response.statusCode = response.statusCode;
+      return;
+    }
+
+    final reqRange = _ByteRangeSpec.parse(rangeHeader);
+    var meta = await cache.getMeta(cacheKey);
+
+    if (meta?.totalLength == null) {
+      await _probeAndServeKcache(
+        request: request,
+        registered: registered,
+        cache: cache,
+        cacheKey: cacheKey,
+        reqRange: reqRange,
+        ifRange: ifRange,
+      );
+      return;
+    }
+
+    await _serveKcacheWithKnownLength(
+      request: request,
+      registered: registered,
+      cache: cache,
+      cacheKey: cacheKey,
+      reqRange: reqRange,
+      total: meta!.totalLength!,
+      contentType: meta.contentType,
+      etag: meta.etag,
+    );
+  }
+
+  static ({int start, int end, int? total})? _parseContentRange(String? raw) {
+    if (raw == null || raw.isEmpty) return null;
+    final m = RegExp(
+      r'^bytes\s+(\d+)-(\d+)/(\d+|\*)$',
+      caseSensitive: false,
+    ).firstMatch(raw.trim());
+    if (m == null) return null;
+    final start = int.tryParse(m.group(1)!);
+    final end = int.tryParse(m.group(2)!);
+    final total = m.group(3) == '*' ? null : int.tryParse(m.group(3)!);
+    if (start == null || end == null || end < start) return null;
+    return (start: start, end: end, total: total);
+  }
+
+  Future<void> _probeAndServeKcache({
+    required HttpRequest request,
+    required _RegisteredTarget registered,
+    required DiskBlockCache cache,
+    required String cacheKey,
+    required _ByteRangeSpec? reqRange,
+    required String? ifRange,
+  }) async {
+    String? probeRange;
+    if (reqRange?.suffixLength != null) {
+      probeRange = 'bytes=-${reqRange!.suffixLength!}';
+    } else {
+      final start = reqRange?.start ?? 0;
+      final startBlock = start ~/ DiskBlockCache.blockSize;
+      final endBlock = reqRange?.end != null
+          ? (reqRange!.end! ~/ DiskBlockCache.blockSize)
+          : startBlock;
+      final alignedStart = startBlock * DiskBlockCache.blockSize;
+      final alignedEnd =
+          (endBlock + 1) * DiskBlockCache.blockSize - 1;
+      probeRange = 'bytes=$alignedStart-$alignedEnd';
+    }
+
+    var (response, finalTarget) = await _sendWithRedirects(
+      registered.uri,
+      method: 'GET',
+      range: probeRange,
+      ifRange: ifRange,
+      allowRange: true,
+    );
+
+    if (_closed || _isCancelled()) {
+      await response.stream.listen((_) {}).cancel();
+      request.response.statusCode = HttpStatus.gone;
+      return;
+    }
+
+    if (response.statusCode == HttpStatus.requestedRangeNotSatisfiable) {
+      await response.stream.listen((_) {}).cancel();
+      (response, finalTarget) = await _sendWithRedirects(
+        registered.uri,
+        method: 'GET',
+        allowRange: false,
+      );
+      if (_closed || _isCancelled()) {
+        await response.stream.listen((_) {}).cancel();
+        request.response.statusCode = HttpStatus.gone;
+        return;
+      }
+    }
+
+    _lastUpstreamStatusCode = response.statusCode;
+    _lastUpstreamHost = finalTarget.host;
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      await response.stream.listen((_) {}).cancel();
+      request.response.statusCode = response.statusCode;
+      return;
+    }
+    _lastUpstreamError = null;
+
+    final contentType = response.headers['content-type'];
+    final etag = response.headers['etag'];
+
+    if (response.statusCode == HttpStatus.ok) {
+      await _ingestFullStreamToCacheAndRespond(
+        upstream: response,
+        downstream: request.response,
+        cache: cache,
+        cacheKey: cacheKey,
+        reqRange: reqRange,
+        contentType: contentType,
+        etag: etag,
+      );
+      return;
+    }
+
+    // 206 Partial Content
+    final cr = _parseContentRange(response.headers['content-range']);
+    if (cr == null) {
+      await _ingestFullStreamToCacheAndRespond(
+        upstream: response,
+        downstream: request.response,
+        cache: cache,
+        cacheKey: cacheKey,
+        reqRange: reqRange,
+        contentType: contentType,
+        etag: etag,
+      );
+      return;
+    }
+
+    final chunkData = await _readBoundedBytes(response.stream);
+    final total = cr.total ??
+        ((cr.end - cr.start + 1 == chunkData.length &&
+                chunkData.length < DiskBlockCache.blockSize)
+            ? cr.end + 1
+            : null);
+
+    await _storeAlignedBlocksFromSlice(
+      cache: cache,
+      cacheKey: cacheKey,
+      sliceStart: cr.start,
+      data: chunkData,
+      totalLength: total,
+      contentType: contentType,
+      etag: etag,
+    );
+
+    if (total == null) {
+      request.response.statusCode = HttpStatus.partialContent;
+      request.response.headers.set('accept-ranges', 'bytes');
+      if (contentType != null && contentType.isNotEmpty) {
+        request.response.headers.set('content-type', contentType);
+      }
+      request.response.headers.set(
+        'content-range',
+        'bytes ${cr.start}-${cr.start + chunkData.length - 1}/*',
+      );
+      request.response.contentLength = chunkData.length;
+      request.response.add(chunkData);
+      return;
+    }
+
+    await _serveKcacheWithKnownLength(
+      request: request,
+      registered: registered,
+      cache: cache,
+      cacheKey: cacheKey,
+      reqRange: reqRange,
+      total: total,
+      contentType: contentType,
+      etag: etag,
+    );
+  }
+
+  Future<Uint8List> _readBoundedBytes(Stream<List<int>> stream) async {
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in stream.timeout(const Duration(seconds: 30))) {
+      if (_closed || _isCancelled()) throw StateError('cancelled');
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
+
+  Future<void> _storeAlignedBlocksFromSlice({
+    required DiskBlockCache cache,
+    required String cacheKey,
+    required int sliceStart,
+    required Uint8List data,
+    required int? totalLength,
+    String? contentType,
+    String? etag,
+  }) async {
+    if (data.isEmpty) return;
+    await cache.updateMeta(
+      cacheKey,
+      totalLength: totalLength,
+      contentType: contentType,
+      etag: etag,
+    );
+    var offset = 0;
+    while (offset < data.length) {
+      final absPos = sliceStart + offset;
+      final blockIdx = absPos ~/ DiskBlockCache.blockSize;
+      final blockStart = blockIdx * DiskBlockCache.blockSize;
+      final inBlockOffset = absPos - blockStart;
+      final remainingInBlock = DiskBlockCache.blockSize - inBlockOffset;
+      final take = math.min(remainingInBlock, data.length - offset);
+      final endsAtTotal =
+          totalLength != null && (absPos + take) >= totalLength;
+      if (inBlockOffset == 0 &&
+          (take == DiskBlockCache.blockSize || endsAtTotal)) {
+        await cache.writeBlock(
+          cacheKey,
+          blockIdx,
+          Uint8List.sublistView(data, offset, offset + take),
+          totalLength: totalLength,
+          contentType: contentType,
+          etag: etag,
+        );
+      }
+      offset += take;
+    }
+  }
+
+  Future<void> _ingestFullStreamToCacheAndRespond({
+    required http.StreamedResponse upstream,
+    required HttpResponse downstream,
+    required DiskBlockCache cache,
+    required String cacheKey,
+    required _ByteRangeSpec? reqRange,
+    String? contentType,
+    String? etag,
+  }) async {
+    final headerLen = int.tryParse(upstream.headers['content-length'] ?? '');
+    if (headerLen == null) {
+      final allBytes = await _readBoundedBytes(upstream.stream);
+      final total = allBytes.length;
+      await _storeAlignedBlocksFromSlice(
+        cache: cache,
+        cacheKey: cacheKey,
+        sliceStart: 0,
+        data: allBytes,
+        totalLength: total,
+        contentType: contentType,
+        etag: etag,
+      );
+      _writeSingleBufferRangeResponse(
+        downstream: downstream,
+        fullOrRangeData: allBytes,
+        total: total,
+        reqRange: reqRange,
+        contentType: contentType,
+      );
+      return;
+    }
+
+    final total = headerLen;
+    await cache.updateMeta(
+      cacheKey,
+      totalLength: total,
+      contentType: contentType,
+      etag: etag,
+    );
+
+    final int reqStart;
+    final int reqEnd;
+    final bool isRange;
+    if (reqRange == null) {
+      reqStart = 0;
+      reqEnd = total - 1;
+      isRange = false;
+    } else if (reqRange.suffixLength != null) {
+      reqStart = math.max(0, total - reqRange.suffixLength!);
+      reqEnd = total - 1;
+      isRange = true;
+    } else {
+      reqStart = reqRange.start;
+      reqEnd = reqRange.end != null
+          ? math.min(reqRange.end!, total - 1)
+          : total - 1;
+      isRange = true;
+    }
+
+    if (total > 0 && (reqStart >= total || reqStart > reqEnd)) {
+      await upstream.stream.listen((_) {}).cancel();
+      downstream.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+      downstream.headers.set('content-range', 'bytes */$total');
+      return;
+    }
+
+    downstream.bufferOutput = false;
+    downstream.statusCode =
+        isRange ? HttpStatus.partialContent : HttpStatus.ok;
+    downstream.headers.set('accept-ranges', 'bytes');
+    if (contentType != null && contentType.isNotEmpty) {
+      downstream.headers.set('content-type', contentType);
+    }
+    downstream.headers.set('cache-control', 'no-store');
+    if (isRange) {
+      downstream.headers.set('content-range', 'bytes $reqStart-$reqEnd/$total');
+    }
+    downstream.contentLength = total == 0 ? 0 : (reqEnd - reqStart + 1);
+    if (total == 0) {
+      await upstream.stream.listen((_) {}).cancel();
+      return;
+    }
+
+    final blockAcc = BytesBuilder(copy: false);
+    var currentBlockIdx = 0;
+    var streamOffset = 0;
+
+    await for (final chunk
+        in upstream.stream.timeout(const Duration(seconds: 30))) {
+      if (_closed || _isCancelled()) throw StateError('cancelled');
+      final chunkStart = streamOffset;
+      final chunkEnd = streamOffset + chunk.length - 1;
+      streamOffset += chunk.length;
+
+      // Feed block accumulator
+      var pos = 0;
+      while (pos < chunk.length) {
+        final needed = DiskBlockCache.blockSize - blockAcc.length;
+        final take = math.min(needed, chunk.length - pos);
+        blockAcc.add(
+          pos == 0 && take == chunk.length
+              ? chunk
+              : Uint8List.sublistView(
+                  Uint8List.fromList(chunk),
+                  pos,
+                  pos + take,
+                ),
+        );
+        pos += take;
+        if (blockAcc.length == DiskBlockCache.blockSize) {
+          await cache.writeBlock(
+            cacheKey,
+            currentBlockIdx++,
+            blockAcc.takeBytes(),
+            totalLength: total,
+            contentType: contentType,
+            etag: etag,
+          );
+        }
+      }
+
+      // Forward requested slice
+      if (chunkEnd >= reqStart && chunkStart <= reqEnd) {
+        final s = math.max(0, reqStart - chunkStart);
+        final e = math.min(chunk.length, reqEnd - chunkStart + 1);
+        if (e > s) {
+          downstream.add(
+            s == 0 && e == chunk.length
+                ? chunk
+                : chunk.sublist(s, e),
+          );
+        }
+      }
+    }
+
+    if (blockAcc.length > 0) {
+      await cache.writeBlock(
+        cacheKey,
+        currentBlockIdx,
+        blockAcc.takeBytes(),
+        totalLength: total,
+        contentType: contentType,
+        etag: etag,
+      );
+    }
+    await downstream.flush().timeout(const Duration(seconds: 30));
+  }
+
+  void _writeSingleBufferRangeResponse({
+    required HttpResponse downstream,
+    required Uint8List fullOrRangeData,
+    required int total,
+    required _ByteRangeSpec? reqRange,
+    String? contentType,
+  }) {
+    if (total == 0 && reqRange == null) {
+      downstream.statusCode = HttpStatus.ok;
+      downstream.headers.set('accept-ranges', 'bytes');
+      downstream.contentLength = 0;
+      return;
+    }
+    final int reqStart;
+    final int reqEnd;
+    final bool isRange;
+    if (reqRange == null) {
+      reqStart = 0;
+      reqEnd = total - 1;
+      isRange = false;
+    } else if (reqRange.suffixLength != null) {
+      reqStart = math.max(0, total - reqRange.suffixLength!);
+      reqEnd = total - 1;
+      isRange = true;
+    } else {
+      reqStart = reqRange.start;
+      reqEnd = reqRange.end != null
+          ? math.min(reqRange.end!, total - 1)
+          : total - 1;
+      isRange = true;
+    }
+    if (reqStart >= total || reqStart > reqEnd) {
+      downstream.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+      downstream.headers.set('content-range', 'bytes */$total');
+      return;
+    }
+    downstream.statusCode =
+        isRange ? HttpStatus.partialContent : HttpStatus.ok;
+    downstream.headers.set('accept-ranges', 'bytes');
+    if (contentType != null && contentType.isNotEmpty) {
+      downstream.headers.set('content-type', contentType);
+    }
+    downstream.headers.set('cache-control', 'no-store');
+    if (isRange) {
+      downstream.headers.set('content-range', 'bytes $reqStart-$reqEnd/$total');
+    }
+    final slice = Uint8List.sublistView(fullOrRangeData, reqStart, reqEnd + 1);
+    downstream.contentLength = slice.length;
+    downstream.add(slice);
+  }
+
+  Future<void> _serveKcacheWithKnownLength({
+    required HttpRequest request,
+    required _RegisteredTarget registered,
+    required DiskBlockCache cache,
+    required String cacheKey,
+    required _ByteRangeSpec? reqRange,
+    required int total,
+    String? contentType,
+    String? etag,
+  }) async {
+    final downstream = request.response;
+    if (total == 0 && reqRange == null) {
+      downstream.statusCode = HttpStatus.ok;
+      downstream.headers.set('accept-ranges', 'bytes');
+      if (contentType != null && contentType.isNotEmpty) {
+        downstream.headers.set('content-type', contentType);
+      }
+      downstream.contentLength = 0;
+      return;
+    }
+
+    final int reqStart;
+    final int reqEnd;
+    final bool isRange;
+    if (reqRange == null) {
+      reqStart = 0;
+      reqEnd = total - 1;
+      isRange = false;
+    } else if (reqRange.suffixLength != null) {
+      reqStart = math.max(0, total - reqRange.suffixLength!);
+      reqEnd = total - 1;
+      isRange = true;
+    } else {
+      reqStart = reqRange.start;
+      reqEnd = reqRange.end != null
+          ? math.min(reqRange.end!, total - 1)
+          : total - 1;
+      isRange = true;
+    }
+
+    if (reqStart >= total || reqStart > reqEnd) {
+      downstream.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+      downstream.headers.set('content-range', 'bytes */$total');
+      return;
+    }
+
+    downstream.bufferOutput = false;
+    downstream.statusCode =
+        isRange ? HttpStatus.partialContent : HttpStatus.ok;
+    downstream.headers.set('accept-ranges', 'bytes');
+    downstream.headers.set(
+      'content-type',
+      (contentType != null && contentType.isNotEmpty)
+          ? contentType
+          : 'application/octet-stream',
+    );
+    downstream.headers.set('cache-control', 'no-store');
+    if (isRange) {
+      downstream.headers.set('content-range', 'bytes $reqStart-$reqEnd/$total');
+    }
+    downstream.contentLength = reqEnd - reqStart + 1;
+
+    final startBlock = reqStart ~/ DiskBlockCache.blockSize;
+    final endBlock = reqEnd ~/ DiskBlockCache.blockSize;
+    var b = startBlock;
+    while (b <= endBlock) {
+      if (_closed || _isCancelled()) throw StateError('cancelled');
+      final cached = await cache.readBlock(cacheKey, b);
+      if (cached != null) {
+        final blockBase = b * DiskBlockCache.blockSize;
+        final s = math.max(0, reqStart - blockBase);
+        final e = math.min(cached.length, reqEnd - blockBase + 1);
+        if (e > s) {
+          downstream.add(Uint8List.sublistView(cached, s, e));
+        }
+        b++;
+        continue;
+      }
+
+      // Group contiguous uncached blocks (capped at 16 blocks = 4 MiB per window).
+      var runEnd = b;
+      final maxRunEnd = math.min(endBlock, b + 15);
+      while (runEnd + 1 <= maxRunEnd &&
+          !(await cache.hasBlock(cacheKey, runEnd + 1))) {
+        runEnd++;
+      }
+
+      final fetchStart = b * DiskBlockCache.blockSize;
+      final fetchEnd = math.min(
+        (runEnd + 1) * DiskBlockCache.blockSize - 1,
+        total - 1,
+      );
+
+      var (resp, finalTarget) = await _sendWithRedirects(
+        registered.uri,
+        method: 'GET',
+        range: 'bytes=$fetchStart-$fetchEnd',
+        allowRange: true,
+      );
+
+      if (resp.statusCode == HttpStatus.requestedRangeNotSatisfiable) {
+        await resp.stream.listen((_) {}).cancel();
+        (resp, finalTarget) = await _sendWithRedirects(
+          registered.uri,
+          method: 'GET',
+          allowRange: false,
+        );
+      }
+
+      _lastUpstreamStatusCode = resp.statusCode;
+      _lastUpstreamHost = finalTarget.host;
+      if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        await resp.stream.listen((_) {}).cancel();
+        throw HttpException('Upstream error ${resp.statusCode}');
+      }
+
+      final respContentType = resp.headers['content-type'] ?? contentType;
+      final respEtag = resp.headers['etag'] ?? etag;
+
+      if (resp.statusCode == HttpStatus.ok) {
+        // Server sent full body from offset 0 without range support.
+        final blockAcc = BytesBuilder(copy: false);
+        var blkIdx = 0;
+        var streamOff = 0;
+        await for (final chunk
+            in resp.stream.timeout(const Duration(seconds: 30))) {
+          if (_closed || _isCancelled()) throw StateError('cancelled');
+          final cStart = streamOff;
+          final cEnd = streamOff + chunk.length - 1;
+          streamOff += chunk.length;
+
+          var pos = 0;
+          while (pos < chunk.length) {
+            final need = DiskBlockCache.blockSize - blockAcc.length;
+            final take = math.min(need, chunk.length - pos);
+            blockAcc.add(
+              pos == 0 && take == chunk.length
+                  ? chunk
+                  : Uint8List.sublistView(
+                      Uint8List.fromList(chunk),
+                      pos,
+                      pos + take,
+                    ),
+            );
+            pos += take;
+            if (blockAcc.length == DiskBlockCache.blockSize) {
+              await cache.writeBlock(
+                cacheKey,
+                blkIdx++,
+                blockAcc.takeBytes(),
+                totalLength: total,
+                contentType: respContentType,
+                etag: respEtag,
+              );
+            }
+          }
+
+          final wantStart = math.max(reqStart, fetchStart);
+          if (cEnd >= wantStart && cStart <= reqEnd) {
+            final s = math.max(0, wantStart - cStart);
+            final e = math.min(chunk.length, reqEnd - cStart + 1);
+            if (e > s) {
+              downstream.add(s == 0 && e == chunk.length ? chunk : chunk.sublist(s, e));
+            }
+          }
+        }
+        if (blockAcc.length > 0) {
+          await cache.writeBlock(
+            cacheKey,
+            blkIdx,
+            blockAcc.takeBytes(),
+            totalLength: total,
+            contentType: respContentType,
+            etag: respEtag,
+          );
+        }
+        break;
+      }
+
+      // 206 Partial Content for [fetchStart .. fetchEnd]
+      final cr = _parseContentRange(resp.headers['content-range']);
+      final actualStart = cr?.start ?? fetchStart;
+      final blockAcc = BytesBuilder(copy: false);
+      var currentBlk = actualStart ~/ DiskBlockCache.blockSize;
+      var inBlockAlign = actualStart % DiskBlockCache.blockSize;
+      var streamPos = actualStart;
+
+      await for (final chunk
+          in resp.stream.timeout(const Duration(seconds: 30))) {
+        if (_closed || _isCancelled()) throw StateError('cancelled');
+        final cStart = streamPos;
+        final cEnd = streamPos + chunk.length - 1;
+        streamPos += chunk.length;
+
+        var pos = 0;
+        if (inBlockAlign > 0) {
+          final skipToAlign =
+              math.min(DiskBlockCache.blockSize - inBlockAlign, chunk.length);
+          pos += skipToAlign;
+          inBlockAlign = (inBlockAlign + skipToAlign) % DiskBlockCache.blockSize;
+          if (inBlockAlign == 0) currentBlk++;
+        }
+        while (pos < chunk.length) {
+          final need = DiskBlockCache.blockSize - blockAcc.length;
+          final take = math.min(need, chunk.length - pos);
+          blockAcc.add(
+            pos == 0 && take == chunk.length
+                ? chunk
+                : Uint8List.sublistView(
+                    Uint8List.fromList(chunk),
+                    pos,
+                    pos + take,
+                  ),
+          );
+          pos += take;
+          final absEndAfter = cStart + pos;
+          if (blockAcc.length == DiskBlockCache.blockSize ||
+              absEndAfter >= total) {
+            await cache.writeBlock(
+              cacheKey,
+              currentBlk++,
+              blockAcc.takeBytes(),
+              totalLength: total,
+              contentType: respContentType,
+              etag: respEtag,
+            );
+          }
+        }
+
+        final wantStart = math.max(reqStart, fetchStart);
+        final wantEnd = math.min(reqEnd, fetchEnd);
+        if (cEnd >= wantStart && cStart <= wantEnd) {
+          final s = math.max(0, wantStart - cStart);
+          final e = math.min(chunk.length, wantEnd - cStart + 1);
+          if (e > s) {
+            downstream.add(s == 0 && e == chunk.length ? chunk : chunk.sublist(s, e));
+          }
+        }
+      }
+
+      if (blockAcc.length > 0 && streamPos >= total) {
+        await cache.writeBlock(
+          cacheKey,
+          currentBlk,
+          blockAcc.takeBytes(),
+          totalLength: total,
+          contentType: respContentType,
+          etag: respEtag,
+        );
+      }
+
+      b = runEnd + 1;
+    }
+
+    await downstream.flush().timeout(const Duration(seconds: 30));
   }
 
   void _copyResponseHeaders(
@@ -1237,7 +2530,294 @@ class LocalMediaLease {
     }
   }
 
+  static String stripVodPlaylistAds(
+    String text,
+    Uri origin, {
+    List<String> adPatterns = const [],
+  }) {
+    final rawLines = text.split('\n');
+    final lines = [
+      for (final raw in rawLines)
+        raw.endsWith('\r') ? raw.substring(0, raw.length - 1) : raw,
+    ];
+    var hasEndList = false;
+    var isVodType = false;
+    var hasDiscontinuity = false;
+    var isMaster = false;
+
+    for (final line in lines) {
+      final t = line.trim();
+      final upper = t.toUpperCase();
+      if (upper == '#EXT-X-ENDLIST') {
+        hasEndList = true;
+      } else if (upper.startsWith('#EXT-X-PLAYLIST-TYPE:') &&
+          upper.contains('VOD')) {
+        isVodType = true;
+      } else if (upper == '#EXT-X-DISCONTINUITY') {
+        hasDiscontinuity = true;
+      } else if (upper.startsWith('#EXT-X-STREAM-INF')) {
+        isMaster = true;
+      }
+    }
+
+    if (isMaster || !hasDiscontinuity || (!hasEndList && !isVodType)) {
+      return text;
+    }
+
+    // Parse header, discontinuity blocks of segments, and footer.
+    final headerLines = <String>[];
+    final footerLines = <String>[];
+    final blocks = <List<({
+      List<String> tags,
+      String uriLine,
+      Uri? resolvedUri,
+      double duration,
+      String? keyTag,
+      String? mapTag,
+    })>>[];
+    var currentBlock = <({
+      List<String> tags,
+      String uriLine,
+      Uri? resolvedUri,
+      double duration,
+      String? keyTag,
+      String? mapTag,
+    })>[];
+    var pendingTags = <String>[];
+    double pendingDuration = 0.0;
+    var seenFirstSegment = false;
+    String? activeKey;
+    String? activeMap;
+
+    for (final line in lines) {
+      final t = line.trim();
+      final upper = t.toUpperCase();
+      if (upper == '#EXT-X-ENDLIST') {
+        footerLines.add(line);
+        continue;
+      }
+      if (!seenFirstSegment &&
+          t.startsWith('#') &&
+          !upper.startsWith('#EXTINF:') &&
+          !upper.startsWith('#EXT-X-KEY:') &&
+          !upper.startsWith('#EXT-X-MAP:') &&
+          !upper.startsWith('#EXT-X-BYTERANGE:') &&
+          upper != '#EXT-X-DISCONTINUITY') {
+        headerLines.add(line);
+        continue;
+      }
+      if (upper == '#EXT-X-DISCONTINUITY') {
+        if (currentBlock.isNotEmpty) {
+          blocks.add(currentBlock);
+          currentBlock = [];
+        }
+        seenFirstSegment = true;
+        continue;
+      }
+      if (t.isEmpty) continue;
+      if (t.startsWith('#')) {
+        seenFirstSegment = true;
+        if (upper.startsWith('#EXTINF:')) {
+          final rawDur = t.substring(8).split(',').first.trim();
+          pendingDuration = double.tryParse(rawDur) ?? 0.0;
+        } else if (upper.startsWith('#EXT-X-KEY:')) {
+          activeKey = line;
+        } else if (upper.startsWith('#EXT-X-MAP:')) {
+          activeMap = line;
+        }
+        pendingTags.add(line);
+        continue;
+      }
+
+      seenFirstSegment = true;
+      Uri? resolved;
+      try {
+        resolved = origin.resolve(t);
+      } catch (_) {}
+      currentBlock.add((
+        tags: pendingTags,
+        uriLine: line,
+        resolvedUri: resolved,
+        duration: pendingDuration,
+        keyTag: activeKey,
+        mapTag: activeMap,
+      ));
+      pendingTags = <String>[];
+      pendingDuration = 0.0;
+    }
+    if (currentBlock.isNotEmpty) {
+      blocks.add(currentBlock);
+    }
+
+    if (blocks.length < 2) return text;
+
+    String dirPrefixOf(Uri uri) {
+      final path = uri.path;
+      final slash = path.lastIndexOf('/');
+      return slash <= 0 ? '/' : path.substring(0, slash + 1).toLowerCase();
+    }
+
+    final hostDurations = <String, double>{};
+    final dirDurations = <String, double>{};
+    var totalDuration = 0.0;
+    for (final blk in blocks) {
+      for (final seg in blk) {
+        totalDuration += seg.duration;
+        final uri = seg.resolvedUri;
+        if (uri != null && uri.host.isNotEmpty) {
+          final host = uri.host.toLowerCase();
+          hostDurations[host] = (hostDurations[host] ?? 0) + seg.duration;
+          final dirKey = '$host|${dirPrefixOf(uri)}';
+          dirDurations[dirKey] = (dirDurations[dirKey] ?? 0) + seg.duration;
+        }
+      }
+    }
+    if (totalDuration <= 0) return text;
+
+    String dominantHost = '';
+    var maxHostDur = -1.0;
+    hostDurations.forEach((host, dur) {
+      if (dur > maxHostDur) {
+        maxHostDur = dur;
+        dominantHost = host;
+      }
+    });
+
+    String dominantDirKey = '';
+    var maxDirDur = -1.0;
+    dirDurations.forEach((dk, dur) {
+      if (dur > maxDirDur) {
+        maxDirDur = dur;
+        dominantDirKey = dk;
+      }
+    });
+
+    final adHeuristicRegex = RegExp(
+      r'(?:^|/)(?:ad|ads|advert|promo|guanggao|sponsor|commercial)(?:/|$)|(?:^|/)(?:adjump|ad_?\d+|adv\d+|guanggao\d*)[^/]*\.(?:ts|m4s|mp4|png|jpg|jpeg)(?:$|[?#])',
+      caseSensitive: false,
+    );
+
+    bool matchesAdRule(Uri uri) {
+      final full = uri.toString().toLowerCase();
+      final host = uri.host.toLowerCase();
+      if (adHeuristicRegex.hasMatch(uri.path)) return true;
+      for (final raw in adPatterns) {
+        final pat = raw.trim().toLowerCase();
+        if (pat.isEmpty) continue;
+        if (!pat.contains('/') && !pat.contains('?')) {
+          final clean = pat.startsWith('*.')
+              ? pat.substring(2)
+              : (pat.startsWith('.') ? pat.substring(1) : pat);
+          if (clean.isNotEmpty &&
+              (host == clean || host.endsWith('.$clean'))) {
+            return true;
+          }
+        } else if (full.contains(pat)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    final stripFlags = List<bool>.filled(blocks.length, false);
+    var removedDuration = 0.0;
+
+    for (var i = 0; i < blocks.length; i++) {
+      final blk = blocks[i];
+      if (blk.isEmpty || blk.length > 20) continue;
+      final blkDur = blk.fold<double>(0.0, (sum, s) => sum + s.duration);
+      if (blkDur <= 0 || blkDur > 60.0) continue;
+      if (blk.any((s) => s.duration > 60.0)) continue;
+
+      final hosts = blk
+          .map((s) => s.resolvedUri?.host.toLowerCase() ?? '')
+          .where((h) => h.isNotEmpty)
+          .toSet();
+      final dirKeys = blk
+          .map((s) => s.resolvedUri == null
+              ? ''
+              : '${s.resolvedUri!.host.toLowerCase()}|${dirPrefixOf(s.resolvedUri!)}')
+          .where((k) => k.isNotEmpty)
+          .toSet();
+
+      final crossDomainAnomaly = dominantHost.isNotEmpty &&
+          hosts.isNotEmpty &&
+          !hosts.contains(dominantHost);
+      final hitsAdSignature = blk.any(
+        (s) => s.resolvedUri != null && matchesAdRule(s.resolvedUri!),
+      );
+      final isSandwichedDirJump = i > 0 &&
+          i + 1 < blocks.length &&
+          dominantDirKey.isNotEmpty &&
+          dirKeys.isNotEmpty &&
+          !dirKeys.contains(dominantDirKey) &&
+          blocks[i - 1].any((s) =>
+              s.resolvedUri != null &&
+              '${s.resolvedUri!.host.toLowerCase()}|${dirPrefixOf(s.resolvedUri!)}' ==
+                  dominantDirKey) &&
+          blocks[i + 1].any((s) =>
+              s.resolvedUri != null &&
+              '${s.resolvedUri!.host.toLowerCase()}|${dirPrefixOf(s.resolvedUri!)}' ==
+                  dominantDirKey);
+
+      if (crossDomainAnomaly || hitsAdSignature || isSandwichedDirJump) {
+        if (removedDuration + blkDur <= totalDuration * 0.40 + 1e-6) {
+          stripFlags[i] = true;
+          removedDuration += blkDur;
+        }
+      }
+    }
+
+    if (!stripFlags.any((f) => f)) return text;
+
+    final out = <String>[...headerLines];
+    var emittedAnyKeptBlock = false;
+    var strippedSinceLastKept = false;
+    String? lastEmittedKey;
+    String? lastEmittedMap;
+
+    for (var i = 0; i < blocks.length; i++) {
+      if (stripFlags[i]) {
+        strippedSinceLastKept = true;
+        continue;
+      }
+      final blk = blocks[i];
+      if (emittedAnyKeptBlock) {
+        out.add('#EXT-X-DISCONTINUITY');
+      }
+      for (var sIdx = 0; sIdx < blk.length; sIdx++) {
+        final seg = blk[sIdx];
+        final hasOwnKey = seg.tags
+            .any((t) => t.trim().toUpperCase().startsWith('#EXT-X-KEY:'));
+        final hasOwnMap = seg.tags
+            .any((t) => t.trim().toUpperCase().startsWith('#EXT-X-MAP:'));
+        if (sIdx == 0 && strippedSinceLastKept) {
+          if (!hasOwnKey && lastEmittedKey != null) {
+            out.add(lastEmittedKey);
+          }
+          if (!hasOwnMap && lastEmittedMap != null) {
+            out.add(lastEmittedMap);
+          }
+        }
+        for (final tag in seg.tags) {
+          final tu = tag.trim().toUpperCase();
+          if (tu.startsWith('#EXT-X-KEY:')) lastEmittedKey = tag;
+          if (tu.startsWith('#EXT-X-MAP:')) lastEmittedMap = tag;
+          out.add(tag);
+        }
+        out.add(seg.uriLine);
+      }
+      emittedAnyKeptBlock = true;
+      strippedSinceLastKept = false;
+    }
+    out.addAll(footerLines);
+    return out.join('\n');
+  }
+
   String _rewritePlaylist(String text, Uri origin) {
+    final cleanedText = (_stripHlsAds && !_isLive)
+        ? stripVodPlaylistAds(text, origin, adPatterns: _adPatterns)
+        : text;
     var encrypted = false;
     var hasInitMap = false;
     var expectVariant = false;
@@ -1253,7 +2833,7 @@ class LocalMediaLease {
     }
 
     final out = <String>[];
-    for (final rawLine in text.split('\n')) {
+    for (final rawLine in cleanedText.split('\n')) {
       final line = rawLine.endsWith('\r')
           ? rawLine.substring(0, rawLine.length - 1)
           : rawLine;
@@ -1317,6 +2897,10 @@ class LocalMediaLease {
     if (_closed) return;
     _closed = true;
     _timer?.cancel();
+    final cachesToFlush = <DiskBlockCache>{
+      for (final t in _targets.values)
+        if (t.kind == _TargetKind.kcache) t.diskCache ?? _diskCache,
+    };
     _headers.clear();
     _cookieJar.clear();
     _targets.clear();
@@ -1326,6 +2910,11 @@ class LocalMediaLease {
     for (final sub in activeUpstreams) {
       try {
         await sub.cancel();
+      } catch (_) {}
+    }
+    for (final c in cachesToFlush) {
+      try {
+        await c.flush();
       } catch (_) {}
     }
     if (_ownsClient) {
