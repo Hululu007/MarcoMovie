@@ -1,214 +1,596 @@
+// Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
+import 'dart:math' as math;
 import 'dart:ui';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
+
 import '../../core/cast_service.dart';
 import '../apple_theme.dart';
-import '../ios_glass_popover.dart';
+import '../ios_glass_popover.dart' show activeIosGlassPopoverCount;
+import '../ios_liquid_glass.dart';
 import '../poster_image.dart';
 
-/// Opens the 爱优腾-style TV Casting popover anchored to the top-right Cast
-/// button. Shows live LAN DLNA discovery + native iOS AirPlay route picker.
+/// Opens the iOS 27 4-side inset concentric Liquid Glass casting panel
+/// highlighting dual-channel **Apple AirPlay 2** + **LAN DLNA** casting.
+///
+/// Backward-compatible with existing `showIosCastPopover` callers while
+/// replacing legacy pointed arrow popovers with an iOS 27 inset concentric
+/// Liquid Glass floating sheet driven by `SpringSimulation`.
 Future<void> showIosCastPopover({
   required BuildContext context,
-  required Rect? anchorRect,
+  Rect? anchorRect,
   required CastController controller,
   required Future<void> Function(CastDevice device) onSelectDevice,
+  bool isAirPlayActive = false,
+  String? airPlayDeviceName,
+  Future<bool> Function()? onOpenAirPlayPicker,
 }) {
   if (!controller.scanning) {
     controller.scanDevices();
   }
-  return showIosGlassPopover<void>(
+  return showGeneralDialog<void>(
     context: context,
-    anchorRect: anchorRect,
-    title: '选择投屏设备',
-    maxWidth: 316,
-    maxHeight: 380,
-    forceDark: true,
-    trailing: AnimatedBuilder(
-      animation: controller,
-      builder: (context, _) {
-        return CupertinoButton(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-          minimumSize: const Size(28, 28),
-          onPressed: controller.scanning ? null : () => controller.scanDevices(),
-          child: controller.scanning
-              ? const CupertinoActivityIndicator(
-                  radius: 7,
-                  color: Colors.white70,
-                )
-              : const Icon(
-                  CupertinoIcons.refresh,
-                  size: 15,
-                  color: Colors.white70,
-                ),
-        );
-      },
-    ),
-    builder: (popoverContext) {
-      return AnimatedBuilder(
-        animation: controller,
-        builder: (context, _) {
-          final devices = controller.devices;
-          return SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // Native AirPlay row (Apple TV / AirPlay 2 TVs / Mac)
-                _CastRowTile(
-                  key: const Key('ios-cast-airplay-row'),
-                  icon: CupertinoIcons.tv_circle_fill,
-                  accent: AppleColors.systemBlue,
-                  title: '隔空播放 (AirPlay)',
-                  subtitle: 'Apple TV · 支持隔空播放的智能电视',
-                  trailing: const Icon(
-                    CupertinoIcons.chevron_right,
-                    size: 14,
-                    color: Colors.white54,
-                  ),
-                  onTap: () async {
-                    HapticFeedback.selectionClick();
-                    Navigator.of(popoverContext).pop();
-                    await controller.openAirPlayPicker();
-                  },
-                ),
-                const SizedBox(height: 8),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Row(
-                    children: [
-                      const Text(
-                        '局域网 DLNA 电视 / 盒子',
-                        style: TextStyle(
-                          color: Colors.white54,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const Spacer(),
-                      Text(
-                        controller.scanning
-                            ? '正在搜索…'
-                            : '发现 ${devices.length} 台',
-                        style: const TextStyle(
-                          color: Colors.white38,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 6),
-                if (devices.isEmpty)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 16,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.06),
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          controller.scanning
-                              ? CupertinoIcons.wifi
-                              : CupertinoIcons.tv,
-                          size: 24,
-                          color: Colors.white54,
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          controller.scanning
-                              ? '正在搜索同一 Wi-Fi 下的投屏设备…'
-                              : (controller.statusMessage ??
-                                  '暂未发现 DLNA 电视或盒子'),
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.white70,
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        const Text(
-                          '请确认手机与电视在同一 Wi-Fi（关闭代理/VPN），并已允许「本地网络」权限',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: Colors.white38,
-                            fontSize: 10.5,
-                            height: 1.35,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
-                else
-                  for (final device in devices) ...[
-                    _CastRowTile(
-                      key: Key('ios-cast-device-${device.id}'),
-                      icon: CupertinoIcons.tv_fill,
-                      accent: controller.activeDevice?.id == device.id
-                          ? AppleColors.systemGreen
-                          : Colors.white,
-                      title: device.name,
-                      subtitle: device.subtitle,
-                      selected: controller.activeDevice?.id == device.id,
-                      trailing: controller.activeDevice?.id == device.id
-                          ? const Icon(
-                              CupertinoIcons.checkmark_circle_fill,
-                              size: 16,
-                              color: AppleColors.systemGreen,
-                            )
-                          : const Text(
-                              '投屏',
-                              style: TextStyle(
-                                color: AppleColors.systemBlue,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                      onTap: () {
-                        HapticFeedback.selectionClick();
-                        Navigator.of(popoverContext).pop();
-                        onSelectDevice(device);
-                      },
-                    ),
-                    const SizedBox(height: 6),
-                  ],
-                const SizedBox(height: 4),
-                _CastRowTile(
-                  key: const Key('ios-cast-manual-ip-row'),
-                  icon: CupertinoIcons.add_circled_solid,
-                  accent: AppleColors.systemTeal,
-                  title: '手动输入电视 IP 连接',
-                  subtitle: '免组播直连 Marco Movie TV 或任意 DLNA 电视',
-                  trailing: const Icon(
-                    CupertinoIcons.chevron_right,
-                    size: 14,
-                    color: Colors.white54,
-                  ),
-                  onTap: () async {
-                    HapticFeedback.selectionClick();
-                    final input = await _promptManualTvAddress(popoverContext);
-                    if (input == null || input.trim().isEmpty) return;
-                    final dev = await controller.probeManualTarget(input);
-                    if (dev != null && popoverContext.mounted) {
-                      Navigator.of(popoverContext).pop();
-                      await onSelectDevice(dev);
-                    }
-                  },
-                ),
-              ],
-            ),
-          );
-        },
+    barrierDismissible: true,
+    barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+    barrierColor: Colors.black.withValues(alpha: 0.42),
+    transitionDuration: const Duration(milliseconds: 320),
+    pageBuilder: (dialogContext, animation, secondaryAnimation) {
+      return _Ios27InsetCastPanelOverlay(
+        anchorRect: anchorRect,
+        controller: controller,
+        onSelectDevice: onSelectDevice,
+        isAirPlayActive: isAirPlayActive,
+        airPlayDeviceName: airPlayDeviceName,
+        onOpenAirPlayPicker: onOpenAirPlayPicker,
+      );
+    },
+    transitionBuilder: (dialogContext, animation, secondaryAnimation, child) {
+      if (MediaQuery.disableAnimationsOf(dialogContext)) {
+        return FadeTransition(opacity: animation, child: child);
+      }
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+        reverseCurve: Curves.easeInCubic,
+      );
+      return FadeTransition(
+        opacity: curved,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, 0.08),
+            end: Offset.zero,
+          ).animate(curved),
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.94, end: 1.0).animate(curved),
+            child: child,
+          ),
+        ),
       );
     },
   );
+}
+
+class _Ios27InsetCastPanelOverlay extends StatefulWidget {
+  final Rect? anchorRect;
+  final CastController controller;
+  final Future<void> Function(CastDevice device) onSelectDevice;
+  final bool isAirPlayActive;
+  final String? airPlayDeviceName;
+  final Future<bool> Function()? onOpenAirPlayPicker;
+
+  const _Ios27InsetCastPanelOverlay({
+    required this.anchorRect,
+    required this.controller,
+    required this.onSelectDevice,
+    required this.isAirPlayActive,
+    required this.airPlayDeviceName,
+    required this.onOpenAirPlayPicker,
+  });
+
+  @override
+  State<_Ios27InsetCastPanelOverlay> createState() =>
+      _Ios27InsetCastPanelOverlayState();
+}
+
+class _Ios27InsetCastPanelOverlayState
+    extends State<_Ios27InsetCastPanelOverlay>
+    with SingleTickerProviderStateMixin {
+  static const double _outerInsetPt = 10.0;
+  static const double _outerRadiusPt = 28.0;
+  static const double _innerRadiusPt = 16.0;
+
+  static final SpringDescription _sheetSpring =
+      SpringDescription.withDampingRatio(
+    mass: 1.0,
+    stiffness: (2 * math.pi / 0.36) * (2 * math.pi / 0.36),
+    ratio: 0.88,
+  );
+
+  late final AnimationController _dragOffsetCtrl = AnimationController.unbounded(
+    vsync: this,
+    value: 0.0,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    activeIosGlassPopoverCount.value++;
+  }
+
+  @override
+  void dispose() {
+    if (activeIosGlassPopoverCount.value > 0) {
+      activeIosGlassPopoverCount.value--;
+    }
+    _dragOffsetCtrl.dispose();
+    super.dispose();
+  }
+
+  void _springDragBack(double velocityY) {
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _dragOffsetCtrl.value = 0.0;
+      return;
+    }
+    final sim = SpringSimulation(
+      _sheetSpring,
+      _dragOffsetCtrl.value,
+      0.0,
+      velocityY,
+    );
+    _dragOffsetCtrl.animateWith(sim);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final safe = media.padding;
+    final screen = media.size;
+    final isWide = screen.width >= 560;
+    final reduceTransparency = IosLiquidGlassBridge.reduceTransparency ||
+        GlassworkBackdrop.reduceTransparency.value ||
+        GlassworkBackdrop.intensity.value <= 0.02 ||
+        MediaQuery.highContrastOf(context);
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+
+    final bottomInset = math.max(safe.bottom, _outerInsetPt) +
+        (safe.bottom > 0 ? 4.0 : _outerInsetPt);
+    final topInset = math.max(safe.top, _outerInsetPt) + 8.0;
+    final sideInset = math.max(safe.left, safe.right) + _outerInsetPt;
+    final maxPanelWidth = isWide ? 416.0 : math.max(260.0, screen.width - sideInset * 2);
+    final maxPanelHeight = math.min(
+      screen.height * 0.78,
+      math.max(260.0, screen.height - topInset - bottomInset),
+    );
+
+    final controller = widget.controller;
+    final airPlayTitle = widget.isAirPlayActive &&
+            (widget.airPlayDeviceName?.isNotEmpty ?? false)
+        ? '隔空播放 2 · ${widget.airPlayDeviceName}'
+        : '隔空播放 2 (AirPlay 2)';
+
+    final panel = ConstrainedBox(
+      constraints: BoxConstraints(
+        maxWidth: maxPanelWidth,
+        maxHeight: maxPanelHeight,
+      ),
+      child: Material(
+        type: MaterialType.transparency,
+        child: Theme(
+          data: Theme.of(context).copyWith(brightness: Brightness.dark),
+          child: DecoratedBox(
+            key: const Key('ios-cast-inset-panel'),
+            decoration: ShapeDecoration(
+              shape: ContinuousRectangleBorder(
+                borderRadius: BorderRadius.circular(_outerRadiusPt),
+              ),
+              shadows: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.52),
+                  blurRadius: 34,
+                  spreadRadius: -4,
+                  offset: const Offset(0, 14),
+                ),
+              ],
+            ),
+            child: ClipPath(
+              clipper: ShapeBorderClipper(
+                shape: ContinuousRectangleBorder(
+                  borderRadius: BorderRadius.circular(_outerRadiusPt),
+                ),
+              ),
+              child: LiquidGlass(
+                borderRadius: _outerRadiusPt,
+                blur: 28,
+                tint: reduceTransparency
+                    ? const Color(0xF51E1E22)
+                    : const Color(0x9C15171F),
+                rimStrength: 1.05,
+                elevated: false,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Grabber + Header with spring rubber-band dismiss gesture
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onVerticalDragUpdate: (details) {
+                        final next = _dragOffsetCtrl.value + details.delta.dy;
+                        _dragOffsetCtrl.value =
+                            next < 0 ? next * 0.22 : next;
+                      },
+                      onVerticalDragEnd: (details) {
+                        final vy = details.velocity.pixelsPerSecond.dy;
+                        if (_dragOffsetCtrl.value > 72 || vy > 520) {
+                          Navigator.of(context).maybePop();
+                        } else {
+                          _springDragBack(vy);
+                        }
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 36,
+                              height: 4.5,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.34),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Row(
+                              children: [
+                                Container(
+                                  width: 28,
+                                  height: 28,
+                                  decoration: ShapeDecoration(
+                                    color: AppleColors.systemBlue
+                                        .withValues(alpha: 0.22),
+                                    shape: ContinuousRectangleBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                  ),
+                                  child: const Icon(
+                                    CupertinoIcons.tv_fill,
+                                    size: 15,
+                                    color: AppleColors.systemCyan,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                const Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        '无线投屏 · AirPlay 2 & DLNA',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w700,
+                                          letterSpacing: -0.25,
+                                        ),
+                                      ),
+                                      Text(
+                                        '零损耗隔空播放 2 直投 · 局域网电视跨屏',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                AnimatedBuilder(
+                                  animation: controller,
+                                  builder: (context, _) {
+                                    return CupertinoButton(
+                                      key: const Key('ios-cast-refresh-button'),
+                                      padding: const EdgeInsets.all(6),
+                                      minimumSize: const Size(32, 32),
+                                      onPressed: controller.scanning
+                                          ? null
+                                          : () => controller.scanDevices(),
+                                      child: controller.scanning
+                                          ? const CupertinoActivityIndicator(
+                                              radius: 7.5,
+                                              color: Colors.white70,
+                                            )
+                                          : const Icon(
+                                              CupertinoIcons.refresh,
+                                              size: 16,
+                                              color: Colors.white70,
+                                            ),
+                                    );
+                                  },
+                                ),
+                                CupertinoButton(
+                                  padding: const EdgeInsets.all(6),
+                                  minimumSize: const Size(32, 32),
+                                  onPressed: () =>
+                                      Navigator.of(context).maybePop(),
+                                  child: Container(
+                                    width: 26,
+                                    height: 26,
+                                    decoration: BoxDecoration(
+                                      color:
+                                          Colors.white.withValues(alpha: 0.12),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(
+                                      CupertinoIcons.xmark,
+                                      size: 13,
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    Divider(
+                      height: 1,
+                      thickness: 0.6,
+                      color: Colors.white.withValues(alpha: 0.12),
+                    ),
+                    Flexible(
+                      child: AnimatedBuilder(
+                        animation: controller,
+                        builder: (context, _) {
+                          final devices = controller.devices;
+                          return SingleChildScrollView(
+                            padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                // Channel 1: Native AirPlay 2 Hero Card
+                                _CastRowTile(
+                                  key: const Key('ios-cast-airplay-row'),
+                                  icon: CupertinoIcons.tv_circle_fill,
+                                  accent: AppleColors.systemBlue,
+                                  title: airPlayTitle,
+                                  subtitle:
+                                      'Apple TV · HomePod · 支持隔空播放 2 的智能电视',
+                                  badgeText: 'AirPlay 2',
+                                  selected: widget.isAirPlayActive,
+                                  reduceMotion: reduceMotion,
+                                  cornerRadius: _innerRadiusPt,
+                                  trailing: Icon(
+                                    widget.isAirPlayActive
+                                        ? CupertinoIcons.checkmark_circle_fill
+                                        : CupertinoIcons.chevron_right,
+                                    size: 16,
+                                    color: widget.isAirPlayActive
+                                        ? AppleColors.systemGreen
+                                        : Colors.white54,
+                                  ),
+                                  onTap: () async {
+                                    HapticFeedback.selectionClick();
+                                    Navigator.of(context).pop();
+                                    if (widget.onOpenAirPlayPicker != null) {
+                                      await widget.onOpenAirPlayPicker!();
+                                    } else {
+                                      await controller.openAirPlayPicker();
+                                    }
+                                  },
+                                ),
+                                const SizedBox(height: 12),
+                                // Channel 2: LAN DLNA Section Header
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 4,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      const Text(
+                                        '局域网 DLNA 电视 / 盒子',
+                                        style: TextStyle(
+                                          color: Colors.white60,
+                                          fontSize: 11.5,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const Spacer(),
+                                      Text(
+                                        controller.scanning
+                                            ? '正在搜索…'
+                                            : '发现 ${devices.length} 台',
+                                        style: const TextStyle(
+                                          color: Colors.white38,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                if (devices.isEmpty)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                      vertical: 16,
+                                    ),
+                                    decoration: ShapeDecoration(
+                                      color:
+                                          Colors.white.withValues(alpha: 0.06),
+                                      shape: ContinuousRectangleBorder(
+                                        borderRadius: BorderRadius.circular(
+                                          _innerRadiusPt,
+                                        ),
+                                      ),
+                                    ),
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          controller.scanning
+                                              ? CupertinoIcons.wifi
+                                              : CupertinoIcons.tv,
+                                          size: 24,
+                                          color: Colors.white54,
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          controller.scanning
+                                              ? '正在搜索同一 Wi-Fi 下的投屏设备…'
+                                              : (controller.statusMessage ??
+                                                  '暂未发现 DLNA 电视或盒子'),
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 12.5,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        const Text(
+                                          '请确认手机与电视在同一 Wi-Fi（关闭代理/VPN），并已允许「本地网络」权限',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            color: Colors.white38,
+                                            fontSize: 10.5,
+                                            height: 1.35,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  )
+                                else
+                                  for (final device in devices) ...[
+                                    _CastRowTile(
+                                      key: Key('ios-cast-device-${device.id}'),
+                                      icon: CupertinoIcons.tv_fill,
+                                      accent:
+                                          controller.activeDevice?.id ==
+                                                  device.id
+                                              ? AppleColors.systemGreen
+                                              : Colors.white,
+                                      title: device.name,
+                                      subtitle: device.subtitle,
+                                      badgeText: 'DLNA',
+                                      selected:
+                                          controller.activeDevice?.id ==
+                                              device.id,
+                                      reduceMotion: reduceMotion,
+                                      cornerRadius: _innerRadiusPt,
+                                      trailing:
+                                          controller.activeDevice?.id ==
+                                                  device.id
+                                              ? const Icon(
+                                                  CupertinoIcons
+                                                      .checkmark_circle_fill,
+                                                  size: 16,
+                                                  color:
+                                                      AppleColors.systemGreen,
+                                                )
+                                              : const Text(
+                                                  '投屏',
+                                                  style: TextStyle(
+                                                    color:
+                                                        AppleColors.systemBlue,
+                                                    fontSize: 12,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                      onTap: () {
+                                        HapticFeedback.selectionClick();
+                                        Navigator.of(context).pop();
+                                        widget.onSelectDevice(device);
+                                      },
+                                    ),
+                                    const SizedBox(height: 7),
+                                  ],
+                                const SizedBox(height: 6),
+                                _CastRowTile(
+                                  key: const Key('ios-cast-manual-ip-row'),
+                                  icon: CupertinoIcons.add_circled_solid,
+                                  accent: AppleColors.systemTeal,
+                                  title: '手动输入电视 IP 连接',
+                                  subtitle: '免组播直连 Marco Movie TV 或任意 DLNA 电视',
+                                  reduceMotion: reduceMotion,
+                                  cornerRadius: _innerRadiusPt,
+                                  trailing: const Icon(
+                                    CupertinoIcons.chevron_right,
+                                    size: 14,
+                                    color: Colors.white54,
+                                  ),
+                                  onTap: () async {
+                                    HapticFeedback.selectionClick();
+                                    final input =
+                                        await _promptManualTvAddress(context);
+                                    if (input == null ||
+                                        input.trim().isEmpty) {
+                                      return;
+                                    }
+                                    final dev = await controller
+                                        .probeManualTarget(input);
+                                    if (dev != null && context.mounted) {
+                                      Navigator.of(context).pop();
+                                      await widget.onSelectDevice(dev);
+                                    }
+                                  },
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: () => Navigator.of(context).maybePop(),
+            child: const SizedBox.expand(),
+          ),
+        ),
+        SafeArea(
+          minimum: EdgeInsets.fromLTRB(
+            _outerInsetPt,
+            _outerInsetPt,
+            _outerInsetPt,
+            _outerInsetPt,
+          ),
+          child: Align(
+            alignment: isWide ? Alignment.center : Alignment.bottomCenter,
+            child: AnimatedBuilder(
+              animation: _dragOffsetCtrl,
+              child: panel,
+              builder: (context, child) {
+                return Transform.translate(
+                  offset: Offset(0, _dragOffsetCtrl.value),
+                  child: child,
+                );
+              },
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 Future<String?> _promptManualTvAddress(BuildContext context) async {
@@ -258,13 +640,84 @@ Future<String?> _promptManualTvAddress(BuildContext context) async {
   }
 }
 
+class _Ios27CastSpringButton extends StatefulWidget {
+  final Widget child;
+  final VoidCallback? onTap;
+  final bool reduceMotion;
+
+  const _Ios27CastSpringButton({
+    super.key,
+    required this.child,
+    required this.onTap,
+    this.reduceMotion = false,
+  });
+
+  @override
+  State<_Ios27CastSpringButton> createState() => _Ios27CastSpringButtonState();
+}
+
+class _Ios27CastSpringButtonState extends State<_Ios27CastSpringButton>
+    with SingleTickerProviderStateMixin {
+  static final SpringDescription _snappy = SpringDescription.withDampingRatio(
+    mass: 1.0,
+    stiffness: (2 * math.pi / 0.28) * (2 * math.pi / 0.28),
+    ratio: 0.88,
+  );
+
+  late final AnimationController _ctrl = AnimationController.unbounded(
+    vsync: this,
+    value: 0.0,
+  );
+
+  void _drive(double target) {
+    if (widget.reduceMotion || widget.onTap == null) {
+      _ctrl.stop();
+      _ctrl.value = 0.0;
+      return;
+    }
+    _ctrl.animateWith(
+      SpringSimulation(_snappy, _ctrl.value, target, _ctrl.velocity),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: widget.onTap != null ? (_) => _drive(1.0) : null,
+      onTapUp: widget.onTap != null ? (_) => _drive(0.0) : null,
+      onTapCancel: widget.onTap != null ? () => _drive(0.0) : null,
+      onTap: widget.onTap,
+      child: AnimatedBuilder(
+        animation: _ctrl,
+        child: widget.child,
+        builder: (context, child) {
+          final scale = widget.reduceMotion
+              ? 1.0
+              : (1.0 + 0.032 * _ctrl.value.clamp(0.0, 1.3));
+          return Transform.scale(scale: scale, child: child);
+        },
+      ),
+    );
+  }
+}
+
 class _CastRowTile extends StatelessWidget {
   final IconData icon;
   final Color accent;
   final String title;
   final String subtitle;
+  final String? badgeText;
   final Widget trailing;
   final bool selected;
+  final bool reduceMotion;
+  final double cornerRadius;
   final VoidCallback onTap;
 
   const _CastRowTile({
@@ -273,40 +726,48 @@ class _CastRowTile extends StatelessWidget {
     required this.accent,
     required this.title,
     required this.subtitle,
+    this.badgeText,
     required this.trailing,
     this.selected = false,
+    this.reduceMotion = false,
+    this.cornerRadius = 16.0,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    final innerIconRadius = math.max(cornerRadius - 6.0, 8.0);
+    return _Ios27CastSpringButton(
+      reduceMotion: reduceMotion,
       onTap: onTap,
-      behavior: HitTestBehavior.opaque,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-        decoration: BoxDecoration(
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+        decoration: ShapeDecoration(
           color: selected
-              ? AppleColors.systemBlue.withValues(alpha: 0.22)
+              ? AppleColors.systemBlue.withValues(alpha: 0.24)
               : Colors.white.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(13),
-          border: Border.all(
-            color: selected
-                ? AppleColors.systemBlue.withValues(alpha: 0.55)
-                : Colors.white.withValues(alpha: 0.1),
-            width: 0.8,
+          shape: ContinuousRectangleBorder(
+            borderRadius: BorderRadius.circular(cornerRadius),
+            side: BorderSide(
+              color: selected
+                  ? AppleColors.systemBlue.withValues(alpha: 0.6)
+                  : Colors.white.withValues(alpha: 0.12),
+              width: 0.8,
+            ),
           ),
         ),
         child: Row(
           children: [
             Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: accent.withValues(alpha: 0.16),
-                borderRadius: BorderRadius.circular(9),
+              width: 34,
+              height: 34,
+              decoration: ShapeDecoration(
+                color: accent.withValues(alpha: 0.18),
+                shape: ContinuousRectangleBorder(
+                  borderRadius: BorderRadius.circular(innerIconRadius),
+                ),
               ),
-              child: Icon(icon, size: 17, color: accent),
+              child: Icon(icon, size: 18, color: accent),
             ),
             const SizedBox(width: 10),
             Expanded(
@@ -314,17 +775,46 @@ class _CastRowTile extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      if (badgeText != null && badgeText!.isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5.5,
+                            vertical: 1.5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: accent.withValues(alpha: 0.22),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Text(
+                            badgeText!,
+                            style: TextStyle(
+                              color: accent == Colors.white
+                                  ? Colors.white70
+                                  : AppleColors.systemCyan,
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
-                  const SizedBox(height: 1.5),
+                  const SizedBox(height: 2),
                   Text(
                     subtitle,
                     maxLines: 1,
@@ -346,13 +836,7 @@ class _CastRowTile extends StatelessWidget {
   }
 }
 
-/// 爱优腾 / Apple TV Remote-style active casting remote control stage.
-///
-/// In iOS portrait mode (`halfScreen: true`), the player viewport smoothly
-/// expands to ~half screen height and transforms into a full-featured TV
-/// remote with play/pause, ±15s seek, smooth progress scrub, previous/next
-/// episode switching, playback speed pills, TV volume/mute rocker, and quick
-/// episode/line sheets.
+/// iOS 27 Spatial Cinema / Apple TV Remote-style active casting remote control stage.
 class IosCastingRemoteStage extends StatefulWidget {
   final CastController controller;
   final String episodeLabel;
@@ -398,10 +882,12 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
     final m = (s % 3600) ~/ 60;
     final sec = s % 60;
     if (h > 0) {
-      return '$h:${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+      return '$h:${m.toString().padLeft(2, '0')}:${sToPad(sec)}';
     }
-    return '${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+    return '${m.toString().padLeft(2, '0')}:${sToPad(sec)}';
   }
+
+  String sToPad(int v) => v.toString().padLeft(2, '0');
 
   String _formatSpeedLabel(double speed) {
     if ((speed - speed.roundToDouble()).abs() < 0.001) {
@@ -413,6 +899,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
   @override
   Widget build(BuildContext context) {
     final controller = widget.controller;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) {
@@ -507,7 +994,8 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                             // 1. Top header: Back + Casting Status + Switch Device / Exit
                             Row(
                               children: [
-                                GestureDetector(
+                                _Ios27CastSpringButton(
+                                  reduceMotion: reduceMotion,
                                   onTap: widget.onBack,
                                   child: Container(
                                     width: 34,
@@ -516,7 +1004,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                       color: Colors.white.withValues(alpha: 0.12),
                                       shape: BoxShape.circle,
                                       border: Border.all(
-                                        color: Colors.white.withValues(alpha: 0.14),
+                                        color: Colors.white.withValues(alpha: 0.16),
                                         width: 0.7,
                                       ),
                                     ),
@@ -591,6 +1079,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                 _CastPillButton(
                                   key: const Key('ios-cast-switch-device'),
                                   label: '换设备',
+                                  reduceMotion: reduceMotion,
                                   onTap: widget.onSwitchDevice,
                                 ),
                                 const SizedBox(width: 6),
@@ -598,12 +1087,13 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                   key: const Key('ios-cast-exit-button'),
                                   label: '退出投屏',
                                   danger: true,
+                                  reduceMotion: reduceMotion,
                                   onTap: widget.onExitCast,
                                 ),
                               ],
                             ),
 
-                            // 2. Main Remote Transport Deck (Prev Episode / -15s / Play-Pause / +15s / Next Episode)
+                            // 2. Main Remote Transport Deck
                             Padding(
                               padding: EdgeInsets.symmetric(
                                 vertical: expandedRemote ? (tight ? 2 : 6) : 0,
@@ -618,6 +1108,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                       label: '上一集',
                                       size: sideBtnSize,
                                       enabled: widget.onPreviousEpisode != null,
+                                      reduceMotion: reduceMotion,
                                       onTap: widget.onPreviousEpisode ?? () {},
                                     )
                                   else
@@ -625,6 +1116,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                       icon: CupertinoIcons.speaker_1_fill,
                                       label: '音量-',
                                       size: sideBtnSize,
+                                      reduceMotion: reduceMotion,
                                       onTap: () => controller.adjustVolume(-8),
                                     ),
                                   _RemoteCircleBtn(
@@ -632,12 +1124,14 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                     icon: CupertinoIcons.gobackward_15,
                                     label: '快退15s',
                                     size: sideBtnSize,
+                                    reduceMotion: reduceMotion,
                                     onTap: () => controller.seek(
                                       controller.position - const Duration(seconds: 15),
                                     ),
                                   ),
-                                  GestureDetector(
+                                  _Ios27CastSpringButton(
                                     key: const Key('ios-cast-play-pause'),
+                                    reduceMotion: reduceMotion,
                                     onTap: () {
                                       HapticFeedback.mediumImpact();
                                       controller.togglePlayPause();
@@ -698,6 +1192,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                     icon: CupertinoIcons.goforward_15,
                                     label: '快进15s',
                                     size: sideBtnSize,
+                                    reduceMotion: reduceMotion,
                                     onTap: () => controller.seek(
                                       controller.position + const Duration(seconds: 15),
                                     ),
@@ -709,6 +1204,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                       label: '下一集',
                                       size: sideBtnSize,
                                       enabled: widget.onNextEpisode != null,
+                                      reduceMotion: reduceMotion,
                                       onTap: widget.onNextEpisode ?? () {},
                                     )
                                   else
@@ -716,6 +1212,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                       icon: CupertinoIcons.speaker_3_fill,
                                       label: '音量+',
                                       size: sideBtnSize,
+                                      reduceMotion: reduceMotion,
                                       onTap: () => controller.adjustVolume(8),
                                     ),
                                 ],
@@ -740,7 +1237,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                 Expanded(
                                   child: SliderTheme(
                                     data: SliderTheme.of(context).copyWith(
-                                      trackHeight: expandedRemote ? 4.5 : 3.5,
+                                      trackHeight: expandedRemote ? 5.0 : 3.5,
                                       thumbShape: RoundSliderThumbShape(
                                         enabledThumbRadius: expandedRemote ? 7.5 : 6,
                                       ),
@@ -796,12 +1293,14 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                               Container(
                                 key: const Key('ios-cast-speed-strip'),
                                 padding: const EdgeInsets.all(3.5),
-                                decoration: BoxDecoration(
+                                decoration: ShapeDecoration(
                                   color: Colors.white.withValues(alpha: 0.08),
-                                  borderRadius: BorderRadius.circular(14),
-                                  border: Border.all(
-                                    color: Colors.white.withValues(alpha: 0.11),
-                                    width: 0.7,
+                                  shape: ContinuousRectangleBorder(
+                                    borderRadius: BorderRadius.circular(16),
+                                    side: BorderSide(
+                                      color: Colors.white.withValues(alpha: 0.11),
+                                      width: 0.7,
+                                    ),
                                   ),
                                 ),
                                 child: Row(
@@ -830,11 +1329,13 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                           child: AnimatedContainer(
                                             duration: const Duration(milliseconds: 180),
                                             padding: const EdgeInsets.symmetric(vertical: 6.5),
-                                            decoration: BoxDecoration(
+                                            decoration: ShapeDecoration(
                                               color: (controller.speed - s).abs() < 0.01
                                                   ? AppleColors.systemBlue
                                                   : Colors.transparent,
-                                              borderRadius: BorderRadius.circular(10),
+                                              shape: ContinuousRectangleBorder(
+                                                borderRadius: BorderRadius.circular(12),
+                                              ),
                                             ),
                                             child: Text(
                                               _formatSpeedLabel(s),
@@ -864,12 +1365,14 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                     child: Container(
                                       key: const Key('ios-cast-volume-capsule'),
                                       height: 38,
-                                      decoration: BoxDecoration(
+                                      decoration: ShapeDecoration(
                                         color: Colors.white.withValues(alpha: 0.09),
-                                        borderRadius: BorderRadius.circular(13),
-                                        border: Border.all(
-                                          color: Colors.white.withValues(alpha: 0.12),
-                                          width: 0.7,
+                                        shape: ContinuousRectangleBorder(
+                                          borderRadius: BorderRadius.circular(15),
+                                          side: BorderSide(
+                                            color: Colors.white.withValues(alpha: 0.12),
+                                            width: 0.7,
+                                          ),
                                         ),
                                       ),
                                       child: Row(
@@ -969,6 +1472,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                       key: const Key('ios-cast-open-episodes'),
                                       icon: CupertinoIcons.square_grid_2x2_fill,
                                       label: '选集',
+                                      reduceMotion: reduceMotion,
                                       onTap: widget.onOpenEpisodes!,
                                     ),
                                   ],
@@ -978,6 +1482,7 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
                                       key: const Key('ios-cast-open-lines'),
                                       icon: CupertinoIcons.layers_alt_fill,
                                       label: '换线路',
+                                      reduceMotion: reduceMotion,
                                       onTap: widget.onOpenLines!,
                                     ),
                                   ],
@@ -1001,18 +1506,21 @@ class _IosCastingRemoteStageState extends State<IosCastingRemoteStage> {
 class _RemoteActionChip extends StatelessWidget {
   final IconData icon;
   final String label;
+  final bool reduceMotion;
   final VoidCallback onTap;
 
   const _RemoteActionChip({
     super.key,
     required this.icon,
     required this.label,
+    this.reduceMotion = false,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return _Ios27CastSpringButton(
+      reduceMotion: reduceMotion,
       onTap: () {
         HapticFeedback.selectionClick();
         onTap();
@@ -1020,12 +1528,14 @@ class _RemoteActionChip extends StatelessWidget {
       child: Container(
         height: 38,
         padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(
+        decoration: ShapeDecoration(
           color: Colors.white.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(13),
-          border: Border.all(
-            color: Colors.white.withValues(alpha: 0.14),
-            width: 0.7,
+          shape: ContinuousRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+            side: BorderSide(
+              color: Colors.white.withValues(alpha: 0.14),
+              width: 0.7,
+            ),
           ),
         ),
         child: Row(
@@ -1051,18 +1561,21 @@ class _RemoteActionChip extends StatelessWidget {
 class _CastPillButton extends StatelessWidget {
   final String label;
   final bool danger;
+  final bool reduceMotion;
   final VoidCallback onTap;
 
   const _CastPillButton({
     super.key,
     required this.label,
     this.danger = false,
+    this.reduceMotion = false,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return _Ios27CastSpringButton(
+      reduceMotion: reduceMotion,
       onTap: () {
         HapticFeedback.selectionClick();
         onTap();
@@ -1099,6 +1612,7 @@ class _RemoteCircleBtn extends StatelessWidget {
   final String label;
   final double size;
   final bool enabled;
+  final bool reduceMotion;
   final VoidCallback onTap;
 
   const _RemoteCircleBtn({
@@ -1107,12 +1621,14 @@ class _RemoteCircleBtn extends StatelessWidget {
     required this.label,
     this.size = 42,
     this.enabled = true,
+    this.reduceMotion = false,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return _Ios27CastSpringButton(
+      reduceMotion: reduceMotion,
       onTap: enabled
           ? () {
               HapticFeedback.selectionClick();
