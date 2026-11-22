@@ -23,6 +23,8 @@ class IosLiquidGlassBridge {
   static final ValueNotifier<bool> available = ValueNotifier<bool>(false);
   static final ValueNotifier<bool> reduceTransparencyNotifier =
       ValueNotifier<bool>(false);
+  static final ValueNotifier<bool> sceneActiveNotifier =
+      ValueNotifier<bool>(true);
   static bool _initialized = false;
   static bool? _testOverride;
   static bool? _testReduceTransparencyOverride;
@@ -31,6 +33,11 @@ class IosLiquidGlassBridge {
   static final ValueNotifier<bool> activeSheetNotifier =
       ValueNotifier<bool>(false);
   static int _pinSessionCounter = 0;
+  static ValueChanged<int>? _onRootTabSelected;
+  static VoidCallback? _onRootTabSearch;
+  static VoidCallback? _onRootTabScrollToTop;
+
+  static bool get isSceneActive => sceneActiveNotifier.value;
 
   static void _setSheetPresentationInFlight(bool active) {
     _sheetPresentationInFlight = active;
@@ -69,6 +76,22 @@ class IosLiquidGlassBridge {
       if (call.method == 'reduceTransparencyChanged' &&
           call.arguments is bool) {
         reduceTransparencyNotifier.value = call.arguments as bool;
+        return null;
+      }
+      if (call.method == 'sceneActivationChanged' && call.arguments is bool) {
+        sceneActiveNotifier.value = call.arguments as bool;
+        return null;
+      }
+      if (call.method == 'rootTabSelected' && call.arguments is int) {
+        _onRootTabSelected?.call(call.arguments as int);
+        return null;
+      }
+      if (call.method == 'rootTabSearchTapped') {
+        _onRootTabSearch?.call();
+        return null;
+      }
+      if (call.method == 'rootTabScrollToTop') {
+        _onRootTabScrollToTop?.call();
         return null;
       }
       if (call.method == 'privacyPinCallback' && call.arguments is Map) {
@@ -121,6 +144,9 @@ class IosLiquidGlassBridge {
       final supported = result?['available'] == true;
       available.value = supported;
       reduceTransparencyNotifier.value = result?['reduceTransparency'] == true;
+      if (result?['sceneActive'] is bool) {
+        sceneActiveNotifier.value = result?['sceneActive'] as bool;
+      }
       return supported;
     } on MissingPluginException {
       available.value = false;
@@ -246,6 +272,131 @@ class IosLiquidGlassBridge {
     }
   }
 
+  /// Attaches and configures the root-controller-level iOS 27 native floating
+  /// `UITabBar` + `UIGlassContainerEffect` chrome overlay directly above the
+  /// `FlutterView` Metal layer (eliminating `UiKitView` route-transition flashes).
+  static Future<bool> configureRootTabChrome({
+    required List<IosNativeDockItem> items,
+    int selectedIndex = 0,
+    bool showSearch = true,
+    bool visible = true,
+    bool minimized = false,
+    bool adaptiveTopOnWide = true,
+    ValueChanged<int>? onSelect,
+    VoidCallback? onSearch,
+    VoidCallback? onScrollToTop,
+  }) async {
+    _ensureIncomingHandler();
+    _onRootTabSelected = onSelect;
+    _onRootTabSearch = onSearch;
+    _onRootTabScrollToTop = onScrollToTop;
+    if (!isAvailable) return false;
+    try {
+      final res = await channel.invokeMethod<bool>(
+        'configureRootTabChrome',
+        <String, dynamic>{
+          'items': [for (final item in items) item.toMap()],
+          'selectedIndex': selectedIndex,
+          'showSearch': showSearch && onSearch != null,
+          'visible': visible,
+          'minimized': minimized,
+          'adaptiveTopOnWide': adaptiveTopOnWide,
+        },
+      );
+      return res == true;
+    } on MissingPluginException {
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Synchronizes the selected tab index of the native root `UITabBar`.
+  static Future<void> setRootTabSelectedIndex(
+    int index, {
+    bool animated = true,
+  }) async {
+    if (!isAvailable) return;
+    try {
+      await channel.invokeMethod<void>(
+        'setRootTabSelectedIndex',
+        <String, dynamic>{'index': index, 'animated': animated},
+      );
+    } on MissingPluginException {
+      // Host tests may not register native channel.
+    } catch (_) {}
+  }
+
+  /// Toggles or smoothly drives scroll-minimize morphing on the root native
+  /// `UIGlassContainerEffect` tab chrome (merging tabs & search into the
+  /// compact glass pill with iOS 27 spring physics).
+  static Future<void> setRootTabMinimized(
+    bool minimized, {
+    bool animated = true,
+    double? progress,
+  }) async {
+    if (!isAvailable) return;
+    try {
+      await channel.invokeMethod<void>(
+        'setRootTabMinimized',
+        <String, dynamic>{
+          'minimized': minimized,
+          'animated': animated,
+          if (progress != null) 'progress': progress.clamp(0.0, 1.0),
+        },
+      );
+    } on MissingPluginException {
+      // Host tests may not register native channel.
+    } catch (_) {}
+  }
+
+  /// Shows or hides the root native tab chrome overlay using iOS 27 spring
+  /// motion while keeping background touches 100% passthrough when hidden.
+  static Future<void> setRootTabVisible(
+    bool visible, {
+    bool animated = true,
+  }) async {
+    if (!isAvailable) return;
+    try {
+      await channel.invokeMethod<void>(
+        'setRootTabVisible',
+        <String, dynamic>{'visible': visible, 'animated': animated},
+      );
+    } on MissingPluginException {
+      // Host tests may not register native channel.
+    } catch (_) {}
+  }
+
+  /// Presents a genuine iOS 26/27 Liquid Glass `UIMenu` anchored in-place at
+  /// [anchorRect] (eliminating legacy arrow popovers) and returns the selected
+  /// item ID, or `null` if dismissed / unavailable.
+  static Future<String?> presentNativeContextMenu({
+    required Rect anchorRect,
+    required List<IosNativeMenuItem> items,
+    String title = '',
+  }) async {
+    if (!isAvailable || items.isEmpty) return null;
+    try {
+      return await channel.invokeMethod<String>(
+        'showMenuAtRect',
+        <String, dynamic>{
+          if (title.isNotEmpty) 'title': title,
+          'anchorRect': <String, double>{
+            'x': anchorRect.left,
+            'y': anchorRect.top,
+            'width': anchorRect.width,
+            'height': anchorRect.height,
+          },
+          'items': [for (final item in items) item.toMap()],
+        },
+      );
+    } on MissingPluginException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   @visibleForTesting
   static void setAvailableForTest(bool? value) {
     _testOverride = value;
@@ -256,6 +407,10 @@ class IosLiquidGlassBridge {
       _sheetPresentationInFlight = false;
       activeSheetNotifier.value = false;
       reduceTransparencyNotifier.value = false;
+      sceneActiveNotifier.value = true;
+      _onRootTabSelected = null;
+      _onRootTabSearch = null;
+      _onRootTabScrollToTop = null;
       _pinCallbacks.clear();
     }
   }
@@ -598,6 +753,7 @@ class IosNativeGlassButton extends StatefulWidget {
   final Color? foregroundColor;
   final Color? tintColor;
   final bool forceDark;
+  final bool prominent;
   final String? accessibilityLabel;
   final double? width;
   final double maxWidth;
@@ -618,6 +774,7 @@ class IosNativeGlassButton extends StatefulWidget {
     this.foregroundColor,
     this.tintColor,
     this.forceDark = false,
+    this.prominent = false,
     this.accessibilityLabel,
     this.width,
     this.maxWidth = 168,
@@ -655,6 +812,7 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
         'label': widget.label,
         'symbolSize': widget.symbolSize,
         'forceDark': widget.forceDark,
+        if (widget.prominent) 'prominent': true,
         if (widget.foregroundColor != null)
           'foregroundColor': widget.foregroundColor!.toARGB32(),
         if (widget.tintColor != null)
@@ -706,6 +864,7 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
         oldWidget.foregroundColor != widget.foregroundColor ||
         oldWidget.tintColor != widget.tintColor ||
         oldWidget.forceDark != widget.forceDark ||
+        oldWidget.prominent != widget.prominent ||
         oldWidget.accessibilityLabel != widget.accessibilityLabel ||
         oldWidget.menuTitle != widget.menuTitle ||
         !listEquals(oldWidget.menuItems, widget.menuItems)) {

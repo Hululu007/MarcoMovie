@@ -7,6 +7,7 @@ import '../core/models.dart';
 import '../core/quark_drive.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
+import 'motion/ios27_springs.dart';
 import 'player_screen.dart';
 
 Future<void> showQuarkLibrarySheet(
@@ -16,7 +17,7 @@ Future<void> showQuarkLibrarySheet(
 }) async {
   final client = drive ?? QuarkDriveClient(accounts: storage.quarkAccounts);
   try {
-    await showAppleModalSheet<void>(
+    await showIos27LiquidSheet<void>(
       context: context,
       title: '夸克网盘 · 我的视频',
       builder: (_) => _QuarkLibrary(storage: storage, drive: client),
@@ -215,27 +216,38 @@ class _QuarkLibraryState extends State<_QuarkLibrary> {
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
                 children: [
                   for (final video in _videos)
-                    ListTile(
-                      key: ValueKey(video.id),
-                      leading: Icon(
-                        video.id.startsWith('mmquark://folder?')
-                            ? CupertinoIcons.folder
-                            : CupertinoIcons.play_rectangle,
-                        color: AppleColors.systemBlue,
+                    Ios27Pressable(
+                      pressedScale: isWindowsDesktopUi
+                          ? 1.0
+                          : Ios27Spring.pressSwellScale,
+                      borderRadius: Ios27ConcentricGeometry.innerRadius(
+                        outerRadius:
+                            Ios27ConcentricGeometry.sheetOuterRadiusPt,
+                        padding: 16.0,
                       ),
-                      title: Text(
-                        video.title,
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: video.remarks.isEmpty
-                          ? null
-                          : Text(video.remarks),
-                      trailing: const Icon(
-                        CupertinoIcons.chevron_right,
-                        size: 16,
-                      ),
+                      enableIllumination: !isWindowsDesktopUi,
                       onTap: () => _open(video),
+                      child: ListTile(
+                        key: ValueKey(video.id),
+                        leading: Icon(
+                          video.id.startsWith('mmquark://folder?')
+                              ? CupertinoIcons.folder
+                              : CupertinoIcons.play_rectangle,
+                          color: AppleColors.systemBlue,
+                        ),
+                        title: Text(
+                          video.title,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: video.remarks.isEmpty
+                            ? null
+                            : Text(video.remarks),
+                        trailing: const Icon(
+                          CupertinoIcons.chevron_right,
+                          size: 16,
+                        ),
+                      ),
                     ),
                   if (_loading)
                     const Padding(

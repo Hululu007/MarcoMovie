@@ -1,3 +1,14 @@
+## 2026-11-23 iOS / iPadOS 0.7.0 大版本升级：真·iOS 27 原生液态玻璃与物理弹簧、AVPlayer+MPV 双核画中画与人声增强、内置 CPython 3.14 生态补齐与 HLS 分块缓存/去广告（iOS / iPadOS 0.7.0）
+
+- [iOS / iPadOS 0.7.0](docs/releases/ios-v0.7.0.md)
+- **真·iOS 27 原生液态玻璃宿主体系与弹簧动效（`MarcoLiquidGlass.swift` / `Ios27Spring`）**：
+  - 根控制器升级为真系统原生 `UITabBar` + `UIGlassContainerEffect` 宿主（`configureRootTabChrome` / `setRootTabSelectedIndex` / `setRootTabMinimized` / `setRootTabVisible`）与真 `UIButton.Configuration.glass()` / `.prominentGlass()`，配合滚动连续最小化、横竖屏自适应与二级/播放页无缝弹簧隐显，彻底消除假胶囊与切页闪烁；新增原生 `UIContextMenuInteraction`、无箭头液态生长菜单、悬浮内缩同心圆角 `Ios27LiquidSheet`、原位流体缩放路由与 `Ios27Spring`（`.snappy` / `.smooth` / `.bouncy`）二阶物理弹簧交互；保持 `MinimumOSVersion = 15.0` 完整兼容 iOS 16.4 巨魔安装。
+- **AVPlayer + libmpv 双引擎与高阶视听增强（`MarcoAvPlayerEngine.swift` / `IosMpvProfile`）**：
+  - 新增 Apple 原生低功耗 `AVQueuePlayer` 内核与 `AVPictureInPictureController`（支持 `canStartPictureInPictureAutomaticallyFromInline` 退后台自动画中画与前台恢复）、AirPlay 2 隔空播放选择器及字幕/音轨控制；遇到 `.mkv`/`.flv`/`.ass` 或解码异常时自动在当前毫秒级进度无缝回退 `libmpv` 续播。
+  - 优化 iOS `libmpv` 内存档位（`< 6 GB` 设备 `64 MiB` / `>= 6 GB` 设备 `128 MiB` 可调）、HDR 自动峰值色调映射、4 档动态人声响度增强（`dynaudnorm`）与 Apple Silicon A15+ / M 系轻量化单通道 `Anime4K_Upscale_CNN_x2_S.glsl` 实时超分（内置 `ProcessInfo.thermalState` 过热自动降级保护）。
+- **片源播放链路补齐、离线分块缓存、HLS 去广告与内置 iOS CPython 3.14 扩容**：
+  - 上线 `DiskBlockCache`（`256 KiB` 分块落盘缓存，支持 HTTP `206` Range 与 `Off / 128 MB / 256 MB / 512 MB` 容量限额及一键清理）与点播 `#EXT-X-DISCONTINUITY` HLS 广告段启发式剔除；打通 `CmsClient` -> `WebMediaResolver` 规则/广告过滤（`rules` / `ads` / `WKContentRuleList` 原生广告拦截）与 `MarcoWebSnifferAndJsHost.swift` 离屏 `WKWebView` 异步 JS/DRPY2 兜底；iOS CPython 3.14 新增锁定官方 `pyquery` + `cssselect`、TVBox `Spider`/`localProxy`/`getDependence` 垫片并将并发会话扩容至 `4`（LRU 回收）。
+
 ## 2026-11-23 Android 电视 0.6.2 专项修复与多源管理升级：根治播放闪退与原生 SIGABRT、订阅源每日自动更新、多源导入自动分组及网盘与多配置中心兼容（Android TV 0.6.2）
 
 - [Android 电视 / 盒子 0.6.2](docs/releases/android-tv-v0.6.2.md)

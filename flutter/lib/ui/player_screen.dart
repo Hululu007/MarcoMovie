@@ -21,6 +21,8 @@ import '../core/danmu/segment_cache.dart';
 import '../core/emby_library.dart';
 import '../core/csp_bridge.dart';
 import '../core/cloud_media_proxy.dart';
+import '../core/ios_avplayer_controller.dart';
+import '../core/ios_mpv_profile.dart';
 import '../core/local_media_proxy.dart';
 import '../core/models.dart';
 import '../core/playback_recovery_policy.dart';
@@ -339,6 +341,68 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final Anime4kController _anime4kController;
   late final bool _ownsAnime4kController;
 
+  bool get _isIosPlayerPlatform =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      !OhosRuntime.isOhos;
+  bool get _canUseIosAvPlayerEngine =>
+      _isIosPlayerPlatform &&
+      widget.debugPlayer == null &&
+      widget.debugVideoSurface == null;
+  IosAvPlayerController? _iosAvPlayerController;
+  IosPlaybackEngineMode _iosEngineMode = IosPlaybackEngineMode.avPlayer;
+  IosHdrToneMappingMode _iosHdrToneMapping = IosHdrToneMappingMode.auto;
+  VocalLoudnessPreset _vocalLoudness = VocalLoudnessPreset.off;
+  bool _iosLargeBuffer = false;
+  bool _usingAvPlayer = false;
+  bool _fallbackInFlight = false;
+  String _lastAvExternalAudioUrl = '';
+  final List<StreamSubscription<dynamic>> _iosAvSubscriptions = [];
+  int? _avPhysicalMemoryBytes;
+  bool _wasAvPlaying = false;
+  bool _wasAvBuffering = false;
+  bool _wasAvCompleted = false;
+
+  static String _avGravityForFit(BoxFit fit) => switch (fit) {
+    BoxFit.cover => 'resizeAspectFill',
+    BoxFit.fill => 'resize',
+    _ => 'resizeAspect',
+  };
+
+  void _setFit(BoxFit nextFit) {
+    setState(() => _fit = nextFit);
+    if (_usingAvPlayer) {
+      unawaited(
+        _iosAvPlayerController?.setVideoGravity(_avGravityForFit(nextFit)),
+      );
+    }
+  }
+
+  double get _engineVolume100 => _usingAvPlayer
+      ? ((_iosAvPlayerController?.volume ?? 1.0) * 100.0).clamp(0.0, 100.0)
+      : _player.state.volume;
+
+  Future<void> _enginePlay() => _usingAvPlayer
+      ? (_iosAvPlayerController?.play() ?? Future<void>.value())
+      : _player.play();
+
+  Future<void> _enginePause() => _usingAvPlayer
+      ? (_iosAvPlayerController?.pause() ?? Future<void>.value())
+      : _player.pause();
+
+  Future<void> _enginePlayOrPause() => _usingAvPlayer
+      ? (_iosAvPlayerController?.playOrPause() ?? Future<void>.value())
+      : _player.playOrPause();
+
+  Future<void> _engineSetRate(double rate) => _usingAvPlayer
+      ? (_iosAvPlayerController?.setRate(rate) ?? Future<void>.value())
+      : _player.setRate(rate);
+
+  Future<void> _engineSetVolume100(double vol100) => _usingAvPlayer
+      ? (_iosAvPlayerController?.setVolume((vol100 / 100.0).clamp(0.0, 1.0)) ??
+            Future<void>.value())
+      : _player.setVolume(vol100);
+
   bool get _useEnhancedHud =>
       !OhosRuntime.isOhos && !OhosRuntime.shouldUseTvUi(widget.storage.tvUiMode);
 
@@ -586,7 +650,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _onSleepTimerExpired() {
     if (!mounted) return;
     _cancelTransientInteractions(GestureInterruptReason.playbackPaused);
-    _player.pause();
+    unawaited(_enginePause());
     PlaybackWakelock.setEnabled(false);
     _showHud('定时关闭已暂停播放');
   }
@@ -671,6 +735,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         logical == _activeQualityLogicalUrl;
   }
   bool get _matchesActiveMedia {
+    if (_usingAvPlayer) return _allowEvents;
     if (_activeMediaUri.isEmpty) return false;
     final playlist = _player.state.playlist;
     if (playlist.medias.isEmpty) return _allowEvents;
@@ -714,7 +779,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _onHideToTray() {
     if (!mounted) return;
     if (_playing) {
-      unawaited(_player.pause());
+      unawaited(_enginePause());
     }
     unawaited(_saveProgress(immediate: true, triggerSync: false));
   }
@@ -798,11 +863,52 @@ class _PlayerScreenState extends State<PlayerScreen>
     _autoNext = widget.storage.autoNext;
     _repeatMode = widget.storage.repeatMode;
     _playerKernel = widget.storage.playerKernel;
+    _iosEngineMode = IosPlaybackEngineMode.fromId(
+      widget.storage.iosPlaybackEngineMode,
+    );
+    _iosHdrToneMapping = IosHdrToneMappingMode.fromId(
+      widget.storage.iosHdrToneMappingMode,
+    );
+    _vocalLoudness = VocalLoudnessPreset.fromId(
+      widget.storage.vocalLoudnessPreset,
+    );
+    _iosLargeBuffer = widget.storage.iosLargeBufferEnabled;
+    if (!OhosRuntime.isOhos) {
+      unawaited(
+        DiskBlockCache.shared.setCapacityMb(
+          widget.storage.mediaDiskCacheLimitMb,
+        ),
+      );
+    }
     _isFavorite = widget.storage.isFavorite(
       widget.site.key,
       widget.video.id,
       forPrivate: widget.site.isEffectivelyPrivate,
     );
+    if (_canUseIosAvPlayerEngine) {
+      final avCtrl = IosAvPlayerController();
+      _iosAvPlayerController = avCtrl;
+      avCtrl.addListener(_onIosAvPlayerChanged);
+      _iosAvSubscriptions.add(
+        avCtrl.onFallbackToMpvRequested.listen((event) {
+          if (!mounted ||
+              event.isStaticPrecheck ||
+              !_usingAvPlayer ||
+              _fallbackInFlight) {
+            return;
+          }
+          unawaited(_handleRuntimeFallbackToMpv(event));
+        }),
+      );
+      _iosAvSubscriptions.add(
+        avCtrl.onPipRestoreForeground.listen((_) {
+          if (!mounted) return;
+          _syncMobileSystemBars(force: true);
+          if (_controlsVisible) _scheduleHide();
+        }),
+      );
+      unawaited(_initIosAvPlayerTelemetry());
+    }
     if (!_desktop &&
         !widget.embedded &&
         defaultTargetPlatform == TargetPlatform.iOS &&
@@ -841,7 +947,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     // episode/quality transitions. Release only after the decoder is disposed.
     _releaseSourceSession = _client.pinPlaybackSource(widget.site);
     _playerConfiguration = _applyPlayerKernel(_playerKernel);
-    if (!OhosRuntime.isOhos && _anime4kController.isAvailableForPlayer(_player)) {
+    if (!OhosRuntime.isOhos &&
+        (_anime4kController.isAvailableForPlayer(_player) ||
+            _anime4kController.isIosLightweightAvailableForPlayer(_player))) {
       unawaited(_initAnime4kAfterKernel());
     }
 
@@ -1229,6 +1337,331 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  Future<void> _initIosAvPlayerTelemetry() async {
+    final ctrl = _iosAvPlayerController;
+    if (ctrl == null || !mounted) return;
+    await ctrl.initialize();
+    if (!mounted) return;
+    final memBytes = ctrl.physicalMemoryBytes;
+    if (memBytes > 0 && memBytes != _avPhysicalMemoryBytes) {
+      _avPhysicalMemoryBytes = memBytes;
+      if (!_usingAvPlayer) {
+        _playerConfiguration = _playerConfiguration.then(
+          (_) => _applyPlayerKernel(_playerKernel),
+        );
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _onIosAvPlayerChanged() {
+    final ctrl = _iosAvPlayerController;
+    if (!mounted || ctrl == null || !_usingAvPlayer || !_allowEvents) return;
+
+    final nextW = ctrl.videoWidth;
+    final nextH = ctrl.videoHeight;
+    final nextPlaying = ctrl.playing;
+    final nextBuffering = ctrl.buffering;
+    final nextDur = ctrl.duration;
+    final nextPos = ctrl.position;
+    final nextCompleted = ctrl.completed;
+    final nextReady = ctrl.ready;
+
+    if (nextW > 0 && nextH > 0 && (nextW != _videoWidth || nextH != _videoHeight)) {
+      _videoWidth = nextW;
+      _videoHeight = nextH;
+      if (_isLiveStream && nextPlaying && !nextBuffering) {
+        _startup.cancel();
+      }
+      _startSpecController.onFirstFrameReady(
+        enabled: _hudPrefs.effectiveStartSpecHud,
+        isLive: _isLiveStream,
+      );
+    }
+
+    if (nextDur > Duration.zero) {
+      if (nextDur.inMilliseconds > _lastKnownDurationMs) {
+        _lastKnownDurationMs = nextDur.inMilliseconds;
+      }
+      _duration = (!_isLiveStream && _lastKnownDurationMs > nextDur.inMilliseconds)
+          ? Duration(milliseconds: _lastKnownDurationMs)
+          : nextDur;
+    }
+
+    if (!_isDraggingSeek && !_isSliderDragging) {
+      _position = (_pendingResumeMs > 0 && nextPos.inMilliseconds < 2000)
+          ? Duration(milliseconds: _pendingResumeMs)
+          : nextPos;
+    }
+
+    if (nextPos.inMilliseconds >= 1000) {
+      _lastKnownPositionMs = nextPos.inMilliseconds;
+      if (!_initialHistoryRecorded) {
+        _initialHistoryRecorded = true;
+        unawaited(_saveProgress());
+      }
+    }
+
+    if (nextReady || nextPlaying || nextPos > Duration.zero || nextDur > Duration.zero) {
+      if (_loading) _loading = false;
+      if (!OhosRuntime.isOhos &&
+          !_hasStartedVodPlayback &&
+          !_isLiveStream &&
+          !widget.embedded &&
+          nextPos > Duration.zero) {
+        _hasStartedVodPlayback = true;
+      }
+    }
+
+    if (!_isLiveStream && nextDur > Duration.zero && _pendingResumeMs > 0) {
+      final maxSeek = math.max(0, nextDur.inMilliseconds - 2000);
+      final targetMs = _pendingResumeMs.clamp(0, maxSeek);
+      _pendingResumeMs = 0;
+      _introSkippedForSession = true;
+      if (targetMs > 0) {
+        _lastKnownPositionMs = targetMs;
+        _startup.reanchor(Duration(milliseconds: targetMs));
+        _position = Duration(milliseconds: targetMs);
+        unawaited(ctrl.seek(Duration(milliseconds: targetMs)));
+        _showHud(
+          '已为您续播至 ${_formatDuration(Duration(milliseconds: targetMs))}',
+        );
+      }
+    }
+
+    _startup.position(nextPos);
+    _startup.updateState(playing: nextPlaying, buffering: nextBuffering);
+    _playing = nextPlaying;
+    _buffering = nextBuffering;
+
+    if (nextPlaying != _wasAvPlaying) {
+      _wasAvPlaying = nextPlaying;
+      PlaybackWakelock.setEnabled(nextPlaying);
+      if (!nextPlaying) {
+        _suspendSkipCountdown();
+        _saveProgress(immediate: true, syncImmediate: false);
+      } else {
+        _maybeEvaluateSkipTriggers();
+        if (!_loading && !_buffering) _scheduleHide();
+      }
+      if (nextPlaying || _position > Duration.zero) {
+        _embySession?.update(_position.inMilliseconds, !nextPlaying, force: true);
+      }
+    }
+
+    if (nextBuffering != _wasAvBuffering) {
+      _wasAvBuffering = nextBuffering;
+      if (!nextBuffering && _playing) _scheduleHide();
+    }
+
+    _embySession?.update(_position.inMilliseconds, !_playing);
+    if (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled) {
+      _danmuCache?.onPlaybackTick(_position.inMilliseconds, playing: _playing);
+    }
+    _maybeEvaluateSkipTriggers(
+      positionOverride: _position,
+      durationOverride: _duration,
+    );
+
+    if (nextCompleted && !_wasAvCompleted && !_outroSkippedForSession) {
+      _wasAvCompleted = true;
+      _embySession?.stop(_position.inMilliseconds);
+      _embySession = null;
+      unawaited(
+        _saveProgress(completed: true, immediate: true, syncImmediate: false),
+      );
+      _handleEpisodeEnd();
+    } else if (!nextCompleted) {
+      _wasAvCompleted = false;
+    }
+
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _handleRuntimeFallbackToMpv(FallbackToMpvRequested event) async {
+    final avCtrl = _iosAvPlayerController;
+    if (!mounted || avCtrl == null || !_usingAvPlayer || _fallbackInFlight) {
+      return;
+    }
+    _fallbackInFlight = true;
+    final resumeMs = event.positionMs > 0
+        ? event.positionMs
+        : (_position.inMilliseconds > 0
+              ? _position.inMilliseconds
+              : _lastKnownPositionMs);
+    final url = _activeResolvedMediaUrl;
+    final headers = _activeResolvedHeaders;
+    final session = _playSession;
+    _usingAvPlayer = false;
+    setState(() {
+      _loading = true;
+      _playing = false;
+      _buffering = false;
+      _wasAvPlaying = false;
+      _wasAvBuffering = false;
+      _wasAvCompleted = false;
+    });
+    try {
+      await avCtrl.stop();
+      if (!mounted || session != _playSession) return;
+      _showHud(
+        event.reason.isNotEmpty
+            ? event.reason
+            : 'Apple 原生内核不支持当前片源，已无缝切回 MPV 续播',
+      );
+      await _applyPlayerKernel(_playerKernel);
+      if (!mounted || session != _playSession || url.isEmpty) return;
+      await _changeMedia(session, () async {
+        _allowEvents = true;
+        _activeMediaUri = Media(url).uri;
+        await _player.open(
+          Media(
+            url,
+            httpHeaders: headers,
+            start: resumeMs > 0 ? Duration(milliseconds: resumeMs) : null,
+          ),
+          play: !_castController.isCasting,
+        );
+        if (_lastAvExternalAudioUrl.isNotEmpty) {
+          await _player.setAudioTrack(AudioTrack.uri(_lastAvExternalAudioUrl));
+        }
+        await _player.setRate(_isLiveStream ? 1.0 : _normalSpeed);
+      });
+    } finally {
+      _fallbackInFlight = false;
+    }
+  }
+
+  Future<void> _toggleIosEngine() async {
+    if (!_isIosPlayerPlatform) return;
+    final nextMode = _iosEngineMode == IosPlaybackEngineMode.avPlayer
+        ? IosPlaybackEngineMode.mpv
+        : IosPlaybackEngineMode.avPlayer;
+    if (nextMode == IosPlaybackEngineMode.avPlayer &&
+        _lastAvExternalAudioUrl.isNotEmpty) {
+      _showHud('当前片源包含独立外挂音轨，需使用 MPV 内核');
+      return;
+    }
+    if (nextMode == IosPlaybackEngineMode.avPlayer) {
+      final precheck = IosAvPlayerController.checkUrlCompatibility(
+        _activeStreamUrl,
+        episodeName: _currentEpisode.name,
+        lineName: _currentLine.name,
+      );
+      if (!precheck.supported) {
+        _showHud(precheck.reason ?? '当前格式不支持 Apple 原生 AVPlayer');
+        return;
+      }
+    }
+    final keepPos = _position.inMilliseconds >= 1000
+        ? _position.inMilliseconds
+        : _lastKnownPositionMs;
+    setState(() => _iosEngineMode = nextMode);
+    await widget.storage.setIosPlaybackEngineMode(nextMode.id);
+    if (!mounted) return;
+    _showHud('已切换至 ${nextMode.labelZh}');
+    unawaited(_openCurrentEpisode(resumeMs: keepPos));
+  }
+
+  void _showVocalLoudnessSheet({Rect? anchorRect}) {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    Future<void> applyPreset(VocalLoudnessPreset preset) async {
+      setState(() => _vocalLoudness = preset);
+      await widget.storage.setVocalLoudnessPreset(preset.id);
+      await IosMpvProfile.applyVocalLoudness(_player, preset);
+      if (!mounted) return;
+      _showHud(
+        _usingAvPlayer
+            ? '人声响度：${preset.labelZh}（将在 MPV 模式生效）'
+            : '人声响度增强：${preset.labelZh}',
+      );
+    }
+
+    if (_canUseNativeIosSheet) {
+      final session = _playSession;
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<VocalLoudnessPreset>(
+          context,
+          title: '人声响度增强',
+          forceOpaque: _effectiveSheetForceOpaque,
+          anchorRect: anchorRect,
+          forceDark: true,
+          options: [
+            for (final preset in VocalLoudnessPreset.values)
+              AppleNativePickerOption<VocalLoudnessPreset>(
+                value: preset,
+                title: preset.labelZh,
+                subtitle: preset.descriptionZh,
+                symbol: 'waveform.badge.plus',
+                checked: _vocalLoudness == preset,
+              ),
+          ],
+          fallback: () async {
+            _showVocalLoudnessFallbackSheet(applyPreset, anchorRect: anchorRect);
+            return null;
+          },
+        );
+        if (!mounted || session != _playSession || picked == null) return;
+        await applyPreset(picked);
+      }());
+      return;
+    }
+    _showVocalLoudnessFallbackSheet(applyPreset, anchorRect: anchorRect);
+  }
+
+  void _showVocalLoudnessFallbackSheet(
+    Future<void> Function(VocalLoudnessPreset) applyPreset, {
+    Rect? anchorRect,
+  }) {
+    Widget buildContent(BuildContext ctx) => ListView(
+      shrinkWrap: true,
+      padding: EdgeInsets.all(_useIos26PlayerChrome ? 4 : 16),
+      children: [
+        AppleGroupedSection(
+          children: [
+            for (final preset in VocalLoudnessPreset.values)
+              AppleGroupedTile(
+                icon: CupertinoIcons.waveform,
+                iconBgColor: _vocalLoudness == preset
+                    ? AppleColors.systemBlue
+                    : AppleColors.groupedTertiary,
+                title: preset.labelZh,
+                subtitle: preset.descriptionZh,
+                trailing: _vocalLoudness == preset
+                    ? const Icon(
+                        CupertinoIcons.checkmark_alt,
+                        color: AppleColors.systemBlue,
+                        size: 18,
+                      )
+                    : null,
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  unawaited(applyPreset(preset));
+                },
+              ),
+          ],
+        ),
+      ],
+    );
+    if (_useIos26PlayerChrome) {
+      showIosGlassPopover<void>(
+        context: context,
+        anchorRect: anchorRect,
+        title: '人声响度增强',
+        maxWidth: 280,
+        maxHeight: 320,
+        forceDark: true,
+        builder: buildContent,
+      );
+      return;
+    }
+    showAppleModalSheet<void>(
+      context: context,
+      title: '人声响度增强',
+      builder: buildContent,
+    );
+  }
+
   void _syncMobileSystemBars({bool force = false}) {
     if (_desktop ||
         widget.embedded ||
@@ -1300,7 +1733,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         return;
       }
       _seekPlayer(Duration.zero);
-      _player.play();
+      _enginePlay();
       _outroSkippedForSession = false;
       return;
     }
@@ -1559,7 +1992,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     : '播放失败，请重试或切换线路';
                 _playbackErrorCause = error;
               });
-              _player.pause();
+              _enginePause();
             }
           }),
         );
@@ -1590,7 +2023,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _playbackError = '此片源需要完成验证码后继续播放';
       }
     });
-    _player.pause();
+    _enginePause();
   }
 
   Future<void> _changeMedia(int session, Future<void> Function() action) {
@@ -1647,6 +2080,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       await _playerConfiguration;
       await _changeMedia(session, () async {
+        if (_usingAvPlayer) {
+          await _iosAvPlayerController?.stop();
+          _usingAvPlayer = false;
+        }
         await _player.stop();
         await _cloudMedia.releaseUnless(qualityLease);
         await _localMedia.releaseUnless(null);
@@ -1669,8 +2106,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     _outroSkippedForSession = false;
     _initialHistoryRecorded = false;
 
-    final configuredParses =
-        widget.storage.loadSavedConfig()?.parses ?? const [];
+    final savedConfig = widget.storage.loadSavedConfig();
+    final configuredParses = savedConfig?.parses ?? const [];
+    final configuredRules = savedConfig?.rules ?? const [];
+    final configuredAds = savedConfig?.ads ?? const [];
     final canOpenDirectly = _isLiveStream
         ? (_currentEpisode.isLocalFile ||
             const {'http', 'https', 'rtmp', 'rtsp'}.contains(
@@ -1730,6 +2169,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                   widget.site,
                   _currentEpisode,
                   parses: configuredParses,
+                  rules: configuredRules,
+                  ads: configuredAds,
                 );
                 if (!mounted || session != _playSession || sourceAbort.isCompleted) {
                   await _cloudMedia.discard(PlayerCloudMediaSession.of(result));
@@ -1825,6 +2266,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           target: parsedTargetUri,
           headers: headers,
           isLive: _isLiveStream,
+          removeHlsAds: !_isLiveStream && widget.storage.hlsAdRemovalEnabled,
+          adHosts: configuredAds,
+          enableDiskCache:
+              !_isLiveStream && widget.storage.mediaDiskCacheLimitMb > 0,
           isCancelled: () => !mounted || session != _playSession,
         );
       }
@@ -1848,6 +2293,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _activeStreamUrl = safePlayUrl;
       _activeQualityLogicalUrl = resolvedLogical is String ? resolvedLogical : '';
       _activeMediaUri = Media(effectiveOpenUrl).uri;
+      _lastAvExternalAudioUrl = effectiveAudioUrl;
 
       await _changeMedia(session, () async {
         _cloudMedia.adopt(pendingLease);
@@ -1870,7 +2316,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           () {
             if (mounted && session == _playSession && _allowEvents) {
               _failPlayback(TimeoutException('media startup'));
-              _changeMedia(session, _player.stop).catchError((_) {});
+              _changeMedia(
+                session,
+                () => _usingAvPlayer
+                    ? (_iosAvPlayerController?.stop() ?? Future<void>.value())
+                    : _player.stop(),
+              ).catchError((_) {});
             }
           },
           hasFallback: hasFallback || (_isLiveStream && !_liveDirectFallbackTried),
@@ -1881,28 +2332,6 @@ class _PlayerScreenState extends State<PlayerScreen>
               ? Duration(seconds: !_liveDirectFallbackTried ? 7 : 8)
               : null,
         );
-        try {
-          final dyn = _player.platform as dynamic;
-          await dyn.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
-          final ua = headers.entries
-              .firstWhere(
-                (e) => e.key.toLowerCase() == 'user-agent',
-                orElse: () => const MapEntry('User-Agent', ''),
-              )
-              .value;
-          if (ua.isNotEmpty) {
-            await dyn.setProperty('user-agent', ua);
-          }
-          final ref = pendingLocalLease != null
-              ? ''
-              : headers.entries
-                  .firstWhere(
-                    (e) => e.key.toLowerCase() == 'referer',
-                    orElse: () => const MapEntry('Referer', ''),
-                  )
-                  .value;
-          await dyn.setProperty('referrer', ref);
-        } catch (_) {}
         _activeResolvedMediaUrl = effectiveOpenUrl;
         _activeResolvedHeaders = Map<String, String>.from(effectiveOpenHeaders);
         if (_castController.isCasting) {
@@ -1915,16 +2344,84 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
           );
         }
-        await _player.open(
-          Media(
-            effectiveOpenUrl,
-            httpHeaders: effectiveOpenHeaders,
-            start: baseMedia.start,
-          ),
-          play: !_castController.isCasting,
-        );
-        if (effectiveAudioUrl.isNotEmpty) {
-          await _player.setAudioTrack(AudioTrack.uri(effectiveAudioUrl));
+
+        final avCtrl = _iosAvPlayerController;
+        var openedWithAvPlayer = false;
+        if (_canUseIosAvPlayerEngine &&
+            avCtrl != null &&
+            _iosEngineMode == IosPlaybackEngineMode.avPlayer &&
+            effectiveAudioUrl.isEmpty &&
+            !_castController.isCasting) {
+          final precheck = IosAvPlayerController.checkUrlCompatibility(
+            safePlayUrl,
+            episodeName: _currentEpisode.name,
+            lineName: _currentLine.name,
+          );
+          if (precheck.supported) {
+            await avCtrl.setVideoGravity(_avGravityForFit(_fit));
+            openedWithAvPlayer = await avCtrl.open(
+              effectiveOpenUrl,
+              headers: effectiveOpenHeaders,
+              startPosition: baseMedia.start ?? Duration.zero,
+              autoPlay: !_castController.isCasting,
+              episodeName: _currentEpisode.name,
+              lineName: _currentLine.name,
+            );
+          } else if ((precheck.reason ?? '').isNotEmpty) {
+            _showHud(precheck.reason!);
+          }
+        }
+
+        if (openedWithAvPlayer && avCtrl != null) {
+          if (mounted) {
+            setState(() {
+              _usingAvPlayer = true;
+              _wasAvPlaying = false;
+              _wasAvBuffering = false;
+              _wasAvCompleted = false;
+            });
+          } else {
+            _usingAvPlayer = true;
+          }
+        } else {
+          if (mounted && _usingAvPlayer) {
+            setState(() => _usingAvPlayer = false);
+          } else {
+            _usingAvPlayer = false;
+          }
+          try {
+            final dyn = _player.platform as dynamic;
+            await dyn.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
+            final ua = headers.entries
+                .firstWhere(
+                  (e) => e.key.toLowerCase() == 'user-agent',
+                  orElse: () => const MapEntry('User-Agent', ''),
+                )
+                .value;
+            if (ua.isNotEmpty) {
+              await dyn.setProperty('user-agent', ua);
+            }
+            final ref = pendingLocalLease != null
+                ? ''
+                : headers.entries
+                    .firstWhere(
+                      (e) => e.key.toLowerCase() == 'referer',
+                      orElse: () => const MapEntry('Referer', ''),
+                    )
+                    .value;
+            await dyn.setProperty('referrer', ref);
+          } catch (_) {}
+          await _player.open(
+            Media(
+              effectiveOpenUrl,
+              httpHeaders: effectiveOpenHeaders,
+              start: baseMedia.start,
+            ),
+            play: !_castController.isCasting,
+          );
+          if (effectiveAudioUrl.isNotEmpty) {
+            await _player.setAudioTrack(AudioTrack.uri(effectiveAudioUrl));
+          }
         }
       });
       if (!mounted || session != _playSession || !_allowEvents) {
@@ -1933,7 +2430,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         return;
       }
       _allowHistory = true;
-      await _player.setRate(_isLiveStream ? 1.0 : _normalSpeed);
+      await _engineSetRate(_isLiveStream ? 1.0 : _normalSpeed);
       if (!mounted || session != _playSession) return;
       _scheduleHide();
     } catch (error) {
@@ -2144,7 +2641,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _applyGestureEvents(events);
       }
       if (_speedBoosting) {
-        _player.setRate(_normalSpeed);
+        _engineSetRate(_normalSpeed);
       }
       setState(() {
         _screenLocked = true;
@@ -2335,12 +2832,18 @@ class _PlayerScreenState extends State<PlayerScreen>
         context: context,
         anchorRect: anchorRect,
         controller: _castController,
+        isAirPlayActive: _iosAvPlayerController?.isAirPlayActive ?? false,
+        airPlayDeviceName: _iosAvPlayerController?.airPlayDeviceName,
+        onOpenAirPlayPicker: _isIosPlayerPlatform
+            ? () => (_iosAvPlayerController?.presentAirPlayPicker() ??
+                  IosLiquidGlassBridge.presentAirPlayPicker())
+            : null,
         onSelectDevice: (device) async {
           if (castUrl.isEmpty) {
             _showHud('当前视频流尚未就绪，请稍后再试');
             return;
           }
-          await _player.pause();
+          await _enginePause();
           final ok = await _castController.castToDevice(
             device: device,
             mediaUrl: castUrl,
@@ -2365,7 +2868,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (resumePos > Duration.zero) {
       _seekPlayer(resumePos);
     }
-    await _player.play();
+    await _enginePlay();
     _showHud('已退出投屏，恢复本机播放');
   }
 
@@ -2683,6 +3186,20 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       await dyn.setProperty('vid', 'auto');
       await dyn.setProperty('audio-display', 'no');
+      if (_isIosPlayerPlatform) {
+        await IosMpvProfile.applyToPlayer(
+          _player,
+          physicalMemoryBytes:
+              _avPhysicalMemoryBytes ?? _iosAvPlayerController?.physicalMemoryBytes,
+          largeBuffer: _iosLargeBuffer || kernel == 'mpv',
+          isLive: _isLiveStream,
+          hdrToneMapping: _iosHdrToneMapping,
+          vocalLoudness: _vocalLoudness,
+          hwdec: _hardwareDecoder(kernel),
+        );
+      } else if (_vocalLoudness != VocalLoudnessPreset.off) {
+        await IosMpvProfile.applyVocalLoudness(_player, _vocalLoudness);
+      }
       if (_isLiveStream) {
         // Live-tuned libmpv profile: lean 16 MiB/4 MiB ring buffer, fast
         // stream-layer reconnect + tolerant live TLS, 1s/1MB probe, and smooth
@@ -2709,15 +3226,17 @@ class _PlayerScreenState extends State<PlayerScreen>
       switch (kernel) {
         case 'ijk':
           await dyn.setProperty('cache', 'yes');
-          await dyn.setProperty(
-            'demuxer-max-bytes',
-            _desktop ? '134217728' : '67108864',
-          );
-          await dyn.setProperty(
-            'demuxer-max-back-bytes',
-            _desktop ? '33554432' : '16777216',
-          );
-          await dyn.setProperty('demuxer-readahead-secs', '30');
+          if (!_isIosPlayerPlatform) {
+            await dyn.setProperty(
+              'demuxer-max-bytes',
+              _desktop ? '134217728' : '67108864',
+            );
+            await dyn.setProperty(
+              'demuxer-max-back-bytes',
+              _desktop ? '33554432' : '16777216',
+            );
+            await dyn.setProperty('demuxer-readahead-secs', '30');
+          }
           await dyn.setProperty('network-timeout', '25');
           await dyn.setProperty(
             'demuxer-lavf-o',
@@ -2726,20 +3245,22 @@ class _PlayerScreenState extends State<PlayerScreen>
           break;
         case 'mpv':
           await dyn.setProperty('cache', 'yes');
-          await dyn.setProperty(
-            'demuxer-max-bytes',
-            (Platform.isWindows || Platform.isLinux)
-                ? '536870912'
-                : (Platform.isMacOS ? '268435456' : '134217728'),
-          );
-          await dyn.setProperty(
-            'demuxer-max-back-bytes',
-            _desktop ? '134217728' : '33554432',
-          );
-          await dyn.setProperty(
-            'demuxer-readahead-secs',
-            _desktop ? '90' : '45',
-          );
+          if (!_isIosPlayerPlatform) {
+            await dyn.setProperty(
+              'demuxer-max-bytes',
+              (Platform.isWindows || Platform.isLinux)
+                  ? '536870912'
+                  : (Platform.isMacOS ? '268435456' : '134217728'),
+            );
+            await dyn.setProperty(
+              'demuxer-max-back-bytes',
+              _desktop ? '134217728' : '33554432',
+            );
+            await dyn.setProperty(
+              'demuxer-readahead-secs',
+              _desktop ? '90' : '45',
+            );
+          }
           await dyn.setProperty('network-timeout', '25');
           await dyn.setProperty(
             'demuxer-lavf-o',
@@ -2749,22 +3270,24 @@ class _PlayerScreenState extends State<PlayerScreen>
         case 'exo':
         default:
           await dyn.setProperty('cache', 'yes');
-          await dyn.setProperty(
-            'demuxer-max-bytes',
-            (Platform.isWindows || Platform.isLinux)
-                ? '268435456'
-                : (Platform.isMacOS
-                      ? '134217728'
-                      : (Platform.isIOS ? '33554432' : '67108864')),
-          );
-          await dyn.setProperty(
-            'demuxer-max-back-bytes',
-            _desktop ? '67108864' : '16777216',
-          );
-          await dyn.setProperty(
-            'demuxer-readahead-secs',
-            _desktop ? '45' : '20',
-          );
+          if (!_isIosPlayerPlatform) {
+            await dyn.setProperty(
+              'demuxer-max-bytes',
+              (Platform.isWindows || Platform.isLinux)
+                  ? '268435456'
+                  : (Platform.isMacOS
+                        ? '134217728'
+                        : (Platform.isIOS ? '33554432' : '67108864')),
+            );
+            await dyn.setProperty(
+              'demuxer-max-back-bytes',
+              _desktop ? '67108864' : '16777216',
+            );
+            await dyn.setProperty(
+              'demuxer-readahead-secs',
+              _desktop ? '45' : '20',
+            );
+          }
           await dyn.setProperty('network-timeout', '20');
           await dyn.setProperty(
             'demuxer-lavf-o',
@@ -2958,6 +3481,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     _anime4kController.removeListener(_onHudSubstateChanged);
     final anime4kController = _anime4kController;
     final ownsAnime4kController = _ownsAnime4kController;
+    for (final sub in _iosAvSubscriptions) {
+      unawaited(sub.cancel());
+    }
+    _iosAvSubscriptions.clear();
+    final iosAvPlayerController = _iosAvPlayerController;
+    _iosAvPlayerController = null;
+    iosAvPlayerController?.removeListener(_onIosAvPlayerChanged);
     for (final sub in _playerSubscriptions) {
       unawaited(sub.cancel());
     }
@@ -2996,7 +3526,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       try {
         try {
           if (!OhosRuntime.isOhos &&
-              anime4kController.isAvailableForPlayer(_player)) {
+              (anime4kController.isAvailableForPlayer(_player) ||
+                  anime4kController.isIosLightweightAvailableForPlayer(
+                    _player,
+                  ))) {
             await anime4kController.resetSession(_player);
           }
         } catch (_) {
@@ -3005,6 +3538,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             anime4kController.dispose();
           }
         }
+        iosAvPlayerController?.dispose();
         await _player.dispose();
       } finally {
         try {
@@ -3036,7 +3570,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             );
             _applyGestureEvents(unlock);
           }
-          _player.playOrPause();
+          _enginePlayOrPause();
           setState(() => _controlsVisible = true);
           _scheduleHide();
         case ToggleFullscreenEvent():
@@ -3107,7 +3641,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         case VerticalVolumeUpdateEvent():
           _verticalHudClearTimer?.cancel();
           final nextVol = (event.volume * 100.0).clamp(0.0, 100.0);
-          _player.setVolume(nextVol);
+          _engineSetVolume100(nextVol);
           setState(() {
             _isVerticalDragging = true;
             _hudText = '音量 ${nextVol.round()}%';
@@ -3117,20 +3651,20 @@ class _PlayerScreenState extends State<PlayerScreen>
           _scheduleVerticalHudClear();
         case SpeedBoostStartEvent():
           if (event.haptic) HapticFeedback.selectionClick();
-          _player.setRate(event.speed);
+          _engineSetRate(event.speed);
           setState(() {
             _speedBoosting = true;
             _hudText = '';
           });
         case SpeedBoostChangeEvent():
           if (event.haptic) HapticFeedback.selectionClick();
-          _player.setRate(event.speed);
+          _engineSetRate(event.speed);
           setState(() => _speedBoosting = true);
         case SpeedLockReadyChangedEvent():
           if (event.haptic) HapticFeedback.mediumImpact();
           setState(() {});
         case SpeedBoostEndEvent():
-          _player.setRate(event.restoreSpeed);
+          _engineSetRate(event.restoreSpeed);
           setState(() {
             _normalSpeed = event.restoreSpeed;
             _speedBoosting = false;
@@ -3138,14 +3672,14 @@ class _PlayerScreenState extends State<PlayerScreen>
           });
         case SpeedLockedEvent():
           if (event.haptic) HapticFeedback.mediumImpact();
-          _player.setRate(event.speed);
+          _engineSetRate(event.speed);
           setState(() {
             _speedBoosting = false;
             _hudText = '';
           });
         case SpeedUnlockedEvent():
           if (event.reason != GestureInterruptReason.manualSpeedChange) {
-            _player.setRate(event.restoreSpeed);
+            _engineSetRate(event.restoreSpeed);
           }
           setState(() {
             if (event.reason != GestureInterruptReason.manualSpeedChange) {
@@ -3297,7 +3831,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _applyGestureEvents(events);
     }
     setState(() => _normalSpeed = clamped);
-    _player.setRate(clamped);
+    _engineSetRate(clamped);
     if (_castController.isCasting) {
       unawaited(_castController.setSpeed(clamped));
     }
@@ -3315,8 +3849,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (!mounted || _screenLocked) return;
           if (resolved is PointerScrollEvent && resolved.scrollDelta.dy != 0) {
             final delta = resolved.scrollDelta.dy < 0 ? 5.0 : -5.0;
-            final nextVol = (_player.state.volume + delta).clamp(0.0, 100.0);
-            _player.setVolume(nextVol);
+            final nextVol = (_engineVolume100 + delta).clamp(0.0, 100.0);
+            _engineSetVolume100(nextVol);
             _showHud('音量 ${nextVol.round()}%');
           }
         },
@@ -3326,7 +3860,12 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _seekPlayer(Duration target) {
     final clampedMs = math.max(0, target.inMilliseconds);
-    _player.seek(Duration(milliseconds: clampedMs));
+    final clamped = Duration(milliseconds: clampedMs);
+    if (_usingAvPlayer) {
+      unawaited(_iosAvPlayerController?.seek(clamped));
+    } else {
+      _player.seek(clamped);
+    }
     if (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled) {
       _danmuCache?.onSeekChanged(clampedMs);
     }
@@ -3342,15 +3881,45 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _initAnime4kAfterKernel() async {
-    if (OhosRuntime.isOhos || !_anime4kController.isAvailableForPlayer(_player)) {
+    if (OhosRuntime.isOhos) return;
+    final desktopAvail = _anime4kController.isAvailableForPlayer(_player);
+    final iosAvail =
+        _isIosPlayerPlatform &&
+        _anime4kController.isIosLightweightAvailableForPlayer(_player);
+    if (!desktopAvail && !iosAvail) {
       return;
     }
     try {
-      await _anime4kController.loadSavedPreset();
-      await _playerConfiguration;
-      if (!mounted) return;
-      if (_anime4kController.preset != Anime4kPreset.off) {
-        await _anime4kController.reapplyActivePreset(_player);
+      if (desktopAvail) {
+        await _anime4kController.loadSavedPreset();
+        await _playerConfiguration;
+        if (!mounted) return;
+        if (_anime4kController.preset != Anime4kPreset.off) {
+          await _anime4kController.reapplyActivePreset(_player);
+        }
+      } else if (iosAvail) {
+        final avCtrl = _iosAvPlayerController;
+        if (avCtrl != null) {
+          _anime4kController.bindThermalStream(
+            _player,
+            avCtrl.onThermalStateChanged,
+          );
+          await _anime4kController.handleThermalState(
+            _player,
+            avCtrl.thermalState,
+          );
+        }
+        _anime4kController.onThermalAutoDisabled = (state) {
+          if (mounted) {
+            _showHud('设备温度过高（${state.labelZh}），已自动关闭 Anime4K 轻超分');
+          }
+        };
+        await _anime4kController.loadSavedIosLightweight();
+        await _playerConfiguration;
+        if (!mounted) return;
+        if (_anime4kController.iosLightweightEnabled) {
+          await _anime4kController.reapplyIosLightweight(_player);
+        }
       }
     } catch (_) {}
   }
@@ -3735,12 +4304,18 @@ class _PlayerScreenState extends State<PlayerScreen>
         Center(
           key: const Key('player-video-surface-layer'),
           child: RepaintBoundary(
-            child: _videoKernel.buildVideoSurface(
-              fit: _fit,
-              videoWidth: _videoWidth,
-              videoHeight: _videoHeight,
-              externalSubtitleOverlay: !OhosRuntime.isOhos,
-            ),
+            child: _usingAvPlayer &&
+                    widget.debugVideoSurface == null &&
+                    _iosAvPlayerController != null
+                ? _iosAvPlayerController!.buildView(
+                    key: const Key('ios-avplayer-surface'),
+                  )
+                : _videoKernel.buildVideoSurface(
+                    fit: _fit,
+                    videoWidth: _videoWidth,
+                    videoHeight: _videoHeight,
+                    externalSubtitleOverlay: !OhosRuntime.isOhos,
+                  ),
           ),
         ),
         // M3b: DanmuLayer strictly ABOVE video surface and BELOW subtitles & HUD.
@@ -3955,7 +4530,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 positionMs: _position.inMilliseconds,
                 userNormalSpeed: _normalSpeed,
                 brightness: _playerBrightness,
-                volume: (_player.state.volume / 100.0).clamp(0.0, 1.0),
+                volume: (_engineVolume100 / 100.0).clamp(0.0, 1.0),
                 isTouchPointer: event.kind == PointerDeviceKind.touch ||
                     event.kind == PointerDeviceKind.stylus,
               );
@@ -4003,7 +4578,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       _toggleOrientation();
                       return;
                     }
-                    _player.playOrPause();
+                    _enginePlayOrPause();
                     setState(() => _controlsVisible = true);
                     _scheduleHide();
                   },
@@ -4016,14 +4591,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                         _speedBoosting = true;
                         _hudText = '2.0× 倍速播放中 · 松手恢复';
                       });
-                      _player.setRate(2.0);
+                      _engineSetRate(2.0);
                     }
                   },
             onLongPressEnd: _screenLocked
                 ? null
                 : (_) {
                     if (_speedBoosting) {
-                      _player.setRate(_normalSpeed);
+                      _engineSetRate(_normalSpeed);
                       setState(() {
                         _speedBoosting = false;
                         _hudText = '';
@@ -4103,7 +4678,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     _verticalDragStartY = details.localPosition.dy;
                     _verticalDragStartValue = _isDraggingLeftBrightness
                         ? _playerBrightness
-                        : (_player.state.volume / 100.0).clamp(0.0, 1.0);
+                        : (_engineVolume100 / 100.0).clamp(0.0, 1.0);
                   },
             onVerticalDragUpdate: (_desktop || _screenLocked)
                 ? null
@@ -4124,7 +4699,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       final nextVolRatio =
                           (_verticalDragStartValue + delta).clamp(0.0, 1.0);
                       final nextVol = nextVolRatio * 100.0;
-                      _player.setVolume(nextVol);
+                      _engineSetVolume100(nextVol);
                       setState(() {
                         _hudText = '音量 ${nextVol.round()}%';
                       });
@@ -4328,12 +4903,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
               event.logicalKey == LogicalKeyboardKey.arrowDown) {
             final volume =
-                (_player.state.volume +
+                (_engineVolume100 +
                         (event.logicalKey == LogicalKeyboardKey.arrowUp
                             ? 5
                             : -5))
                     .clamp(0.0, 100.0);
-            _player.setVolume(volume);
+            _engineSetVolume100(volume);
             _showHud('音量 ${volume.round()}%');
             return KeyEventResult.handled;
           }
@@ -4365,13 +4940,13 @@ class _PlayerScreenState extends State<PlayerScreen>
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.keyM) {
-            if (_player.state.volume > 0) {
-              _previousVolume = _player.state.volume;
-              _player.setVolume(0);
+            if (_engineVolume100 > 0) {
+              _previousVolume = _engineVolume100;
+              _engineSetVolume100(0);
               _showHud('静音');
             } else {
               final restore = _previousVolume > 0 ? _previousVolume : 100.0;
-              _player.setVolume(restore);
+              _engineSetVolume100(restore);
               _showHud('音量 ${restore.round()}%');
             }
             return KeyEventResult.handled;
@@ -4389,7 +4964,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (event.logicalKey == LogicalKeyboardKey.space ||
               event.logicalKey == LogicalKeyboardKey.enter ||
               event.logicalKey == LogicalKeyboardKey.select) {
-            _player.playOrPause();
+            _enginePlayOrPause();
             setState(() => _controlsVisible = true);
             _scheduleHide();
             return KeyEventResult.handled;
@@ -5792,6 +6367,28 @@ class _PlayerScreenState extends State<PlayerScreen>
             (currentDownload.isActive ||
                 currentDownload.status == DownloadStatus.completed),
         storageReduceTransparency: _storageReduceTransparency,
+        isPipSupported:
+            _usingAvPlayer && (_iosAvPlayerController?.isPipSupported ?? false),
+        isPipActive:
+            _usingAvPlayer && (_iosAvPlayerController?.isPipActive ?? false),
+        onPipTap: () {
+          final avCtrl = _iosAvPlayerController;
+          if (!_usingAvPlayer || avCtrl == null) return;
+          unawaited(avCtrl.isPipActive ? avCtrl.stopPip() : avCtrl.startPip());
+        },
+        engineLabel: _usingAvPlayer ? 'AVPlayer' : 'MPV',
+        isAvPlayerActive: _usingAvPlayer,
+        onEngineSwitchTap: _isIosPlayerPlatform
+            ? () => unawaited(_toggleIosEngine())
+            : null,
+        onEngineSwitchAnchoredTap: _isIosPlayerPlatform
+            ? (_) => unawaited(_toggleIosEngine())
+            : null,
+        vocalLoudnessLabel: _vocalLoudness.shortLabelZh,
+        vocalLoudnessActive: _vocalLoudness != VocalLoudnessPreset.off,
+        onVocalLoudnessTap: () => _showVocalLoudnessSheet(),
+        onVocalLoudnessAnchoredTap: (rect) =>
+            _showVocalLoudnessSheet(anchorRect: rect),
         onBack: () async {
           await _saveProgress(immediate: true);
           if (context.mounted) {
@@ -5805,7 +6402,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             );
             _applyGestureEvents(unlock);
           }
-          _player.playOrPause();
+          _enginePlayOrPause();
           _scheduleHide();
         },
         onRewind15: () => _seekRelative(-15),
@@ -5965,13 +6562,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _toggleDesktopMute() {
-    if (_player.state.volume > 0) {
-      _previousVolume = _player.state.volume;
-      _player.setVolume(0);
+    if (_engineVolume100 > 0) {
+      _previousVolume = _engineVolume100;
+      _engineSetVolume100(0);
       _showHud('静音');
     } else {
       final restore = _previousVolume > 0 ? _previousVolume : 100.0;
-      _player.setVolume(restore);
+      _engineSetVolume100(restore);
       _showHud('音量 ${restore.round()}%');
     }
     if (mounted) setState(() {});
@@ -5982,13 +6579,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     showAppleModalSheet<void>(context: context, title: '音量', maxWidth: 420,
       builder: (_) => StreamBuilder<double>(stream: _safePlayerVolumeStream(),
-        initialData: _player.state.volume, builder: (context, snapshot) =>
+        initialData: _engineVolume100, builder: (context, snapshot) =>
           Padding(padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               Text('${(snapshot.data ?? 100).round()}%',
                 style: const TextStyle(color: Colors.white)),
               Slider(value: (snapshot.data ?? 100).clamp(0, 100), max: 100,
-                label: '${(snapshot.data ?? 100).round()}%', onChanged: _player.setVolume),
+                label: '${(snapshot.data ?? 100).round()}%', onChanged: _engineSetVolume100),
             ]))));
   }
 
@@ -6237,7 +6834,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     child: InkWell(
                       borderRadius: BorderRadius.circular(8),
                       onTap: () {
-                        setState(() => _fit = item.$1);
+                        _setFit(item.$1);
                         _showHud('画面比例：${item.$2}');
                       },
                       child: Container(
@@ -6378,7 +6975,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               _showHud('正在刷新直播流…');
             } else {
               _seekPlayer(Duration.zero);
-              _player.play();
+              _enginePlay();
               _showHud('已从头开始播放');
             }
           }),
@@ -6407,11 +7004,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       isLive: _isLiveStream,
       isFullscreen: _desktopWindow?.fullscreen == true,
       normalSpeed: _normalSpeed,
-      volume: _player.state.volume,
-      volumeStream: _safePlayerVolumeStream(),
+      volume: _engineVolume100,
+      volumeStream: _usingAvPlayer ? null : _safePlayerVolumeStream(),
       onVolumeChanged: (v) {
         final next = v.clamp(0.0, 100.0);
-        _player.setVolume(next);
+        _engineSetVolume100(next);
         if (mounted) setState(() {});
         _showHud('音量 ${next.round()}%');
         _scheduleHide();
@@ -6449,7 +7046,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       transportButtons: _buildCenterTransportButtons(scale),
       moreToolsDock: _buildDesktopMoreMenuPopover(context, width),
       onExit: _exitPlayer,
-      onPlayPause: _player.playOrPause,
+      onPlayPause: _enginePlayOrPause,
       onVolumeTap: _showWindowsVolume,
       onEpisodesTap: _showEpisodesSheet,
       onSpeedTap: _showSpeedSheet,
@@ -6689,7 +7286,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         iconSize: 36 * scale,
         hero: true,
         onTap: () {
-          _player.playOrPause();
+          _enginePlayOrPause();
           _scheduleHide();
         },
       );
@@ -6713,7 +7310,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           iconSize: 36 * scale,
           hero: true,
           onTap: () {
-            _player.playOrPause();
+            _enginePlayOrPause();
             _scheduleHide();
           },
         ),
@@ -7108,7 +7705,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _showHud('正在刷新直播流…');
         } else {
           _seekPlayer(Duration.zero);
-          _player.play();
+          _enginePlay();
           _showHud('已从头开始播放');
         }
       }),
@@ -7683,6 +8280,52 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _showAudioTracksSheet() {
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    if (_usingAvPlayer) {
+      final avCtrl = _iosAvPlayerController;
+      final tracks = avCtrl?.audioTracks ?? const <IosAvPlayerTrack>[];
+      if (avCtrl == null || tracks.isEmpty) {
+        _showHud('当前片源仅包含单一音轨');
+        return;
+      }
+      if (_canUseNativeIosSheet) {
+        final session = _playSession;
+        unawaited(() async {
+          final picked = await showAppleNativeOptionSheet<IosAvPlayerTrack>(
+            context,
+            title: '切换音轨',
+            forceOpaque: _effectiveSheetForceOpaque,
+            options: [
+              for (final t in tracks)
+                AppleNativePickerOption<IosAvPlayerTrack>(
+                  value: t,
+                  title: t.title.trim().isNotEmpty
+                      ? t.title.trim()
+                      : (t.language.trim().isNotEmpty
+                            ? t.language.trim()
+                            : '音轨 ${t.id}'),
+                  symbol: 'speaker.wave.2.fill',
+                  checked: t.selected,
+                ),
+            ],
+            fallback: () async {
+              _showAvAudioTracksFallbackSheet(avCtrl, tracks);
+              return null;
+            },
+          );
+          if (!mounted || session != _playSession || picked == null) return;
+          final label = picked.title.trim().isNotEmpty
+              ? picked.title.trim()
+              : (picked.language.trim().isNotEmpty
+                    ? picked.language.trim()
+                    : picked.id);
+          await avCtrl.setAudioTrack(picked.id);
+          _showHud('已切换音轨：$label');
+        }());
+        return;
+      }
+      _showAvAudioTracksFallbackSheet(avCtrl, tracks);
+      return;
+    }
     final tracks = _player.state.tracks.audio;
     final active = _player.state.track.audio;
     if (_canUseNativeIosSheet) {
@@ -7771,8 +8414,109 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  void _showAvAudioTracksFallbackSheet(
+    IosAvPlayerController avCtrl,
+    List<IosAvPlayerTrack> tracks,
+  ) {
+    showAppleModalSheet<void>(
+      context: context,
+      title: '切换音轨',
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: tracks.map((t) {
+              final label = t.title.trim().isNotEmpty
+                  ? t.title.trim()
+                  : (t.language.trim().isNotEmpty ? t.language.trim() : t.id);
+              return AppleGroupedTile(
+                icon: CupertinoIcons.speaker_2_fill,
+                iconBgColor: t.selected
+                    ? AppleColors.systemBlue
+                    : AppleColors.groupedTertiary,
+                title: label.isEmpty ? '音轨 ${t.id}' : label,
+                trailing: t.selected
+                    ? const Icon(
+                        CupertinoIcons.checkmark_alt,
+                        color: AppleColors.systemBlue,
+                        size: 18,
+                      )
+                    : null,
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  unawaited(avCtrl.setAudioTrack(t.id));
+                  _showHud('已切换音轨：${label.isEmpty ? t.id : label}');
+                },
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showSubtitleTracksSheet() {
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    if (_usingAvPlayer) {
+      final avCtrl = _iosAvPlayerController;
+      final tracks = avCtrl?.subtitleTracks ?? const <IosAvPlayerTrack>[];
+      if (avCtrl == null) {
+        _showHud('当前播放器暂不支持切换内嵌字幕');
+        return;
+      }
+      final hasSelected = tracks.any((t) => t.selected);
+      if (_canUseNativeIosSheet) {
+        final session = _playSession;
+        unawaited(() async {
+          final picked = await showAppleNativeOptionSheet<String>(
+            context,
+            title: '切换字幕',
+            forceOpaque: _effectiveSheetForceOpaque,
+            options: [
+              AppleNativePickerOption<String>(
+                value: '',
+                title: '关闭内嵌字幕',
+                symbol: 'captions.bubble',
+                checked: !hasSelected,
+              ),
+              for (final t in tracks)
+                AppleNativePickerOption<String>(
+                  value: t.id,
+                  title: t.title.trim().isNotEmpty
+                      ? t.title.trim()
+                      : (t.language.trim().isNotEmpty
+                            ? t.language.trim()
+                            : '字幕 ${t.id}'),
+                  symbol: 'captions.bubble.fill',
+                  checked: t.selected,
+                ),
+            ],
+            fallback: () async {
+              _showAvSubtitleTracksFallbackSheet(avCtrl, tracks);
+              return null;
+            },
+          );
+          if (!mounted || session != _playSession || picked == null) return;
+          if (picked.isEmpty) {
+            await avCtrl.setSubtitleTrack(null);
+            _showHud('已关闭内嵌字幕');
+          } else {
+            await avCtrl.setSubtitleTrack(picked);
+            final matched = tracks.where((t) => t.id == picked).firstOrNull;
+            final label = matched?.title.trim().isNotEmpty == true
+                ? matched!.title.trim()
+                : (matched?.language.trim().isNotEmpty == true
+                      ? matched!.language.trim()
+                      : picked);
+            _showHud('已切换字幕：$label');
+          }
+        }());
+        return;
+      }
+      _showAvSubtitleTracksFallbackSheet(avCtrl, tracks);
+      return;
+    }
     final tracks = _player.state.tracks.subtitle;
     final active = _player.state.track.subtitle;
     if (_canUseNativeIosSheet) {
@@ -7816,6 +8560,65 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     _showSubtitleTracksFallbackSheet(tracks, active);
+  }
+
+  void _showAvSubtitleTracksFallbackSheet(
+    IosAvPlayerController avCtrl,
+    List<IosAvPlayerTrack> tracks,
+  ) {
+    final hasSelected = tracks.any((t) => t.selected);
+    showAppleModalSheet<void>(
+      context: context,
+      title: '切换字幕',
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: [
+              AppleGroupedTile(
+                icon: CupertinoIcons.captions_bubble,
+                iconBgColor: !hasSelected
+                    ? AppleColors.systemBlue
+                    : AppleColors.groupedTertiary,
+                title: '关闭内嵌字幕',
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  unawaited(avCtrl.setSubtitleTrack(null));
+                  _showHud('已关闭内嵌字幕');
+                },
+              ),
+              ...tracks.map((t) {
+                final label = t.title.trim().isNotEmpty
+                    ? t.title.trim()
+                    : (t.language.trim().isNotEmpty
+                          ? t.language.trim()
+                          : t.id);
+                return AppleGroupedTile(
+                  icon: CupertinoIcons.captions_bubble_fill,
+                  iconBgColor: t.selected
+                      ? AppleColors.systemBlue
+                      : AppleColors.groupedTertiary,
+                  title: label.isEmpty ? '字幕 ${t.id}' : label,
+                  trailing: t.selected
+                      ? const Icon(
+                          CupertinoIcons.checkmark_alt,
+                          color: AppleColors.systemBlue,
+                          size: 18,
+                        )
+                      : null,
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    unawaited(avCtrl.setSubtitleTrack(t.id));
+                    _showHud('已切换字幕：${label.isEmpty ? t.id : label}');
+                  },
+                );
+              }),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   void _showSubtitleTracksFallbackSheet(
@@ -7999,7 +8802,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         currentFit: _fit,
         onFitSelected: (nextFit) {
           if (!mounted) return;
-          setState(() => _fit = nextFit);
+          _setFit(nextFit);
           _showHud('画面比例：$_fitLabel');
         },
         onOpenEpisodes: _showEpisodesSheet,
@@ -8244,13 +9047,13 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     void applyChoice(String choice) {
       if (choice == 'fit:contain') {
-        setState(() => _fit = BoxFit.contain);
+        _setFit(BoxFit.contain);
         _showHud('画面：适应屏幕');
       } else if (choice == 'fit:cover') {
-        setState(() => _fit = BoxFit.cover);
+        _setFit(BoxFit.cover);
         _showHud('画面：裁切填充');
       } else if (choice == 'fit:fill') {
-        setState(() => _fit = BoxFit.fill);
+        _setFit(BoxFit.fill);
         _showHud('画面：铺满屏幕');
       } else if (choice.startsWith('kernel:')) {
         final key = choice.substring('kernel:'.length);
@@ -8567,6 +9370,26 @@ class _PlayerScreenState extends State<PlayerScreen>
         section: 0,
         sectionTitle: '播放增强',
       ),
+      if (_isIosPlayerPlatform &&
+          _anime4kController.isIosLightweightAvailableForPlayer(_player))
+        AppleNativePickerOption<String>(
+          value: 'anime4k_lightweight',
+          title: 'Anime4K 轻超分',
+          subtitle: _anime4kController.iosLightweightEnabled
+              ? '已开启（过热自动降级）'
+              : '适用于 A15 及以上 Apple Silicon',
+          symbol: 'wand.and.stars',
+          checked: _anime4kController.iosLightweightEnabled,
+          section: 0,
+        ),
+      AppleNativePickerOption<String>(
+        value: 'vocal_loudness',
+        title: '人声响度：${_vocalLoudness.shortLabelZh}',
+        subtitle: _vocalLoudness.descriptionZh,
+        symbol: 'waveform.badge.plus',
+        checked: _vocalLoudness != VocalLoudnessPreset.off,
+        section: 0,
+      ),
       if (_qualityChoices.length > 1)
         AppleNativePickerOption<String>(
           value: 'quality',
@@ -8662,6 +9485,22 @@ class _PlayerScreenState extends State<PlayerScreen>
       switch (action) {
         case 'sleep_timer':
           _showSleepTimerSheet(anchorRect: anchorRect);
+        case 'anime4k_lightweight':
+          final next = !_anime4kController.iosLightweightEnabled;
+          unawaited(() async {
+            await _anime4kController.setIosLightweightEnabled(_player, next);
+            await widget.storage.setIosAnime4kLightweightEnabled(next);
+            if (!mounted) return;
+            _showHud(
+              next
+                  ? (_usingAvPlayer
+                        ? '已开启 Anime4K 轻超分（切至 MPV 内核生效）'
+                        : '已开启 Anime4K 轻超分')
+                  : '已关闭 Anime4K 轻超分',
+            );
+          }());
+        case 'vocal_loudness':
+          _showVocalLoudnessSheet(anchorRect: anchorRect);
         case 'quality':
           unawaited(_showQualityChoices());
         case 'audio':
@@ -8694,7 +9533,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             _showHud('正在刷新直播流…');
           } else {
             _seekPlayer(Duration.zero);
-            _player.play();
+            _enginePlay();
             _showHud('已从头开始播放');
           }
       }

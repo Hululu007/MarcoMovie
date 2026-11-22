@@ -2717,6 +2717,8 @@ class CmsClient {
     String targetUrl, {
     String explicitPlayUrl = '',
     List<CmsParse> parses = const [],
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
     Map<String, String> extraHeaders = const {},
   }) {
     return WebMediaResolver.resolve(
@@ -2724,6 +2726,8 @@ class CmsClient {
       targetUrl: targetUrl,
       explicitPlayUrl: explicitPlayUrl,
       parses: parses,
+      rules: rules,
+      ads: ads,
       extraHeaders: extraHeaders,
       sourceOrigin:
           GuardSource.supports(site) ? null : _sourceCredentialOrigin(site),
@@ -2736,6 +2740,8 @@ class CmsClient {
     CmsSite site,
     Map rawPayload, {
     List<CmsParse> parses = const [],
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
   }) async {
     final payload = Map<String, dynamic>.from(rawPayload);
     final rawUrlObj = payload['url'];
@@ -2755,6 +2761,8 @@ class CmsClient {
         rawUrl,
         explicitPlayUrl: (payload['playUrl'] ?? '').toString(),
         parses: parses,
+        rules: rules,
+        ads: ads,
         extraHeaders: spiderHeaders,
       );
       if (parsed != null) {
@@ -2781,6 +2789,8 @@ class CmsClient {
     CmsEpisode episode,
     String candidateUrl, {
     List<CmsParse> parses = const [],
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
   }) async {
     final trimmed = candidateUrl.trim();
     if (!trimmed.startsWith('mmshare://') &&
@@ -2819,7 +2829,13 @@ class CmsClient {
     } else {
       picked = items.first;
     }
-    return resolveEpisodeForPlayback(site, picked, parses: parses);
+    return resolveEpisodeForPlayback(
+      site,
+      picked,
+      parses: parses,
+      rules: rules,
+      ads: ads,
+    );
   }
 
   Future<CmsEpisode> _wrapAliMediaLease(CmsEpisode played) async {
@@ -2892,6 +2908,8 @@ class CmsClient {
     CmsSite site,
     CmsEpisode episode, {
     List<CmsParse> parses = const [],
+    List<CmsSniffRule> rules = const [],
+    List<String> ads = const [],
   }) async {
     site = _resolveAdapterSite(site);
     if (episode.url.startsWith('mmshare://') ||
@@ -2902,6 +2920,8 @@ class CmsClient {
         episode,
         episode.url,
         parses: parses,
+        rules: rules,
+        ads: ads,
       );
       if (shareResolved != null) return shareResolved;
     }
@@ -2949,10 +2969,18 @@ class CmsClient {
           episode,
           payloadUrl,
           parses: parses,
+          rules: rules,
+          ads: ads,
         );
         if (shareResolved != null) return shareResolved;
       }
-      final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
+      final payload = await _maybeUnwrapSpiderPayload(
+        site,
+        raw,
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
       return SourcePlayback.decode(
         payload,
         episode,
@@ -2978,10 +3006,22 @@ class CmsClient {
       final payloadUrl = raw['url'];
       if (payloadUrl is String) {
         final shareResolved = await _tryResolveCloudShareTarget(
-            site, episode, payloadUrl, parses: parses);
+          site,
+          episode,
+          payloadUrl,
+          parses: parses,
+          rules: rules,
+          ads: ads,
+        );
         if (shareResolved != null) return shareResolved;
       }
-      final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
+      final payload = await _maybeUnwrapSpiderPayload(
+        site,
+        raw,
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
       return SourcePlayback.decode(payload, episode, localUrl: _scriptHost.resolve,
         sourceHeaders: site.headers, sourceOrigin: _sourceCredentialOrigin(site));
     }
@@ -2993,10 +3033,22 @@ class CmsClient {
       final payloadUrl = raw['url'];
       if (payloadUrl is String) {
         final shareResolved = await _tryResolveCloudShareTarget(
-            site, episode, payloadUrl, parses: parses);
+          site,
+          episode,
+          payloadUrl,
+          parses: parses,
+          rules: rules,
+          ads: ads,
+        );
         if (shareResolved != null) return shareResolved;
       }
-      final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
+      final payload = await _maybeUnwrapSpiderPayload(
+        site,
+        raw,
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
       return SourcePlayback.decode(payload,episode,localUrl:CatPawHost.instance.resolve,sourceHeaders:site.headers,sourceOrigin:_sourceCredentialOrigin(site));
     }
     if (site.isEmby && episode.url.startsWith('mmemby://play?')) {
@@ -3009,10 +3061,22 @@ class CmsClient {
       final payloadUrl = raw['url'];
       if (payloadUrl is String) {
         final shareResolved = await _tryResolveCloudShareTarget(
-            site, episode, payloadUrl, parses: parses);
+          site,
+          episode,
+          payloadUrl,
+          parses: parses,
+          rules: rules,
+          ads: ads,
+        );
         if (shareResolved != null) return shareResolved;
       }
-      final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
+      final payload = await _maybeUnwrapSpiderPayload(
+        site,
+        raw,
+        parses: parses,
+        rules: rules,
+        ads: ads,
+      );
       final resolved = await SourcePlayback.decode(payload, episode,
           localUrl: _scriptHost.resolve,
           // A plugin's import headers are not the adapted media server's
@@ -3031,6 +3095,8 @@ class CmsClient {
         resolved,
         resolved.url,
         parses: parses,
+        rules: rules,
+        ads: ads,
       );
       if (shareResolved != null) return shareResolved;
     }
@@ -3050,6 +3116,8 @@ class CmsClient {
         site,
         resolved.url,
         parses: parses,
+        rules: rules,
+        ads: ads,
         extraHeaders: resolved.headers,
       );
       if (parsed != null) {

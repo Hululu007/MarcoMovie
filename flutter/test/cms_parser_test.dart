@@ -5,6 +5,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/cms_parser.dart';
 import 'package:marco_movie/core/csp_bridge.dart';
 import 'package:marco_movie/core/models.dart';
+import 'package:marco_movie/core/storage_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   test('parses CMS config with relative URLs and strips JSON comments', () {
     const raw = '''
@@ -679,6 +681,95 @@ https://depot.example/config.json
     final config = CmsParser.parseConfig(whitespaceHex);
     expect(config.supportedSites.length, 1);
     expect(config.supportedSites.first.key, 'ws_tvbox');
+  });
+
+  test('parses top-level TVBox rules and ads into CmsConfig', () {
+    const raw = '''
+    {
+      "sites": [
+        {"key": "demo", "name": "Demo", "type": 1, "api": "https://cms.test/vod"}
+      ],
+      "rules": [
+        {
+          "name": "quantum",
+          "hosts": ["lzizy.com", "lzcdn.com"],
+          "regex": ["https?://.+\\\\.m3u8", "#EXT-X-DISCONTINUITY\\\\r?\\\\n"],
+          "exclude": ["\\\\.gif", "ad\\\\.mp4"],
+          "script": "document.querySelector('.play')?.click();"
+        },
+        {
+          "name": "legacy_click",
+          "hosts": ["legacy.test"],
+          "regex": ["play\\\\?id="],
+          "click": "window.startPlay();"
+        }
+      ],
+      "ads": [
+        "mimg.0c1q0l.cn",
+        "iqiyi.hbuioo.com",
+        "mimg.0c1q0l.cn"
+      ]
+    }
+    ''';
+
+    final config = CmsParser.parseConfig(raw);
+    expect(config.rules, hasLength(2));
+    expect(config.rules[0].name, 'quantum');
+    expect(config.rules[0].hosts, ['lzizy.com', 'lzcdn.com']);
+    expect(config.rules[0].regex, hasLength(2));
+    expect(config.rules[0].exclude, [r'\.gif', r'ad\.mp4']);
+    expect(config.rules[0].effectiveScript,
+        "document.querySelector('.play')?.click();");
+    expect(config.rules[1].effectiveScript, 'window.startPlay();');
+    expect(config.ads, ['mimg.0c1q0l.cn', 'iqiyi.hbuioo.com']);
+  });
+
+  test('StorageService persists and restores rules, ads, hlsAdRemovalEnabled and mediaDiskCacheLimitMb', () async {
+    SharedPreferences.setMockInitialValues({});
+    final storage = StorageService(await SharedPreferences.getInstance());
+
+    expect(storage.hlsAdRemovalEnabled, isTrue);
+    expect(storage.mediaDiskCacheLimitMb, 256);
+
+    await storage.setHlsAdRemovalEnabled(false);
+    await storage.setMediaDiskCacheLimitMb(512);
+
+    const cfg = '''
+    {
+      "sites": [{"key": "s1", "name": "S1", "type": 1, "api": "https://s1.test/vod"}],
+      "rules": [
+        {
+          "name": "r1",
+          "hosts": ["play.test"],
+          "regex": ["stream\\\\.m3u8"],
+          "exclude": ["banner"],
+          "script": "go();"
+        }
+      ],
+      "ads": ["ad.test", "tracker.test"]
+    }
+    ''';
+    await storage.saveConfig(cfg, origin: 'https://s1.test/tv.json');
+
+    final loaded = storage.loadSavedConfig()!;
+    expect(loaded.rules, hasLength(1));
+    expect(loaded.rules.single.name, 'r1');
+    expect(loaded.rules.single.effectiveScript, 'go();');
+    expect(loaded.ads, ['ad.test', 'tracker.test']);
+    expect(storage.hlsAdRemovalEnabled, isFalse);
+    expect(storage.mediaDiskCacheLimitMb, 512);
+
+    final backupJson = storage.exportBackupJson();
+
+    SharedPreferences.setMockInitialValues({});
+    final storage2 = StorageService(await SharedPreferences.getInstance());
+    await storage2.importBackupJson(backupJson);
+    final restored = storage2.loadSavedConfig()!;
+    expect(restored.rules, hasLength(1));
+    expect(restored.rules.single.hosts, ['play.test']);
+    expect(restored.ads, ['ad.test', 'tracker.test']);
+    expect(storage2.hlsAdRemovalEnabled, isFalse);
+    expect(storage2.mediaDiskCacheLimitMb, 512);
   });
 }
 

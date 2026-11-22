@@ -697,18 +697,76 @@ class CmsParse {
   });
 }
 
+class CmsSniffRule {
+  final String name;
+  final List<String> hosts;
+  final List<String> regex;
+  final List<String> exclude;
+  final String script;
+  final String click;
+
+  const CmsSniffRule({
+    this.name = '',
+    this.hosts = const [],
+    this.regex = const [],
+    this.exclude = const [],
+    this.script = '',
+    this.click = '',
+  });
+
+  String get effectiveScript =>
+      click.trim().isNotEmpty ? click.trim() : script.trim();
+
+  Map<String, dynamic> toJson() => {
+    if (name.isNotEmpty) 'name': name,
+    if (hosts.isNotEmpty) 'hosts': hosts,
+    if (regex.isNotEmpty) 'regex': regex,
+    if (exclude.isNotEmpty) 'exclude': exclude,
+    if (script.isNotEmpty) 'script': script,
+    if (click.isNotEmpty) 'click': click,
+  };
+
+  factory CmsSniffRule.fromJson(Map<String, dynamic> json) {
+    List<String> stringList(dynamic raw) {
+      if (raw is List) {
+        return raw
+            .map((e) => e?.toString().trim() ?? '')
+            .where((s) => s.isNotEmpty)
+            .toList(growable: false);
+      }
+      if (raw is String && raw.trim().isNotEmpty) {
+        return [raw.trim()];
+      }
+      return const [];
+    }
+
+    return CmsSniffRule(
+      name: (json['name'] ?? '').toString().trim(),
+      hosts: stringList(json['hosts'] ?? json['host']),
+      regex: stringList(json['regex']),
+      exclude: stringList(json['exclude']),
+      script: (json['script'] ?? '').toString(),
+      click: (json['click'] ?? '').toString(),
+    );
+  }
+}
+
 class CmsConfig {
   final List<CmsSite> sites;
   final List<LiveSource> lives;
   final List<CmsDepot> depots;
   final List<CmsParse> parses;
   final String spider;
+  final List<CmsSniffRule> rules;
+  final List<String> ads;
   const CmsConfig({
     this.sites = const [],
     this.lives = const [],
     this.depots = const [],
     this.parses = const [],
     this.spider = '',
+    this.rules = const [],
+    this.ads = const [],
   });
   List<CmsSite> get supportedSites => List<CmsSite>.unmodifiable(sites);
   List<CmsSite> get publicSupportedSites => sites

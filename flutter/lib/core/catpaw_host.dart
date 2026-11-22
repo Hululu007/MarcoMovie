@@ -31,8 +31,30 @@ class _RecoverableLoopbackException implements Exception {
 /// Stable subscriptions reference verified local bytes, never an ephemeral port.
 class CatPawHost {
   static CatPawHost instance = CatPawHost();
+  static final Map<String, String> _permissionFlagCache = <String, String>{};
   final Future<Directory> Function()? directory;
   final String? executable;
+
+  static Future<String> _resolvePermissionFlag(String nodePath) async {
+    final cached = _permissionFlagCache[nodePath];
+    if (cached != null) return cached;
+    var flag = '--experimental-permission';
+    try {
+      final result = await Process.run(
+        nodePath,
+        const ['-v'],
+      ).timeout(const Duration(seconds: 3));
+      if (result.exitCode == 0) {
+        final match = RegExp(r'v?(\d+)\.').firstMatch('${result.stdout}');
+        final major = match != null ? int.tryParse(match.group(1)!) : null;
+        if (major != null && major >= 24) {
+          flag = '--permission';
+        }
+      }
+    } catch (_) {}
+    _permissionFlagCache[nodePath] = flag;
+    return flag;
+  }
   final String? bootstrap;
   final bool? useEmbeddedRuntime;
   CatPawHost({
@@ -353,11 +375,12 @@ class CatPawHost {
         'TEMP': root.path,
         'TMP': root.path,
       };
+      final permissionFlag = await _resolvePermissionFlag(node);
       final process = await Process.start(
         node,
         [
           if (Platform.isMacOS) '--jitless',
-          '--experimental-permission',
+          permissionFlag,
           '--allow-worker',
           '--allow-fs-read=${root.path}',
           '--allow-fs-write=${root.path}',

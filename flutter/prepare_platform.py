@@ -10,6 +10,8 @@ import sys
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 IOS_LIQUID_GLASS_SWIFT_PATH = Path(__file__).resolve().parent / "ios_native" / "MarcoLiquidGlass.swift"
+IOS_AVPLAYER_ENGINE_SWIFT_PATH = Path(__file__).resolve().parent / "ios_native" / "MarcoAvPlayerEngine.swift"
+IOS_WEB_SNIFFER_JS_HOST_SWIFT_PATH = Path(__file__).resolve().parent / "ios_native" / "MarcoWebSnifferAndJsHost.swift"
 LOGO_MARK = REPO_ROOT / "android" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png"
 OPAQUE_ICON = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
 MACOS_ICON_DIR = ROOT / "brand" / "macos"
@@ -90,20 +92,10 @@ private enum MarcoNativeChannelRegistrar {
       }
     }
 
-    let snifferChannel = FlutterMethodChannel(name: "marco_movie/web_sniffer", binaryMessenger: messenger)
-    snifferChannel.setMethodCallHandler { call, result in
-      if call.method == "sniffMedia", let args = call.arguments as? [String: Any] {
-        let urlStr = (args["url"] as? String) ?? ""
-        let rawHeaders = (args["headers"] as? [String: Any]) ?? [:]
-        var headers: [String: String] = [:]
-        for (k, v) in rawHeaders {
-          headers[k] = String(describing: v)
-        }
-        let timeoutMs = (args["timeoutMs"] as? Int) ?? 12000
-        HeadlessMediaWebSniffer.sniff(urlString: urlStr, headers: headers, timeoutMs: timeoutMs, completion: result)
-      } else {
-        result(FlutterMethodNotImplemented)
-      }
+    MarcoWebSnifferAndJsHostRegistrar.register(messenger: messenger)
+
+    if let avRegistrar = pluginRegistry.registrar(forPlugin: "MarcoAvPlayerPlugin") {
+      MarcoAvPlayerEngine.register(with: avRegistrar, messenger: avRegistrar.messenger())
     }
 
     if let glassRegistrar = pluginRegistry.registrar(forPlugin: "MarcoLiquidGlassPlugin") {
@@ -1304,6 +1296,10 @@ def main() -> None:
                     'CFBundleURLSchemes': ['marcomovie'],
                 })
             info['CFBundleURLTypes'] = url_types
+            bg_modes = list(info.get('UIBackgroundModes') or [])
+            if 'audio' not in bg_modes:
+                bg_modes.append('audio')
+            info['UIBackgroundModes'] = bg_modes
             info.setdefault('UILaunchStoryboardName', 'LaunchScreen')
             info.setdefault('UISupportedInterfaceOrientations', [
                 'UIInterfaceOrientationPortrait',
@@ -1356,6 +1352,9 @@ def main() -> None:
                 ad_changed = True
             if "import AVKit" not in ad_text and "import UIKit" in ad_text:
                 ad_text = ad_text.replace("import UIKit", "import UIKit\nimport AVKit", 1)
+                ad_changed = True
+            if "import AVFoundation" not in ad_text and "import UIKit" in ad_text:
+                ad_text = ad_text.replace("import UIKit", "import UIKit\nimport AVFoundation", 1)
                 ad_changed = True
             if "MarcoNativeChannelRegistrar.register(" not in ad_text:
                 if "GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)" in ad_text:
@@ -1520,8 +1519,18 @@ def main() -> None:
             if "final class NetdiskWebAuthController" not in ad_text:
                 ad_text = ad_text.rstrip() + "\n" + IOS_NETDISK_AUTH_CONTROLLER_SWIFT
                 ad_changed = True
-            if "private final class HeadlessMediaWebSniffer" not in ad_text:
-                ad_text = ad_text.rstrip() + "\n" + APPLE_WEB_SNIFFER_SWIFT
+            if "private enum MarcoWebSnifferAndJsHostRegistrar" not in ad_text and IOS_WEB_SNIFFER_JS_HOST_SWIFT_PATH.is_file():
+                # Strip any legacy APPLE_WEB_SNIFFER_SWIFT block before injecting upgraded sniffer & JS host.
+                legacy_sniffer_re = re.compile(
+                    r"\n*private final class WeakSnifferScriptHandler:.*?private final class HeadlessMediaWebSniffer:.*?\n\}\s*",
+                    re.DOTALL,
+                )
+                if legacy_sniffer_re.search(ad_text):
+                    ad_text = legacy_sniffer_re.sub("\n", ad_text)
+                ad_text = ad_text.rstrip() + "\n\n" + IOS_WEB_SNIFFER_JS_HOST_SWIFT_PATH.read_text(encoding="utf-8")
+                ad_changed = True
+            if "enum MarcoAvPlayerEngine" not in ad_text and IOS_AVPLAYER_ENGINE_SWIFT_PATH.is_file():
+                ad_text = ad_text.rstrip() + "\n\n" + IOS_AVPLAYER_ENGINE_SWIFT_PATH.read_text(encoding="utf-8")
                 ad_changed = True
             if "private enum MarcoLiquidGlassSupport" not in ad_text and IOS_LIQUID_GLASS_SWIFT_PATH.is_file():
                 ad_text = ad_text.rstrip() + "\n\n" + IOS_LIQUID_GLASS_SWIFT_PATH.read_text(encoding="utf-8")

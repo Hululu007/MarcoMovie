@@ -5,11 +5,14 @@ private enum MarcoLiquidGlassSupport {
   static var brandLogoImage: UIImage?
   static var interfaceStyle: UIUserInterfaceStyle = .unspecified
   static var glassIntensity: CGFloat = 0.68
+  static var isSceneActive: Bool = true
   static let appearanceChangedNotification = Notification.Name("MarcoLiquidGlassAppearanceChanged")
   static let glassIntensityChangedNotification = Notification.Name("MarcoLiquidGlassIntensityChanged")
   static let windowGeometryChangedNotification = Notification.Name("MarcoWindowGeometryChanged")
+  static let sceneActivationChangedNotification = Notification.Name("MarcoSceneActivationChanged")
   private static var accessibilityObservers: [NSObjectProtocol] = []
   private static var hiddenAirPlayPicker: AVRoutePickerView?
+  private static var activeMenuButtons: Set<ObjectIdentifier> = []
 
   /// Resolves the active UIWindow across UIScene / iPhone Duo fold-unfold / Split View
   /// without touching the deprecated `UIScreen.main` global.
@@ -213,6 +216,53 @@ private enum MarcoLiquidGlassSupport {
     #endif
   }
 
+  static func animateSpring(
+    duration: TimeInterval = 0.38,
+    bounce: CGFloat = 0.16,
+    animations: @escaping () -> Void,
+    completion: (() -> Void)? = nil
+  ) {
+    if UIAccessibility.isReduceMotionEnabled {
+      UIView.animate(withDuration: 0.14, delay: 0.0, options: [.beginFromCurrentState, .allowUserInteraction], animations: animations) { _ in
+        completion?()
+      }
+      return
+    }
+    if #available(iOS 17.0, *) {
+      let timing = UISpringTimingParameters(duration: duration, bounce: bounce)
+      let animator = UIViewPropertyAnimator(duration: 0.0, timingParameters: timing)
+      animator.isInterruptible = true
+      animator.isUserInteractionEnabled = true
+      animator.addAnimations(animations)
+      if let completion = completion {
+        animator.addCompletion { _ in completion() }
+      }
+      animator.startAnimation()
+    } else {
+      let damping = max(0.55, min(0.98, 1.0 - bounce))
+      UIView.animate(
+        withDuration: duration,
+        delay: 0.0,
+        usingSpringWithDamping: damping,
+        initialSpringVelocity: 0.6,
+        options: [.beginFromCurrentState, .allowUserInteraction],
+        animations: animations
+      ) { _ in
+        completion?()
+      }
+    }
+  }
+
+  private static func updateSceneActivationState() {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let active = scenes.isEmpty || scenes.contains { $0.activationState == .foregroundActive }
+    if isSceneActive != active {
+      isSceneActive = active
+      NotificationCenter.default.post(name: sceneActivationChangedNotification, object: nil)
+      bridgeChannel?.invokeMethod("sceneActivationChanged", arguments: active)
+    }
+  }
+
   private static func installAccessibilityObservers() {
     let center = NotificationCenter.default
     for token in accessibilityObservers {
@@ -243,6 +293,89 @@ private enum MarcoLiquidGlassSupport {
         using: notify
       )
     )
+    accessibilityObservers.append(
+      center.addObserver(
+        forName: UIScene.didActivateNotification,
+        object: nil,
+        queue: .main
+      ) { _ in
+        isSceneActive = true
+        NotificationCenter.default.post(name: sceneActivationChangedNotification, object: nil)
+        bridgeChannel?.invokeMethod("sceneActivationChanged", arguments: true)
+      }
+    )
+    accessibilityObservers.append(
+      center.addObserver(
+        forName: UIScene.willDeactivateNotification,
+        object: nil,
+        queue: .main
+      ) { _ in
+        DispatchQueue.main.async {
+          updateSceneActivationState()
+        }
+      }
+    )
+  }
+
+  static func showMenuAtRect(args: [String: Any], completion: @escaping FlutterResult) {
+    guard let host = topPresenter(),
+          let rawItems = args["items"] as? [[String: Any]],
+          !rawItems.isEmpty else {
+      completion(nil)
+      return
+    }
+    let title = (args["title"] as? String) ?? ""
+    let anchor = args["anchorRect"] as? [String: Any]
+    let ax = CGFloat((anchor?["x"] as? NSNumber)?.doubleValue ?? Double(host.view.bounds.midX))
+    let ay = CGFloat((anchor?["y"] as? NSNumber)?.doubleValue ?? Double(host.view.bounds.midY))
+    let aw = max(CGFloat((anchor?["width"] as? NSNumber)?.doubleValue ?? 40.0), 4.0)
+    let ah = max(CGFloat((anchor?["height"] as? NSNumber)?.doubleValue ?? 40.0), 4.0)
+
+    if #available(iOS 17.4, *) {
+      var resolved = false
+      var pendingCompletion: FlutterResult? = completion
+      let anchorBtn = MarcoEphemeralMenuAnchorButton(type: .system)
+      let btnId = ObjectIdentifier(anchorBtn)
+      activeMenuButtons.insert(btnId)
+
+      func finish(_ selectedId: String?) {
+        guard !resolved else { return }
+        resolved = true
+        activeMenuButtons.remove(btnId)
+        anchorBtn.removeFromSuperview()
+        let cb = pendingCompletion
+        pendingCompletion = nil
+        cb?(selectedId)
+      }
+
+      guard let menu = buildMenu(title: title, rawItems: rawItems, onSelect: { selectedId in
+        finish(selectedId)
+      }) else {
+        finish(nil)
+        return
+      }
+
+      anchorBtn.frame = CGRect(
+        x: max(4.0, min(ax, host.view.bounds.width - aw - 4.0)),
+        y: max(4.0, min(ay, host.view.bounds.height - ah - 4.0)),
+        width: aw,
+        height: ah
+      )
+      anchorBtn.backgroundColor = .clear
+      anchorBtn.alpha = 0.02
+      anchorBtn.overrideUserInterfaceStyle = interfaceStyle
+      anchorBtn.menu = menu
+      anchorBtn.showsMenuAsPrimaryAction = true
+      anchorBtn.onMenuEnded = {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+          finish(nil)
+        }
+      }
+      host.view.addSubview(anchorBtn)
+      anchorBtn.performPrimaryAction()
+      return
+    }
+    MarcoNativeOptionSheetController.present(args: args, completion: completion)
   }
 
   static func register(with registrar: FlutterPluginRegistrar, messenger: FlutterBinaryMessenger) {
@@ -262,7 +395,61 @@ private enum MarcoLiquidGlassSupport {
           "majorVersion": majorOSVersion,
           "sdk26": builtWithSDK26,
           "reduceTransparency": isReduceTransparencyEnabled,
+          "sceneActive": isSceneActive,
         ])
+      case "configureRootTabChrome":
+        guard let args = call.arguments as? [String: Any] else {
+          result(false)
+          return
+        }
+        DispatchQueue.main.async {
+          MarcoIos27RootTabChromeController.shared.configure(args: args)
+          result(true)
+        }
+      case "setRootTabSelectedIndex":
+        DispatchQueue.main.async {
+          if let dict = call.arguments as? [String: Any], let idx = dict["index"] as? Int {
+            let animated = (dict["animated"] as? Bool) ?? true
+            MarcoIos27RootTabChromeController.shared.setSelectedIndex(idx, animated: animated)
+          } else if let idx = call.arguments as? Int {
+            MarcoIos27RootTabChromeController.shared.setSelectedIndex(idx, animated: true)
+          }
+          result(nil)
+        }
+      case "setRootTabMinimized":
+        DispatchQueue.main.async {
+          if let dict = call.arguments as? [String: Any] {
+            if let progress = (dict["progress"] as? NSNumber)?.doubleValue {
+              MarcoIos27RootTabChromeController.shared.updateScrollMinimizeProgress(CGFloat(progress))
+            } else {
+              let minimized = (dict["minimized"] as? Bool) ?? false
+              let animated = (dict["animated"] as? Bool) ?? true
+              MarcoIos27RootTabChromeController.shared.setMinimized(minimized, animated: animated)
+            }
+          } else if let minimized = call.arguments as? Bool {
+            MarcoIos27RootTabChromeController.shared.setMinimized(minimized, animated: true)
+          }
+          result(nil)
+        }
+      case "setRootTabVisible":
+        DispatchQueue.main.async {
+          if let dict = call.arguments as? [String: Any] {
+            let visible = (dict["visible"] as? Bool) ?? true
+            let animated = (dict["animated"] as? Bool) ?? true
+            MarcoIos27RootTabChromeController.shared.setRootDockVisible(visible, animated: animated)
+          } else if let visible = call.arguments as? Bool {
+            MarcoIos27RootTabChromeController.shared.setRootDockVisible(visible, animated: true)
+          }
+          result(nil)
+        }
+      case "showMenuAtRect":
+        guard let args = call.arguments as? [String: Any] else {
+          result(nil)
+          return
+        }
+        DispatchQueue.main.async {
+          showMenuAtRect(args: args, completion: result)
+        }
       case "showAlert":
         guard let args = call.arguments as? [String: Any] else {
           result(nil)
@@ -516,6 +703,25 @@ private enum MarcoLiquidGlassSupport {
       presenter = presented
     }
     return presenter
+  }
+}
+
+private final class MarcoEphemeralMenuAnchorButton: UIButton {
+  var onMenuEnded: (() -> Void)?
+
+  override func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    willEndFor configuration: UIContextMenuConfiguration,
+    animator: UIContextMenuInteractionAnimating?
+  ) {
+    super.contextMenuInteraction(interaction, willEndFor: configuration, animator: animator)
+    if let animator = animator {
+      animator.addCompletion { [weak self] in
+        self?.onMenuEnded?()
+      }
+    } else {
+      onMenuEnded?()
+    }
   }
 }
 
@@ -983,8 +1189,10 @@ private final class MarcoNativeOptionSheetController: UIViewController,
       if let sheet = nav.sheetPresentationController {
         sheet.detents = [.medium(), .large()]
         sheet.prefersGrabberVisible = true
-        sheet.preferredCornerRadius = 28.0
+        sheet.preferredCornerRadius = 32.0
         sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+        sheet.prefersEdgeAttachedInCompactHeight = true
+        sheet.widthFollowsPreferredContentSizeWhenEdgeAttached = true
       }
     }
     guard MarcoNativeSheetCoordinator.tryBeginPresentation(
@@ -1061,6 +1269,7 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   }
 
   deinit {
+    NotificationCenter.default.removeObserver(self)
     guard !resolved else { return }
     resolved = true
     let cb = completion
@@ -1115,10 +1324,22 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     tableView.separatorColor = dark
       ? UIColor.white.withAlphaComponent(0.12)
       : UIColor.black.withAlphaComponent(0.10)
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      tableView.cornerConfiguration = .corners(radius: .containerConcentric(minimum: 20.0))
+    }
+    #endif
     tableView.dataSource = self
     tableView.delegate = self
     tableView.register(UITableViewCell.self, forCellReuseIdentifier: "MarcoOptionCell")
     view.addSubview(tableView)
+
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(handleSceneActivationChanged),
+      name: MarcoLiquidGlassSupport.sceneActivationChangedNotification,
+      object: nil
+    )
 
     NSLayoutConstraint.activate([
       tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
@@ -1126,6 +1347,13 @@ private final class MarcoNativeOptionSheetController: UIViewController,
       tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
       tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
     ])
+  }
+
+  @objc private func handleSceneActivationChanged() {
+    let active = MarcoLiquidGlassSupport.isSceneActive
+    UIView.animate(withDuration: 0.18) {
+      self.view.alpha = active ? 1.0 : 0.90
+    }
   }
 
   func numberOfSections(in tableView: UITableView) -> Int {
@@ -1323,8 +1551,10 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     if let sheet = nav.sheetPresentationController {
       sheet.detents = [.medium(), .large()]
       sheet.prefersGrabberVisible = true
-      sheet.preferredCornerRadius = 28.0
+      sheet.preferredCornerRadius = 32.0
       sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+      sheet.prefersEdgeAttachedInCompactHeight = true
+      sheet.widthFollowsPreferredContentSizeWhenEdgeAttached = true
     }
     guard MarcoNativeSheetCoordinator.tryBeginPresentation(
       host: host,
@@ -1368,6 +1598,7 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
   }
 
   deinit {
+    NotificationCenter.default.removeObserver(self)
     guard !resolved else { return }
     resolved = true
     let cb = completion
@@ -1418,7 +1649,19 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     scrollView.translatesAutoresizingMaskIntoConstraints = false
     scrollView.alwaysBounceVertical = true
     scrollView.showsVerticalScrollIndicator = false
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      scrollView.cornerConfiguration = .corners(radius: .containerConcentric(minimum: 20.0))
+    }
+    #endif
     view.addSubview(scrollView)
+
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(handleSceneActivationChanged),
+      name: MarcoLiquidGlassSupport.sceneActivationChangedNotification,
+      object: nil
+    )
 
     stackView.axis = .vertical
     stackView.spacing = 18.0
@@ -1508,6 +1751,7 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
       cfg.cornerStyle = .capsule
       cfg.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 13, bottom: 7, trailing: 13)
       button.configuration = cfg
+      button.cornerConfiguration = .capsule()
       return
     }
     #endif
@@ -1593,6 +1837,13 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     selectedYear = ""
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
     refreshSelectionStyles()
+  }
+
+  @objc private func handleSceneActivationChanged() {
+    let active = MarcoLiquidGlassSupport.isSceneActive
+    UIView.animate(withDuration: 0.18) {
+      self.view.alpha = active ? 1.0 : 0.90
+    }
   }
 
   @objc private func doneTapped() {
@@ -1700,6 +1951,7 @@ private final class MarcoNativePinSheetController: UIViewController {
   }
 
   deinit {
+    NotificationCenter.default.removeObserver(self)
     resetWorkItem?.cancel()
     finish(succeeded: false)
   }
@@ -1805,14 +2057,31 @@ private final class MarcoNativePinSheetController: UIViewController {
     #endif
     cardEffectView.overrideUserInterfaceStyle = style
     cardEffectView.translatesAutoresizingMaskIntoConstraints = false
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      cardEffectView.cornerConfiguration = .corners(radius: .containerConcentric(minimum: 26.0))
+    } else {
+      cardEffectView.layer.cornerRadius = 34.0
+      cardEffectView.layer.cornerCurve = .continuous
+      cardEffectView.clipsToBounds = true
+    }
+    #else
     cardEffectView.layer.cornerRadius = 34.0
     cardEffectView.layer.cornerCurve = .continuous
     cardEffectView.clipsToBounds = true
+    #endif
     cardEffectView.layer.borderWidth = 0.65
     cardEffectView.layer.borderColor = (dark
       ? UIColor.white.withAlphaComponent(0.18)
       : UIColor.black.withAlphaComponent(0.10)).cgColor
     cardShadowView.addSubview(cardEffectView)
+
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(handlePinSceneActivationChanged),
+      name: MarcoLiquidGlassSupport.sceneActivationChangedNotification,
+      object: nil
+    )
 
     scrollView.translatesAutoresizingMaskIntoConstraints = false
     scrollView.showsVerticalScrollIndicator = false
@@ -2008,19 +2277,18 @@ private final class MarcoNativePinSheetController: UIViewController {
     becomeFirstResponder()
     guard !didAnimateIn else { return }
     didAnimateIn = true
-    UIView.animate(
-      withDuration: 0.30,
-      delay: 0,
-      usingSpringWithDamping: 0.84,
-      initialSpringVelocity: 0.5,
-      options: [.allowUserInteraction],
-      animations: {
-        self.backdropControl.alpha = 1.0
-        self.cardShadowView.alpha = 1.0
-        self.cardShadowView.transform = .identity
-      },
-      completion: nil
-    )
+    MarcoLiquidGlassSupport.animateSpring(duration: 0.36, bounce: 0.14) {
+      self.backdropControl.alpha = 1.0
+      self.cardShadowView.alpha = 1.0
+      self.cardShadowView.transform = .identity
+    }
+  }
+
+  @objc private func handlePinSceneActivationChanged() {
+    let active = MarcoLiquidGlassSupport.isSceneActive
+    UIView.animate(withDuration: 0.18) {
+      self.cardEffectView.alpha = active ? 1.0 : 0.90
+    }
   }
 
   override func viewDidLayoutSubviews() {
@@ -2056,6 +2324,7 @@ private final class MarcoNativePinSheetController: UIViewController {
       cfg.cornerStyle = .capsule
       cfg.contentInsets = .zero
       btn.configuration = cfg
+      btn.cornerConfiguration = .capsule()
     } else {
       var cfg = UIButton.Configuration.filled()
       cfg.attributedTitle = titleAttr
@@ -2963,10 +3232,9 @@ private final class MarcoAnimatedTabIconView: UIView {
   }
 }
 
-/// Full-height (62pt) native iOS 26 Liquid Glass 4-tab capsule using `UIGlassEffect`
-/// directly so it matches the 62pt trailing search circle and Apple's iOS 26
-/// floating tab bar proportions, complete with custom animated vector tab icons
-/// and an elevated refractive `UIGlassEffect(style: .clear)` press-and-slide lens.
+/// Fallback capsule for iOS 15–25 (non-Liquid Glass OS versions).
+/// On iOS 26+, `MarcoIos27DockChromeView` renders real `UITabBar` + `UIGlassContainerEffect`
+/// + `UIButton(configuration: .glass())`.
 private final class MarcoNativeLiquidTabCapsuleView: UIView {
   struct TabSpec {
     let label: String
@@ -3428,189 +3696,138 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   }
 }
 
-/// Genuine iOS 26 circular Liquid Glass control (`UIGlassEffect(style: .regular)`
-/// with `isInteractive = true` and `cornerConfiguration = .capsule()`) hosting a
-/// fixed-size centered `UIImageView` + optional transparent `UIMenu` overlay.
-/// Avoids `UIButton.Configuration.glass()`'s iOS 26 frame-resize icon scale bounce
-/// inside Flutter `UiKitView`.
-private final class MarcoInteractiveCircleGlassControl: UIControl {
-  private let effectView: UIVisualEffectView
-  private let iconView = UIImageView()
-  let menuOverlayButton = UIButton(type: .system)
-  private var configuredTintARGB: UInt64?
-  private var hasConfiguredEffect = false
+private final class MarcoIos27PassthroughChromeView: UIView {
+  weak var chromeView: UIView?
+  weak var glassContainerView: UIVisualEffectView?
 
-  override init(frame: CGRect) {
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      let glass = UIGlassEffect(style: .regular)
-      glass.isInteractive = true
-      effectView = UIVisualEffectView(effect: glass)
-    } else {
-      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+  override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+    guard !isHidden, alpha > 0.01, isUserInteractionEnabled else { return nil }
+    guard let hit = super.hitTest(point, with: event) else { return nil }
+    if hit === self || hit === chromeView || hit === glassContainerView || hit === glassContainerView?.contentView {
+      return nil
     }
-    #else
-    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
-    #endif
-    super.init(frame: frame)
-    backgroundColor = .clear
-    isOpaque = false
-    clipsToBounds = false
-    overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-
-    effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-    effectView.isUserInteractionEnabled = false
-    effectView.translatesAutoresizingMaskIntoConstraints = false
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      effectView.cornerConfiguration = .capsule()
-    } else {
-      effectView.layer.cornerCurve = .continuous
-      effectView.clipsToBounds = true
-    }
-    #else
-    effectView.layer.cornerCurve = .continuous
-    effectView.clipsToBounds = true
-    #endif
-    addSubview(effectView)
-
-    iconView.contentMode = .scaleAspectFit
-    iconView.tintColor = .white
-    iconView.isUserInteractionEnabled = false
-    iconView.translatesAutoresizingMaskIntoConstraints = false
-    effectView.contentView.addSubview(iconView)
-
-    menuOverlayButton.backgroundColor = .clear
-    menuOverlayButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-    menuOverlayButton.showsMenuAsPrimaryAction = true
-    menuOverlayButton.isHidden = true
-    menuOverlayButton.translatesAutoresizingMaskIntoConstraints = false
-    addSubview(menuOverlayButton)
-
-    NSLayoutConstraint.activate([
-      effectView.topAnchor.constraint(equalTo: topAnchor),
-      effectView.bottomAnchor.constraint(equalTo: bottomAnchor),
-      effectView.leadingAnchor.constraint(equalTo: leadingAnchor),
-      effectView.trailingAnchor.constraint(equalTo: trailingAnchor),
-      iconView.centerXAnchor.constraint(equalTo: effectView.contentView.centerXAnchor),
-      iconView.centerYAnchor.constraint(equalTo: effectView.contentView.centerYAnchor),
-      menuOverlayButton.topAnchor.constraint(equalTo: topAnchor),
-      menuOverlayButton.bottomAnchor.constraint(equalTo: bottomAnchor),
-      menuOverlayButton.leadingAnchor.constraint(equalTo: leadingAnchor),
-      menuOverlayButton.trailingAnchor.constraint(equalTo: trailingAnchor),
-    ])
-  }
-
-  @available(*, unavailable)
-  required init?(coder: NSCoder) {
-    fatalError("init(coder:) has not been implemented")
-  }
-
-  override func layoutSubviews() {
-    super.layoutSubviews()
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      return
-    }
-    #endif
-    effectView.layer.cornerRadius = bounds.height * 0.5
-  }
-
-  override var isHighlighted: Bool {
-    didSet {
-      UIView.animate(
-        withDuration: 0.14,
-        delay: 0,
-        options: [.allowUserInteraction, .beginFromCurrentState]
-      ) {
-        self.transform = self.isHighlighted
-          ? CGAffineTransform(scaleX: 0.93, y: 0.93)
-          : .identity
-      }
-    }
-  }
-
-  func configure(
-    image: UIImage?,
-    foregroundColor: UIColor,
-    tintColor: UIColor?,
-    tintARGB: UInt64?,
-    menu: UIMenu?,
-    forceDark: Bool = false
-  ) {
-    MarcoLiquidGlassSupport.withoutAnimations {
-      let targetStyle: UIUserInterfaceStyle = forceDark ? .dark : MarcoLiquidGlassSupport.interfaceStyle
-      self.tag = forceDark ? 99001 : 0
-      self.overrideUserInterfaceStyle = targetStyle
-      self.effectView.overrideUserInterfaceStyle = targetStyle
-      self.effectView.backgroundColor = .clear
-      self.menuOverlayButton.overrideUserInterfaceStyle = targetStyle
-      let resolvedTint = tintColor ?? (forceDark ? UIColor(white: 0.08, alpha: 0.28) : nil)
-      let resolvedTintKey: UInt64? = tintARGB ?? (forceDark ? 0xFE080808 : nil)
-      #if compiler(>=6.2)
-      if #available(iOS 26.0, *) {
-        if !self.hasConfiguredEffect || self.configuredTintARGB != resolvedTintKey {
-          self.hasConfiguredEffect = true
-          self.configuredTintARGB = resolvedTintKey
-          let glass = UIGlassEffect(style: .regular)
-          glass.isInteractive = true
-          glass.tintColor = resolvedTint
-          self.effectView.effect = glass
-        }
-      }
-      #endif
-      if MarcoLiquidGlassSupport.isNearWhite(foregroundColor) {
-        self.iconView.image = image
-        self.iconView.tintColor = foregroundColor
-      } else {
-        self.iconView.image = image?.withTintColor(foregroundColor, renderingMode: .alwaysOriginal)
-        self.iconView.tintColor = foregroundColor
-      }
-      if let menu = menu {
-        self.menuOverlayButton.menu = menu
-        self.menuOverlayButton.isHidden = false
-      } else {
-        self.menuOverlayButton.menu = nil
-        self.menuOverlayButton.isHidden = true
-      }
-    }
+    return hit
   }
 }
 
-private final class MarcoDockContainerView: UIView {
-  let tabCapsule = MarcoNativeLiquidTabCapsuleView(frame: .zero)
-  let searchButton = MarcoInteractiveCircleGlassControl(frame: .zero)
-  let logoButton = MarcoInteractiveCircleGlassControl(frame: .zero)
+private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
+  private let isRootHost: Bool
+  private let glassContainerView: UIVisualEffectView?
+  private let fallbackContainerView = UIView()
+  private let nativeTabBar = UITabBar(frame: .zero)
+  private let legacyTabCapsule = MarcoNativeLiquidTabCapsuleView(frame: .zero)
+  private let searchButton = UIButton(type: .system)
+  private let logoButton = UIButton(type: .system)
 
+  private var rawItemDicts: [[String: Any]] = []
+  private var tabSpecs: [MarcoNativeLiquidTabCapsuleView.TabSpec] = []
+  private(set) var selectedIndex: Int = 0
+  private(set) var isMinimized: Bool = false
+  private(set) var isChromeVisible: Bool = true
+  private var minimizeProgress: CGFloat = 0.0
   var showSearchButton: Bool = true {
     didSet {
       updateVisibilityState()
       setNeedsLayout()
     }
   }
-  private(set) var isCollapsed: Bool = false
+  var adaptiveTopOnWide: Bool = true {
+    didSet { setNeedsLayout() }
+  }
 
-  override init(frame: CGRect) {
+  var onSelectTab: ((Int) -> Void)?
+  var onSearchTapped: (() -> Void)?
+  var onScrollToTopTapped: (() -> Void)?
+
+  private var usesNativeGlass26: Bool {
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      return !UIAccessibility.isReduceTransparencyEnabled
+    }
+    #endif
+    return false
+  }
+
+  init(isRootHost: Bool, frame: CGRect = .zero) {
+    self.isRootHost = isRootHost
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      let containerEffect = UIGlassContainerEffect()
+      containerEffect.spacing = 10.0
+      self.glassContainerView = UIVisualEffectView(effect: containerEffect)
+    } else {
+      self.glassContainerView = nil
+    }
+    #else
+    self.glassContainerView = nil
+    #endif
     super.init(frame: frame)
+
     backgroundColor = .clear
     isOpaque = false
     clipsToBounds = false
     insetsLayoutMarginsFromSafeArea = false
     overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
-    addSubview(tabCapsule)
+    let contentParent: UIView
+    if let glassContainer = glassContainerView {
+      glassContainer.backgroundColor = .clear
+      glassContainer.isOpaque = false
+      glassContainer.clipsToBounds = false
+      glassContainer.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      addSubview(glassContainer)
+      contentParent = glassContainer.contentView
+    } else {
+      fallbackContainerView.backgroundColor = .clear
+      fallbackContainerView.isOpaque = false
+      fallbackContainerView.clipsToBounds = false
+      addSubview(fallbackContainerView)
+      contentParent = fallbackContainerView
+    }
 
-    searchButton.accessibilityLabel = "搜索"
-    configureSearchButton()
-    addSubview(searchButton)
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      nativeTabBar.delegate = self
+      nativeTabBar.isTranslucent = true
+      nativeTabBar.itemPositioning = .fill
+      nativeTabBar.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      nativeTabBar.cornerConfiguration = .capsule()
+      contentParent.addSubview(nativeTabBar)
+    } else {
+      contentParent.addSubview(legacyTabCapsule)
+    }
+    #else
+    contentParent.addSubview(legacyTabCapsule)
+    #endif
 
-    logoButton.accessibilityLabel = "快捷导航"
-    logoButton.menuOverlayButton.accessibilityLabel = "快捷导航"
+    legacyTabCapsule.onSelect = { [weak self] idx in
+      guard let self = self else { return }
+      self.selectedIndex = idx
+      self.rebuildLogoMenu()
+      self.onSelectTab?(idx)
+    }
+
+    configureGlassCircleButton(
+      searchButton,
+      image: UIImage(
+        systemName: "magnifyingglass",
+        withConfiguration: UIImage.SymbolConfiguration(pointSize: 20.5, weight: .semibold)
+      ),
+      accessibilityLabel: "搜索"
+    )
+    searchButton.addTarget(self, action: #selector(handleSearchTap), for: .touchUpInside)
+    contentParent.addSubview(searchButton)
+
+    configureGlassCircleButton(
+      logoButton,
+      image: MarcoLiquidGlassSupport.brandLogoImage,
+      accessibilityLabel: "快捷导航"
+    )
+    logoButton.showsMenuAsPrimaryAction = true
     logoButton.alpha = 0.0
     logoButton.isUserInteractionEnabled = false
     logoButton.transform = CGAffineTransform(scaleX: 0.55, y: 0.55)
-    configureLogoButton()
-    addSubview(logoButton)
+    contentParent.addSubview(logoButton)
 
     NotificationCenter.default.addObserver(
       self,
@@ -3618,10 +3835,34 @@ private final class MarcoDockContainerView: UIView {
       name: MarcoLiquidGlassSupport.appearanceChangedNotification,
       object: nil
     )
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(handleSceneActivationChanged),
+      name: MarcoLiquidGlassSupport.sceneActivationChangedNotification,
+      object: nil
+    )
   }
 
   deinit {
     NotificationCenter.default.removeObserver(self)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  var containerViewForHitTest: UIVisualEffectView? {
+    return glassContainerView
+  }
+
+  override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+    guard !isHidden, alpha > 0.01, isUserInteractionEnabled else { return nil }
+    guard let hit = super.hitTest(point, with: event) else { return nil }
+    if hit === self || hit === fallbackContainerView || hit === glassContainerView || hit === glassContainerView?.contentView {
+      return nil
+    }
+    return hit
   }
 
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -3631,65 +3872,204 @@ private final class MarcoDockContainerView: UIView {
     }
   }
 
+  private func configureGlassCircleButton(
+    _ button: UIButton,
+    image: UIImage?,
+    accessibilityLabel: String
+  ) {
+    let fg = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: self)
+    button.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    button.accessibilityLabel = accessibilityLabel
+    if #available(iOS 17.0, *) {
+      button.isSymbolAnimationEnabled = true
+    }
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      var cfg = UIButton.Configuration.glass()
+      cfg.image = image
+      cfg.baseForegroundColor = fg
+      cfg.cornerStyle = .capsule
+      cfg.contentInsets = .zero
+      button.configuration = cfg
+      button.cornerConfiguration = .capsule()
+      return
+    }
+    #endif
+    let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
+    var cfg = UIButton.Configuration.filled()
+    cfg.image = image
+    cfg.baseForegroundColor = fg
+    cfg.baseBackgroundColor = dark
+      ? UIColor(white: 0.16, alpha: 0.88)
+      : UIColor(white: 0.98, alpha: 0.92)
+    cfg.cornerStyle = .capsule
+    cfg.contentInsets = .zero
+    button.configuration = cfg
+  }
+
   @objc private func handleAppearanceChanged() {
     overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-    tabCapsule.refreshAppearance()
-    searchButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-    logoButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-    configureSearchButton()
-    configureLogoButton()
-  }
-
-  @available(*, unavailable)
-  required init?(coder: NSCoder) {
-    fatalError("init(coder:) has not been implemented")
-  }
-
-  private func configureSearchButton() {
-    let symbolConfig = UIImage.SymbolConfiguration(pointSize: 21.5, weight: .semibold)
-    let icon = UIImage(systemName: "magnifyingglass", withConfiguration: symbolConfig)
-    let fg: UIColor = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: self)
-    searchButton.configure(
-      image: icon,
-      foregroundColor: fg,
-      tintColor: nil,
-      tintARGB: nil,
-      menu: nil
+    glassContainerView?.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    nativeTabBar.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    legacyTabCapsule.refreshAppearance()
+    configureGlassCircleButton(
+      searchButton,
+      image: UIImage(
+        systemName: "magnifyingglass",
+        withConfiguration: UIImage.SymbolConfiguration(pointSize: 20.5, weight: .semibold)
+      ),
+      accessibilityLabel: "搜索"
+    )
+    configureGlassCircleButton(
+      logoButton,
+      image: MarcoLiquidGlassSupport.brandLogoImage,
+      accessibilityLabel: "快捷导航"
     )
   }
 
-  private func configureLogoButton() {
-    let logo = MarcoLiquidGlassSupport.brandLogoImage
-    let fg: UIColor = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: self)
-    logoButton.configure(
-      image: logo,
-      foregroundColor: fg,
-      tintColor: nil,
-      tintARGB: nil,
-      menu: nil
-    )
+  @objc private func handleSceneActivationChanged() {
+    let active = MarcoLiquidGlassSupport.isSceneActive
+    let targetAlpha: CGFloat = isChromeVisible ? (active ? 1.0 : 0.86) : 0.0
+    UIView.animate(withDuration: 0.18) {
+      self.alpha = targetAlpha
+    }
+  }
+
+  @objc private func handleSearchTap() {
+    if #available(iOS 17.0, *) {
+      searchButton.imageView?.addSymbolEffect(.bounce, options: .nonRepeating, animated: true)
+    }
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    onSearchTapped?()
   }
 
   private func updateVisibilityState() {
-    searchButton.isHidden = !showSearchButton && !isCollapsed
+    searchButton.isHidden = !showSearchButton && !isMinimized
   }
 
-  func setCollapsed(_ collapsed: Bool, animated: Bool) {
-    guard collapsed != isCollapsed else { return }
-    isCollapsed = collapsed
+  func setItems(_ rawItems: [[String: Any]]) {
+    guard !rawItems.isEmpty else { return }
+    rawItemDicts = rawItems
+    let specs = rawItems.map { item -> MarcoNativeLiquidTabCapsuleView.TabSpec in
+      let title = (item["label"] as? String) ?? ""
+      let symbol = (item["symbol"] as? String) ?? "circle"
+      let selectedSymbol = (item["selectedSymbol"] as? String) ?? symbol
+      let kind = MarcoAnimatedTabIconView.Kind.resolve(
+        kind: item["kind"] as? String,
+        symbol: symbol,
+        label: title
+      )
+      return MarcoNativeLiquidTabCapsuleView.TabSpec(
+        label: title,
+        symbol: symbol,
+        selectedSymbol: selectedSymbol,
+        kind: kind
+      )
+    }
+    tabSpecs = specs
+    legacyTabCapsule.setItems(specs)
+
+    var barItems: [UITabBarItem] = []
+    for (idx, spec) in specs.enumerated() {
+      let img = UIImage(systemName: spec.symbol)
+      let selImg = UIImage(systemName: spec.selectedSymbol) ?? img
+      let barItem = UITabBarItem(title: spec.label, image: img, selectedImage: selImg)
+      barItem.tag = idx
+      barItems.append(barItem)
+    }
+    nativeTabBar.setItems(barItems, animated: false)
+    if selectedIndex >= 0, selectedIndex < barItems.count {
+      nativeTabBar.selectedItem = barItems[selectedIndex]
+    }
+    rebuildLogoMenu()
+    setNeedsLayout()
+  }
+
+  func setSelectedIndex(_ index: Int, animated: Bool) {
+    guard index >= 0, index < max(tabSpecs.count, rawItemDicts.count) else { return }
+    selectedIndex = index
+    legacyTabCapsule.setSelectedIndex(index, animated: animated)
+    if let barItems = nativeTabBar.items, index < barItems.count {
+      nativeTabBar.selectedItem = barItems[index]
+    }
+    rebuildLogoMenu()
+  }
+
+  func tabBar(_ tabBar: UITabBar, didSelect item: UITabBarItem) {
+    let idx = item.tag
+    guard idx >= 0, idx < max(tabSpecs.count, rawItemDicts.count) else { return }
+    selectedIndex = idx
+    legacyTabCapsule.setSelectedIndex(idx, animated: true)
+    rebuildLogoMenu()
+    UISelectionFeedbackGenerator().selectionChanged()
+    onSelectTab?(idx)
+  }
+
+  private func activeTabView() -> UIView {
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      return nativeTabBar
+    }
+    #endif
+    return legacyTabCapsule
+  }
+
+  func updateScrollMinimizeProgress(_ rawProgress: CGFloat) {
+    let p = max(0.0, min(rawProgress, 1.0))
+    minimizeProgress = p
+    let minimizedTarget = p >= 0.5
+    isMinimized = minimizedTarget
+    let tabView = activeTabView()
     let targetCenterX = logoButton.center.x
-    let tabShift = targetCenterX - tabCapsule.center.x
+    let tabShift = (targetCenterX - tabView.center.x) * 0.42 * p
+    let tabScale = 1.0 - 0.55 * p
+    let searchScale = 1.0 - 0.55 * p
+    let logoScale = 0.55 + 0.45 * p
+
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *), let glassEffect = glassContainerView?.effect as? UIGlassContainerEffect {
+      glassEffect.spacing = max(0.0, 10.0 * (1.0 - p))
+    }
+    #endif
+
+    tabView.alpha = max(0.0, 1.0 - p * 1.15)
+    tabView.transform = CGAffineTransform(translationX: tabShift, y: 0).scaledBy(x: tabScale, y: tabScale)
+    searchButton.alpha = showSearchButton ? max(0.0, 1.0 - p * 1.15) : 0.0
+    searchButton.transform = CGAffineTransform(scaleX: searchScale, y: searchScale)
+    logoButton.alpha = max(0.0, (p - 0.2) / 0.8)
+    logoButton.transform = CGAffineTransform(scaleX: logoScale, y: logoScale)
+
+    tabView.isUserInteractionEnabled = !minimizedTarget
+    searchButton.isUserInteractionEnabled = !minimizedTarget && showSearchButton
+    logoButton.isUserInteractionEnabled = minimizedTarget
+  }
+
+  func setMinimized(_ minimized: Bool, animated: Bool) {
+    guard minimized != isMinimized || (minimized ? minimizeProgress < 0.99 : minimizeProgress > 0.01) else {
+      return
+    }
+    isMinimized = minimized
+    minimizeProgress = minimized ? 1.0 : 0.0
+    let tabView = activeTabView()
+    let targetCenterX = logoButton.center.x
+    let tabShift = targetCenterX - tabView.center.x
+
     let apply = {
-      if collapsed {
-        self.tabCapsule.alpha = 0.0
-        self.tabCapsule.transform = CGAffineTransform(translationX: tabShift * 0.42, y: 0).scaledBy(x: 0.45, y: 0.45)
+      #if compiler(>=6.2)
+      if #available(iOS 26.0, *), let glassEffect = self.glassContainerView?.effect as? UIGlassContainerEffect {
+        glassEffect.spacing = minimized ? 0.0 : 10.0
+      }
+      #endif
+      if minimized {
+        tabView.alpha = 0.0
+        tabView.transform = CGAffineTransform(translationX: tabShift * 0.42, y: 0).scaledBy(x: 0.45, y: 0.45)
         self.searchButton.alpha = 0.0
         self.searchButton.transform = CGAffineTransform(scaleX: 0.45, y: 0.45)
         self.logoButton.alpha = 1.0
         self.logoButton.transform = .identity
       } else {
-        self.tabCapsule.alpha = 1.0
-        self.tabCapsule.transform = .identity
+        tabView.alpha = 1.0
+        tabView.transform = .identity
         self.searchButton.alpha = self.showSearchButton ? 1.0 : 0.0
         self.searchButton.transform = .identity
         self.logoButton.alpha = 0.0
@@ -3697,23 +4077,81 @@ private final class MarcoDockContainerView: UIView {
       }
     }
 
-    tabCapsule.isUserInteractionEnabled = !collapsed
-    searchButton.isUserInteractionEnabled = !collapsed && showSearchButton
-    logoButton.isUserInteractionEnabled = collapsed
+    tabView.isUserInteractionEnabled = !minimized
+    searchButton.isUserInteractionEnabled = !minimized && showSearchButton
+    logoButton.isUserInteractionEnabled = minimized
 
     if animated {
-      UIView.animate(
-        withDuration: collapsed ? 0.28 : 0.38,
-        delay: 0,
-        usingSpringWithDamping: collapsed ? 0.86 : 0.78,
-        initialSpringVelocity: 0.6,
-        options: [.beginFromCurrentState, .allowUserInteraction],
-        animations: apply,
-        completion: nil
-      )
+      MarcoLiquidGlassSupport.animateSpring(duration: 0.38, bounce: 0.16, animations: apply)
     } else {
       apply()
     }
+  }
+
+  func setRootDockVisible(_ visible: Bool, animated: Bool) {
+    isChromeVisible = visible
+    isUserInteractionEnabled = visible
+    let isTopWide = isRootHost && adaptiveTopOnWide && (bounds.width >= 600.0 || bounds.width > bounds.height)
+    let hiddenOffsetY: CGFloat = isTopWide ? -96.0 : 120.0
+    let targetTransform = visible ? CGAffineTransform.identity : CGAffineTransform(translationX: 0.0, y: hiddenOffsetY)
+    let targetAlpha: CGFloat = visible ? (MarcoLiquidGlassSupport.isSceneActive ? 1.0 : 0.86) : 0.0
+
+    let apply = {
+      let host: UIView = self.glassContainerView ?? self.fallbackContainerView
+      host.transform = targetTransform
+      self.alpha = targetAlpha
+    }
+    if animated {
+      MarcoLiquidGlassSupport.animateSpring(duration: 0.38, bounce: 0.16, animations: apply)
+    } else {
+      apply()
+    }
+  }
+
+  private func rebuildLogoMenu() {
+    var sections: [UIMenuElement] = []
+
+    if showSearchButton {
+      let searchAction = UIAction(
+        title: "搜索影片",
+        image: UIImage(systemName: "magnifyingglass")
+      ) { [weak self] _ in
+        self?.handleSearchTap()
+      }
+      sections.append(UIMenu(title: "", options: .displayInline, children: [searchAction]))
+    }
+
+    var navActions: [UIAction] = []
+    for (idx, item) in rawItemDicts.enumerated() {
+      let title = (item["label"] as? String) ?? ""
+      let isSelected = idx == selectedIndex
+      let symbol = isSelected
+        ? ((item["selectedSymbol"] as? String) ?? (item["symbol"] as? String) ?? "circle")
+        : ((item["symbol"] as? String) ?? "circle")
+      let action = UIAction(
+        title: title,
+        image: UIImage(systemName: symbol),
+        state: isSelected ? .on : .off
+      ) { [weak self] _ in
+        guard let self = self else { return }
+        self.setSelectedIndex(idx, animated: true)
+        self.onSelectTab?(idx)
+      }
+      navActions.append(action)
+    }
+    if !navActions.isEmpty {
+      sections.append(UIMenu(title: "", options: .displayInline, children: navActions))
+    }
+
+    let topAction = UIAction(
+      title: "回到顶部",
+      image: UIImage(systemName: "arrow.up.to.line")
+    ) { [weak self] _ in
+      self?.onScrollToTopTapped?()
+    }
+    sections.append(UIMenu(title: "", options: .displayInline, children: [topAction]))
+
+    logoButton.menu = UIMenu(title: "", children: sections)
   }
 
   override func layoutSubviews() {
@@ -3722,30 +4160,49 @@ private final class MarcoDockContainerView: UIView {
     let totalH = bounds.height
     guard totalW > 0, totalH > 0 else { return }
 
-    let isCompactSplit = totalW < 360.0
+    let containerTarget: UIView = glassContainerView ?? fallbackContainerView
+    let safeInsets = window?.safeAreaInsets ?? safeAreaInsets
+
+    // Determine whether we are embedded inside a 76pt PlatformView slice or full-screen root host.
+    let isEmbeddedSlice = !isRootHost || totalH <= 140.0
+    let isWideTopLayout = !isEmbeddedSlice && adaptiveTopOnWide && (totalW >= 600.0 || totalW > totalH)
+
+    let chromeBounds: CGRect
+    if isEmbeddedSlice {
+      chromeBounds = bounds
+    } else if isWideTopLayout {
+      let barH: CGFloat = 54.0
+      let topY = max(safeInsets.top, 10.0) + 6.0
+      chromeBounds = CGRect(x: 0.0, y: topY, width: totalW, height: barH)
+    } else {
+      let barH: CGFloat = 72.0
+      let bottomY = totalH - max(safeInsets.bottom, 8.0) - barH
+      chromeBounds = CGRect(x: 0.0, y: max(0.0, bottomY), width: totalW, height: barH)
+    }
+
+    containerTarget.bounds = CGRect(x: 0.0, y: 0.0, width: chromeBounds.width, height: chromeBounds.height)
+    containerTarget.center = CGPoint(x: chromeBounds.midX, y: chromeBounds.midY)
+
+    let cw = chromeBounds.width
+    let ch = chromeBounds.height
+    let isCompactSplit = cw < 360.0
     let outerMargin: CGFloat = isCompactSplit ? 10.0 : 16.0
     let gap: CGFloat = isCompactSplit ? 8.0 : 10.0
-    // Match V1's full 62pt search button & Apple's iOS 26/27 floating tab bar height,
-    // scaling down slightly on narrow Split View windows so capsules never overlap.
-    let dockSize: CGFloat = min(totalW < 340.0 ? 56.0 : 62.0, totalH)
+    let dockSize: CGFloat = min(isWideTopLayout ? 52.0 : (cw < 340.0 ? 56.0 : 62.0), ch)
 
-    // When collapsed into the narrow right-aligned container, keep logoButton anchored
-    // at the trailing edge without disturbing tabCapsule's untransformed geometry.
-    if isCollapsed && totalW < 150.0 {
+    let tabView = activeTabView()
+    if isMinimized && cw < 150.0 {
       logoButton.bounds = CGRect(x: 0, y: 0, width: dockSize, height: dockSize)
-      logoButton.center = CGPoint(x: totalW - outerMargin - dockSize * 0.5, y: totalH * 0.5)
-      bringSubviewToFront(logoButton)
+      logoButton.center = CGPoint(x: cw - outerMargin - dockSize * 0.5, y: ch * 0.5)
+      containerTarget.bringSubviewToFront(logoButton)
       return
     }
 
-    // On iPhone Duo unfolded inner display (669pt+) / iPad portrait, center a slightly
-    // roomier floating glass dock while keeping standard iPhone widths unchanged.
-    let maxCap: CGFloat = totalW >= 600.0 ? 468.0 : 440.0
-    let maxRowWidth: CGFloat = min(totalW, maxCap)
-    let rowX = (totalW - maxRowWidth) * 0.5
-    let centerY = totalH * 0.5
+    let maxCap: CGFloat = isWideTopLayout ? 520.0 : (cw >= 600.0 ? 468.0 : 440.0)
+    let maxRowWidth: CGFloat = min(cw, maxCap)
+    let rowX = (cw - maxRowWidth) * 0.5
+    let centerY = ch * 0.5
 
-    // Use bounds + center (never frame) so active collapsed transforms stay safe.
     let rightCenterX = rowX + maxRowWidth - outerMargin - dockSize * 0.5
     logoButton.bounds = CGRect(x: 0, y: 0, width: dockSize, height: dockSize)
     logoButton.center = CGPoint(x: rightCenterX, y: centerY)
@@ -3757,26 +4214,141 @@ private final class MarcoDockContainerView: UIView {
       let tabX = rowX + outerMargin
       let availTabW = (rightCenterX - dockSize * 0.5 - gap) - tabX
       let tabW = max(availTabW, min(180.0, max(availTabW, 132.0)))
-      tabCapsule.bounds = CGRect(x: 0, y: 0, width: tabW, height: dockSize)
-      tabCapsule.center = CGPoint(x: tabX + tabW * 0.5, y: centerY)
+      tabView.bounds = CGRect(x: 0, y: 0, width: tabW, height: dockSize)
+      tabView.center = CGPoint(x: tabX + tabW * 0.5, y: centerY)
     } else {
       let tabX = rowX + outerMargin
       let availTabW = maxRowWidth - outerMargin * 2.0
       let tabW = max(availTabW, min(180.0, max(availTabW, 132.0)))
-      tabCapsule.bounds = CGRect(x: 0, y: 0, width: tabW, height: dockSize)
-      tabCapsule.center = CGPoint(x: tabX + tabW * 0.5, y: centerY)
+      tabView.bounds = CGRect(x: 0, y: 0, width: tabW, height: dockSize)
+      tabView.center = CGPoint(x: tabX + tabW * 0.5, y: centerY)
     }
 
-    bringSubviewToFront(searchButton)
-    bringSubviewToFront(logoButton)
+    let contentParent = glassContainerView?.contentView ?? fallbackContainerView
+    contentParent.bringSubviewToFront(searchButton)
+    contentParent.bringSubviewToFront(logoButton)
+  }
+}
+
+private final class MarcoIos27RootTabChromeController: NSObject {
+  static let shared = MarcoIos27RootTabChromeController()
+
+  private let overlayView = MarcoIos27PassthroughChromeView(frame: .zero)
+  private let chromeView = MarcoIos27DockChromeView(isRootHost: true, frame: .zero)
+  private var observers: [NSObjectProtocol] = []
+  private weak var attachedHostView: UIView?
+
+  private override init() {
+    super.init()
+    overlayView.backgroundColor = .clear
+    overlayView.isOpaque = false
+    overlayView.clipsToBounds = false
+    overlayView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    overlayView.chromeView = chromeView
+    overlayView.glassContainerView = chromeView.containerViewForHitTest
+
+    chromeView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    overlayView.addSubview(chromeView)
+
+    chromeView.onSelectTab = { idx in
+      MarcoLiquidGlassSupport.bridgeChannel?.invokeMethod("rootTabSelected", arguments: idx)
+    }
+    chromeView.onSearchTapped = {
+      MarcoLiquidGlassSupport.bridgeChannel?.invokeMethod("rootTabSearchTapped", arguments: nil)
+    }
+    chromeView.onScrollToTopTapped = {
+      MarcoLiquidGlassSupport.bridgeChannel?.invokeMethod("rootTabScrollToTop", arguments: nil)
+    }
+
+    observers.append(
+      NotificationCenter.default.addObserver(
+        forName: MarcoLiquidGlassSupport.windowGeometryChangedNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        self?.syncOverlayFrame()
+      }
+    )
+  }
+
+  deinit {
+    for obs in observers {
+      NotificationCenter.default.removeObserver(obs)
+    }
+  }
+
+  private func attachToRootIfNeeded() {
+    guard let rootVC = MarcoLiquidGlassSupport.activeWindow()?.rootViewController,
+          let rootView = rootVC.view else {
+      return
+    }
+    if attachedHostView !== rootView || overlayView.superview !== rootView {
+      overlayView.removeFromSuperview()
+      overlayView.frame = rootView.bounds
+      chromeView.frame = overlayView.bounds
+      rootView.addSubview(overlayView)
+      attachedHostView = rootView
+    }
+    rootView.bringSubviewToFront(overlayView)
+  }
+
+  private func syncOverlayFrame() {
+    guard let rootView = attachedHostView ?? MarcoLiquidGlassSupport.activeWindow()?.rootViewController?.view else {
+      return
+    }
+    overlayView.frame = rootView.bounds
+    chromeView.frame = overlayView.bounds
+    chromeView.setNeedsLayout()
+    rootView.bringSubviewToFront(overlayView)
+  }
+
+  func configure(args: [String: Any]) {
+    attachToRootIfNeeded()
+    if let showSearch = args["showSearch"] as? Bool {
+      chromeView.showSearchButton = showSearch
+    }
+    if let adaptiveTop = args["adaptiveTopOnWide"] as? Bool {
+      chromeView.adaptiveTopOnWide = adaptiveTop
+    }
+    if let items = args["items"] as? [[String: Any]], !items.isEmpty {
+      chromeView.setItems(items)
+    }
+    if let selectedIndex = args["selectedIndex"] as? Int {
+      chromeView.setSelectedIndex(selectedIndex, animated: false)
+    }
+    if let minimized = args["minimized"] as? Bool {
+      chromeView.setMinimized(minimized, animated: false)
+    }
+    if let visible = args["visible"] as? Bool {
+      chromeView.setRootDockVisible(visible, animated: false)
+    }
+    syncOverlayFrame()
+  }
+
+  func setSelectedIndex(_ index: Int, animated: Bool) {
+    attachToRootIfNeeded()
+    chromeView.setSelectedIndex(index, animated: animated)
+  }
+
+  func setMinimized(_ minimized: Bool, animated: Bool) {
+    attachToRootIfNeeded()
+    chromeView.setMinimized(minimized, animated: animated)
+  }
+
+  func updateScrollMinimizeProgress(_ progress: CGFloat) {
+    attachToRootIfNeeded()
+    chromeView.updateScrollMinimizeProgress(progress)
+  }
+
+  func setRootDockVisible(_ visible: Bool, animated: Bool) {
+    attachToRootIfNeeded()
+    chromeView.setRootDockVisible(visible, animated: animated)
   }
 }
 
 private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
-  private let container: MarcoDockContainerView
+  private let container: MarcoIos27DockChromeView
   private let channel: FlutterMethodChannel
-  private var rawItemDicts: [[String: Any]] = []
-  private var currentSelectedIndex: Int = 0
 
   init(
     frame: CGRect,
@@ -3790,20 +4362,22 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
       defaultWidth: MarcoLiquidGlassSupport.activeWindowBounds().width,
       defaultHeight: 76.0
     )
-    self.container = MarcoDockContainerView(frame: initialFrame)
+    self.container = MarcoIos27DockChromeView(isRootHost: false, frame: initialFrame)
     self.channel = FlutterMethodChannel(
       name: "marco_movie/ios26_dock_\(viewId)",
       binaryMessenger: messenger
     )
     super.init()
 
-    container.tabCapsule.onSelect = { [weak self] idx in
-      guard let self = self else { return }
-      self.currentSelectedIndex = idx
-      self.rebuildLogoMenu()
-      self.channel.invokeMethod("onSelect", arguments: idx)
+    container.onSelectTab = { [weak self] idx in
+      self?.channel.invokeMethod("onSelect", arguments: idx)
     }
-    container.searchButton.addTarget(self, action: #selector(searchTapped), for: .touchUpInside)
+    container.onSearchTapped = { [weak self] in
+      self?.channel.invokeMethod("onSearch", arguments: nil)
+    }
+    container.onScrollToTopTapped = { [weak self] in
+      self?.channel.invokeMethod("onScrollToTop", arguments: nil)
+    }
 
     if let args = args {
       MarcoLiquidGlassSupport.withoutAnimations {
@@ -3826,20 +4400,17 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
           result(nil)
         case "setSelectedIndex":
           if let idx = call.arguments as? Int {
-            self.selectTab(index: idx, animated: true)
+            self.container.setSelectedIndex(idx, animated: true)
           }
           result(nil)
         case "setCollapsed":
           if let collapsed = call.arguments as? Bool {
-            self.container.setCollapsed(collapsed, animated: true)
+            self.container.setMinimized(collapsed, animated: true)
           }
           result(nil)
         case "setHidden":
           if let hidden = call.arguments as? Bool {
-            UIView.animate(withDuration: 0.18) {
-              self.container.alpha = hidden ? 0.0 : 1.0
-            }
-            self.container.isUserInteractionEnabled = !hidden
+            self.container.setRootDockVisible(!hidden, animated: true)
           }
           result(nil)
         default:
@@ -3862,98 +4433,18 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
       container.showSearchButton = showSearch
     }
     if let hidden = args["hidden"] as? Bool {
-      container.alpha = hidden ? 0.0 : 1.0
-      container.isUserInteractionEnabled = !hidden
+      container.setRootDockVisible(!hidden, animated: animated)
     }
     if let rawItems = args["items"] as? [[String: Any]], !rawItems.isEmpty {
-      rawItemDicts = rawItems
-      let specs = rawItems.map { item -> MarcoNativeLiquidTabCapsuleView.TabSpec in
-        let title = (item["label"] as? String) ?? ""
-        let symbol = (item["symbol"] as? String) ?? "circle"
-        let selectedSymbol = (item["selectedSymbol"] as? String) ?? symbol
-        let kind = MarcoAnimatedTabIconView.Kind.resolve(
-          kind: item["kind"] as? String,
-          symbol: symbol,
-          label: title
-        )
-        return MarcoNativeLiquidTabCapsuleView.TabSpec(
-          label: title,
-          symbol: symbol,
-          selectedSymbol: selectedSymbol,
-          kind: kind
-        )
-      }
-      container.tabCapsule.setItems(specs)
+      container.setItems(rawItems)
     }
     if let selectedIndex = args["selectedIndex"] as? Int {
-      selectTab(index: selectedIndex, animated: animated)
-    } else {
-      rebuildLogoMenu()
+      container.setSelectedIndex(selectedIndex, animated: animated)
     }
     if let collapsed = args["collapsed"] as? Bool {
-      container.setCollapsed(collapsed, animated: animated)
+      container.setMinimized(collapsed, animated: animated)
     }
     container.setNeedsLayout()
-  }
-
-  private func selectTab(index: Int, animated: Bool) {
-    guard index >= 0, index < rawItemDicts.count else { return }
-    currentSelectedIndex = index
-    container.tabCapsule.setSelectedIndex(index, animated: animated)
-    rebuildLogoMenu()
-  }
-
-  private func rebuildLogoMenu() {
-    var sections: [UIMenuElement] = []
-
-    if container.showSearchButton {
-      let searchAction = UIAction(
-        title: "搜索影片",
-        image: UIImage(systemName: "magnifyingglass")
-      ) { [weak self] _ in
-        self?.searchTapped()
-      }
-      sections.append(UIMenu(title: "", options: .displayInline, children: [searchAction]))
-    }
-
-    var navActions: [UIAction] = []
-    for (idx, item) in rawItemDicts.enumerated() {
-      let title = (item["label"] as? String) ?? ""
-      let isSelected = idx == currentSelectedIndex
-      let symbol = isSelected
-        ? ((item["selectedSymbol"] as? String) ?? (item["symbol"] as? String) ?? "circle")
-        : ((item["symbol"] as? String) ?? "circle")
-      let action = UIAction(
-        title: title,
-        image: UIImage(systemName: symbol),
-        state: isSelected ? .on : .off
-      ) { [weak self] _ in
-        guard let self = self else { return }
-        self.selectTab(index: idx, animated: true)
-        self.channel.invokeMethod("onSelect", arguments: idx)
-      }
-      navActions.append(action)
-    }
-    if !navActions.isEmpty {
-      sections.append(UIMenu(title: "", options: .displayInline, children: navActions))
-    }
-
-    let topAction = UIAction(
-      title: "回到顶部",
-      image: UIImage(systemName: "arrow.up.to.line")
-    ) { [weak self] _ in
-      self?.channel.invokeMethod("onScrollToTop", arguments: nil)
-    }
-    sections.append(UIMenu(title: "", options: .displayInline, children: [topAction]))
-
-    container.logoButton.menuOverlayButton.menu = UIMenu(title: "", children: sections)
-    container.logoButton.menuOverlayButton.isHidden = false
-  }
-
-  @objc private func searchTapped() {
-    let generator = UIImpactFeedbackGenerator(style: .light)
-    generator.impactOccurred()
-    channel.invokeMethod("onSearch", arguments: nil)
   }
 }
 
@@ -3985,96 +4476,82 @@ private final class MarcoNativeGlassButtonFactory: NSObject, FlutterPlatformView
   }
 }
 
-private final class MarcoInteractiveCapsuleGlassControl: UIControl {
-  private let effectView: UIVisualEffectView
-  private let stack = UIStackView()
-  private let leadingIcon = UIImageView()
-  private let titleLabel = UILabel()
-  private let trailingIcon = UIImageView()
-  let menuOverlayButton = UIButton(type: .system)
-  private var configuredTintARGB: UInt64?
-  private var hasConfiguredEffect = false
+private final class MarcoNativeGlassButtonControl: UIView {
+  private let button = UIButton(type: .system)
+  private let fallbackBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+  private let trailingAccessoryView = UIImageView()
+  private var sceneObserver: NSObjectProtocol?
+
+  var onTap: (() -> Void)?
 
   override init(frame: CGRect) {
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      let glass = UIGlassEffect(style: .regular)
-      glass.isInteractive = true
-      effectView = UIVisualEffectView(effect: glass)
-    } else {
-      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
-    }
-    #else
-    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
-    #endif
     super.init(frame: frame)
     backgroundColor = .clear
     isOpaque = false
+    clipsToBounds = false
     overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
-    effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-    effectView.isUserInteractionEnabled = false
-    effectView.translatesAutoresizingMaskIntoConstraints = false
+    var useFallbackBackdrop = true
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
-      effectView.cornerConfiguration = .capsule()
-    } else {
-      effectView.layer.cornerCurve = .continuous
-      effectView.clipsToBounds = true
+      useFallbackBackdrop = false
     }
-    #else
-    effectView.layer.cornerCurve = .continuous
-    effectView.clipsToBounds = true
     #endif
-    addSubview(effectView)
 
-    stack.axis = .horizontal
-    stack.alignment = .center
-    stack.spacing = 5.0
-    stack.isUserInteractionEnabled = false
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    effectView.contentView.addSubview(stack)
+    if useFallbackBackdrop {
+      fallbackBlurView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      fallbackBlurView.isUserInteractionEnabled = false
+      fallbackBlurView.layer.cornerCurve = .continuous
+      fallbackBlurView.clipsToBounds = true
+      fallbackBlurView.translatesAutoresizingMaskIntoConstraints = false
+      addSubview(fallbackBlurView)
+      NSLayoutConstraint.activate([
+        fallbackBlurView.topAnchor.constraint(equalTo: topAnchor),
+        fallbackBlurView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        fallbackBlurView.leadingAnchor.constraint(equalTo: leadingAnchor),
+        fallbackBlurView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      ])
+    }
 
-    leadingIcon.contentMode = .scaleAspectFit
-    leadingIcon.tintColor = .white
-    leadingIcon.setContentHuggingPriority(.required, for: .horizontal)
-    leadingIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
+    button.translatesAutoresizingMaskIntoConstraints = false
+    button.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    if #available(iOS 17.0, *) {
+      button.isSymbolAnimationEnabled = true
+    }
+    button.addTarget(self, action: #selector(handleButtonTap), for: .touchUpInside)
+    addSubview(button)
 
-    titleLabel.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
-    titleLabel.textColor = .white
-    titleLabel.lineBreakMode = .byTruncatingTail
-    titleLabel.numberOfLines = 1
-    titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-    trailingIcon.contentMode = .scaleAspectFit
-    trailingIcon.tintColor = UIColor.white.withAlphaComponent(0.82)
-    trailingIcon.setContentHuggingPriority(.required, for: .horizontal)
-    trailingIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-    stack.addArrangedSubview(leadingIcon)
-    stack.addArrangedSubview(titleLabel)
-    stack.addArrangedSubview(trailingIcon)
-
-    menuOverlayButton.backgroundColor = .clear
-    menuOverlayButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-    menuOverlayButton.showsMenuAsPrimaryAction = true
-    menuOverlayButton.isHidden = true
-    menuOverlayButton.translatesAutoresizingMaskIntoConstraints = false
-    addSubview(menuOverlayButton)
+    trailingAccessoryView.contentMode = .scaleAspectFit
+    trailingAccessoryView.isUserInteractionEnabled = false
+    trailingAccessoryView.isHidden = true
+    trailingAccessoryView.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(trailingAccessoryView)
 
     NSLayoutConstraint.activate([
-      effectView.topAnchor.constraint(equalTo: topAnchor),
-      effectView.bottomAnchor.constraint(equalTo: bottomAnchor),
-      effectView.leadingAnchor.constraint(equalTo: leadingAnchor),
-      effectView.trailingAnchor.constraint(equalTo: trailingAnchor),
-      stack.leadingAnchor.constraint(equalTo: effectView.contentView.leadingAnchor, constant: 12.0),
-      stack.trailingAnchor.constraint(equalTo: effectView.contentView.trailingAnchor, constant: -11.0),
-      stack.centerYAnchor.constraint(equalTo: effectView.contentView.centerYAnchor),
-      menuOverlayButton.topAnchor.constraint(equalTo: topAnchor),
-      menuOverlayButton.bottomAnchor.constraint(equalTo: bottomAnchor),
-      menuOverlayButton.leadingAnchor.constraint(equalTo: leadingAnchor),
-      menuOverlayButton.trailingAnchor.constraint(equalTo: trailingAnchor),
+      button.topAnchor.constraint(equalTo: topAnchor),
+      button.bottomAnchor.constraint(equalTo: bottomAnchor),
+      button.leadingAnchor.constraint(equalTo: leadingAnchor),
+      button.trailingAnchor.constraint(equalTo: trailingAnchor),
+      trailingAccessoryView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10.0),
+      trailingAccessoryView.centerYAnchor.constraint(equalTo: centerYAnchor),
     ])
+
+    sceneObserver = NotificationCenter.default.addObserver(
+      forName: MarcoLiquidGlassSupport.sceneActivationChangedNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      guard let self = self else { return }
+      UIView.animate(withDuration: 0.18) {
+        self.alpha = MarcoLiquidGlassSupport.isSceneActive ? 1.0 : 0.88
+      }
+    }
+  }
+
+  deinit {
+    if let obs = sceneObserver {
+      NotificationCenter.default.removeObserver(obs)
+    }
   }
 
   @available(*, unavailable)
@@ -4084,94 +4561,117 @@ private final class MarcoInteractiveCapsuleGlassControl: UIControl {
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      return
+    if fallbackBlurView.superview != nil {
+      fallbackBlurView.layer.cornerRadius = bounds.height * 0.5
     }
-    #endif
-    effectView.layer.cornerRadius = bounds.height * 0.5
   }
 
-  override var isHighlighted: Bool {
-    didSet {
-      UIView.animate(
-        withDuration: 0.16,
-        delay: 0,
-        options: [.allowUserInteraction, .beginFromCurrentState]
-      ) {
-        self.transform = self.isHighlighted
-          ? CGAffineTransform(scaleX: 0.95, y: 0.95)
-          : .identity
-      }
+  @objc private func handleButtonTap() {
+    if #available(iOS 17.0, *) {
+      button.imageView?.addSymbolEffect(.bounce, options: .nonRepeating, animated: true)
     }
+    onTap?()
   }
 
   func configure(
+    isCapsule: Bool,
     label: String,
     symbol: String?,
     trailingSymbol: String?,
     foregroundColor: UIColor,
     tintColor: UIColor?,
-    tintARGB: UInt64?,
+    prominent: Bool,
     symbolSize: CGFloat,
     menu: UIMenu?,
-    forceDark: Bool = false
+    accessibilityLabel: String,
+    forceDark: Bool
   ) {
     MarcoLiquidGlassSupport.withoutAnimations {
       let targetStyle: UIUserInterfaceStyle = forceDark ? .dark : MarcoLiquidGlassSupport.interfaceStyle
       self.tag = forceDark ? 99001 : 0
       self.overrideUserInterfaceStyle = targetStyle
-      self.effectView.overrideUserInterfaceStyle = targetStyle
-      self.effectView.backgroundColor = .clear
-      self.menuOverlayButton.overrideUserInterfaceStyle = targetStyle
-      let resolvedTint = tintColor ?? (forceDark ? UIColor(white: 0.08, alpha: 0.28) : nil)
-      let resolvedTintKey: UInt64? = tintARGB ?? (forceDark ? 0xFE080808 : nil)
+      self.button.overrideUserInterfaceStyle = targetStyle
+      self.fallbackBlurView.overrideUserInterfaceStyle = targetStyle
+      self.accessibilityLabel = accessibilityLabel
+      self.button.accessibilityLabel = accessibilityLabel
+
+      let symCfg = UIImage.SymbolConfiguration(pointSize: symbolSize, weight: .semibold)
+      let leadingImg = symbol.flatMap { UIImage(systemName: $0, withConfiguration: symCfg) }
+      let hasTrailing = isCapsule && !(trailingSymbol?.isEmpty ?? true)
+
+      if hasTrailing, let trailing = trailingSymbol {
+        let trailCfg = UIImage.SymbolConfiguration(pointSize: max(symbolSize - 3.0, 11.0), weight: .semibold)
+        self.trailingAccessoryView.image = UIImage(systemName: trailing, withConfiguration: trailCfg)
+        self.trailingAccessoryView.tintColor = foregroundColor.withAlphaComponent(0.82)
+        self.trailingAccessoryView.isHidden = false
+      } else {
+        self.trailingAccessoryView.isHidden = true
+      }
+
+      var titleAttr: AttributedString?
+      if isCapsule && !label.isEmpty {
+        var attr = AttributedString(label)
+        attr.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+        titleAttr = attr
+      }
+
+      let useProminent = prominent || tintColor != nil
+
       #if compiler(>=6.2)
       if #available(iOS 26.0, *) {
-        if !self.hasConfiguredEffect || self.configuredTintARGB != resolvedTintKey {
-          self.hasConfiguredEffect = true
-          self.configuredTintARGB = resolvedTintKey
-          let glass = UIGlassEffect(style: .regular)
-          glass.isInteractive = true
-          glass.tintColor = resolvedTint
-          self.effectView.effect = glass
+        var cfg = useProminent ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
+        cfg.image = leadingImg
+        cfg.attributedTitle = titleAttr
+        cfg.baseForegroundColor = foregroundColor
+        if let tint = tintColor {
+          cfg.baseBackgroundColor = tint
+        } else if forceDark {
+          cfg.baseBackgroundColor = UIColor(white: 0.10, alpha: 0.35)
         }
+        cfg.imagePadding = isCapsule ? 5.0 : 0.0
+        cfg.cornerStyle = .capsule
+        cfg.contentInsets = isCapsule
+          ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
+          : .zero
+        self.button.configuration = cfg
+        self.button.cornerConfiguration = .capsule()
+      } else {
+        var cfg = useProminent ? UIButton.Configuration.filled() : UIButton.Configuration.plain()
+        cfg.image = leadingImg
+        cfg.attributedTitle = titleAttr
+        cfg.baseForegroundColor = foregroundColor
+        if let tint = tintColor {
+          cfg.baseBackgroundColor = tint
+        }
+        cfg.imagePadding = isCapsule ? 5.0 : 0.0
+        cfg.cornerStyle = .capsule
+        cfg.contentInsets = isCapsule
+          ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
+          : .zero
+        self.button.configuration = cfg
       }
+      #else
+      var cfg = useProminent ? UIButton.Configuration.filled() : UIButton.Configuration.plain()
+      cfg.image = leadingImg
+      cfg.attributedTitle = titleAttr
+      cfg.baseForegroundColor = foregroundColor
+      if let tint = tintColor {
+        cfg.baseBackgroundColor = tint
+      }
+      cfg.imagePadding = isCapsule ? 5.0 : 0.0
+      cfg.cornerStyle = .capsule
+      cfg.contentInsets = isCapsule
+        ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
+        : .zero
+      self.button.configuration = cfg
       #endif
 
-      self.titleLabel.text = label
-      self.titleLabel.textColor = foregroundColor
-      self.titleLabel.isHidden = label.isEmpty
-
-      if let symbol = symbol, !symbol.isEmpty {
-        let cfg = UIImage.SymbolConfiguration(pointSize: symbolSize, weight: .semibold)
-        let raw = UIImage(systemName: symbol, withConfiguration: cfg)
-        if MarcoLiquidGlassSupport.isNearWhite(foregroundColor) {
-          self.leadingIcon.image = raw
-        } else {
-          self.leadingIcon.image = raw?.withTintColor(foregroundColor, renderingMode: .alwaysOriginal)
-        }
-        self.leadingIcon.tintColor = foregroundColor
-        self.leadingIcon.isHidden = false
-      } else {
-        self.leadingIcon.isHidden = true
-      }
-
-      if let trailing = trailingSymbol, !trailing.isEmpty {
-        let cfg = UIImage.SymbolConfiguration(pointSize: max(symbolSize - 3.0, 11.0), weight: .semibold)
-        self.trailingIcon.image = UIImage(systemName: trailing, withConfiguration: cfg)
-        self.trailingIcon.tintColor = foregroundColor.withAlphaComponent(0.82)
-        self.trailingIcon.isHidden = false
-      } else {
-        self.trailingIcon.isHidden = true
-      }
-
       if let menu = menu {
-        self.menuOverlayButton.menu = menu
-        self.menuOverlayButton.isHidden = false
+        self.button.menu = menu
+        self.button.showsMenuAsPrimaryAction = true
       } else {
-        self.menuOverlayButton.menu = nil
-        self.menuOverlayButton.isHidden = true
+        self.button.menu = nil
+        self.button.showsMenuAsPrimaryAction = false
       }
     }
   }
@@ -4179,10 +4679,8 @@ private final class MarcoInteractiveCapsuleGlassControl: UIControl {
 
 private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let hostView = MarcoTraitAwareHostView(frame: .zero)
-  private let circleControl = MarcoInteractiveCircleGlassControl(frame: .zero)
-  private let capsuleControl = MarcoInteractiveCapsuleGlassControl(frame: .zero)
+  private let glassButton = MarcoNativeGlassButtonControl(frame: .zero)
   private let channel: FlutterMethodChannel
-  private var isCapsuleMode = false
   private var lastArgs: [String: Any] = [:]
   private var appearanceObserver: NSObjectProtocol?
 
@@ -4211,23 +4709,17 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
       self.hostView.clipsToBounds = false
       self.hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
-      self.circleControl.translatesAutoresizingMaskIntoConstraints = false
-      self.circleControl.addTarget(self, action: #selector(self.handleTap), for: .touchUpInside)
-      self.hostView.addSubview(self.circleControl)
-
-      self.capsuleControl.translatesAutoresizingMaskIntoConstraints = false
-      self.capsuleControl.addTarget(self, action: #selector(self.handleTap), for: .touchUpInside)
-      self.hostView.addSubview(self.capsuleControl)
+      self.glassButton.translatesAutoresizingMaskIntoConstraints = false
+      self.glassButton.onTap = { [weak self] in
+        self?.handleTap()
+      }
+      self.hostView.addSubview(self.glassButton)
 
       NSLayoutConstraint.activate([
-        self.circleControl.topAnchor.constraint(equalTo: self.hostView.topAnchor),
-        self.circleControl.bottomAnchor.constraint(equalTo: self.hostView.bottomAnchor),
-        self.circleControl.leadingAnchor.constraint(equalTo: self.hostView.leadingAnchor),
-        self.circleControl.trailingAnchor.constraint(equalTo: self.hostView.trailingAnchor),
-        self.capsuleControl.topAnchor.constraint(equalTo: self.hostView.topAnchor),
-        self.capsuleControl.bottomAnchor.constraint(equalTo: self.hostView.bottomAnchor),
-        self.capsuleControl.leadingAnchor.constraint(equalTo: self.hostView.leadingAnchor),
-        self.capsuleControl.trailingAnchor.constraint(equalTo: self.hostView.trailingAnchor),
+        self.glassButton.topAnchor.constraint(equalTo: self.hostView.topAnchor),
+        self.glassButton.bottomAnchor.constraint(equalTo: self.hostView.bottomAnchor),
+        self.glassButton.leadingAnchor.constraint(equalTo: self.hostView.leadingAnchor),
+        self.glassButton.trailingAnchor.constraint(equalTo: self.hostView.trailingAnchor),
       ])
 
       if let args = args {
@@ -4284,14 +4776,12 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
     let label = (args["label"] as? String) ?? ""
     let symbolSize = CGFloat((args["symbolSize"] as? NSNumber)?.doubleValue ?? 17.0)
     let forceDark = (args["forceDark"] as? Bool) ?? false
-    let tintARGB = (args["tintColor"] as? NSNumber)?.uint64Value
+    let prominent = (args["prominent"] as? Bool) ?? false
     let tintColor = MarcoLiquidGlassSupport.colorFromARGB(args["tintColor"])
     let explicitFg = MarcoLiquidGlassSupport.colorFromARGB(args["foregroundColor"])
     let effectiveDark = forceDark || MarcoLiquidGlassSupport.isEffectiveDark(for: hostView)
     let fgColor: UIColor
     if let explicit = explicitFg {
-      // Bidirectional readability guard: prevent white-on-light AND black-on-dark
-      // across live Light <-> Dark mode transitions.
       if tintColor == nil && !effectiveDark && MarcoLiquidGlassSupport.isNearWhite(explicit) {
         fgColor = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: hostView, forceDark: false)
       } else if tintColor == nil && effectiveDark && MarcoLiquidGlassSupport.isNearBlack(explicit) {
@@ -4315,48 +4805,30 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
       self?.channel.invokeMethod("onMenuSelected", arguments: selectedId)
     }
 
-    isCapsuleMode = (style == "capsule" && (!label.isEmpty || (trailingSymbol != nil && !trailingSymbol!.isEmpty)))
-    circleControl.isHidden = isCapsuleMode
-    capsuleControl.isHidden = !isCapsuleMode
-
-    if isCapsuleMode {
-      capsuleControl.accessibilityLabel = a11yLabel
-      capsuleControl.menuOverlayButton.accessibilityLabel = a11yLabel
-      capsuleControl.configure(
-        label: label,
-        symbol: symbol,
-        trailingSymbol: trailingSymbol,
-        foregroundColor: fgColor,
-        tintColor: tintColor,
-        tintARGB: tintARGB,
-        symbolSize: symbolSize,
-        menu: menu,
-        forceDark: forceDark
-      )
-    } else {
-      circleControl.accessibilityLabel = a11yLabel
-      circleControl.menuOverlayButton.accessibilityLabel = a11yLabel
-      let symCfg = UIImage.SymbolConfiguration(pointSize: symbolSize, weight: .semibold)
-      let rawImage = symbol.flatMap { UIImage(systemName: $0, withConfiguration: symCfg) }
-      circleControl.configure(
-        image: rawImage,
-        foregroundColor: fgColor,
-        tintColor: tintColor,
-        tintARGB: tintARGB,
-        menu: menu,
-        forceDark: forceDark
-      )
-    }
+    let isCapsuleMode = (style == "capsule" && (!label.isEmpty || (trailingSymbol != nil && !trailingSymbol!.isEmpty)))
+    glassButton.configure(
+      isCapsule: isCapsuleMode,
+      label: label,
+      symbol: symbol,
+      trailingSymbol: trailingSymbol,
+      foregroundColor: fgColor,
+      tintColor: tintColor,
+      prominent: prominent,
+      symbolSize: symbolSize,
+      menu: menu,
+      accessibilityLabel: a11yLabel,
+      forceDark: forceDark
+    )
   }
 
-  @objc private func handleTap() {
+  private func handleTap() {
     let generator = UIImpactFeedbackGenerator(style: .light)
     generator.impactOccurred()
     channel.invokeMethod("onTap", arguments: nil)
   }
 }
 
-// MARK: - 3. Native iOS 26 Multi-Action Liquid Glass Pill (e.g. Detail Top-Right 3 Actions)
+// MARK: - 3. Native iOS 26/27 Multi-Action Liquid Glass Pill (UIGlassContainerEffect + UIButton.Configuration.glass())
 
 private final class MarcoNativeGlassPillFactory: NSObject, FlutterPlatformViewFactory {
   private let messenger: FlutterBinaryMessenger
@@ -4388,14 +4860,14 @@ private final class MarcoGlassPillHostView: UIView {
   let effectView: UIVisualEffectView
   let stack = UIStackView()
   var onTraitChanged: (() -> Void)?
-  private var lastForceDark: Bool?
+  private var sceneObserver: NSObjectProtocol?
 
   override init(frame: CGRect) {
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
-      let glass = UIGlassEffect(style: .regular)
-      glass.isInteractive = true
-      effectView = UIVisualEffectView(effect: glass)
+      let containerEffect = UIGlassContainerEffect()
+      containerEffect.spacing = 6.0
+      effectView = UIVisualEffectView(effect: containerEffect)
     } else {
       effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
     }
@@ -4427,7 +4899,15 @@ private final class MarcoGlassPillHostView: UIView {
     stack.axis = .horizontal
     stack.alignment = .center
     stack.distribution = .fill
-    stack.spacing = 0
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      stack.spacing = 4.0
+    } else {
+      stack.spacing = 0.0
+    }
+    #else
+    stack.spacing = 0.0
+    #endif
     stack.translatesAutoresizingMaskIntoConstraints = false
     effectView.contentView.addSubview(stack)
 
@@ -4438,9 +4918,26 @@ private final class MarcoGlassPillHostView: UIView {
       effectView.trailingAnchor.constraint(equalTo: trailingAnchor),
       stack.topAnchor.constraint(equalTo: effectView.contentView.topAnchor),
       stack.bottomAnchor.constraint(equalTo: effectView.contentView.bottomAnchor),
-      stack.leadingAnchor.constraint(equalTo: effectView.contentView.leadingAnchor, constant: 6.0),
-      stack.trailingAnchor.constraint(equalTo: effectView.contentView.trailingAnchor, constant: -6.0),
+      stack.leadingAnchor.constraint(equalTo: effectView.contentView.leadingAnchor, constant: 4.0),
+      stack.trailingAnchor.constraint(equalTo: effectView.contentView.trailingAnchor, constant: -4.0),
     ])
+
+    sceneObserver = NotificationCenter.default.addObserver(
+      forName: MarcoLiquidGlassSupport.sceneActivationChangedNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      guard let self = self else { return }
+      UIView.animate(withDuration: 0.18) {
+        self.alpha = MarcoLiquidGlassSupport.isSceneActive ? 1.0 : 0.88
+      }
+    }
+  }
+
+  deinit {
+    if let obs = sceneObserver {
+      NotificationCenter.default.removeObserver(obs)
+    }
   }
 
   @available(*, unavailable)
@@ -4461,17 +4958,6 @@ private final class MarcoGlassPillHostView: UIView {
     overrideUserInterfaceStyle = targetStyle
     effectView.overrideUserInterfaceStyle = targetStyle
     effectView.backgroundColor = .clear
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      if lastForceDark != forceDark {
-        lastForceDark = forceDark
-        let glass = UIGlassEffect(style: .regular)
-        glass.isInteractive = true
-        glass.tintColor = forceDark ? UIColor(white: 0.08, alpha: 0.28) : nil
-        effectView.effect = glass
-      }
-    }
-    #endif
   }
 
   override func layoutSubviews() {
@@ -4568,6 +5054,13 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
     let targetStyle: UIUserInterfaceStyle = forceDark ? .dark : MarcoLiquidGlassSupport.interfaceStyle
     let sepColor = dark ? UIColor.white.withAlphaComponent(0.24) : UIColor.black.withAlphaComponent(0.14)
 
+    var useNativeGlass26 = false
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      useNativeGlass26 = true
+    }
+    #endif
+
     if buttons.count != items.count {
       for sub in hostView.stack.arrangedSubviews {
         hostView.stack.removeArrangedSubview(sub)
@@ -4576,7 +5069,7 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
       buttons.removeAll()
       separators.removeAll()
       for idx in 0..<items.count {
-        if idx > 0 {
+        if idx > 0 && !useNativeGlass26 {
           let sep = UIView()
           sep.backgroundColor = sepColor
           sep.translatesAutoresizingMaskIntoConstraints = false
@@ -4591,10 +5084,13 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
         btn.tag = idx
         btn.overrideUserInterfaceStyle = targetStyle
         btn.translatesAutoresizingMaskIntoConstraints = false
+        if #available(iOS 17.0, *) {
+          btn.isSymbolAnimationEnabled = true
+        }
         btn.addTarget(self, action: #selector(itemTapped(_:)), for: .touchUpInside)
         NSLayoutConstraint.activate([
-          btn.widthAnchor.constraint(equalToConstant: 38.0),
-          btn.heightAnchor.constraint(equalToConstant: 38.0),
+          btn.widthAnchor.constraint(equalToConstant: 36.0),
+          btn.heightAnchor.constraint(equalToConstant: 36.0),
         ])
         hostView.stack.addArrangedSubview(btn)
         buttons.append(btn)
@@ -4625,27 +5121,40 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
         tint = defaultFg
       }
       let label = (item["accessibilityLabel"] as? String) ?? symbol
-      btn.setImage(UIImage(systemName: symbol, withConfiguration: symCfg), for: .normal)
-      btn.tintColor = tint
+      let img = UIImage(systemName: symbol, withConfiguration: symCfg)
+      #if compiler(>=6.2)
+      if #available(iOS 26.0, *) {
+        var cfg = UIButton.Configuration.glass()
+        cfg.image = img
+        cfg.baseForegroundColor = tint
+        cfg.cornerStyle = .capsule
+        cfg.contentInsets = .zero
+        btn.configuration = cfg
+        btn.cornerConfiguration = .capsule()
+      } else {
+        var cfg = UIButton.Configuration.plain()
+        cfg.image = img
+        cfg.baseForegroundColor = tint
+        cfg.contentInsets = .zero
+        btn.configuration = cfg
+      }
+      #else
+      var cfg = UIButton.Configuration.plain()
+      cfg.image = img
+      cfg.baseForegroundColor = tint
+      cfg.contentInsets = .zero
+      btn.configuration = cfg
+      #endif
       btn.accessibilityLabel = label
     }
   }
 
   @objc private func itemTapped(_ sender: UIButton) {
+    if #available(iOS 17.0, *) {
+      sender.imageView?.addSymbolEffect(.bounce, options: .nonRepeating, animated: true)
+    }
     let generator = UIImpactFeedbackGenerator(style: .light)
     generator.impactOccurred()
-    UIView.animate(withDuration: 0.10, animations: {
-      sender.transform = CGAffineTransform(scaleX: 0.84, y: 0.84)
-    }) { _ in
-      UIView.animate(
-        withDuration: 0.24,
-        delay: 0,
-        usingSpringWithDamping: 0.55,
-        initialSpringVelocity: 0.8
-      ) {
-        sender.transform = .identity
-      }
-    }
     channel.invokeMethod("onAction", arguments: sender.tag)
   }
 }

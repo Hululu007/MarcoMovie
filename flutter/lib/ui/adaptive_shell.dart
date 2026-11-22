@@ -22,7 +22,9 @@ import '../core/app_update.dart';
 import '../core/csp_bridge.dart';
 import '../core/curated_discovery.dart';
 import '../core/download_service.dart';
+import '../core/ios_avplayer_controller.dart';
 import '../core/live_channel_organizer.dart';
+import '../core/local_media_proxy.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
 import '../core/storage_service.dart';
@@ -36,12 +38,14 @@ import 'apple_theme.dart';
 import 'cloud_sync_panel.dart';
 import 'curated_discovery_section.dart';
 import 'detail_screen.dart';
+import 'ios_glass_popover.dart' show activeIosGlassPopoverCount;
 import 'ios_liquid_glass.dart';
 import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
 import 'live_station_badge.dart';
 import 'motion/aurora_background.dart';
+import 'motion/ios27_springs.dart';
 import 'motion/player_enter_transition.dart';
 import 'netdisk_sheet.dart';
 import 'onboarding/onboarding_prefs.dart';
@@ -271,6 +275,37 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   // Favorites / History segmented index
   int _librarySegment = 0;
   bool _dockCollapsed = false;
+  bool _useRootNativeTabChrome = false;
+  int _pushedRouteDepth = 0;
+  bool _settingsSecondaryRouteActive = false;
+  double _lastReportedDockProgress = 0.0;
+  bool _lastReportedDockVisible = true;
+  bool _sceneActive = true;
+  static const List<IosNativeDockItem> _iosNativeDockItems = <IosNativeDockItem>[
+    IosNativeDockItem(
+      label: '主页',
+      symbol: 'play.rectangle',
+      selectedSymbol: 'play.rectangle.fill',
+      kind: 'home',
+    ),
+    IosNativeDockItem(
+      label: '直播',
+      symbol: 'dot.radiowaves.left.and.right',
+      kind: 'live',
+    ),
+    IosNativeDockItem(
+      label: '片库',
+      symbol: 'square.stack.3d.up',
+      selectedSymbol: 'square.stack.3d.up.fill',
+      kind: 'library',
+    ),
+    IosNativeDockItem(
+      label: '设置',
+      symbol: 'gearshape',
+      selectedSymbol: 'gearshape.fill',
+      kind: 'settings',
+    ),
+  ];
   // Scroll controllers (inline shell views only; sheets own their own)
   final ScrollController _homeScrollController = ScrollController();
   final ScrollController _windowsDiscoverScrollController = ScrollController();
@@ -360,11 +395,139 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _onCredentialMigrationFailure();
     }
     _reloadSavedConfig();
+    IosLiquidGlassBridge.available.addListener(_onRootChromeDependencyChanged);
+    IosLiquidGlassBridge.sceneActiveNotifier.addListener(
+      _onSceneActivationChanged,
+    );
+    IosLiquidGlassBridge.activeSheetNotifier.addListener(
+      _onRootOverlayVisibilityChanged,
+    );
+    activeAppleModalSheetCount.addListener(_onRootOverlayVisibilityChanged);
+    activeIosGlassPopoverCount.addListener(_onRootOverlayVisibilityChanged);
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        !OhosRuntime.isOhos) {
+      unawaited(
+        DiskBlockCache.shared.setCapacityMb(
+          widget.storage.mediaDiskCacheLimitMb,
+        ),
+      );
+      unawaited(_initRootNativeTabChrome());
+    }
     if (!OhosRuntime.isOhos) {
       unawaited(_maybeShowFirstLaunchOnboarding());
     }
     if (!Platform.environment.containsKey('FLUTTER_TEST')) {
       unawaited(_runStartupWebdavSync());
+    }
+  }
+
+  Future<void> _initRootNativeTabChrome() async {
+    if (kIsWeb ||
+        defaultTargetPlatform != TargetPlatform.iOS ||
+        OhosRuntime.isOhos) {
+      return;
+    }
+    await IosLiquidGlassBridge.ensureInitialized();
+    if (!mounted) return;
+    if (!IosLiquidGlassBridge.isAvailable) {
+      if (_useRootNativeTabChrome) {
+        setState(() => _useRootNativeTabChrome = false);
+      }
+      return;
+    }
+    final safeIdx = _tabIndex.clamp(0, _iosNativeDockItems.length - 1);
+    final configured = await IosLiquidGlassBridge.configureRootTabChrome(
+      items: _iosNativeDockItems,
+      selectedIndex: safeIdx,
+      showSearch: true,
+      visible: _computeRootTabShouldBeVisible(),
+      minimized: _dockCollapsed && safeIdx == 0,
+      adaptiveTopOnWide: true,
+      onSelect: _handleRootNativeTabSelected,
+      onSearch: _showGlobalSearchSheet,
+      onScrollToTop: _scrollHomeToTop,
+    );
+    if (!mounted) return;
+    if (configured != _useRootNativeTabChrome) {
+      setState(() => _useRootNativeTabChrome = configured);
+    }
+    if (configured) {
+      _lastReportedDockVisible = _computeRootTabShouldBeVisible();
+    }
+  }
+
+  void _onRootChromeDependencyChanged() {
+    if (!mounted) return;
+    if (IosLiquidGlassBridge.isAvailable && !_useRootNativeTabChrome) {
+      unawaited(_initRootNativeTabChrome());
+    } else if (!IosLiquidGlassBridge.isAvailable && _useRootNativeTabChrome) {
+      setState(() => _useRootNativeTabChrome = false);
+    }
+  }
+
+  void _onSceneActivationChanged() {
+    if (!mounted) return;
+    final next = IosLiquidGlassBridge.isSceneActive;
+    if (next != _sceneActive) {
+      setState(() => _sceneActive = next);
+    }
+  }
+
+  void _onRootOverlayVisibilityChanged() {
+    if (!mounted) return;
+    _syncRootTabVisibility(animated: true);
+  }
+
+  void _handleRootNativeTabSelected(int index) {
+    if (!mounted) return;
+    final clamped = index.clamp(0, _iosNativeDockItems.length - 1);
+    setState(() {
+      _tabIndex = clamped;
+      if (clamped != 0) _dockCollapsed = false;
+    });
+    if (_useRootNativeTabChrome) {
+      unawaited(IosLiquidGlassBridge.setRootTabSelectedIndex(clamped));
+      if (clamped != 0) {
+        _lastReportedDockProgress = 0.0;
+        unawaited(
+          IosLiquidGlassBridge.setRootTabMinimized(false, progress: 0.0),
+        );
+      }
+    }
+  }
+
+  bool _computeRootTabShouldBeVisible() {
+    return !_privacyPortalAnimating &&
+        _pushedRouteDepth == 0 &&
+        !_settingsSecondaryRouteActive &&
+        activeAppleModalSheetCount.value == 0 &&
+        activeIosGlassPopoverCount.value == 0 &&
+        !IosLiquidGlassBridge.activeSheetNotifier.value;
+  }
+
+  void _syncRootTabVisibility({bool animated = true}) {
+    if (!_useRootNativeTabChrome) return;
+    final shouldBeVisible = _computeRootTabShouldBeVisible();
+    if (shouldBeVisible != _lastReportedDockVisible) {
+      _lastReportedDockVisible = shouldBeVisible;
+      unawaited(
+        IosLiquidGlassBridge.setRootTabVisible(
+          shouldBeVisible,
+          animated: animated,
+        ),
+      );
+    }
+  }
+
+  Future<T?> _trackSecondaryRoute<T>(Future<T?> Function() pushFn) async {
+    _pushedRouteDepth++;
+    _syncRootTabVisibility(animated: true);
+    try {
+      return await pushFn();
+    } finally {
+      _pushedRouteDepth = math.max(0, _pushedRouteDepth - 1);
+      _syncRootTabVisibility(animated: true);
     }
   }
 
@@ -419,9 +582,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         initialBlurLevel == 'solid' ? null : initialBlurStrength;
 
     try {
-      await Navigator.of(context).push<void>(
-        buildApplePageRoute<void>(
-          builder: (routeCtx) => OnboardingScreen(
+      await _trackSecondaryRoute<void>(
+        () => Navigator.of(context).push<void>(
+          buildApplePageRoute<void>(
+            builder: (routeCtx) => OnboardingScreen(
             prefs: prefs,
             initialReduceTransparency:
                 widget.storage.glassBlurLevel == 'solid' ||
@@ -493,6 +657,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             },
           ),
         ),
+        ),
       );
     } finally {
       _onboardingRouteOpen = false;
@@ -517,18 +682,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _showAppleNotice('隐私空间已隔离', '隐私空间不参与网络同步，请先退出隐私模式再使用多端同步。');
       return;
     }
-    await showCloudSyncSheet(
-      context,
-      widget.storage,
-      iosBackLabel: iosBackLabel,
-      onSynced: ({required subscriptionsChanged}) {
-        if (!mounted) return;
-        if (subscriptionsChanged) {
-          _reloadSavedConfig();
-        } else {
-          setState(() {});
-        }
-      },
+    await _trackSecondaryRoute<void>(
+      () => showCloudSyncSheet(
+        context,
+        widget.storage,
+        iosBackLabel: iosBackLabel,
+        onSynced: ({required subscriptionsChanged}) {
+          if (!mounted) return;
+          if (subscriptionsChanged) {
+            _reloadSavedConfig();
+          } else {
+            setState(() {});
+          }
+        },
+      ),
     );
     if (mounted) setState(() {});
   }
@@ -761,6 +928,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
   @override
   void dispose() {
+    IosLiquidGlassBridge.available.removeListener(
+      _onRootChromeDependencyChanged,
+    );
+    IosLiquidGlassBridge.sceneActiveNotifier.removeListener(
+      _onSceneActivationChanged,
+    );
+    IosLiquidGlassBridge.activeSheetNotifier.removeListener(
+      _onRootOverlayVisibilityChanged,
+    );
+    activeAppleModalSheetCount.removeListener(_onRootOverlayVisibilityChanged);
+    activeIosGlassPopoverCount.removeListener(_onRootOverlayVisibilityChanged);
+    if (_useRootNativeTabChrome) {
+      unawaited(IosLiquidGlassBridge.setRootTabVisible(false, animated: false));
+    }
     WidgetsBinding.instance.removeObserver(this);
     widget.storage.credentialMigrationFailureNotifier.removeListener(
       _onCredentialMigrationFailure,
@@ -1767,13 +1948,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     if (video.id.startsWith('netdisk_qr:')) {
       final driveKey = video.id.substring('netdisk_qr:'.length).trim();
-      showNetdiskAccountSheet(
-        context,
-        widget.storage,
-        initialDriveKey: driveKey.isEmpty ? null : driveKey,
-        onChanged: () {
-          if (mounted) setState(() {});
-        },
+      unawaited(
+        _trackSecondaryRoute<void>(
+          () => showNetdiskAccountSheet(
+            context,
+            widget.storage,
+            initialDriveKey: driveKey.isEmpty ? null : driveKey,
+            onChanged: () {
+              if (mounted) setState(() {});
+            },
+          ),
+        ),
       );
       return;
     }
@@ -1836,7 +2021,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             builder: detailBuilder,
           )
         : buildApplePageRoute<void>(builder: detailBuilder);
-    Navigator.of(context).push(route).then((_) {
+    _trackSecondaryRoute<void>(() => Navigator.of(context).push(route)).then((_) {
       if (mounted) setState(() {});
     });
   }
@@ -1887,25 +2072,57 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   void _onHomeScroll() {
     if (!_homeScrollController.hasClients || _tabIndex != 0) return;
     final offset = _homeScrollController.offset;
+    final progress = (offset / 72.0).clamp(0.0, 1.0);
     if (!_dockCollapsed && offset > 72.0) {
       setState(() => _dockCollapsed = true);
+      if (_useRootNativeTabChrome) {
+        _lastReportedDockProgress = 1.0;
+        unawaited(
+          IosLiquidGlassBridge.setRootTabMinimized(true, progress: 1.0),
+        );
+      }
     } else if (_dockCollapsed && offset < 36.0) {
       setState(() => _dockCollapsed = false);
+      if (_useRootNativeTabChrome) {
+        _lastReportedDockProgress = 0.0;
+        unawaited(
+          IosLiquidGlassBridge.setRootTabMinimized(false, progress: 0.0),
+        );
+      }
+    } else if (_useRootNativeTabChrome &&
+        (progress - _lastReportedDockProgress).abs() >= 0.08) {
+      _lastReportedDockProgress = progress;
+      unawaited(
+        IosLiquidGlassBridge.setRootTabMinimized(
+          _dockCollapsed,
+          animated: false,
+          progress: progress,
+        ),
+      );
     }
   }
 
   void _scrollHomeToTop() {
     if (_homeScrollController.hasClients) {
+      final useSpring = !isWindowsDesktopUi && !OhosRuntime.isOhos;
       unawaited(
         _homeScrollController.animateTo(
           0,
-          duration: const Duration(milliseconds: 360),
-          curve: Curves.easeOutCubic,
+          duration: useSpring
+              ? Ios27Spring.smooth.nominalDuration
+              : const Duration(milliseconds: 360),
+          curve: useSpring ? Ios27Spring.smooth.curve : Curves.easeOutCubic,
         ),
       );
     }
     if (_dockCollapsed) {
       setState(() => _dockCollapsed = false);
+    }
+    if (_useRootNativeTabChrome) {
+      _lastReportedDockProgress = 0.0;
+      unawaited(
+        IosLiquidGlassBridge.setRootTabMinimized(false, progress: 0.0),
+      );
     }
   }
 
@@ -2281,7 +2498,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         child: Scaffold(
       backgroundColor: ApplePalette.of(context).background,
       extendBody: true,
-      bottomNavigationBar: useSidebar
+      bottomNavigationBar: (useSidebar || _useRootNativeTabChrome)
           ? null
           : Center(
               heightFactor: 1,
@@ -2334,10 +2551,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             ),
           ),
-          // Active page content (with right clearance in landscape for the right-side Dock)
+          // Active page content (with right clearance in landscape for the right-side Dock,
+          // or top clearance when root-hosted iOS 27 native chrome switches to top bar in wide mode)
           Padding(
             padding: EdgeInsets.only(
-              right: useSidebar
+              top: (useSidebar && _useRootNativeTabChrome) ? 62.0 : 0.0,
+              right: (useSidebar && !_useRootNativeTabChrome)
                   ? AppleLiquidGlassDock.landscapeFootprint(context)
                   : 0,
             ),
@@ -2346,7 +2565,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           // iPhone / iPad style Dock:
           // - Portrait: bottom floating rounded-rectangle dock
           // - Landscape: right-side vertical dock
-          if (useSidebar)
+          if (useSidebar && !_useRootNativeTabChrome)
             Positioned(
               top: 0,
               bottom: 0,
@@ -2370,6 +2589,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 onFinished: () {
                   if (mounted) {
                     setState(() => _privacyPortalAnimating = false);
+                    _syncRootTabVisibility(animated: true);
                   }
                 },
               ),
@@ -3388,59 +3608,72 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             final loggedCount = NetdiskService.drives
                 .where((d) => widget.storage.isNetdiskLoggedIn(d.key))
                 .length;
-            void openNetdisk() => showNetdiskAccountSheet(
-                  context,
-                  widget.storage,
-                  onChanged: () {
-                    if (mounted) setState(() {});
-                  },
+            void openNetdisk() => unawaited(
+                  _trackSecondaryRoute<void>(
+                    () => showNetdiskAccountSheet(
+                      context,
+                      widget.storage,
+                      onChanged: () {
+                        if (mounted) setState(() {});
+                      },
+                    ),
+                  ),
                 );
             final netdiskLabel = compactHeader
                 ? ''
                 : (loggedCount > 0 ? '网盘 · $loggedCount' : '网盘');
-            final fallback = ApplePressableScale(
-              key: const ValueKey('home-netdisk-button'),
-              pressedScale: 0.93,
-              pressedOpacity: 0.86,
-              onTap: openNetdisk,
-              child: LiquidGlass(
-                borderRadius: 999,
-                elevated: false,
-                rimStrength: 0.9,
-                tint: loggedCount > 0
-                    ? const Color(0x33165B33)
-                    : const Color(0x281E1E24),
-                padding: EdgeInsets.symmetric(
-                  horizontal: compactHeader ? 8.5 : 11,
-                  vertical: 8.5,
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      loggedCount > 0
-                          ? CupertinoIcons.cloud_fill
-                          : CupertinoIcons.qrcode_viewfinder,
-                      color: loggedCount > 0
-                          ? AppleColors.systemGreen
-                          : const Color(0xFF5AC8FA),
-                      size: 13.5,
-                    ),
-                    if (!compactHeader) ...[
-                      const SizedBox(width: 4),
-                      Text(
-                        netdiskLabel,
-                        style: TextStyle(
-                          color: ApplePalette.of(context).labelPrimary,
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w600,
-                        ),
+            final netdiskGlass = LiquidGlass(
+              borderRadius: 999,
+              elevated: false,
+              rimStrength: 0.9,
+              tint: loggedCount > 0
+                  ? const Color(0x33165B33)
+                  : const Color(0x281E1E24),
+              padding: EdgeInsets.symmetric(
+                horizontal: compactHeader ? 8.5 : 11,
+                vertical: 8.5,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    loggedCount > 0
+                        ? CupertinoIcons.cloud_fill
+                        : CupertinoIcons.qrcode_viewfinder,
+                    color: loggedCount > 0
+                        ? AppleColors.systemGreen
+                        : const Color(0xFF5AC8FA),
+                    size: 13.5,
+                  ),
+                  if (!compactHeader) ...[
+                    const SizedBox(width: 4),
+                    Text(
+                      netdiskLabel,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelPrimary,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
                       ),
-                    ],
+                    ),
                   ],
-                ),
+                ],
               ),
             );
+            final fallback = (isWindowsDesktopUi || OhosRuntime.isOhos)
+                ? ApplePressableScale(
+                    key: const ValueKey('home-netdisk-button'),
+                    pressedScale: 0.93,
+                    pressedOpacity: 0.86,
+                    onTap: openNetdisk,
+                    child: netdiskGlass,
+                  )
+                : Ios27Pressable(
+                    key: const ValueKey('home-netdisk-button'),
+                    pressedScale: Ios27Spring.pressSwellScale,
+                    borderRadius: 999,
+                    onTap: openNetdisk,
+                    child: netdiskGlass,
+                  );
             return IosNativeGlassButton(
               style: compactHeader ? 'circle' : 'capsule',
               symbol: loggedCount > 0 ? 'cloud.fill' : 'qrcode.viewfinder',
@@ -3769,8 +4002,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
           ),
         AnimatedSize(
-          duration: const Duration(milliseconds: 260),
-          curve: Curves.easeOutCubic,
+          duration: (isWindowsDesktopUi || OhosRuntime.isOhos)
+              ? const Duration(milliseconds: 260)
+              : Ios27Spring.smooth.nominalDuration,
+          curve: (isWindowsDesktopUi || OhosRuntime.isOhos)
+              ? Curves.easeOutCubic
+              : Ios27Spring.smooth.curve,
           child: _filterExpanded
               ? Padding(
                   padding: EdgeInsets.fromLTRB(
@@ -4316,8 +4553,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         children: [
                           for (int i = 0; i < featuredList.length; i++)
                             AnimatedContainer(
-                              duration: const Duration(milliseconds: 220),
-                              curve: Curves.easeOutCubic,
+                              duration: (isWindowsDesktopUi || OhosRuntime.isOhos)
+                                  ? const Duration(milliseconds: 220)
+                                  : Ios27Spring.snappy.nominalDuration,
+                              curve: (isWindowsDesktopUi || OhosRuntime.isOhos)
+                                  ? Curves.easeOutCubic
+                                  : Ios27Spring.snappy.curve,
                               margin: const EdgeInsets.symmetric(horizontal: 3),
                               width: i == activeIdx ? 18 : 5.5,
                               height: 5.5,
@@ -5505,12 +5746,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 icon: CupertinoIcons.qrcode,
                 primary: true,
                 compact: true,
-                onPressed: () => showNetdiskAccountSheet(
-                  context,
-                  widget.storage,
-                  onChanged: () {
-                    if (mounted) setState(() {});
-                  },
+                onPressed: () => unawaited(
+                  _trackSecondaryRoute<void>(
+                    () => showNetdiskAccountSheet(
+                      context,
+                      widget.storage,
+                      onChanged: () {
+                        if (mounted) setState(() {});
+                      },
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -5538,13 +5783,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       : CupertinoIcons.qrcode_viewfinder,
                   primary: widget.storage.isNetdiskLoggedIn(drive.key),
                   compact: true,
-                  onPressed: () => showNetdiskAccountSheet(
-                    context,
-                    widget.storage,
-                    initialDriveKey: drive.key,
-                    onChanged: () {
-                      if (mounted) setState(() {});
-                    },
+                  onPressed: () => unawaited(
+                    _trackSecondaryRoute<void>(
+                      () => showNetdiskAccountSheet(
+                        context,
+                        widget.storage,
+                        initialDriveKey: drive.key,
+                        onChanged: () {
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                    ),
                   ),
                 ),
             ],
@@ -5820,9 +6069,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _windowsNavigate('search');
       return;
     }
-    Navigator.of(context).push(
-      buildIosSearchOverlayRoute<void>(
-        builder: (_) => IosGlobalSearchPage(
+    unawaited(
+      _trackSecondaryRoute<void>(
+        () => Navigator.of(context).push(
+          buildIosSearchOverlayRoute<void>(
+            builder: (_) => IosGlobalSearchPage(
           controller: _searchController,
           storage: widget.storage,
           client: widget.client,
@@ -5879,6 +6130,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             cardIdPrefix: cardIdPrefix,
             onTapWithSource: onTapWithSource,
           ),
+          ),
+        ),
         ),
       ),
     );
@@ -5912,6 +6165,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _tabIndex = 0;
       _windowsPage = 'home';
     });
+    _syncRootTabVisibility(animated: true);
     _reloadSavedConfig();
   }
 
@@ -6084,7 +6338,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         );
       },
       transitionBuilder: (ctx, anim, _, child) {
-        final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutBack);
+        final useSpring = !isWindowsDesktopUi && !OhosRuntime.isOhos;
+        final curved = CurvedAnimation(
+          parent: anim,
+          curve: useSpring ? Ios27Spring.bouncy.curve : Curves.easeOutBack,
+        );
         return FadeTransition(
           opacity: anim,
           child: ScaleTransition(
@@ -6220,7 +6478,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         );
       },
       transitionBuilder: (ctx, anim, _, child) {
-        final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutBack);
+        final useSpring = !isWindowsDesktopUi && !OhosRuntime.isOhos;
+        final curved = CurvedAnimation(
+          parent: anim,
+          curve: useSpring ? Ios27Spring.bouncy.curve : Curves.easeOutBack,
+        );
         return FadeTransition(
           opacity: anim,
           child: ScaleTransition(
@@ -7260,34 +7522,40 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
     final catalogGroups = _displayLiveGroups;
     if (OhosRuntime.isOhos) {
-      Navigator.of(context).push(
-        buildApplePageRoute<void>(
-          builder: (_) => PlayerScreen(
-            site: liveSite,
-            video: liveVideo,
-            initialLineIndex: 0,
-            initialEpisodeIndex: lineIdx.clamp(0, ch.urls.length - 1),
-            storage: widget.storage,
-            isLive: true,
-            liveGroups: catalogGroups,
-            initialLiveChannel: ch,
+      unawaited(
+        _trackSecondaryRoute<void>(
+          () => Navigator.of(context).push(
+            buildApplePageRoute<void>(
+              builder: (_) => PlayerScreen(
+                site: liveSite,
+                video: liveVideo,
+                initialLineIndex: 0,
+                initialEpisodeIndex: lineIdx.clamp(0, ch.urls.length - 1),
+                storage: widget.storage,
+                isLive: true,
+                liveGroups: catalogGroups,
+                initialLiveChannel: ch,
+              ),
+            ),
           ),
         ),
       );
     } else {
       unawaited(
-        pushPlayerRoute<void>(
-          context: context,
-          useFastWindowsMode: isWindowsDesktopUi,
-          builder: (_) => PlayerScreen(
-            site: liveSite,
-            video: liveVideo,
-            initialLineIndex: 0,
-            initialEpisodeIndex: lineIdx.clamp(0, ch.urls.length - 1),
-            storage: widget.storage,
-            isLive: true,
-            liveGroups: catalogGroups,
-            initialLiveChannel: ch,
+        _trackSecondaryRoute<void>(
+          () => pushPlayerRoute<void>(
+            context: context,
+            useFastWindowsMode: isWindowsDesktopUi,
+            builder: (_) => PlayerScreen(
+              site: liveSite,
+              video: liveVideo,
+              initialLineIndex: 0,
+              initialEpisodeIndex: lineIdx.clamp(0, ch.urls.length - 1),
+              storage: widget.storage,
+              isLive: true,
+              liveGroups: catalogGroups,
+              initialLiveChannel: ch,
+            ),
           ),
         ),
       );
@@ -9082,28 +9350,34 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       ],
     );
     if (OhosRuntime.isOhos) {
-      Navigator.of(context).push(
-        buildApplePageRoute<void>(
-          builder: (_) => PlayerScreen(
-            site: site,
-            video: video,
-            initialLineIndex: 0,
-            initialEpisodeIndex: start < 0 ? 0 : start,
-            storage: widget.storage,
+      unawaited(
+        _trackSecondaryRoute<void>(
+          () => Navigator.of(context).push(
+            buildApplePageRoute<void>(
+              builder: (_) => PlayerScreen(
+                site: site,
+                video: video,
+                initialLineIndex: 0,
+                initialEpisodeIndex: start < 0 ? 0 : start,
+                storage: widget.storage,
+              ),
+            ),
           ),
         ),
       );
     } else {
       unawaited(
-        pushPlayerRoute<void>(
-          context: context,
-          useFastWindowsMode: isWindowsDesktopUi,
-          builder: (_) => PlayerScreen(
-            site: site,
-            video: video,
-            initialLineIndex: 0,
-            initialEpisodeIndex: start < 0 ? 0 : start,
-            storage: widget.storage,
+        _trackSecondaryRoute<void>(
+          () => pushPlayerRoute<void>(
+            context: context,
+            useFastWindowsMode: isWindowsDesktopUi,
+            builder: (_) => PlayerScreen(
+              site: site,
+              video: video,
+              initialLineIndex: 0,
+              initialEpisodeIndex: start < 0 ? 0 : start,
+              storage: widget.storage,
+            ),
           ),
         ),
       );
@@ -9285,6 +9559,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       return IosSettingsPage(
         pages: _iosSettingsPages,
         version: _currentAppVersion,
+        onSecondaryRouteActive: (active) {
+          _settingsSecondaryRouteActive = active;
+          _syncRootTabVisibility(animated: true);
+        },
         onChanged: () {
           if (mounted) setState(() {});
         },
@@ -9607,8 +9885,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required Widget Function(BuildContext context, VoidCallback refreshSubPage)
         sectionBuilder,
   }) {
-    Navigator.of(context)
-        .push(
+    unawaited(
+      _trackSecondaryRoute<void>(
+        () => Navigator.of(context).push(
           buildApplePageRoute<void>(
             builder: (routeCtx) => StatefulBuilder(
               builder: (subCtx, setSubState) {
@@ -9710,10 +9989,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               },
             ),
           ),
-        )
-        .then((_) {
-          if (mounted) setState(() {});
-        });
+        ),
+      ).then((_) {
+        if (mounted) setState(() {});
+      }),
+    );
   }
 
   Widget _buildAppearanceSettingsSection(
@@ -9982,11 +10262,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'picture',
             '画质与画面',
-            '设置默认起播画质、画面比例与解码策略',
+            '播放内核（AVPlayer/MPV）、HDR 色调映射、人声响度与超分',
             CupertinoIcons.tv_fill,
             AppleColors.systemPurple,
-            trailingText: _defaultAspectLabel,
+            trailingText:
+                '${IosPlaybackEngineMode.fromId(storage.iosPlaybackEngineMode).shortLabel} · $_defaultAspectLabel',
             content: stack([
+              IosPlaybackEngineSettingsSection(
+                storage: storage,
+                onChanged: refresh,
+              ),
+              const SizedBox(height: 20),
               choices(
                 '画质与线路',
                 storage.preferredQuality,
@@ -10255,11 +10541,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'cache',
             '缓存与搜索记录',
-            '查看并清理海报缓存与本地搜索历史',
+            '媒体分块落盘缓存、HLS 点播去广告与海报搜索清理',
             CupertinoIcons.trash_fill,
             AppleColors.systemRed,
             trailingText: PosterLoader.memoryCacheSizeLabel,
             content: stack([
+              if (!OhosRuntime.isOhos) ...[
+                IosMediaCacheAndAdSection(
+                  storage: storage,
+                  onChanged: refresh,
+                ),
+                const SizedBox(height: 24),
+              ],
               IosSettingsGroup(
                 header: '存储概览',
                 footer: '清理海报缓存和当前空间的搜索历史，不会删除收藏和观看记录。',
@@ -10697,15 +10990,27 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           ),
                         ),
                       const SizedBox(width: 4),
-                      CupertinoSwitch(
-                        key: ValueKey('switch-home-section-$id'),
-                        value: enabled,
-                        activeTrackColor: AppleColors.systemGreen,
-                        onChanged: (v) async {
-                          await storage.setHomeSectionEnabled(id, v);
-                          refresh();
-                        },
-                      ),
+                      if (isWindowsDesktopUi || OhosRuntime.isOhos)
+                        CupertinoSwitch(
+                          key: ValueKey('switch-home-section-$id'),
+                          value: enabled,
+                          activeTrackColor: AppleColors.systemGreen,
+                          onChanged: (v) async {
+                            await storage.setHomeSectionEnabled(id, v);
+                            refresh();
+                          },
+                        )
+                      else
+                        IosNativeSwitch(
+                          key: ValueKey('switch-home-section-$id'),
+                          value: enabled,
+                          activeColor: AppleColors.systemGreen,
+                          accessibilityLabel: meta.title,
+                          onChanged: (v) async {
+                            await storage.setHomeSectionEnabled(id, v);
+                            refresh();
+                          },
+                        ),
                     ],
                   ),
                 );
@@ -11185,8 +11490,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     SizedBox(width: 5),
                     AnimatedRotation(
                       turns: expanded ? 0.5 : 0.0,
-                      duration: const Duration(milliseconds: 220),
-                      curve: Curves.easeOutCubic,
+                      duration: (isWindowsDesktopUi || OhosRuntime.isOhos)
+                          ? const Duration(milliseconds: 220)
+                          : Ios27Spring.snappy.nominalDuration,
+                      curve: (isWindowsDesktopUi || OhosRuntime.isOhos)
+                          ? Curves.easeOutCubic
+                          : Ios27Spring.snappy.curve,
                       child: Icon(
                         CupertinoIcons.chevron_down,
                         size: 13.5,
@@ -11229,8 +11538,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           ),
           crossFadeState:
               expanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
-          duration: const Duration(milliseconds: 220),
-          sizeCurve: Curves.easeOutCubic,
+          duration: (isWindowsDesktopUi || OhosRuntime.isOhos)
+              ? const Duration(milliseconds: 220)
+              : Ios27Spring.smooth.nominalDuration,
+          sizeCurve: (isWindowsDesktopUi || OhosRuntime.isOhos)
+              ? Curves.easeOutCubic
+              : Ios27Spring.smooth.curve,
         ),
       ],
     );
@@ -11631,17 +11944,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }) {
     final targetCtx = hostContext ?? context;
     if (defaultTargetPlatform == TargetPlatform.iOS) {
-      return Navigator.of(targetCtx).push<T>(
-        buildApplePageRoute<T>(
-          builder: (pageCtx) => IosSettingsScaffold(
-            title: title,
-            backLabel: backLabel,
-            trailing: trailingAction,
-            body: Align(
-              alignment: Alignment.topCenter,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: maxWidth),
-                child: builder(pageCtx),
+      return _trackSecondaryRoute<T>(
+        () => Navigator.of(targetCtx).push<T>(
+          buildApplePageRoute<T>(
+            builder: (pageCtx) => IosSettingsScaffold(
+              title: title,
+              backLabel: backLabel,
+              trailing: trailingAction,
+              body: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: maxWidth),
+                  child: builder(pageCtx),
+                ),
               ),
             ),
           ),
@@ -14020,8 +14335,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     return GestureDetector(
                       onTap: () => setPickerState(() => selectedGroup = g),
                       child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        curve: Curves.easeOutCubic,
+                        duration: (isWindowsDesktopUi || OhosRuntime.isOhos)
+                            ? const Duration(milliseconds: 200)
+                            : Ios27Spring.snappy.nominalDuration,
+                        curve: (isWindowsDesktopUi || OhosRuntime.isOhos)
+                            ? Curves.easeOutCubic
+                            : Ios27Spring.snappy.curve,
                         height: MediaQuery.textScalerOf(ctx).scale(16) + 20,
                         alignment: Alignment.center,
                         padding: const EdgeInsets.symmetric(horizontal: 14),

@@ -8,10 +8,13 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'anime4k_controller.dart';
 import 'catpaw_host.dart';
 import 'windows_appearance_preferences.dart';
 import 'cms_parser.dart';
 import 'csp_bridge.dart';
+import 'ios_avplayer_controller.dart';
+import 'ios_mpv_profile.dart';
 import 'models.dart';
 import 'quark_account.dart';
 import 'netdisk_session.dart';
@@ -129,6 +132,10 @@ class StorageService {
   static const String keySpiderGatewayUrl = 'spider_gateway_url';
   static const String keySpiderGatewayDeviceName = 'spider_gateway_device_name';
   static const String keySpiderGatewayToken = 'spider_gateway_token';
+  static const String keyHlsAdRemovalEnabled = 'hls_ad_removal_enabled';
+  static const String keyMediaDiskCacheLimitMb = 'media_disk_cache_limit_mb';
+  static const String keyCmsSniffRules = 'cms_sniff_rules_v1';
+  static const String keyCmsAds = 'cms_ads_v1';
   static const int maxVideoSkipRecords = 500;
   static const String _subscriptionsFileName = 'subscriptions.json';
   static const String _watchHistoryFileName = 'watch_history.json';
@@ -807,6 +814,59 @@ class StorageService {
       _prefs.getString(keyDefaultAspectMode) ?? 'contain';
   String get playerKernel =>
       _prefs.getString(keyPlayerKernel) ?? 'exo';
+  String get iosPlaybackEngineMode =>
+      IosPlaybackEngineMode.fromId(
+        _prefs.getString(IosMpvProfile.prefKeyEngineMode),
+      ).id;
+  String get iosHdrToneMappingMode =>
+      IosHdrToneMappingMode.fromId(
+        _prefs.getString(IosMpvProfile.prefKeyHdrToneMapping),
+      ).id;
+  String get vocalLoudnessPreset =>
+      VocalLoudnessPreset.fromId(
+        _prefs.getString(IosMpvProfile.prefKeyVocalLoudness),
+      ).id;
+  bool get iosLargeBufferEnabled =>
+      _prefs.getBool(IosMpvProfile.prefKeyLargeBuffer) ?? false;
+  bool get iosAnime4kLightweightEnabled =>
+      _prefs.getBool(Anime4kController.prefKeyIosLightweight) ?? false;
+  bool get hlsAdRemovalEnabled =>
+      _prefs.getBool(keyHlsAdRemovalEnabled) ?? true;
+  int get mediaDiskCacheLimitMb =>
+      (_prefs.getInt(keyMediaDiskCacheLimitMb) ?? 256).clamp(0, 4096);
+  List<CmsSniffRule> getSavedSniffRules() {
+    final loaded = loadSavedConfig();
+    if (loaded != null && loaded.rules.isNotEmpty) return loaded.rules;
+    final raw = _prefs.getString(keyCmsSniffRules);
+    if (raw == null || raw.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return decoded
+          .whereType<Map>()
+          .map((m) => CmsSniffRule.fromJson(Map<String, dynamic>.from(m)))
+          .toList(growable: false);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  List<String> getSavedAdRules() {
+    final loaded = loadSavedConfig();
+    if (loaded != null && loaded.ads.isNotEmpty) return loaded.ads;
+    final raw = _prefs.getString(keyCmsAds);
+    if (raw == null || raw.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return decoded
+          .map((e) => e?.toString().trim() ?? '')
+          .where((s) => s.isNotEmpty)
+          .toList(growable: false);
+    } catch (_) {
+      return const [];
+    }
+  }
   String get tvUiMode => _prefs.getString(keyTvUiMode) ?? 'auto';
   String get tvAmbientTheme => _prefs.getString(keyTvAmbientTheme) ?? 'aurora';
   String get tvAmbientIntensity =>
@@ -2016,6 +2076,8 @@ class StorageService {
       depots: config.depots,
       parses: config.parses,
       spider: config.spider,
+      rules: config.rules,
+      ads: config.ads,
     );
     _cachedConfig = result;
     return result;
@@ -2031,8 +2093,12 @@ class StorageService {
       final mergedLives = <LiveSource>[];
       final mergedDepots = <CmsDepot>[];
       final mergedParses = <CmsParse>[];
+      final mergedRules = <CmsSniffRule>[];
+      final mergedAds = <String>[];
       final seenDepotUrls = <String>{};
       final seenParseUrls = <String>{};
+      final seenRuleKeys = <String>{};
+      final seenAds = <String>{};
       final legacyOwners = subs.where((s) => !s.isEffectivelyPrivate &&
           s.url == configOrigin && (s.format == '多仓' || s.id == 'legacy_primary'));
       if (legacyOwners.isNotEmpty) {
@@ -2063,6 +2129,17 @@ class StorageService {
           for (final p in parsed.parses) {
             if (seenParseUrls.add(p.url) && mergedParses.length < 100) {
               mergedParses.add(p);
+            }
+          }
+          for (final rule in parsed.rules) {
+            final ruleKey = jsonEncode(rule.toJson());
+            if (seenRuleKeys.add(ruleKey) && mergedRules.length < 256) {
+              mergedRules.add(rule);
+            }
+          }
+          for (final ad in parsed.ads) {
+            if (seenAds.add(ad) && mergedAds.length < 2048) {
+              mergedAds.add(ad);
             }
           }
           for (final d in [...sub.depots, ...parsed.depots]) {
@@ -2105,6 +2182,8 @@ class StorageService {
           depots: mergedDepots,
           parses: mergedParses,
           spider: spider,
+          rules: mergedRules,
+          ads: mergedAds,
         );
       }
     }
@@ -2120,6 +2199,8 @@ class StorageService {
           depots: savedDepots,
           parses: parsed.parses,
           spider: parsed.spider,
+          rules: parsed.rules,
+          ads: parsed.ads,
         );
       }
       return parsed;
@@ -2183,7 +2264,14 @@ class StorageService {
           depots: effectiveDepots,
           parses: parsed.parses,
           spider: parsed.spider,
+          rules: parsed.rules,
+          ads: parsed.ads,
         );
+    await _prefs.setString(
+      keyCmsSniffRules,
+      jsonEncode(merged.rules.map((r) => r.toJson()).toList()),
+    );
+    await _prefs.setString(keyCmsAds, jsonEncode(merged.ads));
     final availableVisible =
         isPrivate ? merged.availableSites : merged.publicAvailableSites;
     if (!availableVisible.any((s) => s.key == selectedSiteKey)) {
@@ -2531,6 +2619,30 @@ class StorageService {
   }
   Future<void> setPlayerKernel(String kernel) async {
     await _prefs.setString(keyPlayerKernel, kernel.trim());
+  }
+  Future<void> setIosPlaybackEngineMode(String mode) async {
+    final normalized = IosPlaybackEngineMode.fromId(mode).id;
+    await _prefs.setString(IosMpvProfile.prefKeyEngineMode, normalized);
+  }
+  Future<void> setIosHdrToneMappingMode(String mode) async {
+    final normalized = IosHdrToneMappingMode.fromId(mode).id;
+    await _prefs.setString(IosMpvProfile.prefKeyHdrToneMapping, normalized);
+  }
+  Future<void> setVocalLoudnessPreset(String preset) async {
+    final normalized = VocalLoudnessPreset.fromId(preset).id;
+    await _prefs.setString(IosMpvProfile.prefKeyVocalLoudness, normalized);
+  }
+  Future<void> setIosLargeBufferEnabled(bool enabled) async {
+    await _prefs.setBool(IosMpvProfile.prefKeyLargeBuffer, enabled);
+  }
+  Future<void> setIosAnime4kLightweightEnabled(bool enabled) async {
+    await _prefs.setBool(Anime4kController.prefKeyIosLightweight, enabled);
+  }
+  Future<void> setHlsAdRemovalEnabled(bool enabled) async {
+    await _prefs.setBool(keyHlsAdRemovalEnabled, enabled);
+  }
+  Future<void> setMediaDiskCacheLimitMb(int limitMb) async {
+    await _prefs.setInt(keyMediaDiskCacheLimitMb, limitMb.clamp(0, 4096));
   }
   Future<void> setTvUiMode(String mode) async {
     final normalized = switch (mode.trim().toLowerCase()) {
@@ -3414,6 +3526,8 @@ class StorageService {
         keyEpisodesDescending: episodesDescending,
         keyPlaySpeed: playSpeed,
         keyAutoNext: autoNext,
+        keyHlsAdRemovalEnabled: hlsAdRemovalEnabled,
+        keyMediaDiskCacheLimitMb: mediaDiskCacheLimitMb,
       },
     );
   }
@@ -3688,7 +3802,21 @@ class StorageService {
     if (settings[keyAutoNext] is bool) {
       await setAutoNext(settings[keyAutoNext] as bool);
     }
-    return loadSavedConfig();
+    if (settings[keyHlsAdRemovalEnabled] is bool) {
+      await setHlsAdRemovalEnabled(settings[keyHlsAdRemovalEnabled] as bool);
+    }
+    if (settings[keyMediaDiskCacheLimitMb] is int) {
+      await setMediaDiskCacheLimitMb(settings[keyMediaDiskCacheLimitMb] as int);
+    }
+    final restored = loadSavedConfig();
+    if (restored != null) {
+      await _prefs.setString(
+        keyCmsSniffRules,
+        jsonEncode(restored.rules.map((r) => r.toJson()).toList()),
+      );
+      await _prefs.setString(keyCmsAds, jsonEncode(restored.ads));
+    }
+    return restored;
   }
 
   // ===========================================================================

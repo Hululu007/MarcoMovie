@@ -11,8 +11,7 @@ import '../ios_glass_popover.dart';
 import '../ios_liquid_glass.dart';
 import 'start_spec_overlay.dart';
 
-/// Metrics aligned 1:1 with `shared/ui-spec/motion-tokens.json`
-/// `ios26PlayerGlassMetrics`.
+/// Metrics aligned with iOS 27 Spatial Cinema Concentric Liquid Glass HUD.
 class Ios26PlayerGlassMetrics {
   static const double topCapsuleHeightPt = 40.0;
   static const double topCapsuleRadiusPt = 20.0;
@@ -21,9 +20,14 @@ class Ios26PlayerGlassMetrics {
   static const double centerPrimaryButtonSizePt = 76.0;
   static const double centerSecondaryButtonSizePt = 56.0;
   static const double scrubberTrackIdleHeightPt = 5.0;
-  static const double scrubberTrackExpandedHeightPt = 10.0;
-  static const double dockCapsuleRadiusPt = 20.0;
-  static const int maxPrimaryDockActions = 8;
+  static const double scrubberTrackExpandedHeightPt = 12.0;
+  static const double dockCapsuleRadiusPt = 24.0;
+  static const int maxPrimaryDockActions = 10;
+
+  /// Computes a concentric inner radius inside an outer surface padded by [inset].
+  static double concentricRadius(double outerRadius, double inset) {
+    return math.max(outerRadius - inset, 8.0);
+  }
 }
 
 /// Unified iOS / iPadOS 26 Concentric Spatial Cinema Player HUD.
@@ -101,6 +105,20 @@ class IosPlayerChrome extends StatefulWidget {
   final ValueChanged<Rect?>? onAspectAnchoredTap;
   final ValueChanged<Rect?>? onAudioSubtitleAnchoredTap;
 
+  // Optional iOS 27 Wave 2 dual-engine, PiP & vocal loudness hooks.
+  final bool isPipSupported;
+  final bool isPipActive;
+  final VoidCallback? onPipTap;
+  final ValueChanged<Rect?>? onPipAnchoredTap;
+  final String engineLabel;
+  final bool isAvPlayerActive;
+  final VoidCallback? onEngineSwitchTap;
+  final ValueChanged<Rect?>? onEngineSwitchAnchoredTap;
+  final String vocalLoudnessLabel;
+  final bool vocalLoudnessActive;
+  final VoidCallback? onVocalLoudnessTap;
+  final ValueChanged<Rect?>? onVocalLoudnessAnchoredTap;
+
   const IosPlayerChrome({
     super.key,
     required this.title,
@@ -159,6 +177,18 @@ class IosPlayerChrome extends StatefulWidget {
     this.onDanmuSettingsAnchoredTap,
     this.onAspectAnchoredTap,
     this.onAudioSubtitleAnchoredTap,
+    this.isPipSupported = false,
+    this.isPipActive = false,
+    this.onPipTap,
+    this.onPipAnchoredTap,
+    this.engineLabel = 'MPV',
+    this.isAvPlayerActive = false,
+    this.onEngineSwitchTap,
+    this.onEngineSwitchAnchoredTap,
+    this.vocalLoudnessLabel = '关闭',
+    this.vocalLoudnessActive = false,
+    this.onVocalLoudnessTap,
+    this.onVocalLoudnessAnchoredTap,
   });
 
   static String formatTimestamp(Duration d) {
@@ -185,6 +215,7 @@ class IosPlayerChrome extends StatefulWidget {
 
 class _IosPlayerChromeState extends State<IosPlayerChrome> {
   final GlobalKey _castAnchorKey = GlobalKey();
+  final GlobalKey _pipAnchorKey = GlobalKey();
   final GlobalKey _favoriteAnchorKey = GlobalKey();
   final GlobalKey _downloadAnchorKey = GlobalKey();
   final GlobalKey _moreAnchorKey = GlobalKey();
@@ -194,6 +225,8 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
   final GlobalKey _danmuAnchorKey = GlobalKey();
   final GlobalKey _aspectAnchorKey = GlobalKey();
   final GlobalKey _tracksAnchorKey = GlobalKey();
+  final GlobalKey _engineAnchorKey = GlobalKey();
+  final GlobalKey _loudnessAnchorKey = GlobalKey();
 
   void _triggerAnchored(
     GlobalKey anchorKey,
@@ -868,7 +901,29 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
     required bool reduceMotion,
   }) {
     final children = <Widget>[
-      // 1. 投屏 (Cast)
+      // 1. 画中画 (Picture-in-Picture) when supported/wired
+      if (widget.onPipTap != null || widget.onPipAnchoredTap != null)
+        _buildTopCircleButton(
+          key: const Key('ios-player-pip-button'),
+          anchorKey: _pipAnchorKey,
+          size: buttonSize,
+          iconSize: iconSize,
+          icon: widget.isPipActive
+              ? CupertinoIcons.rectangle_fill_on_rectangle_fill
+              : CupertinoIcons.rectangle_on_rectangle,
+          active: widget.isPipActive,
+          activeTint: AppleColors.systemBlue,
+          semanticLabel: '画中画',
+          ios26Visual: ios26Visual,
+          reduceTransparency: reduceTransparency,
+          reduceMotion: reduceMotion,
+          onTap: () => _triggerAnchored(
+            _pipAnchorKey,
+            widget.onPipAnchoredTap,
+            widget.onPipTap,
+          ),
+        ),
+      // 2. 投屏 (Cast)
       _buildTopCircleButton(
         key: const Key('ios-player-cast-button'),
         anchorKey: _castAnchorKey,
@@ -1191,6 +1246,40 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
           widget.onAudioSubtitleTap,
         ),
       ),
+      if (widget.onVocalLoudnessTap != null ||
+          widget.onVocalLoudnessAnchoredTap != null)
+        _IosDockAction(
+          key: const Key('ios-player-loudness-button'),
+          id: 'loudness',
+          anchorKey: _loudnessAnchorKey,
+          icon: CupertinoIcons.waveform_path_ecg,
+          label: widget.vocalLoudnessLabel == '关闭'
+              ? '响度'
+              : widget.vocalLoudnessLabel,
+          active: widget.vocalLoudnessActive,
+          onTap: () => _triggerAnchored(
+            _loudnessAnchorKey,
+            widget.onVocalLoudnessAnchoredTap,
+            widget.onVocalLoudnessTap,
+          ),
+        ),
+      if (widget.onEngineSwitchTap != null ||
+          widget.onEngineSwitchAnchoredTap != null)
+        _IosDockAction(
+          key: const Key('ios-player-engine-button'),
+          id: 'engine',
+          anchorKey: _engineAnchorKey,
+          icon: widget.isAvPlayerActive
+              ? CupertinoIcons.play_rectangle_fill
+              : CupertinoIcons.gear_alt_fill,
+          label: widget.engineLabel,
+          active: widget.isAvPlayerActive,
+          onTap: () => _triggerAnchored(
+            _engineAnchorKey,
+            widget.onEngineSwitchAnchoredTap,
+            widget.onEngineSwitchTap,
+          ),
+        ),
       _IosDockAction(
         key: const Key('player-fullscreen-toggle'),
         id: 'fullscreen',
@@ -1224,7 +1313,11 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
     final dockKey = widget.isLandscape
         ? const Key('ios-player-primary-dock')
         : const Key('player-tool-dock-portrait');
-    final useScrollable = width < 480;
+    final useScrollable = width < 480 || (width < 600 && bounded.length > 8);
+    final innerPillRadius = Ios26PlayerGlassMetrics.concentricRadius(
+      Ios26PlayerGlassMetrics.dockCapsuleRadiusPt,
+      5.0,
+    );
 
     final rowChildren = <Widget>[
       for (var i = 0; i < bounded.length; i++)
@@ -1234,12 +1327,14 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                 child: _buildCompactDockPill(
                   bounded[i],
                   reduceMotion: reduceMotion,
+                  pillRadius: innerPillRadius,
                 ),
               )
             : Expanded(
                 child: _buildCompactDockPill(
                   bounded[i],
                   reduceMotion: reduceMotion,
+                  pillRadius: innerPillRadius,
                 ),
               ),
     ];
@@ -1309,6 +1404,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
   Widget _buildCompactDockPill(
     _IosDockAction action, {
     required bool reduceMotion,
+    double pillRadius = 14.0,
   }) {
     final fg = action.active ? AppleColors.systemCyan : AppleColors.labelPrimary;
     final button = _IosRefractivePressButton(
@@ -1318,11 +1414,13 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
       child: Container(
         height: 29,
         padding: const EdgeInsets.symmetric(horizontal: 5),
-        decoration: BoxDecoration(
+        decoration: ShapeDecoration(
           color: action.active
-              ? AppleColors.systemBlue.withValues(alpha: 0.24)
+              ? AppleColors.systemBlue.withValues(alpha: 0.26)
               : Colors.transparent,
-          borderRadius: BorderRadius.circular(12),
+          shape: ContinuousRectangleBorder(
+            borderRadius: BorderRadius.circular(pillRadius),
+          ),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -1375,13 +1473,13 @@ class _IosDockAction {
   });
 }
 
-/// Interactive fluid expanding scrubber capsule for iOS/iPadOS 26:
+/// Interactive fluid expanding scrubber capsule for iOS/iPadOS 27:
 /// - Resting track height: `5pt` (`scrubberTrackIdleHeightPt`).
-/// - Active touch/drag height: springs to `10pt` (`scrubberTrackExpandedHeightPt`)
-///   via the `hudPopup` physical spring (`response: 0.28, dampingRatio: 0.86`,
+/// - Active touch/drag height: springs to `12pt` (`scrubberTrackExpandedHeightPt`)
+///   via the iOS 27 snappy physical spring (`duration: 0.28, bounce: 0.12`,
 ///   instant snap when `reduceMotion` is enabled) with subtle luminous glow,
-///   tabular numeric timestamps, strict single-pointer `pointerId` tracking,
-///   opaque capsule hit absorption, and intro/outro ticks.
+///   light haptics, tabular numeric timestamps, strict single-pointer
+///   `pointerId` tracking, opaque capsule hit absorption, and intro/outro ticks.
 /// - Supports `embedded: true` when fused inside the unified bottom glass deck.
 class IosFluidScrubberCapsule extends StatefulWidget {
   final Duration position;
@@ -1426,11 +1524,11 @@ class IosFluidScrubberCapsule extends StatefulWidget {
 
 class _IosFluidScrubberCapsuleState extends State<IosFluidScrubberCapsule>
     with SingleTickerProviderStateMixin {
-  static final SpringDescription _hudPopupSpring =
+  static final SpringDescription _snappyTrackSpring =
       SpringDescription.withDampingRatio(
     mass: 1.0,
     stiffness: (2 * math.pi / 0.28) * (2 * math.pi / 0.28),
-    ratio: 0.86,
+    ratio: 0.88,
   );
 
   late final AnimationController _expandCtrl = AnimationController.unbounded(
@@ -1452,7 +1550,7 @@ class _IosFluidScrubberCapsuleState extends State<IosFluidScrubberCapsule>
       return;
     }
     final sim = SpringSimulation(
-      _hudPopupSpring,
+      _snappyTrackSpring,
       _expandCtrl.value,
       target,
       _expandCtrl.velocity,
@@ -1540,7 +1638,7 @@ class _IosFluidScrubberCapsuleState extends State<IosFluidScrubberCapsule>
                         if (_activePointerId != null) return;
                         final nextMs =
                             _valueForLocalX(event.localPosition.dx, trackW);
-                        HapticFeedback.selectionClick();
+                        HapticFeedback.lightImpact();
                         setState(() {
                           _activePointerId = event.pointer;
                           _localDragMs = nextMs;
@@ -1596,7 +1694,7 @@ class _IosFluidScrubberCapsuleState extends State<IosFluidScrubberCapsule>
                                               Ios26PlayerGlassMetrics
                                                   .scrubberTrackIdleHeightPt) *
                                           t)
-                                  .clamp(3.0, 14.0);
+                                  .clamp(3.0, 16.0);
                           final glowActive =
                               t > 0.15 && !widget.reduceTransparency;
                           return Container(
@@ -1759,34 +1857,114 @@ class _IosRefractivePressButton extends StatefulWidget {
       _IosRefractivePressButtonState();
 }
 
-class _IosRefractivePressButtonState extends State<_IosRefractivePressButton> {
-  bool _pressed = false;
+class _IosRefractivePressButtonState extends State<_IosRefractivePressButton>
+    with SingleTickerProviderStateMixin {
+  static final SpringDescription _snappyPressSpring =
+      SpringDescription.withDampingRatio(
+    mass: 1.0,
+    stiffness: (2 * math.pi / 0.28) * (2 * math.pi / 0.28),
+    ratio: 0.88,
+  );
+
+  late final AnimationController _pressCtrl = AnimationController.unbounded(
+    vsync: this,
+    value: 0.0,
+  );
+
+  void _driveTo(double target) {
+    if (widget.reduceMotion) {
+      _pressCtrl.stop();
+      _pressCtrl.value = target;
+      return;
+    }
+    final sim = SpringSimulation(
+      _snappyPressSpring,
+      _pressCtrl.value,
+      target,
+      _pressCtrl.velocity,
+    );
+    _pressCtrl.animateWith(sim);
+  }
+
+  @override
+  void didUpdateWidget(covariant _IosRefractivePressButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.reduceMotion && !oldWidget.reduceMotion) {
+      _pressCtrl.stop();
+      _pressCtrl.value = 0.0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _pressCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTapDown: (_) {
-        if (!_pressed) setState(() => _pressed = true);
-      },
-      onTapUp: (_) {
-        if (_pressed) setState(() => _pressed = false);
-      },
-      onTapCancel: () {
-        if (_pressed) setState(() => _pressed = false);
-      },
+      onTapDown: (_) => _driveTo(1.0),
+      onTapUp: (_) => _driveTo(0.0),
+      onTapCancel: () => _driveTo(0.0),
       onTap: () {
         HapticFeedback.lightImpact();
         widget.onTap();
       },
-      child: AnimatedScale(
-        scale: (!widget.reduceMotion && _pressed) ? 0.92 : 1.0,
-        duration: Duration(milliseconds: widget.reduceMotion ? 0 : 160),
-        curve: Curves.easeOutCubic,
+      child: AnimatedBuilder(
+        animation: _pressCtrl,
         child: widget.child,
+        builder: (context, child) {
+          final t = _pressCtrl.value.clamp(0.0, 1.35);
+          // iOS 27 Fluid Gel Swell: outward expansion (1.0 -> 1.045x) + radial touch glow
+          final scale = widget.reduceMotion ? 1.0 : (1.0 + 0.045 * t);
+          return Transform.scale(
+            scale: scale,
+            child: CustomPaint(
+              foregroundPainter: t > 0.01
+                  ? _TouchIlluminationPainter(strength: t.clamp(0.0, 1.0))
+                  : null,
+              child: child,
+            ),
+          );
+        },
       ),
     );
   }
+}
+
+class _TouchIlluminationPainter extends CustomPainter {
+  final double strength;
+
+  const _TouchIlluminationPainter({required this.strength});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty || strength <= 0.01) return;
+    final rect = Offset.zero & size;
+    final radius = math.max(size.width, size.height) * 0.68;
+    final paint = Paint()
+      ..shader = RadialGradient(
+        colors: [
+          Colors.white.withValues(alpha: 0.22 * strength),
+          Colors.white.withValues(alpha: 0.06 * strength),
+          Colors.white.withValues(alpha: 0.0),
+        ],
+        stops: const [0.0, 0.55, 1.0],
+      ).createShader(Rect.fromCircle(center: rect.center, radius: radius));
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        rect,
+        Radius.circular(math.min(size.width, size.height) * 0.5),
+      ),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _TouchIlluminationPainter old) =>
+      old.strength != strength;
 }
 
 class _IosSpatialRimPainter extends CustomPainter {
@@ -1870,7 +2048,7 @@ class _IosSpatialGlassSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final radius = BorderRadius.circular(borderRadius);
-    final shape = RoundedRectangleBorder(borderRadius: radius);
+    final shape = ContinuousRectangleBorder(borderRadius: radius);
 
     if (reduceTransparency) {
       final base = tint != null
