@@ -1,5 +1,6 @@
 """Deployment guard regression tests; these do not replace a device launch test."""
 import plistlib
+import re
 import struct
 import tempfile
 import unittest
@@ -78,7 +79,17 @@ class DeploymentChecks(unittest.TestCase):
             root = Path(temp)
             runner = root / 'ios/Runner'
             runner.mkdir(parents=True)
-            (runner / 'Info.plist').write_bytes(plistlib.dumps({'MinimumOSVersion': '14.0'}))
+            flutter_ios = root / 'ios/Flutter'
+            flutter_ios.mkdir(parents=True)
+            (flutter_ios / 'AppFrameworkInfo.plist').write_bytes(plistlib.dumps({'MinimumOSVersion': '14.0'}))
+            (flutter_ios / 'Release.xcconfig').write_text('IPHONEOS_DEPLOYMENT_TARGET = 13.0\n', encoding='utf-8')
+            xcodeproj = root / 'ios/Runner.xcodeproj'
+            xcodeproj.mkdir(parents=True)
+            (xcodeproj / 'project.pbxproj').write_text('IPHONEOS_DEPLOYMENT_TARGET = 13.0;\n', encoding='utf-8')
+            (runner / 'Info.plist').write_bytes(plistlib.dumps({
+                'MinimumOSVersion': '15.0',
+                'UIBackgroundModes': ['fetch'],
+            }))
             app_delegate = runner / 'AppDelegate.swift'
             app_delegate.write_text(
                 'import Flutter\n'
@@ -98,12 +109,26 @@ class DeploymentChecks(unittest.TestCase):
             with patch.object(prepare_platform, 'ROOT', root):
                 prepare_platform.main()
                 prepare_platform.main()
+                prepare_platform.main()
             swift = app_delegate.read_text(encoding='utf-8')
             self.assertEqual(swift.count('import WebKit'), 1)
+            self.assertEqual(len(re.findall(r'(?m)^import AVKit$', swift)), 1)
+            self.assertEqual(len(re.findall(r'(?m)^import AVFoundation$', swift)), 1)
             self.assertEqual(swift.count('marco_movie/wakelock'), 1)
             self.assertEqual(swift.count('marco_movie/netdisk_auth'), 1)
-            self.assertEqual(swift.count('marco_movie/web_sniffer'), 1)
+            self.assertEqual(swift.count('"marco_movie/web_sniffer"'), 1)
+            self.assertEqual(swift.count('"marco_movie/webview_js"'), 1)
             self.assertEqual(swift.count('MarcoLiquidGlassPlugin'), 1)
+            self.assertEqual(swift.count('MarcoAvPlayerPlugin'), 1)
+            self.assertEqual(swift.count('enum MarcoAvPlayerEngine'), 1)
+            self.assertEqual(swift.count('"marco_movie/ios_avplayer"'), 1)
+            self.assertEqual(swift.count('"marco_movie/ios_avplayer_view"'), 1)
+            self.assertEqual(swift.count('private enum MarcoWebSnifferAndJsHostRegistrar'), 1)
+            self.assertEqual(swift.count('private final class MarcoOffscreenWebJsHost'), 1)
+            self.assertIn('AVPictureInPictureController', swift)
+            self.assertIn('canStartPictureInPictureAutomaticallyFromInline', swift)
+            self.assertIn('WKContentRuleList', swift)
+            self.assertIn('WKScriptMessageHandlerWithReply', swift)
             self.assertEqual(swift.count('private enum MarcoLiquidGlassSupport'), 1)
             self.assertEqual(swift.count('"marco_movie/ios26_dock"'), 1)
             self.assertEqual(swift.count('"marco_movie/ios26_glass_button"'), 1)
@@ -150,6 +175,10 @@ class DeploymentChecks(unittest.TestCase):
             self.assertNotIn('updateNativeGlassIntensity', swift)
             self.assertNotIn('UIScreen.main.bounds', swift)
             self.assertNotIn('UIScreen.main.scale', swift)
+            self.assertEqual(
+                [line for line in swift.splitlines() if not line.lstrip().startswith('//') and 'UIScreen.main' in line],
+                [],
+            )
             self.assertIn('static func activeWindowBounds', swift)
             self.assertEqual(swift.count('final class NetdiskWebAuthController'), 1)
             self.assertEqual(swift.count('private final class HeadlessMediaWebSniffer'), 1)
@@ -159,9 +188,16 @@ class DeploymentChecks(unittest.TestCase):
             plist = plistlib.loads((runner / 'Info.plist').read_bytes())
             self.assertIs(plist['UIRequiresFullScreen'], False)
             self.assertIn('UIApplicationSceneManifest', plist)
+            self.assertIn('audio', plist['UIBackgroundModes'])
+            self.assertIn('fetch', plist['UIBackgroundModes'])
+            self.assertEqual(plist['UIBackgroundModes'].count('audio'), 1)
             self.assertEqual(len([u for u in plist['CFBundleURLTypes'] if 'marcomovie' in u.get('CFBundleURLSchemes', [])]), 1)
             for svc in ('_marcomovie-cast._tcp', '_airplay._tcp', '_lelink._tcp', '_googlecast._tcp', '_dlna._tcp', '_upnp._tcp'):
                 self.assertIn(svc, plist['NSBonjourServices'])
+            app_fw_plist = plistlib.loads((flutter_ios / 'AppFrameworkInfo.plist').read_bytes())
+            self.assertEqual(app_fw_plist['MinimumOSVersion'], '15.0')
+            self.assertIn('IPHONEOS_DEPLOYMENT_TARGET = 15.0', (flutter_ios / 'Release.xcconfig').read_text(encoding='utf-8'))
+            self.assertIn('IPHONEOS_DEPLOYMENT_TARGET = 15.0;', (xcodeproj / 'project.pbxproj').read_text(encoding='utf-8'))
 
     def test_ios_uiscene_implicit_engine_template_for_iphone_duo_idempotently(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -200,8 +236,11 @@ class DeploymentChecks(unittest.TestCase):
             self.assertEqual(swift.count('marco_movie/wakelock'), 1)
             self.assertEqual(swift.count('marco_movie/system_chrome'), 1)
             self.assertEqual(swift.count('marco_movie/netdisk_auth'), 1)
-            self.assertEqual(swift.count('marco_movie/web_sniffer'), 1)
+            self.assertEqual(swift.count('"marco_movie/web_sniffer"'), 1)
+            self.assertEqual(swift.count('"marco_movie/webview_js"'), 1)
+            self.assertEqual(swift.count('"marco_movie/ios_avplayer"'), 1)
             self.assertEqual(swift.count('MarcoLiquidGlassPlugin'), 1)
+            self.assertEqual(swift.count('MarcoAvPlayerPlugin'), 1)
             self.assertIn('override func viewWillTransition(', swift)
             self.assertIn('override func viewSafeAreaInsetsDidChange()', swift)
             self.assertNotIn('UIScreen.main.bounds', swift)

@@ -5,7 +5,11 @@ import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart' show Colors, Material;
 import '../core/danmu/danmu_prefs.dart';
+import '../core/ios_avplayer_controller.dart';
+import '../core/ios_mpv_profile.dart';
+import '../core/local_media_proxy.dart';
 import '../core/ohos_runtime.dart';
+import '../core/storage_service.dart';
 import 'apple_theme.dart';
 import 'danmu/danmu_settings_sheet.dart';
 import 'ios_liquid_glass.dart';
@@ -42,11 +46,13 @@ class IosSettingsPage extends StatefulWidget {
   final SettingsPanes pages;
   final VoidCallback onChanged;
   final String version;
+  final ValueChanged<bool>? onSecondaryRouteActive;
   const IosSettingsPage({
     super.key,
     required this.pages,
     required this.onChanged,
     this.version = '',
+    this.onSecondaryRouteActive,
   });
 
   @override
@@ -106,6 +112,7 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
     List<String> pathIds, {
     String parentTitle = '设置',
   }) {
+    widget.onSecondaryRouteActive?.call(true);
     Navigator.of(context)
         .push<void>(
           buildApplePageRoute<void>(
@@ -119,6 +126,7 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
           ),
         )
         .then((_) {
+          widget.onSecondaryRouteActive?.call(false);
           if (mounted) setState(() {});
         });
   }
@@ -1343,6 +1351,223 @@ class _IosPlayerHudSettingsSectionState
             ('1.0x', '强制恢复 1.0× 原速'),
           ],
           onSelected: (v) => _hudPrefs.setLongPressRestoreMode(v),
+        ),
+      ],
+    );
+  }
+}
+
+/// iOS 27 dual-engine (`AVPlayer` / `MPV`), HDR tone-mapping, 4-tier vocal
+/// loudness gain, and Apple Silicon thermal-guarded single-pass Anime4K settings.
+class IosPlaybackEngineSettingsSection extends StatelessWidget {
+  final StorageService storage;
+  final VoidCallback? onChanged;
+
+  const IosPlaybackEngineSettingsSection({
+    super.key,
+    required this.storage,
+    this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (OhosRuntime.isOhos) return const SizedBox.shrink();
+    final engineMode = IosPlaybackEngineMode.fromId(storage.iosPlaybackEngineMode);
+    final hdrMode = IosHdrToneMappingMode.fromId(storage.iosHdrToneMappingMode);
+    final loudness = VocalLoudnessPreset.fromId(storage.vocalLoudnessPreset);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SettingsChoices<String>(
+          title: '播放内核偏好',
+          footer:
+              'Apple 原生 AVPlayer 支持低功耗 4K/HDR 硬件直出、画中画 (PiP) 与 AirPlay 2（遇到 MKV/FLV/ASS 特效字幕或异常时自动无感切换 MPV）；MPV 全能解码原生支持全格式与 Anime4K 超分。',
+          value: engineMode.id,
+          choices: [
+            for (final mode in IosPlaybackEngineMode.values)
+              (mode.id, mode.labelZh),
+          ],
+          onSelected: (val) async {
+            await storage.setIosPlaybackEngineMode(val);
+            onChanged?.call();
+          },
+        ),
+        SettingsChoices<String>(
+          title: 'HDR 色调映射（MPV 内核）',
+          footer: '在 iOS / iPadOS XDR 屏幕与标准屏幕间自动适配杜比视界 / HDR10 峰值亮度曲线。',
+          value: hdrMode.id,
+          choices: [
+            for (final mode in IosHdrToneMappingMode.values)
+              (mode.id, mode.labelZh),
+          ],
+          onSelected: (val) async {
+            await storage.setIosHdrToneMappingMode(val);
+            onChanged?.call();
+          },
+        ),
+        SettingsChoices<String>(
+          title: '人声响度增强（4 档）',
+          footer: '动态均衡 5.1 / 7.1 环绕声下混双声道时偏轻的对白人声（支持 AVPlayer 之外的 MPV 全能模式与跨端播放）。',
+          value: loudness.id,
+          choices: [
+            for (final preset in VocalLoudnessPreset.values)
+              (preset.id, '${preset.labelZh} · ${preset.descriptionZh}'),
+          ],
+          onSelected: (val) async {
+            await storage.setVocalLoudnessPreset(val);
+            onChanged?.call();
+          },
+        ),
+        IosSettingsGroup(
+          header: 'Apple Silicon 轻量超分与高内存缓冲',
+          footer:
+              '单 Pass Anime4K（Anime4K_Upscale_CNN_x2_S.glsl）仅在 MPV 内核生效，推荐 A15+ / M 系芯片开启；当系统检测到 serious / critical 高温状态时将自动关闭以防降频掉帧。',
+          children: [
+            IosSettingsSwitchRow(
+              key: const ValueKey('ios-switch-anime4k-lightweight'),
+              icon: CupertinoIcons.wand_stars,
+              iconColor: AppleColors.systemPurple,
+              title: 'Apple Silicon 轻量 Anime4K 超分',
+              subtitle: '高温自动降级保护（仅 MPV 路径生效）',
+              value: storage.iosAnime4kLightweightEnabled,
+              onChanged: (v) async {
+                await storage.setIosAnime4kLightweightEnabled(v);
+                onChanged?.call();
+              },
+            ),
+            IosSettingsSwitchRow(
+              key: const ValueKey('ios-switch-mpv-large-buffer'),
+              icon: CupertinoIcons.gauge,
+              iconColor: AppleColors.systemTeal,
+              title: '6 GB+ 设备大容量预读缓冲',
+              subtitle: '将 MPV 前向缓冲从 128 MB 提升至 256 MB，减少 4K 高码率卡顿',
+              value: storage.iosLargeBufferEnabled,
+              onChanged: (v) async {
+                await storage.setIosLargeBufferEnabled(v);
+                onChanged?.call();
+              },
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Local media 256 KiB disk block cache limit/clear & HLS VOD ad-removal settings.
+class IosMediaCacheAndAdSection extends StatefulWidget {
+  final StorageService storage;
+  final VoidCallback? onChanged;
+
+  const IosMediaCacheAndAdSection({
+    super.key,
+    required this.storage,
+    this.onChanged,
+  });
+
+  @override
+  State<IosMediaCacheAndAdSection> createState() =>
+      _IosMediaCacheAndAdSectionState();
+}
+
+class _IosMediaCacheAndAdSectionState
+    extends State<IosMediaCacheAndAdSection> {
+  bool _clearing = false;
+
+  static String _formatCacheBytes(int bytes) {
+    if (bytes <= 0) return '0 MB';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  Future<void> _setLimitMb(int mb) async {
+    await widget.storage.setMediaDiskCacheLimitMb(mb);
+    await DiskBlockCache.shared.setCapacityMb(mb);
+    if (mounted) setState(() {});
+    widget.onChanged?.call();
+  }
+
+  Future<void> _clearMediaDiskCache() async {
+    if (_clearing) return;
+    setState(() => _clearing = true);
+    try {
+      await DiskBlockCache.shared.clear();
+    } finally {
+      if (mounted) setState(() => _clearing = false);
+    }
+    widget.onChanged?.call();
+    if (!mounted) return;
+    await showAppleNativeAlert(
+      context,
+      title: '媒体缓存已清理',
+      message: '已清空本地媒体 256 KiB 分块落盘缓存。',
+      actions: const [
+        AppleNativeAlertAction(id: 'ok', title: '好的', isDefault: true),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (OhosRuntime.isOhos) return const SizedBox.shrink();
+    final limitMb = widget.storage.mediaDiskCacheLimitMb;
+    final usedLabel = _formatCacheBytes(DiskBlockCache.shared.currentBytes);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        IosSettingsGroup(
+          header: '点播流净化与拦截',
+          footer: '仅对点播（含 #EXT-X-ENDLIST 或 VOD 标记）生效，直播流永远不会触发广告剔除。',
+          children: [
+            IosSettingsSwitchRow(
+              key: const ValueKey('ios-switch-hls-ad-removal'),
+              icon: CupertinoIcons.scissors,
+              iconColor: AppleColors.systemOrange,
+              title: 'HLS 点播自动去广告',
+              subtitle: '启发式剔除 #EXT-X-DISCONTINUITY 插播广告切片',
+              value: widget.storage.hlsAdRemovalEnabled,
+              onChanged: (v) async {
+                await widget.storage.setHlsAdRemovalEnabled(v);
+                if (mounted) setState(() {});
+                widget.onChanged?.call();
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        SettingsChoices<int>(
+          title: '本地媒体落盘缓存上限',
+          footer: '按 256 KiB 块对齐缓存点播拖动分片（当前已占用 $usedLabel），超出上限时自动按 LRU 淘汰。',
+          value: limitMb,
+          choices: const [
+            (0, '关闭（仅内存播放）'),
+            (128, '128 MB'),
+            (256, '256 MB（默认）'),
+            (512, '512 MB'),
+          ],
+          onSelected: _setLimitMb,
+        ),
+        IosSettingsGroup(
+          dividerIndent: 18,
+          children: [
+            IosSettingsRow(
+              key: const ValueKey('ios-media-disk-cache-usage'),
+              icon: CupertinoIcons.tray_full_fill,
+              iconColor: AppleColors.systemBlue,
+              title: '媒体分块落盘缓存占用',
+              trailingText: usedLabel,
+            ),
+            IosSettingsRow(
+              key: const ValueKey('ios-clear-media-disk-cache-row'),
+              title: _clearing ? '正在清理媒体缓存…' : '一键清理媒体落盘缓存',
+              titleColor: AppleColors.systemRed,
+              onTap: _clearing ? null : _clearMediaDiskCache,
+            ),
+          ],
         ),
       ],
     );

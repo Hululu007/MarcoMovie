@@ -345,19 +345,19 @@ const dp = new DPlayer({
     final rules = <CmsSniffRule>[
       const CmsSniffRule(
         name: 'target-site',
-        hosts: ['player.example.com'],
+        hosts: ['player.test'],
         regex: [r'/manifest/\d+\?token='],
         exclude: [r'preview_ad'],
         click: 'document.querySelector(".play-btn")?.click();',
       ),
       const CmsSniffRule(
         name: 'other-site',
-        hosts: ['unrelated.example.org'],
+        hosts: ['unrelated.test'],
         regex: [r'\.mp4'],
         click: 'window.other();',
       ),
     ];
-    const ads = ['ad.doubleclick.net', 'mimg.0c1q0l.cn'];
+    const ads = ['ad.doubleclick.test', 'ad-tracker.test'];
 
     WebMediaResolver.debugRuleSnifferOverride = (
       url,
@@ -371,7 +371,7 @@ const dp = new DPlayer({
       capturedAds = ads;
       capturedClick = clickScript;
       return const WebSniffResult(
-        url: 'https://cdn.example.com/manifest/42?token=abc',
+        url: 'https://cdn.test/manifest/42?token=abc',
         headers: {'User-Agent': 'CustomWebKit/18.0'},
       );
     };
@@ -383,7 +383,7 @@ const dp = new DPlayer({
         type: 3,
         api: 'csp_RuleTest',
       ),
-      targetUrl: 'https://player.example.com/watch/99',
+      targetUrl: 'https://player.test/watch/99',
       rules: rules,
       ads: ads,
       fetchDocument: (url, {headers = const {}, timeout}) async {
@@ -398,7 +398,7 @@ const dp = new DPlayer({
     );
 
     expect(result, isNotNull);
-    expect(result!['url'], 'https://cdn.example.com/manifest/42?token=abc');
+    expect(result!['url'], 'https://cdn.test/manifest/42?token=abc');
     expect(capturedRules, hasLength(1));
     expect(capturedRules!.single['name'], 'target-site');
     expect(capturedAds, ads);
@@ -415,11 +415,11 @@ const dp = new DPlayer({
     const rules = <CmsSniffRule>[
       CmsSniffRule(
         name: 'filter-test',
-        hosts: ['watch.example.com'],
+        hosts: ['watch.test'],
         exclude: [r'/promo/intro\.m3u8'],
       ),
     ];
-    const ads = ['mimg.0c1q0l.cn'];
+    const ads = ['ad-tracker.test'];
 
     WebMediaResolver.debugRuleSnifferOverride = (
       url,
@@ -430,7 +430,7 @@ const dp = new DPlayer({
       String? clickScript,
     }) async {
       return const WebSniffResult(
-        url: 'https://mimg.0c1q0l.cn/video/ad_clip.m3u8',
+        url: 'https://ad-tracker.test/video/ad_clip.m3u8',
       );
     };
 
@@ -441,7 +441,7 @@ const dp = new DPlayer({
         type: 1,
         api: 'https://cms.test/vod',
       ),
-      targetUrl: 'https://watch.example.com/play/1',
+      targetUrl: 'https://watch.test/play/1',
       rules: rules,
       ads: ads,
       fetchDocument: (url, {headers = const {}, timeout}) async {
@@ -465,7 +465,7 @@ const dp = new DPlayer({
       String? clickScript,
     }) async {
       return const WebSniffResult(
-        url: 'https://watch.example.com/promo/intro.m3u8',
+        url: 'https://watch.test/promo/intro.m3u8',
       );
     };
 
@@ -476,7 +476,7 @@ const dp = new DPlayer({
         type: 1,
         api: 'https://cms.test/vod',
       ),
-      targetUrl: 'https://watch.example.com/play/1',
+      targetUrl: 'https://watch.test/play/1',
       rules: rules,
       ads: ads,
       fetchDocument: (url, {headers = const {}, timeout}) async {

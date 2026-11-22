@@ -15,29 +15,29 @@ void main() {
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:6
 #EXTINF:5.0,
-https://cdn-main.example.com/v1/seg001.ts
+https://cdn-main.test/v1/seg001.ts
 #EXTINF:5.0,
-https://cdn-main.example.com/v1/seg002.ts
+https://cdn-main.test/v1/seg002.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:5.0,
-https://ad-node.example.net/ads/spot1.ts
+https://ad-node.test/ads/spot1.ts
 #EXTINF:5.0,
-https://ad-node.example.net/ads/spot2.ts
+https://ad-node.test/ads/spot2.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:10.0,
-https://cdn-main.example.com/v1/seg003.ts
+https://cdn-main.test/v1/seg003.ts
 #EXTINF:10.0,
-https://cdn-main.example.com/v1/seg004.ts
+https://cdn-main.test/v1/seg004.ts
 #EXT-X-ENDLIST
 ''';
 
       final res = LocalMediaLease.stripHlsAdsIfVod(
         playlist,
-        Uri.parse('https://cdn-main.example.com/v1/index.m3u8'),
+        Uri.parse('https://cdn-main.test/v1/index.m3u8'),
       );
       expect(res.removedSegments, 2);
       expect(res.removedDuration, closeTo(10.0, 0.001));
-      expect(res.playlist, isNot(contains('ad-node.example.net')));
+      expect(res.playlist, isNot(contains('ad-node.test')));
       expect(res.playlist, contains('seg001.ts'));
       expect(res.playlist, contains('seg003.ts'));
       expect(res.playlist, contains('#EXT-X-ENDLIST'));
@@ -50,27 +50,27 @@ https://cdn-main.example.com/v1/seg004.ts
 #EXT-X-TARGETDURATION:6
 #EXT-X-MEDIA-SEQUENCE:100
 #EXTINF:5.0,
-https://cdn-main.example.com/live/100.ts
+https://cdn-main.test/live/100.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:5.0,
-https://ad-node.example.net/ads/101.ts
+https://ad-node.test/ads/101.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:15.0,
-https://cdn-main.example.com/live/102.ts
+https://cdn-main.test/live/102.ts
 ''';
 
       // No ENDLIST and no PLAYLIST-TYPE:VOD
       final autoLive = LocalMediaLease.stripHlsAdsIfVod(
         livePlaylist,
-        Uri.parse('https://cdn-main.example.com/live/stream.m3u8'),
+        Uri.parse('https://cdn-main.test/live/stream.m3u8'),
       );
       expect(autoLive.removedSegments, 0);
-      expect(autoLive.playlist, contains('ad-node.example.net'));
+      expect(autoLive.playlist, contains('ad-node.test'));
 
       // Even if ENDLIST were somehow present when caller marks isLive=true
       final forcedLive = LocalMediaLease.stripHlsAdsIfVod(
         '$livePlaylist\n#EXT-X-ENDLIST\n',
-        Uri.parse('https://cdn-main.example.com/live/stream.m3u8'),
+        Uri.parse('https://cdn-main.test/live/stream.m3u8'),
         isLive: true,
       );
       expect(forcedLive.removedSegments, 0);
@@ -82,17 +82,17 @@ https://cdn-main.example.com/live/102.ts
 #EXTM3U
 #EXT-X-PLAYLIST-TYPE:VOD
 #EXTINF:10.0,
-https://cdn-main.example.com/v1/main1.ts
+https://cdn-main.test/v1/main1.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:15.0,
-https://ad-node.example.net/ads/big.ts
+https://ad-node.test/ads/big.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:10.0,
-https://cdn-main.example.com/v1/main2.ts
+https://cdn-main.test/v1/main2.ts
 ''';
       final capped = LocalMediaLease.stripHlsAdsIfVod(
         tooLongRatio,
-        Uri.parse('https://cdn-main.example.com/v1/index.m3u8'),
+        Uri.parse('https://cdn-main.test/v1/index.m3u8'),
       );
       expect(capped.removedSegments, 0);
 
@@ -101,14 +101,14 @@ https://cdn-main.example.com/v1/main2.ts
 #EXTM3U
 #EXT-X-ENDLIST
 #EXTINF:200.0,
-https://cdn-main.example.com/v1/main1.ts
+https://cdn-main.test/v1/main1.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:65.0,
-https://ad-node.example.net/ads/long.ts
+https://ad-node.test/ads/long.ts
 ''';
       final longSeg = LocalMediaLease.stripHlsAdsIfVod(
         over60s,
-        Uri.parse('https://cdn-main.example.com/v1/index.m3u8'),
+        Uri.parse('https://cdn-main.test/v1/index.m3u8'),
       );
       expect(longSeg.removedSegments, 0);
 
@@ -117,18 +117,18 @@ https://ad-node.example.net/ads/long.ts
 #EXTM3U
 #EXT-X-ENDLIST
 #EXTINF:20.0,
-https://cdn-main.example.com/v1/main1.ts
+https://cdn-main.test/v1/main1.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:5.0,
-https://ad-node.example.net/ads/spot.ts
+https://ad-node.test/ads/spot.ts
 ''';
       final disabled = LocalMediaLease.stripHlsAdsIfVod(
         vodWithAd,
-        Uri.parse('https://cdn-main.example.com/v1/index.m3u8'),
+        Uri.parse('https://cdn-main.test/v1/index.m3u8'),
         enabled: false,
       );
       expect(disabled.removedSegments, 0);
-      expect(disabled.playlist, contains('ad-node.example.net'));
+      expect(disabled.playlist, contains('ad-node.test'));
     });
 
     test('LocalMediaLease HTTP proxy strips VOD discontinuity ads and records stats', () async {
@@ -136,13 +136,13 @@ https://ad-node.example.net/ads/spot.ts
 #EXTM3U
 #EXT-X-TARGETDURATION:10
 #EXTINF:10.0,
-https://video.example.com/part1.ts
+https://video.test/part1.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:4.0,
-https://video.example.com/gg/ad1.ts
+https://video.test/gg/ad1.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:10.0,
-https://video.example.com/part2.ts
+https://video.test/part2.ts
 #EXT-X-ENDLIST
 ''';
       final mockClient = MockClient((req) async {
@@ -153,7 +153,7 @@ https://video.example.com/part2.ts
         );
       });
       final lease = await LocalMediaLease.open(
-        target: Uri.parse('https://video.example.com/index.m3u8'),
+        target: Uri.parse('https://video.test/index.m3u8'),
         isCancelled: () => false,
         client: mockClient,
         removeHlsAds: true,
@@ -242,7 +242,7 @@ https://video.example.com/part2.ts
         );
 
         final lease = await LocalMediaLease.open(
-          target: Uri.parse('https://cdn.example.com/movie.mp4'),
+          target: Uri.parse('https://cdn.test/movie.mp4'),
           isCancelled: () => false,
           client: upstreamClient,
           enableDiskCache: true,
@@ -337,7 +337,7 @@ https://video.example.com/part2.ts
 
       final cache = DiskBlockCache(directory: tempDir);
       final lease = await LocalMediaLease.open(
-        target: Uri.parse('https://cdn.example.com/no-range.mp4'),
+        target: Uri.parse('https://cdn.test/no-range.mp4'),
         isCancelled: () => false,
         client: upstreamClient,
         enableDiskCache: true,

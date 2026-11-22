@@ -1218,4 +1218,94 @@ void main() {
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
+
+  testWidgets(
+    'AdaptiveShell activates root-controller native UITabBar chrome when supported and hides on secondary push',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final storage = await initTestStorage();
+      await storage.saveConfig(
+        '{"sites":[{"key":"test","name":"测试片源","type":1,"api":"http://127.0.0.1:9999/api"}]}',
+      );
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(IosLiquidGlassBridge.channel, (call) async {
+        calls.add(call);
+        if (call.method == 'configureRootTabChrome') {
+          return true;
+        }
+        return null;
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: AdaptiveShell(
+            storage: storage,
+            client: CmsClient(
+              client: MockClient(
+                (_) async => http.Response('{"class":[],"list":[]}', 200),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final configCall =
+          calls.where((c) => c.method == 'configureRootTabChrome').last;
+      final configArgs = Map<String, dynamic>.from(configCall.arguments as Map);
+      expect((configArgs['items'] as List).length, 4);
+      // Fallback inline dock must stay absent when native root tab host owns chrome.
+      expect(find.byType(AppleLiquidGlassDock), findsNothing);
+
+      // Switching tabs via native bridge updates selected index.
+      await tester.runAsync(() async {});
+      calls.clear();
+      await IosLiquidGlassBridge.channel.invokeMethod<void>(
+        'setRootTabSelectedIndex',
+        3,
+      );
+      // Simulate native root tab selection callback via platform message.
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      await messenger.handlePlatformMessage(
+        IosLiquidGlassBridge.channel.name,
+        const StandardMethodCodec().encodeMethodCall(
+          const MethodCall('rootTabSelected', 3),
+        ),
+        (_) {},
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('ios-settings-root')), findsOneWidget);
+
+      // Pushing a secondary drawer hides root native tab chrome, popping restores it.
+      await tester.tap(find.byKey(const ValueKey('settings-category-about')));
+      await tester.pumpAndSettle();
+      final visCallsDuringPush = calls
+          .where((c) => c.method == 'setRootTabVisible')
+          .map((c) => (c.arguments as Map)['visible'])
+          .toList();
+      expect(visCallsDuringPush, contains(false));
+
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('settings-page-about'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      expect(
+        (calls
+                .where((c) => c.method == 'setRootTabVisible')
+                .last
+                .arguments as Map)['visible'],
+        isTrue,
+      );
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
 }

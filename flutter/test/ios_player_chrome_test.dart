@@ -1435,9 +1435,9 @@ void main() {
               id: 'uuid:test-tv',
               name: 'Apple TV 客厅',
               model: 'Marco TV',
-              host: '192.168.1.50',
-              location: 'http://192.168.1.50:18652/desc.xml',
-              avTransportControlUrl: 'http://192.168.1.50:18652/ctrl',
+              host: '127.0.0.1',
+              location: 'http://127.0.0.1:18652/desc.xml',
+              avTransportControlUrl: 'http://127.0.0.1:18652/ctrl',
             ),
           ]);
         addTearDown(controller.dispose);

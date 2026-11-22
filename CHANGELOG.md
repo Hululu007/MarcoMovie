@@ -1,3 +1,13 @@
+## 2026-11-23 iOS / iPadOS 0.7.0 大版本升级：真·iOS 26/27 原生液态玻璃与物理弹簧、AVPlayer+MPV 双核画中画与人声增强、内置 CPython 与 HLS 分块缓存/去广告（iOS / iPadOS 0.7.0）
+
+- **真·iOS 26/27 原生液态玻璃宿主体系与弹簧动效（`MarcoLiquidGlass.swift` / `Ios27Spring`）**：
+  - 根控制器升级为原生 `UITabBar` + `UIGlassContainerEffect` 宿主（`configureRootTabChrome` / `setRootTabSelectedIndex` / `setRootTabMinimized` / `setRootTabVisible`），配合滚动连续最小化、横竖屏自适应与二级/播放页无缝弹簧隐显，彻底消除 Flutter 切页闪烁；新增原生 `UIContextMenuInteraction`、`IosNativeSwitch`、`Ios27LiquidSheet` 与 `Ios27Spring` / `Ios27Pressable` 物理弹簧交互；保持 `MinimumOSVersion = 15.0`，iOS 15–25 自动回退至同款自绘液态玻璃体验。
+- **AVPlayer + libmpv 双引擎与高阶视听增强（`MarcoAvPlayerEngine.swift` / `IosMpvProfile`）**：
+  - 新增 Apple 原生低功耗 `AVQueuePlayer` 内核与 `AVPictureInPictureController`（支持 `canStartPictureInPictureAutomaticallyFromInline` 自动小窗与前台恢复）、AirPlay 2 隔空播放选择器及字幕/音轨控制；遇到 `.mkv`/`.flv`/`.ass` 或解码异常时自动在当前毫秒级进度无缝回退 `libmpv` 续播。
+  - 优化 iOS `libmpv` 内存档位（4GB 设备 64 MiB / 6GB+ 设备 128 MiB 可调）、HDR 自动峰值色调映射、4 档动态人声响度增强（`dynaudnorm`）与 Apple Silicon A15+ 轻量化单通道 `Anime4K_Upscale_CNN_x2_S.glsl` 实时超分（内置 `ProcessInfo.thermalState` 过热自动降级保护）。
+- **片源播放链路补齐、离线盘缓存、HLS 去广告与内置 iOS CPython 3.11**：
+  - 上线 `DiskBlockCache`（256 KiB 分块落盘缓存，支持 HTTP `206` Range 与 `Off / 128 MB / 256 MB / 512 MB` 容量限额及一键清理）与点播 `#EXT-X-DISCONTINUITY` HLS 广告段启发式剔除；打通 `CmsClient` -> `WebMediaResolver` 规则/广告过滤（`rules` / `ads`）与 `MarcoWebSnifferAndJsHost.swift` 无头嗅探/JS 异步桥接；补齐 iOS/iPadOS 端可复现内置 CPython 3.11 运行时打包脚本与全量打包测试。
+
 ## 2026-11-22 Android 电视 0.6.1 & 手机/平板 0.6.0：MPV 高画质内核、内置 CPython 3.11、HLS 伪装代理/分块缓存、AList 原生引擎与电视端全面体验升级（Android TV 0.6.1 · Android 手机/平板 0.6.0）
 
 - [Android 电视 / 盒子 0.6.1](docs/releases/android-tv-v0.6.1.md) · [Android 手机 / 平板 0.6.0](docs/releases/android-mobile-v0.6.0.md)

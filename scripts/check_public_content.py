@@ -104,6 +104,7 @@ LAN_IP_TEST_FILES = {
 EXPERIMENT_HOSTS = {
     'scripts/ios_cpython/run_cpython_probe.py': {'files.pythonhosted.org'},
     'scripts/ios_cpython/pure-dependencies.lock.json': {'files.pythonhosted.org', 'pypi.org'},
+    'scripts/prepare_ios_python_runtime.py': {'files.pythonhosted.org'},
     'scripts/ios_cpython_crypto/source.lock.json': {'files.pythonhosted.org'},
     'scripts/ios_lxml/source.lock.json': {'files.pythonhosted.org'},
     'scripts/ios_lxml/native-libraries.lock.json': {'download.gnome.org'},

@@ -8,10 +8,13 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'anime4k_controller.dart';
 import 'catpaw_host.dart';
 import 'windows_appearance_preferences.dart';
 import 'cms_parser.dart';
 import 'csp_bridge.dart';
+import 'ios_avplayer_controller.dart';
+import 'ios_mpv_profile.dart';
 import 'models.dart';
 import 'quark_account.dart';
 import 'netdisk_session.dart';
@@ -811,6 +814,22 @@ class StorageService {
       _prefs.getString(keyDefaultAspectMode) ?? 'contain';
   String get playerKernel =>
       _prefs.getString(keyPlayerKernel) ?? 'exo';
+  String get iosPlaybackEngineMode =>
+      IosPlaybackEngineMode.fromId(
+        _prefs.getString(IosMpvProfile.prefKeyEngineMode),
+      ).id;
+  String get iosHdrToneMappingMode =>
+      IosHdrToneMappingMode.fromId(
+        _prefs.getString(IosMpvProfile.prefKeyHdrToneMapping),
+      ).id;
+  String get vocalLoudnessPreset =>
+      VocalLoudnessPreset.fromId(
+        _prefs.getString(IosMpvProfile.prefKeyVocalLoudness),
+      ).id;
+  bool get iosLargeBufferEnabled =>
+      _prefs.getBool(IosMpvProfile.prefKeyLargeBuffer) ?? false;
+  bool get iosAnime4kLightweightEnabled =>
+      _prefs.getBool(Anime4kController.prefKeyIosLightweight) ?? false;
   bool get hlsAdRemovalEnabled =>
       _prefs.getBool(keyHlsAdRemovalEnabled) ?? true;
   int get mediaDiskCacheLimitMb =>
@@ -2600,6 +2619,24 @@ class StorageService {
   }
   Future<void> setPlayerKernel(String kernel) async {
     await _prefs.setString(keyPlayerKernel, kernel.trim());
+  }
+  Future<void> setIosPlaybackEngineMode(String mode) async {
+    final normalized = IosPlaybackEngineMode.fromId(mode).id;
+    await _prefs.setString(IosMpvProfile.prefKeyEngineMode, normalized);
+  }
+  Future<void> setIosHdrToneMappingMode(String mode) async {
+    final normalized = IosHdrToneMappingMode.fromId(mode).id;
+    await _prefs.setString(IosMpvProfile.prefKeyHdrToneMapping, normalized);
+  }
+  Future<void> setVocalLoudnessPreset(String preset) async {
+    final normalized = VocalLoudnessPreset.fromId(preset).id;
+    await _prefs.setString(IosMpvProfile.prefKeyVocalLoudness, normalized);
+  }
+  Future<void> setIosLargeBufferEnabled(bool enabled) async {
+    await _prefs.setBool(IosMpvProfile.prefKeyLargeBuffer, enabled);
+  }
+  Future<void> setIosAnime4kLightweightEnabled(bool enabled) async {
+    await _prefs.setBool(Anime4kController.prefKeyIosLightweight, enabled);
   }
   Future<void> setHlsAdRemovalEnabled(bool enabled) async {
     await _prefs.setBool(keyHlsAdRemovalEnabled, enabled);
