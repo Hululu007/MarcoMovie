@@ -704,7 +704,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
 
   private func isHdrItem(_ item: AVPlayerItem) -> Bool {
     for track in item.asset.tracks(withMediaType: .video) {
-      if track.hasMediaCharacteristic(.containsHDRContent) {
+      if track.hasMediaCharacteristic(.containsHDRVideo) {
         return true
       }
     }
