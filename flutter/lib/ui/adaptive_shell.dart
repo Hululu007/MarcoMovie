@@ -919,7 +919,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
   void _updateHeroAmbientFromBytes(CmsVideo video, Uint8List bytes) {
     final key = '${video.poster}|${video.title}|${video.year}';
-    final cached = PosterLoader.peekAmbientColor(bytes);
+    final cached = PosterLoader.peekVibrantAmbientColor(bytes);
     if (cached != null) {
       if (_iosHeroAmbientColors[key] != cached && mounted) {
         setState(() => _iosHeroAmbientColors[key] = cached);
@@ -930,7 +930,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     if (!_iosHeroAmbientPending.add(key)) return;
     unawaited(
-      PosterLoader.extractEdgeAmbientColor(bytes).then((color) {
+      PosterLoader.extractVibrantAmbientColor(bytes).then((color) {
         _iosHeroAmbientPending.remove(key);
         if (!mounted) return;
         if (_iosHeroAmbientColors[key] != color) {
@@ -975,14 +975,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       preferHd: true,
     );
     if (bytes != null) {
-      final cached = PosterLoader.peekAmbientColor(bytes);
+      final cached = PosterLoader.peekVibrantAmbientColor(bytes);
       if (cached != null) {
         _iosHeroAmbientColors[key] = cached;
         return cached;
       }
       if (_iosHeroAmbientPending.add(key)) {
         unawaited(
-          PosterLoader.extractEdgeAmbientColor(bytes).then((color) {
+          PosterLoader.extractVibrantAmbientColor(bytes).then((color) {
             _iosHeroAmbientPending.remove(key);
             if (!mounted) return;
             if (_iosHeroAmbientColors[key] != color) {
@@ -994,7 +994,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         );
       }
     }
-    return palette.isDark ? const Color(0xFF212633) : const Color(0xFFD3DAE7);
+    return palette.isDark ? const Color(0xFF283446) : const Color(0xFF4B6478);
   }
 
   Future<void> _loadSiteHome({
@@ -2645,7 +2645,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         history: history,
                         horizontalPad: horizontalPad,
                         topSpacing:
-                            emittedCount == 0 && showIosImmersiveHero ? 18 : 16,
+                            emittedCount == 0 && showIosImmersiveHero ? 6 : 16,
                       ),
                     ),
                   );
@@ -2663,7 +2663,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       child: Padding(
                         padding: EdgeInsets.only(
                           top: emittedCount == 0 && showIosImmersiveHero
-                              ? 22
+                              ? 4
                               : 22,
                         ),
                         child: CuratedDiscoverySection(
@@ -3601,15 +3601,51 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }) {
     final palette = ApplePalette.of(context);
     final isDark = palette.isDark;
+    final pageBg = palette.background;
     final activeIdx = _iosHeroIndex.clamp(0, featuredList.length - 1);
     final activeFeatured = featuredList[activeIdx];
-    final rawAmbient = _resolveHeroAmbientColor(activeFeatured, palette);
-    Color harmonizeHeroAmbient(Color c) => Color.lerp(
-          c,
-          const Color(0xFF0E111A),
-          isDark ? 0.36 : 0.24,
-        )!;
-    final heroAmbientBase = harmonizeHeroAmbient(rawAmbient);
+    final bool isShortHero = heroHeight < 460;
+
+    // Derive a 3-tier poster atmosphere palette (deep -> mid -> softCanvas)
+    // preserving the poster's real hue so the Hero melts seamlessly into BOTH
+    // Light Mode and Dark Mode shelves with zero Mach-band cliff or muddy gray
+    // smear behind the first section header.
+    ({Color deep, Color mid, Color softCanvas}) resolveHeroAtmosphere(
+      Color seed,
+    ) {
+      final hsl = HSLColor.fromColor(seed);
+      final hasChroma = hsl.saturation >= 0.06;
+      if (isDark) {
+        final deep = hsl
+            .withSaturation(
+              hasChroma ? (hsl.saturation * 1.12).clamp(0.18, 0.54) : 0.06,
+            )
+            .withLightness(hsl.lightness.clamp(0.11, 0.17))
+            .toColor();
+        final mid = Color.lerp(deep, pageBg, 0.52)!;
+        final softCanvas = Color.lerp(pageBg, deep, 0.28)!;
+        return (deep: deep, mid: mid, softCanvas: softCanvas);
+      }
+      final deep = hsl
+          .withSaturation(
+            hasChroma ? (hsl.saturation * 1.05).clamp(0.20, 0.48) : 0.08,
+          )
+          .withLightness(hsl.lightness.clamp(0.20, 0.27))
+          .toColor();
+      final pastelTone = hsl
+          .withSaturation(
+            hasChroma ? (hsl.saturation * 0.72).clamp(0.14, 0.32) : 0.04,
+          )
+          .withLightness(0.78)
+          .toColor();
+      final mid = Color.lerp(deep, pastelTone, 0.34)!;
+      final softCanvas = Color.lerp(pageBg, pastelTone, 0.24)!;
+      return (deep: deep, mid: mid, softCanvas: softCanvas);
+    }
+
+    final heroAtmo = resolveHeroAtmosphere(
+      _resolveHeroAmbientColor(activeFeatured, palette),
+    );
     const primaryInk = Colors.white;
     final secondaryInk = Colors.white.withValues(alpha: 0.90);
     final bodyInk = Colors.white.withValues(alpha: 0.80);
@@ -3652,24 +3688,25 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               _homeRefreshing ? 1.0 : pullProgress.clamp(0.0, 1.0);
 
           const auraTopExtend = 280.0;
-          const auraBottomBleed = 96.0;
+          const auraBottomBleed = 180.0;
           final auraTotalHeight =
               auraTopExtend + stretchedHeight + auraBottomBleed;
-          // Exact normalized stop where the Hero's bottom meets the page below
-          // so 100% opaque heroAmbientBase joins ios-hero-bottom-ambient-gradient
-          // with zero horizontal seam and melts smoothly into the page canvas
-          // in both Light Mode and Dark Mode.
+          final topStop = (auraTopExtend / auraTotalHeight).clamp(0.10, 0.45);
+          // Exact normalized stop where the Hero's bottom meets the shelves
+          // below: softCanvas matches ios-hero-bottom-ambient-gradient's end
+          // color pixel-for-pixel and glides out over 180pt with zero Mach band.
           final heroBottomStop =
               ((auraTopExtend + stretchedHeight) / auraTotalHeight)
-                  .clamp(0.70, 0.96);
+                  .clamp(0.60, 0.92);
           final tail = 1.0 - heroBottomStop;
 
           return Stack(
             clipBehavior: Clip.none,
             children: [
               // 1. Overflowing poster-extracted ambient aura behind the poster:
-              //    extends 280pt above screen top for elastic overscroll and
-              //    bleeds 96pt smoothly beneath the hero bottom into the canvas.
+              //    deep cinema tone above y = 0 for elastic overscroll, and a
+              //    clean airy softCanvas glow bleeding 180pt beneath the hero
+              //    bottom into the page canvas (zero muddy gray smear in Light).
               Positioned(
                 top: -overscroll - auraTopExtend,
                 left: 0,
@@ -3685,17 +3722,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         begin: Alignment.topCenter,
                         end: Alignment.bottomCenter,
                         colors: [
-                          heroAmbientBase,
-                          heroAmbientBase,
-                          heroAmbientBase.withValues(alpha: isDark ? 0.68 : 0.46),
-                          heroAmbientBase.withValues(alpha: isDark ? 0.26 : 0.14),
-                          heroAmbientBase.withValues(alpha: 0.0),
+                          heroAtmo.deep,
+                          heroAtmo.deep,
+                          heroAtmo.softCanvas,
+                          heroAtmo.softCanvas.withValues(alpha: 0.74),
+                          heroAtmo.softCanvas.withValues(alpha: 0.42),
+                          heroAtmo.softCanvas.withValues(alpha: 0.14),
+                          heroAtmo.softCanvas.withValues(alpha: 0.0),
                         ],
                         stops: [
                           0.0,
+                          topStop,
                           heroBottomStop,
-                          heroBottomStop + tail * 0.28,
-                          heroBottomStop + tail * 0.62,
+                          heroBottomStop + tail * 0.20,
+                          heroBottomStop + tail * 0.45,
+                          heroBottomStop + tail * 0.75,
                           1.0,
                         ],
                       ),
@@ -3723,9 +3764,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   },
                   itemBuilder: (context, index) {
                     final featured = featuredList[index];
-                    final itemAmbient = harmonizeHeroAmbient(
+                    final itemAtmo = resolveHeroAtmosphere(
                       _resolveHeroAmbientColor(featured, palette),
                     );
+                    final itemAmbient = itemAtmo.deep;
                     final heroCardId =
                         'ios_hero_${site.key}_${featured.id.isNotEmpty ? featured.id : featured.title}_$index';
                     final metaParts = <String>[
@@ -3822,15 +3864,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ),
                             ),
 
-                            // Rich poster-ambient color gradient strictly from
-                            // the title (`剧名`) zone downward so the poster
-                            // shines unobstructed above and melts seamlessly
-                            // into its own atmosphere below.
+                            // Rich poster-atmosphere bottom gradient strictly
+                            // below the faces (starting at the title zone):
+                            // - Dark Mode: silky 9-stop deep cinema dissolve
+                            //   straight into pure obsidian canvas (`softCanvas`)
+                            // - Light Mode: keeps rich poster-hue depth behind
+                            //   white title/CTA/dots right down into the elevated
+                            //   rounded sheet cap (zero milky fog on poster,
+                            //   zero muddy dark cliff over shelves below!).
                             Positioned(
                               left: 0,
                               right: 0,
                               bottom: 0,
-                              height: stretchedHeight * 0.50,
+                              height: stretchedHeight * (isDark ? 0.60 : 0.54),
                               child: IgnorePointer(
                                 child: buildHeroChromeFade(
                                   child: DecoratedBox(
@@ -3841,20 +3887,71 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                       gradient: LinearGradient(
                                         begin: Alignment.topCenter,
                                         end: Alignment.bottomCenter,
-                                        colors: [
-                                          itemAmbient.withValues(alpha: 0.0),
-                                          itemAmbient.withValues(alpha: 0.42),
-                                          itemAmbient.withValues(alpha: 0.84),
-                                          itemAmbient.withValues(alpha: 0.97),
-                                          itemAmbient,
-                                        ],
-                                        stops: const [
-                                          0.0,
-                                          0.26,
-                                          0.54,
-                                          0.80,
-                                          1.0,
-                                        ],
+                                        colors: isDark
+                                            ? [
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.0),
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.14),
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.46),
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.74),
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.88),
+                                                Color.lerp(
+                                                  itemAtmo.deep,
+                                                  itemAtmo.mid,
+                                                  0.55,
+                                                )!.withValues(alpha: 0.94),
+                                                Color.lerp(
+                                                  itemAtmo.mid,
+                                                  itemAtmo.softCanvas,
+                                                  0.55,
+                                                )!.withValues(alpha: 0.98),
+                                                Color.lerp(
+                                                  itemAtmo.mid,
+                                                  itemAtmo.softCanvas,
+                                                  0.86,
+                                                )!.withValues(alpha: 0.995),
+                                                itemAtmo.softCanvas,
+                                              ]
+                                            : [
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.0),
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.12),
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.40),
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.66),
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.84),
+                                                itemAtmo.deep
+                                                    .withValues(alpha: 0.94),
+                                                itemAtmo.deep,
+                                              ],
+                                        stops: isDark
+                                            ? const [
+                                                0.0,
+                                                0.18,
+                                                0.38,
+                                                0.56,
+                                                0.70,
+                                                0.80,
+                                                0.89,
+                                                0.95,
+                                                1.0,
+                                              ]
+                                            : const [
+                                                0.0,
+                                                0.16,
+                                                0.34,
+                                                0.54,
+                                                0.74,
+                                                0.88,
+                                                1.0,
+                                              ],
                                       ),
                                     ),
                                   ),
@@ -3865,9 +3962,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             Positioned(
                               left: horizontalPad + 6,
                               right: horizontalPad + 6,
-                              bottom: featuredList.length > 1
-                                  ? (heroHeight < 460 ? 24 : 30)
-                                  : (heroHeight < 460 ? 12 : 16),
+                              bottom: isDark
+                                  ? (featuredList.length > 1
+                                      ? (isShortHero ? 44 : 56)
+                                      : (isShortHero ? 26 : 36))
+                                  : (featuredList.length > 1
+                                      ? (isShortHero ? 54 : 62)
+                                      : (isShortHero ? 38 : 46)),
                               child: buildHeroChromeFade(
                                 child: Center(
                                   child: ConstrainedBox(
@@ -4114,12 +4215,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ),
 
-              // 5. Centered carousel pagination dots with airy bottom clearance
+              // 5. Centered carousel pagination dots seated cleanly above the
+              //    bottom transition zone (elevated rounded sheet cap in Light
+              //    Mode; seamless obsidian dissolve in Dark Mode).
               if (featuredList.length > 1)
                 Positioned(
                   left: 0,
                   right: 0,
-                  bottom: 12,
+                  bottom: isDark
+                      ? (isShortHero ? 26 : 36)
+                      : (isShortHero ? 36 : 42),
                   child: IgnorePointer(
                     child: buildHeroChromeFade(
                       child: Row(
@@ -4135,11 +4240,64 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               decoration: BoxDecoration(
                                 color: i == activeIdx
                                     ? primaryInk
-                                    : primaryInk.withValues(alpha: 0.30),
+                                    : primaryInk.withValues(alpha: 0.36),
                                 borderRadius: BorderRadius.circular(999),
                               ),
                             ),
                         ],
+                      ),
+                    ),
+                  ),
+                ),
+
+              // 6. Light Mode Apple-style elevated continuous rounded sheet lip:
+              //    rises 26pt cleanly over the rich cinema poster bottom and
+              //    joins the airy poster-tinted shelf surface below with zero
+              //    flat cut, zero white fog on artwork, and zero muddy gray
+              //    smudge behind section headers.
+              if (!isDark)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: -1,
+                  height: 27,
+                  child: IgnorePointer(
+                    child: buildHeroChromeFade(
+                      child: AnimatedContainer(
+                        key: const ValueKey('ios-hero-light-sheet-cap'),
+                        duration: const Duration(milliseconds: 420),
+                        curve: Curves.easeOutCubic,
+                        decoration: BoxDecoration(
+                          color: heroAtmo.softCanvas,
+                          borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(28),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: heroAtmo.deep.withValues(alpha: 0.24),
+                              blurRadius: 18,
+                              offset: const Offset(0, -4),
+                            ),
+                          ],
+                        ),
+                        child: ClipRRect(
+                          borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(28),
+                          ),
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  Colors.white.withValues(alpha: 0.62),
+                                  heroAtmo.softCanvas.withValues(alpha: 0.0),
+                                ],
+                                stops: const [0.0, 0.14],
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   ),

@@ -541,6 +541,57 @@ void main() {
           lessThanOrEqualTo(470.0),
         );
 
+        // Verify Hero bottom boundary treatment in BOTH Light Mode and Dark Mode:
+        // - Light Mode: Apple-style elevated continuous rounded sheet lip
+        //   (`ios-hero-light-sheet-cap`) matching `ios-hero-top-ambient-aura`
+        //   pixel-for-pixel with airy light luminance (>= 0.65) and zero muddy
+        //   dark smudge over the first shelf header.
+        // - Dark Mode: 9-stop silky deep cinema dissolve straight into obsidian
+        //   (`luminance <= 0.12`) with zero sheet lip seam.
+        void expectSeamlessHeroBottomMelt({required bool dark}) {
+          final auraContainer = tester.widget<AnimatedContainer>(
+            find.byKey(const ValueKey('ios-hero-top-ambient-aura')),
+          );
+          final auraGrad =
+              (auraContainer.decoration! as BoxDecoration).gradient!
+                  as LinearGradient;
+          final auraSeamColor = auraGrad.colors[2];
+          expect(auraGrad.colors.last.a, closeTo(0.0, 0.001));
+
+          final sheetCapFinder = find.byKey(
+            const ValueKey('ios-hero-light-sheet-cap'),
+          );
+          if (dark) {
+            expect(sheetCapFinder, findsNothing);
+            final bottomBox = tester.widget<DecoratedBox>(
+              find.byKey(const ValueKey('ios-hero-bottom-ambient-gradient')),
+            );
+            final bottomGrad =
+                (bottomBox.decoration as BoxDecoration).gradient!
+                    as LinearGradient;
+            expect(bottomGrad.colors.length, greaterThanOrEqualTo(9));
+            expect(bottomGrad.colors.last, equals(auraSeamColor));
+            expect(auraSeamColor.computeLuminance(), lessThanOrEqualTo(0.12));
+          } else {
+            expect(sheetCapFinder, findsOneWidget);
+            final sheetCap = tester.widget<AnimatedContainer>(sheetCapFinder);
+            final capDeco = sheetCap.decoration! as BoxDecoration;
+            expect(
+              capDeco.borderRadius,
+              equals(const BorderRadius.vertical(top: Radius.circular(28))),
+            );
+            expect(capDeco.color, equals(auraSeamColor));
+            expect(auraSeamColor.computeLuminance(), greaterThanOrEqualTo(0.65));
+          }
+        }
+
+        expectSeamlessHeroBottomMelt(dark: false);
+        themeMode.value = ThemeMode.dark;
+        await tester.pumpAndSettle();
+        expectSeamlessHeroBottomMelt(dark: true);
+        themeMode.value = ThemeMode.light;
+        await tester.pumpAndSettle();
+
         // Live unfold to 7.6" inner portrait -> landscape -> Split View -> fold back!
         for (final mode in const [ThemeMode.light, ThemeMode.dark]) {
           themeMode.value = mode;

@@ -165,6 +165,7 @@ class PosterLoader {
   static final Map<String, ({String id, bool isTv})> _doubanSubjectIdCache =
       LruMap(500);
   static final Map<int, Color> _ambientColorCache = LruMap(500);
+  static final Map<int, Color> _vibrantAmbientColorCache = LruMap(500);
   static final Map<int, bool> _hdDimensionCache = LruMap(500);
   static final Map<int, bool> _heroHdDimensionCache = LruMap(500);
   static final Map<int, bool> _landscapeDimensionCache = LruMap(500);
@@ -224,6 +225,7 @@ class PosterLoader {
     _inflightRatings.clear();
     _doubanSubjectIdCache.clear();
     _ambientColorCache.clear();
+    _vibrantAmbientColorCache.clear();
     _hdDimensionCache.clear();
     _heroHdDimensionCache.clear();
     _landscapeDimensionCache.clear();
@@ -1679,6 +1681,91 @@ class PosterLoader {
       _landscapeCoverUrlsCache[scoped] = combined;
     }
     return combined;
+  }
+
+  /// Synchronously peeks cached vibrant hero atmosphere color for [bytes].
+  static Color? peekVibrantAmbientColor(Uint8List bytes) {
+    return _vibrantAmbientColorCache[_bytesFingerprint(bytes)];
+  }
+
+  /// Extracts the poster's true atmospheric hue & natural saturation (without
+  /// crushing luminance down to near-black) so the Home Hero can melt smoothly
+  /// into BOTH Light Mode and Dark Mode shelves with zero muddy dark cliff.
+  static Future<Color> extractVibrantAmbientColor(Uint8List bytes) async {
+    final fp = _bytesFingerprint(bytes);
+    final cached = _vibrantAmbientColorCache[fp];
+    if (cached != null) return cached;
+    try {
+      final codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: 24,
+        targetHeight: 36,
+      );
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+      final byteData = await image.toByteData(
+        format: ui.ImageByteFormat.rawRgba,
+      );
+      image.dispose();
+      if (byteData != null) {
+        final data = byteData.buffer.asUint8List();
+        const w = 24;
+        const h = 36;
+        double rSum = 0;
+        double gSum = 0;
+        double bSum = 0;
+        double weightSum = 0;
+        for (int y = 0; y < h; y++) {
+          final isLower = y >= (h * 0.45);
+          final isMid = y >= (h * 0.18) && y < (h * 0.45);
+          final rowWeight = isLower ? 1.8 : (isMid ? 1.15 : 1.0);
+          for (int x = 0; x < w; x++) {
+            final idx = (y * w + x) * 4;
+            if (idx + 3 >= data.length) continue;
+            final r = data[idx].toDouble();
+            final g = data[idx + 1].toDouble();
+            final b = data[idx + 2].toDouble();
+            final a = data[idx + 3].toDouble() / 255.0;
+            if (a < 0.2) continue;
+            final maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
+            final minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
+            final sat = maxC > 0 ? (maxC - minC) / maxC : 0.0;
+            final luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
+            // Downweight pure black jackets / blown-out white text so the
+            // poster's real atmospheric hue dominates.
+            final toneWeight =
+                (luma < 0.10 || luma > 0.92) ? 0.22 : (0.55 + sat * 1.65);
+            final wgt = rowWeight * toneWeight * a;
+            rSum += r * wgt;
+            gSum += g * wgt;
+            bSum += b * wgt;
+            weightSum += wgt;
+          }
+        }
+        if (weightSum > 0) {
+          final raw = Color.fromARGB(
+            255,
+            (rSum / weightSum).round().clamp(0, 255),
+            (gSum / weightSum).round().clamp(0, 255),
+            (bSum / weightSum).round().clamp(0, 255),
+          );
+          final hsl = HSLColor.fromColor(raw);
+          final color = hsl
+              .withSaturation(
+                hsl.saturation < 0.06
+                    ? hsl.saturation
+                    : hsl.saturation.clamp(0.20, 0.58),
+              )
+              .withLightness(hsl.lightness.clamp(0.28, 0.54))
+              .toColor();
+          _vibrantAmbientColorCache[fp] = color;
+          return color;
+        }
+      }
+    } catch (_) {}
+    const fallback = Color(0xFF3E5664);
+    _vibrantAmbientColorCache[fp] = fallback;
+    return fallback;
   }
 
   /// Synchronously peeks cached ambient color extracted from poster [bytes].
