@@ -997,6 +997,71 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     return palette.isDark ? const Color(0xFF283446) : const Color(0xFF4B6478);
   }
 
+  /// Rex-style poster atmospheric tone derived from the poster's lower band:
+  /// - **Dark Mode**: harmonizes into a deep, rich cinema tone (`L in [0.11, 0.20]`)
+  ///   so the Hero dissolves effortlessly into pure obsidian `#000000` behind the
+  ///   first shelf.
+  /// - **Light Mode**: preserves the poster's true natural lightness & warmth
+  ///   (`L in [0.24, 0.68]`) — sunlit warm posters stay golden while moody
+  ///   posters stay rich cinema slate/bronze, then dissolve smoothly behind the
+  ///   first shelf cards into the clean Light canvas with zero seam.
+  Color _resolveRexHeroAtmosphere(CmsVideo video, ApplePalette palette) {
+    final seed = _resolveHeroAmbientColor(video, palette);
+    final hsl = HSLColor.fromColor(seed);
+    final hasChroma = hsl.saturation >= 0.06;
+    if (palette.isDark) {
+      return hsl
+          .withSaturation(
+            hasChroma ? (hsl.saturation * 1.12).clamp(0.16, 0.50) : 0.06,
+          )
+          .withLightness((hsl.lightness * 0.62).clamp(0.11, 0.20))
+          .toColor();
+    }
+    return hsl
+        .withSaturation(
+          hasChroma ? (hsl.saturation * 1.02).clamp(0.12, 0.48) : 0.06,
+        )
+        .withLightness(hsl.lightness.clamp(0.24, 0.68))
+        .toColor();
+  }
+
+  /// Whether foreground ink over [atmo] (Hero title/dots & first shelf header)
+  /// should use crisp white (`true`) or deep charcoal (`false`).
+  bool _useLightInkForHeroAtmo(Color atmo, bool isDark) {
+    return isDark || atmo.computeLuminance() < 0.27;
+  }
+
+  /// Live horizontal-swipe interpolated Rex Hero atmosphere color across
+  /// adjacent [heroCandidates] driven by [_iosHeroPageController].
+  Color _resolveLiveRexHeroAtmo(
+    List<CmsVideo> heroCandidates,
+    ApplePalette palette,
+  ) {
+    if (heroCandidates.isEmpty) {
+      return palette.isDark
+          ? const Color(0xFF1A2230)
+          : const Color(0xFF4B6478);
+    }
+    final fallbackIdx = _iosHeroIndex.clamp(0, heroCandidates.length - 1);
+    if (_iosHeroPageController.positions.length != 1 ||
+        !_iosHeroPageController.position.hasViewportDimension ||
+        heroCandidates.length == 1) {
+      return _resolveRexHeroAtmosphere(heroCandidates[fallbackIdx], palette);
+    }
+    final page = (_iosHeroPageController.page ?? fallbackIdx.toDouble()).clamp(
+      0.0,
+      (heroCandidates.length - 1).toDouble(),
+    );
+    final leftIdx = page.floor().clamp(0, heroCandidates.length - 1);
+    final rightIdx = page.ceil().clamp(0, heroCandidates.length - 1);
+    final leftColor =
+        _resolveRexHeroAtmosphere(heroCandidates[leftIdx], palette);
+    if (leftIdx == rightIdx) return leftColor;
+    final rightColor =
+        _resolveRexHeroAtmosphere(heroCandidates[rightIdx], palette);
+    return Color.lerp(leftColor, rightColor, page - leftIdx) ?? leftColor;
+  }
+
   Future<void> _loadSiteHome({
     bool bypassSnapshot = false,
     bool preserveExisting = false,
@@ -2632,20 +2697,49 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             final orderedIds = widget.storage.homeSectionOrder;
             var emittedCount = 0;
 
+            Widget wrapFirstHeroShelfHeader(
+              Widget Function(Color? headerInk) builder,
+            ) {
+              if (!(emittedCount == 0 && showIosImmersiveHero)) {
+                return builder(null);
+              }
+              return AnimatedBuilder(
+                animation: _iosHeroPageController,
+                builder: (context, _) {
+                  final palette = ApplePalette.of(context);
+                  final liveAtmo = _resolveLiveRexHeroAtmo(
+                    heroCandidates,
+                    palette,
+                  );
+                  final useLight = _useLightInkForHeroAtmo(
+                    liveAtmo,
+                    palette.isDark,
+                  );
+                  return builder(
+                    useLight ? Colors.white : const Color(0xFF141821),
+                  );
+                },
+              );
+            }
+
             for (final sectionId in orderedIds) {
               if (!widget.storage.isHomeSectionEnabled(sectionId)) continue;
 
               if (sectionId == StorageService.homeSectionHistory) {
                 if (!_privateSessionUnlocked && history.isNotEmpty) {
+                  final isFirstUnderHero =
+                      emittedCount == 0 && showIosImmersiveHero;
                   slivers.add(
                     SliverToBoxAdapter(
                       key: const ValueKey('home-section-watch_history'),
-                      child: _buildHomeHistoryShelf(
-                        context,
-                        history: history,
-                        horizontalPad: horizontalPad,
-                        topSpacing:
-                            emittedCount == 0 && showIosImmersiveHero ? 6 : 16,
+                      child: wrapFirstHeroShelfHeader(
+                        (headerInk) => _buildHomeHistoryShelf(
+                          context,
+                          history: history,
+                          horizontalPad: horizontalPad,
+                          topSpacing: isFirstUnderHero ? 14 : 16,
+                          headerInkOverride: headerInk,
+                        ),
                       ),
                     ),
                   );
@@ -2657,32 +2751,35 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               if (sectionId.startsWith('disc_')) {
                 if (!_privateSessionUnlocked &&
                     widget.storage.showCuratedDiscovery) {
+                  final isFirstUnderHero =
+                      emittedCount == 0 && showIosImmersiveHero;
                   slivers.add(
                     SliverToBoxAdapter(
                       key: ValueKey('home-section-$sectionId'),
                       child: Padding(
                         padding: EdgeInsets.only(
-                          top: emittedCount == 0 && showIosImmersiveHero
-                              ? 4
-                              : 22,
+                          top: isFirstUnderHero ? 14 : 22,
                         ),
-                        child: CuratedDiscoverySection(
-                          visibleSectionIds: [sectionId],
-                          hasUserSources: hasSearchable,
-                          loadLive:
-                              !Platform.environment.containsKey('FLUTTER_TEST'),
-                          onOpenVideo: (video) => _openVideoDetail(
-                            CuratedDiscoveryService.curatedSiteSentinel,
-                            video,
-                          ),
-                          onOpenVideoFromCard:
-                              (video, cardCtx, radius, cardId) =>
-                                  _openVideoDetail(
-                            CuratedDiscoveryService.curatedSiteSentinel,
-                            video,
-                            sourceContext: cardCtx,
-                            sourceRadius: radius,
-                            sourceCardId: cardId,
+                        child: wrapFirstHeroShelfHeader(
+                          (headerInk) => CuratedDiscoverySection(
+                            visibleSectionIds: [sectionId],
+                            hasUserSources: hasSearchable,
+                            loadLive:
+                                !Platform.environment.containsKey('FLUTTER_TEST'),
+                            headerInkOverride: headerInk,
+                            onOpenVideo: (video) => _openVideoDetail(
+                              CuratedDiscoveryService.curatedSiteSentinel,
+                              video,
+                            ),
+                            onOpenVideoFromCard:
+                                (video, cardCtx, radius, cardId) =>
+                                    _openVideoDetail(
+                              CuratedDiscoveryService.curatedSiteSentinel,
+                              video,
+                              sourceContext: cardCtx,
+                              sourceRadius: radius,
+                              sourceCardId: cardId,
+                            ),
                           ),
                         ),
                       ),
@@ -2695,14 +2792,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
               if (sectionId == StorageService.homeSectionSourceUpdates &&
                   _activeSite != null) {
+                final isFirstUnderHero =
+                    emittedCount == 0 && showIosImmersiveHero;
+                final topPad = isFirstUnderHero
+                    ? 14.0
+                    : (emittedCount == 0 ? 12.0 : 22.0);
                 slivers.add(
                   SliverToBoxAdapter(
                     key: const ValueKey('home-section-source_updates'),
-                    child: _buildHomeSourceUpdatesHeader(
-                      context,
-                      horizontalPad: horizontalPad,
-                      topPadding: emittedCount == 0 ? 12 : 22,
-                      bottomPadding: 10,
+                    child: wrapFirstHeroShelfHeader(
+                      (headerInk) => _buildHomeSourceUpdatesHeader(
+                        context,
+                        horizontalPad: horizontalPad,
+                        topPadding: topPad,
+                        bottomPadding: 10,
+                        headerInkOverride: headerInk,
+                      ),
                     ),
                   ),
                 );
@@ -3037,6 +3142,93 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           final homeStack = Stack(
             fit: StackFit.expand,
             children: [
+              // Layer 0 (STRICTLY BEHIND CustomScrollView): Rex-style full-bleed
+              // Hero atmosphere backdrop. Tracks vertical scroll & pull-down
+              // stretch 1:1 and live-morphs color across horizontal carousel
+              // swipes. Stays 100% solid across the Hero & right behind the
+              // first shelf header ("光影风向标"), then dissolves smoothly behind
+              // the opaque first-row cards into the pure Light/Dark page canvas
+              // — zero Sliver 0 paint-order fog, zero seam, zero white flash!
+              if (showIosImmersiveHero)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: AnimatedBuilder(
+                      animation: Listenable.merge([
+                        _homeScrollController,
+                        _iosHeroPageController,
+                      ]),
+                      builder: (context, _) {
+                        final palette = ApplePalette.of(context);
+                        final liveAtmo = _resolveLiveRexHeroAtmo(
+                          heroCandidates,
+                          palette,
+                        );
+                        final rawOffset =
+                            _homeScrollController.positions.length == 1
+                                ? _homeScrollController.offset
+                                : 0.0;
+                        final overscroll = math.max(0.0, -rawOffset);
+                        final scrollDown = math.max(0.0, rawOffset);
+                        final stretchedHeight = iosHeroHeight + overscroll;
+
+                        const auraTopExtend = 280.0;
+                        const auraSolidPastHero = 26.0;
+                        const auraDissolveHeight = 148.0;
+                        final auraTotalHeight = auraTopExtend +
+                            stretchedHeight +
+                            auraSolidPastHero +
+                            auraDissolveHeight;
+                        final solidEndStop = ((auraTopExtend +
+                                    stretchedHeight +
+                                    auraSolidPastHero) /
+                                auraTotalHeight)
+                            .clamp(0.55, 0.92);
+                        final tail = 1.0 - solidEndStop;
+
+                        return Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Positioned(
+                              top: -auraTopExtend - scrollDown,
+                              left: 0,
+                              right: 0,
+                              height: auraTotalHeight,
+                              child: DecoratedBox(
+                                key: const ValueKey(
+                                  'ios-hero-top-ambient-aura',
+                                ),
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      liveAtmo,
+                                      liveAtmo,
+                                      liveAtmo.withValues(alpha: 0.80),
+                                      liveAtmo.withValues(alpha: 0.50),
+                                      liveAtmo.withValues(alpha: 0.22),
+                                      liveAtmo.withValues(alpha: 0.06),
+                                      liveAtmo.withValues(alpha: 0.0),
+                                    ],
+                                    stops: [
+                                      0.0,
+                                      solidEndStop,
+                                      solidEndStop + tail * 0.18,
+                                      solidEndStop + tail * 0.40,
+                                      solidEndStop + tail * 0.64,
+                                      solidEndStop + tail * 0.84,
+                                      1.0,
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ),
               maskedScroll,
               if (showIosImmersiveHero)
                 Positioned(
@@ -3274,7 +3466,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required List<WatchHistoryEntry> history,
     required double horizontalPad,
     required double topSpacing,
+    Color? headerInkOverride,
   }) {
+    final titleColor =
+        headerInkOverride ?? ApplePalette.of(context).labelPrimary;
+    final actionColor = headerInkOverride == Colors.white
+        ? Colors.white.withValues(alpha: 0.84)
+        : AppleColors.systemBlue;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -3286,7 +3484,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               Text(
                 '历史记录',
                 style: TextStyle(
-                  color: ApplePalette.of(context).labelPrimary,
+                  color: titleColor,
                   fontSize: 19,
                   fontWeight: FontWeight.w700,
                   letterSpacing: -0.4,
@@ -3297,10 +3495,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 padding: EdgeInsets.zero,
                 minSize: 24,
                 onPressed: _showWatchHistorySheet,
-                child: const Text(
+                child: Text(
                   '查看全部',
                   style: TextStyle(
-                    color: AppleColors.systemBlue,
+                    color: actionColor,
                     fontSize: 13,
                   ),
                 ),
@@ -3337,7 +3535,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required double horizontalPad,
     required double topPadding,
     required double bottomPadding,
+    Color? headerInkOverride,
   }) {
+    final palette = ApplePalette.of(context);
+    final titleColor = headerInkOverride ?? palette.labelPrimary;
+    final subColor = headerInkOverride != null
+        ? headerInkOverride.withValues(alpha: 0.72)
+        : palette.labelTertiary;
     return Padding(
       key: const ValueKey('home-source-updates-header'),
       padding: EdgeInsets.fromLTRB(
@@ -3351,7 +3555,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           Text(
             '片源最新更新',
             style: TextStyle(
-              color: ApplePalette.of(context).labelPrimary,
+              color: titleColor,
               fontSize: 18,
               fontWeight: FontWeight.w800,
               letterSpacing: -0.35,
@@ -3364,7 +3568,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: ApplePalette.of(context).labelTertiary,
+                color: subColor,
                 fontSize: 12.5,
                 fontWeight: FontWeight.w600,
               ),
@@ -3601,54 +3805,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }) {
     final palette = ApplePalette.of(context);
     final isDark = palette.isDark;
-    final pageBg = palette.background;
     final activeIdx = _iosHeroIndex.clamp(0, featuredList.length - 1);
     final activeFeatured = featuredList[activeIdx];
     final bool isShortHero = heroHeight < 460;
 
-    // Derive a 3-tier poster atmosphere palette (deep -> mid -> softCanvas)
-    // preserving the poster's real hue so the Hero melts seamlessly into BOTH
-    // Light Mode and Dark Mode shelves with zero Mach-band cliff or muddy gray
-    // smear behind the first section header.
-    ({Color deep, Color mid, Color softCanvas}) resolveHeroAtmosphere(
-      Color seed,
-    ) {
-      final hsl = HSLColor.fromColor(seed);
-      final hasChroma = hsl.saturation >= 0.06;
-      if (isDark) {
-        final deep = hsl
-            .withSaturation(
-              hasChroma ? (hsl.saturation * 1.12).clamp(0.18, 0.54) : 0.06,
-            )
-            .withLightness(hsl.lightness.clamp(0.11, 0.17))
-            .toColor();
-        final mid = Color.lerp(deep, pageBg, 0.52)!;
-        final softCanvas = Color.lerp(pageBg, deep, 0.28)!;
-        return (deep: deep, mid: mid, softCanvas: softCanvas);
-      }
-      final deep = hsl
-          .withSaturation(
-            hasChroma ? (hsl.saturation * 1.05).clamp(0.20, 0.48) : 0.08,
-          )
-          .withLightness(hsl.lightness.clamp(0.20, 0.27))
-          .toColor();
-      final pastelTone = hsl
-          .withSaturation(
-            hasChroma ? (hsl.saturation * 0.72).clamp(0.14, 0.32) : 0.04,
-          )
-          .withLightness(0.78)
-          .toColor();
-      final mid = Color.lerp(deep, pastelTone, 0.34)!;
-      final softCanvas = Color.lerp(pageBg, pastelTone, 0.24)!;
-      return (deep: deep, mid: mid, softCanvas: softCanvas);
-    }
-
-    final heroAtmo = resolveHeroAtmosphere(
-      _resolveHeroAmbientColor(activeFeatured, palette),
-    );
-    const primaryInk = Colors.white;
-    final secondaryInk = Colors.white.withValues(alpha: 0.90);
-    final bodyInk = Colors.white.withValues(alpha: 0.80);
+    final activeAtmo = _resolveRexHeroAtmosphere(activeFeatured, palette);
+    final activeUseLight = _useLightInkForHeroAtmo(activeAtmo, isDark);
+    final activeDotInk =
+        activeUseLight ? Colors.white : const Color(0xFF141821);
 
     Widget buildHeroChromeFade({required Widget child}) {
       return ValueListenableBuilder<double>(
@@ -3687,66 +3851,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           final refreshPillOpacity =
               _homeRefreshing ? 1.0 : pullProgress.clamp(0.0, 1.0);
 
-          const auraTopExtend = 280.0;
-          const auraBottomBleed = 180.0;
-          final auraTotalHeight =
-              auraTopExtend + stretchedHeight + auraBottomBleed;
-          final topStop = (auraTopExtend / auraTotalHeight).clamp(0.10, 0.45);
-          // Exact normalized stop where the Hero's bottom meets the shelves
-          // below: softCanvas matches ios-hero-bottom-ambient-gradient's end
-          // color pixel-for-pixel and glides out over 180pt with zero Mach band.
-          final heroBottomStop =
-              ((auraTopExtend + stretchedHeight) / auraTotalHeight)
-                  .clamp(0.60, 0.92);
-          final tail = 1.0 - heroBottomStop;
-
           return Stack(
             clipBehavior: Clip.none,
             children: [
-              // 1. Overflowing poster-extracted ambient aura behind the poster:
-              //    deep cinema tone above y = 0 for elastic overscroll, and a
-              //    clean airy softCanvas glow bleeding 180pt beneath the hero
-              //    bottom into the page canvas (zero muddy gray smear in Light).
-              Positioned(
-                top: -overscroll - auraTopExtend,
-                left: 0,
-                right: 0,
-                height: auraTotalHeight,
-                child: IgnorePointer(
-                  child: AnimatedContainer(
-                    key: const ValueKey('ios-hero-top-ambient-aura'),
-                    duration: const Duration(milliseconds: 420),
-                    curve: Curves.easeOutCubic,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          heroAtmo.deep,
-                          heroAtmo.deep,
-                          heroAtmo.softCanvas,
-                          heroAtmo.softCanvas.withValues(alpha: 0.74),
-                          heroAtmo.softCanvas.withValues(alpha: 0.42),
-                          heroAtmo.softCanvas.withValues(alpha: 0.14),
-                          heroAtmo.softCanvas.withValues(alpha: 0.0),
-                        ],
-                        stops: [
-                          0.0,
-                          topStop,
-                          heroBottomStop,
-                          heroBottomStop + tail * 0.20,
-                          heroBottomStop + tail * 0.45,
-                          heroBottomStop + tail * 0.75,
-                          1.0,
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-
-              // 2. Full-bleed swipeable HD Posters anchored to screen y = 0 on
+              // 1. Full-bleed swipeable HD Posters anchored to screen y = 0 on
               //    overscroll and scrolling smoothly away as one intact block.
+              //    (The continuous Rex atmosphere aura lives in Layer 0 BEHIND
+              //    CustomScrollView so Sliver 0 never paints over shelf headers!)
               Positioned(
                 top: -overscroll,
                 left: 0,
@@ -3764,10 +3875,45 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   },
                   itemBuilder: (context, index) {
                     final featured = featuredList[index];
-                    final itemAtmo = resolveHeroAtmosphere(
-                      _resolveHeroAmbientColor(featured, palette),
-                    );
-                    final itemAmbient = itemAtmo.deep;
+                    final itemAtmo =
+                        _resolveRexHeroAtmosphere(featured, palette);
+                    final useLightInk =
+                        _useLightInkForHeroAtmo(itemAtmo, isDark);
+                    final primaryInk =
+                        useLightInk ? Colors.white : const Color(0xFF141821);
+                    final secondaryInk = useLightInk
+                        ? Colors.white.withValues(alpha: 0.90)
+                        : const Color(0xFF141821).withValues(alpha: 0.80);
+                    final bodyInk = useLightInk
+                        ? Colors.white.withValues(alpha: 0.80)
+                        : const Color(0xFF141821).withValues(alpha: 0.72);
+                    final titleShadows = useLightInk
+                        ? const [
+                            Shadow(
+                              color: Color(0x99000000),
+                              blurRadius: 14,
+                              offset: Offset(0, 2),
+                            ),
+                          ]
+                        : const [
+                            Shadow(
+                              color: Color(0x45FFFFFF),
+                              blurRadius: 10,
+                            ),
+                          ];
+                    final subShadows = useLightInk
+                        ? const [
+                            Shadow(
+                              color: Color(0x88000000),
+                              blurRadius: 8,
+                            ),
+                          ]
+                        : const [
+                            Shadow(
+                              color: Color(0x38FFFFFF),
+                              blurRadius: 6,
+                            ),
+                          ];
                     final heroCardId =
                         'ios_hero_${site.key}_${featured.id.isNotEmpty ? featured.id : featured.title}_$index';
                     final metaParts = <String>[
@@ -3791,7 +3937,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           sourceRadius: 0.0,
                           sourceCardId: heroCardId,
                           isFullBleedHero: true,
-                          ambientColor: itemAmbient,
+                          ambientColor: itemAtmo,
                         ),
                         child: Stack(
                           fit: StackFit.expand,
@@ -3803,7 +3949,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 cardId: heroCardId,
                                 child: ClipRect(
                                   child: ColoredBox(
-                                    color: itemAmbient,
+                                    color: itemAtmo,
                                     child: Transform.scale(
                                       key: const ValueKey(
                                         'ios-hero-stretch-zoom',
@@ -3828,7 +3974,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                           bytes,
                                         ),
                                         placeholder: ColoredBox(
-                                          color: itemAmbient,
+                                          color: itemAtmo,
                                         ),
                                       ),
                                     ),
@@ -3864,19 +4010,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ),
                             ),
 
-                            // Rich poster-atmosphere bottom gradient strictly
-                            // below the faces (starting at the title zone):
-                            // - Dark Mode: silky 9-stop deep cinema dissolve
-                            //   straight into pure obsidian canvas (`softCanvas`)
-                            // - Light Mode: keeps rich poster-hue depth behind
-                            //   white title/CTA/dots right down into the elevated
-                            //   rounded sheet cap (zero milky fog on poster,
-                            //   zero muddy dark cliff over shelves below!).
+                            // Rex-style silky 8-stop single-color atmospheric
+                            // dissolve strictly below the faces: ends at 100%
+                            // solid `itemAtmo` matching Layer 0 pixel-for-pixel
+                            // with zero seam, zero Mach band, and zero rounded
+                            // sheet cliff in BOTH Light Mode and Dark Mode.
                             Positioned(
                               left: 0,
                               right: 0,
                               bottom: 0,
-                              height: stretchedHeight * (isDark ? 0.60 : 0.54),
+                              height: stretchedHeight * 0.54,
                               child: IgnorePointer(
                                 child: buildHeroChromeFade(
                                   child: DecoratedBox(
@@ -3887,71 +4030,26 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                       gradient: LinearGradient(
                                         begin: Alignment.topCenter,
                                         end: Alignment.bottomCenter,
-                                        colors: isDark
-                                            ? [
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.0),
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.14),
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.46),
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.74),
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.88),
-                                                Color.lerp(
-                                                  itemAtmo.deep,
-                                                  itemAtmo.mid,
-                                                  0.55,
-                                                )!.withValues(alpha: 0.94),
-                                                Color.lerp(
-                                                  itemAtmo.mid,
-                                                  itemAtmo.softCanvas,
-                                                  0.55,
-                                                )!.withValues(alpha: 0.98),
-                                                Color.lerp(
-                                                  itemAtmo.mid,
-                                                  itemAtmo.softCanvas,
-                                                  0.86,
-                                                )!.withValues(alpha: 0.995),
-                                                itemAtmo.softCanvas,
-                                              ]
-                                            : [
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.0),
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.12),
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.40),
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.66),
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.84),
-                                                itemAtmo.deep
-                                                    .withValues(alpha: 0.94),
-                                                itemAtmo.deep,
-                                              ],
-                                        stops: isDark
-                                            ? const [
-                                                0.0,
-                                                0.18,
-                                                0.38,
-                                                0.56,
-                                                0.70,
-                                                0.80,
-                                                0.89,
-                                                0.95,
-                                                1.0,
-                                              ]
-                                            : const [
-                                                0.0,
-                                                0.16,
-                                                0.34,
-                                                0.54,
-                                                0.74,
-                                                0.88,
-                                                1.0,
-                                              ],
+                                        colors: [
+                                          itemAtmo.withValues(alpha: 0.0),
+                                          itemAtmo.withValues(alpha: 0.06),
+                                          itemAtmo.withValues(alpha: 0.20),
+                                          itemAtmo.withValues(alpha: 0.46),
+                                          itemAtmo.withValues(alpha: 0.72),
+                                          itemAtmo.withValues(alpha: 0.90),
+                                          itemAtmo.withValues(alpha: 0.98),
+                                          itemAtmo,
+                                        ],
+                                        stops: const [
+                                          0.0,
+                                          0.14,
+                                          0.30,
+                                          0.48,
+                                          0.66,
+                                          0.82,
+                                          0.93,
+                                          1.0,
+                                        ],
                                       ),
                                     ),
                                   ),
@@ -3962,13 +4060,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             Positioned(
                               left: horizontalPad + 6,
                               right: horizontalPad + 6,
-                              bottom: isDark
-                                  ? (featuredList.length > 1
-                                      ? (isShortHero ? 44 : 56)
-                                      : (isShortHero ? 26 : 36))
-                                  : (featuredList.length > 1
-                                      ? (isShortHero ? 54 : 62)
-                                      : (isShortHero ? 38 : 46)),
+                              bottom: featuredList.length > 1
+                                  ? (isShortHero ? 26 : 30)
+                                  : (isShortHero ? 14 : 16),
                               child: buildHeroChromeFade(
                                 child: Center(
                                   child: ConstrainedBox(
@@ -3986,25 +4080,31 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                             vertical: 4,
                                           ),
                                           decoration: BoxDecoration(
-                                            color: Colors.white.withValues(
-                                              alpha: 0.16,
-                                            ),
+                                            color: useLightInk
+                                                ? Colors.white
+                                                    .withValues(alpha: 0.16)
+                                                : Colors.black
+                                                    .withValues(alpha: 0.08),
                                             borderRadius: BorderRadius.circular(
                                               999,
                                             ),
                                             border: Border.all(
-                                              color: Colors.white.withValues(
-                                                alpha: 0.24,
-                                              ),
+                                              color: useLightInk
+                                                  ? Colors.white
+                                                      .withValues(alpha: 0.24)
+                                                  : Colors.black
+                                                      .withValues(alpha: 0.14),
                                               width: 0.6,
                                             ),
                                           ),
                                           child: Row(
                                             mainAxisSize: MainAxisSize.min,
                                             children: [
-                                              const Icon(
+                                              Icon(
                                                 CupertinoIcons.sparkles,
-                                                color: Color(0xFF5AC8FA),
+                                                color: useLightInk
+                                                    ? const Color(0xFF5AC8FA)
+                                                    : AppleColors.systemBlue,
                                                 size: 11.5,
                                               ),
                                               const SizedBox(width: 4),
@@ -4014,7 +4114,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                                   maxLines: 1,
                                                   overflow:
                                                       TextOverflow.ellipsis,
-                                                  style: const TextStyle(
+                                                  style: TextStyle(
                                                     color: primaryInk,
                                                     fontSize: 11,
                                                     fontWeight: FontWeight.w600,
@@ -4036,111 +4136,94 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                             fontWeight: FontWeight.w800,
                                             letterSpacing: -0.5,
                                             height: 1.15,
-                                            shadows: const [
-                                              Shadow(
-                                                color: Color(0x99000000),
-                                                blurRadius: 14,
-                                                offset: Offset(0, 2),
-                                              ),
-                                            ],
+                                            shadows: titleShadows,
                                           ),
                                         ),
-                                    if (metaParts.isNotEmpty) ...[
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        metaParts.join(' · '),
-                                        maxLines: 1,
-                                        textAlign: TextAlign.center,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: secondaryInk,
-                                          fontSize: 12.5,
-                                          fontWeight: FontWeight.w600,
-                                          letterSpacing: 0.1,
-                                          shadows: const [
-                                            Shadow(
-                                              color: Color(0x88000000),
-                                              blurRadius: 8,
+                                        if (metaParts.isNotEmpty) ...[
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            metaParts.join(' · '),
+                                            maxLines: 1,
+                                            textAlign: TextAlign.center,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: secondaryInk,
+                                              fontSize: 12.5,
+                                              fontWeight: FontWeight.w600,
+                                              letterSpacing: 0.1,
+                                              shadows: subShadows,
                                             ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                    if (infoLine.isNotEmpty) ...[
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        infoLine,
-                                        maxLines: 1,
-                                        textAlign: TextAlign.center,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: bodyInk,
-                                          fontSize: 12,
-                                          height: 1.32,
-                                          shadows: const [
-                                            Shadow(
-                                              color: Color(0x7A000000),
-                                              blurRadius: 8,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                    const SizedBox(height: 10),
-                                    ApplePressableScale(
-                                      pressedScale: 0.94,
-                                      onTap: () => _openVideoDetail(
-                                        site,
-                                        featured,
-                                        sourceContext: heroTapCtx,
-                                        sourceRadius: 0.0,
-                                        sourceCardId: heroCardId,
-                                        isFullBleedHero: true,
-                                        ambientColor: itemAmbient,
-                                      ),
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 20,
-                                          vertical: 8.5,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: AppleColors.systemBlue,
-                                          borderRadius: BorderRadius.circular(
-                                            999,
                                           ),
-                                          boxShadow: const [
-                                            BoxShadow(
-                                              color: Color(0x4D0A84FF),
-                                              blurRadius: 14,
-                                              offset: Offset(0, 4),
+                                        ],
+                                        if (infoLine.isNotEmpty) ...[
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            infoLine,
+                                            maxLines: 1,
+                                            textAlign: TextAlign.center,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: bodyInk,
+                                              fontSize: 12,
+                                              height: 1.32,
+                                              shadows: subShadows,
                                             ),
-                                          ],
+                                          ),
+                                        ],
+                                        const SizedBox(height: 10),
+                                        ApplePressableScale(
+                                          pressedScale: 0.94,
+                                          onTap: () => _openVideoDetail(
+                                            site,
+                                            featured,
+                                            sourceContext: heroTapCtx,
+                                            sourceRadius: 0.0,
+                                            sourceCardId: heroCardId,
+                                            isFullBleedHero: true,
+                                            ambientColor: itemAtmo,
+                                          ),
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 20,
+                                              vertical: 8.5,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: AppleColors.systemBlue,
+                                              borderRadius:
+                                                  BorderRadius.circular(999),
+                                              boxShadow: const [
+                                                BoxShadow(
+                                                  color: Color(0x4D0A84FF),
+                                                  blurRadius: 14,
+                                                  offset: Offset(0, 4),
+                                                ),
+                                              ],
+                                            ),
+                                            child: const Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Icon(
+                                                  CupertinoIcons.play_fill,
+                                                  color: Colors.white,
+                                                  size: 13,
+                                                ),
+                                                SizedBox(width: 5),
+                                                Text(
+                                                  '立即观看',
+                                                  style: TextStyle(
+                                                    color: Colors.white,
+                                                    fontSize: 13.5,
+                                                    fontWeight: FontWeight.w700,
+                                                    letterSpacing: -0.1,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
                                         ),
-                                        child: const Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Icon(
-                                              CupertinoIcons.play_fill,
-                                              color: Colors.white,
-                                              size: 13,
-                                            ),
-                                            SizedBox(width: 5),
-                                            Text(
-                                              '立即观看',
-                                              style: TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 13.5,
-                                                fontWeight: FontWeight.w700,
-                                                letterSpacing: -0.1,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
+                                      ],
                                     ),
-                                  ],
-                                ),
-                                ),
+                                  ),
                                 ),
                               ),
                             ),
@@ -4152,7 +4235,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
               ),
 
-              // 3. Floating Header Row nestled in the top ambient aura: gently
+              // 2. Floating Header Row nestled in the top ambient aura: gently
               //    tracks pull-down overscroll and scrolls upward cleanly as one
               //    intact piece when scrolling down (never crushed or sliced!).
               Positioned(
@@ -4163,7 +4246,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 child: buildHeroChromeFade(child: headerOverlay),
               ),
 
-              // 4. Translucent pull-to-refresh pill while pulling/refreshing
+              // 3. Translucent pull-to-refresh pill while pulling/refreshing
               if (showRefreshPill)
                 Positioned(
                   top: topSafePad + 54 - overscroll * 0.52,
@@ -4189,9 +4272,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              CupertinoActivityIndicator(
+                              const CupertinoActivityIndicator(
                                 radius: 7.5,
-                                color: primaryInk,
+                                color: Colors.white,
                               ),
                               const SizedBox(width: 6),
                               Text(
@@ -4201,8 +4284,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                         ? '松手立即刷新'
                                         : '下拉放大刷新'),
                                 textScaler: TextScaler.noScaling,
-                                style: TextStyle(
-                                  color: primaryInk,
+                                style: const TextStyle(
+                                  color: Colors.white,
                                   fontSize: 11,
                                   fontWeight: FontWeight.w600,
                                 ),
@@ -4215,16 +4298,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ),
 
-              // 5. Centered carousel pagination dots seated cleanly above the
-              //    bottom transition zone (elevated rounded sheet cap in Light
-              //    Mode; seamless obsidian dissolve in Dark Mode).
+              // 4. Centered carousel pagination dots right above the seamless
+              //    Rex atmosphere continuation into the first shelf below.
               if (featuredList.length > 1)
                 Positioned(
                   left: 0,
                   right: 0,
-                  bottom: isDark
-                      ? (isShortHero ? 26 : 36)
-                      : (isShortHero ? 36 : 42),
+                  bottom: isShortHero ? 10 : 12,
                   child: IgnorePointer(
                     child: buildHeroChromeFade(
                       child: Row(
@@ -4239,65 +4319,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               height: 5.5,
                               decoration: BoxDecoration(
                                 color: i == activeIdx
-                                    ? primaryInk
-                                    : primaryInk.withValues(alpha: 0.36),
+                                    ? activeDotInk
+                                    : activeDotInk.withValues(alpha: 0.36),
                                 borderRadius: BorderRadius.circular(999),
                               ),
                             ),
                         ],
-                      ),
-                    ),
-                  ),
-                ),
-
-              // 6. Light Mode Apple-style elevated continuous rounded sheet lip:
-              //    rises 26pt cleanly over the rich cinema poster bottom and
-              //    joins the airy poster-tinted shelf surface below with zero
-              //    flat cut, zero white fog on artwork, and zero muddy gray
-              //    smudge behind section headers.
-              if (!isDark)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: -1,
-                  height: 27,
-                  child: IgnorePointer(
-                    child: buildHeroChromeFade(
-                      child: AnimatedContainer(
-                        key: const ValueKey('ios-hero-light-sheet-cap'),
-                        duration: const Duration(milliseconds: 420),
-                        curve: Curves.easeOutCubic,
-                        decoration: BoxDecoration(
-                          color: heroAtmo.softCanvas,
-                          borderRadius: const BorderRadius.vertical(
-                            top: Radius.circular(28),
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: heroAtmo.deep.withValues(alpha: 0.24),
-                              blurRadius: 18,
-                              offset: const Offset(0, -4),
-                            ),
-                          ],
-                        ),
-                        child: ClipRRect(
-                          borderRadius: const BorderRadius.vertical(
-                            top: Radius.circular(28),
-                          ),
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topCenter,
-                                end: Alignment.bottomCenter,
-                                colors: [
-                                  Colors.white.withValues(alpha: 0.62),
-                                  heroAtmo.softCanvas.withValues(alpha: 0.0),
-                                ],
-                                stops: const [0.0, 0.14],
-                              ),
-                            ),
-                          ),
-                        ),
                       ),
                     ),
                   ),

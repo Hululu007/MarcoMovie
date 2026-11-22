@@ -1715,10 +1715,9 @@ class PosterLoader {
         double gSum = 0;
         double bSum = 0;
         double weightSum = 0;
-        for (int y = 0; y < h; y++) {
-          final isLower = y >= (h * 0.45);
-          final isMid = y >= (h * 0.18) && y < (h * 0.45);
-          final rowWeight = isLower ? 1.8 : (isMid ? 1.15 : 1.0);
+        for (int y = (h * 0.56).floor(); y < h; y++) {
+          final isEdgeBand = y >= (h * 0.72);
+          final rowWeight = isEdgeBand ? 2.0 : 1.2;
           for (int x = 0; x < w; x++) {
             final idx = (y * w + x) * 4;
             if (idx + 3 >= data.length) continue;
@@ -1730,12 +1729,7 @@ class PosterLoader {
             final maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
             final minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
             final sat = maxC > 0 ? (maxC - minC) / maxC : 0.0;
-            final luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0;
-            // Downweight pure black jackets / blown-out white text so the
-            // poster's real atmospheric hue dominates.
-            final toneWeight =
-                (luma < 0.10 || luma > 0.92) ? 0.22 : (0.55 + sat * 1.65);
-            final wgt = rowWeight * toneWeight * a;
+            final wgt = rowWeight * (0.65 + sat * 1.1) * a;
             rSum += r * wgt;
             gSum += g * wgt;
             bSum += b * wgt;
@@ -1752,11 +1746,11 @@ class PosterLoader {
           final hsl = HSLColor.fromColor(raw);
           final color = hsl
               .withSaturation(
-                hsl.saturation < 0.06
+                hsl.saturation < 0.05
                     ? hsl.saturation
-                    : hsl.saturation.clamp(0.20, 0.58),
+                    : hsl.saturation.clamp(0.12, 0.52),
               )
-              .withLightness(hsl.lightness.clamp(0.28, 0.54))
+              .withLightness(hsl.lightness.clamp(0.18, 0.72))
               .toColor();
           _vibrantAmbientColorCache[fp] = color;
           return color;

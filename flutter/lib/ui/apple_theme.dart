@@ -296,18 +296,19 @@ class AppleViewportLayout {
   }
 
   /// Adaptive immersive hero height on iOS Home across cover, unfolded, Split
-  /// View, and standard iPhone heights.
+  /// View, and standard iPhone heights (proportioned so the first shelf & card
+  /// row shine right on the initial fold above the floating Dock).
   double iosHomeHeroHeight(double maxH) {
     if (isShortPortrait) {
-      return (maxH * 0.62).clamp(360.0, 470.0);
+      return (maxH * 0.60).clamp(360.0, 455.0);
     }
     if (isExpandedPortrait) {
-      return (maxH * 0.60).clamp(500.0, 600.0);
+      return (maxH * 0.58).clamp(500.0, 580.0);
     }
     if (isCompactSplit) {
-      return (maxH * 0.56).clamp(420.0, 520.0);
+      return (maxH * 0.55).clamp(420.0, 510.0);
     }
-    return (maxH * 0.69).clamp(500.0, 620.0);
+    return (maxH * 0.64).clamp(500.0, 585.0);
   }
 }
 

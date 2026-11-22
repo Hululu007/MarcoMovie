@@ -52,6 +52,7 @@ class CuratedDiscoverySection extends StatefulWidget {
   final bool hasUserSources;
   final bool loadLive;
   final List<String>? visibleSectionIds;
+  final Color? headerInkOverride;
 
   static const List<String> defaultDiscoverySectionIds = <String>[
     StorageService.homeSectionWidescreenRadar,
@@ -69,6 +70,7 @@ class CuratedDiscoverySection extends StatefulWidget {
     required this.hasUserSources,
     this.loadLive = true,
     this.visibleSectionIds,
+    this.headerInkOverride,
   });
 
   @override
@@ -193,6 +195,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
     final marvelSpec = _specById('marvel');
     final dcSpec = _specById('dc');
 
+    final hdrInk = widget.headerInkOverride;
     return switch (sectionId) {
       StorageService.homeSectionWidescreenRadar => _LandscapeDiscoveryShelf(
           key: Key('curated-module-${trendingSpec.id}'),
@@ -200,6 +203,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
           accentColor: trendingSpec.accentColor,
           items: _itemsFor(trendingSpec.id),
           palette: palette,
+          headerInkOverride: hdrInk,
           onOpenAll: () => _openCollectionWithWall(
             trendingSpec,
             customTitle: '光影风向标',
@@ -214,6 +218,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
               title: '月度策划',
               palette: palette,
               badgeText: '藤蔓特辑',
+              inkOverride: hdrInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -297,6 +302,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
           accentColor: cnHotSpec.accentColor,
           items: _itemsFor(cnHotSpec.id),
           palette: palette,
+          headerInkOverride: hdrInk,
           showRankBadges: true,
           onOpenAll: () => _openCollectionWithWall(
             cnHotSpec,
@@ -311,6 +317,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
             _SectionHeaderRow(
               title: '灵感片单',
               palette: palette,
+              inkOverride: hdrInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -376,6 +383,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
               title: '影业档案室',
               palette: palette,
               badgeText: widget.hasUserSources ? '点播自动匹配片源' : '需添加片源播放',
+              inkOverride: hdrInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -428,6 +436,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
             _SectionHeaderRow(
               title: '口碑典藏馆',
               palette: palette,
+              inkOverride: hdrInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -528,16 +537,22 @@ class _SectionHeaderRow extends StatelessWidget {
   final ApplePalette palette;
   final String? badgeText;
   final VoidCallback? onTapChevron;
+  final Color? inkOverride;
 
   const _SectionHeaderRow({
     required this.title,
     required this.palette,
     this.badgeText,
     this.onTapChevron,
+    this.inkOverride,
   });
 
   @override
   Widget build(BuildContext context) {
+    final titleColor = inkOverride ?? palette.labelPrimary;
+    final chevronColor = inkOverride != null
+        ? inkOverride!.withValues(alpha: 0.72)
+        : palette.labelTertiary;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
@@ -545,7 +560,7 @@ class _SectionHeaderRow extends StatelessWidget {
           Text(
             title,
             style: TextStyle(
-              color: palette.labelPrimary,
+              color: titleColor,
               fontSize: 18,
               fontWeight: FontWeight.w800,
               letterSpacing: -0.35,
@@ -582,7 +597,7 @@ class _SectionHeaderRow extends StatelessWidget {
               child: Icon(
                 CupertinoIcons.chevron_right,
                 size: 16,
-                color: palette.labelTertiary,
+                color: chevronColor,
               ),
             ),
         ],
@@ -597,6 +612,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
   final Color accentColor;
   final List<CmsVideo> items;
   final ApplePalette palette;
+  final Color? headerInkOverride;
   final bool showRankBadges;
   final VoidCallback onOpenAll;
   final CuratedCardOpenCallback onOpenVideo;
@@ -607,6 +623,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
     required this.accentColor,
     required this.items,
     required this.palette,
+    this.headerInkOverride,
     this.showRankBadges = false,
     required this.onOpenAll,
     required this.onOpenVideo,
@@ -622,6 +639,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
           title: title,
           palette: palette,
           onTapChevron: onOpenAll,
+          inkOverride: headerInkOverride,
         ),
         const SizedBox(height: 10),
         SizedBox(
@@ -660,6 +678,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
   final Color accentColor;
   final List<CmsVideo> items;
   final ApplePalette palette;
+  final Color? headerInkOverride;
   final VoidCallback onOpenAll;
   final CuratedCardOpenCallback onOpenVideo;
 
@@ -669,6 +688,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
     required this.accentColor,
     required this.items,
     required this.palette,
+    this.headerInkOverride,
     required this.onOpenAll,
     required this.onOpenVideo,
   });
@@ -683,6 +703,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
           title: title,
           palette: palette,
           onTapChevron: onOpenAll,
+          inkOverride: headerInkOverride,
         ),
         const SizedBox(height: 10),
         SizedBox(
