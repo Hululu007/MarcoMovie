@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -490,5 +492,134 @@ const dp = new DPlayer({
       },
     );
     expect(blockedByExclude, isNull);
+  });
+
+  test(
+      'Windows Stage-3 platform channel passes host-matched rules, ads, and clickScript and filters ads/wrapper URLs in Stage 2 and Stage 3',
+      () async {
+    const channel = MethodChannel('marco_movie/web_sniffer');
+    final recordedCalls = <Map<String, dynamic>>[];
+
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'sniffMedia');
+      final args = Map<String, dynamic>.from(call.arguments as Map);
+      recordedCalls.add(args);
+      if (recordedCalls.length == 1) {
+        // First response returns an ad-domain URL which Stage-3 must reject!
+        return <String, dynamic>{
+          'url': 'https://ad.blocked.test/promo/ad.mp4',
+          'headers': {'Referer': args['url']},
+        };
+      }
+      return <String, dynamic>{
+        'url': 'https://stream.ok.test/master/index.m3u8?token=win32',
+        'headers': {
+          'Referer': 'https://vip.player.test/',
+          'User-Agent': 'EdgeWebView2/131',
+        },
+      };
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    const site = CmsSite(
+      key: 'win_sniff',
+      name: 'Windows Sniff Site',
+      type: 1,
+      api: 'https://cms.test/api.php',
+    );
+    const rules = [
+      CmsSniffRule(
+        name: 'vip_rule',
+        hosts: ['*.player.test'],
+        regex: [r'\.m3u8'],
+        exclude: [r'preview\.mp4'],
+        script: 'window.__autoPlay = 1;',
+        click: '#btn-play',
+      ),
+      CmsSniffRule(
+        name: 'other_host_rule',
+        hosts: ['unrelated.example'],
+        script: 'window.__shouldNotPass = 1;',
+      ),
+    ];
+    const ads = ['ad.blocked.test', '*.tracker.test'];
+
+    // Stage 2 must ignore ad-domain <video>, disguised wrapper URLs, and ad iframes,
+    // then fall through to Stage 3 on Windows!
+    Future<ResolverHttpDocument> fakeFetch(
+      String url, {
+      Map<String, String> headers = const {},
+      Duration? timeout,
+    }) async {
+      return ResolverHttpDocument(
+        finalUri: Uri.parse(url),
+        statusCode: 200,
+        responseHeaders: const {'content-type': 'text/html'},
+        effectiveRequestHeaders: headers,
+        body: '''
+<html><body>
+  <video src="https://ad.blocked.test/video/preroll.mp4"></video>
+  <iframe src="https://sub.tracker.test/adframe.html"></iframe>
+  <script>
+    const wrapped = "https://jx.helper.test/parse?url=https://real.cdn.test/fake.m3u8";
+  </script>
+</body></html>
+''',
+      );
+    }
+
+    // 1st attempt: Stage 3 mock returns ad URL -> rejected cleanly.
+    final rejectedAd = await WebMediaResolver.resolve(
+      site: site,
+      targetUrl: 'https://vip.player.test/watch/1001.html',
+      rules: rules,
+      ads: ads,
+      fetchDocument: fakeFetch,
+    );
+    if (Platform.isWindows || Platform.isIOS || Platform.isMacOS) {
+      expect(rejectedAd, isNull);
+      expect(recordedCalls, hasLength(1));
+      final firstArgs = recordedCalls.first;
+      expect(firstArgs['url'], 'https://vip.player.test/watch/1001.html');
+      expect(firstArgs['ads'], ads);
+      expect(firstArgs['clickScript'], allOf(
+        contains('window.__autoPlay = 1;'),
+        contains('#btn-play'),
+      ));
+      expect(firstArgs['clickScript'], isNot(contains('__shouldNotPass')));
+      final sentRules = (firstArgs['rules'] as List).cast<Map>();
+      expect(sentRules, hasLength(1));
+      expect(sentRules.single['name'], 'vip_rule');
+
+      // 2nd attempt: Stage 3 returns real stream URL -> accepted!
+      final accepted = await WebMediaResolver.resolve(
+        site: site,
+        targetUrl: 'https://vip.player.test/watch/1001.html',
+        rules: rules,
+        ads: ads,
+        fetchDocument: fakeFetch,
+      );
+      expect(accepted, isNotNull);
+      expect(accepted!['url'], 'https://stream.ok.test/master/index.m3u8?token=win32');
+      expect((accepted['header'] as Map)['User-Agent'], 'EdgeWebView2/131');
+    }
+
+    // Also verify disguised wrapper URL rejection directly
+    expect(
+      WebMediaResolver.isDisguisedWrapperUrl(
+        Uri.parse('https://jx.helper.test/parse?url=https://cdn.test/a.m3u8'),
+      ),
+      isTrue,
+    );
+    expect(
+      WebMediaResolver.isDisguisedWrapperUrl(
+        Uri.parse('https://cdn.test/video/index.m3u8?token=abc&expires=123'),
+      ),
+      isFalse,
+    );
   });
 }

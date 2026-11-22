@@ -13,6 +13,7 @@ import 'package:flutter/material.dart'
         TextButton,
         Tooltip;
 
+import '../../core/windows_video_quality.dart';
 import '../apple_theme.dart';
 import '../ios_liquid_glass.dart';
 import '../windows_appearance.dart';
@@ -104,6 +105,8 @@ class DesktopHudBarVisibility {
   final bool showDanmu;
   final bool showSubtitles;
   final bool showAnime4k;
+  final bool showVideoQuality;
+  final bool showAudioLoudness;
   final bool showSleepTimer;
 
   const DesktopHudBarVisibility({
@@ -112,6 +115,8 @@ class DesktopHudBarVisibility {
     required this.showDanmu,
     required this.showSubtitles,
     required this.showAnime4k,
+    this.showVideoQuality = false,
+    this.showAudioLoudness = false,
     required this.showSleepTimer,
   });
 
@@ -120,6 +125,8 @@ class DesktopHudBarVisibility {
     required bool isLive,
     required bool danmuAvailable,
     required bool anime4kAvailable,
+    bool videoQualityAvailable = false,
+    bool audioLoudnessAvailable = false,
   }) {
     return DesktopHudBarVisibility(
       showInlineVolume: width >= 820,
@@ -127,18 +134,22 @@ class DesktopHudBarVisibility {
       showDanmu: !isLive && danmuAvailable && width >= 860,
       showSubtitles: !isLive && width >= 960,
       showAnime4k: anime4kAvailable && width >= 1080,
+      showVideoQuality: videoQualityAvailable && width >= 1020,
+      showAudioLoudness: audioLoudnessAvailable && width >= 1120,
       showSleepTimer: width >= 1160,
     );
   }
 }
+
+enum _DesktopHudQuickMenu { quality, loudness }
 
 /// Refactored Windows desktop cinema player HUD:
 /// - Top scrim header (back + title + fused badges, zero lock clutter)
 /// - Midline far-left lock button (matching locked-state unlock anchor)
 /// - Center canvas Play/Pause + Rewind 15s + Fast-Forward 15s transport controls
 /// - Full-width edge-to-edge bottom progress bar & clean desktop action row
-/// - PC-native anchored "More" popover menu (zero duplicates, zero touch swipe)
-class DesktopPlayerHud extends StatelessWidget {
+/// - PC-native anchored "More" & quick quality/loudness popovers (zero duplicates, zero focus steal)
+class DesktopPlayerHud extends StatefulWidget {
   final bool embedded;
   final String title;
   final bool playing;
@@ -163,6 +174,18 @@ class DesktopPlayerHud extends StatelessWidget {
   final bool anime4kActive;
   final String anime4kLabel;
   final VoidCallback? onAnime4kTap;
+  final bool videoQualityVisible;
+  final bool videoQualityActive;
+  final String? videoQualityLabel;
+  final WindowsQualityPreset? videoQualityPreset;
+  final VoidCallback? onVideoQualityTap;
+  final ValueChanged<WindowsQualityPreset>? onVideoQualityChanged;
+  final bool audioLoudnessVisible;
+  final bool audioLoudnessActive;
+  final String? audioLoudnessLabel;
+  final AudioLoudnessPreset? audioLoudnessPreset;
+  final VoidCallback? onAudioLoudnessTap;
+  final ValueChanged<AudioLoudnessPreset>? onAudioLoudnessChanged;
   final Widget topHeader;
   final Widget? lockButton;
   final Widget? progressBar;
@@ -205,6 +228,18 @@ class DesktopPlayerHud extends StatelessWidget {
     this.anime4kActive = false,
     this.anime4kLabel = 'Anime4K',
     this.onAnime4kTap,
+    this.videoQualityVisible = false,
+    this.videoQualityActive = false,
+    this.videoQualityLabel,
+    this.videoQualityPreset,
+    this.onVideoQualityTap,
+    this.onVideoQualityChanged,
+    this.audioLoudnessVisible = false,
+    this.audioLoudnessActive = false,
+    this.audioLoudnessLabel,
+    this.audioLoudnessPreset,
+    this.onAudioLoudnessTap,
+    this.onAudioLoudnessChanged,
     required this.topHeader,
     this.lockButton,
     required this.progressBar,
@@ -223,8 +258,33 @@ class DesktopPlayerHud extends StatelessWidget {
   });
 
   @override
+  State<DesktopPlayerHud> createState() => _DesktopPlayerHudState();
+}
+
+class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
+  _DesktopHudQuickMenu? _activeQuickMenu;
+
+  @override
+  void didUpdateWidget(covariant DesktopPlayerHud oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if ((widget.moreControlsOpen && !oldWidget.moreControlsOpen) ||
+        (widget.embedded && !oldWidget.embedded)) {
+      _activeQuickMenu = null;
+    }
+  }
+
+  void _toggleQuickMenu(_DesktopHudQuickMenu menu) {
+    if (widget.moreControlsOpen) {
+      widget.onCloseMore?.call();
+    }
+    setState(() {
+      _activeQuickMenu = _activeQuickMenu == menu ? null : menu;
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (embedded) {
+    if (widget.embedded) {
       return ExcludeFocus(
         child: Stack(
           key: const Key('desktop-player-hud-embedded'),
@@ -237,7 +297,7 @@ class DesktopPlayerHud extends StatelessWidget {
                 children: [
                   Expanded(
                     child: Text(
-                      title,
+                      widget.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -248,17 +308,17 @@ class DesktopPlayerHud extends StatelessWidget {
                   ),
                   IconButton(
                     tooltip: '停止播放',
-                    onPressed: onExit,
+                    onPressed: widget.onExit,
                     icon: const Icon(CupertinoIcons.xmark, color: Colors.white),
                   ),
                 ],
               ),
             ),
-            if (moreControlsOpen)
+            if (widget.moreControlsOpen)
               Positioned(
                 right: 12,
                 bottom: 72,
-                child: moreToolsDock,
+                child: widget.moreToolsDock,
               ),
             Positioned(
               left: 12,
@@ -271,10 +331,10 @@ class DesktopPlayerHud extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     IconButton(
-                      tooltip: playing ? '暂停' : '播放',
-                      onPressed: onPlayPause,
+                      tooltip: widget.playing ? '暂停' : '播放',
+                      onPressed: widget.onPlayPause,
                       icon: Icon(
-                        playing
+                        widget.playing
                             ? CupertinoIcons.pause_fill
                             : CupertinoIcons.play_fill,
                         color: Colors.white,
@@ -282,7 +342,7 @@ class DesktopPlayerHud extends StatelessWidget {
                     ),
                     IconButton(
                       tooltip: '音量',
-                      onPressed: onVolumeTap,
+                      onPressed: widget.onVolumeTap,
                       icon: const Icon(
                         CupertinoIcons.volume_up,
                         color: Colors.white,
@@ -290,7 +350,7 @@ class DesktopPlayerHud extends StatelessWidget {
                     ),
                     IconButton(
                       tooltip: '线路',
-                      onPressed: onEpisodesTap,
+                      onPressed: widget.onEpisodesTap,
                       icon: const Icon(
                         CupertinoIcons.list_bullet,
                         color: Colors.white,
@@ -298,7 +358,7 @@ class DesktopPlayerHud extends StatelessWidget {
                     ),
                     IconButton(
                       tooltip: '更多',
-                      onPressed: onToggleMore,
+                      onPressed: widget.onToggleMore,
                       icon: const Icon(
                         CupertinoIcons.ellipsis,
                         color: Colors.white,
@@ -306,7 +366,7 @@ class DesktopPlayerHud extends StatelessWidget {
                     ),
                     IconButton(
                       tooltip: '展开播放',
-                      onPressed: onToggleExpand,
+                      onPressed: widget.onToggleExpand,
                       icon: const Icon(
                         CupertinoIcons.arrow_up_left_arrow_down_right,
                         color: Colors.white,
@@ -323,11 +383,19 @@ class DesktopPlayerHud extends StatelessWidget {
 
     final size = MediaQuery.sizeOf(context);
     final width = size.width;
+    final videoQualityAvailable = widget.videoQualityVisible &&
+        (widget.onVideoQualityTap != null ||
+            widget.onVideoQualityChanged != null);
+    final audioLoudnessAvailable = widget.audioLoudnessVisible &&
+        (widget.onAudioLoudnessTap != null ||
+            widget.onAudioLoudnessChanged != null);
     final visibility = DesktopHudBarVisibility.forWidth(
       width,
-      isLive: isLive,
-      danmuAvailable: onDanmuToggle != null,
-      anime4kAvailable: anime4kVisible && onAnime4kTap != null,
+      isLive: widget.isLive,
+      danmuAvailable: widget.onDanmuToggle != null,
+      anime4kAvailable: widget.anime4kVisible && widget.onAnime4kTap != null,
+      videoQualityAvailable: videoQualityAvailable,
+      audioLoudnessAvailable: audioLoudnessAvailable,
     );
 
     Widget barButton(
@@ -388,20 +456,20 @@ class DesktopPlayerHud extends StatelessWidget {
     }
 
     Widget buildVolumeControl() {
-      if (!visibility.showInlineVolume || onVolumeChanged == null) {
+      if (!visibility.showInlineVolume || widget.onVolumeChanged == null) {
         return iconAction(
-          icon: volume <= 0.1
+          icon: widget.volume <= 0.1
               ? CupertinoIcons.volume_off
               : CupertinoIcons.volume_up,
           tooltip: '音量',
-          onPressed: onVolumeTap,
+          onPressed: widget.onVolumeTap,
         );
       }
       return StreamBuilder<double>(
-        stream: volumeStream,
-        initialData: volume,
+        stream: widget.volumeStream,
+        initialData: widget.volume,
         builder: (context, snapshot) {
-          final currentVol = (snapshot.data ?? volume).clamp(0.0, 100.0);
+          final currentVol = (snapshot.data ?? widget.volume).clamp(0.0, 100.0);
           final icon = currentVol <= 0.5
               ? CupertinoIcons.volume_off
               : currentVol < 50
@@ -413,17 +481,38 @@ class DesktopPlayerHud extends StatelessWidget {
               iconAction(
                 icon: icon,
                 tooltip: currentVol <= 0.5 ? '取消静音 (M)' : '静音 (M)',
-                onPressed: onMuteToggle ?? onVolumeTap,
+                onPressed: widget.onMuteToggle ?? widget.onVolumeTap,
               ),
               _DesktopInlineVolumeTrack(
                 value: currentVol,
-                onChanged: onVolumeChanged!,
+                onChanged: widget.onVolumeChanged!,
               ),
             ],
           );
         },
       );
     }
+
+    final resolvedQualityLabel = widget.videoQualityLabel ??
+        (widget.videoQualityPreset != null
+            ? '画质·${widget.videoQualityPreset!.shortLabelZh}'
+            : '画质');
+    final resolvedQualityActive = widget.videoQualityActive ||
+        (widget.videoQualityPreset != null &&
+            widget.videoQualityPreset != WindowsQualityPreset.ecoCompat) ||
+        _activeQuickMenu == _DesktopHudQuickMenu.quality;
+
+    final resolvedLoudnessLabel = widget.audioLoudnessLabel ??
+        (widget.audioLoudnessPreset != null &&
+                widget.audioLoudnessPreset != AudioLoudnessPreset.off
+            ? '人声·${widget.audioLoudnessPreset!.shortLabelZh}'
+            : '人声');
+    final resolvedLoudnessActive = widget.audioLoudnessActive ||
+        (widget.audioLoudnessPreset != null &&
+            widget.audioLoudnessPreset != AudioLoudnessPreset.off) ||
+        _activeQuickMenu == _DesktopHudQuickMenu.loudness;
+
+    final hasPopoverOpen = widget.moreControlsOpen || _activeQuickMenu != null;
 
     return ExcludeFocus(
       child: Stack(
@@ -452,7 +541,7 @@ class DesktopPlayerHud extends StatelessWidget {
                 bottom: false,
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(24, 14, 24, 24),
-                  child: topHeader,
+                  child: widget.topHeader,
                 ),
               ),
             ),
@@ -460,11 +549,11 @@ class DesktopPlayerHud extends StatelessWidget {
           // Center canvas transport controls: Rewind 15s, Play/Pause, Forward 15s
           Positioned.fill(
             child: Center(
-              child: transportButtons,
+              child: widget.transportButtons,
             ),
           ),
           // Midline far-left lock button (aligned with locked-state unlock anchor)
-          if (lockButton != null)
+          if (widget.lockButton != null)
             Positioned(
               left: 20,
               top: 0,
@@ -473,16 +562,24 @@ class DesktopPlayerHud extends StatelessWidget {
                 right: false,
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: lockButton!,
+                  child: widget.lockButton!,
                 ),
               ),
             ),
-          // Dismiss barrier when "More" desktop popover is open
-          if (moreControlsOpen && onCloseMore != null)
+          // Dismiss barrier when "More" or quick-switch popover is open
+          if (hasPopoverOpen &&
+              (widget.onCloseMore != null || _activeQuickMenu != null))
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
-                onTap: onCloseMore,
+                onTap: () {
+                  if (_activeQuickMenu != null) {
+                    setState(() => _activeQuickMenu = null);
+                  }
+                  if (widget.moreControlsOpen) {
+                    widget.onCloseMore?.call();
+                  }
+                },
                 child: const SizedBox.expand(),
               ),
             ),
@@ -511,85 +608,131 @@ class DesktopPlayerHud extends StatelessWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (!isLive && progressBar != null) ...[
-                        progressBar!,
+                      if (!widget.isLive && widget.progressBar != null) ...[
+                        widget.progressBar!,
                         const SizedBox(height: 6),
                       ],
                       Row(
                         children: [
-                          if (hasPrevEpisode && onPrevEpisode != null)
+                          if (widget.hasPrevEpisode &&
+                              widget.onPrevEpisode != null)
                             iconAction(
                               icon: CupertinoIcons.backward_end_fill,
-                              tooltip: isLive ? '上一源 (P)' : '上一集 (P)',
-                              onPressed: onPrevEpisode!,
+                              tooltip: widget.isLive ? '上一源 (P)' : '上一集 (P)',
+                              onPressed: widget.onPrevEpisode!,
                             ),
-                          if (hasNextEpisode && onNextEpisode != null)
+                          if (widget.hasNextEpisode &&
+                              widget.onNextEpisode != null)
                             iconAction(
                               icon: CupertinoIcons.forward_end_fill,
-                              tooltip: isLive ? '下一源 (N)' : '下一集 (N)',
-                              onPressed: onNextEpisode!,
+                              tooltip: widget.isLive ? '下一源 (N)' : '下一集 (N)',
+                              onPressed: widget.onNextEpisode!,
                             ),
                           buildVolumeControl(),
                           const Spacer(),
                           if (visibility.showSpeed)
                             barButton(
-                              '$normalSpeed×',
+                              '${widget.normalSpeed}×',
                               CupertinoIcons.speedometer,
-                              onSpeedTap,
-                              highlighted: normalSpeed != 1.0,
+                              widget.onSpeedTap,
+                              highlighted: widget.normalSpeed != 1.0,
                             ),
                           if (visibility.showDanmu)
                             barButton(
-                              danmuEnabled ? '弹幕开' : '弹幕',
-                              danmuEnabled
+                              widget.danmuEnabled ? '弹幕开' : '弹幕',
+                              widget.danmuEnabled
                                   ? CupertinoIcons.chat_bubble_text_fill
                                   : CupertinoIcons.chat_bubble_text,
-                              onDanmuToggle!,
-                              highlighted: danmuEnabled,
+                              widget.onDanmuToggle!,
+                              highlighted: widget.danmuEnabled,
                               key: const Key('desktop-danmu-toggle-button'),
                             ),
                           if (visibility.showSubtitles)
                             barButton(
                               '字幕',
                               CupertinoIcons.captions_bubble,
-                              onSubtitlesTap,
+                              widget.onSubtitlesTap,
+                            ),
+                          if (visibility.showVideoQuality)
+                            barButton(
+                              resolvedQualityLabel,
+                              CupertinoIcons.sparkles,
+                              () {
+                                if (widget.onVideoQualityTap != null) {
+                                  if (_activeQuickMenu != null) {
+                                    setState(() => _activeQuickMenu = null);
+                                  }
+                                  widget.onVideoQualityTap!();
+                                } else {
+                                  _toggleQuickMenu(
+                                      _DesktopHudQuickMenu.quality);
+                                }
+                              },
+                              highlighted: resolvedQualityActive,
+                              key: const Key('desktop-video-quality-button'),
+                            ),
+                          if (visibility.showAudioLoudness)
+                            barButton(
+                              resolvedLoudnessLabel,
+                              CupertinoIcons.waveform,
+                              () {
+                                if (widget.onAudioLoudnessTap != null) {
+                                  if (_activeQuickMenu != null) {
+                                    setState(() => _activeQuickMenu = null);
+                                  }
+                                  widget.onAudioLoudnessTap!();
+                                } else {
+                                  _toggleQuickMenu(
+                                      _DesktopHudQuickMenu.loudness);
+                                }
+                              },
+                              highlighted: resolvedLoudnessActive,
+                              key: const Key('desktop-audio-loudness-button'),
                             ),
                           if (visibility.showAnime4k)
                             barButton(
-                              anime4kLabel,
+                              widget.anime4kLabel,
                               CupertinoIcons.wand_stars,
-                              onAnime4kTap!,
-                              highlighted: anime4kActive,
+                              widget.onAnime4kTap!,
+                              highlighted: widget.anime4kActive,
                               key: const Key('desktop-anime4k-button'),
                             ),
                           if (visibility.showSleepTimer)
                             barButton(
-                              sleepTimerActive ? sleepTimerLabel : '定时',
+                              widget.sleepTimerActive
+                                  ? widget.sleepTimerLabel
+                                  : '定时',
                               CupertinoIcons.moon_zzz_fill,
-                              onSleepTimerTap,
-                              highlighted: sleepTimerActive,
+                              widget.onSleepTimerTap,
+                              highlighted: widget.sleepTimerActive,
                               key: const Key('desktop-sleep-timer-button'),
                             ),
                           barButton(
-                            isLive ? '信号' : '选集',
+                            widget.isLive ? '信号' : '选集',
                             CupertinoIcons.list_bullet,
-                            onEpisodesTap,
+                            widget.onEpisodesTap,
                           ),
                           barButton(
                             '更多',
                             CupertinoIcons.ellipsis,
-                            onToggleMore,
-                            highlighted: moreControlsOpen,
+                            () {
+                              if (_activeQuickMenu != null) {
+                                setState(() => _activeQuickMenu = null);
+                              }
+                              widget.onToggleMore();
+                            },
+                            highlighted: widget.moreControlsOpen,
                             key: const Key('desktop-more-button'),
                           ),
                           const SizedBox(width: 2),
                           iconAction(
                             key: const Key('player-fullscreen-toggle'),
-                            icon: isFullscreen
+                            icon: widget.isFullscreen
                                 ? CupertinoIcons.fullscreen_exit
                                 : CupertinoIcons.fullscreen,
-                            tooltip: isFullscreen ? '退出全屏 (F)' : '全屏 (F)',
-                            onPressed: onToggleExpand,
+                            tooltip:
+                                widget.isFullscreen ? '退出全屏 (F)' : '全屏 (F)',
+                            onPressed: widget.onToggleExpand,
                           ),
                         ],
                       ),
@@ -599,11 +742,11 @@ class DesktopPlayerHud extends StatelessWidget {
               ),
             ),
           ),
-          // Desktop PC-native anchored "More" popover menu (bottom-right above "更多")
-          if (moreControlsOpen)
+          // Built-in quick quality/loudness popover when inline selector is active
+          if (_activeQuickMenu != null && !widget.moreControlsOpen)
             Positioned(
               right: 24,
-              bottom: isLive ? 66 : 106,
+              bottom: widget.isLive ? 66 : 106,
               child: ConstrainedBox(
                 constraints: BoxConstraints(
                   maxWidth: 324,
@@ -618,7 +761,54 @@ class DesktopPlayerHud extends StatelessWidget {
                       );
                     }
                   },
-                  child: moreToolsDock,
+                  child: DesktopPlayerMorePopover(
+                    sections: [
+                      if (_activeQuickMenu == _DesktopHudQuickMenu.quality &&
+                          widget.onVideoQualityChanged != null)
+                        DesktopVideoQualitySection(
+                          currentPreset: widget.videoQualityPreset ??
+                              WindowsQualityPreset.balancedHq,
+                          anime4kActive: widget.anime4kActive,
+                          onSelected: (preset) {
+                            widget.onVideoQualityChanged!(preset);
+                            setState(() => _activeQuickMenu = null);
+                          },
+                        ),
+                      if (_activeQuickMenu == _DesktopHudQuickMenu.loudness &&
+                          widget.onAudioLoudnessChanged != null)
+                        DesktopAudioLoudnessSection(
+                          currentPreset: widget.audioLoudnessPreset ??
+                              AudioLoudnessPreset.off,
+                          onSelected: (preset) {
+                            widget.onAudioLoudnessChanged!(preset);
+                            setState(() => _activeQuickMenu = null);
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          // Desktop PC-native anchored "More" popover menu (bottom-right above "更多")
+          if (widget.moreControlsOpen)
+            Positioned(
+              right: 24,
+              bottom: widget.isLive ? 66 : 106,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: 324,
+                  maxHeight: math.max(180.0, size.height - 172.0),
+                ),
+                child: Listener(
+                  onPointerSignal: (event) {
+                    if (event is PointerScrollEvent) {
+                      GestureBinding.instance.pointerSignalResolver.register(
+                        event,
+                        (_) {},
+                      );
+                    }
+                  },
+                  child: widget.moreToolsDock,
                 ),
               ),
             ),
@@ -843,6 +1033,234 @@ class DesktopMoreMenuRow extends StatelessWidget {
               ),
             ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Reusable 3-tier Windows MPV quality / HDR tone-mapping selector section for
+/// [DesktopPlayerMorePopover] or quick-switch popovers.
+class DesktopVideoQualitySection extends StatelessWidget {
+  final WindowsQualityPreset currentPreset;
+  final ValueChanged<WindowsQualityPreset> onSelected;
+  final bool anime4kActive;
+
+  const DesktopVideoQualitySection({
+    super.key,
+    required this.currentPreset,
+    required this.onSelected,
+    this.anime4kActive = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      key: const Key('desktop-video-quality-section'),
+      padding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  '画质与 HDR 映射',
+                  style: TextStyle(
+                    color: Color(0x99FFFFFF),
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              Text(
+                currentPreset == WindowsQualityPreset.cinemaUltra
+                    ? '去色带 + 超清'
+                    : (currentPreset == WindowsQualityPreset.balancedHq
+                        ? 'HDR 动态映射'
+                        : '低功耗'),
+                style: TextStyle(
+                  color: currentPreset == WindowsQualityPreset.ecoCompat
+                      ? const Color(0x88FFFFFF)
+                      : AppleColors.systemCyan,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              for (var i = 0; i < WindowsQualityPreset.values.length; i++)
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                      right:
+                          i == WindowsQualityPreset.values.length - 1 ? 0 : 6,
+                    ),
+                    child: _DesktopSegmentPill(
+                      key: Key(
+                        'desktop-quality-preset-${WindowsQualityPreset.values[i].id}',
+                      ),
+                      label: WindowsQualityPreset.values[i].shortLabelZh,
+                      selected:
+                          currentPreset == WindowsQualityPreset.values[i],
+                      onTap: () => onSelected(WindowsQualityPreset.values[i]),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            anime4kActive
+                ? '${currentPreset.descriptionZh}（Anime4K 已开启，关闭后恢复当前缩放器）'
+                : currentPreset.descriptionZh,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Color(0x88FFFFFF),
+              fontSize: 11,
+              height: 1.3,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Reusable 4-tier `dynaudnorm` vocal dialogue & loudness selector section for
+/// [DesktopPlayerMorePopover] or quick-switch popovers.
+class DesktopAudioLoudnessSection extends StatelessWidget {
+  final AudioLoudnessPreset currentPreset;
+  final ValueChanged<AudioLoudnessPreset> onSelected;
+
+  const DesktopAudioLoudnessSection({
+    super.key,
+    required this.currentPreset,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      key: const Key('desktop-audio-loudness-section'),
+      padding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  '人声响度增强',
+                  style: TextStyle(
+                    color: Color(0x99FFFFFF),
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              Text(
+                currentPreset == AudioLoudnessPreset.off
+                    ? '原声'
+                    : currentPreset.shortLabelZh,
+                style: TextStyle(
+                  color: currentPreset == AudioLoudnessPreset.off
+                      ? const Color(0x88FFFFFF)
+                      : AppleColors.systemCyan,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              for (var i = 0; i < AudioLoudnessPreset.values.length; i++)
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                      right:
+                          i == AudioLoudnessPreset.values.length - 1 ? 0 : 6,
+                    ),
+                    child: _DesktopSegmentPill(
+                      key: Key(
+                        'desktop-loudness-preset-${AudioLoudnessPreset.values[i].id}',
+                      ),
+                      label: AudioLoudnessPreset.values[i].shortLabelZh,
+                      selected:
+                          currentPreset == AudioLoudnessPreset.values[i],
+                      onTap: () => onSelected(AudioLoudnessPreset.values[i]),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            currentPreset.descriptionZh,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Color(0x88FFFFFF),
+              fontSize: 11,
+              height: 1.3,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DesktopSegmentPill extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _DesktopSegmentPill({
+    super.key,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: onTap,
+      child: Container(
+        height: 34,
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected
+              ? const Color(0xFF2D4364)
+              : Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: selected
+                ? const Color(0xFF4C9AFF)
+                : Colors.white.withValues(alpha: 0.08),
+          ),
+        ),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.white : const Color(0xCCFFFFFF),
+              fontSize: 12,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+            ),
+          ),
         ),
       ),
     );

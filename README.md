@@ -6,7 +6,7 @@
   </picture>
   <h1>Marco Movie</h1>
   <p>支持 Android 电视、手机、平板，HarmonyOS NEXT（手机 / 平板 / 智慧屏），Apple TV（tvOS）及 Windows / macOS / iOS 多端自适应的播放器。</p>
-  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.6.0 · Android 电视：0.6.2 · Android Lite：0.5.8 · Windows：0.6.0 · macOS：0.5.20 · iOS：0.7.0 · Apple TV：0.1.1 · HarmonyOS NEXT：0.1.1 · 各端独立更新</p>
+  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.6.0 · Android 电视：0.6.2 · Android Lite：0.5.8 · Windows：0.7.0 · macOS：0.5.20 · iOS：0.7.0 · Apple TV：0.1.1 · HarmonyOS NEXT：0.1.1 · 各端独立更新</p>
   <p><a href="https://marcotv.wlj9919.top/movie/">镜像下载与产品展示</a> · <a href="https://github.com/Pilipala9919/MarcoMovie/releases">GitHub 下载</a> · <a href="docs/USER_GUIDE.md">使用指南</a> · <a href="docs/BUILD.md">构建说明</a> · <a href="docs/PRIVACY.md">隐私说明</a></p>
 </div>
 
@@ -29,7 +29,7 @@ Marco Movie 希望让大屏电视、随身手机、平板电脑与桌面端上�
 | 我的收藏与历史 | 详情页一键收藏；整合观看历史与我的收藏，支持单条删除与一键清空；数据保存于本机 |
 | 全局搜索 | 在已导入、可搜索的配置项之间并发检索；Android 电视端内置遥控拼音键盘（支持中文、全拼、首拼），Apple TV 支持系统搜索与听写；手机/平板端直接调起系统输入法软键盘 |
 | 播放控制与触屏手势 | 电视端（Android TV / Apple TV / 鸿蒙智慧屏）确认键暂停/继续、遥控长按加速快进预览、3 秒片头/片尾跳过倒计时与定时关闭；手机/平板端支持**双击自定义（播放暂停/左右步进）、左右滑快进快退、左半屏亮度、右半屏音量、长按 2.0× 倍速并横滑切换 `1.25×–3.0×` 与上滑锁定**；iOS/iPadOS 26 采用同心液态玻璃空间影院 HUD 与原生半屏面板；桌面端支持 2.5s 鼠标自动隐藏、滚轮调音量、`←`/`→` 加速预览（`Esc` 取消）、`S`/`[`/`]` 倍速与 `D` 弹幕开关 |
-| 播放内核 | Android 采用 Media3 + FFmpeg / AV1 / VP9 软解扩展（[范围与限制](docs/DECODERS.md)）；Apple TV 采用原生 `AVPlayer`（支持 HLS / 4K HDR10 / 杜比视界）；HarmonyOS NEXT 采用原生 ArkTS `AVPlayer` + `XComponent` GPU 硬件纹理；桌面与 iOS 采用 `media_kit`（`libmpv`），Windows / macOS 可选热切换 `Anime4K v4.0.1` 实时超分 |
+| 播放内核 | Android 采用 Media3 + FFmpeg / AV1 / VP9 软解扩展与可选 MPV（[范围与限制](docs/DECODERS.md)）；Apple TV 采用原生 `AVPlayer`（支持 HLS / 4K HDR10 / 杜比视界）；HarmonyOS NEXT 采用原生 ArkTS `AVPlayer` + `XComponent` GPU 硬件纹理；iOS / iPadOS 采用原生 `AVPlayer`（画中画 / AirPlay 2）+ `libmpv` 双引擎自动回退；Windows / macOS 采用 `media_kit`（`libmpv`，Windows 支持三档 HDR 动态色调映射、人声增强与蓝光 `.iso` 流式代理）及可选热切换 `Anime4K v4.0.1` 实时超分 |
 | 字幕与弹幕 | 外挂 SRT / VTT / ASS / TTML 字幕及流内音轨/字幕轨切换（字幕严格渲染在弹幕上方）；内置清洁室 30 秒分片弹幕引擎（默认服务地址为空，无碰撞轨道与 ReDoS 防护），仅在用户自行配置兼容服务或导入本地 XML/JSON 弹幕文件后生效，不提供在线弹幕资源 |
 | 直播列表 | 读取用户提供的兼容 M3U / TXT 列表与分组；电视端支持遥控快速换台；手机与桌面端提供分组与频道列表点选即播 |
 | 配置导入管理 | 电视端（Android TV / Apple TV / 鸿蒙智慧屏）提供同一局域网手机扫码推送、手动输入与备份导入；**手机/平板/桌面端直接提供原生输入框、剪贴板一键粘贴导入与本地 JSON 文件选择**；新增 5 幕独立新手引导（配程序化抽象几何「示例」海报，不内置真实影片或内容源），全端支持配置备份与还原 |
@@ -59,7 +59,7 @@ Marco Movie 希望让大屏电视、随身手机、平板电脑与桌面端上�
 ## 设备与兼容性说明
 
 - **Android**：标准版最低 Android 6.0（API 23），Lite 版最低 Android 4.0（API 14）；当前主要实机验证环境为 Android 9、ARM 32 位电视。
-- **Windows / macOS / iOS / iPadOS**：iOS / iPadOS 最低 14.0（Xcode 26.6 / iOS 26 SDK 编译下支持原生 Liquid Glass 控件与半屏面板，iOS 14–18 自动平滑回退）；Windows / macOS 可选热切换 MIT 许可 `Anime4K v4.0.1` 实时超分着色器（Windows 关闭时保持低开销 `bilinear`）。
+- **Windows / macOS / iOS / iPadOS**：iOS / iPadOS 最低 15.0（Xcode 27.2 / iOS 27.2 SDK 编译下支持真系统级 `UITabBar` + `UIGlassContainerEffect` 液态玻璃宿主、二阶物理弹簧与 `AVPlayer` + `libmpv` 双引擎，iOS 15–18 / iOS 16.4 巨魔自动平滑回退）；Windows x64 内置免安装 Python 3.11.9 运行时、三档 MPV HDR 色调映射与蓝光 `.iso` 流式代理；Windows / macOS 可选热切换 MIT 许可 `Anime4K v4.0.1` 实时超分着色器。
 - **Apple TV（tvOS）**：最低 tvOS 16.0（当前版本保持 `0.1.1`）；已通过 Swift 自动化回归与 Xcode Release 云端构建验证，支持 `AVPlayer` 原生播放、QuickJS-NG 脚本源、`marco-movie-sync` v2 及四盘扫码 + 6 路并发 Range 代理，尚未宣称完成全型号物理 Apple TV 真机验收。
 - **HarmonyOS NEXT（纯血鸿蒙）**：最低 API 12（HarmonyOS 5.0+，当前版本保持 `0.1.1`），单 HAP 同时适配手机、平板/2in1 与鸿蒙智慧屏（大屏自动切换 10 英尺遥控焦点界面）；已通过 OpenHarmony Flutter 与 DevEco SDK 云端构建打包验证，尚未宣称完成全型号物理鸿蒙真机验收。
 - 兼容标准 JSON/XML 内容接口及各端已实现的脚本/网盘扩展形式。没有承诺所有配置、网盘、直播列表、编码或第三方服务都可使用。

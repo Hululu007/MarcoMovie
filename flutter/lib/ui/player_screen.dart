@@ -10,6 +10,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import '../core/anime4k_controller.dart';
+import '../core/bluray_iso_proxy.dart';
 import '../core/cast_service.dart';
 import '../core/catpaw_host.dart';
 import '../core/cms_client.dart';
@@ -32,6 +33,7 @@ import '../core/ohos_runtime.dart';
 import '../core/video_kernel.dart';
 import '../core/web_media_resolver.dart';
 import '../core/windows_tray_service.dart';
+import '../core/windows_video_quality.dart';
 import '../core/wogg_source.dart';
 import 'player_interaction_layers.dart';
 import '../core/storage_service.dart';
@@ -340,6 +342,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _firstPlayHintDismissedThisSession = false;
   late final Anime4kController _anime4kController;
   late final bool _ownsAnime4kController;
+  late final WindowsVideoQualityController _winQualityController;
+  BlurayIsoLease? _blurayIsoLease;
+  List<BlurayChapter> _blurayChapters = const [];
 
   bool get _isIosPlayerPlatform =>
       !kIsWeb &&
@@ -776,6 +781,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       CspBridge.isHuyaSite(widget.site) ||
       CspBridge.isDouyuSite(widget.site);
 
+  int get _effectiveDiskCacheLimitMb => _desktop
+      ? widget.storage.diskCacheMaxMb
+      : widget.storage.mediaDiskCacheLimitMb;
+
   void _onHideToTray() {
     if (!mounted) return;
     if (_playing) {
@@ -813,10 +822,33 @@ class _PlayerScreenState extends State<PlayerScreen>
       isPrivate: widget.site.isEffectivelyPrivate,
     );
     _alwaysShowClock = widget.storage.playerAlwaysShowClock;
+    _winQualityController = WindowsVideoQualityController()
+      ..addListener(_onHudSubstateChanged);
     _ownsAnime4kController = widget.debugAnime4kController == null;
-    _anime4kController = widget.debugAnime4kController ?? Anime4kController();
+    _anime4kController = widget.debugAnime4kController ??
+        Anime4kController(
+          windowsBaseScalerResolver: () =>
+              _winQualityController.activeBaseScalers,
+        );
+    if (widget.debugAnime4kController == null && Platform.isWindows) {
+      _anime4kController.setWindowsBaseScalerResolver(
+        () => _winQualityController.activeBaseScalers,
+      );
+    }
     _anime4kController.addListener(_onHudSubstateChanged);
+    final initialCfg = widget.storage.loadSavedConfig();
+    WebMediaResolver.defaultSniffRules = initialCfg?.rules ?? const [];
+    WebMediaResolver.defaultAdRules = initialCfg?.ads ?? const [];
+    LocalMediaLease.defaultHlsAdStripEnabled =
+        widget.storage.hlsAdStripEnabled;
     if (!OhosRuntime.isOhos) {
+      final cacheLimitMb = _effectiveDiskCacheLimitMb;
+      final desiredDiskCacheBytes = cacheLimitMb <= 0
+          ? 0
+          : cacheLimitMb * 1024 * 1024;
+      if (DiskBlockCache.shared.maxBytes != desiredDiskCacheBytes) {
+        unawaited(DiskBlockCache.shared.setCapacityMb(cacheLimitMb));
+      }
       if (widget.debugDanmuSettings != null) {
         _danmuSettings = widget.debugDanmuSettings!;
         _rebuildDanmuPipeline();
@@ -873,13 +905,6 @@ class _PlayerScreenState extends State<PlayerScreen>
       widget.storage.vocalLoudnessPreset,
     );
     _iosLargeBuffer = widget.storage.iosLargeBufferEnabled;
-    if (!OhosRuntime.isOhos) {
-      unawaited(
-        DiskBlockCache.shared.setCapacityMb(
-          widget.storage.mediaDiskCacheLimitMb,
-        ),
-      );
-    }
     _isFavorite = widget.storage.isFavorite(
       widget.site.key,
       widget.video.id,
@@ -2078,6 +2103,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _playbackError = '';
     _playbackErrorCause = null;
     try {
+      final previousIsoLease = _blurayIsoLease;
+      _blurayIsoLease = null;
+      _blurayChapters = const [];
       await _playerConfiguration;
       await _changeMedia(session, () async {
         if (_usingAvPlayer) {
@@ -2087,6 +2115,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         await _player.stop();
         await _cloudMedia.releaseUnless(qualityLease);
         await _localMedia.releaseUnless(null);
+        await previousIsoLease?.close();
       });
     } catch (_) {
       if (session == _playSession) _failPlayback();
@@ -2110,6 +2139,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     final configuredParses = savedConfig?.parses ?? const [];
     final configuredRules = savedConfig?.rules ?? const [];
     final configuredAds = savedConfig?.ads ?? const [];
+    WebMediaResolver.defaultSniffRules = configuredRules;
+    WebMediaResolver.defaultAdRules = configuredAds;
+    LocalMediaLease.defaultHlsAdStripEnabled =
+        widget.storage.hlsAdStripEnabled;
     final canOpenDirectly = _isLiveStream
         ? (_currentEpisode.isLocalFile ||
             const {'http', 'https', 'rtmp', 'rtsp'}.contains(
@@ -2158,6 +2191,8 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     CloudMediaLease? pendingLease;
     LocalMediaLease? pendingLocalLease;
+    BlurayIsoLease? pendingBlurayLease;
+    List<BlurayChapter> pendingBlurayChapters = const [];
     try {
       var resolvedEpisode = quality ?? (_currentEpisode.isLocalFile
           ? _currentEpisode
@@ -2250,6 +2285,16 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       final parsedTargetUri = Uri.tryParse(safePlayUrl);
       _activeEpisodeUsedLocalProxy = false;
+      if (!_isLiveStream &&
+          pendingLease == null &&
+          BlurayIsoProxy.isIsoTarget(safePlayUrl)) {
+        pendingBlurayLease = await BlurayIsoProxy.open(
+          target: safePlayUrl,
+          headers: headers,
+          isCancelled: () => !mounted || session != _playSession,
+        );
+        pendingBlurayChapters = pendingBlurayLease.chapters;
+      }
       final forceProxyForWindowsHttps =
           Platform.isWindows && parsedTargetUri?.scheme.toLowerCase() == 'https';
       // Live streams on iOS/macOS/Android (and HTTP everywhere) play directly
@@ -2257,19 +2302,31 @@ class _PlayerScreenState extends State<PlayerScreen>
       // falling back to LocalMediaLease automatically only if direct fails.
       final preferDirectLive =
           _isLiveStream && !forceLiveLocalProxy && !forceProxyForWindowsHttps;
-      if ((!bypassLocalProxy && !preferDirectLive || forceProxyForWindowsHttps) &&
+      if (pendingBlurayLease == null &&
+          (!bypassLocalProxy && !preferDirectLive || forceProxyForWindowsHttps) &&
           pendingLease == null &&
           parsedTargetUri != null &&
           LocalMediaLease.shouldProxy(parsedTargetUri)) {
         _activeEpisodeUsedLocalProxy = true;
+        final cacheLimitMb = _effectiveDiskCacheLimitMb;
+        final desiredDiskCacheBytes = cacheLimitMb <= 0
+            ? 0
+            : cacheLimitMb * 1024 * 1024;
+        if (DiskBlockCache.shared.maxBytes != desiredDiskCacheBytes) {
+          await DiskBlockCache.shared.setCapacityMb(cacheLimitMb);
+        }
+        final effectiveAdHosts = configuredAds.isNotEmpty
+            ? configuredAds
+            : widget.storage.cachedAdDomains;
         pendingLocalLease = await LocalMediaLease.open(
           target: parsedTargetUri,
           headers: headers,
           isLive: _isLiveStream,
           removeHlsAds: !_isLiveStream && widget.storage.hlsAdRemovalEnabled,
-          adHosts: configuredAds,
-          enableDiskCache:
-              !_isLiveStream && widget.storage.mediaDiskCacheLimitMb > 0,
+          adHosts: effectiveAdHosts,
+          enableDiskCache: !_isLiveStream &&
+              cacheLimitMb > 0 &&
+              !parsedTargetUri.path.toLowerCase().endsWith('.m3u8'),
           isCancelled: () => !mounted || session != _playSession,
         );
       }
@@ -2277,6 +2334,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         report?.stop();
         await _cloudMedia.discard(pendingLease);
         await _localMedia.discard(pendingLocalLease);
+        await pendingBlurayLease?.close();
         return;
       }
       var effectiveAudioUrl = resolvedEpisode.externalAudioUrl;
@@ -2287,9 +2345,13 @@ class _PlayerScreenState extends State<PlayerScreen>
           effectiveAudioUrl = proxiedAudio.toString();
         }
       }
-      final effectiveOpenUrl = pendingLocalLease?.url.toString() ?? safePlayUrl;
+      final effectiveOpenUrl = pendingBlurayLease?.url.toString() ??
+          pendingLocalLease?.url.toString() ??
+          safePlayUrl;
       final effectiveOpenHeaders =
-          pendingLocalLease != null ? const <String, String>{} : headers;
+          (pendingBlurayLease != null || pendingLocalLease != null)
+              ? const <String, String>{}
+              : headers;
       _activeStreamUrl = safePlayUrl;
       _activeQualityLogicalUrl = resolvedLogical is String ? resolvedLogical : '';
       _activeMediaUri = Media(effectiveOpenUrl).uri;
@@ -2298,6 +2360,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       await _changeMedia(session, () async {
         _cloudMedia.adopt(pendingLease);
         _localMedia.adopt(pendingLocalLease);
+        _blurayIsoLease = pendingBlurayLease;
+        _blurayChapters = pendingBlurayChapters;
         _allowEvents = true;
         final hasFallback = _isLiveStream
             ? (_currentLine.episodes.length > 1 &&
@@ -2427,6 +2491,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (!mounted || session != _playSession || !_allowEvents) {
         await _cloudMedia.discard(pendingLease);
         await _localMedia.discard(pendingLocalLease);
+        if (!identical(_blurayIsoLease, pendingBlurayLease)) {
+          await pendingBlurayLease?.close();
+        }
         return;
       }
       _allowHistory = true;
@@ -2436,6 +2503,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     } catch (error) {
       await _cloudMedia.discard(pendingLease);
       await _localMedia.discard(pendingLocalLease);
+      if (!identical(_blurayIsoLease, pendingBlurayLease)) {
+        await pendingBlurayLease?.close();
+      }
       if (mounted && session == _playSession) _failPlayback(error);
     }
   }
@@ -3170,14 +3240,18 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (Platform.isWindows) {
         await dyn.setProperty('vd-lavc-threads', '0');
         await dyn.setProperty('vd-lavc-dr', 'yes');
-        await dyn.setProperty('scale', 'bilinear');
-        await dyn.setProperty('cscale', 'bilinear');
-        await dyn.setProperty('dscale', 'bilinear');
-        await dyn.setProperty('correct-downscaling', 'no');
-        await dyn.setProperty('linear-downscaling', 'no');
-        await dyn.setProperty('sigmoid-upscaling', 'no');
-        await dyn.setProperty('dither-depth', 'no');
-        await dyn.setProperty('hdr-compute-peak', 'no');
+        if (!OhosRuntime.isOhos &&
+            _winQualityController.isAvailableForPlayer(_player)) {
+          await _winQualityController.loadSaved();
+          final anime4kActive =
+              _anime4kController.isAvailableForPlayer(_player) &&
+              _anime4kController.preset != Anime4kPreset.off;
+          await _winQualityController.applyAll(
+            _player,
+            anime4kActive: anime4kActive,
+            playerKernel: kernel,
+          );
+        }
         if (!OhosRuntime.isOhos &&
             _anime4kController.isAvailableForPlayer(_player) &&
             _anime4kController.preset != Anime4kPreset.off) {
@@ -3197,7 +3271,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           vocalLoudness: _vocalLoudness,
           hwdec: _hardwareDecoder(kernel),
         );
-      } else if (_vocalLoudness != VocalLoudnessPreset.off) {
+      } else if (!Platform.isWindows &&
+          _vocalLoudness != VocalLoudnessPreset.off) {
         await IosMpvProfile.applyVocalLoudness(_player, _vocalLoudness);
       }
       if (_isLiveStream) {
@@ -3488,6 +3563,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     final iosAvPlayerController = _iosAvPlayerController;
     _iosAvPlayerController = null;
     iosAvPlayerController?.removeListener(_onIosAvPlayerChanged);
+    _winQualityController.removeListener(_onHudSubstateChanged);
+    _winQualityController.dispose();
     for (final sub in _playerSubscriptions) {
       unawaited(sub.cancel());
     }
@@ -3522,6 +3599,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _releaseSourceSession = null;
     final cloudLease = _cloudMedia.detach();
     final localLease = _localMedia.detach();
+    final blurayIsoLease = _blurayIsoLease;
+    _blurayIsoLease = null;
+    _blurayChapters = const [];
     _mediaChanges.whenComplete(() async {
       try {
         try {
@@ -3547,7 +3627,11 @@ class _PlayerScreenState extends State<PlayerScreen>
           try {
             await localLease?.close();
           } finally {
-            releaseSource?.call();
+            try {
+              await blurayIsoLease?.close();
+            } finally {
+              releaseSource?.call();
+            }
           }
         }
       }
@@ -3896,6 +3980,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (!mounted) return;
         if (_anime4kController.preset != Anime4kPreset.off) {
           await _anime4kController.reapplyActivePreset(_player);
+          if (Platform.isWindows &&
+              _winQualityController.isAvailableForPlayer(_player)) {
+            await _winQualityController.syncHardwareDecoder(
+              _player,
+              anime4kActive: true,
+              playerKernel: _playerKernel,
+            );
+          }
         }
       } else if (iosAvail) {
         final avCtrl = _iosAvPlayerController;
@@ -4211,6 +4303,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                       _player,
                       preset,
                     );
+                    if (!mounted || session != _playSession) return;
+                    if (Platform.isWindows &&
+                        !OhosRuntime.isOhos &&
+                        _winQualityController.isAvailableForPlayer(_player)) {
+                      await _winQualityController.syncHardwareDecoder(
+                        _player,
+                        anime4kActive:
+                            ok && preset != Anime4kPreset.off,
+                        playerKernel: _playerKernel,
+                      );
+                    }
                     if (!mounted || session != _playSession) return;
                     if (ok) {
                       _showHud(
@@ -6664,63 +6767,85 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
           ),
           Expanded(
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 4.0,
-                thumbShape: const RoundSliderThumbShape(
-                  enabledThumbRadius: 6.5,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 4.0,
+                    thumbShape: const RoundSliderThumbShape(
+                      enabledThumbRadius: 6.5,
+                    ),
+                    overlayShape: const RoundSliderOverlayShape(
+                      overlayRadius: 13.0,
+                    ),
+                    activeTrackColor: const Color(0xFF4C9AFF),
+                    inactiveTrackColor: const Color(0x42FFFFFF),
+                    thumbColor: Colors.white,
+                    overlayColor: const Color(0x284C9AFF),
+                  ),
+                  child: Slider(
+                    focusNode: _desktop ? _desktopSliderFocusNode : null,
+                    value: curMs,
+                    min: 0,
+                    max: maxMs,
+                    onChangeStart: hasDuration
+                        ? (value) {
+                            setState(() {
+                              _isSliderDragging = true;
+                              _sliderDragPosMs = value;
+                            });
+                            _hideTimer?.cancel();
+                          }
+                        : null,
+                    onChanged: hasDuration
+                        ? (value) {
+                            setState(() {
+                              _isSliderDragging = true;
+                              _sliderDragPosMs = value;
+                            });
+                          }
+                        : null,
+                    onChangeEnd: hasDuration
+                        ? (value) {
+                            final targetMs = value.round().clamp(
+                              0,
+                              effectiveDurationMs,
+                            );
+                            setState(() {
+                              _isSliderDragging = false;
+                              _position = Duration(milliseconds: targetMs);
+                            });
+                            _seekPlayer(Duration(milliseconds: targetMs));
+                            unawaited(
+                              _saveProgress(
+                                immediate: true,
+                                triggerSync: false,
+                              ),
+                            );
+                            if (_desktop) {
+                              _restorePlayerFocusIfCurrent();
+                            }
+                            _scheduleHide();
+                          }
+                        : null,
+                  ),
                 ),
-                overlayShape: const RoundSliderOverlayShape(
-                  overlayRadius: 13.0,
-                ),
-                activeTrackColor: const Color(0xFF4C9AFF),
-                inactiveTrackColor: const Color(0x42FFFFFF),
-                thumbColor: Colors.white,
-                overlayColor: const Color(0x284C9AFF),
-              ),
-              child: Slider(
-                focusNode: _desktop ? _desktopSliderFocusNode : null,
-                value: curMs,
-                min: 0,
-                max: maxMs,
-                onChangeStart: hasDuration
-                    ? (value) {
-                        setState(() {
-                          _isSliderDragging = true;
-                          _sliderDragPosMs = value;
-                        });
-                        _hideTimer?.cancel();
-                      }
-                    : null,
-                onChanged: hasDuration
-                    ? (value) {
-                        setState(() {
-                          _isSliderDragging = true;
-                          _sliderDragPosMs = value;
-                        });
-                      }
-                    : null,
-                onChangeEnd: hasDuration
-                    ? (value) {
-                        final targetMs = value.round().clamp(
-                          0,
-                          effectiveDurationMs,
-                        );
-                        setState(() {
-                          _isSliderDragging = false;
-                          _position = Duration(milliseconds: targetMs);
-                        });
-                        _seekPlayer(Duration(milliseconds: targetMs));
-                        unawaited(
-                          _saveProgress(immediate: true, triggerSync: false),
-                        );
-                        if (_desktop) {
-                          _restorePlayerFocusIfCurrent();
-                        }
-                        _scheduleHide();
-                      }
-                    : null,
-              ),
+                if (_blurayChapters.isNotEmpty && hasDuration)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 13),
+                        child: CustomPaint(
+                          painter: _BlurayChapterTickPainter(
+                            chapters: _blurayChapters,
+                            durationMs: effectiveDurationMs,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
           Padding(
@@ -6743,16 +6868,55 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  void _showBlurayChaptersSheet() {
+    if (_blurayChapters.isEmpty) return;
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final session = _playSession;
+    showAppleModalSheet<void>(
+      context: context,
+      title: '蓝光原盘章节（${_blurayChapters.length}）',
+      maxWidth: 460,
+      builder: (ctx) => ListView.builder(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        itemCount: _blurayChapters.length,
+        itemBuilder: (_, i) {
+          final ch = _blurayChapters[i];
+          return AppleGroupedTile(
+            key: ValueKey('bluray-chapter-${ch.index}'),
+            icon: CupertinoIcons.bookmark_fill,
+            iconBgColor: AppleColors.systemBlue,
+            title: ch.title.isNotEmpty ? ch.title : '第 ${ch.index + 1} 章',
+            trailingText: _formatDuration(ch.position),
+            onTap: () {
+              Navigator.of(ctx).pop();
+              if (!mounted || session != _playSession) return;
+              _seekPlayer(ch.position);
+              _showHud(
+                '章节：${ch.title.isNotEmpty ? ch.title : "第 ${ch.index + 1} 章"} (${_formatDuration(ch.position)})',
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
   Widget _buildDesktopMoreMenuPopover(BuildContext context, double width) {
     final live = _isLiveStream;
     final danmuEnabled = widget.onToggleDanmu != null
         ? widget.danmuEnabled
         : (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled);
+    final winQualityAvailable = Platform.isWindows &&
+        !OhosRuntime.isOhos &&
+        _winQualityController.isAvailableForPlayer(_player);
     final visibility = DesktopHudBarVisibility.forWidth(
       width,
       isLive: live,
       danmuAvailable: !OhosRuntime.isOhos,
       anime4kAvailable: _anime4kAvailable,
+      videoQualityAvailable: winQualityAvailable,
+      audioLoudnessAvailable: winQualityAvailable,
     );
 
     void closeAndRun(VoidCallback fn) {
@@ -6889,6 +7053,13 @@ class _PlayerScreenState extends State<PlayerScreen>
             label: '清晰度切换',
             onTap: () => closeAndRun(_showQualityChoices),
           ),
+        if (_blurayChapters.isNotEmpty)
+          DesktopMoreMenuRow(
+            icon: CupertinoIcons.bookmark,
+            label: '蓝光章节',
+            valueText: '${_blurayChapters.length} 章',
+            onTap: () => closeAndRun(_showBlurayChaptersSheet),
+          ),
         DesktopMoreMenuRow(
           icon: CupertinoIcons.speaker_2,
           label: '音轨选择',
@@ -6987,6 +7158,37 @@ class _PlayerScreenState extends State<PlayerScreen>
       sections: [
         if (overflowItems.isNotEmpty)
           Column(mainAxisSize: MainAxisSize.min, children: overflowItems),
+        if (winQualityAvailable && !visibility.showVideoQuality)
+          DesktopVideoQualitySection(
+            currentPreset: _winQualityController.qualityPreset,
+            anime4kActive: _anime4kController.preset != Anime4kPreset.off,
+            onSelected: (preset) {
+              unawaited(() async {
+                final anime4kActive =
+                    _anime4kController.preset != Anime4kPreset.off;
+                await _winQualityController.applyQualityPreset(
+                  _player,
+                  preset,
+                  anime4kActive: anime4kActive,
+                  playerKernel: _playerKernel,
+                );
+                if (mounted) _showHud('画质：${preset.labelZh}');
+              }());
+            },
+          ),
+        if (winQualityAvailable && !visibility.showAudioLoudness)
+          DesktopAudioLoudnessSection(
+            currentPreset: _winQualityController.loudnessPreset,
+            onSelected: (preset) {
+              unawaited(() async {
+                await _winQualityController.applyLoudnessPreset(
+                  _player,
+                  preset,
+                );
+                if (mounted) _showHud('人声响度：${preset.labelZh}');
+              }());
+            },
+          ),
         aspectSection,
         trackSection,
         playbackSection,
@@ -6997,6 +7199,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   Widget _buildWindowsChrome(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
     final scale = (width / 1280).clamp(.78, 1.0);
+    final winQualityAvailable = Platform.isWindows &&
+        !OhosRuntime.isOhos &&
+        _winQualityController.isAvailableForPlayer(_player);
     return DesktopPlayerHud(
       embedded: widget.embedded,
       title: _displayTitle,
@@ -7032,6 +7237,33 @@ class _PlayerScreenState extends State<PlayerScreen>
           ? 'Anime4K'
           : 'Anime4K·${_anime4kController.preset.labelZh}',
       onAnime4kTap: _anime4kAvailable ? _showAnime4kSheet : null,
+      videoQualityVisible: winQualityAvailable,
+      videoQualityActive:
+          _winQualityController.qualityPreset != WindowsQualityPreset.ecoCompat,
+      videoQualityPreset: _winQualityController.qualityPreset,
+      onVideoQualityChanged: (preset) {
+        unawaited(() async {
+          final anime4kActive =
+              _anime4kController.preset != Anime4kPreset.off;
+          await _winQualityController.applyQualityPreset(
+            _player,
+            preset,
+            anime4kActive: anime4kActive,
+            playerKernel: _playerKernel,
+          );
+          if (mounted) _showHud('画质：${preset.labelZh}');
+        }());
+      },
+      audioLoudnessVisible: winQualityAvailable,
+      audioLoudnessActive:
+          _winQualityController.loudnessPreset != AudioLoudnessPreset.off,
+      audioLoudnessPreset: _winQualityController.loudnessPreset,
+      onAudioLoudnessChanged: (preset) {
+        unawaited(() async {
+          await _winQualityController.applyLoudnessPreset(_player, preset);
+          if (mounted) _showHud('人声响度：${preset.labelZh}');
+        }());
+      },
       topHeader: _buildTopHeader(
         context,
         true,
@@ -10783,4 +11015,35 @@ class _CompanionActionChip extends StatelessWidget {
       ),
     );
   }
+}
+
+class _BlurayChapterTickPainter extends CustomPainter {
+  final List<BlurayChapter> chapters;
+  final int durationMs;
+
+  const _BlurayChapterTickPainter({
+    required this.chapters,
+    required this.durationMs,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty || durationMs <= 0 || chapters.isEmpty) return;
+    final paint = Paint()..color = const Color(0xCCFFD60A);
+    final centerY = size.height * 0.5;
+    for (final ch in chapters) {
+      final frac = (ch.position.inMilliseconds / durationMs).clamp(0.0, 1.0);
+      if (frac <= 0.005 || frac >= 0.995) continue;
+      final x = size.width * frac;
+      canvas.drawRect(
+        Rect.fromCenter(center: Offset(x, centerY), width: 2.0, height: 8.0),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _BlurayChapterTickPainter oldDelegate) =>
+      oldDelegate.durationMs != durationMs ||
+      oldDelegate.chapters.length != chapters.length;
 }

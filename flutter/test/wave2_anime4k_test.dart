@@ -785,6 +785,59 @@ void main() {
         expect(disposeIdx, greaterThan(cscaleIdx), reason: 'events=$events');
       },
     );
+
+    test(
+      'Windows decoupled windowsBaseScalerResolver restores spline36 / ewa_lanczossharp instead of forcing bilinear on Off / reset / error',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp('a4k_decoupled_');
+        addTearDown(() => tempDir.delete(recursive: true));
+        final props = <(String, String)>[];
+        final player = _Anime4kFakePlayer();
+        addTearDown(player.dispose);
+
+        var currentScalers = (scale: 'spline36', cscale: 'spline36');
+        final ctrl = Anime4kController(
+          platformOverride: TargetPlatform.windows,
+          isOhosOverride: false,
+          isWebOverride: false,
+          isNativePlayerOverride: true,
+          cacheDirResolver: () async => tempDir,
+          assetLoader: loadDiskShader,
+          propertySetterOverride: (k, v) async => props.add((k, v)),
+          windowsBaseScalerResolver: () => currentScalers,
+          persistLocally: false,
+        );
+        addTearDown(ctrl.dispose);
+
+        expect(await ctrl.applyPreset(player, Anime4kPreset.balanced), isTrue);
+        props.clear();
+        expect(await ctrl.applyPreset(player, Anime4kPreset.off), isTrue);
+        expect(
+          props,
+          equals(const [
+            ('glsl-shaders', ''),
+            ('scale', 'spline36'),
+            ('cscale', 'spline36'),
+          ]),
+        );
+
+        // Update resolver dynamically via setWindowsBaseScalerResolver -> ewa_lanczossharp
+        ctrl.setWindowsBaseScalerResolver(
+          () => (scale: 'ewa_lanczossharp', cscale: 'spline36'),
+        );
+        expect(await ctrl.applyPreset(player, Anime4kPreset.performance), isTrue);
+        props.clear();
+        await ctrl.resetSession(player);
+        expect(
+          props,
+          equals(const [
+            ('glsl-shaders', ''),
+            ('scale', 'ewa_lanczossharp'),
+            ('cscale', 'spline36'),
+          ]),
+        );
+      },
+    );
   });
 
   group('iOS 27 Single-Pass Anime4K & Apple Silicon Thermal Guard', () {

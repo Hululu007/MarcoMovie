@@ -111,6 +111,9 @@ EXPERIMENT_HOSTS = {
     'scripts/ios_lxml/owner_fixture.py': {'www.w3.org'},
     'scripts/ios_cpython/README.md': {'docs.python.org', 'briefcase.beeware.org'},
     'scripts/ios_cpython_transport/README.md': {'requests.readthedocs.io', 'www.rfc-editor.org'},
+    'scripts/prepare_windows_python_runtime.py': {'files.pythonhosted.org', 'www.python.org'},
+    'scripts/test_windows_python_packaging.py': {'files.pythonhosted.org', 'www.python.org'},
+    'flutter/windows_native/marco_webview2_plugin.cpp': {'marco.localhost'},
     '.github/workflows/build-multiplatform.yml': {'gitcode.com'},
 }
 

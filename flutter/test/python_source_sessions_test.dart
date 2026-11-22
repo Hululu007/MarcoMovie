@@ -492,4 +492,52 @@ void main() {
       );
     },
   );
+
+  test(
+    'default maxAllowedSessions=2 enforces iOS limit while maxAllowedSessions=4 supports 4 concurrent sessions',
+    () async {
+      expect(() => PythonSourceSessions(maxSessions: 3), throwsArgumentError);
+
+      final desktopPool = PythonSourceSessions(
+        maxSessions: 4,
+        maxAllowedSessions: 4,
+      );
+      addTearDown(desktopPool.close);
+      final pins = <void Function()>[];
+      for (final key in ['s1', 's2', 's3', 's4']) {
+        await desktopPool.invoke(
+          sessionKey: key,
+          expectedGeneration: desktopPool.generation,
+          open: open,
+          method: 'home',
+          arguments: const [],
+        );
+        pins.add(desktopPool.pinForPlayback(key));
+      }
+      expect(desktopPool.activeCount, 4);
+      expect(desktopPool.allocatedCount, 4);
+      expect(
+        await desktopPool.callCached(
+          sessionKey: 's1',
+          method: 'home',
+          arguments: const [],
+        ),
+        isNotNull,
+      );
+      await expectLater(
+        desktopPool.invoke(
+          sessionKey: 's5',
+          expectedGeneration: desktopPool.generation,
+          open: open,
+          method: 'home',
+          arguments: const [],
+          budget: const Duration(milliseconds: 30),
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+      for (final unpin in pins) {
+        unpin();
+      }
+    },
+  );
 }

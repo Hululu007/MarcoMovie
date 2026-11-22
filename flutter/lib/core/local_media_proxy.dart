@@ -18,7 +18,14 @@ enum _TargetKind { auto, playlist, tsSegment, raw, diskCached }
 class _RegisteredTarget {
   final Uri uri;
   final _TargetKind kind;
-  const _RegisteredTarget(this.uri, this.kind);
+  final String? cacheKey;
+  final DiskBlockCache? diskCache;
+  const _RegisteredTarget(
+    this.uri,
+    this.kind, {
+    this.cacheKey,
+    this.diskCache,
+  });
 }
 
 class _StoredCookie {
@@ -188,21 +195,30 @@ class _SessionCookieJar {
 class DiskBlockCache {
   DiskBlockCache({
     Directory? directory,
-    int maxBytes = defaultMaxBytes,
+    int? maxBytes,
     int maxFullResponseCacheBytes = defaultMaxFullResponseCacheBytes,
+    DateTime Function()? clock,
   })  : _explicitDirectory = directory,
-        _maxBytes = math.max(0, maxBytes),
-        _maxFullResponseCacheBytes = math.max(1, maxFullResponseCacheBytes);
+        _maxBytes = math.max(0, maxBytes ?? defaultMaxBytes),
+        _maxFullResponseCacheBytes = math.max(1, maxFullResponseCacheBytes),
+        _clock = clock;
 
   static const int blockSize = 256 * 1024; // 256 KiB
-  static const int defaultMaxBytes = 256 * 1024 * 1024; // 256 MB
+  static int get defaultMaxBytes =>
+      (Platform.isWindows || Platform.isMacOS || Platform.isLinux)
+          ? 512 * 1024 * 1024
+          : 256 * 1024 * 1024;
+  static const List<int> supportedMaxMbOptions = <int>[0, 256, 512, 1024, 2048];
   static const int defaultMaxFullResponseCacheBytes = 64 * 1024 * 1024;
   static const int _streamFlushThresholdBytes = 1024 * 1024;
 
   static final DiskBlockCache shared = DiskBlockCache();
+  static DiskBlockCache get instance => shared;
 
   final Directory? _explicitDirectory;
   final int _maxFullResponseCacheBytes;
+  // ignore: unused_field
+  final DateTime Function()? _clock;
   int _maxBytes;
   int _currentBytes = 0;
   int _generation = 0;
@@ -222,19 +238,37 @@ class DiskBlockCache {
       <String, Future<Uint8List>>{};
 
   int get maxBytes => _maxBytes;
+  bool get isEnabled => _maxBytes > 0;
   int get currentBytes => _currentBytes;
   int get cachedBlockCount => _entries.length;
   int get inFlightCount => _inFlightBlocks.length;
 
-  static String cacheKeyForUri(Uri uri) =>
-      sha256.convert(utf8.encode(uri.toString())).toString().substring(0, 32);
+  static String cacheKeyForString(String raw) =>
+      sha256.convert(utf8.encode(raw)).toString().substring(0, 32);
+
+  static String cacheKeyForUri(Uri uri) => cacheKeyForString(uri.toString());
 
   Future<Directory> _resolveDirectory() async {
     if (_resolvedDir != null) return _resolvedDir!;
     if (_explicitDirectory != null) {
-      await _explicitDirectory.create(recursive: true);
+      try {
+        _explicitDirectory.createSync(recursive: true);
+      } catch (_) {}
       _resolvedDir = _explicitDirectory;
       return _resolvedDir!;
+    }
+    if (Platform.isWindows) {
+      final localAppData = (Platform.environment['LOCALAPPDATA'] ?? '').trim();
+      if (localAppData.isNotEmpty) {
+        final winDir = Directory(
+          '$localAppData${Platform.pathSeparator}MarcoMovie${Platform.pathSeparator}cache${Platform.pathSeparator}media-cache',
+        );
+        try {
+          winDir.createSync(recursive: true);
+        } catch (_) {}
+        _resolvedDir = winDir;
+        return winDir;
+      }
     }
     Directory base;
     try {
@@ -249,7 +283,9 @@ class DiskBlockCache {
       );
     }
     final dir = Directory('${base.path}/media-cache');
-    await dir.create(recursive: true);
+    try {
+      dir.createSync(recursive: true);
+    } catch (_) {}
     _resolvedDir = dir;
     return dir;
   }
@@ -260,19 +296,19 @@ class DiskBlockCache {
     if (_initialized) return;
     final dir = await _resolveDirectory();
     final diskBlocks = <({String id, File file, int size, DateTime modified})>[];
-    if (await dir.exists()) {
-      await for (final entity in dir.list(followLinks: false)) {
+    if (dir.existsSync()) {
+      for (final entity in dir.listSync(followLinks: false)) {
         if (entity is! File) continue;
         final name = entity.uri.pathSegments.last;
         if (name.endsWith('.tmp')) {
           try {
-            await entity.delete();
+            entity.deleteSync();
           } catch (_) {}
           continue;
         }
         if (name.endsWith('.blk')) {
           try {
-            final stat = await entity.stat();
+            final stat = entity.statSync();
             final id = name.substring(0, name.length - 4);
             diskBlocks.add((
               id: id,
@@ -303,11 +339,67 @@ class DiskBlockCache {
   Future<void> setCapacityBytes(int nextMaxBytes) async {
     _maxBytes = math.max(0, nextMaxBytes);
     await ensureInitialized();
+    if (_maxBytes == 0) {
+      await clear();
+      return;
+    }
     await _evictToBudget();
   }
 
   Future<void> setCapacityMb(int mb) =>
       setCapacityBytes(mb <= 0 ? 0 : mb * 1024 * 1024);
+
+  Future<void> setMaxBytes(int bytes) => setCapacityBytes(bytes);
+
+  Future<void> setMaxMegabytes(int mb) => setCapacityMb(mb);
+
+  Future<int> currentCacheBytes() async {
+    await ensureInitialized();
+    return _currentBytes;
+  }
+
+  Future<void> clearDiskCache() => clear();
+
+  Future<void> flush() async {
+    await ensureInitialized();
+  }
+
+  Future<void> writeBlock(
+    String rawKey,
+    int blockIndex,
+    Uint8List bytes, {
+    int? totalLength,
+    String contentType = 'application/octet-stream',
+  }) async {
+    await ensureInitialized();
+    final cacheKey = rawKey.length == 32 && RegExp(r'^[0-9a-f]+$').hasMatch(rawKey)
+        ? rawKey
+        : cacheKeyForString(rawKey);
+    final gen = _generation;
+    if (totalLength != null) {
+      await _saveMeta(
+        cacheKey,
+        _CachedObjectMeta(
+          totalLength: totalLength,
+          contentType: contentType,
+          supportsRanges: true,
+        ),
+        gen,
+      );
+    }
+    await _writeCachedBlock(cacheKey, blockIndex, bytes, gen);
+  }
+
+  Future<bool> hasBlock(String rawKey, int blockIndex) async {
+    await ensureInitialized();
+    final cacheKey = rawKey.length == 32 && RegExp(r'^[0-9a-f]+$').hasMatch(rawKey)
+        ? rawKey
+        : cacheKeyForString(rawKey);
+    final id = _blockId(cacheKey, blockIndex);
+    final entry = _entries[id];
+    if (entry == null) return false;
+    return entry.file.exists();
+  }
 
   Future<void> clear() async {
     _generation++;
@@ -316,11 +408,11 @@ class DiskBlockCache {
     _nonCacheablePassthroughKeys.clear();
     _currentBytes = 0;
     final dir = await _resolveDirectory();
-    if (await dir.exists()) {
-      await for (final entity in dir.list(followLinks: false)) {
+    if (dir.existsSync()) {
+      for (final entity in dir.listSync(followLinks: false)) {
         if (entity is File) {
           try {
-            await entity.delete();
+            entity.deleteSync();
           } catch (_) {}
         }
       }
@@ -334,8 +426,8 @@ class DiskBlockCache {
       if (oldest == null) continue;
       _currentBytes = math.max(0, _currentBytes - oldest.size);
       try {
-        if (await oldest.file.exists()) {
-          await oldest.file.delete();
+        if (oldest.file.existsSync()) {
+          oldest.file.deleteSync();
         }
       } catch (_) {}
     }
@@ -1711,6 +1803,8 @@ class _HlsBlock {
 /// (`/kcache/<sid>`), and fake PNG/JPG/GIF header stripping on MPEG-TS segments so
 /// `libmpv` / `AVPlayer` receives a clean local stream.
 class LocalMediaLease {
+  static bool defaultHlsAdStripEnabled = true;
+
   LocalMediaLease._(
     this._server,
     this._client,
@@ -1725,13 +1819,18 @@ class LocalMediaLease {
     this._adHosts,
     this._enableDiskCache,
     this._diskCache,
+    String? diskCacheKey,
   )   : _initialOrigin = _originOf(initialTarget),
         _created = _clock() {
     final initialKind = _inferInitialKind(initialTarget);
     if (_enableDiskCache &&
         !_isLive &&
         initialKind != _TargetKind.playlist) {
-      _initialUrl = _registerDiskCached(initialTarget);
+      _initialUrl = _registerDiskCached(
+        initialTarget,
+        cacheKey: diskCacheKey,
+        diskCache: _diskCache,
+      );
     } else {
       _initialUrl = _register(initialTarget, initialKind);
     }
@@ -1951,10 +2050,13 @@ class LocalMediaLease {
     DateTime Function()? clock,
     http.Client? client,
     bool isLive = false,
-    bool removeHlsAds = true,
+    bool? removeHlsAds,
+    bool? stripHlsAds,
     List<String> adHosts = const [],
+    List<String> adPatterns = const [],
     bool enableDiskCache = false,
     DiskBlockCache? diskCache,
+    String? diskCacheKey,
   }) async {
     if (!shouldProxy(target)) {
       throw const FormatException('本地媒体代理仅接受远程 HTTP/HTTPS 流地址');
@@ -1983,6 +2085,11 @@ class LocalMediaLease {
     final ownsClient = client == null;
     final transport =
         client ?? _createDirectFallbackHttpClient(isLive: isLive);
+    final effectiveRemoveHlsAds =
+        stripHlsAds ?? removeHlsAds ?? defaultHlsAdStripEnabled;
+    final mergedAdHosts = adPatterns.isEmpty
+        ? adHosts
+        : <String>[...adHosts, ...adPatterns];
     return LocalMediaLease._(
       server,
       transport,
@@ -1993,10 +2100,11 @@ class LocalMediaLease {
       capability,
       clock ?? DateTime.now,
       isLive,
-      removeHlsAds,
-      List<String>.unmodifiable(adHosts),
+      effectiveRemoveHlsAds,
+      List<String>.unmodifiable(mergedAdHosts),
       enableDiskCache,
       diskCache ?? DiskBlockCache.shared,
+      diskCacheKey,
     );
   }
 
@@ -2066,17 +2174,36 @@ class LocalMediaLease {
     return uri.host.contains('.') || InternetAddress.tryParse(uri.host) != null;
   }
 
-  Uri _registerDiskCached(Uri target) {
+  Uri registerDiskCacheStream(
+    Uri target, {
+    String? cacheKey,
+    DiskBlockCache? diskCache,
+  }) =>
+      _registerDiskCached(target, cacheKey: cacheKey, diskCache: diskCache);
+
+  Uri _registerDiskCached(
+    Uri target, {
+    String? cacheKey,
+    DiskBlockCache? diskCache,
+  }) {
     if (_closed || !_canRegisterTarget(target)) {
       throw const FormatException('媒体分片或重定向目标不受信任');
     }
-    final key = '${_TargetKind.diskCached.name}|$target';
+    final resolvedCacheKey = (cacheKey != null && cacheKey.trim().isNotEmpty)
+        ? DiskBlockCache.cacheKeyForString(cacheKey.trim())
+        : DiskBlockCache.cacheKeyForUri(target);
+    final key = '${_TargetKind.diskCached.name}|$resolvedCacheKey|$target';
     final path = _paths.putIfAbsent(key, () {
       final sid = _targets.isEmpty
           ? _capability
           : '${_capability}_${_targets.length}';
       final p = '/kcache/$sid';
-      _targets[p] = _RegisteredTarget(target, _TargetKind.diskCached);
+      _targets[p] = _RegisteredTarget(
+        target,
+        _TargetKind.diskCached,
+        cacheKey: resolvedCacheKey,
+        diskCache: diskCache,
+      );
       return p;
     });
     return Uri.parse('http://127.0.0.1:${_server.port}$path');
@@ -2408,9 +2535,10 @@ class LocalMediaLease {
     _requests.add(request);
     try {
       if (registered.kind == _TargetKind.diskCached) {
-        await _diskCache.serveRequest(
+        final effectiveCache = registered.diskCache ?? _diskCache;
+        await effectiveCache.serveRequest(
           request,
-          cacheKey: DiskBlockCache.cacheKeyForUri(registered.uri),
+          cacheKey: registered.cacheKey ?? DiskBlockCache.cacheKeyForUri(registered.uri),
           fetchUpstream: ({range, ifRange, required allowRange}) =>
               _sendWithRedirects(
             registered.uri,
@@ -2601,6 +2729,13 @@ class LocalMediaLease {
     return _adPathPattern.hasMatch(segmentUri.path) ||
         _adPathPattern.hasMatch(host);
   }
+
+  static String stripVodPlaylistAds(
+    String text,
+    Uri origin, {
+    List<String> adPatterns = const [],
+  }) =>
+      stripHlsAdsIfVod(text, origin, adHosts: adPatterns).playlist;
 
   /// Heuristic HLS VOD discontinuity ad remover.
   /// Never triggers on live streams (requires `#EXT-X-ENDLIST` or
@@ -2808,9 +2943,10 @@ class LocalMediaLease {
         continue;
       }
       final block = blocks[i];
+      final wasPrecededByRemovedAd = prevWasRemoved;
       if (emittedAnyBlock &&
           block.hasPrecedingDiscontinuity &&
-          !prevWasRemoved) {
+          !wasPrecededByRemovedAd) {
         out.add('#EXT-X-DISCONTINUITY');
       }
       prevWasRemoved = false;
@@ -2820,12 +2956,15 @@ class LocalMediaLease {
         final blockHasOwnKey = seg.tagLines.any(
           (l) => l.trim().toUpperCase().startsWith('#EXT-X-KEY:'),
         );
-        if (sIdx == 0 &&
-            !blockHasOwnKey &&
-            seg.keyTag != null &&
-            seg.keyTag != lastEmittedKeyTag) {
-          out.add(seg.keyTag!);
-          lastEmittedKeyTag = seg.keyTag;
+        if (sIdx == 0 && !blockHasOwnKey) {
+          if (wasPrecededByRemovedAd) {
+            if (lastEmittedKeyTag != null) {
+              out.add(lastEmittedKeyTag);
+            }
+          } else if (seg.keyTag != null && seg.keyTag != lastEmittedKeyTag) {
+            out.add(seg.keyTag!);
+            lastEmittedKeyTag = seg.keyTag;
+          }
         }
         for (final tag in seg.tagLines) {
           if (tag.trim().toUpperCase().startsWith('#EXT-X-KEY:')) {

@@ -1166,6 +1166,8 @@ class CmsParser {
         (decoded['name'] != null || decoded['key'] != null)) {
       decoded = <String, dynamic>{
         'spider': decoded['spider'] ?? decoded['jar'] ?? '',
+        if (decoded['rules'] != null) 'rules': decoded['rules'],
+        if (decoded['ads'] != null) 'ads': decoded['ads'],
         'sites': [decoded],
       };
     }
@@ -1389,11 +1391,7 @@ class CmsParser {
       for (final rawRule in decoded['rules'] as List) {
         if (rawRule is! Map) continue;
         final rule = CmsSniffRule.fromJson(Map<String, dynamic>.from(rawRule));
-        if (rule.name.isNotEmpty ||
-            rule.hosts.isNotEmpty ||
-            rule.regex.isNotEmpty ||
-            rule.exclude.isNotEmpty ||
-            rule.effectiveScript.isNotEmpty) {
+        if (!rule.isEmpty) {
           rules.add(rule);
         }
       }
@@ -1404,14 +1402,14 @@ class CmsParser {
     if (rawAds is List) {
       for (final entry in rawAds) {
         final item = (entry ?? '').toString().trim();
-        if (item.isNotEmpty && seenAds.add(item)) {
+        if (item.isNotEmpty && seenAds.add(item.toLowerCase())) {
           ads.add(item);
         }
       }
     } else if (rawAds is String && rawAds.trim().isNotEmpty) {
       for (final part in rawAds.split(RegExp(r'[\s,;]+'))) {
         final item = part.trim();
-        if (item.isNotEmpty && seenAds.add(item)) {
+        if (item.isNotEmpty && seenAds.add(item.toLowerCase())) {
           ads.add(item);
         }
       }
@@ -1433,9 +1431,9 @@ class CmsParser {
       lives: lives,
       depots: depots,
       parses: parses,
+      rules: List<CmsSniffRule>.unmodifiable(rules),
+      ads: List<String>.unmodifiable(ads),
       spider: spider,
-      rules: rules,
-      ads: ads,
     );
   }
 

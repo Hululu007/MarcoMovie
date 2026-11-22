@@ -235,6 +235,8 @@ jobs:
           Remove-Item Env:MARCOMOVIE_TEST_MPV
           python ../scripts/prepare_catpaw_runtime.py --platform windows --destination "$releaseDir/data/node"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          python ../scripts/prepare_windows_python_runtime.py --destination "$releaseDir/data/python" --verify
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "concrt140.dll")) {
             $sysDll = Join-Path $env:SystemRoot "System32\$dll"
             if (Test-Path $sysDll) {

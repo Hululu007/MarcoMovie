@@ -1761,8 +1761,15 @@ extension _WindowsShell on _AdaptiveShellState {
       return _buildLayoutSettingsSection(
           context, () => _updateWindowsState(() {}));
     if (_windowsSettings == '播放')
-      return _buildPlaybackSettingsSection(
-          context, () => _updateWindowsState(() {}));
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        _WindowsPlaybackEnhancementGroup(
+          storage: widget.storage,
+          onChanged: () => _updateWindowsState(() {}),
+        ),
+        const SizedBox(height: 22),
+        _buildPlaybackSettingsSection(
+            context, () => _updateWindowsState(() {})),
+      ]);
     if (_windowsSettings == '更多设置')
       return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         WinSettingsGroup(
@@ -1815,6 +1822,11 @@ extension _WindowsShell on _AdaptiveShellState {
         const SizedBox(height: 22),
         _buildCloudAndDataSettingsSection(
             context, () => _updateWindowsState(() {})),
+        const SizedBox(height: 22),
+        _WindowsMediaCacheAndRuntimeSection(
+          storage: widget.storage,
+          onChanged: () => _updateWindowsState(() {}),
+        ),
         const SizedBox(height: 22),
         WinSettingsGroup(header: '版本与诊断', children: [
           WinSettingsRow(
@@ -2335,6 +2347,406 @@ extension _WindowsShell on _AdaptiveShellState {
         separatorBuilder: (_, __) => const SizedBox(height: 12),
         itemBuilder: (_, i) => buildRow(results[i].$1, results[i].$2),
       ),
+    );
+  }
+}
+
+class _WindowsPlaybackEnhancementGroup extends StatefulWidget {
+  final StorageService storage;
+  final VoidCallback onChanged;
+
+  const _WindowsPlaybackEnhancementGroup({
+    required this.storage,
+    required this.onChanged,
+  });
+
+  @override
+  State<_WindowsPlaybackEnhancementGroup> createState() =>
+      _WindowsPlaybackEnhancementGroupState();
+}
+
+class _WindowsPlaybackEnhancementGroupState
+    extends State<_WindowsPlaybackEnhancementGroup> {
+  final WindowsVideoQualityController _qualityController =
+      WindowsVideoQualityController();
+  WindowsQualityPreset _qualityPreset = WindowsQualityPreset.balancedHq;
+  AudioLoudnessPreset _loudnessPreset = AudioLoudnessPreset.off;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadPresets());
+  }
+
+  Future<void> _loadPresets() async {
+    final quality = await WindowsVideoQualityController.readSavedQualityPreset();
+    final loudness =
+        await WindowsVideoQualityController.readSavedLoudnessPreset();
+    if (!mounted) return;
+    setState(() {
+      _qualityPreset = quality;
+      _loudnessPreset = loudness;
+    });
+  }
+
+  @override
+  void dispose() {
+    _qualityController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return WinSettingsGroup(
+      header: 'Windows 画质、人声响度与流媒体净化',
+      footer: '高画质 HDR 映射档采用 spline36 缩放与动态色调映射解决 4K HDR 发灰与色带；切换后下次起播自动生效（播放中亦可在右下角实时热切）。',
+      children: [
+        Padding(
+          key: const ValueKey('windows-settings-video-quality'),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(CupertinoIcons.sparkles,
+                      size: 20, color: winMuted(context)),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Windows 渲染画质预设',
+                          style: TextStyle(
+                            color: winInk(context),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _qualityPreset.descriptionZh,
+                          style: TextStyle(
+                            color: winMuted(context),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final preset in WindowsQualityPreset.values)
+                    WinButton(
+                      preset == WindowsQualityPreset.balancedHq
+                          ? '${preset.labelZh}（推荐）'
+                          : preset.labelZh,
+                      key: ValueKey('win-setting-quality-${preset.id}'),
+                      selected: _qualityPreset == preset,
+                      onPressed: () async {
+                        setState(() => _qualityPreset = preset);
+                        await _qualityController.saveQualityPreset(preset);
+                        widget.onChanged();
+                      },
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          key: const ValueKey('windows-settings-audio-loudness'),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(CupertinoIcons.waveform,
+                      size: 20, color: winMuted(context)),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '音频响度与人声对白增强',
+                          style: TextStyle(
+                            color: winInk(context),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _loudnessPreset.descriptionZh,
+                          style: TextStyle(
+                            color: winMuted(context),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final preset in AudioLoudnessPreset.values)
+                    WinButton(
+                      preset.labelZh,
+                      key: ValueKey('win-setting-loudness-${preset.id}'),
+                      selected: _loudnessPreset == preset,
+                      onPressed: () async {
+                        setState(() => _loudnessPreset = preset);
+                        await _qualityController.saveLoudnessPreset(preset);
+                        widget.onChanged();
+                      },
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        WinSettingsRow(
+          key: const ValueKey('windows-settings-hls-ad-strip'),
+          title: 'HLS 点播切片去广告',
+          subtitle: '自动识别点播 M3U8 中插入的异域断层短插播广告并剥离（直播流不触发）',
+          icon: CupertinoIcons.shield_lefthalf_fill,
+          trailing: CupertinoSwitch(
+            value: widget.storage.hlsAdStripEnabled,
+            activeTrackColor: AppleColors.systemGreen,
+            onChanged: (v) async {
+              await widget.storage.setHlsAdStripEnabled(v);
+              LocalMediaLease.defaultHlsAdStripEnabled = v;
+              widget.onChanged();
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _WindowsMediaCacheAndRuntimeSection extends StatefulWidget {
+  final StorageService storage;
+  final VoidCallback onChanged;
+
+  const _WindowsMediaCacheAndRuntimeSection({
+    required this.storage,
+    required this.onChanged,
+  });
+
+  @override
+  State<_WindowsMediaCacheAndRuntimeSection> createState() =>
+      _WindowsMediaCacheAndRuntimeSectionState();
+}
+
+class _WindowsMediaCacheAndRuntimeSectionState
+    extends State<_WindowsMediaCacheAndRuntimeSection> {
+  int _cacheBytes = 0;
+  bool _clearingCache = false;
+  late PythonRuntimeStatus _pythonStatus;
+  Map<String, dynamic>? _webview2Status;
+
+  @override
+  void initState() {
+    super.initState();
+    _pythonStatus = PythonSourceHost.desktopRuntimeStatus();
+    unawaited(_refreshStatus());
+  }
+
+  Future<void> _refreshStatus() async {
+    final pyStatus = PythonSourceHost.desktopRuntimeStatus();
+    if (mounted) {
+      setState(() => _pythonStatus = pyStatus);
+    }
+    final webviewFuture = DesktopWebViewJsBridge.instance.getStatus().then((wv) {
+      if (!mounted) return;
+      setState(() => _webview2Status = wv);
+    });
+    final bytesFuture = DiskBlockCache.instance.currentCacheBytes().then((b) {
+      if (!mounted) return;
+      setState(() => _cacheBytes = b);
+    });
+    await Future.wait<void>([webviewFuture, bytesFuture]);
+  }
+
+  static String _formatBytes(int bytes) {
+    if (bytes <= 0) return '0 B';
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+
+  static String _cacheOptionLabel(int mb) {
+    if (mb <= 0) return '关闭';
+    if (mb == StorageService.defaultDiskCacheMaxMb) return '$mb MB（默认）';
+    if (mb >= 1024) return '${mb ~/ 1024} GB';
+    return '$mb MB';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final wv = _webview2Status;
+    final wvReady = wv?['available'] == true;
+    final wvVersion = (wv?['version'] ?? '').toString();
+    final wvReason = (wv?['reason'] ?? 'checking').toString();
+    final pySummary = _pythonStatus.ready
+        ? '已就绪 · CPython ${_pythonStatus.version}'
+        : '未就绪 (${_pythonStatus.reason})';
+    final wvSummary = wv == null
+        ? '正在检测…'
+        : (wvReady
+            ? '已就绪${wvVersion.isNotEmpty ? " · v$wvVersion" : ""}'
+            : '不可用 ($wvReason)');
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        WinSettingsGroup(
+          header: '媒体磁盘块缓存',
+          footer: '点播直链按 256 KiB 对齐分块落盘缓存，加速拖动回放并降低网盘/直链重复拉流。',
+          children: [
+            Padding(
+              key: const ValueKey('windows-settings-disk-cache'),
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(CupertinoIcons.archivebox,
+                          size: 20, color: winMuted(context)),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '媒体磁盘块缓存上限',
+                              style: TextStyle(
+                                color: winInk(context),
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              '当前已用空间：${_formatBytes(_cacheBytes)}',
+                              key: const ValueKey(
+                                  'windows-settings-disk-cache-used'),
+                              style: TextStyle(
+                                color: winMuted(context),
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      WinButton(
+                        _clearingCache ? '清理中…' : '一键清理缓存',
+                        key: const ValueKey('windows-settings-clear-disk-cache'),
+                        onPressed: _clearingCache
+                            ? null
+                            : () async {
+                                setState(() => _clearingCache = true);
+                                try {
+                                  await DiskBlockCache.instance
+                                      .clearDiskCache();
+                                  await _refreshStatus();
+                                } finally {
+                                  if (mounted) {
+                                    setState(() => _clearingCache = false);
+                                  }
+                                }
+                              },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final mb
+                          in StorageService.allowedDiskCacheMbOptions)
+                        WinButton(
+                          _cacheOptionLabel(mb),
+                          key: ValueKey('win-setting-disk-cache-$mb'),
+                          selected: widget.storage.diskCacheMaxMb == mb,
+                          onPressed: () async {
+                            await widget.storage.setDiskCacheMaxMb(mb);
+                            await DiskBlockCache.instance.setMaxMegabytes(mb);
+                            await _refreshStatus();
+                            widget.onChanged();
+                          },
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 22),
+        WinSettingsGroup(
+          header: '运行环境状态',
+          footer: 'Python 3.11 原生引擎用于本地运行社区 .py 片源；Edge WebView2 引擎负责 Stage-3 动态网页嗅探与异步 JS 源兜底。',
+          children: [
+            WinSettingsRow(
+              key: const ValueKey('windows-runtime-python-status'),
+              title: 'Python 3.11 原生引擎',
+              subtitle: _pythonStatus.executablePath?.isNotEmpty == true
+                  ? _pythonStatus.executablePath
+                  : '随包免安装隔离运行时 (requests / lxml / pyquery / pycryptodome)',
+              value: pySummary,
+              icon: CupertinoIcons.chevron_left_slash_chevron_right,
+              trailing: Icon(
+                _pythonStatus.ready
+                    ? CupertinoIcons.checkmark_circle_fill
+                    : CupertinoIcons.exclamationmark_circle,
+                size: 18,
+                color: _pythonStatus.ready
+                    ? AppleColors.systemGreen
+                    : winMuted(context),
+              ),
+              onTap: _refreshStatus,
+            ),
+            WinSettingsRow(
+              key: const ValueKey('windows-runtime-webview2-status'),
+              title: 'Edge WebView2 动态嗅探引擎',
+              subtitle: wvReady && (wv?['userDataDir'] ?? '').toString().isNotEmpty
+                  ? (wv!['userDataDir']).toString()
+                  : '系统 Evergreen Runtime 离屏嗅探与异步 DOM/JS 兜底',
+              value: wvSummary,
+              icon: CupertinoIcons.globe,
+              trailing: Icon(
+                wvReady
+                    ? CupertinoIcons.checkmark_circle_fill
+                    : CupertinoIcons.exclamationmark_circle,
+                size: 18,
+                color: wvReady ? AppleColors.systemGreen : winMuted(context),
+              ),
+              onTap: _refreshStatus,
+            ),
+          ],
+        ),
+      ],
     );
   }
 }

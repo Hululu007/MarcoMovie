@@ -1,7 +1,7 @@
 {
   "windows": {
-    "versionName": "0.6.0",
-    "buildNumber": 76
+    "versionName": "0.7.0",
+    "buildNumber": 77
   },
   "macos": {
     "versionName": "0.5.20",

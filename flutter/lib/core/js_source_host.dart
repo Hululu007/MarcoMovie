@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'desktop_webview_js_bridge.dart';
 import 'js_source_syntax.dart';
 import 'script_proxy_protocol.dart';
 import 'script_proxy_server.dart';
@@ -81,6 +82,9 @@ class JsSourceHost {
   /// Only this live source's capability route may receive local-player header
   /// adaptation. An unrelated loopback service or stale URL is never included.
   static bool ownsProxyUrl(String sessionKey, Uri uri) {
+    if (DesktopWebViewJsBridge.instance.ownsProxyUrl(sessionKey, uri)) {
+      return true;
+    }
     final worker = _sessions[sessionKey];
     final proxy = worker?._proxy;
     if (worker == null ||
@@ -126,6 +130,7 @@ class JsSourceHost {
       _webViewJsSessions.remove(key);
       closing.add(_disposeWebViewJs(sessionKey: key));
     }
+    closing.add(DesktopWebViewJsBridge.instance.retainSessions(keys));
     _notifyCapacity();
     return Future.wait(closing);
   }
@@ -135,6 +140,7 @@ class JsSourceHost {
     _proxyServer = null;
     await retainSessions({});
     await _disposeWebViewJs(sessionKey: null);
+    await DesktopWebViewJsBridge.instance.closeAll();
     await server?.close();
   }
 
@@ -171,9 +177,48 @@ class JsSourceHost {
       );
     }
     final worker = _sessions.remove(sessionKey);
-    if (worker == null || worker._closed) return null;
-    _sessions[sessionKey] = worker; // LRU: active workers are never evicted.
-    return worker.invoke(method, arguments, budget, cancellation);
+    if (worker != null && !worker._closed) {
+      _sessions[sessionKey] = worker; // LRU: active workers are never evicted.
+      try {
+        return await worker.invoke(method, arguments, budget, cancellation);
+      } catch (error) {
+        final pythonPrelude = worker.configuration[4] as List;
+        if (pythonPrelude.isEmpty &&
+            cancellation?.isCompleted != true &&
+            DesktopWebViewJsBridge.shouldFallbackFromError(error) &&
+            await DesktopWebViewJsBridge.instance.isAvailable()) {
+          if (identical(_sessions[sessionKey], worker)) {
+            _sessions.remove(sessionKey);
+          }
+          await worker.close();
+          return DesktopWebViewJsBridge.instance.invoke(
+            entry: worker.configuration[0] as String,
+            modules: Map<String, String>.from(
+              worker.configuration[1] as Map,
+            ),
+            method: method,
+            arguments: arguments,
+            extension: worker.configuration[2],
+            rawExtension: worker.configuration[7] as String?,
+            headers: Map<String, String>.from(
+              worker.configuration[3] as Map,
+            ),
+            budget: budget,
+            sessionKey: sessionKey,
+            catDetails: worker.catDetails,
+            cancellation: cancellation,
+          );
+        }
+        rethrow;
+      }
+    }
+    return DesktopWebViewJsBridge.instance.callCached(
+      sessionKey: sessionKey,
+      method: method,
+      arguments: arguments,
+      budget: budget,
+      cancellation: cancellation,
+    );
   }
 
   static Future<String> invoke({
@@ -233,6 +278,16 @@ class JsSourceHost {
     }
 
     check();
+    if (sessionKey != null && pythonPrelude.isEmpty) {
+      final cachedWebView = await DesktopWebViewJsBridge.instance.callCached(
+        sessionKey: sessionKey,
+        method: method,
+        arguments: arguments,
+        budget: budget,
+        cancellation: cancellation,
+      );
+      if (cachedWebView != null) return cachedWebView;
+    }
     if (sessionKey != null) {
       final waiting = Stopwatch()..start();
       if (_sessions[sessionKey]?._closed == true) _sessions.remove(sessionKey);
@@ -312,6 +367,30 @@ class JsSourceHost {
           sessionKey: sessionKey,
           catDetails: catDetails,
           budget: budget,
+          cancellation: cancellation,
+        );
+      }
+      if (pythonPrelude.isEmpty &&
+          cancellation?.isCompleted != true &&
+          startedGeneration == _generation &&
+          DesktopWebViewJsBridge.shouldFallbackFromError(error) &&
+          await DesktopWebViewJsBridge.instance.isAvailable()) {
+        check();
+        if (sessionKey != null && identical(_sessions[sessionKey], selected)) {
+          _sessions.remove(sessionKey);
+        }
+        await selected.close();
+        return await DesktopWebViewJsBridge.instance.invoke(
+          entry: entry,
+          modules: ownedModules,
+          method: method,
+          arguments: arguments,
+          extension: extension,
+          rawExtension: rawExtension,
+          headers: headers,
+          budget: budget,
+          sessionKey: sessionKey,
+          catDetails: catDetails,
           cancellation: cancellation,
         );
       }
