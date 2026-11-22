@@ -3,8 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/services.dart';
 
+import 'desktop_python_bridge.dart';
 import 'python_source_channel.dart';
 import 'python_source_sessions.dart';
+
+export 'desktop_python_bridge.dart'
+    show DesktopPythonBridge, PythonRuntimeStatus;
 
 /// Product-facing failure text. Never interpolate a script's exception message,
 /// native details or stack trace into the catalogue/detail error cards.
@@ -35,11 +39,16 @@ class PythonSourceException implements Exception {
   };
 }
 
-/// Product selection for the bundled iOS interpreter. Execution errors are
-/// never replayed in another engine; Android/desktop keep their existing host.
+/// Product selection for native Python runtimes (bundled iOS interpreter and
+/// Windows/desktop Python 3.11 embeddable bridge). Execution errors are never
+/// replayed in another engine.
 class PythonSourceHost {
   PythonSourceHost({bool? enabled, PythonSourceChannel? channel})
-    : enabled = enabled ?? Platform.isIOS,
+    : enabled =
+          enabled ??
+          (Platform.isIOS ||
+              channel is DesktopPythonBridge ||
+              (channel == null && DesktopPythonBridge.isRuntimeAvailable())),
       _channel = channel;
 
   static final instance = PythonSourceHost();
@@ -49,7 +58,31 @@ class PythonSourceHost {
   Future<void>? _ready;
   int get generation => _sessions.generation;
 
-  PythonSourceChannel get _bridge => _channel ??= PythonSourceChannel();
+  PythonSourceChannel get _bridge => _channel ??=
+      (!Platform.isIOS && DesktopPythonBridge.isRuntimeAvailable())
+          ? DesktopPythonBridge()
+          : PythonSourceChannel();
+
+  /// Synchronous readiness snapshot for desktop UI status panels.
+  static PythonRuntimeStatus desktopRuntimeStatus() =>
+      DesktopPythonBridge.probeStatus();
+
+  bool get isDesktopNativeReady =>
+      !Platform.isIOS &&
+      enabled &&
+      (_channel is DesktopPythonBridge ||
+          DesktopPythonBridge.isRuntimeAvailable());
+
+  Future<PythonRuntimeStatus> runtimeStatus() async {
+    if (Platform.isIOS) {
+      return const PythonRuntimeStatus(
+        ready: true,
+        backend: 'cpython-3.14-ios',
+        version: '3.14',
+      );
+    }
+    return DesktopPythonBridge.probeStatus();
+  }
 
   Future<T> _explainFailure<T>(Future<T> Function() action) async {
     try {
@@ -64,9 +97,20 @@ class PythonSourceHost {
   }
 
   Future<void> _ensureReady() => _ready ??= () async {
-    final reply = await _bridge.channel.invokeMapMethod<String, Object?>(
-      'python.capabilities',
-    );
+    final bridge = _bridge;
+    final reply = await bridge.capabilities();
+    if (bridge is DesktopPythonBridge || reply?['backend'] == 'desktop') {
+      final runtime = reply?['runtime'];
+      final maxSessions = reply?['maxSessions'];
+      if (reply?['version'] != 1 ||
+          runtime is! String ||
+          !runtime.startsWith('3.') ||
+          maxSessions is! int ||
+          maxSessions < 1) {
+        throw const FormatException('Python 运行库版本不匹配，请更新安装包');
+      }
+      return;
+    }
     if (reply?['version'] != 1 ||
         reply?['runtime'] is! String ||
         !(reply!['runtime'] as String).startsWith('3.14.') ||
@@ -124,7 +168,13 @@ class PythonSourceHost {
       enabled ? _sessions.pinForPlayback(key) : () {};
   bool ownsProxyUrl(String key, Uri uri) =>
       enabled && _sessions.ownsProxyUrl(key, uri);
-  Future<void> close() => _sessions.close();
+  Future<void> close() async {
+    await _sessions.close();
+    final channel = _channel;
+    if (channel is DesktopPythonBridge) {
+      await channel.close();
+    }
+  }
 
   /// Retain archive paths, binary bytes and the unmodified extension string.
   /// Remote PHP/extensionless entries are detected by content before this call.
