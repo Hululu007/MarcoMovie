@@ -79,10 +79,12 @@ enum Anime4kPreset {
 typedef Anime4kPropertySetter = Future<void> Function(String key, String value);
 typedef Anime4kAssetLoader = Future<ByteData> Function(String assetKey);
 typedef Anime4kCacheDirResolver = Future<Directory> Function();
+typedef WindowsBaseScalerResolver = ({String scale, String cscale}) Function();
 
 /// Manages desktop-only (Windows & macOS) Anime4K `v4.0.1` shader extraction,
 /// SHA-256 verification, libmpv `glsl-shaders` hot-switching, and the Windows
-/// `bilinear <-> spline36` scaler contract.
+/// scaler restoration contract via [windowsBaseScalerResolver] (defaulting to
+/// `bilinear` when no quality controller resolver is injected).
 ///
 /// Strictly disabled and hidden on iOS, iPadOS, Android, Web, HarmonyOS NEXT
 /// (`OhosRuntime.isOhos`), and any player whose platform is not [NativePlayer].
@@ -116,6 +118,7 @@ class Anime4kController extends ChangeNotifier {
   final Anime4kCacheDirResolver? cacheDirResolver;
   final Anime4kAssetLoader? assetLoader;
   final Anime4kPropertySetter? propertySetterOverride;
+  WindowsBaseScalerResolver? _windowsBaseScalerResolver;
   final bool persistLocally;
   SharedPreferences? _prefs;
 
@@ -132,9 +135,27 @@ class Anime4kController extends ChangeNotifier {
     this.cacheDirResolver,
     this.assetLoader,
     this.propertySetterOverride,
+    WindowsBaseScalerResolver? windowsBaseScalerResolver,
     SharedPreferences? prefs,
     this.persistLocally = true,
-  }) : _prefs = prefs;
+  })  : _windowsBaseScalerResolver = windowsBaseScalerResolver,
+        _prefs = prefs;
+
+  /// Updates the Windows base scaler resolver used when returning to
+  /// [Anime4kPreset.off] (e.g., bound from `WindowsVideoQualityController`).
+  void setWindowsBaseScalerResolver(WindowsBaseScalerResolver? resolver) {
+    _windowsBaseScalerResolver = resolver;
+  }
+
+  ({String scale, String cscale}) _resolveWindowsBaseScalers() {
+    final resolved = _windowsBaseScalerResolver?.call();
+    final scale = (resolved?.scale ?? '').trim();
+    final cscale = (resolved?.cscale ?? '').trim();
+    return (
+      scale: scale.isNotEmpty ? scale : 'bilinear',
+      cscale: cscale.isNotEmpty ? cscale : 'bilinear',
+    );
+  }
 
   Anime4kPreset get preset => _preset;
   String? get lastError => _lastError;
@@ -374,11 +395,12 @@ class Anime4kController extends ChangeNotifier {
       await setProp('glsl-shaders', '');
     } catch (_) {}
     if (_isWindows) {
+      final base = _resolveWindowsBaseScalers();
       try {
-        await setProp('scale', 'bilinear');
+        await setProp('scale', base.scale);
       } catch (_) {}
       try {
-        await setProp('cscale', 'bilinear');
+        await setProp('cscale', base.cscale);
       } catch (_) {}
     }
   }
