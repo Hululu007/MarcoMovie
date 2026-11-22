@@ -85,6 +85,7 @@ final class FocusMotion {
     }
 
     static State state(View view) {
+        UiCompat.setDefaultFocusHighlightEnabled(view, false);
         State state = (State) view.getTag(R.id.focus_motion);
         if (state == null) {
             state = new State();

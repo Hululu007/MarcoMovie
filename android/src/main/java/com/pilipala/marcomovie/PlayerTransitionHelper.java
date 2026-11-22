@@ -751,6 +751,15 @@ public final class PlayerTransitionHelper {
     }
 
     /**
+     * API 23 (Android 6.0.1) low-RAM TV GPUs (e.g., Mali-450 on MiTV OS 1.3.130) can hit
+     * {@code EGL_OUT_OF_MEMORY} or RenderThread crashes when promoting full-screen detail layers
+     * to offscreen {@code LAYER_TYPE_HARDWARE} FBOs right before video surface allocation.
+     */
+    static boolean shouldUseTvHardwareExitLayer(int sdkInt) {
+        return sdkInt > 23;
+    }
+
+    /**
      * Android TV lightweight exit ({@code 220ms}): poster scales {@code 1.0 -> 1.08} while fading
      * smoothly into pure black player layer. Zero blur, zero shader, zero screenshot.
      */
@@ -761,10 +770,15 @@ public final class PlayerTransitionHelper {
             return NO_OP_HANDLE;
         }
         final boolean animatePoster = posterView != null && posterView != detailLayer;
+        final boolean allowHwExitLayer = shouldUseTvHardwareExitLayer(Build.VERSION.SDK_INT);
         final boolean promoteDetailLayer =
-                shouldPromoteDetailHardwareLayer(detailLayer, animatePoster ? posterView : null);
+                allowHwExitLayer
+                        && shouldPromoteDetailHardwareLayer(
+                                detailLayer, animatePoster ? posterView : null);
         final boolean promotePosterLayer =
-                shouldPromotePosterHardwareLayer(detailLayer, animatePoster ? posterView : null);
+                allowHwExitLayer
+                        && shouldPromotePosterHardwareLayer(
+                                detailLayer, animatePoster ? posterView : null);
         final int prevDetailLayer =
                 detailLayer != null ? detailLayer.getLayerType() : View.LAYER_TYPE_NONE;
         final int prevPosterLayer =

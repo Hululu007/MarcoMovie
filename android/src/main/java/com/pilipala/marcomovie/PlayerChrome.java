@@ -7,6 +7,7 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.*;
 import android.widget.*;
+import com.pilipala.marcomovie.hud.EpisodeHoldSwitchOverlay;
 import com.pilipala.marcomovie.hud.FastForwardScrubCapsule;
 import com.pilipala.marcomovie.hud.PlayerHudPrefs;
 import com.pilipala.marcomovie.hud.SlimProgressBar;
@@ -35,6 +36,7 @@ final class PlayerChrome {
     final StartSpecBanner startSpecBanner;
     final SlimProgressBar slimProgressBar;
     final FastForwardScrubCapsule tvScrubCapsule;
+    final EpisodeHoldSwitchOverlay episodeHoldOverlay;
 
     /** Reserved empty mount slots for Wave 2 (FirstPlayGestureHint & BrandLogoLoader). */
     final FrameLayout firstPlayGestureHintSlot;
@@ -48,6 +50,7 @@ final class PlayerChrome {
     final LinearLayout unlockPill;
     final TextView rewindBtn, forwardBtn;
     final TextView loadingText,
+            loadingSubText,
             episodeLabel,
             titleView,
             seekHint,
@@ -60,10 +63,13 @@ final class PlayerChrome {
     final Cms.Video chromeVideo;
     boolean loading = true;
     boolean progressOnlyMode = false;
+    boolean hdrSurfaceActive = false;
     final Rect windowInsets = new Rect();
     boolean layoutPending;
     String lastBadgeSignature = "";
     String lastWallClock = "";
+    String lastPersistentClockText = "";
+    String lastWallClockText = "";
     String lastHudProgressKey = "";
 
     static float modernUnit(MainActivity a) {
@@ -238,7 +244,7 @@ final class PlayerChrome {
             if (label == null || label.isEmpty()) continue;
             TextView pill = a.text(label, 9f, 0xffcfd6e2);
             pill.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 8.8f);
-            pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
             if (android.os.Build.VERSION.SDK_INT >= 21) {
                 pill.setLetterSpacing(0.03f);
             }
@@ -250,7 +256,34 @@ final class PlayerChrome {
                     Math.round(u * 2.2f),
                     Math.round(u * 6.5f),
                     Math.round(u * 2.2f));
-            pill.setBackground(modernSurface(0x1cffffff, 4.2f, 0x1effffff));
+            String upper = label.toUpperCase(java.util.Locale.ROOT);
+            int fillArgb = 0x1cffffff;
+            int strokeArgb = 0x22ffffff;
+            int textArgb = 0xffcfd6e2;
+            if (upper.contains("DOLBY VISION")
+                    || upper.startsWith("DOLBY P")
+                    || upper.contains("DV ·")) {
+                fillArgb = 0x385e5ce6;
+                strokeArgb = 0x80bf5af2;
+                textArgb = 0xffebd6ff;
+            } else if (upper.contains("HDR10")
+                    || upper.contains("HLG")
+                    || "4K".equals(upper)
+                    || "8K".equals(upper)) {
+                fillArgb = 0x30ff9f0a;
+                strokeArgb = 0x70ff9f0a;
+                textArgb = 0xffffc766;
+            } else if (upper.contains("ATMOS")
+                    || upper.contains("TRUEHD")
+                    || upper.contains("DTS")
+                    || upper.contains("DD+")
+                    || upper.contains("DOLBY AUDIO")) {
+                fillArgb = 0x2e0a84ff;
+                strokeArgb = 0x665ac8fa;
+                textArgb = 0xff93e2ff;
+            }
+            pill.setTextColor(textArgb);
+            pill.setBackground(modernSurface(fillArgb, 4.2f, strokeArgb));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
             if (i > 0) lp.leftMargin = Math.round(u * 5f);
             badgeRow.addView(pill, lp);
@@ -685,25 +718,43 @@ final class PlayerChrome {
         loadingPill = a.row();
         loadingPill.setTag("player-loading");
         loadingPill.setGravity(Gravity.CENTER_VERTICAL);
-        loadingPill.setPadding(a.dp(24), a.dp(16), a.dp(24), a.dp(16));
-        loadingPill.setBackground(chromeSurface(0xe01c1c22, 24, 0x2affffff));
-        UiCompat.setElevation(loadingPill, a.dp(10));
+        loadingPill.setPadding(a.dp(18), a.dp(13), a.dp(20), a.dp(13));
+        loadingPill.setBackground(chromeSurface(0xea141822, 18, 0x38ffffff));
+        UiCompat.setElevation(loadingPill, a.dp(12));
         loadingIndicatorSlot = new FrameLayout(a);
         loadingIndicatorSlot.setTag("player-loading-indicator-slot");
         brandLoader = new BrandLogoLoaderView(a);
         brandLoader.setReducedMotion(a.reduced);
         brandLoader.setActive(true);
         loadingIndicatorSlot.addView(
-                brandLoader, new FrameLayout.LayoutParams(a.dp(32), a.dp(32), Gravity.CENTER));
+                brandLoader, new FrameLayout.LayoutParams(a.dp(28), a.dp(28), Gravity.CENTER));
         loadingPill.addView(
-                loadingIndicatorSlot, new LinearLayout.LayoutParams(a.dp(32), a.dp(32)));
-        String epTitle =
-                episode != null && episode.name != null && !episode.name.isEmpty()
-                        ? " " + episode.name
-                        : "";
-        loadingText = a.text("正在加载" + epTitle + "…", 14, MainActivity.WHITE);
-        loadingText.setPadding(a.dp(14), 0, 0, 0);
-        loadingPill.addView(loadingText);
+                loadingIndicatorSlot, new LinearLayout.LayoutParams(a.dp(28), a.dp(28)));
+        LinearLayout loadingCopy = new LinearLayout(a);
+        loadingCopy.setOrientation(LinearLayout.VERTICAL);
+        loadingCopy.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams copyLp = new LinearLayout.LayoutParams(-2, -2);
+        copyLp.leftMargin = a.dp(13);
+        loadingText = a.text(resolveInitialLoadingHeadline(episode), 14.5f, MainActivity.WHITE);
+        loadingText.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        loadingText.setIncludeFontPadding(false);
+        loadingText.setSingleLine(true);
+        loadingText.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        loadingCopy.addView(loadingText, new LinearLayout.LayoutParams(-2, -2));
+
+        String loadingSub =
+                formatLoadingSubtitle(
+                        video != null ? video.title : "", episode != null ? episode.name : "");
+        loadingSubText = a.text(loadingSub, 12f, 0xffb4c0d0);
+        loadingSubText.setIncludeFontPadding(false);
+        loadingSubText.setSingleLine(true);
+        loadingSubText.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        loadingSubText.setVisibility(loadingSub.isEmpty() ? View.GONE : View.VISIBLE);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-2, -2);
+        subLp.topMargin = a.dp(3);
+        loadingCopy.addView(loadingSubText, subLp);
+        loadingPill.addView(loadingCopy, copyLp);
+        applyLoadingCardBounds(a.windowWidth());
         a.playbackLayer.addView(loadingPill, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
 
         String initialPersistentTime = formatWallTime();
@@ -863,8 +914,30 @@ final class PlayerChrome {
             scrubLp.topMargin = vp(a, 54);
             a.playbackLayer.addView(tvScrubCapsule, scrubLp);
             bindTvSeekHintObserver();
+
+            episodeHoldOverlay =
+                    new EpisodeHoldSwitchOverlay(
+                            a,
+                            direction -> {
+                                if (a.isFinishing()
+                                        || a.playerChrome != this
+                                        || a.playbackControls == null) return;
+                                if (a.playbackControls.step(direction)) {
+                                    a.toast(direction < 0 ? "正在切换上一集" : "正在切换下一集");
+                                } else {
+                                    a.toast(direction < 0 ? "已经是第一集" : "已经是最后一集");
+                                }
+                            });
+            episodeHoldOverlay.setReducedMotion(a.reduced);
+            a.playbackLayer.addView(
+                    episodeHoldOverlay,
+                    new FrameLayout.LayoutParams(
+                            EpisodeHoldSwitchOverlay.preferredWidthPx(a),
+                            EpisodeHoldSwitchOverlay.preferredHeightPx(a),
+                            Gravity.CENTER));
         } else {
             tvScrubCapsule = null;
+            episodeHoldOverlay = null;
         }
 
         firstPlayGestureHintSlot = new FrameLayout(a);
@@ -1187,6 +1260,134 @@ final class PlayerChrome {
         if (a.playbackControls != null) {
             a.playbackControls.relayout(compact);
         }
+        applyLoadingCardBounds(width);
+    }
+
+    private void applyLoadingCardBounds(int containerWidth) {
+        if (loadingText == null || loadingSubText == null) return;
+        int cardMax =
+                resolveLoadingCardMaxWidthPx(
+                        containerWidth, a.dp(40), a.dp(180), a.dp(a.isTvDevice() ? 360 : 288));
+        int textMax = Math.max(a.dp(110), cardMax - a.dp(82));
+        loadingText.setMaxWidth(textMax);
+        loadingSubText.setMaxWidth(textMax);
+    }
+
+    static int resolveLoadingCardMaxWidthPx(
+            int containerWidth, int sideMarginPx, int minWidthPx, int maxCapPx) {
+        int safeCap = Math.max(1, maxCapPx);
+        int safeMin = Math.max(1, Math.min(minWidthPx, safeCap));
+        if (containerWidth <= 0) return safeCap;
+        int available = Math.max(1, containerWidth - Math.max(0, sideMarginPx) * 2);
+        return Math.max(Math.min(safeMin, available), Math.min(safeCap, available));
+    }
+
+    private static final java.util.regex.Pattern LOADING_SIZE_TAG_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "(?i)[\\[\\(【（]\\s*(\\d+(?:\\.\\d+)?\\s*(?:TB|GB|MB|GiB|MiB))\\s*[\\]\\)】）]");
+    private static final java.util.regex.Pattern LOADING_EPISODE_MARKER_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "(?i)(第\\s*\\d+\\s*[集话期]|(?:^|[^a-z0-9])(S\\d{1,2}E\\d{1,3}|EP?\\d{1,3})(?:$|[^a-z0-9]))");
+    private static final java.util.regex.Pattern LOADING_RAW_RELEASE_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "(?i)(?:\\.(?:mkv|mp4|m4v|avi|ts|m2ts|mov|webm|flv)(?:$|[^a-z0-9])|"
+                            + "(?:^|[^a-z0-9])(?:web[-.]?dl|webrip|bluray|remux|2160p|1080p|720p|"
+                            + "h\\.?265|h\\.?264|x265|x264|hevc|ddp\\d|atmos|hdr10)(?:$|[^a-z0-9]))");
+
+    static String formatLoadingSubtitle(String videoTitle, String episodeName) {
+        String title = videoTitle == null ? "" : videoTitle.trim();
+        String ep = episodeName == null ? "" : episodeName.trim();
+        String out;
+        if (ep.isEmpty() || ep.equalsIgnoreCase(title) || isGenericEpisodeLabel(ep)) {
+            out = title;
+        } else {
+            boolean rawFilename =
+                    ep.length() > 26 || LOADING_RAW_RELEASE_PATTERN.matcher(ep).find();
+            if (rawFilename) {
+                String epMarker = extractEpisodeMarker(ep);
+                String sizeTag = extractSizeTag(ep);
+                if (!title.isEmpty()) {
+                    if (!epMarker.isEmpty()) {
+                        out = title + " · " + epMarker;
+                    } else if (!sizeTag.isEmpty()) {
+                        out = title + " · " + sizeTag;
+                    } else {
+                        out = title;
+                    }
+                } else if (!epMarker.isEmpty()) {
+                    out = sizeTag.isEmpty() ? epMarker : epMarker + " · " + sizeTag;
+                } else {
+                    String cleaned =
+                            LOADING_SIZE_TAG_PATTERN
+                                    .matcher(ep)
+                                    .replaceAll(" ")
+                                    .replaceAll(
+                                            "(?i)\\.(?:mkv|mp4|m4v|avi|ts|m2ts|mov|webm|flv)$", "")
+                                    .replaceAll("\\s+", " ")
+                                    .trim();
+                    out = cleaned.isEmpty() ? ep : cleaned;
+                }
+            } else {
+                out = title.isEmpty() ? ep : title + " · " + ep;
+            }
+        }
+        return clampLoadingText(out, 34);
+    }
+
+    private static boolean isGenericEpisodeLabel(String ep) {
+        return "正片".equals(ep)
+                || "HD".equalsIgnoreCase(ep)
+                || "4K".equalsIgnoreCase(ep)
+                || "1080P".equalsIgnoreCase(ep)
+                || "超清".equals(ep);
+    }
+
+    private static String extractEpisodeMarker(String raw) {
+        java.util.regex.Matcher m = LOADING_EPISODE_MARKER_PATTERN.matcher(raw);
+        if (!m.find()) return "";
+        String g2 = m.group(2);
+        String token = (g2 != null && !g2.isEmpty()) ? g2 : m.group(1);
+        return token == null ? "" : token.replaceAll("\\s+", "").toUpperCase(java.util.Locale.ROOT);
+    }
+
+    private static String extractSizeTag(String raw) {
+        java.util.regex.Matcher m = LOADING_SIZE_TAG_PATTERN.matcher(raw);
+        if (!m.find()) return "";
+        String g1 = m.group(1);
+        return g1 == null ? "" : g1.replaceAll("\\s+", "").toUpperCase(java.util.Locale.ROOT);
+    }
+
+    private static String clampLoadingText(String text, int maxChars) {
+        if (text == null) return "";
+        String trimmed = text.trim();
+        if (trimmed.length() <= maxChars) return trimmed;
+        return trimmed.substring(0, Math.max(1, maxChars - 1)).trim() + "…";
+    }
+
+    private static String resolveInitialLoadingHeadline(Cms.Episode episode) {
+        if (episode != null && episode.media != null) {
+            int qIdx = episode.media.optInt("_qualityIdx", 0);
+            org.json.JSONArray qualities = episode.media.optJSONArray("qualities");
+            if (qIdx > 0 && qualities != null && qIdx < qualities.length()) {
+                org.json.JSONObject q = qualities.optJSONObject(qIdx);
+                String qName = q != null ? q.optString("name", "").trim() : "";
+                if (!qName.isEmpty()) {
+                    return "正在切换至 " + clampLoadingText(qName, 14) + "…";
+                }
+            }
+        }
+        return "正在加载播放…";
+    }
+
+    void setLoadingStatus(String headline, String subtitle) {
+        if (loadingText != null && headline != null && !headline.trim().isEmpty()) {
+            loadingText.setText(clampLoadingText(headline, 22));
+        }
+        if (loadingSubText != null && subtitle != null) {
+            String sub = clampLoadingText(subtitle, 34);
+            loadingSubText.setText(sub);
+            loadingSubText.setVisibility(sub.isEmpty() ? View.GONE : View.VISIBLE);
+        }
     }
 
     private void place(
@@ -1315,7 +1516,32 @@ final class PlayerChrome {
         update();
     }
 
+    void setHdrSurfaceActive(boolean active) {
+        if (this.hdrSurfaceActive == active) return;
+        this.hdrSurfaceActive = active;
+        update();
+    }
+
+    void cancelEpisodeHoldSwitch() {
+        if (episodeHoldOverlay != null) {
+            episodeHoldOverlay.cancel();
+        }
+    }
+
+    /**
+     * Suppresses background 1Hz RGBA HUD redraws on Android TV HDR SurfaceView playback while
+     * main controls are hidden so Amlogic/MediaTek HWC2 compositors remain locked in hardware HDR
+     * VPP overlay instead of periodically dropping into GPU mixed composition (which flashes HDR
+     * video toward SDR for ~200–300ms per HUD tick).
+     */
+    static boolean shouldSuppressLiveHudRedraws(
+            boolean tvDevice, boolean hdrSurfaceActive, boolean controlsVisible) {
+        return tvDevice && hdrSurfaceActive && !controlsVisible;
+    }
+
     void switchEpisode(Cms.Episode episode, Cms.Line line) {
+        cancelEpisodeHoldSwitch();
+        hdrSurfaceActive = false;
         PlaybackControls.markSleepTimerInPlaceSwitch();
         if (startSpecBanner != null) startSpecBanner.resetEpisode();
         if (mobileSpecBadgeRow != null) {
@@ -1335,9 +1561,10 @@ final class PlayerChrome {
             cardTitleView.setText(formatCardTitle(chromeVideo, episode));
         }
         resolution.setText("分辨率读取中");
-        String statusMsg = "正在加载" + (epName.isEmpty() ? "" : " " + epName) + "…";
-        if (a.playStatus != null) a.playStatus.setText(statusMsg);
-        loadingText.setText(statusMsg);
+        String loadingSub =
+                formatLoadingSubtitle(chromeVideo != null ? chromeVideo.title : "", epName);
+        if (a.playStatus != null) a.playStatus.setText("正在加载播放…");
+        setLoadingStatus("正在切换剧集…", loadingSub);
         loading = true;
         update();
     }
@@ -1389,11 +1616,17 @@ final class PlayerChrome {
     }
 
     void updatePlaybackHud(int displayPosMs, int durationMs, boolean live) {
+        boolean suppressLiveHud =
+                shouldSuppressLiveHudRedraws(a.isTvDevice(), hdrSurfaceActive, a.controlsVisible);
         if (slimProgressBar != null) {
-            slimProgressBar.setProgress(displayPosMs, durationMs);
-            syncSlimProgressVisibility(durationMs, live);
+            if (suppressLiveHud) {
+                slimProgressBar.setActiveVisible(false);
+            } else {
+                slimProgressBar.setProgress(displayPosMs, durationMs);
+                syncSlimProgressVisibility(durationMs, live);
+            }
         }
-        if (tvTopRightHud == null || hudProgressView == null) return;
+        if (tvTopRightHud == null || hudProgressView == null || suppressLiveHud) return;
         String elapsed;
         String total;
         if (live && durationMs <= 0) {
@@ -1413,14 +1646,17 @@ final class PlayerChrome {
     private void syncSlimProgressVisibility(int durationMs, boolean live) {
         if (slimProgressBar == null) return;
         slimProgressBar.setReducedMotion(a.reduced);
+        boolean suppressLiveHud =
+                shouldSuppressLiveHudRedraws(a.isTvDevice(), hdrSurfaceActive, a.controlsVisible);
         boolean showSlim =
-                shouldShowSlimProgressBar(
-                        a.controlsVisible,
-                        a.miniMode,
-                        live,
-                        a.prepared,
-                        durationMs,
-                        PlayerHudPrefs.isSlimProgressEnabled(a));
+                !suppressLiveHud
+                        && shouldShowSlimProgressBar(
+                                a.controlsVisible,
+                                a.miniMode,
+                                live,
+                                a.prepared,
+                                durationMs,
+                                PlayerHudPrefs.isSlimProgressEnabled(a));
         slimProgressBar.setActiveVisible(showSlim);
     }
 
@@ -1435,19 +1671,25 @@ final class PlayerChrome {
         }
         if (a.isTvDevice()) {
             boolean hudEnabled = a.prefs.getBoolean(Prefs.TV_PLAYER_TOP_RIGHT_HUD, true);
-            boolean showHud = hudEnabled && !a.miniMode && !a.controlsVisible;
-            if (persistentClock != null
-                    && (timeChanged || persistentClock.getText().length() == 0)) {
-                persistentClock.setText(styledWallTime(now));
-            }
+            boolean suppressLiveHud =
+                    shouldSuppressLiveHudRedraws(true, hdrSurfaceActive, a.controlsVisible);
+            boolean showHud = hudEnabled && !a.miniMode && !a.controlsVisible && !suppressLiveHud;
             if (tvTopRightHud != null) {
                 int targetVis = showHud ? View.VISIBLE : View.GONE;
                 if (tvTopRightHud.getVisibility() != targetVis) {
                     tvTopRightHud.setVisibility(targetVis);
                 }
             }
-            if (wallClock != null) {
-                if (timeChanged) {
+            if (showHud
+                    && persistentClock != null
+                    && (!now.equals(lastPersistentClockText)
+                            || persistentClock.getText().length() == 0)) {
+                lastPersistentClockText = now;
+                persistentClock.setText(styledWallTime(now));
+            }
+            if (a.controlsVisible && wallClock != null) {
+                if (!now.equals(lastWallClockText) || wallClock.getText().length() == 0) {
+                    lastWallClockText = now;
                     wallClock.setText(styledWallTime(now));
                 }
                 if (wallClock.getVisibility() != View.VISIBLE) {

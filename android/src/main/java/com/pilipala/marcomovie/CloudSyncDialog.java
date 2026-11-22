@@ -1104,7 +1104,9 @@ final class CloudSyncDialog {
                         a.prefs.getString(Prefs.WEBDAV_URL, ""),
                         false);
         urlInput.setTag("cloud-sync-url");
-        panel.addView(urlInput, new LinearLayout.LayoutParams(-1, -2));
+        panel.addView(
+                TvQrInputHelper.wrap(a, urlInput, "WebDAV 地址"),
+                new LinearLayout.LayoutParams(-1, -2));
         a.gap(panel, 8);
 
         final EditText userInput =
@@ -1114,7 +1116,9 @@ final class CloudSyncDialog {
                         a.prefs.getString(Prefs.WEBDAV_USER, ""),
                         false);
         userInput.setTag("cloud-sync-user");
-        panel.addView(userInput, new LinearLayout.LayoutParams(-1, -2));
+        panel.addView(
+                TvQrInputHelper.wrap(a, userInput, "WebDAV 账号"),
+                new LinearLayout.LayoutParams(-1, -2));
         a.gap(panel, 8);
 
         final AtomicBoolean passLoaded = new AtomicBoolean(false);
@@ -1138,7 +1142,9 @@ final class CloudSyncDialog {
                     @Override
                     public void afterTextChanged(Editable s) {}
                 });
-        panel.addView(passInput, new LinearLayout.LayoutParams(-1, -2));
+        panel.addView(
+                TvQrInputHelper.wrap(a, passInput, "WebDAV 密码", false, true, false, null),
+                new LinearLayout.LayoutParams(-1, -2));
         a.gap(panel, 8);
 
         final Context dialogAppCtx =
@@ -1357,7 +1363,9 @@ final class CloudSyncDialog {
 
         TextView tip =
                 a.text(
-                        "在另一台设备打开「多端网络同步 → 本机局域网接收码」（或电视「手机扫码配置」），将该设备上显示的局域网地址输入或粘贴到下方：",
+                        a.isTvDevice()
+                                ? "在另一台设备打开「多端网络同步 → 本机局域网接收码」，点击输入框右侧二维码图标即可用手机扫码发送对方地址："
+                                : "在另一台设备打开「多端网络同步 → 本机局域网接收码」（或电视「手机扫码配置」），将该设备上显示的局域网地址输入或粘贴到下方：",
                         13,
                         MainActivity.MUTED);
         tip.setLineSpacing(a.dp(3), 1f);
@@ -1366,7 +1374,9 @@ final class CloudSyncDialog {
 
         final EditText peerInput = styledInput(a, "http://…/configure/…", "", false);
         peerInput.setTag("lan-sync-peer-input");
-        panel.addView(peerInput, new LinearLayout.LayoutParams(-1, -2));
+        panel.addView(
+                TvQrInputHelper.wrap(a, peerInput, "对方局域网同步地址"),
+                new LinearLayout.LayoutParams(-1, -2));
 
         if (!a.isTvDevice()) {
             a.gap(panel, 8);

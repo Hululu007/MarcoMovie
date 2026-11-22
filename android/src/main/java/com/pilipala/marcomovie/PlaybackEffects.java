@@ -8,6 +8,32 @@ import android.view.View;
 final class PlaybackEffects implements java.io.Closeable {
     Equalizer equalizer;
     BassBoost bass;
+    LoudnessEnhancer loudness;
+
+    void applyLoudness(int session, int boostDb) {
+        if (loudness != null) {
+            try {
+                loudness.release();
+            } catch (Exception ignored) {
+            }
+            loudness = null;
+        }
+        int clamped = Math.max(0, Math.min(15, boostDb));
+        if (clamped <= 0 || session <= 0 || android.os.Build.VERSION.SDK_INT < 19) return;
+        try {
+            loudness = new LoudnessEnhancer(session);
+            loudness.setTargetGain(clamped * 100);
+            loudness.setEnabled(true);
+        } catch (Exception ignored) {
+            if (loudness != null) {
+                try {
+                    loudness.release();
+                } catch (Exception ignored2) {
+                }
+                loudness = null;
+            }
+        }
+    }
 
     void audio(int session, int preset) throws Exception {
         close();
@@ -84,6 +110,13 @@ final class PlaybackEffects implements java.io.Closeable {
 
     @Override
     public void close() {
+        if (loudness != null) {
+            try {
+                loudness.release();
+            } catch (Exception ignored) {
+            }
+            loudness = null;
+        }
         if (bass != null) {
             try {
                 bass.release();

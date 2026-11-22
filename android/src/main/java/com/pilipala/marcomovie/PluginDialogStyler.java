@@ -10,9 +10,11 @@ import android.graphics.drawable.StateListDrawable;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
@@ -27,11 +29,13 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -55,9 +59,76 @@ final class PluginDialogStyler {
             Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
     private static final Set<View> STYLED_LIST_ITEMS =
             Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
-    private static final int[] WATCH_DELAYS_MS = {0, 45, 120, 260, 520, 950, 1600, 2400};
+    private static final Set<View> AUTO_FORWARDED_DECORS =
+            Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
+    private static final int[] WATCH_DELAYS_MS = {
+        0, 40, 100, 180, 300, 480, 750, 1100, 1600, 2200, 3000, 4200, 5600
+    };
+    private static final long DIRECT_DRIVE_FORWARD_TTL_MS = 8000L;
+
+    private static String pendingForwardDriveKey;
+    private static boolean pendingForwardToggleEnable;
+    private static long pendingForwardExpiresAtMs;
+    private static WeakReference<View> pendingDismissIntermediateDecor;
 
     private PluginDialogStyler() {}
+
+    static void armDirectDriveForward(
+            final MainActivity a, final String driveKey, final boolean toggleEnableOnly) {
+        if (driveKey == null || driveKey.trim().isEmpty()) {
+            clearDirectDriveForward();
+            return;
+        }
+        pendingForwardDriveKey = driveKey.trim().toLowerCase(Locale.ROOT);
+        pendingForwardToggleEnable = toggleEnableOnly;
+        pendingForwardExpiresAtMs = SystemClock.uptimeMillis() + DIRECT_DRIVE_FORWARD_TTL_MS;
+        watch(a);
+    }
+
+    static void clearDirectDriveForward() {
+        pendingForwardDriveKey = null;
+        pendingForwardToggleEnable = false;
+        pendingForwardExpiresAtMs = 0L;
+    }
+
+    static boolean shouldExpandToMatchParent(boolean inHScroll, boolean inHorizontalLinearLayout) {
+        return !inHScroll && !inHorizontalLinearLayout;
+    }
+
+    static String detectDriveKeyFromLabel(String text) {
+        if (text == null || text.trim().isEmpty()) return null;
+        String raw = text.trim();
+        String upper = raw.toUpperCase(Locale.ROOT);
+        if (raw.contains("夸父") || raw.contains("夸克") || upper.contains("QUARK")) return "quark";
+        if (raw.contains("优汐") || upper.contains("UC")) return "uc";
+        if (raw.contains("嘟嘟") || raw.contains("百度") || upper.contains("BAIDU")) return "baidu";
+        if (raw.contains("阿狸") || raw.contains("阿里") || upper.contains("ALI")) return "ali";
+        if (raw.contains("115")) return "115";
+        if (raw.contains("天翼") || raw.contains("189")) return "189";
+        if (raw.contains("移动") || raw.contains("139")) return "139";
+        if (raw.contains("123")) return "123";
+        if (raw.contains("迅雷")) return "thunder";
+        return null;
+    }
+
+    static boolean isDriveStatusToggleLabel(String text) {
+        if (text == null || text.trim().isEmpty()) return false;
+        String t = text.trim();
+        return t.contains("启用中")
+                || t.contains("已启用")
+                || t.contains("未启用")
+                || t.contains("已停用")
+                || t.contains("停用")
+                || "开启".equals(t)
+                || "关闭".equals(t);
+    }
+
+    static boolean isDirectDriveLoginTarget(String targetDriveKey, String buttonText) {
+        if (targetDriveKey == null || targetDriveKey.trim().isEmpty()) return false;
+        String detected = detectDriveKeyFromLabel(buttonText);
+        return targetDriveKey.trim().equalsIgnoreCase(detected)
+                && !isDriveStatusToggleLabel(buttonText);
+    }
 
     static void watch(final MainActivity a) {
         if (a == null) return;
@@ -75,8 +146,14 @@ final class PluginDialogStyler {
     static void scanAndStyleWindows(final MainActivity a) {
         if (a == null || a.isFinishing() || a.isDestroyed()) return;
         try {
+            if (pendingForwardDriveKey != null
+                    && SystemClock.uptimeMillis() > pendingForwardExpiresAtMs) {
+                clearDirectDriveForward();
+            }
             View activityDecor = a.getWindow() != null ? a.getWindow().getDecorView() : null;
             List<View> views = getGlobalWindowViews();
+            List<ViewGroup> pluginDecors = new ArrayList<>();
+            List<ViewGroup> pluginContents = new ArrayList<>();
             for (View root : views) {
                 if (root == null || root == activityDecor || !(root instanceof ViewGroup)) continue;
                 if (isAppOwnedWindow(root)) continue;
@@ -92,11 +169,235 @@ final class PluginDialogStyler {
                 if (!(content instanceof ViewGroup) || ((ViewGroup) content).getChildCount() == 0) {
                     continue;
                 }
-                stylePluginDecor(a, (ViewGroup) root, (ViewGroup) content);
+                pluginDecors.add((ViewGroup) root);
+                pluginContents.add((ViewGroup) content);
+            }
+
+            boolean hasNonForwardedPluginDialog = false;
+            for (ViewGroup decor : pluginDecors) {
+                if (!AUTO_FORWARDED_DECORS.contains(decor)) {
+                    hasNonForwardedPluginDialog = true;
+                    break;
+                }
+            }
+
+            for (int i = 0; i < pluginDecors.size(); i++) {
+                ViewGroup decor = pluginDecors.get(i);
+                ViewGroup content = pluginContents.get(i);
+                if (AUTO_FORWARDED_DECORS.contains(decor)) {
+                    decor.setAlpha(0f);
+                    if (!hasNonForwardedPluginDialog && decor.isAttachedToWindow()) {
+                        dismissPluginDecor(decor, content);
+                    }
+                    continue;
+                }
+                if (containsQrImageView(a, content)) {
+                    clearDirectDriveForward();
+                    decor.setAlpha(1f);
+                    stylePluginDecor(a, decor, content);
+                    continue;
+                }
+                if (tryAutoForwardDriveDialog(a, decor, content)) {
+                    continue;
+                }
+                decor.setAlpha(1f);
+                stylePluginDecor(a, decor, content);
             }
         } catch (Throwable t) {
             AppLog.w("PluginDialogStyler", "scanAndStyleWindows skipped", t);
         }
+    }
+
+    private static boolean containsQrImageView(MainActivity a, View v) {
+        if (v == null) return false;
+        if (v instanceof ImageView) {
+            ImageView iv = (ImageView) v;
+            String resName = resourceEntryName(iv);
+            if (!"icon".equals(resName) && iv.getId() != android.R.id.icon) {
+                ViewGroup.LayoutParams lp = iv.getLayoutParams();
+                int w = lp != null && lp.width > 0 ? lp.width : iv.getMeasuredWidth();
+                int h = lp != null && lp.height > 0 ? lp.height : iv.getMeasuredHeight();
+                boolean likelyQr =
+                        (w >= a.dp(105) && h >= a.dp(105))
+                                || (iv.getDrawable() != null
+                                        && iv.getDrawable().getIntrinsicWidth() >= 130
+                                        && Math.abs(
+                                                        iv.getDrawable().getIntrinsicWidth()
+                                                                - iv.getDrawable()
+                                                                        .getIntrinsicHeight())
+                                                <= 36);
+                if (likelyQr) return true;
+            }
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) v;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                if (containsQrImageView(a, vg.getChildAt(i))) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean tryAutoForwardDriveDialog(
+            final MainActivity a, final ViewGroup decor, final ViewGroup content) {
+        List<LinearLayout> driveRows = new ArrayList<>();
+        collectSpiderDriveRows(content, driveRows, 0);
+        if (driveRows.size() < 2) {
+            return false;
+        }
+        // Always harvest live login & enabled statuses for Level-1 AccountPanel.
+        for (LinearLayout row : driveRows) {
+            harvestDriveRowStatus(a, row);
+        }
+        final String targetKey = pendingForwardDriveKey;
+        if (targetKey == null) {
+            return false;
+        }
+        final boolean toggleOnly = pendingForwardToggleEnable;
+        final View targetBtn = findDriveActionView(driveRows, targetKey, toggleOnly);
+        clearDirectDriveForward();
+        if (targetBtn == null) {
+            a.toast("当前片源未提供该网盘的快捷扫码入口，请在列表中选择");
+            return false;
+        }
+        AUTO_FORWARDED_DECORS.add(decor);
+        pendingDismissIntermediateDecor = new WeakReference<>(decor);
+        decor.setAlpha(0f);
+        if (Build.VERSION.SDK_INT >= 18) {
+            decor.getViewTreeObserver()
+                    .addOnWindowFocusChangeListener(
+                            hasFocus -> {
+                                if (hasFocus && AUTO_FORWARDED_DECORS.contains(decor)) {
+                                    decor.setAlpha(0f);
+                                    MAIN.post(() -> dismissPluginDecor(decor, content));
+                                }
+                            });
+        }
+        MAIN.post(
+                () -> {
+                    try {
+                        if (!decor.isAttachedToWindow()) return;
+                        targetBtn.performClick();
+                        if (toggleOnly) {
+                            MAIN.postDelayed(
+                                    () -> {
+                                        try {
+                                            List<LinearLayout> refreshed = new ArrayList<>();
+                                            collectSpiderDriveRows(content, refreshed, 0);
+                                            for (LinearLayout row : refreshed) {
+                                                harvestDriveRowStatus(a, row);
+                                            }
+                                            a.toast("已切换网盘启用状态");
+                                            dismissPluginDecor(decor, content);
+                                        } catch (Throwable ignored) {
+                                        }
+                                    },
+                                    260);
+                        } else {
+                            watch(a);
+                        }
+                    } catch (Throwable t) {
+                        AUTO_FORWARDED_DECORS.remove(decor);
+                        decor.setAlpha(1f);
+                        stylePluginDecor(a, decor, content);
+                    }
+                });
+        return true;
+    }
+
+    private static void collectSpiderDriveRows(View v, List<LinearLayout> out, int depth) {
+        if (v == null || depth > 14) return;
+        if (v instanceof LinearLayout && isSpiderDriveRow((LinearLayout) v)) {
+            out.add((LinearLayout) v);
+            return;
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) v;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                collectSpiderDriveRows(vg.getChildAt(i), out, depth + 1);
+            }
+        }
+    }
+
+    private static void harvestDriveRowStatus(MainActivity a, LinearLayout row) {
+        TextView accountView = null;
+        TextView statusView = null;
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View child = row.getChildAt(i);
+            if (!(child instanceof TextView)) continue;
+            String label = textOf((TextView) child);
+            if (isDriveStatusToggleLabel(label)) {
+                if (statusView == null) statusView = (TextView) child;
+            } else if (detectDriveKeyFromLabel(label) != null || accountView == null) {
+                accountView = (TextView) child;
+            }
+        }
+        if (accountView != null) {
+            AccountPanel.recordObservedSpiderRow(
+                    a, textOf(accountView), statusView == null ? "" : textOf(statusView));
+        }
+    }
+
+    private static View findDriveActionView(
+            List<LinearLayout> driveRows, String targetDriveKey, boolean toggleOnly) {
+        for (LinearLayout row : driveRows) {
+            View accountBtn = null;
+            View statusBtn = null;
+            boolean rowMatchesDrive = false;
+            for (int i = 0; i < row.getChildCount(); i++) {
+                View child = row.getChildAt(i);
+                if (!(child instanceof TextView)) continue;
+                String label = textOf((TextView) child);
+                if (isDirectDriveLoginTarget(targetDriveKey, label)) {
+                    rowMatchesDrive = true;
+                    accountBtn = child;
+                } else if (isDriveStatusToggleLabel(label)) {
+                    statusBtn = child;
+                }
+            }
+            if (rowMatchesDrive) {
+                if (toggleOnly) {
+                    return statusBtn != null ? statusBtn : accountBtn;
+                }
+                return accountBtn;
+            }
+        }
+        return null;
+    }
+
+    private static void dismissPluginDecor(ViewGroup decor, ViewGroup content) {
+        if (decor == null || !decor.isAttachedToWindow()) return;
+        try {
+            View cancel = findDismissButton(content, 0);
+            if (cancel != null && cancel.isClickable()) {
+                cancel.performClick();
+                return;
+            }
+            KeyEvent down = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK);
+            KeyEvent up = new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK);
+            decor.dispatchKeyEvent(down);
+            decor.dispatchKeyEvent(up);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static View findDismissButton(View v, int depth) {
+        if (v == null || depth > 12) return null;
+        if (v instanceof Button && v.getVisibility() == View.VISIBLE) {
+            int id = v.getId();
+            String label = textOf((TextView) v);
+            if (id == android.R.id.button2 || isCancelLabel(label)) {
+                return v;
+            }
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) v;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                View found = findDismissButton(vg.getChildAt(i), depth + 1);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     private static boolean belongsToApp(Context ctx, MainActivity a) {
@@ -407,6 +708,10 @@ final class PluginDialogStyler {
         }
 
         boolean inHScroll = v.getParent() instanceof HorizontalScrollView;
+        boolean inHorizontalRow =
+                v.getParent() instanceof LinearLayout
+                        && ((LinearLayout) v.getParent()).getOrientation()
+                                == LinearLayout.HORIZONTAL;
 
         // Detect Pan.java LoginShow row: Horizontal LinearLayout containing account + status toggle
         if (v instanceof LinearLayout && isSpiderDriveRow((LinearLayout) v)) {
@@ -424,9 +729,22 @@ final class PluginDialogStyler {
             return;
         }
 
+        // Detect any other horizontal multi-child LinearLayout (e.g. [Label][Button][Button]) and
+        // constrain child widths proportionally so no button can ever overflow past cardRoot's edge
+        if (v != cardRoot
+                && v instanceof LinearLayout
+                && !"buttonPanel".equals(resName)
+                && ((LinearLayout) v).getOrientation() == LinearLayout.HORIZONTAL
+                && ((LinearLayout) v).getChildCount() >= 2
+                && !inHScroll) {
+            normalizeHorizontalOverflowRow(a, (LinearLayout) v);
+        }
+
         // Normalize all intermediate ViewGroups so hardcoded widths (e.g. 500dp) or OEM AlertDialog
         // 24dp panel paddings never push child buttons past cardRoot's right edge
-        if (v != cardRoot && v instanceof ViewGroup && !inHScroll) {
+        if (v != cardRoot
+                && v instanceof ViewGroup
+                && shouldExpandToMatchParent(inHScroll, inHorizontalRow)) {
             ViewGroup.LayoutParams lp = v.getLayoutParams();
             if (lp != null) {
                 boolean changed = false;
@@ -484,17 +802,17 @@ final class PluginDialogStyler {
         }
 
         if (v instanceof EditText) {
-            styleEditText(a, (EditText) v, inHScroll);
+            styleEditText(a, (EditText) v, inHScroll, inHorizontalRow);
             return;
         }
 
         if (v instanceof Button) {
-            styleGenericPluginButton(a, (Button) v, inHScroll);
+            styleGenericPluginButton(a, (Button) v, inHScroll, inHorizontalRow);
             return;
         }
 
         if (v instanceof TextView) {
-            stylePluginTextView(a, (TextView) v, resName, inHScroll);
+            stylePluginTextView(a, (TextView) v, resName, inHScroll, inHorizontalRow);
             return;
         }
 
@@ -519,27 +837,67 @@ final class PluginDialogStyler {
 
     private static boolean isSpiderDriveRow(LinearLayout row) {
         if (row.getOrientation() != LinearLayout.HORIZONTAL) return false;
-        if (row.getChildCount() != 2) return false;
-        if (!(row.getChildAt(0) instanceof Button) || !(row.getChildAt(1) instanceof Button)) {
-            return false;
+        int count = row.getChildCount();
+        if (count < 2 || count > 3) return false;
+        boolean hasDriveLabel = false;
+        boolean hasStatusOrButton = false;
+        for (int i = 0; i < count; i++) {
+            View child = row.getChildAt(i);
+            if (child instanceof TextView) {
+                String t = textOf((TextView) child);
+                if (detectDriveKeyFromLabel(t) != null || t.contains("登录")) {
+                    hasDriveLabel = true;
+                }
+                if (isDriveStatusToggleLabel(t) || child instanceof Button) {
+                    hasStatusOrButton = true;
+                }
+            } else if (!(child instanceof ImageView)) {
+                return false;
+            }
         }
-        String left = textOf((TextView) row.getChildAt(0));
-        String right = textOf((TextView) row.getChildAt(1));
-        return left.contains("登录")
-                || left.contains("夸")
-                || left.contains("优汐")
-                || left.contains("UC")
-                || left.contains("嘟嘟")
-                || left.contains("百度")
-                || left.contains("阿狸")
-                || left.contains("阿里")
-                || left.contains("115")
-                || left.contains("天翼")
-                || left.contains("移动")
-                || left.contains("123")
-                || left.contains("迅雷")
-                || right.contains("启用")
-                || right.contains("停用");
+        return hasDriveLabel && hasStatusOrButton;
+    }
+
+    private static void normalizeHorizontalOverflowRow(MainActivity a, LinearLayout row) {
+        row.setMinimumWidth(0);
+        row.setWeightSum(-1f);
+        ViewGroup.LayoutParams rawLp = row.getLayoutParams();
+        if (rawLp != null) {
+            rawLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+            if (rawLp instanceof ViewGroup.MarginLayoutParams) {
+                ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) rawLp;
+                applyHorizontalMargins(mlp, 0, mlp.topMargin, 0, mlp.bottomMargin);
+            }
+            row.setLayoutParams(rawLp);
+        }
+        List<View> visible = new ArrayList<>();
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View c = row.getChildAt(i);
+            if (c.getVisibility() != View.GONE) visible.add(c);
+        }
+        if (visible.size() < 2) return;
+        int gap = a.dp(8);
+        for (int i = 0; i < visible.size(); i++) {
+            View c = visible.get(i);
+            c.setMinimumWidth(0);
+            if (c instanceof TextView) {
+                ((TextView) c).setMinWidth(0);
+                ((TextView) c).setSingleLine(true);
+                ((TextView) c).setEllipsize(TextUtils.TruncateAt.END);
+            }
+            if (c.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+                LinearLayout.LayoutParams clp = (LinearLayout.LayoutParams) c.getLayoutParams();
+                if (c instanceof ImageView) {
+                    clp.weight = 0f;
+                } else {
+                    clp.width = 0;
+                    clp.weight = 1f;
+                }
+                applyHorizontalMargins(
+                        clp, 0, clp.topMargin, i < visible.size() - 1 ? gap : 0, clp.bottomMargin);
+                c.setLayoutParams(clp);
+            }
+        }
     }
 
     private static boolean isPluginHorizontalButtonBar(LinearLayout row) {
@@ -658,10 +1016,21 @@ final class PluginDialogStyler {
     }
 
     private static void styleSpiderDriveRow(MainActivity a, LinearLayout row) {
-        Button accountBtn = (Button) row.getChildAt(0);
-        Button statusBtn = (Button) row.getChildAt(1);
+        TextView accountBtn = null;
+        TextView statusBtn = null;
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View child = row.getChildAt(i);
+            if (!(child instanceof TextView)) continue;
+            String label = textOf((TextView) child);
+            if (isDriveStatusToggleLabel(label)) {
+                if (statusBtn == null) statusBtn = (TextView) child;
+            } else if (detectDriveKeyFromLabel(label) != null || accountBtn == null) {
+                accountBtn = (TextView) child;
+            }
+        }
+        if (accountBtn == null) return;
         String accountLabel = textOf(accountBtn);
-        String statusLabel = textOf(statusBtn);
+        String statusLabel = statusBtn == null ? "" : textOf(statusBtn);
         AccountPanel.recordObservedSpiderRow(a, accountLabel, statusLabel);
 
         boolean loggedIn =
@@ -714,29 +1083,31 @@ final class PluginDialogStyler {
                 leftLp.width = 0;
                 leftLp.weight = 1f;
                 leftLp.height = a.dp(tv ? 42 : 38);
-                applyHorizontalMargins(leftLp, 0, 0, a.dp(10), 0);
+                applyHorizontalMargins(leftLp, 0, 0, statusBtn != null ? a.dp(10) : 0, 0);
                 accountBtn.setLayoutParams(leftLp);
             }
             accountBtn.setPadding(a.dp(12), 0, a.dp(10), 0);
 
-            statusBtn.setMinWidth(0);
-            statusBtn.setMinimumWidth(0);
-            statusBtn.setMinHeight(0);
-            statusBtn.setMinimumHeight(0);
-            if (statusBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
-                LinearLayout.LayoutParams rightLp =
-                        (LinearLayout.LayoutParams) statusBtn.getLayoutParams();
-                rightLp.width = a.dp(tv ? 86 : 72);
-                rightLp.weight = 0f;
-                rightLp.height = a.dp(tv ? 36 : 32);
-                applyHorizontalMargins(rightLp, 0, 0, 0, 0);
-                statusBtn.setLayoutParams(rightLp);
+            if (statusBtn != null) {
+                statusBtn.setMinWidth(0);
+                statusBtn.setMinimumWidth(0);
+                statusBtn.setMinHeight(0);
+                statusBtn.setMinimumHeight(0);
+                if (statusBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+                    LinearLayout.LayoutParams rightLp =
+                            (LinearLayout.LayoutParams) statusBtn.getLayoutParams();
+                    rightLp.width = a.dp(tv ? 86 : 72);
+                    rightLp.weight = 0f;
+                    rightLp.height = a.dp(tv ? 36 : 32);
+                    applyHorizontalMargins(rightLp, 0, 0, 0, 0);
+                    statusBtn.setLayoutParams(rightLp);
+                }
+                statusBtn.setPadding(a.dp(8), 0, a.dp(8), 0);
             }
-            statusBtn.setPadding(a.dp(8), 0, a.dp(8), 0);
         }
 
-        applySpiderDriveAccountButton(a, accountBtn);
-        applySpiderDriveStatusPill(a, statusBtn);
+        if (accountBtn instanceof Button) applySpiderDriveAccountButton(a, (Button) accountBtn);
+        if (statusBtn instanceof Button) applySpiderDriveStatusPill(a, (Button) statusBtn);
     }
 
     private static void refreshSpiderButtonStates(MainActivity a, ViewGroup root) {
@@ -849,6 +1220,7 @@ final class PluginDialogStyler {
         btn.setTypeface(null, Typeface.BOLD);
         btn.setTextSize(13.5f);
         btn.setTextColor(loggedIn ? 0xffffffff : 0xe6f5f5f7);
+        UiCompat.setDefaultFocusHighlightEnabled(btn, false);
         if (Build.VERSION.SDK_INT >= 21) {
             btn.setStateListAnimator(null);
             btn.setElevation(0f);
@@ -883,6 +1255,7 @@ final class PluginDialogStyler {
         btn.setTypeface(null, Typeface.BOLD);
         btn.setTextSize(a.isTvDevice() ? 12.5f : 11.8f);
         btn.setTextColor(enabled ? 0xff4ade80 : 0xd9f5f5f7);
+        UiCompat.setDefaultFocusHighlightEnabled(btn, false);
         if (Build.VERSION.SDK_INT >= 21) {
             btn.setStateListAnimator(null);
             btn.setElevation(0f);
@@ -946,6 +1319,7 @@ final class PluginDialogStyler {
         btn.setTypeface(null, Typeface.BOLD);
         btn.setTextSize(13f);
         btn.setTextColor(textCol);
+        UiCompat.setDefaultFocusHighlightEnabled(btn, false);
         if (Build.VERSION.SDK_INT >= 21) {
             btn.setStateListAnimator(null);
             btn.setElevation(0f);
@@ -953,7 +1327,8 @@ final class PluginDialogStyler {
         btn.setBackground(bg);
     }
 
-    private static void styleGenericPluginButton(MainActivity a, Button btn, boolean inHScroll) {
+    private static void styleGenericPluginButton(
+            MainActivity a, Button btn, boolean inHScroll, boolean inHorizontalRow) {
         int id = btn.getId();
         if (id == android.R.id.button1
                 || id == android.R.id.button2
@@ -964,45 +1339,62 @@ final class PluginDialogStyler {
         btn.setMinimumWidth(0);
         btn.setMinHeight(a.dp(38));
         btn.setMinimumHeight(a.dp(38));
-        if (!inHScroll) {
+        if (shouldExpandToMatchParent(inHScroll, inHorizontalRow)) {
             ViewGroup.LayoutParams lp = btn.getLayoutParams();
             if (lp != null && lp.width > 0) {
                 lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
                 btn.setLayoutParams(lp);
             }
         }
-        btn.setPadding(a.dp(14), a.dp(6), a.dp(14), a.dp(6));
+        btn.setPadding(a.dp(12), a.dp(6), a.dp(12), a.dp(6));
         applyIosActionCapsuleStyle(a, btn, false);
     }
 
     private static void styleAlertButtonBar(MainActivity a, ViewGroup cardRoot) {
-        int[] ids = {android.R.id.button1, android.R.id.button2, android.R.id.button3};
+        int[] ids = {android.R.id.button3, android.R.id.button2, android.R.id.button1};
+        List<Button> visibleBtns = new ArrayList<>();
+        ViewGroup bar = null;
         for (int id : ids) {
             View found = cardRoot.findViewById(id);
             if (!(found instanceof Button) || found.getVisibility() != View.VISIBLE) continue;
             Button b = (Button) found;
-            View parent = b.getParent() instanceof View ? (View) b.getParent() : null;
-            if (parent instanceof ViewGroup) {
-                parent.setPadding(0, a.dp(6), 0, 0);
-                parent.setBackgroundColor(Color.TRANSPARENT);
-                ViewGroup.LayoutParams plp = parent.getLayoutParams();
-                if (plp != null && plp.width != ViewGroup.LayoutParams.MATCH_PARENT) {
-                    plp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-                    parent.setLayoutParams(plp);
-                }
-                ViewGroup bar = (ViewGroup) parent;
-                for (int i = 0; i < bar.getChildCount(); i++) {
-                    View sibling = bar.getChildAt(i);
-                    if (!(sibling instanceof Button)
-                            && sibling.getLayoutParams() instanceof LinearLayout.LayoutParams) {
-                        LinearLayout.LayoutParams slp =
-                                (LinearLayout.LayoutParams) sibling.getLayoutParams();
-                        slp.width = 0;
-                        slp.weight = 1f;
-                        sibling.setLayoutParams(slp);
-                    }
+            visibleBtns.add(b);
+            if (bar == null && b.getParent() instanceof ViewGroup) {
+                bar = (ViewGroup) b.getParent();
+            }
+        }
+        if (visibleBtns.isEmpty()) return;
+        if (bar != null) {
+            bar.setPadding(0, a.dp(8), 0, 0);
+            bar.setBackgroundColor(Color.TRANSPARENT);
+            bar.setMinimumWidth(0);
+            ViewGroup.LayoutParams plp = bar.getLayoutParams();
+            if (plp != null && plp.width != ViewGroup.LayoutParams.MATCH_PARENT) {
+                plp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                bar.setLayoutParams(plp);
+            }
+            if (bar instanceof LinearLayout) {
+                ((LinearLayout) bar).setWeightSum(-1f);
+            }
+            boolean multi = visibleBtns.size() >= 2;
+            for (int i = 0; i < bar.getChildCount(); i++) {
+                View sibling = bar.getChildAt(i);
+                if (!(sibling instanceof Button)
+                        && sibling.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+                    LinearLayout.LayoutParams slp =
+                            (LinearLayout.LayoutParams) sibling.getLayoutParams();
+                    slp.width = 0;
+                    slp.weight = multi ? 0f : 1f;
+                    sibling.setLayoutParams(slp);
+                    if (multi) sibling.setVisibility(View.GONE);
                 }
             }
+        }
+        boolean multi = visibleBtns.size() >= 2;
+        int gap = a.dp(8);
+        for (int i = 0; i < visibleBtns.size(); i++) {
+            Button b = visibleBtns.get(i);
+            int id = b.getId();
             boolean primary = (id == android.R.id.button1);
             Drawable pill =
                     buildStatefulPill(
@@ -1021,18 +1413,29 @@ final class PluginDialogStyler {
             b.setTypeface(null, Typeface.BOLD);
             b.setTextSize(13f);
             b.setTextColor(primary ? Color.WHITE : 0xe6f5f5f7);
-            b.setMinHeight(a.dp(36));
-            b.setMinimumHeight(a.dp(36));
+            b.setMinHeight(a.dp(38));
+            b.setMinimumHeight(a.dp(38));
             b.setMinWidth(0);
             b.setMinimumWidth(0);
-            b.setPadding(a.dp(18), a.dp(6), a.dp(18), a.dp(6));
+            b.setPadding(a.dp(multi ? 10 : 18), a.dp(6), a.dp(multi ? 10 : 18), a.dp(6));
+            UiCompat.setDefaultFocusHighlightEnabled(b, false);
             if (Build.VERSION.SDK_INT >= 21) {
                 b.setStateListAnimator(null);
                 b.setElevation(0f);
             }
             b.setBackground(pill);
             ViewGroup.LayoutParams lp = b.getLayoutParams();
-            if (lp instanceof ViewGroup.MarginLayoutParams) {
+            if (lp instanceof LinearLayout.LayoutParams) {
+                LinearLayout.LayoutParams blp = (LinearLayout.LayoutParams) lp;
+                if (multi) {
+                    blp.width = 0;
+                    blp.weight = 1f;
+                    applyHorizontalMargins(blp, i == 0 ? 0 : gap, a.dp(2), 0, 0);
+                } else {
+                    applyHorizontalMargins(blp, a.dp(8), a.dp(2), 0, 0);
+                }
+                b.setLayoutParams(blp);
+            } else if (lp instanceof ViewGroup.MarginLayoutParams) {
                 applyHorizontalMargins((ViewGroup.MarginLayoutParams) lp, a.dp(8), a.dp(2), 0, 0);
                 b.setLayoutParams(lp);
             }
@@ -1040,8 +1443,12 @@ final class PluginDialogStyler {
     }
 
     private static void stylePluginTextView(
-            MainActivity a, TextView tv, String resName, boolean inHScroll) {
-        if (!inHScroll) {
+            MainActivity a,
+            TextView tv,
+            String resName,
+            boolean inHScroll,
+            boolean inHorizontalRow) {
+        if (shouldExpandToMatchParent(inHScroll, inHorizontalRow)) {
             ViewGroup.LayoutParams lp = tv.getLayoutParams();
             if (lp != null && lp.width > 0) {
                 lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
@@ -1073,8 +1480,9 @@ final class PluginDialogStyler {
         }
     }
 
-    private static void styleEditText(MainActivity a, EditText input, boolean inHScroll) {
-        if (!inHScroll) {
+    private static void styleEditText(
+            MainActivity a, EditText input, boolean inHScroll, boolean inHorizontalRow) {
+        if (shouldExpandToMatchParent(inHScroll, inHorizontalRow)) {
             ViewGroup.LayoutParams lp = input.getLayoutParams();
             if (lp != null && lp.width > 0) {
                 lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
@@ -1091,6 +1499,9 @@ final class PluginDialogStyler {
         input.setHintTextColor(0x73ebebf5);
         input.setTextSize(14f);
         input.setPadding(a.dp(14), a.dp(11), a.dp(14), a.dp(11));
+        if (a.isTvDevice() && !inHScroll && !inHorizontalRow) {
+            TvQrInputHelper.attachToExistingPluginEditText(a, input);
+        }
     }
 
     private static void styleQrOrIconImageView(

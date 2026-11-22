@@ -1,5 +1,6 @@
 package com.pilipala.marcomovie;
 
+import android.graphics.Color;
 import android.graphics.Typeface;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -138,6 +139,8 @@ final class TvV17MarkerOverlay extends FrameLayout {
         if (listener == null) throw new IllegalArgumentException("listener");
         this.listener = listener;
         setTag("tv-v17-marker");
+        UiCompat.setBackground(this, UiCompat.createFocusSafeColorBackground(Color.TRANSPARENT));
+        UiCompat.setDefaultFocusHighlightEnabled(this, false);
         setFocusable(true);
         setFocusableInTouchMode(true);
         LinearLayout card = a.vertical();

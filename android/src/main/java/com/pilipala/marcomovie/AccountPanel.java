@@ -273,9 +273,7 @@ final class AccountPanel {
         boolean hasCatPaw = CatPawSettings.available(a);
         Cms.Site configSite = findConfigCenterSite(a);
         if (configSite == null && !hasCatPaw) {
-            a.notice(
-                    "当前订阅未包含网盘配置中心。\n\n"
-                            + "请在「设置 → 订阅与账号」导入带有配置中心或网盘源的订阅包后，即可在此统一扫码登录夸克、UC、百度、阿里等网盘。");
+            AlistAccounts.openManager(a);
             return;
         }
         String backLabel =
@@ -316,7 +314,7 @@ final class AccountPanel {
         TextView heading = a.text("网盘与账号", 22, MainActivity.WHITE);
         heading.setTypeface(null, Typeface.BOLD);
         titleCol.addView(heading);
-        TextView note = a.text("扫码登录后 Cookie 保存至本机目录，可在下方直接管理各网盘状态与排序。", 12.5f, MainActivity.MUTED);
+        TextView note = a.text("点击下方任意网盘直接弹出二维码登录；长按可切换启用状态。", 12.5f, MainActivity.MUTED);
         note.setPadding(0, a.dp(2), 0, 0);
         titleCol.addView(note);
         headRow.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
@@ -334,6 +332,7 @@ final class AccountPanel {
                                 a.requestRuntimeStoragePermission(() -> show(a, anchor));
                             }
                         });
+        UiCompat.setDefaultFocusHighlightEnabled(permBtn, false);
         permBtn.setTextSize(12f);
         permBtn.setSingleLine(true);
         permBtn.setPadding(a.dp(12), 0, a.dp(12), 0);
@@ -378,7 +377,8 @@ final class AccountPanel {
                 final DriveSpec drive = DRIVES[idx];
                 final boolean loggedIn = isDriveLoggedIn(a, drive.key);
                 final boolean enabled = isDriveEnabled(a, drive.key);
-                String stateBadge = loggedIn ? (enabled ? "已登录 · 启用中" : "已登录") : "未登录 · 点击扫码";
+                String stateBadge =
+                        loggedIn ? (enabled ? "已登录 · 启用中 · 点击重新扫码" : "已登录 · 点击扫码") : "未登录 · 点击直接扫码";
                 final android.widget.Button driveCard =
                         a.button(
                                 drive.tvAlias + "  (" + drive.providerName + ")\n" + stateBadge,
@@ -386,8 +386,18 @@ final class AccountPanel {
                                 () -> {
                                     dialog.dismiss();
                                     a.ensureStoragePermissionForNetdisk(
-                                            () -> dispatchDriveLoginAction(a, configSite, drive));
+                                            () ->
+                                                    dispatchDriveLoginAction(
+                                                            a, configSite, drive, false));
                                 });
+                driveCard.setOnLongClickListener(
+                        v -> {
+                            dialog.dismiss();
+                            a.ensureStoragePermissionForNetdisk(
+                                    () -> dispatchDriveLoginAction(a, configSite, drive, true));
+                            return true;
+                        });
+                UiCompat.setDefaultFocusHighlightEnabled(driveCard, false);
                 driveCard.setSingleLine(false);
                 driveCard.setMaxLines(2);
                 driveCard.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
@@ -419,52 +429,86 @@ final class AccountPanel {
             body.addView(gridRow, new LinearLayout.LayoutParams(-1, -2));
         }
 
-        // Action Buttons (2 rows x 2 columns)
-        String[] labels = {"全部网盘登录与启用", "登录凭据 / Cookie", "网盘优先顺序", "网盘搜索顺序"};
-        String[] actions = {"LoginShow", "pushCkShow", "panSortShow", "panSourceSortShow"};
-        for (int r = 0; r < labels.length; r += 2) {
-            LinearLayout actRow = a.row();
-            actRow.setClipChildren(false);
-            for (int c = 0; c < 2; c++) {
-                int idx = r + c;
-                final String action = actions[idx];
-                final android.widget.Button item =
-                        a.button(
-                                labels[idx],
-                                "account-action:" + action,
-                                () -> {
-                                    dialog.dismiss();
-                                    a.ensureStoragePermissionForNetdisk(
-                                            () -> {
-                                                PluginDialogStyler.watch(a);
-                                                new SettingsScreen(a).accountAction(action);
-                                            });
-                                });
-                item.setSingleLine(true);
-                item.setEllipsize(TextUtils.TruncateAt.END);
-                item.setTextSize(14f);
-                item.setPadding(a.dp(12), 0, a.dp(12), 0);
-                item.setBackground(a.bg(0x1effffff, 14));
-                item.setOnFocusChangeListener(
-                        (v, f) ->
-                                FocusMotion.style(
-                                        a,
-                                        item,
-                                        f,
-                                        0x1effffff,
-                                        MainActivity.WHITE,
-                                        14,
-                                        MainActivity.WHITE,
-                                        MainActivity.DARK,
-                                        false,
-                                        1.015f));
-                LinearLayout.LayoutParams aLp = new LinearLayout.LayoutParams(0, a.dp(44), 1f);
-                if (c == 0) aLp.rightMargin = a.dp(10);
-                aLp.bottomMargin = a.dp(8);
-                actRow.addView(item, aLp);
-            }
-            body.addView(actRow, new LinearLayout.LayoutParams(-1, -2));
+        // Utility Action Row (3 equal-weight compact pills; redundant intermediate LoginShow page
+        // removed because clicking any drive card above launches QR login directly)
+        String[] labels = {"Cookie 凭据", "网盘优先顺序", "网盘搜索顺序"};
+        String[] actions = {"pushCkShow", "panSortShow", "panSourceSortShow"};
+        LinearLayout actRow = a.row();
+        actRow.setClipChildren(false);
+        actRow.setWeightSum(labels.length);
+        for (int c = 0; c < labels.length; c++) {
+            final String action = actions[c];
+            final android.widget.Button item =
+                    a.button(
+                            labels[c],
+                            "account-action:" + action,
+                            () -> {
+                                dialog.dismiss();
+                                a.ensureStoragePermissionForNetdisk(
+                                        () -> {
+                                            PluginDialogStyler.clearDirectDriveForward();
+                                            PluginDialogStyler.watch(a);
+                                            new SettingsScreen(a).accountAction(action);
+                                        });
+                            });
+            UiCompat.setDefaultFocusHighlightEnabled(item, false);
+            item.setMinWidth(0);
+            item.setMinimumWidth(0);
+            item.setSingleLine(true);
+            item.setEllipsize(TextUtils.TruncateAt.END);
+            item.setTextSize(13.5f);
+            item.setPadding(a.dp(10), 0, a.dp(10), 0);
+            item.setBackground(a.bg(0x1effffff, 14));
+            item.setOnFocusChangeListener(
+                    (v, f) ->
+                            FocusMotion.style(
+                                    a,
+                                    item,
+                                    f,
+                                    0x1effffff,
+                                    MainActivity.WHITE,
+                                    14,
+                                    MainActivity.WHITE,
+                                    MainActivity.DARK,
+                                    false,
+                                    1.015f));
+            LinearLayout.LayoutParams aLp = new LinearLayout.LayoutParams(0, a.dp(42), 1f);
+            if (c + 1 < labels.length) aLp.rightMargin = a.dp(10);
+            aLp.bottomMargin = a.dp(8);
+            actRow.addView(item, aLp);
         }
+        body.addView(actRow, new LinearLayout.LayoutParams(-1, -2));
+
+        final android.widget.Button alistBtn =
+                a.button(
+                        "挂载 AList 网盘 / 媒体库  ·  " + AlistAccounts.list(a).size() + " 个已挂载",
+                        "account-action:alist",
+                        () -> {
+                            dialog.dismiss();
+                            AlistAccounts.openManager(a);
+                        });
+        UiCompat.setDefaultFocusHighlightEnabled(alistBtn, false);
+        alistBtn.setSingleLine(true);
+        alistBtn.setEllipsize(TextUtils.TruncateAt.END);
+        alistBtn.setTextSize(13.5f);
+        alistBtn.setBackground(a.bg(0x240a84ff, 14));
+        alistBtn.setTextColor(0xffcce6ff);
+        alistBtn.setOnFocusChangeListener(
+                (v, f) ->
+                        FocusMotion.style(
+                                a,
+                                alistBtn,
+                                f,
+                                0x240a84ff,
+                                MainActivity.WHITE,
+                                14,
+                                0xffcce6ff,
+                                MainActivity.DARK,
+                                false,
+                                1.015f));
+        LinearLayout.LayoutParams alistLp = new LinearLayout.LayoutParams(-1, a.dp(42));
+        alistLp.bottomMargin = a.dp(8);
+        body.addView(alistBtn, alistLp);
 
         if (CatPawSettings.available(a)) {
             final android.widget.Button catItem =
@@ -549,7 +593,7 @@ final class AccountPanel {
                     }
                     View first =
                             permOk
-                                    ? panel.findViewWithTag("account-action:LoginShow")
+                                    ? panel.findViewWithTag("account-drive:quark")
                                     : panel.findViewWithTag("account-storage-permission");
                     if (first != null) first.requestFocus();
                 });
@@ -560,6 +604,7 @@ final class AccountPanel {
                 () -> {
                     try {
                         CspEngine.syncAllPluginActivities(a);
+                        PluginDialogStyler.clearDirectDriveForward();
                         PluginDialogStyler.watch(a);
                         new SettingsScreen(a).accountAction(action);
                     } catch (Throwable t) {
@@ -569,37 +614,104 @@ final class AccountPanel {
                 });
     }
 
+    /**
+     * Resolves the direct per-drive QR login route for a given config center site without stopping
+     * at the old intermediate multi-drive dialog.
+     */
+    static String resolveDirectDriveRoute(Cms.Site configSite, String driveKey) {
+        DriveSpec matched = null;
+        if (driveKey != null) {
+            for (DriveSpec d : DRIVES) {
+                if (d.key.equalsIgnoreCase(driveKey.trim())) {
+                    matched = d;
+                    break;
+                }
+            }
+        }
+        if (matched == null) return "forward:LoginShow";
+        if (configSite == null) return "forward:LoginShow";
+        String api = configSite.api == null ? "" : configSite.api.toLowerCase(Locale.ROOT);
+        String key = configSite.key == null ? "" : configSite.key.toLowerCase(Locale.ROOT);
+        if (api.contains("panconfig") || key.contains("panconfig")) {
+            if (!"LoginShow".equals(matched.panConfigCode)) {
+                return "direct:" + matched.panConfigCode;
+            }
+            return "dynamic:" + matched.key;
+        }
+        if (api.contains("wexconfig")
+                || api.contains("wexokconfig")
+                || key.contains("wexconfig")
+                || key.contains("wexokconfig")) {
+            return "direct:" + matched.wexConfigCode;
+        }
+        if (api.contains("mydrive") || key.contains("mydrive")) {
+            return "forward:LoginShow";
+        }
+        return "dynamic:" + matched.key;
+    }
+
     private static void dispatchDriveLoginAction(
             final MainActivity a, final Cms.Site configSite, final DriveSpec drive) {
+        dispatchDriveLoginAction(a, configSite, drive, false);
+    }
+
+    private static void dispatchDriveLoginAction(
+            final MainActivity a,
+            final Cms.Site configSite,
+            final DriveSpec drive,
+            final boolean toggleEnableOnly) {
         a.ensureStoragePermissionForNetdisk(
                 () -> {
                     try {
                         CspEngine.syncAllPluginActivities(a);
-                        PluginDialogStyler.watch(a);
-                        if (configSite != null) {
-                            String api =
-                                    configSite.api == null
-                                            ? ""
-                                            : configSite.api.toLowerCase(Locale.ROOT);
-                            String key =
-                                    configSite.key == null
-                                            ? ""
-                                            : configSite.key.toLowerCase(Locale.ROOT);
-                            if (api.contains("panconfig") || key.contains("panconfig")) {
-                                if (!"LoginShow".equals(drive.panConfigCode)) {
-                                    a.sourceAction(configSite, drive.panConfigCode);
-                                    return;
-                                }
-                            } else if (api.contains("wexconfig")
-                                    || api.contains("wexokconfig")
-                                    || key.contains("wexconfig")
-                                    || key.contains("wexokconfig")) {
-                                a.sourceAction(configSite, drive.wexConfigCode);
-                                return;
-                            }
+                        String route = resolveDirectDriveRoute(configSite, drive.key);
+                        if (toggleEnableOnly
+                                && configSite != null
+                                && route.startsWith("direct:")
+                                && (configSite.api != null
+                                                && (configSite
+                                                                .api
+                                                                .toLowerCase(Locale.ROOT)
+                                                                .contains("wexconfig")
+                                                        || configSite
+                                                                .api
+                                                                .toLowerCase(Locale.ROOT)
+                                                                .contains("wexokconfig"))
+                                        || (configSite.key != null
+                                                && configSite
+                                                        .key
+                                                        .toLowerCase(Locale.ROOT)
+                                                        .contains("wexconfig")))) {
+                            PluginDialogStyler.clearDirectDriveForward();
+                            PluginDialogStyler.watch(a);
+                            a.sourceAction(configSite, "pankaiguan");
+                            return;
                         }
-                        new SettingsScreen(a).accountAction("LoginShow");
+                        if (!toggleEnableOnly
+                                && configSite != null
+                                && route.startsWith("direct:")) {
+                            PluginDialogStyler.clearDirectDriveForward();
+                            PluginDialogStyler.watch(a);
+                            a.sourceAction(configSite, route.substring("direct:".length()));
+                            return;
+                        }
+                        if (configSite != null && route.startsWith("dynamic:")) {
+                            PluginDialogStyler.watch(a);
+                            new SettingsScreen(a)
+                                    .openDirectDriveConfigAction(
+                                            configSite, drive.key, toggleEnableOnly);
+                            return;
+                        }
+                        // MyDrive / LoginShow spiders: transparently auto-forward past the
+                        // intermediate multi-drive dialog straight to this drive's QR login dialog.
+                        PluginDialogStyler.armDirectDriveForward(a, drive.key, toggleEnableOnly);
+                        if (configSite != null) {
+                            a.sourceAction(configSite, "LoginShow");
+                        } else {
+                            new SettingsScreen(a).accountAction("LoginShow");
+                        }
                     } catch (Throwable t) {
+                        PluginDialogStyler.clearDirectDriveForward();
                         AppLog.w(
                                 "AccountPanel", "dispatchDriveLoginAction failed: " + drive.key, t);
                         a.notice(a.message(t));
@@ -995,7 +1107,18 @@ final class AccountPanel {
                             "CatPaw 本机服务配置",
                             "打开内嵌 CatPaw 控制台配置代理与云盘账号",
                             () -> CatPawSettings.choose(a)));
+            addedAny = true;
         }
+
+        if (addedAny) card.addView(buildGroupedDivider(a));
+        card.addView(
+                buildGroupedRow(
+                        a,
+                        ICON_CLOUD,
+                        0xff32ade6,
+                        "挂载 AList 网盘 / 媒体库",
+                        AlistAccounts.statusSummary(a),
+                        () -> AlistAccounts.openManager(a)));
 
         section.addView(card, new LinearLayout.LayoutParams(-1, -2));
         return section;

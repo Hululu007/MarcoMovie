@@ -440,7 +440,21 @@ final class TvDetailHost {
                             fileCap,
                             histCap);
                     if (!playable) {
+                        WatchHistory.Entry fallbackBm = bm != null ? bm : a.historyFallbackBookmark;
+                        if (fallbackBm != null
+                                && !a.historyFallbackInFlight
+                                && fallbackBm.title != null
+                                && !fallbackBm.title.trim().isEmpty()
+                                && CatalogScreen.hasAlternativeHistorySources(a, site.key)) {
+                            CatalogScreen.resumeHistoryFromAlternativeSources(
+                                    a, fallbackBm, site.key, "原片源暂无可播放线路", true);
+                            return;
+                        }
                         ui.setLoadingStatus("该来源没有返回可播放线路");
+                        if (resolved.title != null && !resolved.title.trim().isEmpty()) {
+                            ui.setSourceSwitchAction(
+                                    "🔍 换其他源", () -> a.openSearch(resolved.title.trim()));
+                        }
                     } else {
                         ui.setLoadingStatus("");
                         bindSeasonPopupDiscovery(a, site, resolved, ui);
@@ -456,6 +470,31 @@ final class TvDetailHost {
                     }
                 };
 
+        MainActivity.Done<Throwable> onDetailError =
+                error -> {
+                    if (!valid.get()) return;
+                    WatchHistory.Entry fallbackBm =
+                            activeBookmark[0] != null
+                                    ? activeBookmark[0]
+                                    : a.historyFallbackBookmark;
+                    if (fallbackBm != null
+                            && !a.historyFallbackInFlight
+                            && fallbackBm.title != null
+                            && !fallbackBm.title.trim().isEmpty()
+                            && CatalogScreen.hasAlternativeHistorySources(a, site.key)) {
+                        CatalogScreen.resumeHistoryFromAlternativeSources(
+                                a, fallbackBm, site.key, "原片源加载失败", true);
+                        return;
+                    }
+                    ui.setLoadingStatus(a.message(error));
+                    String fallbackTitle =
+                            initialVideo.title != null ? initialVideo.title.trim() : "";
+                    if (!fallbackTitle.isEmpty()) {
+                        ui.setSourceSwitchAction("🔍 全站搜其他源", () -> a.openSearch(fallbackTitle));
+                        ui.switchSourceBtn.requestFocus();
+                    }
+                };
+
         if (ready != null) {
             try {
                 bindInPlace.accept(ready);
@@ -466,10 +505,10 @@ final class TvDetailHost {
             if (!a.reduced
                     && (listing.description == null || listing.description.trim().isEmpty())) {
                 ui.setLoadingStatus("正在补全详情…");
-                a.loadDetail(site, listing.id, bindInPlace);
+                a.loadDetail(site, listing.id, bindInPlace, onDetailError);
             }
         } else {
-            a.loadDetail(site, listing.id, bindInPlace);
+            a.loadDetail(site, listing.id, bindInPlace, onDetailError);
         }
     }
 
@@ -515,7 +554,8 @@ final class TvDetailHost {
         String api = site.api == null ? "" : site.api;
         return site.supported()
                 || HttpT4Engine.eligible(site)
-                || api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX);
+                || api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)
+                || api.startsWith(AlistEngine.PREFIX);
     }
 
     /**

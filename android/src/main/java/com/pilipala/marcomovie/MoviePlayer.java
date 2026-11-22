@@ -13,10 +13,12 @@ import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
 import androidx.media3.common.util.Util;
 import androidx.media3.datasource.DefaultDataSource;
-import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.okhttp.OkHttpDataSource;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import okhttp3.ConnectionPool;
+import okhttp3.OkHttpClient;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -67,7 +69,71 @@ public class MoviePlayer {
         boolean onError(MoviePlayer player, int what, int extra);
     }
 
+    public interface OnTextTracksChangedListener {
+        void onTextTracksChanged();
+    }
+
+    public interface OnAudioTracksChangedListener {
+        void onAudioTracksChanged();
+    }
+
+    private OnTextTracksChangedListener textTracksChangedListener;
+    private OnAudioTracksChangedListener audioTracksChangedListener;
+
+    public void setOnTextTracksChangedListener(OnTextTracksChangedListener listener) {
+        onMain(
+                () -> {
+                    textTracksChangedListener = listener;
+                    return null;
+                });
+    }
+
+    public void setOnAudioTracksChangedListener(OnAudioTracksChangedListener listener) {
+        onMain(
+                () -> {
+                    audioTracksChangedListener = listener;
+                    return null;
+                });
+    }
+
     private static volatile String sDefaultUserAgent = null;
+    private static volatile OkHttpClient sharedMediaHttp;
+
+    static OkHttpClient mediaHttpClient() {
+        OkHttpClient existing = sharedMediaHttp;
+        if (existing != null) return existing;
+        synchronized (MoviePlayer.class) {
+            if (sharedMediaHttp == null) {
+                sharedMediaHttp =
+                        new OkHttpClient.Builder()
+                                .connectTimeout(15, TimeUnit.SECONDS)
+                                .readTimeout(30, TimeUnit.SECONDS)
+                                .followRedirects(true)
+                                .followSslRedirects(true)
+                                .retryOnConnectionFailure(true)
+                                .connectionPool(new ConnectionPool(8, 5, TimeUnit.MINUTES))
+                                .build();
+            }
+            return sharedMediaHttp;
+        }
+    }
+
+    static int safeBufferBytes(long maxHeapBytes) {
+        long minBytes = 48L * 1024L * 1024L;
+        long maxBytes = 256L * 1024L * 1024L;
+        long scaled = (maxHeapBytes * 45L) / 100L;
+        return (int) Math.max(minBytes, Math.min(maxBytes, scaled));
+    }
+
+    static boolean isPlatformSoftwareDecoder(String decoderName) {
+        if (decoderName == null || decoderName.isEmpty()) return false;
+        String lower = decoderName.toLowerCase(Locale.ROOT);
+        return lower.startsWith("c2.android.")
+                || lower.startsWith("omx.google.")
+                || lower.contains("ffmpeg")
+                || lower.contains("libvpx")
+                || lower.contains("dav1d");
+    }
 
     static String defaultUserAgent(Context context) {
         if (sDefaultUserAgent != null) return sDefaultUserAgent;
@@ -98,7 +164,8 @@ public class MoviePlayer {
     private OnVideoSizeChangedListener sizeListener;
     private OnErrorListener errorListener;
     private OnHdrChangedListener hdrChangedListener;
-    private boolean readySent, unsupportedVideo, hdrVideo, unsupportedDvProfile5;
+    private volatile boolean readySent;
+    private boolean unsupportedVideo, hdrVideo, unsupportedDvProfile5;
     private volatile boolean released;
     private int preparation;
     private volatile RequestScope probeScope;
@@ -212,19 +279,26 @@ public class MoviePlayer {
                                         selected.add(codec);
                                 return selected.isEmpty() ? raw : selected;
                             });
-                    int buffer =
-                            Math.max(
-                                            15,
-                                            Math.min(
-                                                    50,
-                                                    this.context
-                                                            .getSharedPreferences(Prefs.FILE, 0)
-                                                            .getInt(Prefs.BUFFER_SECONDS, 30)))
-                                    * 1000;
-                    int minBuffer = Math.min(12000, buffer);
-                    int maxBuffer = Math.max(20000, buffer);
-                    int startBufferMs = this.ijkMode ? 400 : 500;
-                    int rebufferMs = this.ijkMode ? 1000 : 1400;
+                    int userBufferSec =
+                            this.context
+                                    .getSharedPreferences(Prefs.FILE, 0)
+                                    .getInt(Prefs.BUFFER_SECONDS, 30);
+                    int memoryClassMb = 256;
+                    boolean lowRamDevice = false;
+                    try {
+                        android.app.ActivityManager am =
+                                (android.app.ActivityManager)
+                                        this.context.getSystemService(Context.ACTIVITY_SERVICE);
+                        if (am != null) {
+                            memoryClassMb = am.getMemoryClass();
+                            lowRamDevice =
+                                    android.os.Build.VERSION.SDK_INT >= 19 && am.isLowRamDevice();
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    LoadControlProfile loadProfile =
+                            resolveLoadControlProfile(
+                                    memoryClassMb, lowRamDevice, userBufferSec, this.ijkMode);
                     exo =
                             new ExoPlayer.Builder(this.context, renderers)
                                     .setVideoChangeFrameRateStrategy(
@@ -233,12 +307,14 @@ public class MoviePlayer {
                                             new androidx.media3.exoplayer.DefaultLoadControl
                                                             .Builder()
                                                     .setBufferDurationsMs(
-                                                            minBuffer,
-                                                            maxBuffer,
-                                                            startBufferMs,
-                                                            rebufferMs)
-                                                    .setPrioritizeTimeOverSizeThresholds(true)
-                                                    .setTargetBufferBytes(64 * 1024 * 1024)
+                                                            loadProfile.minBufferMs,
+                                                            loadProfile.maxBufferMs,
+                                                            loadProfile.startBufferMs,
+                                                            loadProfile.rebufferMs)
+                                                    .setPrioritizeTimeOverSizeThresholds(
+                                                            loadProfile.prioritizeTimeOverSize)
+                                                    .setTargetBufferBytes(
+                                                            loadProfile.targetBufferBytes)
                                                     .build())
                                     .setLooper(Looper.getMainLooper())
                                     .build();
@@ -249,9 +325,17 @@ public class MoviePlayer {
                                                     this.context)
                                             .setExceedRendererCapabilitiesIfNecessary(true)
                                             .setExceedVideoConstraintsIfNecessary(true)
-                                            .setExceedAudioConstraintsIfNecessary(true);
+                                            .setExceedAudioConstraintsIfNecessary(true)
+                                            .setPreferredTextLanguages(
+                                                    "zh-Hans", "zh-CN", "zh", "zho", "chi",
+                                                    "zh-Hant", "zh-TW");
                     android.content.SharedPreferences sp =
                             this.context.getSharedPreferences(Prefs.FILE, 0);
+                    int audioPrefMode = sp.getInt(Prefs.AUDIO_TRACK_PREFERENCE, 0);
+                    if (audioPrefMode == SubtitlePreferenceStore.AUDIO_PREF_CHINESE) {
+                        trackParams.setPreferredAudioLanguages(
+                                "zh-Hans", "zh-CN", "zh", "zho", "chi", "cmn");
+                    }
                     if (sp.getBoolean(Prefs.PREFER_AAC, false))
                         trackParams.setPreferredAudioMimeTypes(MimeTypes.AUDIO_AAC);
                     if (!this.ijkMode && sp.getBoolean(Prefs.TUNNELED_PLAYBACK, false))
@@ -316,11 +400,20 @@ public class MoviePlayer {
 
                                 @Override
                                 public void onTracksChanged(androidx.media3.common.Tracks tracks) {
-                                    boolean video = false, supported = false;
+                                    boolean video = false,
+                                            supported = false,
+                                            hasText = false,
+                                            hasAudio = false;
                                     boolean detectedHdr = false, detectedDvP5 = false;
                                     for (androidx.media3.common.Tracks.Group group :
                                             tracks.getGroups())
-                                        if (group.getType() == C.TRACK_TYPE_VIDEO) {
+                                        if (group.getType() == C.TRACK_TYPE_TEXT
+                                                && group.length > 0) {
+                                            hasText = true;
+                                        } else if (group.getType() == C.TRACK_TYPE_AUDIO
+                                                && group.length > 0) {
+                                            hasAudio = true;
+                                        } else if (group.getType() == C.TRACK_TYPE_VIDEO) {
                                             video = true;
                                             supported |=
                                                     group.isSupported(true) || group.isSelected();
@@ -341,6 +434,12 @@ public class MoviePlayer {
                                                 }
                                             }
                                         }
+                                    if (hasText && textTracksChangedListener != null) {
+                                        textTracksChangedListener.onTextTracksChanged();
+                                    }
+                                    if (hasAudio && audioTracksChangedListener != null) {
+                                        audioTracksChangedListener.onAudioTracksChanged();
+                                    }
                                     if (hdrVideo != detectedHdr) {
                                         hdrVideo = detectedHdr;
                                         if (hdrChangedListener != null) {
@@ -380,13 +479,18 @@ public class MoviePlayer {
                                         String scheme = uri.getScheme();
                                         if ("http".equalsIgnoreCase(scheme)
                                                 || "https".equalsIgnoreCase(scheme)) {
+                                            String epName =
+                                                    options != null
+                                                            ? options.optString("_episodeName", "")
+                                                            : "";
                                             if ((error.errorCode
                                                                     == PlaybackException
                                                                             .ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED
                                                             || error.errorCode
                                                                     == PlaybackException
                                                                             .ERROR_CODE_PARSING_CONTAINER_MALFORMED)
-                                                    && mediaMime == null) {
+                                                    && shouldRetryAsHlsFallback(
+                                                            mediaMime, epName, uri)) {
                                                 hlsFallbackAttempted = true;
                                                 mediaMime = MimeTypes.APPLICATION_M3U8;
                                                 try {
@@ -528,6 +632,8 @@ public class MoviePlayer {
                 });
     }
 
+    public void setSurfaceSize(int width, int height) {}
+
     public void setOnPreparedListener(OnPreparedListener listener) {
         onMain(
                 () -> {
@@ -588,6 +694,57 @@ public class MoviePlayer {
     public boolean isUnsupportedDolbyVisionProfile5() {
         if (exo == null) return false;
         return onMain(() -> unsupportedDvProfile5);
+    }
+
+    public String activeVideoMimeType() {
+        if (exo == null) return "";
+        return onMain(
+                () -> {
+                    if (released) return "";
+                    androidx.media3.common.Format vf = exo.getVideoFormat();
+                    return vf != null && vf.sampleMimeType != null ? vf.sampleMimeType : "";
+                });
+    }
+
+    private static final java.util.regex.Pattern DV_WORD_PATTERN =
+            java.util.regex.Pattern.compile("(?i)(?:^|[^a-z0-9])dv(?:$|[^a-z0-9])");
+    private static final java.util.regex.Pattern HDR_WORD_PATTERN =
+            java.util.regex.Pattern.compile("(?i)(?:^|[^a-z0-9])hdr(?:$|[^a-z0-9])");
+
+    /**
+     * Detects when a pure Dolby Vision (typically Netflix Profile 5 IPT-PQ-C2) netdisk source is
+     * being played via an H.264 cloud-transcoded fallback stream, which commonly bakes green/purple
+     * color distortion into the transcoded frames because server-side transcoders omit Profile 5
+     * IPT reshaping. Hybrid DV+HDR10 streams carry an HDR10 base layer and are excluded.
+     */
+    static boolean looksLikeTranscodedDolbyVisionColorRisk(
+            String episodeName, String lineName, String actualVideoMime) {
+        if (actualVideoMime == null || actualVideoMime.isEmpty()) return false;
+        String mimeLower = actualVideoMime.toLowerCase(Locale.ROOT);
+        if (!mimeLower.contains("avc") && !mimeLower.contains("h264")) return false;
+        String meta =
+                ((episodeName == null ? "" : episodeName)
+                                + " "
+                                + (lineName == null ? "" : lineName))
+                        .toLowerCase(Locale.ROOT)
+                        .trim();
+        if (meta.isEmpty()) return false;
+        boolean mentionsDv =
+                meta.contains("杜比视界")
+                        || meta.contains("dolby vision")
+                        || meta.contains("dolby.vision")
+                        || meta.contains("dovi")
+                        || DV_WORD_PATTERN.matcher(meta).find();
+        if (!mentionsDv) return false;
+        boolean mentionsHdrBase =
+                meta.contains("hdr10")
+                        || meta.contains("hdr+")
+                        || meta.contains("dv.hdr")
+                        || meta.contains("dv+hdr")
+                        || meta.contains("hdr.dv")
+                        || meta.contains("hdr+dv")
+                        || HDR_WORD_PATTERN.matcher(meta).find();
+        return !mentionsHdrBase;
     }
 
     public void setOptions(org.json.JSONObject metadata) {
@@ -733,16 +890,22 @@ public class MoviePlayer {
                     options.optBoolean("live", false) ? Cms.USER_AGENT : defaultUserAgent(context);
             for (Map.Entry<String, String> header : requestHeaders.entrySet())
                 if (header.getKey().equalsIgnoreCase("User-Agent")) userAgent = header.getValue();
-            DefaultHttpDataSource.Factory http =
-                    new DefaultHttpDataSource.Factory()
+            OkHttpClient client =
+                    ijkMode
+                            ? mediaHttpClient()
+                                    .newBuilder()
+                                    .connectTimeout(20, TimeUnit.SECONDS)
+                                    .readTimeout(45, TimeUnit.SECONDS)
+                                    .build()
+                            : mediaHttpClient();
+            OkHttpDataSource.Factory http =
+                    new OkHttpDataSource.Factory(client)
                             .setUserAgent(userAgent)
-                            .setDefaultRequestProperties(requestHeaders)
-                            .setAllowCrossProtocolRedirects(true)
-                            .setConnectTimeoutMs(ijkMode ? 20000 : 15000)
-                            .setReadTimeoutMs(ijkMode ? 45000 : 30000);
+                            .setDefaultRequestProperties(requestHeaders);
+            StartupState startupState = () -> readySent;
             DefaultDataSource.Factory data =
                     new DefaultDataSource.Factory(
-                            context, new ChunkedProxyDataSource.Factory(http));
+                            context, new ChunkedProxyDataSource.Factory(http, startupState));
             mediaMime = resolvedMime;
             androidx.media3.extractor.DefaultExtractorsFactory extractors =
                     new androidx.media3.extractor.DefaultExtractorsFactory()
@@ -760,7 +923,10 @@ public class MoviePlayer {
                                         .FLAG_IGNORE_SPLICE_INFO_STREAM);
             }
             mediaSourceFactory =
-                    new DefaultMediaSourceFactory(data, wrapDisguisedMp3Extractors(extractors));
+                    new DefaultMediaSourceFactory(data, wrapDisguisedMp3Extractors(extractors))
+                            .setLoadErrorHandlingPolicy(
+                                    new ResilientLoadErrorPolicy(
+                                            options.optBoolean("live", false), startupState));
             subtitleDataSourceFactory = data;
             boolean forceHighest =
                     options.optBoolean("live", false)
@@ -780,6 +946,40 @@ public class MoviePlayer {
         }
     }
 
+    static boolean shouldRetryAsHlsFallback(String mediaMime, String episodeName, Uri address) {
+        if (address == null) return false;
+        return shouldRetryAsHlsFallback(
+                mediaMime,
+                episodeName,
+                address.getScheme(),
+                address.getHost(),
+                address.getPath(),
+                address.getQuery(),
+                address.toString());
+    }
+
+    static boolean shouldRetryAsHlsFallback(
+            String mediaMime,
+            String episodeName,
+            String scheme,
+            String host,
+            String path,
+            String query,
+            String fullUrl) {
+        if (mediaMime != null && !mediaMime.isEmpty()) return false;
+        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) return false;
+        String fullLower = fullUrl == null ? "" : fullUrl.toLowerCase(Locale.ROOT);
+        if (fullLower.contains("m3u8") || fullLower.contains("hls")) return true;
+        if (!matchContainerToken(episodeName, CONTAINER_EXT_PATTERN).isEmpty()
+                || !matchContainerToken(path, CONTAINER_EXT_PATTERN).isEmpty()
+                || !matchContainerToken(query, QUERY_CONTAINER_EXT_PATTERN).isEmpty()) {
+            return false;
+        }
+        String hostLower = host == null ? "" : host.toLowerCase(Locale.ROOT);
+        if (isCloudDriveOrLocalProxyHost(hostLower, fullLower)) return false;
+        return true;
+    }
+
     static boolean isCloudDriveOrLocalProxyContainer(Uri address, String fullLower) {
         if (fullLower == null || fullLower.isEmpty()) return false;
         if (fullLower.contains("m3u8") || fullLower.contains(".mpd")) return false;
@@ -787,6 +987,12 @@ public class MoviePlayer {
                 address == null || address.getHost() == null
                         ? ""
                         : address.getHost().toLowerCase(Locale.ROOT);
+        return isCloudDriveOrLocalProxyHost(host, fullLower);
+    }
+
+    private static boolean isCloudDriveOrLocalProxyHost(String host, String fullLower) {
+        if (fullLower == null || fullLower.isEmpty()) return false;
+        if (fullLower.contains("m3u8") || fullLower.contains(".mpd")) return false;
         if (("127.0.0.1".equals(host) || "localhost".equals(host))
                 && fullLower.contains("/proxy")) {
             return true;
@@ -1419,6 +1625,40 @@ public class MoviePlayer {
                 });
     }
 
+    private static String readableLanguage(String lang) {
+        if (lang == null) return "";
+        String l = lang.trim().toLowerCase(Locale.ROOT);
+        if (l.isEmpty() || "und".equals(l) || "unknown".equals(l)) return "";
+        if (l.equals("zh-hans") || l.equals("zh-cn") || l.equals("zh_cn") || l.equals("chs")) {
+            return "简体中文";
+        }
+        if (l.equals("zh-hant")
+                || l.equals("zh-tw")
+                || l.equals("zh_tw")
+                || l.equals("zh-hk")
+                || l.equals("cht")) {
+            return "繁体中文";
+        }
+        if (l.equals("yue") || l.startsWith("yue-")) return "粤语";
+        if (l.equals("zh")
+                || l.startsWith("zh-")
+                || l.equals("zho")
+                || l.equals("chi")
+                || l.equals("cmn")) {
+            return "中文";
+        }
+        if (l.equals("en") || l.startsWith("en-") || l.equals("eng")) return "英语";
+        if (l.equals("ja") || l.startsWith("ja-") || l.equals("jpn")) return "日语";
+        if (l.equals("ko") || l.startsWith("ko-") || l.equals("kor")) return "韩语";
+        if (l.equals("fr") || l.equals("fre") || l.equals("fra")) return "法语";
+        if (l.equals("de") || l.equals("ger") || l.equals("deu")) return "德语";
+        if (l.equals("es") || l.equals("spa")) return "西班牙语";
+        if (l.equals("ru") || l.equals("rus")) return "俄语";
+        if (l.equals("th") || l.equals("tha")) return "泰语";
+        if (l.equals("vi") || l.equals("vie")) return "越南语";
+        return lang.trim();
+    }
+
     public java.util.List<String> trackLabels(int type) {
         return onMain(
                 () -> {
@@ -1429,13 +1669,37 @@ public class MoviePlayer {
                             for (int i = 0; i < group.length; i++)
                                 if (group.isTrackSupported(i)) {
                                     androidx.media3.common.Format f = group.getTrackFormat(i);
-                                    String label =
-                                            f.label != null
-                                                    ? f.label
-                                                    : f.language != null
-                                                            ? f.language
-                                                            : "轨道 " + (out.size() + 1);
-                                    if (f.channelCount > 0) label += " · " + f.channelCount + " 声道";
+                                    String rawLbl = f.label == null ? "" : f.label.trim();
+                                    String langName = readableLanguage(f.language);
+                                    String label;
+                                    if (!rawLbl.isEmpty() && !langName.isEmpty()) {
+                                        String rawBucket =
+                                                SubtitlePreferenceStore.detectLangBucket(rawLbl);
+                                        String langBucket =
+                                                SubtitlePreferenceStore.detectLangBucket(langName);
+                                        if (!rawBucket.isEmpty() && rawBucket.equals(langBucket)) {
+                                            label = rawLbl;
+                                        } else {
+                                            label = rawLbl + " · " + langName;
+                                        }
+                                    } else if (!rawLbl.isEmpty()) {
+                                        label = rawLbl;
+                                    } else if (!langName.isEmpty()) {
+                                        label = langName;
+                                    } else {
+                                        label = "轨道 " + (out.size() + 1);
+                                    }
+                                    if (type == C.TRACK_TYPE_AUDIO) {
+                                        String codec = shortAudioCodec(f.sampleMimeType);
+                                        if (!codec.isEmpty() && !label.contains(codec)) {
+                                            label += " · " + codec;
+                                        }
+                                        if (f.channelCount > 0) {
+                                            label += " · " + f.channelCount + " 声道";
+                                        }
+                                    } else if (f.channelCount > 0) {
+                                        label += " · " + f.channelCount + " 声道";
+                                    }
                                     out.add((group.isTrackSelected(i) ? "✓ " : "") + label);
                                 }
                     return out;
@@ -1517,34 +1781,184 @@ public class MoviePlayer {
         }
     }
 
+    static final class LoadControlProfile {
+        final int minBufferMs;
+        final int maxBufferMs;
+        final int startBufferMs;
+        final int rebufferMs;
+        final int targetBufferBytes;
+        final boolean prioritizeTimeOverSize;
+
+        LoadControlProfile(
+                int minBufferMs,
+                int maxBufferMs,
+                int startBufferMs,
+                int rebufferMs,
+                int targetBufferBytes,
+                boolean prioritizeTimeOverSize) {
+            this.minBufferMs = minBufferMs;
+            this.maxBufferMs = maxBufferMs;
+            this.startBufferMs = startBufferMs;
+            this.rebufferMs = rebufferMs;
+            this.targetBufferBytes = targetBufferBytes;
+            this.prioritizeTimeOverSize = prioritizeTimeOverSize;
+        }
+    }
+
     /**
-     * Bridges Media3 open-ended progressive reads ({@code length == C.LENGTH_UNSET}) with
-     * loopback {@code /proxy} spiders that serve large netdisk files in bounded {@code 206}
-     * slices (e.g. 1 MB {@code byte[]} chunks with {@code Content-Range: bytes a-b/total}).
+     * Scales Media3 buffer ceilings to device heap limits so 1GB-RAM Android 6.0.1 TVs (e.g.,
+     * MiTV OS 1.3.130 with 96–128MB heap) and 2GB TV boxes streaming multi-GB 4K MKVs never OOM
+     * from unbounded time-prioritized allocations.
+     */
+    static LoadControlProfile resolveLoadControlProfile(
+            int memoryClassMb, boolean lowRamDevice, int userBufferSeconds, boolean ijkMode) {
+        int userBufferMs = Math.max(15, Math.min(50, userBufferSeconds)) * 1000;
+        int startBufferMs = ijkMode ? 400 : 500;
+        int rebufferMs = ijkMode ? 1000 : 1400;
+        if (lowRamDevice || (memoryClassMb > 0 && memoryClassMb <= 128)) {
+            int maxBuf = Math.max(10000, Math.min(userBufferMs, 16000));
+            return new LoadControlProfile(
+                    6000, maxBuf, startBufferMs, rebufferMs, 16 * 1024 * 1024, false);
+        }
+        if (memoryClassMb > 0 && memoryClassMb <= 256) {
+            int maxBuf = Math.max(15000, Math.min(userBufferMs, 30000));
+            return new LoadControlProfile(
+                    Math.min(10000, maxBuf),
+                    maxBuf,
+                    startBufferMs,
+                    rebufferMs,
+                    32 * 1024 * 1024,
+                    false);
+        }
+        int minBuf = Math.min(12000, userBufferMs);
+        int maxBuf = Math.max(20000, userBufferMs);
+        return new LoadControlProfile(
+                minBuf, maxBuf, startBufferMs, rebufferMs, 64 * 1024 * 1024, false);
+    }
+
+    /**
+     * Detects premature progressive EOF (e.g., upstream HTTP connection reset on an online MKV)
+     * well before the real end of the title so the player can seamlessly reconnect at the current
+     * timestamp instead of prematurely ending playback.
+     */
+    static boolean isPrematureProgressiveEnd(boolean live, int positionMs, int durationMs) {
+        return !live
+                && durationMs >= 60_000
+                && positionMs >= 5_000
+                && positionMs < durationMs - 15_000;
+    }
+
+    /** API-23-safe startup indicator read from ExoPlayer loader threads. */
+    interface StartupState {
+        boolean isPlaybackStarted();
+    }
+
+    static boolean isSocketTimeout(Throwable error) {
+        Throwable cur = error;
+        for (int depth = 0; cur != null && depth < 5; depth++) {
+            if (cur instanceof java.net.SocketTimeoutException) return true;
+            cur = cur.getCause();
+        }
+        return false;
+    }
+
+    static final class ResilientLoadErrorPolicy
+            extends androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy {
+        private final boolean live;
+        private final StartupState startupState;
+
+        ResilientLoadErrorPolicy(boolean live) {
+            this(live, null);
+        }
+
+        ResilientLoadErrorPolicy(boolean live, StartupState startupState) {
+            super(live ? 4 : 6);
+            this.live = live;
+            this.startupState = startupState;
+        }
+
+        private boolean isStarted() {
+            return startupState == null || startupState.isPlaybackStarted();
+        }
+
+        @Override
+        public int getMinimumLoadableRetryCount(int dataType) {
+            if (!isStarted()) {
+                return 1;
+            }
+            return live ? 4 : 6;
+        }
+
+        @Override
+        public long getRetryDelayMsFor(LoadErrorInfo loadErrorInfo) {
+            if (loadErrorInfo == null || loadErrorInfo.exception == null) {
+                return C.TIME_UNSET;
+            }
+            java.io.IOException ex = loadErrorInfo.exception;
+            if (ex instanceof androidx.media3.common.ParserException
+                    || ex instanceof java.io.FileNotFoundException) {
+                return C.TIME_UNSET;
+            }
+            if (ex
+                    instanceof
+                    androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
+                int code =
+                        ((androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)
+                                        ex)
+                                .responseCode;
+                if (code == 400 || code == 401 || code == 403 || code == 404 || code == 410) {
+                    return C.TIME_UNSET;
+                }
+            }
+            if (!isStarted()) {
+                if (isSocketTimeout(ex) || loadErrorInfo.errorCount > 1) {
+                    return C.TIME_UNSET;
+                }
+                return 400L;
+            }
+            long cap = live ? 2500L : 4000L;
+            return Math.min(cap, 500L * Math.max(1, loadErrorInfo.errorCount));
+        }
+    }
+
+    /**
+     * Transparently chains loopback 206 byte-range chunks for {@link LocalProxy}.
      *
      * <p>Media3's {@code DefaultHttpDataSource} computes stream length from {@code (b - a + 1)}
      * rather than {@code /total}, which would otherwise truncate multi-GB MKV/MP4 files at the
      * first chunk. This wrapper exposes {@code total - position} to the extractor, chains
-     * subsequent chunks on demand, and closes each chunk cleanly in sub-millisecond time when
-     * {@code MatroskaExtractor} seeks to end-of-file {@code Cues}.
+     * subsequent chunks on demand, retries transient chunk drops/truncations from exact byte
+     * offsets, and closes each chunk cleanly in sub-millisecond time when {@code MatroskaExtractor}
+     * seeks to end-of-file {@code Cues}.
      */
     static final class ChunkedProxyDataSource implements androidx.media3.datasource.DataSource {
         static final String HEADER_CHUNKED_CLIENT = "X-Movie-Chunked-Client";
+        static final int MAX_CHUNK_RETRIES = 3;
+        private static final long[] CHUNK_RETRY_BACKOFF_MS = {250L, 600L, 1200L};
 
         static final class Factory implements androidx.media3.datasource.DataSource.Factory {
             private final androidx.media3.datasource.DataSource.Factory innerFactory;
+            private final StartupState startupState;
 
             Factory(androidx.media3.datasource.DataSource.Factory innerFactory) {
+                this(innerFactory, null);
+            }
+
+            Factory(
+                    androidx.media3.datasource.DataSource.Factory innerFactory,
+                    StartupState startupState) {
                 this.innerFactory = innerFactory;
+                this.startupState = startupState;
             }
 
             @Override
             public androidx.media3.datasource.DataSource createDataSource() {
-                return new ChunkedProxyDataSource(innerFactory.createDataSource());
+                return new ChunkedProxyDataSource(innerFactory.createDataSource(), startupState);
             }
         }
 
         private final androidx.media3.datasource.DataSource inner;
+        private final StartupState startupState;
         private androidx.media3.datasource.DataSpec baseSpec;
         private Uri lastUri;
         private Map<String, java.util.List<String>> lastHeaders = Collections.emptyMap();
@@ -1553,9 +1967,49 @@ public class MoviePlayer {
         private long totalLength = C.LENGTH_UNSET;
         private long currentPos;
         private long chunkRemaining;
+        private int consecutiveReadRecoveries;
 
         ChunkedProxyDataSource(androidx.media3.datasource.DataSource inner) {
+            this(inner, null);
+        }
+
+        ChunkedProxyDataSource(
+                androidx.media3.datasource.DataSource inner, StartupState startupState) {
             this.inner = inner;
+            this.startupState = startupState;
+        }
+
+        static int resolveOpenMaxRetries(long position, boolean playbackStarted, Throwable error) {
+            if (!playbackStarted && position == 0L) {
+                return isSocketTimeout(error) ? 0 : 1;
+            }
+            return MAX_CHUNK_RETRIES;
+        }
+
+        static boolean isRetryableChunkError(Throwable error) {
+            if (error == null || Thread.currentThread().isInterrupted()) return false;
+            if (isSocketTimeout(error)) return true;
+            if (error instanceof java.io.InterruptedIOException) return false;
+            if (error
+                    instanceof
+                    androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
+                int code =
+                        ((androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)
+                                        error)
+                                .responseCode;
+                return code == 408 || code == 429 || (code >= 500 && code < 600);
+            }
+            return error instanceof java.io.IOException;
+        }
+
+        private static void sleepRetryBackoff(int attempt) throws java.io.IOException {
+            int idx = Math.max(0, Math.min(CHUNK_RETRY_BACKOFF_MS.length - 1, attempt));
+            try {
+                Thread.sleep(CHUNK_RETRY_BACKOFF_MS[idx]);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new java.io.InterruptedIOException("Interrupted during chunk retry");
+            }
         }
 
         @Override
@@ -1571,6 +2025,7 @@ public class MoviePlayer {
             totalLength = C.LENGTH_UNSET;
             currentPos = Math.max(0L, spec.position);
             chunkRemaining = 0L;
+            consecutiveReadRecoveries = 0;
             lastUri = spec.uri;
             lastHeaders = Collections.emptyMap();
 
@@ -1586,37 +2041,50 @@ public class MoviePlayer {
                 return len;
             }
 
-            try {
-                long innerLen = inner.open(buildChunkSpec(spec, currentPos));
-                innerOpen = true;
-                if (inner.getUri() != null) lastUri = inner.getUri();
-                lastHeaders = inner.getResponseHeaders();
-                long[] cr = parseResponseContentRange(lastHeaders);
-                if (cr != null && (cr[2] == C.LENGTH_UNSET || cr[2] > currentPos)) {
-                    if (cr[0] > currentPos || cr[1] < currentPos) {
-                        throw new java.io.IOException(
-                                "Unexpected Content-Range "
-                                        + cr[0]
-                                        + "-"
-                                        + cr[1]
-                                        + " at offset "
-                                        + currentPos);
+            boolean started = startupState == null || startupState.isPlaybackStarted();
+            java.io.IOException lastError = null;
+            for (int attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
+                try {
+                    long innerLen = inner.open(buildChunkSpec(spec, currentPos));
+                    innerOpen = true;
+                    if (inner.getUri() != null) lastUri = inner.getUri();
+                    lastHeaders = inner.getResponseHeaders();
+                    long[] cr = parseResponseContentRange(lastHeaders);
+                    if (cr != null && (cr[2] == C.LENGTH_UNSET || cr[2] > currentPos)) {
+                        if (cr[0] > currentPos || cr[1] < currentPos) {
+                            throw new java.io.IOException(
+                                    "Unexpected Content-Range "
+                                            + cr[0]
+                                            + "-"
+                                            + cr[1]
+                                            + " at offset "
+                                            + currentPos);
+                        }
+                        if (cr[0] < currentPos) {
+                            skipInnerFully(currentPos - cr[0]);
+                        }
+                        chunkMode = true;
+                        totalLength = cr[2];
+                        chunkRemaining = (cr[1] - currentPos) + 1L;
+                        return totalLength != C.LENGTH_UNSET
+                                ? (totalLength - currentPos)
+                                : C.LENGTH_UNSET;
                     }
-                    if (cr[0] < currentPos) {
-                        skipInnerFully(currentPos - cr[0]);
+                    return innerLen;
+                } catch (java.io.IOException e) {
+                    closeInnerQuietly();
+                    lastError = e;
+                    int maxRetries = resolveOpenMaxRetries(currentPos, started, e);
+                    if (attempt >= maxRetries || !isRetryableChunkError(e)) {
+                        throw e;
                     }
-                    chunkMode = true;
-                    totalLength = cr[2];
-                    chunkRemaining = (cr[1] - currentPos) + 1L;
-                    return totalLength != C.LENGTH_UNSET
-                            ? (totalLength - currentPos)
-                            : C.LENGTH_UNSET;
+                    sleepRetryBackoff(attempt);
+                } catch (RuntimeException e) {
+                    closeInnerQuietly();
+                    throw e;
                 }
-                return innerLen;
-            } catch (java.io.IOException | RuntimeException e) {
-                closeInnerQuietly();
-                throw e;
             }
+            throw lastError != null ? lastError : new java.io.IOException("Chunk open failed");
         }
 
         @Override
@@ -1628,30 +2096,54 @@ public class MoviePlayer {
             if (totalLength != C.LENGTH_UNSET && currentPos >= totalLength) {
                 return C.RESULT_END_OF_INPUT;
             }
-            while (chunkRemaining <= 0L) {
-                if (totalLength != C.LENGTH_UNSET && currentPos >= totalLength) {
-                    return C.RESULT_END_OF_INPUT;
+            while (true) {
+                while (chunkRemaining <= 0L) {
+                    if (totalLength != C.LENGTH_UNSET && currentPos >= totalLength) {
+                        return C.RESULT_END_OF_INPUT;
+                    }
+                    if (!openNextChunk()) {
+                        return C.RESULT_END_OF_INPUT;
+                    }
                 }
-                if (!openNextChunk()) {
-                    return C.RESULT_END_OF_INPUT;
+                int toRead = (int) Math.min((long) length, chunkRemaining);
+                try {
+                    int n = inner.read(buffer, offset, toRead);
+                    if (n == C.RESULT_END_OF_INPUT) {
+                        if (totalLength != C.LENGTH_UNSET && currentPos >= totalLength) {
+                            return C.RESULT_END_OF_INPUT;
+                        }
+                        if (consecutiveReadRecoveries < MAX_CHUNK_RETRIES
+                                && !Thread.currentThread().isInterrupted()) {
+                            int attempt = consecutiveReadRecoveries++;
+                            closeInnerQuietly();
+                            chunkRemaining = 0L;
+                            sleepRetryBackoff(attempt);
+                            continue;
+                        }
+                        throw new java.io.EOFException(
+                                "Chunk stream truncated at offset "
+                                        + currentPos
+                                        + " (missing "
+                                        + chunkRemaining
+                                        + " bytes)");
+                    }
+                    if (n > 0) {
+                        consecutiveReadRecoveries = 0;
+                        currentPos += n;
+                        chunkRemaining -= n;
+                    }
+                    return n;
+                } catch (java.io.IOException e) {
+                    if (consecutiveReadRecoveries < MAX_CHUNK_RETRIES && isRetryableChunkError(e)) {
+                        int attempt = consecutiveReadRecoveries++;
+                        closeInnerQuietly();
+                        chunkRemaining = 0L;
+                        sleepRetryBackoff(attempt);
+                        continue;
+                    }
+                    throw e;
                 }
             }
-            int toRead = (int) Math.min((long) length, chunkRemaining);
-            int n = inner.read(buffer, offset, toRead);
-            if (n == C.RESULT_END_OF_INPUT) {
-                if (totalLength != C.LENGTH_UNSET && currentPos >= totalLength) {
-                    return C.RESULT_END_OF_INPUT;
-                }
-                throw new java.io.EOFException(
-                        "Chunk stream truncated at offset "
-                                + currentPos
-                                + " (missing "
-                                + chunkRemaining
-                                + " bytes)");
-            }
-            currentPos += n;
-            chunkRemaining -= n;
-            return n;
         }
 
         @Override
@@ -1669,54 +2161,80 @@ public class MoviePlayer {
         public void close() throws java.io.IOException {
             chunkMode = false;
             chunkRemaining = 0L;
+            consecutiveReadRecoveries = 0;
             closeInner();
         }
 
         private boolean openNextChunk() throws java.io.IOException {
-            closeInner();
-            long innerLen;
-            try {
-                innerLen = inner.open(buildChunkSpec(baseSpec, currentPos));
-                innerOpen = true;
-            } catch (androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException e) {
-                if (e.responseCode == 416
-                        && (totalLength == C.LENGTH_UNSET || currentPos >= totalLength)) {
-                    return false;
-                }
-                throw e;
-            }
-            try {
-                if (inner.getUri() != null) lastUri = inner.getUri();
-                lastHeaders = inner.getResponseHeaders();
-                long[] cr = parseResponseContentRange(lastHeaders);
-                if (cr != null) {
-                    if (cr[2] > 0) {
-                        totalLength = cr[2];
-                    }
-                    if (cr[0] > currentPos || cr[1] < currentPos) {
-                        throw new java.io.IOException(
-                                "Unexpected Content-Range "
-                                        + cr[0]
-                                        + "-"
-                                        + cr[1]
-                                        + " at offset "
-                                        + currentPos);
-                    }
-                    if (cr[0] < currentPos) {
-                        skipInnerFully(currentPos - cr[0]);
-                    }
-                    chunkRemaining = (cr[1] - currentPos) + 1L;
-                    return chunkRemaining > 0L;
-                }
-                if (innerLen == 0L) {
-                    return false;
-                }
-                chunkRemaining = innerLen != C.LENGTH_UNSET ? innerLen : Long.MAX_VALUE;
-                return true;
-            } catch (java.io.IOException | RuntimeException e) {
+            java.io.IOException lastError = null;
+            for (int attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
                 closeInnerQuietly();
-                throw e;
+                long innerLen;
+                try {
+                    innerLen = inner.open(buildChunkSpec(baseSpec, currentPos));
+                    innerOpen = true;
+                } catch (androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException e) {
+                    closeInnerQuietly();
+                    if (e.responseCode == 416
+                            && (totalLength == C.LENGTH_UNSET || currentPos >= totalLength)) {
+                        return false;
+                    }
+                    lastError = e;
+                    if (attempt >= MAX_CHUNK_RETRIES || !isRetryableChunkError(e)) {
+                        throw e;
+                    }
+                    sleepRetryBackoff(attempt);
+                    continue;
+                } catch (java.io.IOException e) {
+                    closeInnerQuietly();
+                    lastError = e;
+                    if (attempt >= MAX_CHUNK_RETRIES || !isRetryableChunkError(e)) {
+                        throw e;
+                    }
+                    sleepRetryBackoff(attempt);
+                    continue;
+                }
+                try {
+                    if (inner.getUri() != null) lastUri = inner.getUri();
+                    lastHeaders = inner.getResponseHeaders();
+                    long[] cr = parseResponseContentRange(lastHeaders);
+                    if (cr != null) {
+                        if (cr[2] > 0) {
+                            totalLength = cr[2];
+                        }
+                        if (cr[0] > currentPos || cr[1] < currentPos) {
+                            throw new java.io.IOException(
+                                    "Unexpected Content-Range "
+                                            + cr[0]
+                                            + "-"
+                                            + cr[1]
+                                            + " at offset "
+                                            + currentPos);
+                        }
+                        if (cr[0] < currentPos) {
+                            skipInnerFully(currentPos - cr[0]);
+                        }
+                        chunkRemaining = (cr[1] - currentPos) + 1L;
+                        return chunkRemaining > 0L;
+                    }
+                    if (innerLen == 0L) {
+                        return false;
+                    }
+                    chunkRemaining = innerLen != C.LENGTH_UNSET ? innerLen : Long.MAX_VALUE;
+                    return true;
+                } catch (java.io.IOException e) {
+                    closeInnerQuietly();
+                    lastError = e;
+                    if (attempt >= MAX_CHUNK_RETRIES || !isRetryableChunkError(e)) {
+                        throw e;
+                    }
+                    sleepRetryBackoff(attempt);
+                } catch (RuntimeException e) {
+                    closeInnerQuietly();
+                    throw e;
+                }
             }
+            throw lastError != null ? lastError : new java.io.IOException("Next chunk open failed");
         }
 
         private void skipInnerFully(long bytesToSkip) throws java.io.IOException {

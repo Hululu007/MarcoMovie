@@ -39,7 +39,7 @@ final class HomeScreen {
     CategoryFlow filters;
     InlineFilters inlineFilters;
     HomeAmbient ambient;
-    TextView status, source, more, earlier, allHistory;
+    TextView status, source, filterToggle, more, earlier, allHistory;
     int ticket, request, posterWidth, gridEpoch;
     Runnable pendingGrid;
     Runnable pendingTabSwitch;
@@ -82,6 +82,8 @@ final class HomeScreen {
         List<Cms.Video> videos = new ArrayList<>();
         int page = 1, pages = 1, windowStart = 0;
         boolean ready, initialized, filtersExpanded, library, categoryFailed;
+        String activeFilterNote = "";
+        boolean activeFilterLocalFallback;
         int homeScroll, libraryScroll;
         String homeFocus, libraryFocus;
         Snapshot snapshot;
@@ -123,10 +125,15 @@ final class HomeScreen {
         boolean tvLeftDock = a.homeDock != null && a.homeDock.tvLeft;
         boolean tvTopBar = a.homeDock != null && a.homeDock.tvTopLabeled;
         boolean bottomDock = !tvLeftDock && a.useBottomDock();
-        int rightPadDp = 44;
+        int rightPadDp = a.homeDock != null ? a.homeDock.sideMarginDp : 44;
         int bottomPadDp = Math.max(86, Math.round(50 * navScale) + 36);
-        int leftPadDp = tvLeftDock ? Math.max(92, Math.round(56 * navScale) + 38) : 44;
-        int topPadDp = tvTopBar ? 74 : 28;
+        int leftPadDp =
+                tvLeftDock
+                        ? (a.homeDock != null
+                                ? Math.max(84, a.homeDock.crossDp + 34)
+                                : Math.max(92, Math.round(56 * navScale) + 38))
+                        : rightPadDp;
+        int topPadDp = tvTopBar ? (a.homeDock != null ? a.homeDock.topSafeInsetDp : 84) : 28;
         fullBleedTvHero = a.isTvDevice() && !a.privateMode && (tvTopBar || tvLeftDock);
         tvContentLeftPadPx = a.dp(leftPadDp);
         tvContentRightPadPx = a.dp(rightPadDp);
@@ -221,6 +228,20 @@ final class HomeScreen {
                 new LinearLayout.LayoutParams(-2, a.dp(Math.round(34 * navScale)));
         sourceSize.leftMargin = a.dp(14);
         heading.addView(source, sourceSize);
+        if (a.isTvDevice() && !SourceController.isConfigOrNetdiskSite(site)) {
+            filterToggle = pill("筛选  ⌄", "home-filters", this::showFilters);
+            filterToggle.setPadding(
+                    a.dp(Math.round(14 * navScale)), 0, a.dp(Math.round(14 * navScale)), 0);
+            UiCompat.setDefaultFocusHighlightEnabled(filterToggle, false);
+            filterToggle.setOnFocusChangeListener((v, f) -> styleFilterToggle(f));
+            styleFilterToggle(false);
+            LinearLayout.LayoutParams filterSize =
+                    new LinearLayout.LayoutParams(-2, a.dp(Math.round(34 * navScale)));
+            filterSize.leftMargin = a.dp(10);
+            heading.addView(filterToggle, filterSize);
+        } else {
+            filterToggle = null;
+        }
         libraryParent.addView(heading);
         filters = new CategoryFlow(a, this::wireNavigation);
         filters.setPadding(0, a.dp(2), 0, a.dp(8));
@@ -326,7 +347,10 @@ final class HomeScreen {
                 a.homeData.put(site.key, disk);
                 renderSnapshot();
                 long staleMs = a.isTvDevice() ? 1800000L : 300000L;
-                if (System.currentTimeMillis() - disk.time >= staleMs) {
+                boolean missingSchema =
+                        disk.filterSchema == null || disk.filterSchema.trim().length() <= 2;
+                if (System.currentTimeMillis() - disk.time >= staleMs
+                        || (missingSchema && !disk.categories.isEmpty())) {
                     refreshHomeSilently();
                 }
                 return;
@@ -401,10 +425,16 @@ final class HomeScreen {
                                             renderSnapshot();
                                         } else if (inlineFilters != null) {
                                             inlineFilters.render();
+                                            updateFilterToggle();
+                                            wireNavigation();
                                         }
                                     } else {
                                         snapshot.filterSchema = fresh.filterSchema;
-                                        if (inlineFilters != null) inlineFilters.render();
+                                        if (inlineFilters != null) {
+                                            inlineFilters.render();
+                                            updateFilterToggle();
+                                            wireNavigation();
+                                        }
                                     }
                                 });
                     } catch (Throwable ignored) {
@@ -533,6 +563,7 @@ final class HomeScreen {
         if (drawn < windowEnd()) appendCards(drawn, gridEpoch, true);
         resumeMissingPosters(retainedRoot);
         updateMore();
+        updateFilterContinueButton();
         wireNavigation();
         return true;
     }
@@ -920,7 +951,7 @@ final class HomeScreen {
         dotsLp.leftMargin = a.dp(18);
         actionRow.addView(dotsRow, dotsLp);
 
-        TextView swipeHint = a.text("◀ ▶ 切换热门", 11.5f, 0xaaebebf5);
+        final TextView swipeHint = a.text("◀ ▶ 切换热门", 11.5f, 0xaaebebf5);
         LinearLayout.LayoutParams shLp = new LinearLayout.LayoutParams(-2, -2);
         shLp.leftMargin = a.dp(14);
         actionRow.addView(swipeHint, shLp);
@@ -928,31 +959,34 @@ final class HomeScreen {
         info.addView(actionRow, new LinearLayout.LayoutParams(-2, -2));
         hero.addView(info, new FrameLayout.LayoutParams(-1, -1));
 
+        final Runnable syncHeroLeftEdge =
+                () -> {
+                    boolean tvLeftDock = a.homeDock != null && a.homeDock.tvLeft;
+                    if (tvLeftDock && curatedHeroIndex <= 0) {
+                        a.homeDock.leftEdge(playBtn, false);
+                    } else {
+                        playBtn.setNextFocusLeftId(View.NO_ID);
+                    }
+                    swipeHint.setText(
+                            tvLeftDock && curatedHeroIndex <= 0 ? "◀ 导航  ·  ▶ 切换热门" : "◀ ▶ 切换热门");
+                };
+
         final Runnable bindHero =
                 () -> {
                     if (heroList.isEmpty()) return;
                     int idx = Math.max(0, Math.min(heroList.size() - 1, curatedHeroIndex));
+                    curatedHeroIndex = idx;
                     Cms.Video item = heroList.get(idx);
                     titleTv.setText(item.title == null ? "" : item.title);
-                    StringBuilder meta = new StringBuilder();
-                    if (item.year != null && !item.year.isEmpty()) meta.append(item.year);
-                    if (item.genre != null && !item.genre.isEmpty()) {
-                        if (meta.length() > 0) meta.append(" · ");
-                        meta.append(item.genre);
-                    }
-                    if (item.area != null && !item.area.isEmpty()) {
-                        if (meta.length() > 0) meta.append(" · ");
-                        meta.append(item.area);
-                    }
-                    metaTv.setText(meta.toString());
+                    metaTv.setText(formatCuratedHeroMeta(item));
                     if (item.doubanScore != null && !item.doubanScore.isEmpty()) {
                         scorePill.setText("评分 " + item.doubanScore);
                         scorePill.setVisibility(View.VISIBLE);
                     } else {
                         scorePill.setVisibility(View.GONE);
                     }
-                    String d = item.description == null ? "" : item.description.trim();
-                    descTv.setText(d.isEmpty() ? "点击即可从你已添加的片源自动匹配高清线路播放" : d);
+                    descTv.setText(formatCuratedHeroSummary(item));
+                    syncHeroLeftEdge.run();
 
                     dotsRow.removeAllViews();
                     for (int i = 0; i < heroList.size(); i++) {
@@ -998,15 +1032,16 @@ final class HomeScreen {
                             && heroList.size() > 1
                             && (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT
                                     || keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT)) {
-                        curatedHeroIndex =
-                                (curatedHeroIndex
-                                                + (keyCode
-                                                                == android.view.KeyEvent
-                                                                        .KEYCODE_DPAD_RIGHT
-                                                        ? 1
-                                                        : -1)
-                                                + heroList.size())
-                                        % heroList.size();
+                        boolean tvLeftDock = a.homeDock != null && a.homeDock.tvLeft;
+                        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT) {
+                            int next =
+                                    resolveCuratedHeroLeftIndex(
+                                            tvLeftDock, curatedHeroIndex, heroList.size());
+                            if (next < 0) return false;
+                            curatedHeroIndex = next;
+                        } else {
+                            curatedHeroIndex = (curatedHeroIndex + 1) % heroList.size();
+                        }
                         bindHero.run();
                         return true;
                     }
@@ -1016,6 +1051,70 @@ final class HomeScreen {
         curatedHeroBtn = playBtn;
         bindHero.run();
         return hero;
+    }
+
+    /**
+     * Resolves DPAD_LEFT on the curated hero play button: moves to the previous hero card whenever
+     * {@code currentIndex > 0}, enters the left dock ({@code -1}) only at card 0 when the left
+     * navigation dock is active, and wraps to the last card in top-dock mode.
+     */
+    static int resolveCuratedHeroLeftIndex(boolean tvLeftDock, int currentIndex, int heroCount) {
+        if (heroCount <= 1) return tvLeftDock ? -1 : 0;
+        if (currentIndex > 0) return currentIndex - 1;
+        return tvLeftDock ? -1 : (heroCount - 1);
+    }
+
+    /** Formats Hero metadata line (Year · Region · Genre) without duplicate region/genre tokens. */
+    static String formatCuratedHeroMeta(Cms.Video item) {
+        if (item == null) return "";
+        java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
+        StringBuilder meta = new StringBuilder();
+        String year = item.year == null ? "" : item.year.trim();
+        if (!year.isEmpty() && seen.add(ImmersivePoster.normalizeFactTokenKey(year))) {
+            meta.append(year);
+        }
+        String area = dedupMetaField(item.area, " / ", 2, seen);
+        if (!area.isEmpty()) {
+            if (meta.length() > 0) meta.append(" · ");
+            meta.append(area);
+        }
+        String genre = dedupMetaField(item.genre, " ", 3, seen);
+        if (!genre.isEmpty()) {
+            if (meta.length() > 0) meta.append(" · ");
+            meta.append(genre);
+        }
+        return meta.toString();
+    }
+
+    private static String dedupMetaField(
+            String raw, String sep, int maxItems, java.util.Set<String> seen) {
+        if (raw == null || raw.trim().isEmpty()) return "";
+        String[] tokens = raw.trim().split("[,，、/|;；\\s]+");
+        StringBuilder out = new StringBuilder();
+        int added = 0;
+        for (String token : tokens) {
+            String clean = token.trim();
+            if (clean.isEmpty()) continue;
+            if (!seen.add(ImmersivePoster.normalizeFactTokenKey(clean))) continue;
+            if (out.length() > 0) out.append(sep);
+            out.append(clean);
+            if (++added >= maxItems) break;
+        }
+        return out.toString();
+    }
+
+    /** Formats Hero subtitle without repeating year/country/genre from Douban card_subtitle. */
+    static String formatCuratedHeroSummary(Cms.Video item) {
+        if (item == null) return "点击即可从你已添加的片源自动匹配高清线路播放";
+        String d = item.description == null ? "" : item.description.trim();
+        if (!d.isEmpty() && !TvCuratedHome.looksLikeMetadataSubtitle(d)) {
+            return d;
+        }
+        String actor = item.actor == null ? "" : item.actor.trim();
+        if (!actor.isEmpty()) {
+            return "主演：" + actor;
+        }
+        return "点击即可从你已添加的片源自动匹配高清线路播放";
     }
 
     /**
@@ -1394,8 +1493,15 @@ final class HomeScreen {
         String category = state.category;
         if (category.isEmpty() && !snapshot.categories.isEmpty())
             category = snapshot.categories.get(0).id;
+        Cms.Listing cachedCat = state.categoryCache.get(category);
+        List<Cms.Video> pool =
+                cachedCat != null && !cachedCat.videos.isEmpty()
+                        ? cachedCat.videos
+                        : (state.selectedFilters.isEmpty() && !state.videos.isEmpty()
+                                ? state.videos
+                                : snapshot.videos);
         List<VideoFilters.Definition> definitions =
-                VideoFilters.definitions(snapshot.filterSchema, category, snapshot.videos);
+                VideoFilters.definitions(snapshot.filterSchema, category, pool);
         if (site.supported())
             for (VideoFilters.Definition def : definitions) {
                 if (!VideoFilters.allowedKey(def.key)) def.remote = false;
@@ -1403,13 +1509,75 @@ final class HomeScreen {
         return definitions;
     }
 
+    void styleFilterToggle(boolean focused) {
+        if (filterToggle == null) return;
+        boolean hasActive = state != null && !state.selectedFilters.isEmpty();
+        int idleFill = hasActive ? 0xaa2563eb : 0x66344352;
+        int focusFill = hasActive ? 0xff3b82f6 : 0xff344452;
+        FocusMotion.style(
+                a,
+                filterToggle,
+                focused,
+                idleFill,
+                focusFill,
+                17,
+                hasActive ? Color.WHITE : 0xffd7e2ed,
+                Color.WHITE,
+                true,
+                1.02f);
+    }
+
+    void updateFilterToggle() {
+        if (filterToggle == null || state == null) return;
+        boolean show = !SourceController.isConfigOrNetdiskSite(site);
+        filterToggle.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (!show) return;
+        String base =
+                state.selectedFilters.isEmpty() ? "筛选" : "筛选 · " + state.selectedFilters.size();
+        filterToggle.setText(base + (state.filtersExpanded ? "  ⌃" : "  ⌄"));
+        filterToggle.setContentDescription(
+                base + "，按确认键" + (state.filtersExpanded ? "收起筛选" : "展开筛选"));
+        styleFilterToggle(filterToggle.hasFocus());
+    }
+
     void showFilters() {
-        if (snapshot == null) return;
+        if (snapshot == null || SourceController.isConfigOrNetdiskSite(site)) return;
         if (a.isTvDevice()) {
-            state.filtersExpanded = !state.filtersExpanded;
-            inlineFilters.render();
-            updateTabs();
-            wireNavigation();
+            if (state.category.isEmpty() && !snapshot.categories.isEmpty()) {
+                boolean wasApplying = applyingFilters;
+                applyingFilters = true;
+                try {
+                    String firstCat = snapshot.categories.get(0).id;
+                    state.category = firstCat;
+                    state.filtersExpanded = true;
+                    state.ready = false;
+                    busy = false;
+                    choose(firstCat, false);
+                    View target = inlineFilters.firstSelectedChip();
+                    if (target != null) target.requestFocus();
+                } finally {
+                    applyingFilters = wasApplying;
+                }
+                return;
+            }
+            if (state.category.isEmpty()) {
+                a.toast("当前片源暂无可筛选的分类");
+                return;
+            }
+            boolean wasApplying = applyingFilters;
+            applyingFilters = true;
+            try {
+                state.filtersExpanded = !state.filtersExpanded;
+                inlineFilters.render();
+                updateTabs();
+                wireNavigation();
+                if (state.filtersExpanded) {
+                    View target = inlineFilters.firstSelectedChip();
+                    if (target != null) target.requestFocus();
+                }
+            } finally {
+                applyingFilters = wasApplying;
+            }
             return;
         }
         List<VideoFilters.Definition> definitions = filterDefinitions();
@@ -1474,18 +1642,19 @@ final class HomeScreen {
         // A new filter starts at page one; detail/back keeps this exact state.
         View currentFocus = a.getCurrentFocus();
         String currentTag = currentFocus == null ? "" : String.valueOf(currentFocus.getTag());
-        boolean fromReset = "home-filter-reset".equals(currentTag);
+        boolean fromSummaryReset = "home-filter-reset".equals(currentTag) && !state.filtersExpanded;
         String focusTag =
                 currentTag.startsWith("home-filter:")
+                                || ("home-filter-reset".equals(currentTag) && state.filtersExpanded)
                         ? currentTag
                         : a.isTvDevice()
-                                ? (fromReset
+                                ? (fromSummaryReset
                                         ? "home-video:0"
                                         : String.valueOf(selectedTab().getTag()))
                                 : "home-filters";
         applyingFilters = true;
         try {
-            if (fromReset && a.isTvDevice()) {
+            if (fromSummaryReset && a.isTvDevice()) {
                 selectedTab().requestFocus();
             }
             state.category = category;
@@ -1493,7 +1662,7 @@ final class HomeScreen {
             busy = false;
             if (a.current != null) a.current.focus = focusTag;
             choose(category, false);
-            if (fromReset && a.isTvDevice()) {
+            if (fromSummaryReset && a.isTvDevice()) {
                 View firstCard = a.root.findViewWithTag("home-video:0");
                 if (firstCard != null) firstCard.requestFocus();
                 else pendingFocus = "home-video:0";
@@ -1704,6 +1873,7 @@ final class HomeScreen {
             }
         }
         if (inlineFilters != null) inlineFilters.render();
+        updateFilterToggle();
     }
 
     View selectedTab() {
@@ -1719,7 +1889,15 @@ final class HomeScreen {
         busy = false;
         state.categoryFailed = false;
         boolean categoryChanged = !state.category.equals(category);
-        if (categoryChanged) state.selectedFilters.clear();
+        if (categoryChanged) {
+            state.selectedFilters.clear();
+            state.activeFilterNote = "";
+            state.activeFilterLocalFallback = false;
+        }
+        if (state.selectedFilters.isEmpty()) {
+            state.activeFilterNote = "";
+            state.activeFilterLocalFallback = false;
+        }
         state.category = category;
         if (a.isTvDevice()) {
             if (category.isEmpty()
@@ -1816,10 +1994,21 @@ final class HomeScreen {
         int page = first ? 1 : state.page + 1;
         List<VideoFilters.Definition> definitions = filterDefinitions();
         Map<String, String> selections = new LinkedHashMap<>(state.selectedFilters);
+        final VideoFilters.SubCategoryMatch subMatch =
+                VideoFilters.resolveMatchingSubCategory(
+                        snapshot.categories, category, definitions, selections);
+        final String effectiveCategory = subMatch != null ? subMatch.categoryId : category;
+        final String satisfiedDim = subMatch != null ? subMatch.satisfiedDimension : null;
         Map<String, String> remoteFilters =
                 VideoFilters.remoteValues(definitions, selections, site.supported());
+        if (satisfiedDim != null && !site.supported()) {
+            remoteFilters.remove(satisfiedDim);
+        } else if (satisfiedDim != null) {
+            remoteFilters.remove(satisfiedDim);
+        }
+        final Cms.Listing unfilteredBaseline = first ? state.categoryCache.get(category) : null;
         status.setVisibility(first ? View.VISIBLE : View.GONE);
-        status.setText("正在读取分类…");
+        status.setText(selections.isEmpty() ? "正在读取分类…" : "正在按筛选条件加载…");
         more.setVisibility(View.GONE);
         DetailRequest timing = new DetailRequest("MovieCategoryTiming");
         a.submitPage(
@@ -1832,7 +2021,9 @@ final class HomeScreen {
                         String raw =
                                 SourceGate.measured(
                                         phases,
-                                        () -> engine.category(category, page, remoteFilters));
+                                        () ->
+                                                engine.category(
+                                                        effectiveCategory, page, remoteFilters));
                         timing.returned = android.os.SystemClock.elapsedRealtime();
                         timing.gateWaitNanos = phases[0];
                         timing.delegateNanos = phases[1];
@@ -1840,21 +2031,49 @@ final class HomeScreen {
                         Cms.Listing list = Cms.listing(raw);
                         clean(list.videos);
                         int received = list.videos.size();
+                        boolean remoteIgnored =
+                                !selections.isEmpty()
+                                        && !remoteFilters.isEmpty()
+                                        && ((first
+                                                        && subMatch == null
+                                                        && unfilteredBaseline != null
+                                                        && VideoFilters.isIdenticalListing(
+                                                                unfilteredBaseline.videos,
+                                                                list.videos))
+                                                || !VideoFilters.looksSourceHonored(
+                                                        list.videos, definitions, selections));
                         List<Cms.Video> matching =
                                 new ArrayList<>(
-                                        VideoFilters.apply(list.videos, definitions, selections));
+                                        remoteIgnored
+                                                ? VideoFilters.applyAll(
+                                                        list.videos,
+                                                        definitions,
+                                                        selections,
+                                                        satisfiedDim)
+                                                : VideoFilters.applyExcluding(
+                                                        list.videos,
+                                                        definitions,
+                                                        selections,
+                                                        satisfiedDim));
                         int resolvedPage = page;
                         int resolvedPageCount =
                                 received == 0 ? page : Math.max(page, list.pageCount);
-                        boolean localOnly = VideoFilters.hasLocal(definitions, selections);
+                        boolean localScan =
+                                !selections.isEmpty()
+                                        && (remoteIgnored
+                                                || VideoFilters.hasLocalExcluding(
+                                                        definitions, selections, satisfiedDim));
+                        boolean sawMetadata = VideoFilters.hasAnyFilterableMetadata(list.videos);
                         int scanned = 1;
-                        while (localOnly
-                                && matching.size() < COLUMNS
+                        int targetMin = Math.max(COLUMNS, Math.min(12, COLUMNS * 2));
+                        while (localScan
+                                && matching.size() < targetMin
                                 && received > 0
                                 && resolvedPage < resolvedPageCount
-                                && scanned < 3) {
+                                && scanned < 6) {
                             int nextPage = resolvedPage + 1;
-                            String extraRaw = engine.category(category, nextPage, remoteFilters);
+                            String extraRaw =
+                                    engine.category(effectiveCategory, nextPage, remoteFilters);
                             RequestScope.checkCurrent();
                             Cms.Listing extra = Cms.listing(extraRaw);
                             clean(extra.videos);
@@ -1862,14 +2081,50 @@ final class HomeScreen {
                                 resolvedPageCount = resolvedPage;
                                 break;
                             }
+                            if (!sawMetadata) {
+                                sawMetadata = VideoFilters.hasAnyFilterableMetadata(extra.videos);
+                            }
                             resolvedPage = nextPage;
                             resolvedPageCount = Math.max(resolvedPage, extra.pageCount);
                             matching.addAll(
-                                    VideoFilters.apply(extra.videos, definitions, selections));
+                                    remoteIgnored
+                                            ? VideoFilters.applyAll(
+                                                    extra.videos,
+                                                    definitions,
+                                                    selections,
+                                                    satisfiedDim)
+                                            : VideoFilters.applyExcluding(
+                                                    extra.videos,
+                                                    definitions,
+                                                    selections,
+                                                    satisfiedDim));
                             scanned++;
                         }
                         final int finalPage = resolvedPage;
                         final int finalPageCount = resolvedPageCount;
+                        final boolean finalLocalFallback = localScan;
+                        final String filterNote;
+                        if (selections.isEmpty()) {
+                            filterNote = "";
+                        } else if (subMatch != null && !localScan) {
+                            filterNote = "已切换至「" + subMatch.categoryName + "」子分类筛选";
+                        } else if (remoteIgnored && !sawMetadata && matching.isEmpty()) {
+                            filterNote = "当前片源未响应筛选且列表缺少年代/地区信息，建议切换分类或全局搜索";
+                        } else if (remoteIgnored) {
+                            filterNote = "片源未响应服务端筛选，已按影片资料本地筛选（已扫描至第 " + finalPage + " 页）";
+                        } else if (localScan && !sawMetadata && matching.isEmpty()) {
+                            filterNote = "当前片源列表未返回类型/地区/年份字段，建议切换分类或使用全局搜索";
+                        } else if (localScan) {
+                            filterNote =
+                                    (subMatch != null
+                                                    ? "已按「" + subMatch.categoryName + "」与影片资料筛选"
+                                                    : "已按影片资料本地筛选")
+                                            + "（已扫描至第 "
+                                            + finalPage
+                                            + " 页）";
+                        } else {
+                            filterNote = "已按片源筛选条件加载";
+                        }
                         timing.parsed = android.os.SystemClock.elapsedRealtime();
                         a.ui.post(
                                 () -> {
@@ -1898,6 +2153,8 @@ final class HomeScreen {
                                                     : finalPageCount;
                                     state.page = finalPage;
                                     state.pages = changedPageCount;
+                                    state.activeFilterNote = filterNote;
+                                    state.activeFilterLocalFallback = finalLocalFallback;
                                     state.ready = true;
                                     if (first && selections.isEmpty() && !state.videos.isEmpty()) {
                                         Cms.Listing cached = new Cms.Listing();
@@ -1994,13 +2251,25 @@ final class HomeScreen {
         }
         updateEarlier();
         if (existing < windowEnd()) a.learnTitles(state.videos.subList(existing, windowEnd()));
-        status.setText(
-                state.selectedFilters.isEmpty()
-                        ? "这个分类暂无内容，可切换其他分类或使用全局搜索。"
-                        : "当前已读取的影片没有匹配结果，可继续加载或调整筛选。");
-        boolean localFiltering = VideoFilters.hasLocal(filterDefinitions(), state.selectedFilters);
-        if (localFiltering && !state.videos.isEmpty()) status.setText("按片源已提供的影片资料筛选，可继续加载更多结果。");
-        status.setVisibility(state.videos.isEmpty() || localFiltering ? View.VISIBLE : View.GONE);
+        boolean hasFilters = !state.selectedFilters.isEmpty();
+        if (!hasFilters) {
+            status.setText("这个分类暂无内容，可切换其他分类或使用全局搜索。");
+            status.setVisibility(state.videos.isEmpty() ? View.VISIBLE : View.GONE);
+        } else if (state.videos.isEmpty()) {
+            String note = state.activeFilterNote == null ? "" : state.activeFilterNote.trim();
+            status.setText(
+                    note.isEmpty()
+                            ? "当前已读取的影片没有匹配结果，可继续加载下一页或调整筛选条件。"
+                            : note + " · 暂无匹配影片，可点击下方继续筛选或调整条件。");
+            status.setVisibility(View.VISIBLE);
+        } else {
+            String note = state.activeFilterNote == null ? "" : state.activeFilterNote.trim();
+            status.setText(
+                    note.isEmpty()
+                            ? "已筛选出 " + state.videos.size() + " 部影片"
+                            : note + " · 已匹配 " + state.videos.size() + " 部影片");
+            status.setVisibility(View.VISIBLE);
+        }
         // Hiding the focused button would hand focus to the first tab and jump to the top.
         if (pendingFocus == null || !more.hasFocus()) more.setVisibility(View.GONE);
         appendCards(existing, gridEpoch, !append);
@@ -2057,6 +2326,18 @@ final class HomeScreen {
         }
         if (!more.hasFocus()) {
             more.setVisibility(View.GONE);
+        }
+    }
+
+    /** Shows an explicit "继续筛选下一页" action when active filtering has more server pages. */
+    void updateFilterContinueButton() {
+        if (state == null || more == null || state.categoryFailed) return;
+        if (state.ready
+                && !state.selectedFilters.isEmpty()
+                && state.page < state.pages
+                && state.videos.size() < Math.max(COLUMNS, Math.min(12, COLUMNS * 2))) {
+            more.setText("继续筛选下一页");
+            more.setVisibility(View.VISIBLE);
         }
     }
 
@@ -2133,6 +2414,7 @@ final class HomeScreen {
         } else {
             resolvePendingFocus(true);
             updateMore();
+            updateFilterContinueButton();
             wireNavigation(Math.max(0, rows.size() - 1));
             if (restore
                     && a.current != null
@@ -2300,7 +2582,12 @@ final class HomeScreen {
             curatedHeroBtn.setNextFocusUpId(
                     topDockActive ? a.homeDock.items[0].getId() : curatedHeroBtn.getId());
             curatedHeroBtn.setNextFocusDownId(firstAfterHeroId);
-            if (tvLeftDock) a.homeDock.leftEdge(curatedHeroBtn, false);
+            if (tvLeftDock && curatedHeroIndex <= 0) {
+                a.homeDock.leftEdge(curatedHeroBtn, false);
+            } else {
+                curatedHeroBtn.setNextFocusLeftId(View.NO_ID);
+            }
+            curatedHeroBtn.setNextFocusRightId(View.NO_ID);
         }
         horizontal(curatedDramaCards);
         for (int i = 0; i < curatedDramaCards.size(); i++) {
@@ -2385,13 +2672,23 @@ final class HomeScreen {
                 allHistory.setNextFocusUpId(a.homeDock.items[a.homeDock.items.length - 1].getId());
             }
         }
-        source.setNextFocusUpId(
+        int sourceUpId =
                 historyCards.isEmpty()
                         ? (aboveHistoryId != View.NO_ID
                                 ? aboveHistoryId
                                 : (topDockActive ? a.homeDock.items[0].getId() : source.getId()))
-                        : historyCards.get(stackedHistory ? historyCards.size() - 1 : 0).getId());
+                        : historyCards.get(stackedHistory ? historyCards.size() - 1 : 0).getId();
+        source.setNextFocusUpId(sourceUpId);
         source.setNextFocusDownId(selectedTab().getId());
+        boolean filterToggleShown = filterToggle != null && filterToggle.isShown();
+        if (filterToggleShown) {
+            source.setNextFocusRightId(filterToggle.getId());
+            filterToggle.setNextFocusLeftId(source.getId());
+            filterToggle.setNextFocusRightId(filterToggle.getId());
+            filterToggle.setNextFocusUpId(sourceUpId);
+        } else {
+            source.setNextFocusRightId(source.getId());
+        }
         int contentDownId =
                 earlier.isShown()
                         ? earlier.getId()
@@ -2401,6 +2698,10 @@ final class HomeScreen {
         boolean inlineExpanded = inlineFilters != null && inlineFilters.expanded();
         boolean inlineSummary = inlineFilters != null && inlineFilters.summaryShown();
         View firstFilterChip = inlineExpanded ? inlineFilters.entryChip(0) : null;
+        if (filterToggleShown) {
+            filterToggle.setNextFocusDownId(
+                    firstFilterChip != null ? firstFilterChip.getId() : selectedTab().getId());
+        }
         for (int r = 0; r < filters.lines.size(); r++) {
             List<View> line = filters.lines.get(r);
             horizontal(line);

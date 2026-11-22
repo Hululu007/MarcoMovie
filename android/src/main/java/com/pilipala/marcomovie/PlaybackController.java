@@ -11,6 +11,7 @@ import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import com.pilipala.marcomovie.hud.EpisodeHoldSwitchOverlay;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -109,11 +110,19 @@ final class PlaybackController {
         final int ticket = a.generation;
         final int serial = a.playbackResolveSerial;
         try {
+            List<Cms.SniffRule> sniffRules =
+                    a.config != null ? a.config.rules : java.util.Collections.emptyList();
+            List<String> adHosts =
+                    a.config != null ? a.config.ads : java.util.Collections.emptyList();
+            String clickJs = ep.media != null ? ep.media.optString("click", "") : "";
             a.webResolver =
                     new WebResolver(
                             a,
                             address,
                             ep.headers,
+                            sniffRules,
+                            adHosts,
+                            clickJs,
                             new WebResolver.Listener() {
                                 public void media(String url, Map<String, String> headers) {
                                     if (ticket != a.generation || serial != a.playbackResolveSerial)
@@ -138,7 +147,9 @@ final class PlaybackController {
                                     }
                                 }
                             });
-            a.playbackLoading.addView(a.webResolver.view(), new FrameLayout.LayoutParams(1, 1));
+            if (a.webResolver.view() != null) {
+                a.playbackLoading.addView(a.webResolver.view(), new FrameLayout.LayoutParams(1, 1));
+            }
         } catch (Exception error) {
             AppLog.w("PlaybackController", "WebResolver init failed", error);
             a.changingMiniEpisode = false;
@@ -154,6 +165,31 @@ final class PlaybackController {
             showControls(a, true);
         }
         a.toast(message);
+    }
+
+    private static boolean tryHistoryCrossSourceFailover(
+            MainActivity a, Cms.Site failedSite, int currentPositionMs, String reason) {
+        if (a == null
+                || failedSite == null
+                || "live".equals(failedSite.key)
+                || a.historyFallbackInFlight) {
+            return false;
+        }
+        WatchHistory.Entry bm = a.historyFallbackBookmark;
+        if (bm == null || bm.title == null || bm.title.trim().isEmpty()) {
+            return false;
+        }
+        if (!CatalogScreen.hasAlternativeHistorySources(a, failedSite.key)) {
+            return false;
+        }
+        WatchHistory.Entry updated = WatchHistory.cloneEntry(bm);
+        if (currentPositionMs > updated.position) {
+            updated.position = currentPositionMs;
+        }
+        a.historyFallbackBookmark = null;
+        CatalogScreen.resumeHistoryFromAlternativeSources(
+                a, updated, failedSite.key, reason, false);
+        return true;
     }
 
     static WatchHistory.Entry lookupSavedBookmark(
@@ -499,6 +535,10 @@ final class PlaybackController {
                                                 clearPlaybackLoading(a);
                                                 if (url.isEmpty()) {
                                                     a.changingMiniEpisode = false;
+                                                    if (tryHistoryCrossSourceFailover(
+                                                            a, s, a.resumeAt, "原片源未返回有效播放地址")) {
+                                                        return;
+                                                    }
                                                     String spiderMsg =
                                                             finalResult
                                                                     .optString(
@@ -555,6 +595,10 @@ final class PlaybackController {
                                                     || ticket != a.generation) return;
                                             a.changingMiniEpisode = false;
                                             clearPlaybackLoading(a);
+                                            if (tryHistoryCrossSourceFailover(
+                                                    a, s, a.resumeAt, "原片源解析失败")) {
+                                                return;
+                                            }
                                             failInPlaceSwitch(a, a.message(error));
                                         });
                             }
@@ -844,6 +888,11 @@ final class PlaybackController {
             Cms.Line line,
             Cms.Episode episode,
             int position) {
+        if (episode != null && episode.media != null && episode != a.activeEpisode) {
+            episode.media.remove("_eofReconnectCount");
+            episode.media.remove("_ioReconnectCount");
+            episode.media.remove("_hwRetry");
+        }
         a.changingMiniEpisode = a.miniMode;
         a.resumeAt = position;
         if (a.miniMode) {
@@ -1004,6 +1053,19 @@ final class PlaybackController {
         if (retained != null && retained.matches(embySession)) a.embyReporter = null;
         else retained = null;
         releasePlayer(a);
+        try {
+            android.app.ActivityManager am =
+                    (android.app.ActivityManager)
+                            a.getSystemService(android.content.Context.ACTIVITY_SERVICE);
+            if (am != null
+                    && ((android.os.Build.VERSION.SDK_INT >= 19 && am.isLowRamDevice())
+                            || am.getMemoryClass() <= 128)) {
+                a.images.evictAll();
+                ImmersivePoster.trimMemory(
+                        android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW);
+            }
+        } catch (Throwable ignored) {
+        }
         a.embyReporter = retained;
         a.playingBookmark = null;
         if (s != null
@@ -1071,7 +1133,11 @@ final class PlaybackController {
             }
         }
         a.root = new FrameLayout(a);
-        a.root.setBackgroundColor(Color.BLACK);
+        // Disable Android API 26+ defaultFocusHighlight and attach an explicit state_focused
+        // pure-black background so a.root.requestFocus() when hiding TV controls never paints a
+        // full-screen translucent gray highlight over letterbox bars or the video SurfaceView.
+        UiCompat.setBackground(a.root, UiCompat.createFocusSafeColorBackground(Color.BLACK));
+        UiCompat.setDefaultFocusHighlightEnabled(a.root, false);
         a.root.setFocusable(true);
         a.root.setFocusableInTouchMode(true);
         a.root.setTag("player-surface");
@@ -1085,6 +1151,7 @@ final class PlaybackController {
         VideoOutput surface = new VideoOutput(a, useCompatibleOutput);
         VideoOutput.setWindowHdrMode(a, false);
         a.playbackLayer = new FrameLayout(a);
+        UiCompat.setDefaultFocusHighlightEnabled(a.playbackLayer, false);
         a.playbackLayer.setTag("playback-layer");
         a.root.addView(a.playbackLayer, new FrameLayout.LayoutParams(-1, -1));
         a.playbackLayer.addView(surface, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
@@ -1171,6 +1238,12 @@ final class PlaybackController {
                                             Cms.inheritedHeaders(s.api, ep.url, s.headers);
                                     Cms.mergeHeaders(mediaHeaders, ep.headers);
                                     int engPref = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+                                    boolean useMpv =
+                                            !ep.media.optBoolean("_systemFallback")
+                                                    && !ep.media.optBoolean("_softwareFallback")
+                                                    && !ep.media.optBoolean("_mpvFallback")
+                                                    && engPref == 3
+                                                    && MpvPlayer.isAvailable();
                                     boolean preferIjk =
                                             engPref == 2
                                                     || (engPref == 0
@@ -1181,23 +1254,80 @@ final class PlaybackController {
                                     candidate =
                                             ep.media.optBoolean("_systemFallback") || engPref == 1
                                                     ? new SystemPlayer(a)
-                                                    : ep.media.optBoolean("_softwareFallback")
-                                                            ? new MoviePlayer(
-                                                                    a,
-                                                                    ep.media.optInt(
-                                                                            "_fallbackMode", 2),
-                                                                    preferIjk)
-                                                            : preferIjk
-                                                                    ? MoviePlayer.createIjk(a)
-                                                                    : new MoviePlayer(a);
+                                                    : useMpv
+                                                            ? new MpvPlayer(a)
+                                                            : ep.media.optBoolean(
+                                                                            "_softwareFallback")
+                                                                    ? new MoviePlayer(
+                                                                            a,
+                                                                            ep.media.optInt(
+                                                                                    "_fallbackMode",
+                                                                                    2),
+                                                                            preferIjk)
+                                                                    : preferIjk
+                                                                            ? MoviePlayer.createIjk(
+                                                                                    a)
+                                                                            : new MoviePlayer(a);
+                                    String rawPlayUrl =
+                                            Cms.isHttp(ep.url) ? Cms.normalizeHttp(ep.url) : ep.url;
+                                    String playUrl = rawPlayUrl;
+                                    boolean isLiveStream = ep.media.optBoolean("live");
+                                    String declaredMime = MediaOptions.mime(ep.media);
+                                    if (!isLiveStream
+                                            && a.prefs.getBoolean(Prefs.HLS_PROXY_ENABLED, true)
+                                            && HlsStreamProxy.looksLikeHls(
+                                                    rawPlayUrl, declaredMime)) {
+                                        try {
+                                            SourceController.ensureProxy(a, a.config);
+                                            playUrl =
+                                                    HlsStreamProxy.register(
+                                                            rawPlayUrl,
+                                                            mediaHeaders,
+                                                            a.prefs.getBoolean(
+                                                                    Prefs.HLS_AD_STRIP, false));
+                                        } catch (Exception proxyErr) {
+                                            AppLog.w(
+                                                    "PlaybackController",
+                                                    "HLS proxy fallback to direct URL",
+                                                    proxyErr);
+                                        }
+                                    } else if (!isLiveStream) {
+                                        int cacheMb = a.prefs.getInt(Prefs.MEDIA_CACHE_MB, 256);
+                                        if (cacheMb > 0
+                                                && MediaDiskCache.isCacheableDirectUrl(
+                                                        rawPlayUrl, declaredMime)) {
+                                            try {
+                                                SourceController.ensureProxy(a, a.config);
+                                                playUrl =
+                                                        MediaDiskCache.getInstance(
+                                                                        a.getCacheDir(), cacheMb)
+                                                                .register(rawPlayUrl, mediaHeaders);
+                                            } catch (Exception cacheErr) {
+                                                AppLog.w(
+                                                        "PlaybackController",
+                                                        "Disk cache proxy fallback to direct URL",
+                                                        cacheErr);
+                                            }
+                                        }
+                                    }
                                     candidate.configureDefaultAudio();
-                                    candidate.setDataSource(
-                                            a,
-                                            Uri.parse(
-                                                    Cms.isHttp(ep.url)
-                                                            ? Cms.normalizeHttp(ep.url)
-                                                            : ep.url),
-                                            mediaHeaders);
+                                    candidate.setDataSource(a, Uri.parse(playUrl), mediaHeaders);
+                                    try {
+                                        if (ep.name != null
+                                                && !ep.name.isEmpty()
+                                                && ep.media
+                                                        .optString("_episodeName", "")
+                                                        .isEmpty()) {
+                                            ep.media.put("_episodeName", ep.name);
+                                        }
+                                        if (a.activeLine != null
+                                                && a.activeLine.name != null
+                                                && !a.activeLine.name.isEmpty()
+                                                && ep.media.optString("_lineName", "").isEmpty()) {
+                                            ep.media.put("_lineName", a.activeLine.name);
+                                        }
+                                    } catch (Exception ignored) {
+                                    }
                                     candidate.setOptions(ep.media);
                                     final MoviePlayer ready = candidate;
                                     a.ui.post(
@@ -1217,6 +1347,12 @@ final class PlaybackController {
                                                 if (activeSurface[0] != null
                                                         && activeSurface[0].isValid()) {
                                                     ready.setSurface(activeSurface[0]);
+                                                    if (surface.getWidth() > 0
+                                                            && surface.getHeight() > 0) {
+                                                        ready.setSurfaceSize(
+                                                                surface.getWidth(),
+                                                                surface.getHeight());
+                                                    }
                                                 }
                                                 ready.bindSubtitles(
                                                         controls.subtitle,
@@ -1226,34 +1362,111 @@ final class PlaybackController {
                                                                         String.valueOf(text);
                                                             }
                                                         });
+                                                ready.setOnTextTracksChangedListener(
+                                                        () -> {
+                                                            if (ticket == a.generation
+                                                                    && a.playbackControls
+                                                                            == controls) {
+                                                                controls
+                                                                        .onPlayerTextTracksChanged();
+                                                            }
+                                                        });
+                                                ready.setOnAudioTracksChangedListener(
+                                                        () -> {
+                                                            if (ticket == a.generation
+                                                                    && a.playbackControls
+                                                                            == controls) {
+                                                                controls
+                                                                        .onPlayerAudioTracksChanged();
+                                                            }
+                                                        });
                                                 ready.setOnHdrChangedListener(
                                                         hdr -> {
                                                             if (ticket != a.generation
                                                                     || a.isFinishing()) return;
-                                                            surface.setHdrContent(hdr);
-                                                            VideoOutput.setWindowHdrMode(
-                                                                    a,
+                                                            boolean hdrSurface =
                                                                     hdr
                                                                             && surface
-                                                                                    .usesSurfaceView());
+                                                                                    .usesSurfaceView();
+                                                            surface.setHdrContent(hdr);
+                                                            VideoOutput.setWindowHdrMode(
+                                                                    a, hdrSurface);
+                                                            if (a.playerChrome != null) {
+                                                                a.playerChrome.setHdrSurfaceActive(
+                                                                        hdrSurface);
+                                                            }
                                                         });
                                                 ready.setOnPreparedListener(
                                                         mp -> {
                                                             if (ticket != a.generation) return;
                                                             a.prepared = true;
+                                                            a.historyFallbackInFlight = false;
+                                                            a.historyFallbackBookmark = null;
+                                                            if (a.migratingHistoryOldKey != null) {
+                                                                String oldKey =
+                                                                        a.migratingHistoryOldKey;
+                                                                a.migratingHistoryOldKey = null;
+                                                                if (a.playingBookmark == null
+                                                                        || !oldKey.equals(
+                                                                                a.playingBookmark
+                                                                                        .key())) {
+                                                                    a.removeWatchHistory(
+                                                                            oldKey, null);
+                                                                }
+                                                            }
                                                             boolean hdr = mp.isHdrVideo();
-                                                            surface.setHdrContent(hdr);
-                                                            VideoOutput.setWindowHdrMode(
-                                                                    a,
+                                                            boolean hdrSurface =
                                                                     hdr
                                                                             && surface
-                                                                                    .usesSurfaceView());
-                                                            if (a.playerChrome != null)
+                                                                                    .usesSurfaceView();
+                                                            surface.setHdrContent(hdr);
+                                                            VideoOutput.setWindowHdrMode(
+                                                                    a, hdrSurface);
+                                                            if (a.playerChrome != null) {
+                                                                a.playerChrome.setHdrSurfaceActive(
+                                                                        hdrSurface);
                                                                 a.playerChrome.setLoading(false);
+                                                            }
                                                             a.playing = a.foreground;
                                                             if (a.foreground) mp.start();
                                                             else mp.pause();
                                                             controls.prepared();
+                                                            if (!"live".equals(s.key)
+                                                                    && a.foreground
+                                                                    && !ep.media.optBoolean(
+                                                                            "_dvColorWarned")) {
+                                                                String dvEpName =
+                                                                        ep.media.optString(
+                                                                                "_episodeName",
+                                                                                ep.name != null
+                                                                                        ? ep.name
+                                                                                        : "");
+                                                                String dvLineName =
+                                                                        ep.media.optString(
+                                                                                "_lineName",
+                                                                                a.activeLine != null
+                                                                                                && a.activeLine
+                                                                                                                .name
+                                                                                                        != null
+                                                                                        ? a.activeLine
+                                                                                                .name
+                                                                                        : "");
+                                                                if (MoviePlayer
+                                                                        .looksLikeTranscodedDolbyVisionColorRisk(
+                                                                                dvEpName,
+                                                                                dvLineName,
+                                                                                mp
+                                                                                        .activeVideoMimeType())) {
+                                                                    try {
+                                                                        ep.media.put(
+                                                                                "_dvColorWarned",
+                                                                                true);
+                                                                    } catch (Exception ignored) {
+                                                                    }
+                                                                    a.toast(
+                                                                            "纯杜比视界片源经转码易偏色，建议选 HDR10 / SDR / DV+HDR 片源");
+                                                                }
+                                                            }
                                                             savePlaybackHistoryOnPrepared(a);
                                                             a.playStatus.setText(
                                                                     a.foreground
@@ -1294,6 +1507,21 @@ final class PlaybackController {
                                                 ready.setOnVideoSizeChangedListener(
                                                         (mp, w, h) -> {
                                                             if (ticket == a.generation) {
+                                                                if (w > 0
+                                                                        && h > 0
+                                                                        && mp.isHdrVideo()) {
+                                                                    boolean hdrSurface =
+                                                                            surface
+                                                                                    .usesSurfaceView();
+                                                                    surface.setHdrContent(true);
+                                                                    VideoOutput.setWindowHdrMode(
+                                                                            a, hdrSurface);
+                                                                    if (a.playerChrome != null) {
+                                                                        a.playerChrome
+                                                                                .setHdrSurfaceActive(
+                                                                                        hdrSurface);
+                                                                    }
+                                                                }
                                                                 controls.resize(w, h);
                                                                 if ("live".equals(s.key)
                                                                         && w > 0
@@ -1331,16 +1559,84 @@ final class PlaybackController {
                                                                     || a.player != ready) return;
                                                             if (a.markerHost != null)
                                                                 a.markerHost.abort();
+                                                            int curPos = ready.getCurrentPosition();
+                                                            int curDur = ready.getDuration();
+                                                            if (curDur <= 0
+                                                                    && a.playingBookmark != null
+                                                                    && a.playingBookmark.duration
+                                                                            > 0) {
+                                                                curDur = a.playingBookmark.duration;
+                                                            }
+                                                            int eofRetries =
+                                                                    Math.max(
+                                                                            ep.media.optInt(
+                                                                                    "_eofReconnectCount",
+                                                                                    0),
+                                                                            a.activeEpisode != null
+                                                                                            && a.activeEpisode
+                                                                                                            .media
+                                                                                                    != null
+                                                                                    ? a
+                                                                                            .activeEpisode
+                                                                                            .media
+                                                                                            .optInt(
+                                                                                                    "_eofReconnectCount",
+                                                                                                    0)
+                                                                                    : 0);
+                                                            if (MoviePlayer
+                                                                            .isPrematureProgressiveEnd(
+                                                                                    "live"
+                                                                                            .equals(
+                                                                                                    s.key),
+                                                                                    curPos,
+                                                                                    curDur)
+                                                                    && eofRetries < 3
+                                                                    && a.activeLine != null
+                                                                    && a.activeEpisode != null) {
+                                                                try {
+                                                                    ep.media.put(
+                                                                            "_eofReconnectCount",
+                                                                            eofRetries + 1);
+                                                                    if (a.activeEpisode.media
+                                                                            != null) {
+                                                                        a.activeEpisode.media.put(
+                                                                                "_eofReconnectCount",
+                                                                                eofRetries + 1);
+                                                                    }
+                                                                } catch (Exception ignored) {
+                                                                }
+                                                                a.resumeAt = curPos;
+                                                                a.toast("网络波动，正在断点续连…");
+                                                                a.playStatus.setText(
+                                                                        "网络中断，正在断点续连…");
+                                                                final Cms.Line retryLine =
+                                                                        a.activeLine;
+                                                                final Cms.Episode retryEp =
+                                                                        a.activeEpisode;
+                                                                a.ui.postDelayed(
+                                                                        () -> {
+                                                                            if (ticket
+                                                                                            == a.generation
+                                                                                    && !a
+                                                                                            .isFinishing()) {
+                                                                                resolvePlayer(
+                                                                                        a, s, v,
+                                                                                        retryLine,
+                                                                                        retryEp);
+                                                                            }
+                                                                        },
+                                                                        450L);
+                                                                return;
+                                                            }
                                                             if (a.playingBookmark != null) {
-                                                                int dur = ready.getDuration();
-                                                                if (dur > 0) {
+                                                                if (curDur > 0) {
                                                                     a.playingBookmark.duration =
-                                                                            dur;
+                                                                            curDur;
                                                                     a.playingBookmark.position =
                                                                             Math.max(
                                                                                     a.playingBookmark
                                                                                             .position,
-                                                                                    dur);
+                                                                                    curDur);
                                                                 } else if (a.playingBookmark
                                                                                 .position
                                                                         <= 0) {
@@ -1361,6 +1657,90 @@ final class PlaybackController {
                                                                 return true;
                                                             if (a.markerHost != null)
                                                                 a.markerHost.abort();
+                                                            int currentPos =
+                                                                    mp.getCurrentPosition();
+                                                            if (!"live".equals(s.key)
+                                                                    && what >= 2000
+                                                                    && what < 3000
+                                                                    && currentPos > 0
+                                                                    && a.activeLine != null
+                                                                    && a.activeEpisode != null) {
+                                                                int ioRetries =
+                                                                        Math.max(
+                                                                                ep.media.optInt(
+                                                                                        "_ioReconnectCount",
+                                                                                        0),
+                                                                                a.activeEpisode
+                                                                                                        .media
+                                                                                                != null
+                                                                                        ? a
+                                                                                                .activeEpisode
+                                                                                                .media
+                                                                                                .optInt(
+                                                                                                        "_ioReconnectCount",
+                                                                                                        0)
+                                                                                        : 0);
+                                                                if (ioRetries < 2) {
+                                                                    try {
+                                                                        ep.media.put(
+                                                                                "_ioReconnectCount",
+                                                                                ioRetries + 1);
+                                                                        if (a.activeEpisode.media
+                                                                                != null) {
+                                                                            a.activeEpisode.media
+                                                                                    .put(
+                                                                                            "_ioReconnectCount",
+                                                                                            ioRetries
+                                                                                                    + 1);
+                                                                        }
+                                                                    } catch (Exception ignored) {
+                                                                    }
+                                                                    a.resumeAt = currentPos;
+                                                                    a.toast("连接波动，正在刷新播放链接并续播…");
+                                                                    a.playStatus.setText(
+                                                                            "连接波动，正在刷新播放链接…");
+                                                                    final Cms.Line retryLine =
+                                                                            a.activeLine;
+                                                                    final Cms.Episode retryEp =
+                                                                            a.activeEpisode;
+                                                                    a.ui.postDelayed(
+                                                                            () -> {
+                                                                                if (ticket
+                                                                                                == a.generation
+                                                                                        && !a
+                                                                                                .isFinishing()) {
+                                                                                    resolvePlayer(
+                                                                                            a, s, v,
+                                                                                            retryLine,
+                                                                                            retryEp);
+                                                                                }
+                                                                            },
+                                                                            500L);
+                                                                    return true;
+                                                                }
+                                                            }
+                                                            if (mp instanceof MpvPlayer
+                                                                    && !ep.media.optBoolean(
+                                                                            "_mpvFallback")) {
+                                                                try {
+                                                                    ep.media.put(
+                                                                            "_mpvFallback", true);
+                                                                } catch (Exception ignored) {
+                                                                }
+                                                                a.resumeAt =
+                                                                        mp.getCurrentPosition();
+                                                                a.playStatus.setText(
+                                                                        "MPV 播放异常，正在切换 Media3 内核…");
+                                                                a.ui.post(
+                                                                        () -> {
+                                                                            if (ticket
+                                                                                    == a.generation)
+                                                                                playerPage(
+                                                                                        a, s, v,
+                                                                                        ep);
+                                                                        });
+                                                                return true;
+                                                            }
                                                             if (PlaybackFailure.decoderFallback(
                                                                             what)
                                                                     && a.prefs.getInt(
@@ -1368,6 +1748,37 @@ final class PlaybackController {
                                                                                             .DECODER_MODE,
                                                                                     0)
                                                                             == 0) {
+                                                                if (currentPos >= 5000
+                                                                        && !ep.media.optBoolean(
+                                                                                "_hwRetry")
+                                                                        && !ep.media.optBoolean(
+                                                                                "_softwareFallback")
+                                                                        && !ep.media.optBoolean(
+                                                                                "_systemFallback")
+                                                                        && !mp
+                                                                                .isUnsupportedDolbyVisionProfile5()) {
+                                                                    try {
+                                                                        ep.media.put(
+                                                                                "_hwRetry", true);
+                                                                    } catch (Exception ignored) {
+                                                                    }
+                                                                    a.resumeAt = currentPos;
+                                                                    a.playStatus.setText(
+                                                                            "解码器波动，正在重新初始化硬件解码…");
+                                                                    a.ui.postDelayed(
+                                                                            () -> {
+                                                                                if (ticket
+                                                                                                == a.generation
+                                                                                        && !a
+                                                                                                .isFinishing()) {
+                                                                                    playerPage(
+                                                                                            a, s, v,
+                                                                                            ep);
+                                                                                }
+                                                                            },
+                                                                            250L);
+                                                                    return true;
+                                                                }
                                                                 if (!ep.media.optBoolean(
                                                                                 "_softwareFallback")
                                                                         && !mp
@@ -1496,6 +1907,16 @@ final class PlaybackController {
                                                                     }
                                                                 }
                                                             }
+                                                            if (tryHistoryCrossSourceFailover(
+                                                                    a,
+                                                                    s,
+                                                                    Math.max(
+                                                                            0,
+                                                                            mp
+                                                                                    .getCurrentPosition()),
+                                                                    "原片源播放失败")) {
+                                                                return true;
+                                                            }
                                                             stopEmbySession(a);
                                                             a.prepared = false;
                                                             a.playing = false;
@@ -1554,9 +1975,18 @@ final class PlaybackController {
                         if (ticket != a.generation) return;
                         if (a.player != null) {
                             a.player.setSurface(value);
+                            if (surface.getWidth() > 0 && surface.getHeight() > 0) {
+                                a.player.setSurfaceSize(surface.getWidth(), surface.getHeight());
+                            }
                             return;
                         }
                         launchPlayerInit.run();
+                    }
+
+                    public void resized(int width, int height) {
+                        if (ticket == a.generation && a.player != null) {
+                            a.player.setSurfaceSize(width, height);
+                        }
                     }
 
                     public void destroyed() {
@@ -1674,6 +2104,7 @@ final class PlaybackController {
 
     static void showControls(MainActivity a, boolean visible, boolean progressOnly) {
         if (!visible) finishSeek(a, false);
+        if (visible && a.playerChrome != null) a.playerChrome.cancelEpisodeHoldSwitch();
         if (a.miniMode && visible) return;
         if (a.playerLocked && visible) {
             setUnlockButtonVisible(a, true, true);
@@ -1681,6 +2112,27 @@ final class PlaybackController {
         }
         boolean changed = a.controlsVisible != visible;
         a.controlsVisible = visible;
+        if (visible && a.playClock != null && a.player != null && a.prepared) {
+            try {
+                int rawPos = a.player.getCurrentPosition();
+                int displayPos =
+                        a.playbackControls != null
+                                ? a.playbackControls.displayPosition(rawPos)
+                                : rawPos;
+                int dur = a.player.getDuration();
+                if (dur <= 0 && a.playingBookmark != null && a.playingBookmark.duration > 0) {
+                    dur = a.playingBookmark.duration;
+                }
+                String clockText =
+                        formatTime(displayPos)
+                                + " / "
+                                + (dur > 0 ? formatTime(dur) : (a.isLive() ? "直播" : "--:--"));
+                if (!clockText.contentEquals(a.playClock.getText())) {
+                    a.playClock.setText(clockText);
+                }
+            } catch (Exception ignored) {
+            }
+        }
         if (a.playerChrome != null) {
             a.playerChrome.setProgressOnlyMode(visible && progressOnly);
         }
@@ -1898,6 +2350,7 @@ final class PlaybackController {
             ep.media.put("_qualityIdx", qIdx + 1);
             ep.media.remove("_softwareFallback");
             ep.media.remove("_systemFallback");
+            ep.media.remove("_mpvFallback");
         } catch (Exception ignored) {
         }
         applyCandidateHeaders(s, ep, nextQ);
@@ -1914,6 +2367,9 @@ final class PlaybackController {
         String qName = nextQ.optString("name", "备用线路");
         if (a.playStatus != null) {
             a.playStatus.setText("正在切换至 " + qName + "…");
+        }
+        if (a.playerChrome != null) {
+            a.playerChrome.setLoadingStatus("正在切换至 " + qName + "…", null);
         }
         a.ui.post(
                 () -> {
@@ -1996,6 +2452,7 @@ final class PlaybackController {
 
     static void releasePlayer(MainActivity a) {
         if (a.markerHost != null) a.markerHost.abort();
+        if (a.playerChrome != null) a.playerChrome.cancelEpisodeHoldSwitch();
         finishSeek(a, false);
         if (a.hideLockButton != null) {
             a.ui.removeCallbacks(a.hideLockButton);
@@ -2030,6 +2487,66 @@ final class PlaybackController {
                 || a.miniMode
                 || (a.playbackControls != null && a.playbackControls.dialogOpen)) return false;
         int key = event.getKeyCode();
+        EpisodeHoldSwitchOverlay holdOverlay =
+                a.playerChrome != null ? a.playerChrome.episodeHoldOverlay : null;
+        if (holdOverlay != null) {
+            if (holdOverlay.isTracking() && !holdOverlay.isTrackingKey(key)) {
+                holdOverlay.cancel();
+            }
+            if (EpisodeHoldSwitchOverlay.isEpisodeHoldKey(key)) {
+                int action = event.getAction();
+                boolean eligibleHold =
+                        a.isTvDevice()
+                                && !a.isLive()
+                                && !a.isCast()
+                                && a.prepared
+                                && a.markerHost == null
+                                && !a.seekGesture.active
+                                && (!a.controlsVisible
+                                        || (a.playerChrome != null
+                                                && a.playerChrome.progressOnlyMode))
+                                && (a.playbackControls == null
+                                        || !a.playbackControls.isSkipCountdownActive());
+                if (action == KeyEvent.ACTION_DOWN) {
+                    if (event.getRepeatCount() == 0 && eligibleHold) {
+                        int dir = EpisodeHoldSwitchOverlay.Controller.directionForKeyCode(key);
+                        boolean hasTarget =
+                                a.playbackControls != null
+                                        && a.playbackControls.hasAdjacentEpisode(dir);
+                        String targetName =
+                                a.playbackControls != null
+                                        ? a.playbackControls.peekAdjacentEpisodeName(dir)
+                                        : "";
+                        if (holdOverlay.beginHold(
+                                key, event.getDownTime(), hasTarget, targetName)) {
+                            return true;
+                        }
+                    } else if (holdOverlay.isTrackingKey(key)) {
+                        holdOverlay.onKeyRepeat(key);
+                        return true;
+                    }
+                } else if (action == KeyEvent.ACTION_UP && holdOverlay.isTrackingKey(key)) {
+                    int upResult = holdOverlay.handleKeyUp(key, event.isCanceled());
+                    if (upResult == EpisodeHoldSwitchOverlay.Controller.UP_SHORT_PRESS) {
+                        if (key == KeyEvent.KEYCODE_DPAD_UP && a.playbackControls != null) {
+                            KeyEvent syntheticDown =
+                                    new KeyEvent(
+                                            event.getDownTime(),
+                                            event.getEventTime(),
+                                            KeyEvent.ACTION_DOWN,
+                                            KeyEvent.KEYCODE_DPAD_UP,
+                                            0);
+                            if (a.playbackControls.markers().open(syntheticDown)) {
+                                return true;
+                            }
+                        }
+                        showControls(a, true, false);
+                        if (a.playbackControls != null) a.playbackControls.focusPrimaryAction();
+                    }
+                    return true;
+                }
+            }
+        }
         if (a.isTvDevice()
                 && key == KeyEvent.KEYCODE_DPAD_UP
                 && a.playbackControls != null

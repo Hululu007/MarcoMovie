@@ -74,6 +74,9 @@ final class Prefs {
     static final String LIVE_UDPXY_URL = "live_udpxy_url";
     static final String LIVE_EPG_URL = "live_epg_url";
     static final String LIVE_STREAM_METRICS = "live_stream_metrics";
+    static final String LIVE_FAVORITE_CHANNELS = "live_favorite_channels";
+    static final String LIVE_BLOCKED_GROUPS = "live_blocked_groups";
+    static final String LIVE_LAST_SOURCE_URL = "live_last_source_url";
     static final String SELECTED_SITE = "selected_site";
     static final String PREFERRED_SITE = "preferred_site_identity";
     static final String PREFERRED_LINE = "preferred_line";
@@ -104,11 +107,29 @@ final class Prefs {
     static final String MOBILE_CARD_SUBTITLE = "mobile_card_subtitle";
     static final String MOBILE_SHOW_HISTORY = "mobile_show_history";
     static final String VIDEO_SKIP_RECORDS = "video_skip_records";
+    static final String VIDEO_SUBTITLE_RECORDS = "video_subtitle_records";
+    static final String VIDEO_AUDIO_RECORDS = "video_audio_records";
+    static final String AUDIO_TRACK_PREFERENCE = "audio_track_preference";
     static final String PLAYER_ALWAYS_SHOW_CLOCK = "player_always_show_clock";
     static final String TV_PLAYER_TOP_RIGHT_HUD = "tv_player_top_right_hud";
+    static final String TV_PLAYER_TOOLBAR_ORDER = "tv_player_toolbar_order";
     static final String CAST_ENABLED = "cast_enabled";
     static final String CAST_DEVICE_UUID = "cast_device_uuid";
     static final String CAST_DEVICE_NAME = "cast_device_name";
+    static final String SPIDER_GATEWAY_ENABLED = "spider_gateway_enabled";
+    static final String SPIDER_GATEWAY_TOKEN = "spider_gateway_token";
+    static final String SPIDER_GATEWAY_PORT = "spider_gateway_port";
+    static final String SPIDER_GATEWAY_NAME = "spider_gateway_name";
+    static final String CRASH_LAST_EXIT_TS = "crash_last_exit_ts";
+    static final String ANIME4K_ENABLED = "anime4k_enabled";
+    static final String HDR_TONE_MAPPING = "hdr_tone_mapping";
+    static final String HLS_PROXY_ENABLED = "hls_proxy_enabled";
+    static final String HLS_AD_STRIP = "hls_ad_strip";
+    static final String MEDIA_CACHE_MB = "media_cache_mb";
+    static final String LOUDNESS_BOOST = "loudness_boost";
+    static final String WEBVIEW_JS_FALLBACK = "webview_js_fallback";
+    static final String NATIVE_PYTHON_ENABLED = "native_python_enabled";
+    static final String MPV_UNSAFE_DIRECT_CODECS = "mpv_unsafe_direct_codecs";
 
     // Appearance & playback settings exported/restored in backups; update the Prefs.KEYS.length
     // assertion in ReviewFixChecks.java whenever keys are added or removed.
@@ -178,7 +199,13 @@ final class Prefs {
                                     TUNNELED_PLAYBACK,
                                     EPISODES_DESCENDING,
                                     LIVE_HIGH_QUALITY,
-                                    LIVE_MERGE_SOURCES)));
+                                    LIVE_MERGE_SOURCES,
+                                    ANIME4K_ENABLED,
+                                    HDR_TONE_MAPPING,
+                                    HLS_PROXY_ENABLED,
+                                    HLS_AD_STRIP,
+                                    WEBVIEW_JS_FALLBACK,
+                                    NATIVE_PYTHON_ENABLED)));
 
     private static final Map<String, int[]> INT_RANGES;
 
@@ -197,7 +224,7 @@ final class Prefs {
         ranges.put(HOME_ROWS, new int[] {1, 4});
         ranges.put(HOME_SECTIONS, new int[] {0, 5});
         ranges.put(WALLPAPER_DIM, new int[] {0, 100});
-        ranges.put(PLAYER_ENGINE, new int[] {0, 2});
+        ranges.put(PLAYER_ENGINE, new int[] {0, 3});
         ranges.put(VIDEO_OUTPUT, new int[] {0, 1});
         ranges.put(DECODER_MODE, new int[] {0, 2});
         ranges.put(REPEAT_MODE, new int[] {0, 2});
@@ -214,6 +241,8 @@ final class Prefs {
         ranges.put(AUDIO_EFFECT, new int[] {0, 3});
         ranges.put(SEARCH_THREADS, new int[] {2, 6});
         ranges.put(SEARCH_TIMEOUT, new int[] {10, 30});
+        ranges.put(MEDIA_CACHE_MB, new int[] {0, 1024});
+        ranges.put(LOUDNESS_BOOST, new int[] {0, 15});
         INT_RANGES = Collections.unmodifiableMap(ranges);
     }
 
@@ -386,6 +415,9 @@ final class Prefs {
         if (SELECTED_SITE.equals(key)) {
             return text.length() <= 256 ? text : null;
         }
+        if (TV_PLAYER_TOOLBAR_ORDER.equals(key)) {
+            return sanitizeTvToolbarOrder(value);
+        }
         if (LIVE_UDPXY_URL.equals(key)) {
             if (text.isEmpty()) return "";
             return sanitizeUdpxyBase(text);
@@ -428,6 +460,43 @@ final class Prefs {
         } catch (Exception ignored) {
             return null;
         }
+    }
+
+    private static final Set<String> TV_TOOLBAR_ALLOWED_KEYS =
+            Collections.unmodifiableSet(
+                    new HashSet<>(
+                            Arrays.asList(
+                                    "play-pause",
+                                    "next-episode",
+                                    "episodes",
+                                    "subtitles",
+                                    "audio-tracks",
+                                    "lines",
+                                    "speed",
+                                    "decoder",
+                                    "skip-intro-tool",
+                                    "skip-outro-tool",
+                                    "more")));
+
+    static String sanitizeTvToolbarOrder(Object raw) {
+        if (!(raw instanceof String)) return null;
+        String text = ((String) raw).trim();
+        if (text.length() > 256) return null;
+        if (text.isEmpty()) return "";
+        java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
+        for (String token : text.split(",")) {
+            String key = token == null ? "" : token.trim();
+            if (TV_TOOLBAR_ALLOWED_KEYS.contains(key)) {
+                seen.add(key);
+            }
+        }
+        if (seen.isEmpty()) return "";
+        StringBuilder out = new StringBuilder();
+        for (String key : seen) {
+            if (out.length() > 0) out.append(',');
+            out.append(key);
+        }
+        return out.toString();
     }
 
     private static String sanitizeUdpxyBase(String raw) {

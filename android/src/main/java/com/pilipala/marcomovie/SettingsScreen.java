@@ -738,6 +738,105 @@ final class SettingsScreen {
         return null;
     }
 
+    static Cms.Video findDirectDriveCard(java.util.List<Cms.Video> videos, String driveKey) {
+        if (videos == null || driveKey == null || driveKey.trim().isEmpty()) return null;
+        String target = driveKey.trim().toLowerCase(java.util.Locale.ROOT);
+        Cms.Video fallback = null;
+        for (Cms.Video v : videos) {
+            if (v == null) continue;
+            String title = v.title == null ? "" : v.title.trim();
+            String id = v.id == null ? "" : v.id.toLowerCase(java.util.Locale.ROOT);
+            String act = v.action == null ? "" : v.action.toLowerCase(java.util.Locale.ROOT);
+            if (title.contains("清除") || title.contains("重置") || id.contains("clear")) {
+                continue;
+            }
+            String detected = PluginDialogStyler.detectDriveKeyFromLabel(title);
+            if (detected == null) detected = PluginDialogStyler.detectDriveKeyFromLabel(id);
+            if (detected == null) detected = PluginDialogStyler.detectDriveKeyFromLabel(act);
+            if (!target.equals(detected)) continue;
+            if (title.contains("扫码")
+                    || title.contains("二维码")
+                    || title.contains("登录")
+                    || title.contains("登入")
+                    || id.contains("qr")
+                    || id.contains("scan")
+                    || id.contains("login")) {
+                return v;
+            }
+            if (fallback == null) fallback = v;
+        }
+        return fallback;
+    }
+
+    void openDirectDriveConfigAction(
+            Cms.Site targetSite, String driveKey, boolean toggleEnableOnly) {
+        final int ticket = a.generation;
+        a.worker.execute(
+                () -> {
+                    try {
+                        CspEngine.syncAllPluginActivities(a);
+                        SourceEngine eng = a.engine(targetSite);
+                        String homeRaw = eng.home();
+                        java.util.List<Cms.Category> cats = Cms.categories(homeRaw);
+                        Cms.Listing homeList = null;
+                        try {
+                            homeList = Cms.listing(homeRaw);
+                        } catch (Throwable ignored) {
+                        }
+                        Cms.Video matched =
+                                findDirectDriveCard(
+                                        homeList != null ? homeList.videos : null, driveKey);
+                        if (matched == null && cats != null) {
+                            for (Cms.Category c : cats) {
+                                String cname = c.name == null ? "" : c.name;
+                                String cid =
+                                        c.id == null ? "" : c.id.toLowerCase(java.util.Locale.ROOT);
+                                if (driveKey.equals(
+                                                PluginDialogStyler.detectDriveKeyFromLabel(cname))
+                                        || cname.contains("网盘")
+                                        || cname.contains("云盘")
+                                        || cname.contains("扫码")
+                                        || cname.contains("登录")
+                                        || cid.contains("pan")
+                                        || cid.contains("config")) {
+                                    try {
+                                        Cms.Listing cl = Cms.listing(eng.category(c.id, 1));
+                                        matched = findDirectDriveCard(cl.videos, driveKey);
+                                        if (matched != null) break;
+                                    } catch (Throwable ignored) {
+                                    }
+                                }
+                            }
+                        }
+                        if (matched != null) {
+                            final Cms.Video card = matched;
+                            a.ui.post(
+                                    () -> {
+                                        if (a.isFinishing() || ticket != a.generation) return;
+                                        PluginDialogStyler.watch(a);
+                                        a.openListing(targetSite, card);
+                                    });
+                            return;
+                        }
+                        a.ui.post(
+                                () -> {
+                                    if (a.isFinishing() || ticket != a.generation) return;
+                                    PluginDialogStyler.armDirectDriveForward(
+                                            a, driveKey, toggleEnableOnly);
+                                    a.sourceAction(targetSite, "LoginShow");
+                                });
+                    } catch (Throwable error) {
+                        a.ui.post(
+                                () -> {
+                                    if (a.isFinishing() || ticket != a.generation) return;
+                                    PluginDialogStyler.armDirectDriveForward(
+                                            a, driveKey, toggleEnableOnly);
+                                    a.sourceAction(targetSite, "LoginShow");
+                                });
+                    }
+                });
+    }
+
     void showDynamicVideoPicker(
             Cms.Site targetSite, String title, java.util.List<Cms.Video> videos) {
         if (videos == null || videos.isEmpty()) {
@@ -1697,6 +1796,14 @@ final class SettingsScreen {
                     new String[] {"现代悬浮卡片（默认）", "经典双层工具栏"},
                     new int[] {0, 1},
                     0);
+            boolean modernPlayerStyle = a.prefs.getInt(Prefs.TV_PLAYER_STYLE, 0) == 0;
+            link(
+                    "播放工具条按钮顺序",
+                    TvPlayerToolbarOrder.settingsSummary(
+                            a.prefs.getString(Prefs.TV_PLAYER_TOOLBAR_ORDER, ""),
+                            modernPlayerStyle),
+                    "setting-" + Prefs.TV_PLAYER_TOOLBAR_ORDER,
+                    this::showTvToolbarOrderDialog);
         }
         ints(
                 "画面输出",
@@ -1707,8 +1814,13 @@ final class SettingsScreen {
         ints(
                 "播放器",
                 Prefs.PLAYER_ENGINE,
-                new String[] {"Exo (Media3)", "IJK 兼容模式 (Media3 + FFmpeg)", "系统播放器"},
-                new int[] {0, 2, 1},
+                new String[] {
+                    "Exo (Media3 · 默认)",
+                    "MPV 高画质 (libmpv · HDR / Anime4K / ASS)",
+                    "IJK 兼容模式 (Media3 + FFmpeg)",
+                    "系统播放器"
+                },
+                new int[] {0, 3, 2, 1},
                 0);
         ints(
                 "解码方式",
@@ -1717,6 +1829,24 @@ final class SettingsScreen {
                 new int[] {0, 1, 2},
                 0);
         toggle("4K HDR 隧道模式", Prefs.TUNNELED_PLAYBACK, false, null);
+        toggle("MPV HDR 自动峰值色调映射 (libplacebo)", Prefs.HDR_TONE_MAPPING, true, null);
+        toggle("MPV Anime4K 实时超分滤镜", Prefs.ANIME4K_ENABLED, false, null);
+        toggle("HLS 伪装分片实时修正代理", Prefs.HLS_PROXY_ENABLED, true, null);
+        toggle("HLS 点播广告分段启发式过滤", Prefs.HLS_AD_STRIP, false, null);
+        ints(
+                "直链本地分块缓存",
+                Prefs.MEDIA_CACHE_MB,
+                new String[] {"关闭", "128 MB", "256 MB（默认）", "512 MB", "1024 MB"},
+                new int[] {0, 128, 256, 512, 1024},
+                256);
+        ints(
+                "人声与响度增益",
+                Prefs.LOUDNESS_BOOST,
+                new String[] {"关闭", "+4 dB", "+8 dB", "+12 dB"},
+                new int[] {0, 4, 8, 12},
+                0);
+        toggle("内置 CPython 3.11 爬虫引擎", Prefs.NATIVE_PYTHON_ENABLED, true, a::closeEngines);
+        toggle("异步 JS 源 WebView 兜底引擎", Prefs.WEBVIEW_JS_FALLBACK, true, a::closeEngines);
         toggle("优先使用兼容音频解码", Prefs.SOFTWARE_AUDIO, false, null);
         toggle("优先选择 AAC 音轨", Prefs.PREFER_AAC, false, null);
         link("解码组件", "查看本机已加载的音频与视频扩展", "settings-decoders", () -> open(this::decoders));
@@ -1909,15 +2039,17 @@ final class SettingsScreen {
                 SubtitleOverlayView.STYLE_LABELS,
                 new int[] {0, 1, 2, 3, 4, 5, 6, 7},
                 0);
+        ints(
+                "自动音轨偏好",
+                Prefs.AUDIO_TRACK_PREFERENCE,
+                new String[] {"智能默认（自动避开解说音轨）", "优先中文 / 国语", "优先原声 / 片源默认"},
+                new int[] {0, 1, 2},
+                0);
         toggle("自动加载来源弹幕", Prefs.DANMAKU_DEFAULT, true, null);
         DanmuSettingsPanel.DanmuConfig dmCfg = DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
-        int dmServerCount = dmCfg.createProvider().getConfiguredOrigins().size();
-        String dmSummary =
-                (dmCfg.enabled ? "已开启" : "已关闭")
-                        + " · "
-                        + (dmServerCount > 0 ? "已配置 " + dmServerCount + " 个自定义服务源" : "未配置自定义服务源");
+        String dmSummary = DanmuSettingsPanel.formatConfigSummary(dmCfg);
         link(
-                "弹幕设置与自定义服务源",
+                "弹幕设置",
                 dmSummary,
                 "setting-danmu-panel",
                 () -> {
@@ -1946,6 +2078,474 @@ final class SettingsScreen {
                 0);
         a.paragraph(
                 "兼容音频解码仅切换音频，不强制视频软解码；AAC 优先仅在媒体包含可用 AAC 音轨时生效，不会转换文件。以上两项用于 Media3。音效取决于电视提供的音频接口。系统播放器支持的字幕和网络格式少于 Media3；播放器中的字幕按钮可导入外部字幕。");
+    }
+
+    void showTvToolbarOrderDialog() {
+        final boolean modernStyle = a.prefs.getInt(Prefs.TV_PLAYER_STYLE, 0) == 0;
+        final boolean reducedTrans = a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        final String initialSaved = a.prefs.getString(Prefs.TV_PLAYER_TOOLBAR_ORDER, "");
+        final java.util.List<String> order =
+                TvPlayerToolbarOrder.resolveOrder(initialSaved, modernStyle);
+        final int count = order.size();
+        if (count == 0) return;
+
+        final View returnFocus = a.getCurrentFocus();
+        final String[] grabbedKey = {null};
+        final int[] focusedSlot = {0};
+        final boolean[] changed = {false};
+
+        final android.app.Dialog dialog = new android.app.Dialog(a);
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+
+        LinearLayout panel = a.vertical();
+        panel.setTag("tv-toolbar-order-dialog");
+        panel.setClipChildren(false);
+        panel.setClipToPadding(false);
+        panel.setPadding(a.dp(24), a.dp(20), a.dp(24), a.dp(18));
+        panel.setBackground(
+                TvV17Surface.rounded(
+                        reducedTrans ? 0xf6191c23 : 0xee161b25, a.dp(24), 0x30ffffff, a.dp(1)));
+
+        // Header row: title + active player style badge
+        LinearLayout titleRow = a.row();
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView titleView = a.text("自定义播放工具条按钮顺序", 20, MainActivity.WHITE);
+        titleView.setTypeface(null, Typeface.BOLD);
+        titleRow.addView(titleView, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView stylePill = a.text(modernStyle ? "现代悬浮卡片" : "经典双层工具栏", 11.5f, 0xd8d8e6ff);
+        stylePill.setTypeface(null, Typeface.BOLD);
+        stylePill.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
+        stylePill.setBackground(TvV17Surface.rounded(0x28ffffff, a.dp(999), 0x38ffffff, a.dp(1)));
+        titleRow.addView(stylePill, new LinearLayout.LayoutParams(-2, -2));
+        panel.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView subtitle = a.text("上下选择按钮 · 按 ◀ ▶ 直接左移/右移 · 或按确认键抓起后用方向键移动", 12.5f, 0xb2ebebf5);
+        subtitle.setPadding(0, a.dp(5), 0, a.dp(12));
+        panel.addView(subtitle, new LinearLayout.LayoutParams(-1, -2));
+
+        // Live horizontal toolbar preview strip
+        LinearLayout previewBox = a.vertical();
+        previewBox.setPadding(a.dp(12), a.dp(9), a.dp(12), a.dp(10));
+        previewBox.setBackground(TvV17Surface.rounded(0x7a0d1118, a.dp(14), 0x22ffffff, a.dp(1)));
+        TextView previewHeading = a.text("实时预览（从左到右）", 11f, 0x99ebebf5);
+        previewHeading.setPadding(a.dp(2), 0, 0, a.dp(7));
+        previewBox.addView(previewHeading);
+
+        final HorizontalScrollView previewScroller = new HorizontalScrollView(a);
+        previewScroller.setHorizontalScrollBarEnabled(false);
+        previewScroller.setFocusable(false);
+        previewScroller.setFillViewport(true);
+        LinearLayout previewStrip = a.row();
+        previewStrip.setTag("tv-toolbar-order-preview");
+        previewStrip.setGravity(Gravity.CENTER_VERTICAL);
+        final TextView[] previewChips = new TextView[count];
+        for (int i = 0; i < count; i++) {
+            TextView chip = a.text("", 11.5f, 0xdcebebf5);
+            chip.setSingleLine(true);
+            chip.setIncludeFontPadding(false);
+            chip.setGravity(Gravity.CENTER);
+            chip.setPadding(a.dp(9), a.dp(5), a.dp(9), a.dp(5));
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
+            if (i > 0) clp.leftMargin = a.dp(6);
+            previewStrip.addView(chip, clp);
+            previewChips[i] = chip;
+        }
+        previewScroller.addView(previewStrip, new FrameLayout.LayoutParams(-2, -2));
+        previewBox.addView(previewScroller, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams prevBoxLp = new LinearLayout.LayoutParams(-1, -2);
+        prevBoxLp.bottomMargin = a.dp(12);
+        panel.addView(previewBox, prevBoxLp);
+
+        // Scrollable reorderable list of persistent row slots
+        final LinearLayout listContainer = a.vertical();
+        listContainer.setClipChildren(false);
+        listContainer.setClipToPadding(false);
+        listContainer.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+
+        final LinearLayout[] rowViews = new LinearLayout[count];
+        final TextView[] indexBadges = new TextView[count];
+        final TextView[] nameViews = new TextView[count];
+        final TextView[] hintViews = new TextView[count];
+        final int[] rowStates = new int[count];
+        final int[] chipStates = new int[count];
+        java.util.Arrays.fill(rowStates, -1);
+        java.util.Arrays.fill(chipStates, -1);
+
+        final Runnable persistOrder =
+                () -> {
+                    String existing = a.prefs.getString(Prefs.TV_PLAYER_TOOLBAR_ORDER, "");
+                    String merged =
+                            TvPlayerToolbarOrder.mergeEditedOrder(existing, order, modernStyle);
+                    a.prefs.edit().putString(Prefs.TV_PLAYER_TOOLBAR_ORDER, merged).apply();
+                    changed[0] = true;
+                };
+
+        final Runnable syncAll =
+                () -> {
+                    int focusedRowIdx = -1;
+                    for (int i = 0; i < count; i++) {
+                        String key = order.get(i);
+                        boolean grabbed = key.equals(grabbedKey[0]);
+                        boolean focused = rowViews[i].hasFocus();
+                        if (focused) focusedRowIdx = i;
+
+                        rowViews[i].setTag("toolbar-order-row:" + key);
+                        indexBadges[i].setText(String.valueOf(i + 1));
+                        nameViews[i].setText(TvPlayerToolbarOrder.settingsLabel(key));
+
+                        String hintText;
+                        if (grabbed) {
+                            hintText = "● 移动中 · ▲▼◀▶ 调序 · 确认放下";
+                        } else if (focused) {
+                            if (i == 0) {
+                                hintText = "确认抓起 · 右移 ▶";
+                            } else if (i == count - 1) {
+                                hintText = "◀ 左移 · 确认抓起";
+                            } else {
+                                hintText = "◀ 左移 · 确认抓起 · 右移 ▶";
+                            }
+                        } else {
+                            hintText =
+                                    (i > 0 ? "◀ " : "   ")
+                                            + "第 "
+                                            + (i + 1)
+                                            + " 位"
+                                            + (i < count - 1 ? " ▶" : "   ");
+                        }
+                        hintViews[i].setText(hintText);
+
+                        int nextRowState = grabbed ? 2 : (focused ? 1 : 0);
+                        if (rowStates[i] != nextRowState) {
+                            rowStates[i] = nextRowState;
+                            if (nextRowState == 2) {
+                                rowViews[i].setBackground(
+                                        TvV17Surface.rounded(
+                                                0xff0a84ff, a.dp(13), 0x9980c2ff, a.dp(1)));
+                                indexBadges[i].setBackground(
+                                        TvV17Surface.rounded(0x38ffffff, a.dp(999), 0, 0));
+                                indexBadges[i].setTextColor(MainActivity.WHITE);
+                                nameViews[i].setTextColor(MainActivity.WHITE);
+                                hintViews[i].setTextColor(0xeef5f7fb);
+                            } else if (nextRowState == 1) {
+                                rowViews[i].setBackground(
+                                        TvV17Surface.rounded(
+                                                0xfff5f5f7, a.dp(13), 0xffffffff, a.dp(1)));
+                                indexBadges[i].setBackground(
+                                        TvV17Surface.rounded(0x1f101013, a.dp(999), 0, 0));
+                                indexBadges[i].setTextColor(0xff101013);
+                                nameViews[i].setTextColor(0xff101013);
+                                hintViews[i].setTextColor(0xff48484a);
+                            } else {
+                                rowViews[i].setBackground(
+                                        TvV17Surface.rounded(
+                                                reducedTrans ? 0xee202632 : 0x8a202632,
+                                                a.dp(13),
+                                                0x20ffffff,
+                                                a.dp(1)));
+                                indexBadges[i].setBackground(
+                                        TvV17Surface.rounded(0x24ffffff, a.dp(999), 0, 0));
+                                indexBadges[i].setTextColor(0xdcebebf5);
+                                nameViews[i].setTextColor(MainActivity.WHITE);
+                                hintViews[i].setTextColor(0x99ebebf5);
+                            }
+                        }
+
+                        previewChips[i].setText(
+                                (i + 1) + " " + TvPlayerToolbarOrder.shortChipLabel(key));
+                        int nextChipState = grabbed ? 2 : (focused ? 1 : 0);
+                        if (chipStates[i] != nextChipState) {
+                            chipStates[i] = nextChipState;
+                            if (nextChipState == 2) {
+                                previewChips[i].setBackground(
+                                        TvV17Surface.rounded(
+                                                0xff0a84ff, a.dp(999), 0x9980c2ff, a.dp(1)));
+                                previewChips[i].setTextColor(MainActivity.WHITE);
+                                previewChips[i].setTypeface(null, Typeface.BOLD);
+                            } else if (nextChipState == 1) {
+                                previewChips[i].setBackground(
+                                        TvV17Surface.rounded(
+                                                0xfff5f5f7, a.dp(999), 0xffffffff, a.dp(1)));
+                                previewChips[i].setTextColor(0xff101013);
+                                previewChips[i].setTypeface(null, Typeface.BOLD);
+                            } else {
+                                previewChips[i].setBackground(
+                                        TvV17Surface.rounded(
+                                                0x26ffffff, a.dp(999), 0x1effffff, a.dp(1)));
+                                previewChips[i].setTextColor(0xdcebebf5);
+                                previewChips[i].setTypeface(null, Typeface.NORMAL);
+                            }
+                        }
+                    }
+                    int activeIdx =
+                            focusedRowIdx >= 0
+                                    ? focusedRowIdx
+                                    : Math.max(0, Math.min(count - 1, focusedSlot[0]));
+                    final TextView activeChip = previewChips[activeIdx];
+                    previewScroller.post(
+                            () -> {
+                                int chipCenter = activeChip.getLeft() + activeChip.getWidth() / 2;
+                                int targetScroll =
+                                        Math.max(0, chipCenter - previewScroller.getWidth() / 2);
+                                previewScroller.smoothScrollTo(targetScroll, 0);
+                            });
+                };
+
+        for (int i = 0; i < count; i++) {
+            final int slot = i;
+            LinearLayout row = a.row();
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(a.dp(14), a.dp(9), a.dp(14), a.dp(9));
+            row.setId(UiCompat.generateViewId());
+            row.setFocusable(true);
+            row.setFocusableInTouchMode(true);
+            row.setClickable(true);
+            UiCompat.setDefaultFocusHighlightEnabled(row, false);
+
+            TextView badge = a.text(String.valueOf(i + 1), 12.5f, 0xdcebebf5);
+            badge.setTypeface(null, Typeface.BOLD);
+            badge.setGravity(Gravity.CENTER);
+            badge.setIncludeFontPadding(false);
+            LinearLayout.LayoutParams bLp = new LinearLayout.LayoutParams(a.dp(26), a.dp(26));
+            bLp.rightMargin = a.dp(12);
+            row.addView(badge, bLp);
+
+            TextView name = a.text("", 15f, MainActivity.WHITE);
+            name.setTypeface(null, Typeface.BOLD);
+            name.setSingleLine(true);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            row.addView(name, new LinearLayout.LayoutParams(0, -2, 1f));
+
+            TextView hint = a.text("", 12f, 0x99ebebf5);
+            hint.setSingleLine(true);
+            hint.setPadding(a.dp(10), 0, 0, 0);
+            row.addView(hint, new LinearLayout.LayoutParams(-2, -2));
+
+            rowViews[slot] = row;
+            indexBadges[slot] = badge;
+            nameViews[slot] = name;
+            hintViews[slot] = hint;
+
+            row.setOnFocusChangeListener(
+                    (v, focused) -> {
+                        if (focused) {
+                            focusedSlot[0] = slot;
+                        }
+                        syncAll.run();
+                    });
+
+            row.setOnClickListener(
+                    v -> {
+                        String key = order.get(slot);
+                        if (key.equals(grabbedKey[0])) {
+                            grabbedKey[0] = null;
+                        } else {
+                            grabbedKey[0] = key;
+                        }
+                        syncAll.run();
+                    });
+
+            row.setOnKeyListener(
+                    (v, keyCode, event) -> {
+                        boolean down = event.getAction() == android.view.KeyEvent.ACTION_DOWN;
+                        boolean isGrabbed = order.get(slot).equals(grabbedKey[0]);
+                        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT) {
+                            if (down && TvPlayerToolbarOrder.moveItem(order, slot, -1)) {
+                                persistOrder.run();
+                                focusedSlot[0] = slot - 1;
+                                rowViews[slot - 1].requestFocus();
+                                syncAll.run();
+                            }
+                            return true;
+                        }
+                        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
+                            if (down && TvPlayerToolbarOrder.moveItem(order, slot, 1)) {
+                                persistOrder.run();
+                                focusedSlot[0] = slot + 1;
+                                rowViews[slot + 1].requestFocus();
+                                syncAll.run();
+                            }
+                            return true;
+                        }
+                        if (isGrabbed && keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP) {
+                            if (down && TvPlayerToolbarOrder.moveItem(order, slot, -1)) {
+                                persistOrder.run();
+                                focusedSlot[0] = slot - 1;
+                                rowViews[slot - 1].requestFocus();
+                                syncAll.run();
+                            }
+                            return true;
+                        }
+                        if (isGrabbed && keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN) {
+                            if (down && TvPlayerToolbarOrder.moveItem(order, slot, 1)) {
+                                persistOrder.run();
+                                focusedSlot[0] = slot + 1;
+                                rowViews[slot + 1].requestFocus();
+                                syncAll.run();
+                            }
+                            return true;
+                        }
+                        return false;
+                    });
+
+            LinearLayout.LayoutParams rLp = new LinearLayout.LayoutParams(-1, a.dp(46));
+            rLp.bottomMargin = a.dp(6);
+            listContainer.addView(row, rLp);
+        }
+
+        // Footer buttons: Reset Default + Done
+        LinearLayout footer = a.row();
+        footer.setGravity(Gravity.CENTER_VERTICAL);
+        footer.setClipChildren(false);
+        footer.setClipToPadding(false);
+
+        final Button resetBtn =
+                a.navButton(
+                        "恢复默认顺序",
+                        "toolbar-order-reset",
+                        () -> {
+                            grabbedKey[0] = null;
+                            order.clear();
+                            order.addAll(TvPlayerToolbarOrder.defaultOrder(modernStyle));
+                            a.prefs.edit().remove(Prefs.TV_PLAYER_TOOLBAR_ORDER).apply();
+                            changed[0] = true;
+                            focusedSlot[0] = 0;
+                            syncAll.run();
+                            a.toast("已恢复默认按钮顺序");
+                        });
+        resetBtn.setId(UiCompat.generateViewId());
+        UiCompat.setDefaultFocusHighlightEnabled(resetBtn, false);
+        resetBtn.setOnFocusChangeListener(
+                (v, f) -> {
+                    if (f && grabbedKey[0] != null) {
+                        grabbedKey[0] = null;
+                        syncAll.run();
+                    }
+                    FocusMotion.style(
+                            a,
+                            resetBtn,
+                            f,
+                            0xff282832,
+                            MainActivity.WHITE,
+                            19,
+                            0xffe6e6ee,
+                            MainActivity.DARK,
+                            false,
+                            1.02f);
+                });
+
+        final Button doneBtn = a.navButton("完成", "toolbar-order-done", dialog::dismiss);
+        doneBtn.setId(UiCompat.generateViewId());
+        UiCompat.setDefaultFocusHighlightEnabled(doneBtn, false);
+        doneBtn.setOnFocusChangeListener(
+                (v, f) -> {
+                    if (f && grabbedKey[0] != null) {
+                        grabbedKey[0] = null;
+                        syncAll.run();
+                    }
+                    FocusMotion.style(
+                            a,
+                            doneBtn,
+                            f,
+                            0xff282832,
+                            MainActivity.WHITE,
+                            19,
+                            0xffe6e6ee,
+                            MainActivity.DARK,
+                            false,
+                            1.02f);
+                });
+
+        LinearLayout.LayoutParams resetLp = new LinearLayout.LayoutParams(0, a.dp(42), 1f);
+        resetLp.rightMargin = a.dp(10);
+        footer.addView(resetBtn, resetLp);
+        footer.addView(doneBtn, new LinearLayout.LayoutParams(0, a.dp(42), 1f));
+
+        // Deterministic vertical & horizontal focus links
+        for (int i = 0; i < count; i++) {
+            rowViews[i].setNextFocusUpId(i == 0 ? rowViews[0].getId() : rowViews[i - 1].getId());
+            rowViews[i].setNextFocusDownId(
+                    i == count - 1 ? doneBtn.getId() : rowViews[i + 1].getId());
+        }
+        resetBtn.setNextFocusUpId(rowViews[count - 1].getId());
+        resetBtn.setNextFocusDownId(resetBtn.getId());
+        resetBtn.setNextFocusLeftId(doneBtn.getId());
+        resetBtn.setNextFocusRightId(doneBtn.getId());
+        doneBtn.setNextFocusUpId(rowViews[count - 1].getId());
+        doneBtn.setNextFocusDownId(doneBtn.getId());
+        doneBtn.setNextFocusLeftId(resetBtn.getId());
+        doneBtn.setNextFocusRightId(resetBtn.getId());
+
+        TvScrollView scroller = new TvScrollView(a);
+        scroller.setFocusFrameEnabled(false);
+        scroller.setVerticalScrollBarEnabled(false);
+        scroller.addView(listContainer, new ScrollView.LayoutParams(-1, -2));
+
+        FrameLayout viewport =
+                new FrameLayout(a) {
+                    @Override
+                    protected void dispatchDraw(Canvas c) {
+                        int save = c.save();
+                        c.clipRect(0, 0, getWidth(), getHeight());
+                        super.dispatchDraw(c);
+                        c.restoreToCount(save);
+                    }
+                };
+        viewport.setTag("scroll-viewport-clip");
+        viewport.setClipChildren(true);
+        viewport.setClipToPadding(true);
+        viewport.addView(scroller, new FrameLayout.LayoutParams(-1, -1));
+
+        int width = Math.min(a.dp(700), Math.max(a.dp(320), a.windowWidth() - a.dp(72)));
+        int naturalListH = count * a.dp(52) + a.dp(8);
+        int maxListH =
+                AppDialog.computeMaxContentHeight(a.windowHeight(), a.dp(248), a.dp(54), a.dp(150));
+        panel.addView(
+                viewport, new LinearLayout.LayoutParams(-1, Math.min(naturalListH, maxListH)));
+        a.gap(panel, 12);
+        panel.addView(footer, new LinearLayout.LayoutParams(-1, -2));
+
+        dialog.setOnKeyListener(
+                (d, keyCode, event) -> {
+                    if (grabbedKey[0] != null
+                            && (keyCode == android.view.KeyEvent.KEYCODE_BACK
+                                    || keyCode == android.view.KeyEvent.KEYCODE_ESCAPE)) {
+                        if (event.getAction() == android.view.KeyEvent.ACTION_UP) {
+                            grabbedKey[0] = null;
+                            syncAll.run();
+                        }
+                        return true;
+                    }
+                    return false;
+                });
+
+        dialog.setOnDismissListener(
+                d -> {
+                    if (changed[0]) {
+                        if (a.current != null) {
+                            a.current.focus = "setting-" + Prefs.TV_PLAYER_TOOLBAR_ORDER;
+                        }
+                        a.refresh();
+                    } else if (returnFocus != null && UiCompat.isAttached(returnFocus)) {
+                        returnFocus.requestFocus();
+                    }
+                });
+
+        syncAll.run();
+        dialog.setContentView(panel);
+        dialog.show();
+        android.view.Window w = dialog.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawableResource(android.R.color.transparent);
+            w.setLayout(width, -2);
+            w.setGravity(Gravity.CENTER);
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            android.view.WindowManager.LayoutParams attrs = w.getAttributes();
+            attrs.dimAmount = 0.56f;
+            w.setAttributes(attrs);
+            w.getDecorView().setSystemUiVisibility(5894);
+        }
+        rowViews[0].requestFocus();
+        rowViews[0].post(rowViews[0]::requestFocus);
     }
 
     void data() {
@@ -2024,6 +2624,18 @@ final class SettingsScreen {
                 "网盘扫码登录、凭据与网盘顺序（由配置提供）",
                 "settings-accounts",
                 () -> AccountPanel.show(a, null));
+        link(
+                "挂载 AList 网盘 / 媒体库",
+                AlistAccounts.statusSummary(a),
+                "settings-alist-mount",
+                () -> AlistAccounts.openManager(a, a::refresh));
+        if (!a.privateMode) {
+            link(
+                    "局域网蜘蛛网关",
+                    SpiderGatewayDialog.statusSummary(a),
+                    "settings-spider-gateway",
+                    () -> SpiderGatewayDialog.show(a));
+        }
         link(
                 "存储权限（网盘扫码 Cookie 保存）",
                 a.storagePermissionStatusText(),
@@ -2108,6 +2720,18 @@ final class SettingsScreen {
                     a.toast("已清除首页缓存");
                 });
         link("运行日志", "查看本机最近异常与诊断记录", "settings-logs", this::diagnostics);
+        if (!a.privateMode) {
+            int pendingCrashes = CrashReportStore.loadUnsubmittedReports(a.getFilesDir()).size();
+            String crashSub =
+                    pendingCrashes > 0
+                            ? ("待提交 " + pendingCrashes + " 条崩溃日志 · 自动提交 GitHub Issue / 扫码导出")
+                            : "闪退自动留痕，支持一键提交 GitHub Issue 或扫码导出脱敏日志";
+            link(
+                    "崩溃日志与问题反馈",
+                    crashSub,
+                    "settings-crash-feedback",
+                    () -> CrashReportDialog.show(a, true));
+        }
         link(
                 "重新查看新手引导",
                 "重温功能导览并重新启用首播手势提示",
@@ -2126,6 +2750,7 @@ final class SettingsScreen {
                                 () -> {
                                     android.content.SharedPreferences.Editor edit = a.prefs.edit();
                                     for (String key : KEYS) edit.remove(key);
+                                    edit.remove(Prefs.TV_PLAYER_TOOLBAR_ORDER);
                                     edit.apply();
                                     a.reduced = false;
                                     a.recreate();
@@ -2455,6 +3080,7 @@ final class SettingsScreen {
                             for (String dataKey :
                                     new String[] {
                                         Prefs.SELECTED_SITE,
+                                        Prefs.TV_PLAYER_TOOLBAR_ORDER,
                                         Prefs.LIVE_UDPXY_URL,
                                         Prefs.LIVE_EPG_URL,
                                         Prefs.LIVE_SOURCES_JSON,
@@ -2672,6 +3298,7 @@ final class SettingsScreen {
         for (String dataKey :
                 new String[] {
                     Prefs.SELECTED_SITE,
+                    Prefs.TV_PLAYER_TOOLBAR_ORDER,
                     Prefs.LIVE_UDPXY_URL,
                     Prefs.LIVE_EPG_URL,
                     Prefs.LIVE_SOURCES_JSON,

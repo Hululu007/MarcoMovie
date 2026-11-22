@@ -51,6 +51,7 @@ final class SourceController {
         if (s == null) return false;
         String api = s.api == null ? "" : s.api;
         return api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)
+                || api.startsWith(AlistEngine.PREFIX)
                 || api.startsWith("catpaw://")
                 || HttpT4Engine.eligible(s)
                 || s.supported()
@@ -99,6 +100,7 @@ final class SourceController {
                     String api = s.api == null ? "" : s.api;
                     if (api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX))
                         raw = new EmbyEngine(a, s);
+                    else if (api.startsWith(AlistEngine.PREFIX)) raw = new AlistEngine(a, s);
                     else if (api.startsWith("catpaw://")) raw = new CatPawEngine(a, s);
                     else if (HttpT4Engine.eligible(s)) raw = new HttpT4Engine(s);
                     else if (s.supported()) raw = new JsonCmsEngine(s);
@@ -124,6 +126,23 @@ final class SourceController {
                         ensureProxy(a, snapshot);
                         raw = new CspEngine(a.getApplication(), snapshot, s);
                     } else if (a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true)
+                            && NativePythonEngine.eligible(s)
+                            && a.prefs.getBoolean(Prefs.NATIVE_PYTHON_ENABLED, true)
+                            && NativePythonEngine.isAvailable()
+                            && snapshot != null) {
+                        ensureProxy(a, snapshot);
+                        try {
+                            raw = new NativePythonEngine(a.getApplication(), snapshot, s);
+                        } catch (Throwable nativePyError) {
+                            AppLog.w(
+                                    "SourceController",
+                                    "Native CPython failed for "
+                                            + s.key
+                                            + ", falling back to JsEngine",
+                                    nativePyError);
+                            raw = new JsEngine(a.getApplication(), snapshot, s);
+                        }
+                    } else if (a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true)
                             && JsEngine.eligible(s)
                             && snapshot != null) {
                         ensureProxy(a, snapshot);
@@ -131,6 +150,25 @@ final class SourceController {
                             raw = new JsEngine(a.getApplication(), snapshot, s);
                         } catch (JsEngine.DrpyRuleDetected rule) {
                             raw = new DrpyEngine(a, snapshot, s, rule.source);
+                        } catch (Throwable jsError) {
+                            if (a.prefs.getBoolean(Prefs.WEBVIEW_JS_FALLBACK, true)
+                                    && WebViewJsEngine.shouldFallbackFromJsError(jsError)) {
+                                AppLog.w(
+                                        "SourceController",
+                                        "QuickJS failed for "
+                                                + s.key
+                                                + ", trying WebView JS fallback",
+                                        jsError);
+                                try {
+                                    raw = new WebViewJsEngine(a.getApplication(), snapshot, s);
+                                } catch (Throwable wvError) {
+                                    if (jsError instanceof Exception) throw (Exception) jsError;
+                                    throw new IOException(jsError.getMessage(), jsError);
+                                }
+                            } else {
+                                if (jsError instanceof Exception) throw (Exception) jsError;
+                                throw new IOException(jsError.getMessage(), jsError);
+                            }
                         }
                     } else throw new IOException("来源需要尚未启用的扩展引擎");
                     SourceEngine created = new QueuedSourceEngine(raw);
@@ -151,7 +189,9 @@ final class SourceController {
 
     static void ensureProxy(MainActivity a, Cms.Config snapshot) throws IOException {
         synchronized (a) {
-            if (a.localProxy == null) a.localProxy = new LocalProxy(a.getApplication(), snapshot);
+            if (a.localProxy == null || a.localProxy.closed) {
+                a.localProxy = new LocalProxy(a.getApplication(), snapshot);
+            }
         }
     }
 
@@ -388,8 +428,25 @@ final class SourceController {
                         });
     }
 
+    private static boolean hasPlayableDetailLines(Cms.Video video) {
+        if (video == null || video.lines == null) return false;
+        for (Cms.Line line : video.lines) {
+            if (line != null && line.episodes != null && !line.episodes.isEmpty()) return true;
+        }
+        return false;
+    }
+
     static void loadDetail(
             MainActivity a, Cms.Site site, String id, MainActivity.Done<Cms.Video> done) {
+        loadDetail(a, site, id, done, null);
+    }
+
+    static void loadDetail(
+            MainActivity a,
+            Cms.Site site,
+            String id,
+            MainActivity.Done<Cms.Video> done,
+            MainActivity.Done<Throwable> onError) {
         final int ticket = a.generation, epoch = a.engineEpoch;
         final TvSearchContext detailContext =
                 new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
@@ -402,13 +459,25 @@ final class SourceController {
                             try {
                                 timing.dispatched = SystemClock.elapsedRealtime();
                                 String raw = a.detailCache.get(key);
+                                if (raw != null) {
+                                    Cms.Listing memListing = Cms.listing(raw);
+                                    if (memListing.videos.isEmpty()
+                                            || !hasPlayableDetailLines(memListing.videos.get(0))) {
+                                        raw = null;
+                                    }
+                                }
                                 if (raw == null) {
                                     String disk = readDetailDiskCache(a, site, id);
-                                    if (disk != null && !Cms.listing(disk).videos.isEmpty()) {
-                                        raw = disk;
-                                        if (detailContext.matches(
-                                                a.config, a.privateMode, a.engineEpoch)) {
-                                            a.detailCache.put(key, disk);
+                                    if (disk != null) {
+                                        Cms.Listing diskListing = Cms.listing(disk);
+                                        if (!diskListing.videos.isEmpty()
+                                                && hasPlayableDetailLines(
+                                                        diskListing.videos.get(0))) {
+                                            raw = disk;
+                                            if (detailContext.matches(
+                                                    a.config, a.privateMode, a.engineEpoch)) {
+                                                a.detailCache.put(key, disk);
+                                            }
                                         }
                                     }
                                 }
@@ -443,17 +512,18 @@ final class SourceController {
                                 Cms.Listing listing = Cms.listing(raw);
                                 if (listing.videos.isEmpty()) throw new IOException("来源没有返回影片详情");
                                 timing.parsed = SystemClock.elapsedRealtime();
+                                Cms.Video video = listing.videos.get(0);
+                                if ((video.id == null || video.id.trim().isEmpty()) && id != null) {
+                                    video.id = id.trim();
+                                }
                                 if (!timing.cached
+                                        && hasPlayableDetailLines(video)
                                         && detailContext.matches(
                                                 a.config, a.privateMode, a.engineEpoch)) {
                                     a.detailCache.put(key, raw);
                                     if (!a.privateMode) {
                                         writeDetailDiskCache(a, site, id, raw);
                                     }
-                                }
-                                Cms.Video video = listing.videos.get(0);
-                                if ((video.id == null || video.id.trim().isEmpty()) && id != null) {
-                                    video.id = id.trim();
                                 }
                                 a.ui.post(
                                         () -> {
@@ -478,6 +548,13 @@ final class SourceController {
                                                     || !detailContext.matches(
                                                             a.config, a.privateMode, a.engineEpoch))
                                                 return;
+                                            if (onError != null) {
+                                                try {
+                                                    onError.accept(error);
+                                                    return;
+                                                } catch (Throwable ignored) {
+                                                }
+                                            }
                                             View state = a.root.findViewWithTag("detail-loading");
                                             if (state instanceof TextView) {
                                                 state.setVisibility(View.VISIBLE);
@@ -1033,6 +1110,7 @@ final class SourceController {
                 .putString(Prefs.LIVE_URL, updated.get(0).url)
                 .putString(Prefs.LIVE_NAME, updated.get(0).name)
                 .apply();
+        LiveController.clearCatalogCache();
     }
 
     static void showUdpxyDialog(MainActivity a) {
@@ -1058,7 +1136,8 @@ final class SourceController {
             input.setText(current);
             input.setSelection(current.length());
         }
-        panel.addView(input, new LinearLayout.LayoutParams(-1, -2));
+        panel.addView(
+                TvQrInputHelper.wrap(a, input, "组播网关地址"), new LinearLayout.LayoutParams(-1, -2));
         AppDialog.Builder builder =
                 new AppDialog.Builder(a)
                         .setTitle("组播转单播网关 (udpxy)")
@@ -1074,6 +1153,7 @@ final class SourceController {
                                                 .edit()
                                                 .putString(Prefs.LIVE_UDPXY_URL, norm)
                                                 .apply();
+                                        LiveController.clearCatalogCache();
                                         a.toast(
                                                 norm.isEmpty()
                                                         ? "已关闭 udpxy 组播重写"
@@ -1089,6 +1169,7 @@ final class SourceController {
                     "清除网关",
                     (d, w) -> {
                         a.prefs.edit().remove(Prefs.LIVE_UDPXY_URL).apply();
+                        LiveController.clearCatalogCache();
                         a.toast("已清除 udpxy 组播网关");
                         if (!a.isTvDevice()) MobileShell.show(a);
                         else a.refresh();
@@ -1120,7 +1201,8 @@ final class SourceController {
             input.setText(current);
             input.setSelection(current.length());
         }
-        panel.addView(input, new LinearLayout.LayoutParams(-1, -2));
+        panel.addView(
+                TvQrInputHelper.wrap(a, input, "EPG 节目单地址"), new LinearLayout.LayoutParams(-1, -2));
         AppDialog.Builder builder =
                 new AppDialog.Builder(a)
                         .setTitle("自定义 XMLTV 节目单 (EPG)")
@@ -1132,6 +1214,7 @@ final class SourceController {
                                     String raw = input.getText().toString().trim();
                                     if (raw.isEmpty()) {
                                         a.prefs.edit().remove(Prefs.LIVE_EPG_URL).apply();
+                                        LiveController.clearCatalogCache();
                                         a.toast("已恢复使用列表自带 EPG");
                                     } else if (!Cms.isHttp(raw)) {
                                         a.toast("请输入有效的 HTTP(S) XMLTV 地址");
@@ -1143,6 +1226,7 @@ final class SourceController {
                                                     .edit()
                                                     .putString(Prefs.LIVE_EPG_URL, norm)
                                                     .apply();
+                                            LiveController.clearCatalogCache();
                                             a.toast("已保存 EPG 节目单地址");
                                         } catch (Exception ex) {
                                             a.toast(a.message(ex));
@@ -1157,6 +1241,7 @@ final class SourceController {
                     "清除",
                     (d, w) -> {
                         a.prefs.edit().remove(Prefs.LIVE_EPG_URL).apply();
+                        LiveController.clearCatalogCache();
                         a.toast("已清除自定义 EPG");
                         if (!a.isTvDevice()) MobileShell.show(a);
                         else a.refresh();
@@ -1193,7 +1278,9 @@ final class SourceController {
                         a.prefs.getString(Prefs.LIVE_NAME, ""));
         TextView tip =
                 a.text(
-                        "支持叠加导入多份 M3U / TXT (#genre#) / JSON 高清直播源（如 IPv6 源、组播源），同名频道将自动合并优选：",
+                        a.isTvDevice()
+                                ? "支持叠加导入多份 M3U / TXT (#genre#) / JSON 直播源；点击右侧二维码图标，手机扫码即可输入网址或直接上传文件："
+                                : "支持叠加导入多份 M3U / TXT (#genre#) / JSON 高清直播源（如 IPv6 源、组播源），同名频道将自动合并优选：",
                         13,
                         MainActivity.MUTED);
         panel.addView(tip);
@@ -1210,6 +1297,7 @@ final class SourceController {
         }
         a.gap(panel, 10);
 
+        final AppDialog[] holder = new AppDialog[1];
         final android.widget.EditText input = new android.widget.EditText(a);
         input.setHint("https://…/ipv6.m3u 或 #EXTM3U…（添加新直播源）");
         input.setHintTextColor(0xff6b7280);
@@ -1218,37 +1306,52 @@ final class SourceController {
         input.setMaxLines(4);
         input.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
         input.setBackground(a.bg(0xff1e2623, 12));
-        panel.addView(input, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(panel, 12);
-
-        final AppDialog[] holder = new AppDialog[1];
         panel.addView(
-                liveDialogAction(
+                TvQrInputHelper.wrapWithFileUpload(
                         a,
-                        "📋 从剪贴板一键粘贴添加直播源",
+                        input,
+                        "直播源网址或文件",
                         true,
+                        ".txt,.json,.m3u,.m3u8",
+                        "支持选择手机本地 TXT / JSON / M3U / M3U8 直播源文件直接导入电视（最大 8MB）",
+                        (fileName, data) -> importLiveFileBytesSync(a, fileName, data),
                         () -> {
                             if (holder[0] != null) holder[0].dismiss();
-                            android.content.ClipboardManager cm =
-                                    (android.content.ClipboardManager)
-                                            a.getSystemService(
-                                                    android.content.Context.CLIPBOARD_SERVICE);
-                            String clipText = "";
-                            if (cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip() != null) {
-                                android.content.ClipData clip = cm.getPrimaryClip();
-                                if (clip.getItemCount() > 0
-                                        && clip.getItemAt(0).getText() != null) {
-                                    clipText = clip.getItemAt(0).getText().toString().trim();
-                                }
-                            }
-                            if (clipText.isEmpty()) {
-                                a.toast("剪贴板为空，请先复制直播源网址或内容");
-                                return;
-                            }
-                            importLiveTextOrUrl(a, clipText);
                         }),
                 new LinearLayout.LayoutParams(-1, -2));
-        a.gap(panel, 8);
+        a.gap(panel, 12);
+
+        if (!a.isTvDevice()) {
+            panel.addView(
+                    liveDialogAction(
+                            a,
+                            "📋 从剪贴板一键粘贴添加直播源",
+                            true,
+                            () -> {
+                                if (holder[0] != null) holder[0].dismiss();
+                                android.content.ClipboardManager cm =
+                                        (android.content.ClipboardManager)
+                                                a.getSystemService(
+                                                        android.content.Context.CLIPBOARD_SERVICE);
+                                String clipText = "";
+                                if (cm != null
+                                        && cm.hasPrimaryClip()
+                                        && cm.getPrimaryClip() != null) {
+                                    android.content.ClipData clip = cm.getPrimaryClip();
+                                    if (clip.getItemCount() > 0
+                                            && clip.getItemAt(0).getText() != null) {
+                                        clipText = clip.getItemAt(0).getText().toString().trim();
+                                    }
+                                }
+                                if (clipText.isEmpty()) {
+                                    a.toast("剪贴板为空，请先复制直播源网址或内容");
+                                    return;
+                                }
+                                importLiveTextOrUrl(a, clipText);
+                            }),
+                    new LinearLayout.LayoutParams(-1, -2));
+            a.gap(panel, 8);
+        }
 
         panel.addView(
                 liveDialogAction(
@@ -1330,6 +1433,7 @@ final class SourceController {
                                         .remove(Prefs.LIVE_URL)
                                         .remove(Prefs.LIVE_NAME)
                                         .apply();
+                                LiveController.clearCatalogCache();
                                 a.toast("已清空自定义直播源");
                             } else if (idx >= 0 && idx < savedList.size()) {
                                 java.util.List<LiveQualityPolicy.CustomLiveSource> next =
@@ -1348,6 +1452,7 @@ final class SourceController {
                                             .putString(Prefs.LIVE_NAME, next.get(0).name);
                                 }
                                 ed.apply();
+                                LiveController.clearCatalogCache();
                                 a.toast("已移除：" + removed.name);
                             }
                             if (!a.isTvDevice()) MobileShell.show(a);
@@ -1355,6 +1460,126 @@ final class SourceController {
                         })
                 .setNegativeButton("返回", null)
                 .show();
+    }
+
+    static String stripFileExtension(String fileName) {
+        String safe = RemoteInputServer.sanitizeFileName(fileName);
+        int dot = safe.lastIndexOf('.');
+        String base = dot > 0 ? safe.substring(0, dot).trim() : safe.trim();
+        return base.isEmpty() ? "本地直播" : base;
+    }
+
+    /**
+     * Parses, validates, persists, and activates a live source file uploaded from a phone (supports
+     * M3U / M3U8, TXT {@code #genre#}, JSON channel lists, TVBox {@code lives} JSON manifests, and
+     * single-URL TXT files, with automatic UTF-8/GBK decoding).
+     */
+    static String importLiveFileBytesSync(MainActivity a, String fileName, byte[] rawBytes)
+            throws Exception {
+        if (rawBytes == null || rawBytes.length == 0) {
+            throw new IllegalArgumentException("上传的文件为空");
+        }
+        if (rawBytes.length > LiveCatalog.MAX_BYTES) {
+            throw new IllegalArgumentException("文件超过 8MB 大小限制");
+        }
+        String safeName = RemoteInputServer.sanitizeFileName(fileName);
+        String baseName = stripFileExtension(safeName);
+        String text = Cms.document(rawBytes);
+        String trimmed = text == null ? "" : text.trim();
+        if (trimmed.isEmpty()) {
+            throw new IllegalArgumentException("文件内容为空或无法识别编码");
+        }
+
+        // 1. Single HTTP(S) live URL stored inside a .txt file
+        if (!trimmed.contains("\n") && Cms.isHttp(trimmed)) {
+            String norm = Cms.normalizeHttp(trimmed);
+            LiveCatalog.Source src = new LiveCatalog.Source();
+            src.name = baseName;
+            src.url = norm;
+            src.origin = norm;
+            src.headers.put("User-Agent", Cms.USER_AGENT);
+            LiveCatalog.Catalog cat = LiveCatalog.load(src);
+            int count = cat.channelCount();
+            if (count <= 0) {
+                throw new IllegalArgumentException("网址中未解析到有效直播频道");
+            }
+            final String savedName = baseName + " (" + count + "台)";
+            final String savedUrl = norm;
+            a.ui.post(
+                    () -> {
+                        upsertCustomLiveSource(a, savedName, savedUrl);
+                        a.toast("已导入 " + safeName + "（共 " + count + " 个频道）");
+                        if (!a.isTvDevice()) MobileShell.show(a);
+                        else a.refresh();
+                    });
+            return "已导入 " + safeName + "（共 " + count + " 个频道）";
+        }
+
+        // 2. Direct M3U / M3U8 / TXT (#genre#) / channel-list JSON
+        Exception parseErr = null;
+        try {
+            LiveCatalog.Catalog cat = LiveCatalog.parse(trimmed, "", null);
+            int count = cat.channelCount();
+            if (count > 0) {
+                String suffix = LiveQualityPolicy.metricKey(trimmed);
+                if (suffix.length() > 8) suffix = suffix.substring(0, 8);
+                java.io.File liveFile =
+                        new java.io.File(a.getFilesDir(), "custom_live_" + suffix + ".txt");
+                try (java.io.OutputStream out = new java.io.FileOutputStream(liveFile)) {
+                    out.write(trimmed.getBytes("UTF-8"));
+                }
+                final String savedUrl = Cms.fileUri(liveFile);
+                final String savedName = baseName + " (" + count + "台)";
+                a.ui.post(
+                        () -> {
+                            upsertCustomLiveSource(a, savedName, savedUrl);
+                            a.toast("已导入 " + safeName + "（共 " + count + " 个频道）");
+                            if (!a.isTvDevice()) MobileShell.show(a);
+                            else a.refresh();
+                        });
+                return "已导入 " + safeName + "（共 " + count + " 个频道）";
+            }
+        } catch (Exception e) {
+            parseErr = e;
+        }
+
+        // 3. TVBox-style JSON manifest containing a "lives" array of remote live URLs
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+            try {
+                java.util.List<LiveCatalog.Source> manifestSources =
+                        LiveCatalog.sources(trimmed, "");
+                final java.util.List<LiveCatalog.Source> validHttp =
+                        new java.util.ArrayList<LiveCatalog.Source>();
+                for (LiveCatalog.Source s : manifestSources) {
+                    if (s != null && s.url != null && Cms.isHttp(s.url)) {
+                        validHttp.add(s);
+                    }
+                }
+                if (!validHttp.isEmpty()) {
+                    a.ui.post(
+                            () -> {
+                                for (int i = validHttp.size() - 1; i >= 0; i--) {
+                                    LiveCatalog.Source s = validHttp.get(i);
+                                    String label =
+                                            s.name == null || s.name.trim().isEmpty()
+                                                    ? baseName
+                                                    : s.name.trim();
+                                    upsertCustomLiveSource(a, label, s.url);
+                                }
+                                a.toast("已导入 " + safeName + "（共 " + validHttp.size() + " 个直播源）");
+                                if (!a.isTvDevice()) MobileShell.show(a);
+                                else a.refresh();
+                            });
+                    return "已导入 " + safeName + "（共 " + validHttp.size() + " 个直播源）";
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        throw new IllegalArgumentException(
+                parseErr != null && parseErr.getMessage() != null
+                        ? "未识别到有效直播源：" + parseErr.getMessage()
+                        : "未在文件中识别到有效的 M3U / TXT / JSON 直播频道");
     }
 
     static void importLiveTextOrUrl(MainActivity a, String rawInput) {

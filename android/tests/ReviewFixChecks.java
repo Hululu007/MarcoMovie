@@ -191,6 +191,18 @@ public final class ReviewFixChecks {
                 Prefs.KEYS.length == 46,
                 "backup settings key table includes TV dock/background/glow, Live HD/merge, TV player style, tunneled playback, and existing appearance settings");
         check(
+                Integer.valueOf(3).equals(Prefs.sanitizeSetting(Prefs.PLAYER_ENGINE, 3))
+                        && Prefs.sanitizeSetting(Prefs.PLAYER_ENGINE, 4) == null
+                        && Integer.valueOf(256)
+                                .equals(Prefs.sanitizeSetting(Prefs.MEDIA_CACHE_MB, 256))
+                        && Prefs.sanitizeSetting(Prefs.MEDIA_CACHE_MB, 2048) == null
+                        && Integer.valueOf(8).equals(Prefs.sanitizeSetting(Prefs.LOUDNESS_BOOST, 8))
+                        && Prefs.sanitizeSetting(Prefs.LOUDNESS_BOOST, 20) == null
+                        && Boolean.TRUE.equals(Prefs.sanitizeSetting(Prefs.ANIME4K_ENABLED, true))
+                        && Boolean.TRUE.equals(
+                                Prefs.sanitizeSetting(Prefs.NATIVE_PYTHON_ENABLED, true)),
+                "MPV, disk cache, loudness boost, Anime4K, and native Python preferences sanitize within bounds");
+        check(
                 Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_BG_MODE, 0))
                         && Integer.valueOf(3).equals(Prefs.sanitizeSetting(Prefs.TV_BG_MODE, 3))
                         && Prefs.sanitizeSetting(Prefs.TV_BG_MODE, 4) == null

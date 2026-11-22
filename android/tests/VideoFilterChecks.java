@@ -143,5 +143,81 @@ public final class VideoFilterChecks {
         } finally {
             server.stop(0);
         }
+
+        // Refactored multi-format & multi-dimension spider filters (JSON string, type_name key,
+        // sort/lang/letter/extra groups preserved instead of dropped)
+        String stringEncodedSchema =
+                "{\"class\":[{\"type_id\":\"1\",\"type_name\":\"电影\"}],"
+                        + "\"filters\":\"{\\\"电影\\\":[{\\\"key\\\":\\\"class\\\",\\\"name\\\":\\\"类型\\\",\\\"value\\\":[{\\\"n\\\":\\\"全部\\\",\\\"v\\\":\\\"\\\"},{\\\"n\\\":\\\"喜剧\\\",\\\"v\\\":\\\"comedy\\\"}]},{\\\"key\\\":\\\"by\\\",\\\"name\\\":\\\"排序\\\",\\\"value\\\":[{\\\"n\\\":\\\"按更新\\\",\\\"v\\\":\\\"time\\\"},{\\\"n\\\":\\\"高分优先\\\",\\\"v\\\":\\\"score\\\"}]},{\\\"key\\\":\\\"lang\\\",\\\"name\\\":\\\"语言\\\",\\\"value\\\":[{\\\"n\\\":\\\"国语\\\",\\\"v\\\":\\\"zh\\\"}]},{\\\"key\\\":\\\"plot\\\",\\\"name\\\":\\\"剧情\\\",\\\"value\\\":[{\\\"n\\\":\\\"悬疑\\\",\\\"v\\\":\\\"suspense\\\"}]}]}\"}";
+        List<VideoFilters.Definition> multiDefs =
+                VideoFilters.definitions(stringEncodedSchema, "1", Collections.emptyList());
+        check(
+                multiDefs.size() == 4
+                        && VideoFilters.hasRemoteDefinitions(multiDefs)
+                        && "class".equals(multiDefs.get(0).dimension)
+                        && "by".equals(multiDefs.get(1).key)
+                        && "排序".equals(multiDefs.get(1).label)
+                        && "lang".equals(multiDefs.get(2).key)
+                        && "plot".equals(multiDefs.get(3).key),
+                "JSON-string filters keyed by type_name parse cleanly and preserve sort/lang/extra groups");
+        Map<String, String> multiSelected = new LinkedHashMap<>();
+        multiSelected.put(multiDefs.get(0).dimension, "comedy");
+        multiSelected.put(multiDefs.get(1).dimension, "score");
+        multiSelected.put(multiDefs.get(2).dimension, "zh");
+        multiSelected.put(multiDefs.get(3).dimension, "suspense");
+        Map<String, String> multiWire = VideoFilters.remoteValues(multiDefs, multiSelected);
+        check(
+                "comedy".equals(multiWire.get("class"))
+                        && "score".equals(multiWire.get("by"))
+                        && "zh".equals(multiWire.get("lang"))
+                        && "suspense".equals(multiWire.get("plot")),
+                "all multi-dimension remote spider keys forward intact without colliding");
+
+        // Sub-category resolution for MacCMS sources lacking remote filter schemas
+        List<Cms.Category> cmsCats =
+                Arrays.asList(
+                        new Cms.Category("1", "电影"),
+                        new Cms.Category("6", "动作片"),
+                        new Cms.Category("7", "喜剧片"),
+                        new Cms.Category("2", "连续剧"),
+                        new Cms.Category("13", "国产剧"),
+                        new Cms.Category("16", "欧美剧"));
+        List<VideoFilters.Definition> cmsLocalDefs =
+                VideoFilters.definitions("{}", "1", Collections.emptyList());
+        Map<String, String> movieComedy = new LinkedHashMap<>();
+        movieComedy.put("class", "喜剧");
+        VideoFilters.SubCategoryMatch subMovie =
+                VideoFilters.resolveMatchingSubCategory(cmsCats, "1", cmsLocalDefs, movieComedy);
+        check(
+                subMovie != null
+                        && "7".equals(subMovie.categoryId)
+                        && "class".equals(subMovie.satisfiedDimension),
+                "MacCMS parent movie category + 喜剧 resolves to concrete sub-category 喜剧片 (id=7)");
+        Map<String, String> dramaUs = new LinkedHashMap<>();
+        dramaUs.put("area", "美国");
+        VideoFilters.SubCategoryMatch subDrama =
+                VideoFilters.resolveMatchingSubCategory(cmsCats, "2", cmsLocalDefs, dramaUs);
+        check(
+                subDrama != null
+                        && "16".equals(subDrama.categoryId)
+                        && "area".equals(subDrama.satisfiedDimension),
+                "MacCMS parent drama category + 美国 resolves to concrete sub-category 欧美剧 (id=16)");
+
+        // Remote-filter honoring verification + automatic local fallback
+        List<Cms.Video> year2026Videos =
+                Cms.listing(
+                                "{\"list\":[{\"vod_id\":\"a\",\"vod_year\":\"2026\",\"vod_area\":\"美国\"},{\"vod_id\":\"b\",\"vod_year\":\"2026\",\"vod_area\":\"美国\"},{\"vod_id\":\"c\",\"vod_year\":\"2026\",\"vod_area\":\"美国\"},{\"vod_id\":\"d\",\"vod_year\":\"2026\",\"vod_area\":\"美国\"}]}")
+                        .videos;
+        Map<String, String> want2024 = new LinkedHashMap<>();
+        want2024.put("year", "2024");
+        check(
+                !VideoFilters.looksSourceHonored(year2026Videos, definitions, want2024),
+                "looksSourceHonored detects when remote source ignored explicit year filter");
+        check(
+                VideoFilters.isIdenticalListing(year2026Videos, new ArrayList<>(year2026Videos)),
+                "isIdenticalListing detects unchanged unfiltered feed returned for filtered query");
+        check(
+                VideoFilters.applyAll(year2026Videos, definitions, want2024, null).isEmpty(),
+                "applyAll enforces local filtering even on remote definitions when server ignores filter");
     }
 }

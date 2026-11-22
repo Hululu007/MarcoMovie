@@ -144,6 +144,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         Snapshot saved = cache;
         if (results.isEmpty()
                 && saved != null
+                && saved.context != null
                 && !a.privateMode
                 && saved.context.matches(a.config, a.privateMode, a.engineEpoch)
                 && System.currentTimeMillis() - saved.time >= 0
@@ -757,20 +758,54 @@ public final class GlobalSearchScreen implements AutoCloseable {
         a.ui.postDelayed(pendingInputClick, TvV17SearchInput.DOUBLE_CLICK_MS + 1);
     }
 
+    static int safeSelectionIndex(int requested, int textLength) {
+        if (textLength <= 0) return 0;
+        return Math.max(0, Math.min(textLength, requested));
+    }
+
+    static int computeEffectiveSearchThreads(
+            int requestedThreads, boolean tvDevice, boolean lowRamTv) {
+        int clamped = Math.max(2, Math.min(6, requestedThreads));
+        if (tvDevice && lowRamTv) {
+            return Math.min(clamped, 3);
+        }
+        return clamped;
+    }
+
+    private boolean isLowRamTv() {
+        try {
+            android.app.ActivityManager am =
+                    (android.app.ActivityManager)
+                            a.getSystemService(android.content.Context.ACTIVITY_SERVICE);
+            if (am != null && am.isLowRamDevice()) return true;
+        } catch (Throwable ignored) {
+        }
+        return Runtime.getRuntime().maxMemory() <= 256L * 1024L * 1024L;
+    }
+
     void openSystemIme() {
         if (!current() || input == null || keyboard == null) return;
         imeActive = true;
         imeDraft.open(keyboard);
         syncingInput = true;
-        String currentText = imeDraft.text;
+        String currentText = imeDraft.text == null ? "" : imeDraft.text;
         if (!currentText.equals(input.getText().toString())) {
             input.setText(currentText);
         }
-        input.setSelection(Math.min(currentText.length(), imeDraft.selection));
-        if (imeDraft.composing()) {
-            android.view.inputmethod.InputConnection connection =
-                    input.onCreateInputConnection(new android.view.inputmethod.EditorInfo());
-            if (connection != null) connection.setComposingRegion(imeDraft.start, imeDraft.end);
+        int actualLen = input.getText() == null ? 0 : input.getText().length();
+        try {
+            input.setSelection(safeSelectionIndex(imeDraft.selection, actualLen));
+        } catch (Exception ignored) {
+        }
+        if (imeDraft.composing() && imeDraft.start >= 0 && imeDraft.end <= actualLen) {
+            try {
+                android.view.inputmethod.InputConnection connection =
+                        input.onCreateInputConnection(new android.view.inputmethod.EditorInfo());
+                if (connection != null) {
+                    connection.setComposingRegion(imeDraft.start, imeDraft.end);
+                }
+            } catch (Exception ignored) {
+            }
         }
         syncingInput = false;
         input.setShowSoftInputOnFocus(true);
@@ -917,7 +952,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
         syncingInput = true;
         if (!display.equals(input.getText().toString())) {
             input.setText(display);
-            input.setSelection(display.length());
+            int actualLen = input.getText() == null ? 0 : input.getText().length();
+            try {
+                input.setSelection(safeSelectionIndex(display.length(), actualLen));
+            } catch (Exception ignored) {
+            }
         }
         syncingInput = false;
         updateAfterImeInput(resetCandidates);
@@ -971,97 +1010,106 @@ public final class GlobalSearchScreen implements AutoCloseable {
         suggestedQuery = query;
         if (query.isEmpty()) return;
         final int ticket = suggestionSerial;
-        suggestionWork =
-                a.phoneticWork.submit(
-                        () -> {
-                            if (a.phonetic == null)
-                                try {
-                                    a.phoneticReady.await(8, java.util.concurrent.TimeUnit.SECONDS);
-                                } catch (InterruptedException cancelled) {
-                                    Thread.currentThread().interrupt();
-                                    return;
-                                }
-                            if (Thread.currentThread().isInterrupted()) return;
-                            PhoneticSearchIndex index = a.phonetic;
-                            final List<String> values =
-                                    index == null
-                                            ? Collections.emptyList()
-                                            : index.suggestTitles(query, 8);
-                            a.ui.post(
-                                    () -> {
-                                        if (!acceptsTitleSuggestions(ticket, query)) return;
-                                        titleSuggestions.removeAllViews();
-                                        if (values.isEmpty()) return;
-                                        TextView label = a.text("热门联想", 12.5f, 0xa8ebebf5);
-                                        label.setTypeface(null, Typeface.BOLD);
-                                        label.setPadding(0, 0, a.dp(10), 0);
-                                        titleSuggestions.addView(label);
-                                        for (String title : values) {
-                                            Button choice =
-                                                    a.button(
-                                                            title,
-                                                            "search-title:" + title,
-                                                            () -> {
-                                                                if (!current()
-                                                                        || ticket
-                                                                                != suggestionSerial
-                                                                        || a.privateMode
-                                                                        || imeDraft.composing())
-                                                                    return;
-                                                                input.requestFocus();
-                                                                imeDraft.clear();
-                                                                keyboard.set(title);
-                                                                changed();
-                                                                submit(true);
-                                                            });
-                                            choice.setTag("search-title:" + title);
-                                            choice.setTextSize(13.5f);
-                                            choice.setSingleLine(true);
-                                            choice.setMaxWidth(a.dp(220));
-                                            choice.setEllipsize(
-                                                    android.text.TextUtils.TruncateAt.END);
-                                            choice.setMinWidth(0);
-                                            choice.setMinimumWidth(0);
-                                            choice.setMinHeight(0);
-                                            choice.setMinimumHeight(0);
-                                            choice.setPadding(a.dp(14), 0, a.dp(14), 0);
-                                            choice.setBackground(
-                                                    TvV17Surface.rounded(
-                                                            0x28ffffff,
-                                                            a.dp(18),
-                                                            0x38ffffff,
-                                                            a.dp(1)));
-                                            choice.setTextColor(0xf2ffffff);
-                                            choice.setOnFocusChangeListener(
-                                                    (v, focused) -> {
-                                                        FocusMotion.unclipAncestors(choice);
-                                                        choice.setBackground(
-                                                                TvV17Surface.rounded(
-                                                                        focused
-                                                                                ? 0xfff5f5f7
-                                                                                : 0x28ffffff,
-                                                                        a.dp(18),
-                                                                        focused
-                                                                                ? 0xffffffff
-                                                                                : 0x38ffffff,
-                                                                        a.dp(1)));
-                                                        choice.setTextColor(
-                                                                focused ? 0xff0b0e14 : 0xf2ffffff);
-                                                        choice.animate()
-                                                                .scaleX(focused ? 1.05f : 1f)
-                                                                .scaleY(focused ? 1.05f : 1f)
-                                                                .setDuration(120)
-                                                                .start();
-                                                    });
-                                            LinearLayout.LayoutParams size =
-                                                    new LinearLayout.LayoutParams(-2, a.dp(36));
-                                            size.rightMargin = a.dp(8);
-                                            titleSuggestions.addView(choice, size);
-                                        }
-                                        suggestionScroll.scrollTo(0, 0);
-                                        suggestionScroll.setVisibility(View.VISIBLE);
-                                    });
-                        });
+        try {
+            suggestionWork =
+                    a.phoneticWork.submit(
+                            () -> {
+                                if (a.phonetic == null)
+                                    try {
+                                        a.phoneticReady.await(
+                                                8, java.util.concurrent.TimeUnit.SECONDS);
+                                    } catch (InterruptedException cancelled) {
+                                        Thread.currentThread().interrupt();
+                                        return;
+                                    }
+                                if (Thread.currentThread().isInterrupted()) return;
+                                PhoneticSearchIndex index = a.phonetic;
+                                final List<String> values =
+                                        index == null
+                                                ? Collections.emptyList()
+                                                : index.suggestTitles(query, 8);
+                                a.ui.post(
+                                        () -> {
+                                            if (!acceptsTitleSuggestions(ticket, query)) return;
+                                            titleSuggestions.removeAllViews();
+                                            if (values.isEmpty()) return;
+                                            TextView label = a.text("热门联想", 12.5f, 0xa8ebebf5);
+                                            label.setTypeface(null, Typeface.BOLD);
+                                            label.setPadding(0, 0, a.dp(10), 0);
+                                            titleSuggestions.addView(label);
+                                            for (String title : values) {
+                                                Button choice =
+                                                        a.button(
+                                                                title,
+                                                                "search-title:" + title,
+                                                                () -> {
+                                                                    if (!current()
+                                                                            || ticket
+                                                                                    != suggestionSerial
+                                                                            || a.privateMode
+                                                                            || imeDraft.composing())
+                                                                        return;
+                                                                    input.requestFocus();
+                                                                    imeDraft.clear();
+                                                                    keyboard.set(title);
+                                                                    changed();
+                                                                    submit(true);
+                                                                });
+                                                choice.setTag("search-title:" + title);
+                                                UiCompat.setDefaultFocusHighlightEnabled(
+                                                        choice, false);
+                                                choice.setTextSize(13.5f);
+                                                choice.setSingleLine(true);
+                                                choice.setMaxWidth(a.dp(220));
+                                                choice.setEllipsize(
+                                                        android.text.TextUtils.TruncateAt.END);
+                                                choice.setMinWidth(0);
+                                                choice.setMinimumWidth(0);
+                                                choice.setMinHeight(0);
+                                                choice.setMinimumHeight(0);
+                                                choice.setPadding(a.dp(14), 0, a.dp(14), 0);
+                                                choice.setBackground(
+                                                        TvV17Surface.rounded(
+                                                                0x28ffffff,
+                                                                a.dp(18),
+                                                                0x38ffffff,
+                                                                a.dp(1)));
+                                                choice.setTextColor(0xf2ffffff);
+                                                choice.setOnFocusChangeListener(
+                                                        (v, focused) -> {
+                                                            FocusMotion.unclipAncestors(choice);
+                                                            choice.setBackground(
+                                                                    TvV17Surface.rounded(
+                                                                            focused
+                                                                                    ? 0xfff5f5f7
+                                                                                    : 0x28ffffff,
+                                                                            a.dp(18),
+                                                                            focused
+                                                                                    ? 0xffffffff
+                                                                                    : 0x38ffffff,
+                                                                            a.dp(1)));
+                                                            choice.setTextColor(
+                                                                    focused
+                                                                            ? 0xff0b0e14
+                                                                            : 0xf2ffffff);
+                                                            choice.animate()
+                                                                    .scaleX(focused ? 1.05f : 1f)
+                                                                    .scaleY(focused ? 1.05f : 1f)
+                                                                    .setDuration(120)
+                                                                    .start();
+                                                        });
+                                                LinearLayout.LayoutParams size =
+                                                        new LinearLayout.LayoutParams(-2, a.dp(36));
+                                                size.rightMargin = a.dp(8);
+                                                titleSuggestions.addView(choice, size);
+                                            }
+                                            suggestionScroll.scrollTo(0, 0);
+                                            suggestionScroll.setVisibility(View.VISIBLE);
+                                        });
+                            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            suggestionWork = null;
+        }
     }
 
     boolean acceptsTitleSuggestions(int ticket, String query) {
@@ -1227,35 +1275,41 @@ public final class GlobalSearchScreen implements AutoCloseable {
         renderFilters();
         status.setText(total == 0 ? "没有可搜索来源，请先导入配置并启用来源扩展。" : "正在搜索全部 " + total + " 个来源…");
         if (total == 0) return;
-        expansion =
-                a.phoneticWork.submit(
-                        () -> {
-                            if (a.phonetic == null)
-                                try {
-                                    a.phoneticReady.await(8, java.util.concurrent.TimeUnit.SECONDS);
-                                } catch (InterruptedException cancelled) {
-                                    Thread.currentThread().interrupt();
-                                    return;
-                                }
-                            if (Thread.currentThread().isInterrupted()) return;
-                            final PhoneticSearchIndex index = a.phonetic;
-                            final List<String> baseVariants =
-                                    index == null
-                                            ? Collections.singletonList(query)
-                                            : index.searchTerms(query);
-                            final List<String> variants =
-                                    SearchVariants.mergeTerms(query, baseVariants);
-                            a.ui.post(
-                                    () -> {
-                                        if (current() && serial == searchSerial) {
-                                            if (index != null
-                                                    && !resultPrivateMode
-                                                    && !query.matches("[A-Za-z0-9' -]+"))
-                                                index.prefer(query);
-                                            startSources(sources, query, variants, serial);
-                                        }
-                                    });
-                        });
+        try {
+            expansion =
+                    a.phoneticWork.submit(
+                            () -> {
+                                if (a.phonetic == null)
+                                    try {
+                                        a.phoneticReady.await(
+                                                8, java.util.concurrent.TimeUnit.SECONDS);
+                                    } catch (InterruptedException cancelled) {
+                                        Thread.currentThread().interrupt();
+                                        return;
+                                    }
+                                if (Thread.currentThread().isInterrupted()) return;
+                                final PhoneticSearchIndex index = a.phonetic;
+                                final List<String> baseVariants =
+                                        index == null
+                                                ? Collections.singletonList(query)
+                                                : index.searchTerms(query);
+                                final List<String> variants =
+                                        SearchVariants.mergeTerms(query, baseVariants);
+                                a.ui.post(
+                                        () -> {
+                                            if (current() && serial == searchSerial) {
+                                                if (index != null
+                                                        && !resultPrivateMode
+                                                        && !query.matches("[A-Za-z0-9' -]+"))
+                                                    index.prefer(query);
+                                                startSources(sources, query, variants, serial);
+                                            }
+                                        });
+                            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            expansion = null;
+            startSources(sources, query, SearchVariants.mergeTerms(query, null), serial);
+        }
     }
 
     void startSources(List<Cms.Site> sources, String query, List<String> variants, int serial) {
@@ -1271,7 +1325,14 @@ public final class GlobalSearchScreen implements AutoCloseable {
                             : variants.get(0);
             status.setText("搜索全部 " + total + " 个来源 · 自动匹配 " + joined);
         }
-        SearchCoordinator.configureThreads(a.prefs.getInt(Prefs.SEARCH_THREADS, 6));
+        int effectiveThreads =
+                computeEffectiveSearchThreads(
+                        a.prefs.getInt(Prefs.SEARCH_THREADS, 6), a.isTvDevice(), isLowRamTv());
+        SearchCoordinator.onLowMemoryHook =
+                () ->
+                        ImmersivePoster.trimMemory(
+                                android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL);
+        SearchCoordinator.configureThreads(effectiveThreads);
         coordinator =
                 new SearchCoordinator(
                         (site, keyword) -> firstPage(context, site, query, variants, batches),
@@ -1477,8 +1538,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
         final String query = submitted;
         final List<String> variants = new ArrayList<>(searchVariants);
         final int serial = searchSerial;
-        retrySource.setEnabled(false);
-        emptyResult.setText("正在重新搜索此源…");
+        if (retrySource != null) retrySource.setEnabled(false);
+        if (emptyResult != null) emptyResult.setText("正在重新搜索此源…");
         retryCoordinator =
                 new SearchCoordinator(
                         (site, ignored) -> firstPage(context, site, query, variants, batches),
@@ -1817,7 +1878,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         remaining = true;
                         continue;
                     }
-                    if (displayed.size() % columns == 0) {
+                    if (displayed.size() % columns == 0 || lastRow == null) {
                         lastRow = a.row();
                         lastRow.setGravity(Gravity.TOP);
                         lastRow.setClipChildren(false);
@@ -1837,10 +1898,14 @@ public final class GlobalSearchScreen implements AutoCloseable {
                     if (card.getParent() instanceof ViewGroup)
                         ((ViewGroup) card.getParent()).removeView(card);
                     int column = displayed.size() % columns;
-                    lastRow.removeViewAt(column);
                     LinearLayout.LayoutParams cell = new LinearLayout.LayoutParams(0, -2, 1);
                     cell.setMargins(a.dp(3), a.dp(3), a.dp(8), a.dp(13));
-                    lastRow.addView(card, column, cell);
+                    if (column < lastRow.getChildCount()) {
+                        lastRow.removeViewAt(column);
+                        lastRow.addView(card, column, cell);
+                    } else {
+                        lastRow.addView(card, cell);
+                    }
                     displayed.add(key);
                     added++;
                     if (focusNewResults) {
@@ -2052,10 +2117,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                                     || generation != qrGeneration
                                                     || qrServer == null
                                                     || qrServer.expired()) return;
-                                            if (submitNow
-                                                    && qrDialog != null
-                                                    && qrDialog.isShowing()) {
-                                                qrDialog.dismiss();
+                                            if (submitNow) {
+                                                if (qrDialog != null && qrDialog.isShowing()) {
+                                                    qrDialog.dismiss();
+                                                }
+                                                TvQrInputHelper.dismissActive();
                                             }
                                             imeDraft.clear();
                                             keyboard.set(keyword == null ? "" : keyword);
@@ -2325,9 +2391,18 @@ public final class GlobalSearchScreen implements AutoCloseable {
         iconBtn.setFocusable(true);
         iconBtn.setFocusableInTouchMode(true);
         iconBtn.setClickable(true);
+        UiCompat.setDefaultFocusHighlightEnabled(iconBtn, false);
         iconBtn.setBackground(TvV17Surface.rounded(0x26ffffff, a.dp(10), 0x34ffffff, a.dp(1)));
         a.pressFeedback(iconBtn);
-        iconBtn.setOnClickListener(v -> showQrDialog(false));
+        iconBtn.setOnClickListener(
+                v -> {
+                    try {
+                        String address = ensureQrServer(false);
+                        TvQrInputHelper.showSearchBubble(a, v, address);
+                    } catch (Exception error) {
+                        a.toast("未检测到局域网连接，请确认电视已连接 Wi-Fi 或有线网络");
+                    }
+                });
         iconBtn.setOnFocusChangeListener(
                 (v, focused) -> {
                     FocusMotion.unclipAncestors(iconBtn);
@@ -2337,7 +2412,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                     a.dp(10),
                                     focused ? 0xffffffff : 0x34ffffff,
                                     a.dp(1)));
-                    iconBtn.setElevation(focused ? a.dp(6) : 0);
+                    UiCompat.setElevation(iconBtn, focused ? a.dp(6) : 0);
                     iconBtn.animate()
                             .scaleX(focused ? 1.07f : 1f)
                             .scaleY(focused ? 1.07f : 1f)
@@ -2365,6 +2440,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
             qrDialog.dismiss();
         }
         qrDialog = null;
+        TvQrInputHelper.dismissActive();
         closeQrServer();
         rememberSourcePosition();
         if (resultScroll != null) savedResultScroll = resultScroll.getScrollY();

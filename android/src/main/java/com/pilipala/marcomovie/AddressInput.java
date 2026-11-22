@@ -15,6 +15,8 @@ final class AddressInput extends LinearLayout {
         super(host);
         a = host;
         setOrientation(VERTICAL);
+        setClipChildren(false);
+        setClipToPadding(false);
         input = new EditText(a);
         input.setTag("address-input");
         input.setSingleLine(true);
@@ -23,7 +25,7 @@ final class AddressInput extends LinearLayout {
         input.setHintTextColor(MainActivity.MUTED);
         input.setHint(hint);
         input.setInputType(17);
-        input.setShowSoftInputOnFocus(!a.isTvDevice());
+        UiCompat.setShowSoftInputOnFocus(input, !a.isTvDevice());
         input.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
         input.setBackground(a.bg(0xff36363e, 16));
         input.setOnFocusChangeListener(
@@ -41,10 +43,17 @@ final class AddressInput extends LinearLayout {
                                 1.005f));
         input.setText(value);
         input.setSelection(input.length());
-        addView(input, new LinearLayout.LayoutParams(-1, a.dp(48)));
+        error = a.text("", 12, 0xffffb4ad);
+        String qrLabel = hint != null && hint.contains("wallpaper") ? "壁纸图片地址" : "配置地址";
+        View inputRow =
+                TvQrInputHelper.wrap(
+                        a, input, qrLabel, false, false, false, () -> error.setText(""));
+        addView(
+                inputRow,
+                new LinearLayout.LayoutParams(
+                        -1, a.isTvDevice() ? ViewGroup.LayoutParams.WRAP_CONTENT : a.dp(48)));
         input.setLongClickable(!a.isTvDevice());
         input.setTextIsSelectable(!a.isTvDevice());
-        error = a.text("", 12, 0xffffb4ad);
         addView(error);
         keys = a.vertical();
         addView(keys);
@@ -103,16 +112,24 @@ final class AddressInput extends LinearLayout {
                     if (pos > 0) input.getText().delete(pos - 1, pos);
                 });
         key(row, "清空", () -> input.setText(""));
-        key(
-                row,
-                "粘贴",
-                () -> {
-                    android.content.ClipboardManager clipboard =
-                            (android.content.ClipboardManager)
-                                    a.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
-                    if (clipboard.hasPrimaryClip())
-                        insert(clipboard.getPrimaryClip().getItemAt(0).coerceToText(a).toString());
-                });
+        if (!a.isTvDevice()) {
+            key(
+                    row,
+                    "粘贴",
+                    () -> {
+                        android.content.ClipboardManager clipboard =
+                                (android.content.ClipboardManager)
+                                        a.getSystemService(
+                                                android.content.Context.CLIPBOARD_SERVICE);
+                        if (clipboard != null && clipboard.hasPrimaryClip())
+                            insert(
+                                    clipboard
+                                            .getPrimaryClip()
+                                            .getItemAt(0)
+                                            .coerceToText(a)
+                                            .toString());
+                    });
+        }
     }
 
     void key(LinearLayout row, String label, Runnable action) {

@@ -63,6 +63,7 @@ public final class MainActivity extends Activity {
     PhoneConfigDialog phoneConfig;
     CastService castService;
     CastScreen activeCastScreen;
+    SpiderGatewayServer spiderGateway;
     LiveSession liveSession;
     final Runnable tuneLiveNumber = this::commitLiveNumber;
     LocalProxy localProxy;
@@ -73,6 +74,9 @@ public final class MainActivity extends Activity {
     Cms.Episode activeEpisode;
     int resumeAt;
     WatchHistory.Entry playingBookmark;
+    WatchHistory.Entry historyFallbackBookmark;
+    boolean historyFallbackInFlight;
+    String migratingHistoryOldKey;
     long lastBookmarkSave;
     final ArrayDeque<Screen> back = new ArrayDeque<>();
     final LruCache<String, Bitmap> images =
@@ -681,6 +685,8 @@ public final class MainActivity extends Activity {
                             } catch (Throwable nextError) {
                                 if (!ListingRoute.hasPluginFrame(nextError)
                                         && !hasDexClassLoaderFrame(nextError)) {
+                                    CrashReportStore.recordUncaughtCrash(
+                                            activeActivity, thread, nextError);
                                     if (previous != null)
                                         previous.uncaughtException(thread, nextError);
                                     return;
@@ -697,6 +703,7 @@ public final class MainActivity extends Activity {
                             "uncaught on " + (thread == null ? "?" : thread.getName()),
                             error);
                     MainActivity activity = activeActivity;
+                    CrashReportStore.recordUncaughtCrash(activity, thread, error);
                     if (activity != null && activity.prefs != null) {
                         String currentSite = activity.prefs.getString(Prefs.SELECTED_SITE, "");
                         if (currentSite != null && !currentSite.isEmpty()) {
@@ -1042,7 +1049,11 @@ public final class MainActivity extends Activity {
         configOrigin = prefs.getString("origin", "");
         try {
             ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-            if (am != null) images.resize(ImageDecodePolicy.cacheBytes(am.getMemoryClass()));
+            if (am != null) {
+                int memClass = am.getMemoryClass();
+                images.resize(ImageDecodePolicy.cacheBytes(memClass));
+                ImmersivePoster.applyMemoryBudget(memClass);
+            }
         } catch (Exception ignored) {
         }
         try {
@@ -1143,6 +1154,7 @@ public final class MainActivity extends Activity {
                                             () -> clearStartupBootGuard(getCacheDir()), 3500);
                                     if (!privateMode) {
                                         CloudSyncDialog.pullOnStartup(MainActivity.this);
+                                        CrashReportDialog.maybePromptOnStartup(MainActivity.this);
                                     }
                                     if (recoveredFromCrash) {
                                         toast("上次加载该片源时异常退出，已自动重置片源选择");
@@ -1294,6 +1306,7 @@ public final class MainActivity extends Activity {
         b.setPadding(dp(20), dp(9), dp(20), dp(9));
         b.setBackground(bg(0xff242429, 12));
         b.setTag(key);
+        UiCompat.setDefaultFocusHighlightEnabled(b, false);
         b.setFocusable(true);
         b.setFocusableInTouchMode(isTvDevice());
         b.setOnClickListener(v -> action.run());
@@ -1468,27 +1481,23 @@ public final class MainActivity extends Activity {
         watchRootLayout(root);
         homeDock = null;
         if (navigation) {
+            homeDock = new HomeDock(this);
             if (useBottomDock()) {
                 body.setPadding(dp(18), statusBarHeight() + dp(14), dp(18), dp(86));
+            } else if (homeDock.tvTopLabeled) {
+                body.setPadding(
+                        homeDock.leftSafeInsetPx(),
+                        homeDock.topSafeInsetPx(),
+                        homeDock.rightSafeInsetPx(),
+                        dp(36));
             } else if (useTopDock()) {
                 body.setPadding(dp(34), dp(18), dp(34), dp(36));
             } else if (useLeftDock()) {
-                int left =
-                        Math.max(
-                                80,
-                                Math.round(
-                                                56
-                                                        * Prefs.clampNavScale(
-                                                                prefs.getInt(
-                                                                        Prefs.NAV_SCALE_PERCENT,
-                                                                        100))
-                                                        / 100f)
-                                        + 30);
-                body.setPadding(dp(left), dp(18), dp(34), dp(36));
+                body.setPadding(
+                        homeDock.leftSafeInsetPx(), dp(18), homeDock.rightSafeInsetPx(), dp(36));
             } else {
                 body.setPadding(dp(34), dp(18), dp(34), dp(36));
             }
-            homeDock = new HomeDock(this);
             if (!homeDock.tvLeft && !homeDock.tvTopLabeled) {
                 LinearLayout brandRow = row();
                 brandRow.setTag("home-brand");
@@ -2233,16 +2242,28 @@ public final class MainActivity extends Activity {
         super.finish();
     }
 
+    static boolean shouldPopScreenOnPluginFinish(
+            boolean isHome, boolean isPlayer, boolean hasBackStack) {
+        return !isHome && !isPlayer && hasBackStack;
+    }
+
     private void interceptPluginFinish() {
         AppLog.w(
                 "PluginGuard",
                 "intercepted unexpected Activity.finish() from extension",
                 new Throwable());
+        // Never disrupt an active playback session when a background spider/netdisk extension
+        // unexpectedly calls Activity.finish().
+        if (current != null && current.player) {
+            return;
+        }
         generation++;
         ui.post(
                 () -> {
                     if (isDestroyed() || allowSystemFinish) return;
-                    if (current != null && !current.home && !back.isEmpty()) {
+                    if (current != null
+                            && shouldPopScreenOnPluginFinish(
+                                    current.home, current.player, !back.isEmpty())) {
                         cancelPageRequests();
                         generation++;
                         current = back.pop();
@@ -2287,44 +2308,111 @@ public final class MainActivity extends Activity {
         PlaybackController.expandPlayback(this);
     }
 
+    /**
+     * Pure-JVM toast layout policy returning {@code {bottomMargin, rightMargin, maxWidth}}.
+     *
+     * <p>Prevents two layout bugs: (1) computing maxWidth from an unlaid-out root ({@code parentW
+     * == 0}) which collapsed toasts into an 80dp-wide vertical column, and (2) subtracting a
+     * full-width top dock's width as {@code rightMargin} as if it were a right vertical rail.
+     */
+    static int[] computeToastLayout(
+            int containerW,
+            int dockW,
+            int dockH,
+            int dockGravity,
+            int dockBottomMargin,
+            int dockRightMargin,
+            int dp10,
+            int dp24,
+            int dp32,
+            int minWidthPx,
+            int maxCapPx) {
+        int safeW = Math.max(dp32 * 4, containerW);
+        int bottomMargin = dp24;
+        int rightMargin = 0;
+        if (dockW > 0 || dockH > 0) {
+            int vGrav = dockGravity & Gravity.VERTICAL_GRAVITY_MASK;
+            int hGrav = dockGravity & Gravity.HORIZONTAL_GRAVITY_MASK;
+            if (vGrav == Gravity.BOTTOM) {
+                bottomMargin = Math.max(bottomMargin, dockH + dockBottomMargin + dp10);
+            } else if (vGrav != Gravity.TOP
+                    && hGrav == Gravity.RIGHT
+                    && dockW > 0
+                    && dockW < safeW / 2) {
+                rightMargin = dockW + dockRightMargin + dp10;
+            }
+        }
+        int availW = Math.max(dp32 * 3, safeW - rightMargin - dp32);
+        int preferredCap = Math.min(maxCapPx, Math.round(availW * 0.78f));
+        int maxWidth = Math.min(availW, Math.max(minWidthPx, preferredCap));
+        return new int[] {bottomMargin, rightMargin, maxWidth};
+    }
+
     void toast(String message) {
         final FrameLayout parent = root;
         if (parent == null) return;
         View previous = parent.findViewWithTag("app-toast");
         if (previous != null && previous.getParent() == parent) parent.removeView(previous);
-        TextView tip = text(message, 14, WHITE);
+        TextView tip = text(message, 14.5f, WHITE);
+        tip.setTypeface(
+                android.graphics.Typeface.create(
+                        "sans-serif-medium", android.graphics.Typeface.NORMAL));
         tip.setGravity(Gravity.CENTER);
-        tip.setPadding(dp(22), dp(12), dp(22), dp(12));
-        glass(tip, 22);
+        tip.setMaxLines(3);
+        tip.setLineSpacing(dp(2.5f), 1f);
+        tip.setPadding(dp(24), dp(12), dp(24), dp(12));
+        GradientDrawable pillBg = bg(0xeb141922, 999);
+        pillBg.setStroke(Math.max(1, dp(1)), 0x3bffffff);
+        tip.setBackground(pillBg);
+        UiCompat.setElevation(tip, dp(20));
         tip.setTag("app-toast");
         FrameLayout.LayoutParams size =
                 new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        size.bottomMargin = dp(24);
+        int containerW = parent.getWidth() > 0 ? parent.getWidth() : windowWidth();
+        int containerH = parent.getHeight() > 0 ? parent.getHeight() : windowHeight();
+        int dockW = 0;
+        int dockH = 0;
+        int dockGravity = 0;
+        int dockBottomMargin = 0;
+        int dockRightMargin = 0;
         View dock = parent.findViewWithTag("home-dock");
         if (dock != null
                 && dock.getVisibility() == View.VISIBLE
                 && dock.getLayoutParams() instanceof FrameLayout.LayoutParams) {
             FrameLayout.LayoutParams rail = (FrameLayout.LayoutParams) dock.getLayoutParams();
-            if ((rail.gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.BOTTOM) {
-                size.bottomMargin =
-                        Math.max(
-                                size.bottomMargin,
-                                Math.max(dock.getHeight(), rail.height)
-                                        + rail.bottomMargin
-                                        + dp(10));
-            } else {
-                size.rightMargin =
-                        Math.max(dock.getWidth(), rail.width) + rail.rightMargin + dp(10);
-            }
-            tip.setElevation(dock.getElevation() + dp(1));
+            dockW = Math.max(dock.getWidth(), rail.width > 0 ? rail.width : 0);
+            dockH = Math.max(dock.getHeight(), rail.height > 0 ? rail.height : 0);
+            dockGravity = rail.gravity;
+            dockBottomMargin = rail.bottomMargin;
+            dockRightMargin = rail.rightMargin;
+            UiCompat.setElevation(tip, Math.max(dp(20), dock.getElevation() + dp(4)));
         }
+        int[] layout =
+                computeToastLayout(
+                        containerW,
+                        dockW,
+                        dockH,
+                        dockGravity,
+                        dockBottomMargin,
+                        dockRightMargin,
+                        dp(10),
+                        dp(28),
+                        dp(40),
+                        dp(260),
+                        dp(560));
+        size.bottomMargin = layout[0];
+        size.rightMargin = layout[1];
         android.graphics.Rect visible = new android.graphics.Rect();
         parent.getWindowVisibleDisplayFrame(visible);
-        int[] xy = new int[2];
-        parent.getLocationOnScreen(xy);
-        size.bottomMargin =
-                Math.max(size.bottomMargin, xy[1] + parent.getHeight() - visible.bottom + dp(10));
-        tip.setMaxWidth(Math.max(dp(80), parent.getWidth() - size.rightMargin - dp(32)));
+        if (parent.getHeight() > 0 && visible.bottom > 0) {
+            int[] xy = new int[2];
+            parent.getLocationOnScreen(xy);
+            int keyboardInset = xy[1] + containerH - visible.bottom;
+            if (keyboardInset > dp(48) && keyboardInset < containerH) {
+                size.bottomMargin = Math.max(size.bottomMargin, keyboardInset + dp(12));
+            }
+        }
+        tip.setMaxWidth(layout[2]);
         parent.addView(tip, size);
         ui.postDelayed(() -> parent.removeView(tip), 2600);
     }
@@ -2347,6 +2435,10 @@ public final class MainActivity extends Activity {
 
     void loadDetail(Cms.Site site, String id, Done<Cms.Video> done) {
         SourceController.loadDetail(this, site, id, done);
+    }
+
+    void loadDetail(Cms.Site site, String id, Done<Cms.Video> done, Done<Throwable> onError) {
+        SourceController.loadDetail(this, site, id, done, onError);
     }
 
     <T> void load(String label, Work<T> task, Done<T> done) {
@@ -2426,6 +2518,9 @@ public final class MainActivity extends Activity {
         SourceController.pickDocument(this, 42, "这台电视没有文件选择器，可安装文件管理器后再导入字幕。");
     }
 
+    static final String FIRST_RUN_DECLARATION =
+            "本产品仅为播放工具，不内置、不提供、不托管任何影视资源或配置地址。请自行合法获取内容与配置，并确保拥有相应使用权。";
+
     void home() {
         if (current != null) current.home = true;
         if (!isTvDevice()) {
@@ -2441,39 +2536,7 @@ public final class MainActivity extends Activity {
             contentHome(selected);
             return;
         }
-        renderPage("把今晚，留给好故事。", "YOUR OWN CINEMA", true);
-        paragraph("属于你的电视播放器。导入自己合法获取的配置，用遥控器浏览和播放。");
-        LinearLayout hero = row();
-        addButton(
-                hero,
-                button(
-                        config == null ? "＋ 导入我的配置" : (isTvDevice() ? "＋ 添加新源" : "＋ 更新配置"),
-                        "primary",
-                        () -> importDialog()));
-        if (config != null) addButton(hero, button("浏览片库", "primary", () -> chooseSources()));
-        addButton(
-                hero,
-                navButton("观看历史", "history-open", () -> open(new Screen(this::historyPage), true)));
-        if (!privateMode) {
-            addButton(
-                    hero,
-                    navButton(
-                            "多端同步",
-                            "cloud-sync-open",
-                            () -> CloudSyncDialog.show(this, this::refresh)));
-        }
-        body.addView(hero);
-        gap(body, 30);
-        if (config == null) {
-            paragraph("本产品仅为播放工具，不内置、不提供、不托管任何影视资源或配置地址。请自行合法获取内容与配置，并确保拥有相应使用权。");
-            return;
-        }
-        TextView t = text("我的来源", 22, WHITE);
-        body.addView(t);
-        gap(body, 10);
-        int supported = 0;
-        for (Cms.Site s : config.sites) if (available(s)) supported++;
-        paragraph("已保存 " + config.sites.size() + " 个来源。选择一个，开始浏览。还未支持的来源会保留在列表中。");
+        new TvV17WelcomeHomeScreen(this).show();
     }
 
     void contentHome(Cms.Site site) {
@@ -2550,7 +2613,7 @@ public final class MainActivity extends Activity {
             return;
         }
         DetailScreen.show(this, s, listing, ready);
-        if (root != null) {
+        if (root != null && android.os.Build.VERSION.SDK_INT > 23) {
             activeTransition = PlayerTransitionHelper.animateTvPageFade(root, true, reduced, null);
         }
     }
@@ -2660,6 +2723,66 @@ public final class MainActivity extends Activity {
         if (castService != null) {
             castService.close();
             castService = null;
+        }
+    }
+
+    private volatile int spiderGatewayEpoch;
+    private boolean spiderGatewayStarting;
+
+    synchronized void syncSpiderGateway() {
+        if (privateMode
+                || prefs == null
+                || !prefs.getBoolean(Prefs.SPIDER_GATEWAY_ENABLED, false)) {
+            spiderGatewayStarting = false;
+            spiderGatewayEpoch++;
+            stopSpiderGateway();
+            return;
+        }
+        if ((spiderGateway != null && !spiderGateway.closed) || spiderGatewayStarting) return;
+        spiderGatewayStarting = true;
+        final int epoch = ++spiderGatewayEpoch;
+        worker.execute(
+                () -> {
+                    SpiderGatewayServer started = null;
+                    try {
+                        started = SpiderGatewayServer.startForActivity(this, null);
+                    } catch (Throwable err) {
+                        AppLog.w("MainActivity", "spider gateway start failed", err);
+                    }
+                    final SpiderGatewayServer ready = started;
+                    synchronized (MainActivity.this) {
+                        if (epoch == spiderGatewayEpoch) {
+                            spiderGatewayStarting = false;
+                        }
+                        if (epoch != spiderGatewayEpoch
+                                || isFinishing()
+                                || isDestroyed()
+                                || privateMode
+                                || prefs == null
+                                || !prefs.getBoolean(Prefs.SPIDER_GATEWAY_ENABLED, false)) {
+                            if (ready != null) ready.close();
+                            return;
+                        }
+                        if (spiderGateway != null && spiderGateway != ready) {
+                            spiderGateway.close();
+                        }
+                        spiderGateway = ready;
+                    }
+                });
+    }
+
+    synchronized void restartSpiderGateway() {
+        spiderGatewayStarting = false;
+        spiderGatewayEpoch++;
+        stopSpiderGateway();
+        syncSpiderGateway();
+    }
+
+    synchronized void stopSpiderGateway() {
+        spiderGatewayStarting = false;
+        if (spiderGateway != null) {
+            spiderGateway.close();
+            spiderGateway = null;
         }
     }
 
@@ -3081,6 +3204,7 @@ public final class MainActivity extends Activity {
         super.onWindowFocusChanged(focus);
         if (!focus) {
             if (markerHost != null) markerHost.abort();
+            if (playerChrome != null) playerChrome.cancelEpisodeHoldSwitch();
             finishSeek(false);
             PluginDialogStyler.watch(this);
         }
@@ -3108,6 +3232,7 @@ public final class MainActivity extends Activity {
         foreground = true;
         CspEngine.syncAllPluginActivities(this);
         syncCastService();
+        syncSpiderGateway();
         UpdateManager.get(this)
                 .listen(
                         () -> {
@@ -3130,6 +3255,7 @@ public final class MainActivity extends Activity {
         foreground = true;
         CspEngine.syncAllPluginActivities(this);
         syncCastService();
+        syncSpiderGateway();
     }
 
     @Override
@@ -3137,6 +3263,7 @@ public final class MainActivity extends Activity {
         clearStartupBootGuard(getCacheDir());
         cancelActiveTransition();
         if (markerHost != null) markerHost.abort();
+        if (playerChrome != null) playerChrome.cancelEpisodeHoldSwitch();
         savePlaybackHistory(true);
         super.onPause();
     }
@@ -3146,6 +3273,7 @@ public final class MainActivity extends Activity {
         clearStartupBootGuard(getCacheDir());
         cancelActiveTransition();
         PrivacySpace.cancelPrompt(this);
+        if (playerChrome != null) playerChrome.cancelEpisodeHoldSwitch();
         finishSeek(false);
         if (playbackLoading != null) {
             clearPlaybackLoading();
@@ -3159,6 +3287,8 @@ public final class MainActivity extends Activity {
             session.close();
             if (session.dialog != null) session.dialog.dismiss();
         }
+        CrashReportDialog.closeActiveShareSession();
+        TvQrInputHelper.dismissActive();
         if (searchScreen != null) {
             searchScreen.closeQrServer();
             if (searchScreen.qrDialog != null && searchScreen.qrDialog.isShowing()) {
@@ -3193,6 +3323,7 @@ public final class MainActivity extends Activity {
         if (privateMode && isFinishing() && !switchingPrivacy) {
             MobileShell.clearSearchSession();
             VideoSkipStore.clearPrivateRecords();
+            SubtitlePreferenceStore.clearPrivateRecords();
             VideoMarkerRepository.clearPrivate();
             PrivacySpace.active = false;
         }
@@ -3200,8 +3331,10 @@ public final class MainActivity extends Activity {
         cancelActiveTransition();
         dismissOnboarding();
         clearPlaybackLoading();
+        TvQrInputHelper.dismissActive();
         if (phoneConfig != null) phoneConfig.close();
         stopCastService();
+        stopSpiderGateway();
         if (startupIntro != null) startupIntro.cancel();
         if (searchScreen != null) searchScreen.close();
         stopWeb();

@@ -152,6 +152,22 @@
     "sha256": "b86cfb137a94bf471d6b2802415edd4fe66038dab6986682133786ca7dd43de2"
   },
   {
+    "name": "media3-datasource-okhttp",
+    "group": "androidx.media3",
+    "version": "1.5.1",
+    "license": "The Apache Software License, Version 2.0",
+    "url": "https://dl.google.com/dl/android/maven2/androidx/media3/media3-datasource-okhttp/1.5.1/media3-datasource-okhttp-1.5.1.aar",
+    "sha256": "f778c8943d5e9fbc1bd271339a9ed7b2e8708e18b160e7cabd8f979c4e5d32bf"
+  },
+  {
+    "name": "libmpv",
+    "group": "dev.jdtech.mpv",
+    "version": "0.4.1",
+    "license": "MIT; LGPL-2.1-or-later; GPL-2.0-or-later",
+    "url": "https://repo.maven.apache.org/maven2/dev/jdtech/mpv/libmpv/0.4.1/libmpv-0.4.1.aar",
+    "sha256": "361f4fecb2769fd77697e02f83e24e767431859560282225facc5310a60f6ab2"
+  },
+  {
     "name": "media3-decoder",
     "group": "androidx.media3",
     "version": "1.5.1",

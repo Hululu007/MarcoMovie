@@ -244,6 +244,27 @@ final class TvMarkerHost {
             a.root.requestFocus();
     }
 
+    /**
+     * Clears any per-episode v2 node/disabled override back to INHERIT so newly saved per-video
+     * intro/outro skip seconds take effect immediately on the current episode as well.
+     */
+    void inheritLegacy(boolean intro) {
+        if (!valid()) return;
+        try {
+            VideoMarkerStore.Document snapshot = load();
+            VideoMarkerStore.Field field = snapshot.field(repository.identity, intro);
+            if (field.mode != VideoMarkerStore.INHERIT) {
+                repository.write(snapshot.revision, intro, VideoMarkerStore.Field.inherit());
+                document = repository.read();
+            }
+            legacyFallback = false;
+            readFailed = false;
+        } catch (Throwable ignored) {
+            legacyFallback = true;
+        }
+        controls.refreshMarkerPlaybackMode();
+    }
+
     void manage(boolean intro) {
         if (!valid()) return;
         final VideoMarkerStore.Document snapshot;

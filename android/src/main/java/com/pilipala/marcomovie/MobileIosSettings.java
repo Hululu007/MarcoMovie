@@ -653,13 +653,18 @@ final class MobileIosSettings {
                         COLOR_ORANGE,
                         (body, ctl) -> {
                             int eng = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
-                            final int[] engVals = {0, 2, 1};
-                            int engIdx = eng == 2 ? 1 : (eng == 1 ? 2 : 0);
+                            final int[] engVals = {0, 3, 2, 1};
+                            int engIdx = eng == 3 ? 1 : (eng == 2 ? 2 : (eng == 1 ? 3 : 0));
                             addChoices(
                                     a,
                                     body,
                                     "默认播放器内核",
-                                    new String[] {"Exo (Media3)", "IJK (FFmpeg)", "系统播放器"},
+                                    new String[] {
+                                        "Exo (Media3)",
+                                        "MPV 高画质 (HDR/Anime4K)",
+                                        "IJK (FFmpeg)",
+                                        "系统播放器"
+                                    },
                                     engIdx,
                                     idx -> {
                                         a.prefs
@@ -764,6 +769,145 @@ final class MobileIosSettings {
                                                 .edit()
                                                 .putBoolean(Prefs.TUNNELED_PLAYBACK, idx == 1)
                                                 .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+
+                            boolean hdrTm = a.prefs.getBoolean(Prefs.HDR_TONE_MAPPING, true);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "MPV HDR 色调映射",
+                                    new String[] {"关闭", "开启 (libplacebo)"},
+                                    hdrTm ? 1 : 0,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putBoolean(Prefs.HDR_TONE_MAPPING, idx == 1)
+                                                .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+
+                            boolean anime4k = a.prefs.getBoolean(Prefs.ANIME4K_ENABLED, false);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "MPV Anime4K 超分",
+                                    new String[] {"关闭", "开启 (CNN x2)"},
+                                    anime4k ? 1 : 0,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putBoolean(Prefs.ANIME4K_ENABLED, idx == 1)
+                                                .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+
+                            boolean hlsProxy = a.prefs.getBoolean(Prefs.HLS_PROXY_ENABLED, true);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "HLS 伪装分片修正代理",
+                                    new String[] {"关闭", "开启 (推荐)"},
+                                    hlsProxy ? 1 : 0,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putBoolean(Prefs.HLS_PROXY_ENABLED, idx == 1)
+                                                .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+
+                            boolean hlsAdStrip = a.prefs.getBoolean(Prefs.HLS_AD_STRIP, false);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "HLS 广告分段过滤",
+                                    new String[] {"关闭", "开启"},
+                                    hlsAdStrip ? 1 : 0,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putBoolean(Prefs.HLS_AD_STRIP, idx == 1)
+                                                .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+
+                            int cacheMb = a.prefs.getInt(Prefs.MEDIA_CACHE_MB, 256);
+                            final int[] cacheVals = {0, 128, 256, 512, 1024};
+                            int cacheIdx = 2;
+                            for (int ci = 0; ci < cacheVals.length; ci++) {
+                                if (cacheVals[ci] == cacheMb) {
+                                    cacheIdx = ci;
+                                    break;
+                                }
+                            }
+                            addChoices(
+                                    a,
+                                    body,
+                                    "直链本地分块缓存",
+                                    new String[] {"关闭", "128MB", "256MB", "512MB", "1GB"},
+                                    cacheIdx,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putInt(Prefs.MEDIA_CACHE_MB, cacheVals[idx])
+                                                .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+
+                            int loud = a.prefs.getInt(Prefs.LOUDNESS_BOOST, 0);
+                            final int[] loudVals = {0, 4, 8, 12};
+                            int loudIdx = 0;
+                            for (int li = 0; li < loudVals.length; li++) {
+                                if (loudVals[li] == loud) {
+                                    loudIdx = li;
+                                    break;
+                                }
+                            }
+                            addChoices(
+                                    a,
+                                    body,
+                                    "人声与响度增益",
+                                    new String[] {"关闭", "+4dB", "+8dB", "+12dB"},
+                                    loudIdx,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putInt(Prefs.LOUDNESS_BOOST, loudVals[idx])
+                                                .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+
+                            boolean nativePy =
+                                    a.prefs.getBoolean(Prefs.NATIVE_PYTHON_ENABLED, true);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "内置 CPython 3.11 源引擎",
+                                    new String[] {"关闭 (Skulpt)", "开启 (原生)"},
+                                    nativePy ? 1 : 0,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putBoolean(Prefs.NATIVE_PYTHON_ENABLED, idx == 1)
+                                                .apply();
+                                        a.closeEngines();
+                                        ctl.rerenderInPlace();
+                                    });
+
+                            boolean wvJs = a.prefs.getBoolean(Prefs.WEBVIEW_JS_FALLBACK, true);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "异步 JS WebView 兜底",
+                                    new String[] {"关闭", "开启 (推荐)"},
+                                    wvJs ? 1 : 0,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putBoolean(Prefs.WEBVIEW_JS_FALLBACK, idx == 1)
+                                                .apply();
+                                        a.closeEngines();
                                         ctl.rerenderInPlace();
                                     });
 
@@ -879,6 +1023,21 @@ final class MobileIosSettings {
                                         ctl.rerenderInPlace();
                                     });
 
+                            int audioPref = a.prefs.getInt(Prefs.AUDIO_TRACK_PREFERENCE, 0);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "自动音轨偏好",
+                                    new String[] {"智能默认", "优先中文", "优先原声"},
+                                    Math.max(0, Math.min(2, audioPref)),
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putInt(Prefs.AUDIO_TRACK_PREFERENCE, idx)
+                                                .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+
                             boolean danmaku = a.prefs.getBoolean(Prefs.DANMAKU_DEFAULT, true);
                             addChoices(
                                     a,
@@ -896,19 +1055,13 @@ final class MobileIosSettings {
 
                             DanmuSettingsPanel.DanmuConfig dmCfg =
                                     DanmuSettingsPanel.loadConfig(a, false);
-                            int dmOrigins = dmCfg.createProvider().getConfiguredOrigins().size();
-                            String dmSummary =
-                                    (dmCfg.enabled ? "已开启" : "已关闭")
-                                            + " · "
-                                            + (dmOrigins > 0
-                                                    ? "已配置 " + dmOrigins + " 个自定义服务源"
-                                                    : "未配置自定义服务源");
+                            String dmSummary = DanmuSettingsPanel.formatConfigSummary(dmCfg);
                             addActionCapsule(
                                     a,
                                     body,
                                     ICON_LAYERS,
                                     COLOR_TEAL,
-                                    "弹幕外观与自定义服务设置",
+                                    "弹幕设置",
                                     dmSummary,
                                     () -> {
                                         android.app.AlertDialog dlg =
@@ -1204,6 +1357,17 @@ final class MobileIosSettings {
                                     "管理夸克、UC、百度、阿里、115 等授权与解析排序",
                                     () -> AccountPanel.show(a));
 
+                            if (!a.privateMode) {
+                                addActionCapsule(
+                                        a,
+                                        body,
+                                        ICON_CLOUD,
+                                        COLOR_INDIGO,
+                                        "局域网蜘蛛网关",
+                                        SpiderGatewayDialog.statusSummary(a),
+                                        () -> SpiderGatewayDialog.show(a, ctl::rerenderInPlace));
+                            }
+
                             addActionCapsule(
                                     a,
                                     body,
@@ -1212,6 +1376,15 @@ final class MobileIosSettings {
                                     "连接 Emby 媒体服务器",
                                     "直连家庭 NAS 或远程 Emby 媒体库流畅播放",
                                     () -> EmbyEngine.connect(a));
+
+                            addActionCapsule(
+                                    a,
+                                    body,
+                                    ICON_CLOUD,
+                                    COLOR_BLUE,
+                                    "挂载 AList 网盘 / 媒体库",
+                                    AlistAccounts.statusSummary(a),
+                                    () -> AlistAccounts.openManager(a, ctl::rerenderInPlace));
 
                             if (CatPawSettings.available(a)) {
                                 addActionCapsule(

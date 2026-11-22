@@ -1,3 +1,19 @@
+## 2026-11-22 Android 电视 0.6.1 & 手机/平板 0.6.0：MPV 高画质内核、内置 CPython 3.11、HLS 伪装代理/分块缓存、AList 原生引擎与电视端全面体验升级（Android TV 0.6.1 · Android 手机/平板 0.6.0）
+
+- [Android 电视 / 盒子 0.6.1](docs/releases/android-tv-v0.6.1.md) · [Android 手机 / 平板 0.6.0](docs/releases/android-mobile-v0.6.0.md)
+- **高画质多内核播放体系（MPV + Media3 增强 + 响度增益）**：
+  - 全新集成官方 Maven `dev.jdtech.mpv:libmpv:0.4.1` 可选 **MPV 高画质内核**（`PLAYER_ENGINE = 3`，保留既有 Exo / IJK / 系统播放器选项并支持异常自动回退 Media3），内置 `gpu-next` + `libplacebo` HDR 自动峰值色调映射、`libass` 特效字幕、MIT 许可 `Anime4K_Upscale_CNN_x2_S.glsl` 实时超分着色器及硬解 Direct-Guard 降级保护；
+  - Media3 内核升级至 `media3-datasource-okhttp:1.5.1`（HTTP/2 连接池 + 重试）、按本机显示能力协商杜比视界基底降级（`hasDisplayDolbyVisionSupport`）与 Amlogic/非广色域电视 HDR 窗体防闪策略（`shouldRequestWindowHdrColorMode`）；新增 Media3 `LoudnessEnhancer` 与 MPV 音量增益双路**人声/响度增益**（`0..+12 dB`）。
+- **片源播放链路与源生态全面补齐（HLS 代理 / 分块缓存 / 嗅探规则 / WebView 异步 JS / 内置 CPython 3.11）**：
+  - 新增本地回环 **HLS 伪装分片实时修正代理**（`HlsStreamProxy`）：仅 64 KiB 头部流式探测 3×188 字节 `0x47` TS 同步头即可零全片缓冲剥离伪装 PNG/JPG/GIF 头，重写嵌套 m3u8/Key/Map，并支持可选点播 `#EXT-X-DISCONTINUITY` 广告段启发式过滤；
+  - 新增直链 **256 KiB 分块落盘缓存**（`MediaDiskCache`，`/kcache/<sid>`，完整 HTTP `206` Range 与 `416` 自动降级回退、LRU 容量回收，默认 256 MB，支持关闭至 1 GB 可调）；
+  - 升级 `Cms` 与 `WebResolver`：解析配置 `rules`（`hosts` / `regex` / `exclude` / `script` / `click`）与 `ads` 广告域名列表，支持广告拦截、脚本自动点击、Cookie 透传、RTMP/RTSP 直链捕获与 API 26+ `onRenderProcessGone` 渲染进程崩溃恢复；
+  - 新增离屏 **Blink WebView 异步 JS 兜底引擎**（`WebViewJsEngine`，QuickJS 遇 `Promise` / `DOMParser` / ES2022+ 失败时自动回退）与**内置原生 CPython 3.11.17-0 运行时**（`NativePythonEngine` + NDK r28c 16 KB 对齐 `libmarco_python.so`，内置官方纯 Python `requests`/`urllib3`/`certifi`/`idna`/`charset_normalizer`/`soupsieve`/`pyaes` 及纯 Python `Crypto`/`lxml`/`bs4` 兼容层，无需安装外部 Python 环境）。
+- **电视端 & 手机端重磅新功能与体验升级**：
+  - **AList 原生网盘源引擎（`AlistAccounts` / `AlistEngine`）**：支持挂载多组 AList 服务、自动令牌刷新、自然集数排序、直链播放及中文字幕自动匹配；
+  - **智能音轨/字幕记忆与跨源续播兜底**：新增 `SubtitlePreferenceStore`（双语简体中文优先、智能规避口述影像音轨并按剧集记忆音轨/字幕偏好）与 `HistoryResumeMatcher`（原片源失效时按规范集号与季号跨源精准续播）；
+  - **电视端操控与界面精进**：新增 `TvV17WelcomeHomeScreen` 欢迎首页、`TvPlayerToolbarOrder` 播放器工具栏按键自定义排序与焦点浮泡提示、`EpisodeHoldSwitchOverlay` 长按切集浮层、极简标签页 Apple TV 磨砂风格 `DanmuSettingsPanel`、`TvQrInputHelper` / `RemoteInputServer` 扫码远程输入、`SpiderGatewayServer` 局域网爬虫网关以及可自托管的 `CrashReport*` 崩溃日志一键上报与二维码分享闭环；同步优化直播分组收藏屏蔽（`LivePreferences`）、选片筛选（`VideoFilters`）与手机端 `MobileIosSettings` / `MobileShell` 设置入口。
+
 ## 2026-11-22 iOS / iPadOS 0.6.1 专项版本升级：iPhone Duo 全适配、首页连续氛围过渡、底部四按钮重绘动效、独立直播源与日夜模式全面优化（iOS / iPadOS 0.6.1）
 
 - [iOS / iPadOS 0.6.1](docs/releases/ios-v0.6.1.md)

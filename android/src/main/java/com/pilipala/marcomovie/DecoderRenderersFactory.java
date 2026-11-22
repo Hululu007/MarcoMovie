@@ -36,12 +36,14 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
 
     private final Context appContext;
     private final int mode;
+    private final boolean displaySupportsDolbyVision;
 
     DecoderRenderersFactory(Context context, int decoderMode) {
         super(context);
         DecoderSupport.configure();
         appContext = context.getApplicationContext();
         mode = decoderMode;
+        displaySupportsDolbyVision = hasDisplayDolbyVisionSupport(appContext);
         setEnableDecoderFallback(true);
         setExtensionRendererMode(
                 (mode == 2
@@ -138,6 +140,47 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
                     }
                 }
             }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    static boolean hasDisplayDolbyVisionSupport(Context context) {
+        if (context == null || Build.VERSION.SDK_INT < 24) return false;
+        try {
+            android.hardware.display.DisplayManager dm =
+                    (android.hardware.display.DisplayManager)
+                            context.getSystemService(Context.DISPLAY_SERVICE);
+            if (dm == null) return false;
+            android.view.Display display = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY);
+            if (display == null) return false;
+            android.view.Display.HdrCapabilities caps = display.getHdrCapabilities();
+            if (caps == null) return false;
+            int[] types = caps.getSupportedHdrTypes();
+            if (types == null) return false;
+            for (int type : types) {
+                if (type == android.view.Display.HdrCapabilities.HDR_TYPE_DOLBY_VISION) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    static boolean hasDisplayHdrSupport(Context context) {
+        if (context == null || Build.VERSION.SDK_INT < 24) return false;
+        try {
+            android.hardware.display.DisplayManager dm =
+                    (android.hardware.display.DisplayManager)
+                            context.getSystemService(Context.DISPLAY_SERVICE);
+            if (dm == null) return false;
+            android.view.Display display = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY);
+            if (display == null) return false;
+            android.view.Display.HdrCapabilities caps = display.getHdrCapabilities();
+            if (caps == null) return false;
+            int[] types = caps.getSupportedHdrTypes();
+            return types != null && types.length > 0;
         } catch (Throwable ignored) {
         }
         return false;
@@ -300,7 +343,9 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
                         }
                         if (format != null
                                 && MimeTypes.VIDEO_DOLBY_VISION.equals(format.sampleMimeType)) {
-                            if (mode == 2 || !hasNativeDolbyVisionDecoder(format)) {
+                            if (mode == 2
+                                    || !displaySupportsDolbyVision
+                                    || !hasNativeDolbyVisionDecoder(format)) {
                                 return super.supportsFormat(
                                         mediaCodecSelector, toBaseLayerFormat(format));
                             }
@@ -341,7 +386,9 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
                         if (format != null
                                 && MimeTypes.VIDEO_DOLBY_VISION.equals(format.sampleMimeType)) {
                             List<MediaCodecInfo> combined = new ArrayList<>();
-                            if (mode != 2 && hasNativeDolbyVisionDecoder(format)) {
+                            if (mode != 2
+                                    && displaySupportsDolbyVision
+                                    && hasNativeDolbyVisionDecoder(format)) {
                                 try {
                                     for (MediaCodecInfo info :
                                             super.getDecoderInfos(
@@ -491,6 +538,7 @@ final class DecoderRenderersFactory extends DefaultRenderersFactory {
                             if (isDolbyVisionProfile5(formatHolder.format)) {
                                 formatHolder.format = ensureDolbyVisionMime(formatHolder.format);
                             } else if (mode == 2
+                                    || !displaySupportsDolbyVision
                                     || !hasNativeDolbyVisionDecoder(formatHolder.format)) {
                                 formatHolder.format = toBaseLayerFormat(formatHolder.format);
                             }

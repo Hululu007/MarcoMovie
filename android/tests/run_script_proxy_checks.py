@@ -28,7 +28,8 @@ with tempfile.TemporaryDirectory(prefix='script-proxy-check-') as temporary:
         file.write_text(text, encoding='utf-8')
         shim_files.append(file)
     sources = [src / name for name in ('Cms.java','RequestScope.java','SourceEngine.java','JsEngine.java','QuickJsDeadline.java',
-                                      'LocalSourcePackage.java','LiveQualityPolicy.java','LiveCatalog.java','ProxyAddress.java','LocalProxy.java')]
+                                      'LocalSourcePackage.java','LiveQualityPolicy.java','LiveCatalog.java','ProxyAddress.java',
+                                      'HlsStreamProxy.java','MediaDiskCache.java','LocalProxy.java')]
     subprocess.run([jdk / 'javac','-encoding','UTF-8','-source','8','-target','8','-Xlint:-options','-cp',classpath,'-d',classes,
                     *shim_files,root / 'shared/java/com/pilipala/source/Json.java',root / 'shared/java/com/pilipala/source/Warehouse.java',*sources,
                     root / 'android/tests/ScriptProxyChecks.java'],check=True)

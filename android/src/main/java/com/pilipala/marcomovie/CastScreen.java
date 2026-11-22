@@ -274,7 +274,7 @@ final class CastScreen {
         edit.setHintTextColor(MainActivity.MUTED);
         edit.setBackground(a.bg(0xff262832, 10));
         edit.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
-        box.addView(edit, new LinearLayout.LayoutParams(-1, -2));
+        box.addView(TvQrInputHelper.wrap(a, edit, "投屏设备名称"), new LinearLayout.LayoutParams(-1, -2));
         new AppDialog.Builder(a)
                 .setTitle("修改投屏设备名称")
                 .setView(box)
@@ -306,7 +306,7 @@ final class CastScreen {
         edit.setHintTextColor(MainActivity.MUTED);
         edit.setBackground(a.bg(0xff262832, 10));
         edit.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
-        box.addView(edit, new LinearLayout.LayoutParams(-1, -2));
+        box.addView(TvQrInputHelper.wrap(a, edit, "网络流地址"), new LinearLayout.LayoutParams(-1, -2));
         new AppDialog.Builder(a)
                 .setTitle("播放网络流地址")
                 .setView(box)

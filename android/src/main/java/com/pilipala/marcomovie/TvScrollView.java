@@ -23,6 +23,7 @@ final class TvScrollView extends ScrollView {
         focusFrame = (host != null && host.isTvDevice()) ? new TvFocusFrame(host, this) : null;
         setOverScrollMode(OVER_SCROLL_NEVER);
         setSmoothScrollingEnabled(false);
+        UiCompat.setDefaultFocusHighlightEnabled(this, false);
         setClipChildren(false);
         setClipToPadding(false);
     }

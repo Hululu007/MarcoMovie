@@ -62,9 +62,17 @@ final class PrivacySpace {
                         15,
                         MainActivity.MUTED));
         EditText pin = input(a, "4 位数字密码");
-        panel.addView(pin);
+        LinearLayout.LayoutParams pinLp = new LinearLayout.LayoutParams(-1, -2);
+        pinLp.topMargin = a.dp(10);
+        panel.addView(TvQrInputHelper.wrap(a, pin, "4 位隐私密码", false, true, true, null), pinLp);
         EditText confirm = input(a, "再次输入密码");
-        if (setup) panel.addView(confirm);
+        if (setup) {
+            LinearLayout.LayoutParams confirmLp = new LinearLayout.LayoutParams(-1, -2);
+            confirmLp.topMargin = a.dp(10);
+            panel.addView(
+                    TvQrInputHelper.wrap(a, confirm, "确认 4 位隐私密码", false, true, true, null),
+                    confirmLp);
+        }
         if (a.isTvDevice()) {
             final EditText[] target = {pin};
             pin.setOnFocusChangeListener(
@@ -266,6 +274,7 @@ final class PrivacySpace {
             CloudSyncDialog.cancel(a);
             a.stopWeb();
             a.stopCastService();
+            a.stopSpiderGateway();
             if (a.phoneConfig != null) {
                 PhoneConfigDialog session = a.phoneConfig;
                 session.close();
@@ -281,6 +290,7 @@ final class PrivacySpace {
         active = privateMode;
         if (!privateMode) {
             VideoSkipStore.clearPrivateRecords();
+            SubtitlePreferenceStore.clearPrivateRecords();
             VideoMarkerRepository.clearPrivate();
         }
         a.switchingPrivacy = true;

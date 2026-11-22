@@ -2,9 +2,12 @@ package com.pilipala.marcomovie;
 
 import android.content.res.ColorStateList;
 import android.graphics.Paint;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Build;
 import android.util.LruCache;
+import android.util.StateSet;
 import android.view.View;
 import android.view.ViewPropertyAnimator;
 import android.view.Window;
@@ -62,6 +65,34 @@ final class UiCompat {
         if (view != null && Build.VERSION.SDK_INT >= 21) {
             view.setClipToOutline(clipToOutline);
         }
+    }
+
+    static boolean supportsDefaultFocusHighlightApi(int sdkInt) {
+        return sdkInt >= 26;
+    }
+
+    /**
+     * Disables Android API 26+ automatic {@code defaultFocusHighlight} (the translucent gray
+     * RippleDrawable drawn in {@code View.draw()} after {@code dispatchDraw()}) on views that
+     * either should stay visually pure (such as the full-screen player root) or draw their own
+     * custom focus highlight.
+     */
+    static void setDefaultFocusHighlightEnabled(View view, boolean enabled) {
+        if (view != null && supportsDefaultFocusHighlightApi(Build.VERSION.SDK_INT)) {
+            view.setDefaultFocusHighlightEnabled(enabled);
+        }
+    }
+
+    /**
+     * Builds an explicit focus-stateful solid color background ({@code state_focused} + default) so
+     * {@code Drawable#hasFocusStateSpecified()} is {@code true} even on OEM TV ROMs that ignore
+     * {@code defaultFocusHighlightEnabled}.
+     */
+    static Drawable createFocusSafeColorBackground(int color) {
+        StateListDrawable bg = new StateListDrawable();
+        bg.addState(new int[] {android.R.attr.state_focused}, new ColorDrawable(color));
+        bg.addState(StateSet.WILD_CARD, new ColorDrawable(color));
+        return bg;
     }
 
     static void setElevation(View view, float elevation) {

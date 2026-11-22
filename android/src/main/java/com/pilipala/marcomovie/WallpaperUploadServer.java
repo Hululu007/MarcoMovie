@@ -160,7 +160,8 @@ final class WallpaperUploadServer implements Closeable {
             }
             int length;
             try {
-                length = Integer.parseInt(headers.getOrDefault("content-length", "-1"));
+                String rawLen = headers.get("content-length");
+                length = Integer.parseInt(rawLen != null ? rawLen : "-1");
             } catch (NumberFormatException e) {
                 length = -1;
             }

@@ -1040,7 +1040,7 @@ public final class InteractionProbe extends Instrumentation {
                             () ->
                                     a.accountDialog
                                                     .findViewById(android.R.id.content)
-                                                    .findViewWithTag("account-action:LoginShow")
+                                                    .findViewWithTag("account-drive:quark")
                                             != null));
             frame("accounts");
             key(KeyEvent.KEYCODE_BACK);

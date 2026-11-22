@@ -86,67 +86,74 @@ final class HotTitleCatalog {
         if (fetchInFlight) return;
         fetchInFlight = true;
         final File cacheFile = new File(a.getCacheDir(), CACHE_FILE);
-        a.worker.execute(
-                () -> {
-                    try {
-                        // 1. Fast disk cache warm-up if fresh
-                        List<String> disk = readDiskCache(cacheFile, now);
-                        if (!disk.isEmpty()) {
-                            memoryCache = Collections.unmodifiableList(disk);
-                            lastLoadedMs = now;
-                            applyToIndex(a, memoryCache, onUpdatedUi);
-                            return;
-                        }
-                        // 2. Fetch live recent trending collections from Douban Rexxar
-                        Set<String> merged = new LinkedHashSet<>();
-                        for (String col : COLLECTIONS) {
-                            String url =
-                                    "https://m.douban.com/rexxar/api/v2/subject_collection/"
-                                            + col
-                                            + "/items?start=0&count=50";
-                            String body = httpGet(url, "https://m.douban.com/movie/");
-                            for (String t : parseDoubanCollectionJson(body)) {
-                                merged.add(t);
+        try {
+            a.worker.execute(
+                    () -> {
+                        try {
+                            // 1. Fast disk cache warm-up if fresh
+                            List<String> disk = readDiskCache(cacheFile, now);
+                            if (!disk.isEmpty()) {
+                                memoryCache = Collections.unmodifiableList(disk);
+                                lastLoadedMs = now;
+                                applyToIndex(a, memoryCache, onUpdatedUi);
+                                return;
                             }
-                            if (merged.size() >= 320) break;
+                            // 2. Fetch live recent trending collections from Douban Rexxar
+                            Set<String> merged = new LinkedHashSet<>();
+                            for (String col : COLLECTIONS) {
+                                String url =
+                                        "https://m.douban.com/rexxar/api/v2/subject_collection/"
+                                                + col
+                                                + "/items?start=0&count=50";
+                                String body = httpGet(url, "https://m.douban.com/movie/");
+                                for (String t : parseDoubanCollectionJson(body)) {
+                                    merged.add(t);
+                                }
+                                if (merged.size() >= 320) break;
+                            }
+                            if (!merged.isEmpty()) {
+                                List<String> fresh = new ArrayList<>(merged);
+                                memoryCache = Collections.unmodifiableList(fresh);
+                                lastLoadedMs = System.currentTimeMillis();
+                                writeDiskCache(cacheFile, fresh, lastLoadedMs);
+                                applyToIndex(a, memoryCache, onUpdatedUi);
+                            }
+                        } catch (Exception ignored) {
+                        } finally {
+                            fetchInFlight = false;
                         }
-                        if (!merged.isEmpty()) {
-                            List<String> fresh = new ArrayList<>(merged);
-                            memoryCache = Collections.unmodifiableList(fresh);
-                            lastLoadedMs = System.currentTimeMillis();
-                            writeDiskCache(cacheFile, fresh, lastLoadedMs);
-                            applyToIndex(a, memoryCache, onUpdatedUi);
-                        }
-                    } catch (Exception ignored) {
-                    } finally {
-                        fetchInFlight = false;
-                    }
-                });
+                    });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            fetchInFlight = false;
+        }
     }
 
     private static void applyToIndex(MainActivity a, List<String> titles, Runnable onUpdatedUi) {
         if (a == null || a.privateMode || titles == null || titles.isEmpty()) return;
-        a.phoneticWork.execute(
-                () -> {
-                    try {
-                        if (a.phonetic == null) {
-                            a.phoneticReady.await(6, java.util.concurrent.TimeUnit.SECONDS);
-                        }
-                        PhoneticSearchIndex idx = a.phonetic;
-                        if (idx != null && !a.privateMode) {
-                            idx.learnHotTitles(titles);
-                            if (onUpdatedUi != null) {
-                                a.ui.post(
-                                        () -> {
-                                            if (!a.isFinishing() && !a.privateMode) {
-                                                onUpdatedUi.run();
-                                            }
-                                        });
+        try {
+            a.phoneticWork.execute(
+                    () -> {
+                        try {
+                            if (a.phonetic == null) {
+                                a.phoneticReady.await(6, java.util.concurrent.TimeUnit.SECONDS);
                             }
+                            PhoneticSearchIndex idx = a.phonetic;
+                            if (idx != null && !a.privateMode) {
+                                idx.learnHotTitles(titles);
+                                if (onUpdatedUi != null) {
+                                    a.ui.post(
+                                            () -> {
+                                                if (!a.isFinishing() && !a.privateMode) {
+                                                    onUpdatedUi.run();
+                                                }
+                                            });
+                                }
+                            }
+                        } catch (Exception ignored) {
                         }
-                    } catch (Exception ignored) {
-                    }
-                });
+                    });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+        }
     }
 
     private static List<String> readDiskCache(File file, long now) {

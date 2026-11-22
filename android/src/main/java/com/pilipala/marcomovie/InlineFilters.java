@@ -8,8 +8,9 @@ import android.widget.*;
 import java.util.*;
 
 /**
- * Category-scoped TV filter panel: shows three horizontally scrollable filter rows when active on a
- * concrete category, and folds into a single-line summary bar once focus enters the poster grid.
+ * Category-scoped TV filter panel: renders all source-advertised (or smart fallback) filter rows in
+ * horizontally scrollable tracks with auto-centering D-pad focus, plus inline clear/collapse
+ * controls, and folds into a compact summary bar while browsing the poster grid.
  */
 final class InlineFilters extends LinearLayout {
     final HomeScreen home;
@@ -18,6 +19,7 @@ final class InlineFilters extends LinearLayout {
     final Map<TextView, String[]> choices = new LinkedHashMap<>();
     LinearLayout summaryRow;
     TextView summaryLabel, expandButton, resetButton;
+    TextView expandedClearBtn, expandedCollapseBtn;
     String schema = "";
     String mode = "none";
 
@@ -27,8 +29,8 @@ final class InlineFilters extends LinearLayout {
         a = home.a;
         setOrientation(VERTICAL);
         setTag("home-inline-filters");
-        setPadding(a.dp(10), a.dp(6), a.dp(6), a.dp(6));
-        setBackground(a.bg(0x55282d37, 18));
+        setPadding(a.dp(12), a.dp(8), a.dp(10), a.dp(8));
+        setBackground(a.bg(0x66222833, 18));
         setVisibility(GONE);
     }
 
@@ -45,7 +47,10 @@ final class InlineFilters extends LinearLayout {
             boolean wasApplying = home.applyingFilters;
             home.applyingFilters = true;
             try {
-                View safe = home.selectedTab();
+                View safe =
+                        home.filterToggle != null && home.filterToggle.isShown()
+                                ? home.filterToggle
+                                : home.selectedTab();
                 if (safe != null) safe.requestFocus();
             } finally {
                 home.applyingFilters = wasApplying;
@@ -58,6 +63,8 @@ final class InlineFilters extends LinearLayout {
         summaryLabel = null;
         expandButton = null;
         resetButton = null;
+        expandedClearBtn = null;
+        expandedCollapseBtn = null;
     }
 
     void render() {
@@ -72,9 +79,16 @@ final class InlineFilters extends LinearLayout {
         }
         List<VideoFilters.Definition> definitions = home.filterDefinitions();
         if (home.state.filtersExpanded) {
-            StringBuilder signature = new StringBuilder();
+            boolean remoteBacked = VideoFilters.hasRemoteDefinitions(definitions);
+            StringBuilder signature = new StringBuilder(remoteBacked ? "R|" : "L|");
             for (VideoFilters.Definition def : definitions) {
-                signature.append(def.dimension).append(':').append(def.key).append(':');
+                signature
+                        .append(def.dimension)
+                        .append(':')
+                        .append(def.key)
+                        .append(':')
+                        .append(def.label)
+                        .append(':');
                 for (VideoFilters.Choice choice : def.choices)
                     signature
                             .append(choice.value.length())
@@ -92,14 +106,53 @@ final class InlineFilters extends LinearLayout {
                 clearViews();
                 mode = "expanded";
                 schema = signature.toString();
-                setPadding(a.dp(10), a.dp(6), a.dp(6), a.dp(6));
-                setBackground(a.bg(0x55282d37, 18));
+                setPadding(a.dp(12), a.dp(8), a.dp(10), a.dp(8));
+                android.graphics.drawable.GradientDrawable panelBg = a.bg(0x70212734, 18);
+                panelBg.setStroke(Math.max(1, a.dp(0.8f)), 0x26ffffff);
+                setBackground(panelBg);
+
+                LinearLayout header = a.row();
+                header.setGravity(Gravity.CENTER_VERTICAL);
+                header.setPadding(a.dp(2), 0, a.dp(2), a.dp(6));
+                TextView badge =
+                        a.text(
+                                remoteBacked ? "片源筛选" : "智能筛选",
+                                10.5f * home.navScale,
+                                remoteBacked ? 0xff4ade80 : 0xff7dd3fc);
+                badge.setTypeface(null, Typeface.BOLD);
+                badge.setSingleLine(true);
+                badge.setPadding(a.dp(8), a.dp(2.5f), a.dp(8), a.dp(2.5f));
+                badge.setBackground(a.bg(remoteBacked ? 0x2a30d158 : 0x2a38bdf8, 999));
+                header.addView(badge, new LayoutParams(-2, -2));
+
+                TextView hint =
+                        a.text(
+                                remoteBacked
+                                        ? "  直接请求片源筛选接口，点选下方条件实时刷新"
+                                        : "  自动匹配片源子分类或本机影片资料，点选实时刷新",
+                                11f * home.navScale,
+                                0xb8cbd5e1);
+                hint.setSingleLine(true);
+                hint.setEllipsize(TextUtils.TruncateAt.END);
+                header.addView(hint, new LayoutParams(0, -2, 1f));
+                addView(header, new LayoutParams(-1, -2));
+
                 for (VideoFilters.Definition def : definitions) addRow(def);
-                if (focus != null && focus.startsWith("home-filter:")) {
+                addExpandedFooterRow();
+
+                if (focus != null && focus.startsWith("home-filter")) {
                     View replacement = findViewWithTag(focus);
                     if (replacement != null) replacement.requestFocus();
                 }
             }
+            if (expandedClearBtn != null) {
+                expandedClearBtn.setText(
+                        home.state.selectedFilters.isEmpty()
+                                ? "清空筛选"
+                                : "清空筛选 (" + home.state.selectedFilters.size() + ")");
+                styleAction(expandedClearBtn);
+            }
+            if (expandedCollapseBtn != null) styleAction(expandedCollapseBtn);
             setVisibility(VISIBLE);
             for (TextView button : choices.keySet()) style(button);
             return;
@@ -113,7 +166,7 @@ final class InlineFilters extends LinearLayout {
             setVisibility(GONE);
             return;
         }
-        StringBuilder summary = new StringBuilder("已选：");
+        StringBuilder summary = new StringBuilder("已选筛选：");
         boolean first = true;
         for (VideoFilters.Definition def : definitions) {
             String val = home.state.selectedFilters.get(def.dimension);
@@ -122,12 +175,22 @@ final class InlineFilters extends LinearLayout {
             summary.append(def.labelFor(val));
             first = false;
         }
+        if (first) {
+            for (String val : home.state.selectedFilters.values()) {
+                if (val == null || val.isEmpty()) continue;
+                if (!first) summary.append(" · ");
+                summary.append(val);
+                first = false;
+            }
+        }
         if (!"summary".equals(mode) || summaryRow == null) {
             clearViews();
             mode = "summary";
             schema = "";
             setPadding(a.dp(14), a.dp(5), a.dp(8), a.dp(5));
-            setBackground(a.bg(0x55282d37, 16));
+            android.graphics.drawable.GradientDrawable barBg = a.bg(0x66222833, 16);
+            barBg.setStroke(Math.max(1, a.dp(0.8f)), 0x26ffffff);
+            setBackground(barBg);
             summaryRow = a.row();
             summaryRow.setTag("home-filter-summary");
             summaryRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -140,7 +203,7 @@ final class InlineFilters extends LinearLayout {
 
             expandButton =
                     actionChip(
-                            "修改",
+                            "修改筛选",
                             "home-filter-expand",
                             () -> {
                                 boolean wasApplying = home.applyingFilters;
@@ -162,7 +225,7 @@ final class InlineFilters extends LinearLayout {
 
             resetButton =
                     actionChip(
-                            "重置",
+                            "清空",
                             "home-filter-reset",
                             () -> {
                                 home.state.selectedFilters.clear();
@@ -180,6 +243,48 @@ final class InlineFilters extends LinearLayout {
         setVisibility(VISIBLE);
     }
 
+    private void addExpandedFooterRow() {
+        LinearLayout footer = a.row();
+        footer.setGravity(Gravity.CENTER_VERTICAL);
+        footer.setPadding(a.dp(Math.round(82 * home.navScale)), a.dp(4), 0, a.dp(2));
+        expandedClearBtn =
+                actionChip(
+                        "清空筛选",
+                        "home-filter-reset",
+                        () -> {
+                            if (!home.state.selectedFilters.isEmpty()) {
+                                home.state.selectedFilters.clear();
+                                home.applyFilters();
+                            }
+                        });
+        LayoutParams clearLp = new LayoutParams(-2, a.dp(Math.round(30 * home.navScale)));
+        clearLp.rightMargin = a.dp(8);
+        footer.addView(expandedClearBtn, clearLp);
+
+        expandedCollapseBtn =
+                actionChip(
+                        "收起筛选",
+                        "home-filter-collapse",
+                        () -> {
+                            home.state.filtersExpanded = false;
+                            render();
+                            home.updateTabs();
+                            home.wireNavigation();
+                            View fallback =
+                                    home.filterToggle != null && home.filterToggle.isShown()
+                                            ? home.filterToggle
+                                            : home.selectedTab();
+                            if (fallback != null) fallback.requestFocus();
+                        });
+        footer.addView(
+                expandedCollapseBtn, new LayoutParams(-2, a.dp(Math.round(30 * home.navScale))));
+        addView(footer, new LayoutParams(-1, -2));
+        List<View> footerLine = new ArrayList<>();
+        footerLine.add(expandedClearBtn);
+        footerLine.add(expandedCollapseBtn);
+        rows.add(footerLine);
+    }
+
     TextView actionChip(String label, String tag, Runnable action) {
         TextView button = a.text(label, 11.5f * home.navScale, MainActivity.WHITE);
         button.setGravity(Gravity.CENTER);
@@ -187,6 +292,7 @@ final class InlineFilters extends LinearLayout {
         button.setIncludeFontPadding(false);
         button.setPadding(a.dp(12), 0, a.dp(12), 0);
         home.focusable(button, tag);
+        UiCompat.setDefaultFocusHighlightEnabled(button, false);
         button.setOnClickListener(v -> action.run());
         button.setOnFocusChangeListener(
                 (v, focused) -> {
@@ -199,9 +305,10 @@ final class InlineFilters extends LinearLayout {
     void styleAction(TextView button) {
         if (button == null) return;
         boolean focused = button.hasFocus();
-        button.setTextColor(focused ? MainActivity.WHITE : 0xffd0dae8);
-        android.graphics.drawable.GradientDrawable bg = a.bg(focused ? 0x995c7189 : 0x443c4758, 15);
-        if (focused) bg.setStroke(Math.max(2, a.dp(1.5f)), MainActivity.WHITE);
+        button.setTextColor(focused ? 0xff10141c : 0xffd0dae8);
+        android.graphics.drawable.GradientDrawable bg =
+                a.bg(focused ? MainActivity.WHITE : 0x443c4758, 15);
+        if (focused) bg.setStroke(Math.max(2, a.dp(1.5f)), 0xff7dd3fc);
         else bg.setStroke(Math.max(1, a.dp(1)), 0x448da2bd);
         button.setBackground(bg);
     }
@@ -210,13 +317,15 @@ final class InlineFilters extends LinearLayout {
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = a.text(def.label, 11.5f * home.navScale, MainActivity.MUTED);
+        title.setSingleLine(true);
+        title.setEllipsize(TextUtils.TruncateAt.END);
         row.addView(title, new LayoutParams(a.dp(Math.round(82 * home.navScale)), -2));
-        HorizontalScrollView viewport = new HorizontalScrollView(a);
+        final HorizontalScrollView viewport = new HorizontalScrollView(a);
         viewport.setHorizontalScrollBarEnabled(false);
         viewport.setOverScrollMode(OVER_SCROLL_NEVER);
-        viewport.setSmoothScrollingEnabled(false);
+        viewport.setSmoothScrollingEnabled(true);
         viewport.setFocusable(false);
-        LinearLayout options = a.row();
+        final LinearLayout options = a.row();
         options.setGravity(Gravity.CENTER_VERTICAL);
         List<View> line = new ArrayList<>();
         rows.add(line);
@@ -228,6 +337,7 @@ final class InlineFilters extends LinearLayout {
             button.setIncludeFontPadding(false);
             button.setPadding(a.dp(12), 0, a.dp(12), 0);
             home.focusable(button, "home-filter:" + def.dimension + ":" + index);
+            UiCompat.setDefaultFocusHighlightEnabled(button, false);
             choices.put(button, new String[] {def.dimension, choice.value});
             button.setOnClickListener(
                     v -> {
@@ -246,15 +356,28 @@ final class InlineFilters extends LinearLayout {
             button.setOnFocusChangeListener(
                     (v, focused) -> {
                         style(button);
-                        if (focused) post(home::wireNavigation);
+                        if (focused) {
+                            viewport.post(
+                                    () -> {
+                                        int vw = viewport.getWidth();
+                                        if (vw <= 0) return;
+                                        int maxScroll = Math.max(0, options.getWidth() - vw);
+                                        int desired =
+                                                button.getLeft() - (vw - button.getWidth()) / 2;
+                                        int targetX = Math.max(0, Math.min(maxScroll, desired));
+                                        if (a.reduced) viewport.scrollTo(targetX, 0);
+                                        else viewport.smoothScrollTo(targetX, 0);
+                                    });
+                            post(home::wireNavigation);
+                        }
                     });
-            LayoutParams size = new LayoutParams(-2, a.dp(Math.round(34 * home.navScale)));
-            size.rightMargin = a.dp(4);
+            LayoutParams size = new LayoutParams(-2, a.dp(Math.round(32 * home.navScale)));
+            size.rightMargin = a.dp(5);
             options.addView(button, size);
             line.add(button);
         }
         viewport.addView(options, new HorizontalScrollView.LayoutParams(-2, -1));
-        row.addView(viewport, new LayoutParams(0, a.dp(Math.round(40 * home.navScale)), 1));
+        row.addView(viewport, new LayoutParams(0, a.dp(Math.round(38 * home.navScale)), 1));
         addView(row, new LayoutParams(-1, -2));
     }
 
@@ -265,15 +388,17 @@ final class InlineFilters extends LinearLayout {
         boolean checked = value[1].equals(selected == null ? "" : selected);
         boolean focused = button.hasFocus();
         button.setSelected(checked);
-        button.setTypeface(null, checked ? Typeface.BOLD : Typeface.NORMAL);
-        button.setTextColor(checked || focused ? MainActivity.WHITE : 0xffb8c3d3);
+        button.setTypeface(null, checked || focused ? Typeface.BOLD : Typeface.NORMAL);
+        button.setTextColor(focused ? 0xff10141c : (checked ? MainActivity.WHITE : 0xffb8c3d3));
         int fill =
-                focused ? (checked ? 0xcc4d709b : 0x885c7189) : (checked ? 0xaa436185 : 0x00000000);
-        android.graphics.drawable.GradientDrawable background = a.bg(fill, 17);
+                focused
+                        ? MainActivity.WHITE
+                        : (checked ? (value[1].isEmpty() ? 0x553b4a62 : 0xcc2563eb) : 0x00000000);
+        android.graphics.drawable.GradientDrawable background = a.bg(fill, 16);
         if (focused) {
-            background.setStroke(Math.max(2, a.dp(1.5f)), MainActivity.WHITE);
+            background.setStroke(Math.max(2, a.dp(1.5f)), 0xff7dd3fc);
         } else if (checked && !value[1].isEmpty()) {
-            background.setStroke(Math.max(1, a.dp(1)), 0x889ec5ff);
+            background.setStroke(Math.max(1, a.dp(1)), 0xaa93c5fd);
         }
         button.setBackground(background);
         button.setContentDescription(button.getText() + (checked ? "，已选择" : ""));

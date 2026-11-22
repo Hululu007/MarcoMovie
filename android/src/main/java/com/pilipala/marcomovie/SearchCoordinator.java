@@ -31,6 +31,7 @@ public final class SearchCoordinator implements AutoCloseable {
 
     private static int baseThreads = 6;
     private static int wedgedWorkers = 0;
+    static volatile Runnable onLowMemoryHook;
     private static final ConcurrentHashMap<String, AtomicInteger> WEDGED_SITES =
             new ConcurrentHashMap<>();
     private static final ThreadPoolExecutor NETWORK =
@@ -185,8 +186,10 @@ public final class SearchCoordinator implements AutoCloseable {
                                 job.site.supported()
                                                 || HttpT4Engine.eligible(job.site)
                                                 || (job.site.api != null
-                                                        && job.site.api.startsWith(
-                                                                "emby://account/"))
+                                                        && (job.site.api.startsWith(
+                                                                        "emby://account/")
+                                                                || job.site.api.startsWith(
+                                                                        "alist://mount/")))
                                         ? HTTP_NETWORK
                                         : NETWORK,
                                 job);
@@ -246,6 +249,15 @@ public final class SearchCoordinator implements AutoCloseable {
                         }
                 finish(videos, videos.isEmpty() ? Outcome.EMPTY : Outcome.RESULT);
             } catch (Throwable error) {
+                if (error instanceof OutOfMemoryError) {
+                    Runnable hook = onLowMemoryHook;
+                    if (hook != null) {
+                        try {
+                            hook.run();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
                 finish(
                         Collections.emptyList(),
                         Thread.currentThread().isInterrupted()
@@ -286,7 +298,16 @@ public final class SearchCoordinator implements AutoCloseable {
             }
             if (!closed) {
                 listener.source(site, Collections.unmodifiableList(videos), outcome);
-                TIMER.execute(() -> pump());
+                try {
+                    TIMER.execute(
+                            () -> {
+                                try {
+                                    pump();
+                                } catch (Throwable ignored) {
+                                }
+                            });
+                } catch (RejectedExecutionException ignored) {
+                }
             }
         }
 

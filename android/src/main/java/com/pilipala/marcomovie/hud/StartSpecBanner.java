@@ -610,12 +610,17 @@ public final class StartSpecBanner extends LinearLayout {
     private boolean reducedMotion;
     private boolean reducedTransparency;
     private boolean shownForCurrentEpisode;
+    private boolean pendingReveal;
     private boolean activeDisplay;
     private boolean topControlsVisible;
     private int safeLeftPx;
     private int safeTopPx;
     private int topHeaderBottomPx;
     private final List<Badge> latestBadges = new ArrayList<>();
+
+    public static boolean shouldDeferReveal(boolean topControlsVisible) {
+        return topControlsVisible;
+    }
 
     private final Runnable showRunnable = this::revealNow;
     private final Runnable hideRunnable = this::fadeOutNow;
@@ -673,11 +678,19 @@ public final class StartSpecBanner extends LinearLayout {
             cancel();
         } else {
             applyLayoutMargins();
+            if (!controlsVisible && pendingReveal && !latestBadges.isEmpty()) {
+                pendingReveal = false;
+                renderPills(latestBadges);
+                removeCallbacks(showRunnable);
+                removeCallbacks(hideRunnable);
+                postDelayed(showRunnable, DELAY_MS);
+            }
         }
     }
 
     public void resetEpisode() {
         shownForCurrentEpisode = false;
+        pendingReveal = false;
         latestBadges.clear();
         cancel();
     }
@@ -728,6 +741,11 @@ public final class StartSpecBanner extends LinearLayout {
         renderPills(badges);
         removeCallbacks(showRunnable);
         removeCallbacks(hideRunnable);
+        if (shouldDeferReveal(controlsVisible)) {
+            pendingReveal = true;
+            return;
+        }
+        pendingReveal = false;
         postDelayed(showRunnable, DELAY_MS);
     }
 
@@ -777,10 +795,14 @@ public final class StartSpecBanner extends LinearLayout {
     }
 
     private void revealNow() {
-        if (topControlsVisible || latestBadges.isEmpty()) {
-            // Controls are visible; inline badge row owns display with zero back-button collision.
+        if (latestBadges.isEmpty()) return;
+        if (shouldDeferReveal(topControlsVisible)) {
+            // Controls are still visible on entry; defer reveal until they auto-hide so the
+            // opening spec banner is not silently lost for the entire episode.
+            pendingReveal = true;
             return;
         }
+        pendingReveal = false;
         applyLayoutMargins();
         activeDisplay = true;
         animate().cancel();

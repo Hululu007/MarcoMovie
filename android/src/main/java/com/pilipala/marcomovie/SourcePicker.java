@@ -388,7 +388,7 @@ final class SourcePicker {
         input.setHintTextColor(0xff8e8e93);
         input.setBackground(a.bg(0x33ffffff, 10));
         input.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
-        box.addView(input, new LinearLayout.LayoutParams(-1, -2));
+        box.addView(TvQrInputHelper.wrap(a, input, "新分组名称"), new LinearLayout.LayoutParams(-1, -2));
         new AppDialog.Builder(a)
                 .setTitle("新建分组")
                 .setView(box)
@@ -497,9 +497,8 @@ final class SourcePicker {
                         site.playUrl == null ? "" : site.playUrl,
                         "留空使用直连或全局解析");
         String extInitial = site.ext == null ? "" : String.valueOf(site.ext);
-        EditText extInput = addLabeledInput(a, form, "扩展参数 Ext（可选）", extInitial, "自定义扩展参数或规则地址");
-        extInput.setSingleLine(false);
-        extInput.setMaxLines(3);
+        EditText extInput =
+                addLabeledInput(a, form, "扩展参数 Ext（可选）", extInitial, "自定义扩展参数或规则地址", true);
 
         CheckBox searchableCheck = new CheckBox(a);
         searchableCheck.setText("允许参与全站聚合搜索");
@@ -582,11 +581,26 @@ final class SourcePicker {
 
     private static EditText addLabeledInput(
             MainActivity a, LinearLayout parent, String label, String value, String hint) {
+        return addLabeledInput(a, parent, label, value, hint, false);
+    }
+
+    private static EditText addLabeledInput(
+            MainActivity a,
+            LinearLayout parent,
+            String label,
+            String value,
+            String hint,
+            boolean multiline) {
         TextView tv = a.text(label, 12, MainActivity.MUTED);
         tv.setPadding(0, a.dp(8), 0, a.dp(4));
         parent.addView(tv);
         EditText input = new EditText(a);
-        input.setSingleLine(true);
+        if (multiline) {
+            input.setSingleLine(false);
+            input.setMaxLines(3);
+        } else {
+            input.setSingleLine(true);
+        }
         input.setText(value == null ? "" : value);
         input.setHint(hint);
         input.setTextColor(Color.WHITE);
@@ -594,7 +608,9 @@ final class SourcePicker {
         input.setTextSize(13.5f);
         input.setBackground(a.bg(0x2effffff, 10));
         input.setPadding(a.dp(12), a.dp(8), a.dp(12), a.dp(8));
-        parent.addView(input, new LinearLayout.LayoutParams(-1, -2));
+        parent.addView(
+                TvQrInputHelper.wrap(a, input, label, multiline, false, false, null),
+                new LinearLayout.LayoutParams(-1, -2));
         return input;
     }
 

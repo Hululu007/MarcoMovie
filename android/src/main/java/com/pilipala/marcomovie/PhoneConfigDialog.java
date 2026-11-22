@@ -117,9 +117,11 @@ final class PhoneConfigDialog {
             url.setGravity(android.view.Gravity.CENTER);
             url.setPadding(0, a.dp(10), 0, 0);
             panel.addView(url);
+            LinearLayout mountRow = a.row();
+            mountRow.setGravity(android.view.Gravity.CENTER);
             android.widget.Button emby =
                     a.button(
-                            "连接 Emby 媒体库",
+                            "连接 Emby",
                             "config-emby",
                             () -> {
                                 if (dialog != null) dialog.dismiss();
@@ -127,8 +129,21 @@ final class PhoneConfigDialog {
                             });
             emby.setTextSize(13.5f);
             LinearLayout.LayoutParams embyLp = new LinearLayout.LayoutParams(-2, a.dp(40));
-            embyLp.topMargin = a.dp(10);
-            panel.addView(emby, embyLp);
+            embyLp.rightMargin = a.dp(8);
+            mountRow.addView(emby, embyLp);
+            android.widget.Button alist =
+                    a.button(
+                            "挂载 AList",
+                            "config-alist",
+                            () -> {
+                                if (dialog != null) dialog.dismiss();
+                                AlistAccounts.openManager(a);
+                            });
+            alist.setTextSize(13.5f);
+            mountRow.addView(alist, new LinearLayout.LayoutParams(-2, a.dp(40)));
+            LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-2, -2);
+            rowLp.topMargin = a.dp(10);
+            panel.addView(mountRow, rowLp);
             a.gap(panel, 6);
             panel.addView(a.text("二维码有效 5 分钟 · 关闭后停止接收", 12, MainActivity.MUTED));
             dialog =

@@ -388,6 +388,7 @@ public final class OnboardingScreen extends FrameLayout {
         this.demoItems = loadDemoItems(context);
 
         setClickable(true);
+        UiCompat.setDefaultFocusHighlightEnabled(this, false);
         setFocusable(true);
         setFocusableInTouchMode(true);
         setClipChildren(false);

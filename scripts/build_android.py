@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib, json, os, re, subprocess, zipfile, urllib.request
 import xml.etree.ElementTree as ET
 from build_catpaw_android import build as build_catpaw, assets_for_package
+from build_python_android import build as build_python_android
 from build_quickjs_deadline import build as build_quickjs_deadline
 from android_package_names import package_name, compatibility_alias
 
@@ -84,6 +85,9 @@ def main():
     native_files_mobile.update(catpaw_files)
     catpaw_tv_assets = assets_for_package(catpaw_assets, native_files, BUILD/'catpaw/assets-tv')
     catpaw_mobile_assets = assets_for_package(catpaw_assets, native_files_mobile, BUILD/'catpaw/assets-mobile')
+    python_tv_libs, python_mobile_libs, python_tv_assets, python_mobile_assets = build_python_android()
+    native_files.update(python_tv_libs)
+    native_files_mobile.update(python_mobile_libs)
     ui_spec_assets = BUILD / 'ui-spec-assets'
     badge_rules_src = ROOT / 'shared/ui-spec/badge-rules.json'
     if badge_rules_src.exists():
@@ -105,9 +109,11 @@ def main():
     generated=BUILD/'generated';generated.mkdir(exist_ok=True)
     for old in generated.rglob('*.java'):old.unlink()
     extra=['--extra-packages',':'.join(sorted(set(packages)))] if packages else []
-    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',SRC/'AndroidManifest.xml','-I',ANDROID,'-A',SRC/'assets','-A',catpaw_tv_assets,*ui_spec_asset_args,'--java',generated,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
+    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',SRC/'AndroidManifest.xml','-I',ANDROID,'-A',SRC/'assets','-A',catpaw_tv_assets,'-A',python_tv_assets,*ui_spec_asset_args,'--java',generated,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
     sources=sorted((SRC/'java').rglob('*.java'))+sorted((ROOT/'shared/java').rglob('*.java'))+sorted(generated.rglob('*.java'))
-    run(exe(JDK/'bin','javac'),'-encoding','UTF-8','-source','8','-target','8','-Xlint:-options','-classpath',os.pathsep.join(str(p) for p in [ANDROID,*dependencies]),'-d',BUILD/'classes',*sources)
+    argfile = BUILD / 'javac-sources.txt'
+    argfile.write_text('\n'.join('"' + str(p).replace('\\', '/') + '"' for p in sources) + '\n', encoding='utf-8')
+    run(exe(JDK/'bin','javac'),'-encoding','UTF-8','-source','8','-target','8','-Xlint:-options','-classpath',os.pathsep.join(str(p) for p in [ANDROID,*dependencies]),'-d',BUILD/'classes','@'+str(argfile))
     with zipfile.ZipFile(BUILD/'classes.jar','w',zipfile.ZIP_DEFLATED) as z:
         for p in (BUILD/'classes').rglob('*.class'): z.write(p,p.relative_to(BUILD/'classes').as_posix())
     run(exe(JDK/'bin','java'),'-cp',SDK/'lib/d8.jar','com.android.tools.r8.D8','--release','--min-api','23','--lib',ANDROID,'--output',BUILD/'dex',BUILD/'classes.jar',*dependencies)
@@ -139,7 +145,7 @@ def main():
         tv_xml = re.sub(r'android:versionCode="[^"]+"', f'android:versionCode="{tv_version_code}"', tv_xml)
         tv_xml = re.sub(r'android:versionName="[^"]+"', f'android:versionName="{tv_version}"', tv_xml)
         tv_manifest.write_text(tv_xml, encoding='utf-8')
-        run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',tv_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_tv_assets,*ui_spec_asset_args,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
+        run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',tv_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_tv_assets,'-A',python_tv_assets,*ui_spec_asset_args,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
         with zipfile.ZipFile(BUILD/'resources.apk') as source, zipfile.ZipFile(BUILD/'unsigned.apk','w',zipfile.ZIP_DEFLATED,compresslevel=9) as dest:
             for entry in source.infolist():dest.writestr(entry,source.read(entry.filename))
             for dex in (BUILD/'dex').glob('*.dex'):dest.write(dex,dex.name)
@@ -172,7 +178,7 @@ def main():
     mobile_xml=re.sub(r'android:versionCode="[^"]+"', f'android:versionCode="{mobile_version_code}"', mobile_xml)
     mobile_xml=re.sub(r'android:versionName="[^"]+"', f'android:versionName="{mobile_version}"', mobile_xml)
     mobile_manifest.write_text(mobile_xml,encoding='utf-8')
-    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources-mobile.apk','--manifest',mobile_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_mobile_assets,*ui_spec_asset_args,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
+    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources-mobile.apk','--manifest',mobile_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_mobile_assets,'-A',python_mobile_assets,*ui_spec_asset_args,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
     with zipfile.ZipFile(BUILD/'resources-mobile.apk') as source, zipfile.ZipFile(BUILD/'unsigned-mobile.apk','w',zipfile.ZIP_DEFLATED,compresslevel=9) as dest:
         for entry in source.infolist():dest.writestr(entry,source.read(entry.filename))
         for dex in (BUILD/'dex').glob('*.dex'):dest.write(dex,dex.name)

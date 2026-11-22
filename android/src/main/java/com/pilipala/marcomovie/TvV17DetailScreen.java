@@ -195,7 +195,7 @@ final class TvV17DetailScreen {
         heroColumn.addView(nameplateRow, nameplateLp);
 
         // 3. Plot Synopsis directly below nameplate badges, ABOVE Play & Episodes buttons
-        String initialSynopsis = video.description == null ? "" : video.description.trim();
+        String initialSynopsis = cleanSynopsisText(video.description);
         synopsisView = a.text(initialSynopsis, 14, 0xd8e8edf7);
         synopsisView.setTag("detail-synopsis");
         synopsisView.setMaxLines(3);
@@ -400,9 +400,9 @@ final class TvV17DetailScreen {
                     } else {
                         rebuildNameplateBadges();
                     }
+                    String existingSynopsis = cleanSynopsisText(this.video.description);
                     if (!details.intro.isEmpty()
-                            && (this.video.description == null
-                                    || this.video.description.trim().length() < 18)) {
+                            && (existingSynopsis.isEmpty() || existingSynopsis.length() < 18)) {
                         this.video.description = details.intro;
                         updateSynopsisText(details.intro);
                     }
@@ -440,8 +440,15 @@ final class TvV17DetailScreen {
         }
     }
 
+    static String cleanSynopsisText(String raw) {
+        if (raw == null) return "";
+        String text = raw.trim();
+        if (text.isEmpty() || TvCuratedHome.looksLikeMetadataSubtitle(text)) return "";
+        return text;
+    }
+
     private void updateSynopsisText(String raw) {
-        String text = raw == null ? "" : raw.trim();
+        String text = cleanSynopsisText(raw);
         synopsisView.setText(text);
         synopsisView.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE);
         synopsisMoreBtn.setVisibility(text.length() > 64 ? View.VISIBLE : View.GONE);
@@ -532,13 +539,12 @@ final class TvV17DetailScreen {
                     historyView.getText().length() > 0 ? View.VISIBLE : View.GONE);
         }
 
-        if (this.video != null
-                && this.video.description != null
-                && !this.video.description.trim().isEmpty()
+        String resolvedDesc = this.video != null ? cleanSynopsisText(this.video.description) : "";
+        if (!resolvedDesc.isEmpty()
                 && (synopsisView.getText().length() < 18
                         || officialDetails == null
                         || officialDetails.intro.isEmpty())) {
-            updateSynopsisText(this.video.description);
+            updateSynopsisText(resolvedDesc);
         }
         if (this.video != null
                 && (officialDetails == null || officialDetails.cast.isEmpty())

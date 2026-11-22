@@ -125,6 +125,7 @@ public final class FirstPlayGestureHint extends LinearLayout {
         dismissButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         dismissButton.setTypeface(Typeface.DEFAULT_BOLD);
         dismissButton.setSingleLine(true);
+        UiCompat.setDefaultFocusHighlightEnabled(dismissButton, false);
         dismissButton.setFocusable(true);
         dismissButton.setClickable(true);
         dismissButton.setPadding(dp(10), dp(5), dp(10), dp(5));

@@ -14,7 +14,72 @@ import java.util.List;
  * Emby Live TV, XMLTV EPG/Catchup, numeric keypad overlay, and remote key bindings.
  */
 final class LiveController {
+    private static final long CATALOG_CACHE_TTL_MS = 15L * 60L * 1000L;
+    private static final java.util.Map<String, CachedCatalog> CATALOG_CACHE =
+            new java.util.LinkedHashMap<String, CachedCatalog>(8, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, CachedCatalog> eldest) {
+                    return size() > 6;
+                }
+            };
+
+    private static final class CachedCatalog {
+        final LiveCatalog.Catalog catalog;
+        final LiveEpgService.Guide guide;
+        final long loadedAtMs;
+
+        CachedCatalog(LiveCatalog.Catalog catalog, LiveEpgService.Guide guide, long loadedAtMs) {
+            this.catalog = catalog;
+            this.guide = guide;
+            this.loadedAtMs = loadedAtMs;
+        }
+    }
+
     private LiveController() {}
+
+    static void clearCatalogCache() {
+        synchronized (CATALOG_CACHE) {
+            CATALOG_CACHE.clear();
+        }
+    }
+
+    private static String catalogCacheKey(MainActivity a, LiveCatalog.Source source) {
+        String url = source != null && source.url != null ? source.url : "";
+        String udpxy =
+                a != null && a.prefs != null ? a.prefs.getString(Prefs.LIVE_UDPXY_URL, "") : "";
+        boolean preferHq =
+                a == null || a.prefs == null || a.prefs.getBoolean(Prefs.LIVE_HIGH_QUALITY, true);
+        String epg = a != null && a.prefs != null ? a.prefs.getString(Prefs.LIVE_EPG_URL, "") : "";
+        int epoch = a != null ? a.engineEpoch : 0;
+        return epoch + "|" + url + "|" + udpxy + "|" + preferHq + "|" + epg;
+    }
+
+    static LiveCatalog.Catalog peekCachedCatalog(MainActivity a, LiveCatalog.Source source) {
+        if (source == null) return null;
+        String key = catalogCacheKey(a, source);
+        synchronized (CATALOG_CACHE) {
+            CachedCatalog entry = CATALOG_CACHE.get(key);
+            if (entry != null
+                    && (System.currentTimeMillis() - entry.loadedAtMs) <= CATALOG_CACHE_TTL_MS) {
+                return entry.catalog;
+            }
+        }
+        return null;
+    }
+
+    static LiveEpgService.Guide peekCachedGuide(MainActivity a, LiveCatalog.Source source) {
+        if (source == null) return null;
+        String key = catalogCacheKey(a, source);
+        synchronized (CATALOG_CACHE) {
+            CachedCatalog entry = CATALOG_CACHE.get(key);
+            if (entry != null
+                    && (System.currentTimeMillis() - entry.loadedAtMs) <= CATALOG_CACHE_TTL_MS) {
+                return entry.guide;
+            }
+        }
+        return null;
+    }
 
     static List<LiveCatalog.Source> rawSourcesFor(MainActivity a) {
         if (a == null) return java.util.Collections.emptyList();
@@ -239,6 +304,15 @@ final class LiveController {
 
     static LiveCatalog.Catalog loadCatalog(MainActivity a, LiveCatalog.Source source)
             throws Exception {
+        return loadCatalog(a, source, false);
+    }
+
+    static LiveCatalog.Catalog loadCatalog(
+            MainActivity a, LiveCatalog.Source source, boolean forceRefresh) throws Exception {
+        if (!forceRefresh) {
+            LiveCatalog.Catalog cached = peekCachedCatalog(a, source);
+            if (cached != null) return cached;
+        }
         String udpxy = a.prefs != null ? a.prefs.getString(Prefs.LIVE_UDPXY_URL, "") : "";
         boolean preferHq = a.prefs == null || a.prefs.getBoolean(Prefs.LIVE_HIGH_QUALITY, true);
         boolean hasIpv6 = LiveQualityPolicy.hasGlobalIpv6Connectivity();
@@ -291,28 +365,41 @@ final class LiveController {
             }
             LiveCatalog.Catalog merged =
                     LiveQualityPolicy.mergeCatalogs(loaded, udpxy, hasIpv6, metrics, preferHq);
-            enrichCatalogWithEpg(a, merged);
+            LiveEpgService.Guide guide = enrichCatalogWithEpg(a, merged);
+            synchronized (CATALOG_CACHE) {
+                CATALOG_CACHE.put(
+                        catalogCacheKey(a, source),
+                        new CachedCatalog(merged, guide, System.currentTimeMillis()));
+            }
             return merged;
         }
         LiveCatalog.Catalog single = loadSingleCatalog(a, source);
         LiveQualityPolicy.rankCatalogInPlace(single, udpxy, hasIpv6, metrics, preferHq);
-        enrichCatalogWithEpg(a, single);
+        LiveEpgService.Guide guide = enrichCatalogWithEpg(a, single);
+        synchronized (CATALOG_CACHE) {
+            CATALOG_CACHE.put(
+                    catalogCacheKey(a, source),
+                    new CachedCatalog(single, guide, System.currentTimeMillis()));
+        }
         return single;
     }
 
-    private static void enrichCatalogWithEpg(MainActivity a, LiveCatalog.Catalog catalog) {
-        if (catalog == null || catalog.channelCount() == 0) return;
+    private static LiveEpgService.Guide enrichCatalogWithEpg(
+            MainActivity a, LiveCatalog.Catalog catalog) {
+        if (catalog == null || catalog.channelCount() == 0) return null;
         String userEpg = a.prefs != null ? a.prefs.getString(Prefs.LIVE_EPG_URL, "") : "";
         String epgUrl = LiveEpgService.firstEpgUrl(catalog, userEpg);
-        if (epgUrl.isEmpty()) return;
+        if (epgUrl.isEmpty()) return null;
         try {
             LiveEpgService.Guide guide = LiveEpgService.load(epgUrl);
             LiveEpgService.applyGuideToCatalog(catalog, guide, System.currentTimeMillis());
             if (a.liveSession != null && a.liveSession.catalog == catalog) {
                 a.liveSession.epgGuide = guide;
             }
+            return guide;
         } catch (Exception ignored) {
             // EPG enrichment is strictly best-effort and must never block live playback.
+            return null;
         }
     }
 

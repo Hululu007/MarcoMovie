@@ -90,7 +90,7 @@ final class MobileDetailScreen {
             0xff162e2e, // Deep teal
             0xff291c24 // Deep burgundy
         };
-        int h = title == null ? 0 : Math.abs(title.hashCode());
+        int h = title == null ? 0 : (title.hashCode() & 0x7fffffff);
         return palette[h % palette.length];
     }
 
@@ -1103,8 +1103,37 @@ final class MobileDetailScreen {
                             discoveredLabels);
                 };
 
-        if (ready == null) a.loadDetail(s, listing.id, present);
-        else {
+        if (ready == null) {
+            a.loadDetail(
+                    s,
+                    listing.id,
+                    present,
+                    error -> {
+                        WatchHistory.Entry fallbackBm = a.historyFallbackBookmark;
+                        if (fallbackBm == null && s != null && listing.id != null) {
+                            for (WatchHistory.Entry entry : a.watchHistory()) {
+                                if (s.key.equals(entry.site) && listing.id.equals(entry.id)) {
+                                    fallbackBm = entry;
+                                    break;
+                                }
+                            }
+                        }
+                        if (fallbackBm != null
+                                && !a.historyFallbackInFlight
+                                && fallbackBm.title != null
+                                && !fallbackBm.title.trim().isEmpty()
+                                && CatalogScreen.hasAlternativeHistorySources(a, s.key)) {
+                            CatalogScreen.resumeHistoryFromAlternativeSources(
+                                    a, fallbackBm, s.key, "原片源加载失败", true);
+                            return;
+                        }
+                        View st = a.root != null ? a.root.findViewWithTag("detail-loading") : null;
+                        if (st instanceof TextView) {
+                            st.setVisibility(View.VISIBLE);
+                            ((TextView) st).setText(a.message(error));
+                        }
+                    });
+        } else {
             try {
                 present.accept(ready);
             } catch (Exception e) {

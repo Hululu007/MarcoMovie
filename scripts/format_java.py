@@ -62,21 +62,30 @@ def main():
             raw = path.read_bytes()
             if b'\r' in raw:
                 path.write_bytes(raw.replace(b'\r\n', b'\n').replace(b'\r', b'\n'))
-    result = subprocess.run([java(), *EXPORTS, '-jar', str(formatter()), *OPTIONS, *mode, *map(str, files)],
-                            cwd=ROOT, text=True, encoding='utf-8', errors='replace', capture_output=True)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
+    jar = str(formatter())
+    changed = []
+    batch_size = 100
+    for i in range(0, len(files), batch_size):
+        batch = [p.relative_to(ROOT).as_posix() for p in files[i:i + batch_size]]
+        result = subprocess.run([java(), *EXPORTS, '-jar', jar, *OPTIONS, *mode, *batch],
+                                cwd=ROOT, text=True, encoding='utf-8', errors='replace', capture_output=True)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        if check:
+            changed.extend(line for line in result.stdout.splitlines() if line.strip())
+            if result.returncode and not result.stdout.strip():
+                changed.append('(formatter error in batch)')
+        elif result.returncode:
+            return result.returncode
     if check:
-        changed = [line for line in result.stdout.splitlines() if line.strip()]
-        if changed or result.returncode:
+        if changed:
             print('Files need formatting (run python scripts/format_java.py):')
             for line in changed:
-                print('  ' + Path(line).resolve().relative_to(ROOT).as_posix())
+                p = Path(line)
+                print('  ' + (p.resolve().relative_to(ROOT).as_posix() if p.exists() else line))
             return 1
         print(f'{len(files)} Java files already formatted')
         return 0
-    if result.returncode:
-        return result.returncode
     print(f'Formatted {len(files)} Java files')
     return 0
 

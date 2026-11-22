@@ -14,7 +14,7 @@ import org.json.JSONObject;
  */
 final class VideoSkipStore {
     static final int MAX_ENTRIES = 500;
-    static final int MAX_SKIP_SECONDS = 600;
+    static final int MAX_SKIP_SECONDS = 1200;
 
     private static final Map<String, int[]> PRIVATE_RECORDS = new LinkedHashMap<>();
 

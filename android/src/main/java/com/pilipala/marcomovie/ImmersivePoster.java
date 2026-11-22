@@ -163,6 +163,31 @@ final class ImmersivePoster extends FrameLayout {
             newByteBoundedBitmapCache(HERO_FEATHERED_CACHE_MAX_BYTES);
     private static final LruCache<String, Bitmap> PORTRAIT_HD_MEM_CACHE =
             newByteBoundedBitmapCache(PORTRAIT_HD_MEM_CACHE_MAX_BYTES);
+    private static volatile boolean lowRamBudget = false;
+
+    /**
+     * API 23 (Android 6.0.1) low-RAM Mali-450 TV GPUs (e.g., MiTV OS 1.3.130) crash RenderThread
+     * or hit EGL_OUT_OF_MEMORY on nested 1080p {@code Canvas.saveLayer} + {@code DST_IN} offscreen
+     * FBO allocations during detail-card navigation. Use direct clipped canvas + ambient gradient
+     * feathering instead.
+     */
+    static boolean useLightweightBackdropDraw(int sdkInt, boolean reducedMotion) {
+        return sdkInt <= 23 || reducedMotion;
+    }
+
+    static void applyMemoryBudget(int memoryClassMb) {
+        if (memoryClassMb > 0 && memoryClassMb <= 128) {
+            lowRamBudget = true;
+            if (android.os.Build.VERSION.SDK_INT >= 21) {
+                try {
+                    WIDE_MEM_CACHE.resize(3 * 1024 * 1024);
+                    HERO_FEATHERED_CACHE.resize(2 * 1024 * 1024);
+                    PORTRAIT_HD_MEM_CACHE.resize(2 * 1024 * 1024);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
 
     static void trimMemory(int level) {
         if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
@@ -914,9 +939,11 @@ final class ImmersivePoster extends FrameLayout {
                 return null;
             }
             BitmapFactory.Options opts = new BitmapFactory.Options();
+            int targetW = lowRamBudget ? 960 : 1280;
+            int targetH = lowRamBudget ? 540 : 720;
             int sample = 1;
-            while ((bounds.outWidth / (sample * 2)) >= 1280
-                    && (bounds.outHeight / (sample * 2)) >= 720) {
+            while ((bounds.outWidth / (sample * 2)) >= targetW
+                    && (bounds.outHeight / (sample * 2)) >= targetH) {
                 sample *= 2;
             }
             opts.inSampleSize = sample;
@@ -2017,15 +2044,27 @@ final class ImmersivePoster extends FrameLayout {
     private static String joinJsonStringArray(JSONArray arr, String sep, int maxItems) {
         if (arr == null || arr.length() == 0) return "";
         StringBuilder sb = new StringBuilder();
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
         int count = 0;
         for (int i = 0; i < arr.length() && count < maxItems; i++) {
             String s = arr.optString(i, "").trim();
-            if (s.isEmpty()) continue;
+            if (s.isEmpty() || !seen.add(normalizeFactTokenKey(s))) continue;
             if (sb.length() > 0) sb.append(sep);
             sb.append(s);
             count++;
         }
         return sb.toString();
+    }
+
+    static String normalizeFactTokenKey(String raw) {
+        if (raw == null) return "";
+        String s = raw.trim().toLowerCase(java.util.Locale.ROOT);
+        if (s.equals("大陆") || s.equals("内地") || s.equals("国产") || s.equals("中国内地")) {
+            return "中国大陆";
+        }
+        if (s.equals("香港")) return "中国香港";
+        if (s.equals("台湾")) return "中国台湾";
+        return s;
     }
 
     private static void appendDoubanPeopleArray(
@@ -2106,20 +2145,52 @@ final class ImmersivePoster extends FrameLayout {
         }
     }
 
+    private static boolean isRedundantRegionCategoryLabel(String token) {
+        return "国产剧".equals(token)
+                || "大陆剧".equals(token)
+                || "内地剧".equals(token)
+                || "港剧".equals(token)
+                || "港台剧".equals(token)
+                || "台剧".equals(token)
+                || "美剧".equals(token)
+                || "欧美剧".equals(token)
+                || "韩剧".equals(token)
+                || "日韩剧".equals(token)
+                || "日剧".equals(token)
+                || "英剧".equals(token)
+                || "泰剧".equals(token);
+    }
+
     static java.util.List<String> buildOfficialFactBadges(
             Cms.Video v, SubjectDetails official, int detectedSeasons) {
         java.util.List<String> parts = new java.util.ArrayList<>();
+        java.util.Set<String> seenTokens = new java.util.LinkedHashSet<>();
         String year =
                 official != null && !official.year.isEmpty()
                         ? official.year
                         : (v == null ? "" : extractFourDigitYear(v.year));
-        if (!year.isEmpty()) parts.add(year);
+        if (!year.isEmpty() && seenTokens.add(normalizeFactTokenKey(year))) {
+            parts.add(year);
+        }
 
-        String region =
+        String rawRegion =
                 official != null && !official.countries.isEmpty()
                         ? official.countries
                         : (v == null || v.area == null ? "" : v.area.trim());
-        if (!region.isEmpty()) parts.add(region);
+        if (!rawRegion.isEmpty()) {
+            String[] rParts = rawRegion.split("[/,，、;；\\s]+");
+            StringBuilder rBuf = new StringBuilder();
+            int rAdded = 0;
+            for (String r : rParts) {
+                String clean = r.trim();
+                if (clean.isEmpty()) continue;
+                if (!seenTokens.add(normalizeFactTokenKey(clean))) continue;
+                if (rBuf.length() > 0) rBuf.append(" / ");
+                rBuf.append(clean);
+                if (++rAdded >= 2) break;
+            }
+            if (rBuf.length() > 0) parts.add(rBuf.toString());
+        }
 
         int seasons =
                 Math.max(
@@ -2150,19 +2221,28 @@ final class ImmersivePoster extends FrameLayout {
         } else if (v != null && v.remarks != null && !v.remarks.trim().isEmpty()) {
             episodeOrDuration = v.remarks.trim();
         }
-        if (!episodeOrDuration.isEmpty()) parts.add(episodeOrDuration);
+        if (!episodeOrDuration.isEmpty()
+                && seenTokens.add(normalizeFactTokenKey(episodeOrDuration))) {
+            parts.add(episodeOrDuration);
+        }
 
         String genreText =
                 official != null && !official.genres.isEmpty()
                         ? official.genres
-                        : (v == null || v.tag == null ? "" : v.tag.trim());
+                        : (v != null && v.genre != null && !v.genre.trim().isEmpty()
+                                ? v.genre.trim()
+                                : (v == null || v.tag == null ? "" : v.tag.trim()));
+        boolean hasRegionBadge = !rawRegion.isEmpty();
         if (!genreText.isEmpty()) {
-            String[] gParts = genreText.split("[/,，、\\s]+");
+            String[] gParts = genreText.split("[/,，、;；\\s]+");
             StringBuilder gBuf = new StringBuilder();
             int gAdded = 0;
             for (String g : gParts) {
                 String clean = g.trim();
-                if (clean.isEmpty() || parts.contains(clean)) continue;
+                if (clean.isEmpty()) continue;
+                if (hasRegionBadge && isRedundantRegionCategoryLabel(clean)) continue;
+                String normKey = normalizeFactTokenKey(clean);
+                if (!seenTokens.add(normKey)) continue;
                 if (gBuf.length() > 0) gBuf.append(" / ");
                 gBuf.append(clean);
                 if (++gAdded >= 2) break;
@@ -2765,6 +2845,10 @@ final class ImmersivePoster extends FrameLayout {
         @Override
         protected void onDraw(Canvas canvas) {
             if (immersiveMode || getDrawable() == null) return;
+            if (useLightweightBackdropDraw(android.os.Build.VERSION.SDK_INT, a.reduced)) {
+                super.onDraw(canvas);
+                return;
+            }
             int save = canvas.saveLayer(0, 0, getWidth(), getHeight(), null);
             super.onDraw(canvas);
             mask.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
@@ -2942,6 +3026,25 @@ final class ImmersivePoster extends FrameLayout {
             float dy = (winH - dh) * 0.22f;
             dstRect.set(dx, dy, dx + dw, dy + dh);
 
+            if (useLightweightBackdropDraw(android.os.Build.VERSION.SDK_INT, a.reduced)) {
+                int clip = c.save();
+                c.clipRect(0, 0, w, winH);
+                paint.setAlpha(255);
+                c.drawBitmap(hero, null, dstRect, paint);
+                Bitmap blurred =
+                        wideBlurredBitmap != null && !wideBlurredBitmap.isRecycled()
+                                ? wideBlurredBitmap
+                                : bitmap;
+                if (blurred != null && !blurred.isRecycled() && scrollProgress > 0.01f) {
+                    int scrollBlurAlpha = Math.min(220, Math.round(scrollProgress * 220f));
+                    paint.setAlpha(scrollBlurAlpha);
+                    c.drawBitmap(blurred, null, dstRect, paint);
+                    paint.setAlpha(255);
+                }
+                c.restoreToCount(clip);
+                return;
+            }
+
             int layer = c.saveLayer(0, 0, w, winH, null);
 
             paint.setAlpha(255);
@@ -2998,6 +3101,56 @@ final class ImmersivePoster extends FrameLayout {
             int bw = raw.getWidth();
             int bh = raw.getHeight();
             if (bw <= 0 || bh <= 0) return;
+
+            if (useLightweightBackdropDraw(android.os.Build.VERSION.SDK_INT, a.reduced)) {
+                int clip = c.save();
+                c.clipRect(0, 0, w, winH);
+                if (bitmap != null && !bitmap.isRecycled()) {
+                    wingRect.set(-w * 0.04f, -winH * 0.06f, w * 1.04f, winH * 1.06f);
+                    paint.setAlpha(185);
+                    c.drawBitmap(bitmap, null, wingRect, paint);
+                    paint.setAlpha(255);
+                }
+                float scale = (winH * 0.96f) / bh;
+                float dw = bw * scale;
+                float dh = bh * scale;
+                float dx =
+                        leftAlignedHero
+                                ? Math.max(
+                                        w * 0.36f,
+                                        Math.min(w - dw - w * 0.04f, w * 0.68f - dw * 0.5f))
+                                : (w - dw) * 0.5f;
+                dstRect.set(dx, 0f, dx + dw, dh);
+                paint.setAlpha(255);
+                c.drawBitmap(raw, null, dstRect, paint);
+                int r = Color.red(bg);
+                int g = Color.green(bg);
+                int b = Color.blue(bg);
+                float edge = Math.max(12f, dw * 0.20f);
+                veilPaint.setShader(
+                        new LinearGradient(
+                                dx,
+                                0,
+                                dx + edge,
+                                0,
+                                new int[] {Color.argb(235, r, g, b), Color.argb(0, r, g, b)},
+                                null,
+                                Shader.TileMode.CLAMP));
+                c.drawRect(dx, 0, dx + edge, winH, veilPaint);
+                veilPaint.setShader(
+                        new LinearGradient(
+                                dx + dw - edge,
+                                0,
+                                dx + dw,
+                                0,
+                                new int[] {Color.argb(0, r, g, b), Color.argb(235, r, g, b)},
+                                null,
+                                Shader.TileMode.CLAMP));
+                c.drawRect(dx + dw - edge, 0, dx + dw, winH, veilPaint);
+                veilPaint.setShader(null);
+                c.restoreToCount(clip);
+                return;
+            }
 
             int layer = c.saveLayer(0, 0, w, winH, null);
 

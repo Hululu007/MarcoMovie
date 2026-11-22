@@ -3,10 +3,14 @@
 package com.pilipala.marcomovie;
 
 import android.content.*;
+import android.content.pm.PackageManager;
 import android.graphics.*;
 import android.graphics.drawable.GradientDrawable;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
@@ -16,6 +20,14 @@ import android.text.style.StyleSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.*;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -607,6 +619,123 @@ final class UpdateScreen {
                 .show();
     }
 
+    static final String XIAOMI_TV_SECURITY_ACTION = "com.xiaomi.mitv.settings.SECURITY_SETTINGS";
+
+    static boolean canRequestPackageInstallsCompat(Context c) {
+        if (Build.VERSION.SDK_INT < 26) return true;
+        if (c == null || c.getPackageManager() == null) return false;
+        try {
+            return c.getPackageManager().canRequestPackageInstalls();
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Pure-JVM fallback order for opening unknown-app installation settings across Android phones,
+     * standard Android TV, and OEM TVs (such as Xiaomi HyperOS TV / MiTV) that strip AOSP's
+     * per-app {@code ACTION_MANAGE_UNKNOWN_APP_SOURCES} activity.
+     */
+    static List<String> unknownSourcesSettingsActionOrder(boolean tvDevice) {
+        List<String> actions = new ArrayList<String>();
+        actions.add(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES + "|package");
+        actions.add(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
+        if (tvDevice) {
+            actions.add(XIAOMI_TV_SECURITY_ACTION);
+        }
+        actions.add(Settings.ACTION_SECURITY_SETTINGS);
+        actions.add(Settings.ACTION_APPLICATION_DETAILS_SETTINGS + "|package");
+        actions.add(Settings.ACTION_SETTINGS);
+        return actions;
+    }
+
+    static List<Intent> unknownSourcesSettingsFallbacks(String packageName, boolean tvDevice) {
+        String pkg = packageName == null ? "" : packageName.trim();
+        Uri pkgUri = pkg.isEmpty() ? null : Uri.parse("package:" + pkg);
+        List<Intent> out = new ArrayList<Intent>();
+        if (pkgUri != null) {
+            out.add(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, pkgUri));
+        }
+        out.add(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES));
+        if (tvDevice) {
+            out.add(new Intent(XIAOMI_TV_SECURITY_ACTION));
+        }
+        out.add(new Intent(Settings.ACTION_SECURITY_SETTINGS));
+        if (pkgUri != null) {
+            out.add(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri));
+        }
+        out.add(new Intent(Settings.ACTION_SETTINGS));
+        return out;
+    }
+
+    static boolean hasUnknownSourcesSettingsActivity(PackageManager pm, String packageName) {
+        if (pm == null) return false;
+        String pkg = packageName == null ? "" : packageName.trim();
+        if (!pkg.isEmpty()) {
+            Intent withPkg =
+                    new Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:" + pkg));
+            if (pm.resolveActivity(withPkg, 0) != null) return true;
+        }
+        Intent generic = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
+        return pm.resolveActivity(generic, 0) != null;
+    }
+
+    /**
+     * Pure-JVM installer action order: API 29+ prioritizes {@code ACTION_VIEW} (since {@code
+     * ACTION_INSTALL_PACKAGE} is deprecated on Android 10+ and blocked on some HyperOS/Android 12+
+     * TVs), while API 23-28 retains {@code ACTION_INSTALL_PACKAGE} first with {@code ACTION_VIEW}
+     * fallback.
+     */
+    static List<String> installActionOrder(int sdkInt) {
+        List<String> order = new ArrayList<String>();
+        if (sdkInt >= 29) {
+            order.add(Intent.ACTION_VIEW);
+            order.add(Intent.ACTION_INSTALL_PACKAGE);
+        } else {
+            order.add(Intent.ACTION_INSTALL_PACKAGE);
+            order.add(Intent.ACTION_VIEW);
+        }
+        return order;
+    }
+
+    static String exportApkFileName(String version, boolean tvDevice) {
+        String cleanVer = version == null ? "" : version.replaceAll("[^0-9A-Za-z._-]", "");
+        while (cleanVer.contains("..")) {
+            cleanVer = cleanVer.replace("..", "");
+        }
+        while (cleanVer.startsWith(".") || cleanVer.startsWith("-")) {
+            cleanVer = cleanVer.substring(1);
+        }
+        while (cleanVer.endsWith(".") || cleanVer.endsWith("-")) {
+            cleanVer = cleanVer.substring(0, cleanVer.length() - 1);
+        }
+        if (cleanVer.isEmpty()) cleanVer = "update";
+        return "MarcoMovie-" + cleanVer + (tvDevice ? "-android-tv.apk" : "-android-mobile.apk");
+    }
+
+    private boolean openUnknownSourcesSettings() {
+        List<Intent> candidates =
+                unknownSourcesSettingsFallbacks(a.getPackageName(), a.isTvDevice());
+        for (Intent intent : candidates) {
+            try {
+                if (a.getPackageManager().resolveActivity(intent, 0) == null) continue;
+                a.startActivity(intent);
+                return true;
+            } catch (RuntimeException ignored) {
+            }
+        }
+        for (Intent intent : candidates) {
+            try {
+                a.startActivity(intent);
+                return true;
+            } catch (RuntimeException ignored) {
+            }
+        }
+        return false;
+    }
+
     void install() {
         if (updates.busy) {
             a.toast("请等待当前任务完成");
@@ -617,24 +746,41 @@ final class UpdateScreen {
             return;
         }
         String deviceName = a.isTvDevice() ? "电视" : "手机";
-        if (Build.VERSION.SDK_INT >= 26 && !a.getPackageManager().canRequestPackageInstalls()) {
-            new AppDialog.Builder(a)
-                    .setTitle("允许安装更新")
-                    .setMessage(deviceName + "需要你允许 Marco Movie 安装应用。打开系统授权后，返回本页再次选择安装。")
-                    .setPositiveButton(
-                            "打开授权页面",
-                            (d, n) -> {
-                                try {
-                                    a.startActivity(
-                                            new Intent(
-                                                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                                    Uri.parse("package:" + a.getPackageName())));
-                                } catch (RuntimeException e) {
-                                    a.notice("当前设备未提供授权页面，请从设置中开启未知来源安装权限。");
-                                }
-                            })
-                    .setNegativeButton("稍后", null)
-                    .show();
+        if (!canRequestPackageInstallsCompat(a)) {
+            boolean hasPerAppSettings =
+                    hasUnknownSourcesSettingsActivity(a.getPackageManager(), a.getPackageName());
+            if (hasPerAppSettings) {
+                new AppDialog.Builder(a)
+                        .setTitle("允许安装更新")
+                        .setMessage(
+                                deviceName
+                                        + "需要允许 Marco Movie 安装应用。打开系统授权后返回本页再次点击安装；若电视已在系统安全设置中开启全局未知来源，也可直接尝试安装。")
+                        .setPositiveButton(
+                                "打开授权页面",
+                                (d, n) -> {
+                                    if (!openUnknownSourcesSettings()) {
+                                        a.notice("当前设备未提供授权页面，请前往系统设置开启未知来源安装，或直接尝试安装。");
+                                    }
+                                })
+                        .setNeutralButton("直接尝试安装", (d, n) -> prepareInstall())
+                        .setNegativeButton("稍后", null)
+                        .show();
+            } else {
+                new AppDialog.Builder(a)
+                        .setTitle("安装 " + updates.available.version)
+                        .setMessage(
+                                "该电视未提供应用级安装授权页（如小米澎湃 OS 电视）。可先点「直接尝试安装」；若系统拦截，请前往「设置 → 账号与安全 → 安装未知来源的应用」开启允许，或点击「保存到本机下载」后在电视「媒体中心 / 电视管家」中直接安装。")
+                        .setPositiveButton("直接尝试安装", (d, n) -> prepareInstall())
+                        .setNeutralButton(
+                                "打开安全设置",
+                                (d, n) -> {
+                                    if (!openUnknownSourcesSettings()) {
+                                        a.notice("请使用遥控器打开电视「设置 → 账号与安全 → 安装未知来源的应用」并设为允许。");
+                                    }
+                                })
+                        .setNegativeButton("保存到本机下载", (d, n) -> exportVerifiedApkToDownloads())
+                        .show();
+            }
             return;
         }
         new AppDialog.Builder(a)
@@ -654,6 +800,168 @@ final class UpdateScreen {
                         .putExtra(Intent.EXTRA_RETURN_RESULT, true);
         intent.setClipData(ClipData.newRawUri("Marco Movie update", UpdateApkProvider.URI));
         return intent;
+    }
+
+    static Intent viewInstallIntent() {
+        Intent intent =
+                new Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(
+                                UpdateApkProvider.URI, "application/vnd.android.package-archive")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        intent.setClipData(ClipData.newRawUri("Marco Movie update", UpdateApkProvider.URI));
+        return intent;
+    }
+
+    private boolean launchSystemInstaller() {
+        List<String> order = installActionOrder(Build.VERSION.SDK_INT);
+        for (String action : order) {
+            Intent intent =
+                    Intent.ACTION_VIEW.equals(action) ? viewInstallIntent() : installIntent();
+            try {
+                a.startActivityForResult(intent, INSTALL);
+                return true;
+            } catch (RuntimeException ignored) {
+            }
+        }
+        try {
+            Intent detached = viewInstallIntent().addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            a.startActivity(detached);
+            return true;
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private void showInstallBlockedDialog() {
+        new AppDialog.Builder(a)
+                .setTitle("电视系统限制了应用内直接安装")
+                .setMessage(
+                        "当前电视系统拒绝直接拉起安装器。请确认已在「设置 → 账号与安全」开启「安装未知来源的应用」；也可将已校验的新版安装包保存到本机 Download 目录，直接在电视自带的「媒体中心 / 高清播放器 / 电视管家」中点击安装（无需 U 盘或电脑）。")
+                .setPositiveButton("保存到本机下载", (d, n) -> exportVerifiedApkToDownloads())
+                .setNeutralButton(
+                        "打开安全设置",
+                        (d, n) -> {
+                            if (!openUnknownSourcesSettings()) {
+                                a.notice("请前往电视「设置 → 账号与安全 → 安装未知来源的应用」开启允许。");
+                            }
+                        })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    private void exportVerifiedApkToDownloads() {
+        final UpdateManager.Release release = updates.available;
+        if (release == null || updates.busy) return;
+        final int epoch = a.generation;
+        updates.busy = true;
+        updates.resetCancellation();
+        updates.message = "正在校验并保存到本机下载目录…";
+        refresh();
+        updates.worker.execute(
+                () -> {
+                    try {
+                        File apkFile = updates.apk();
+                        UpdateManager.verifyApk(a, apkFile, release);
+                        String fileName = exportApkFileName(release.version, a.isTvDevice());
+                        String savedPath = saveApkToPublicDownloads(a, apkFile, fileName);
+                        a.ui.post(
+                                () -> {
+                                    updates.busy = false;
+                                    updates.message = "安装包已保存到 " + savedPath;
+                                    refresh();
+                                    if (!a.isFinishing() && epoch == a.generation) {
+                                        new AppDialog.Builder(a)
+                                                .setTitle("已保存到本机下载目录")
+                                                .setMessage(
+                                                        "保存位置："
+                                                                + savedPath
+                                                                + "\n\n请打开电视自带的「媒体中心 / 高清播放器 / 文件管理 / 电视管家」，在「下载 (Download)」文件夹中点击该安装包即可覆盖升级（无需 U 盘或电脑，配置与观看记录全部保留）。")
+                                                .setPositiveButton("知道了", null)
+                                                .show();
+                                    }
+                                });
+                    } catch (final Exception error) {
+                        a.ui.post(
+                                () -> {
+                                    updates.busy = false;
+                                    updates.message = "保存安装包失败，请检查存储权限或使用 U 盘 / 局域网安装";
+                                    refresh();
+                                    a.notice("保存到本机下载目录失败：" + a.message(error));
+                                });
+                    }
+                });
+    }
+
+    private static String saveApkToPublicDownloads(Context ctx, File srcApk, String fileName)
+            throws IOException {
+        if (Build.VERSION.SDK_INT >= 29) {
+            try {
+                ContentValues cv = new ContentValues();
+                cv.put(OpenableColumns.DISPLAY_NAME, fileName);
+                cv.put("mime_type", "application/vnd.android.package-archive");
+                cv.put("relative_path", Environment.DIRECTORY_DOWNLOADS + "/MarcoMovie");
+                Uri target =
+                        ctx.getContentResolver()
+                                .insert(Uri.parse("content://media/external/downloads"), cv);
+                if (target != null) {
+                    try (InputStream in = new FileInputStream(srcApk);
+                            OutputStream out = ctx.getContentResolver().openOutputStream(target)) {
+                        if (out == null) throw new IOException("无法写入系统下载目录");
+                        copyStream(in, out);
+                        return "Download/MarcoMovie/" + fileName;
+                    } catch (IOException | RuntimeException e) {
+                        try {
+                            ctx.getContentResolver().delete(target, null, null);
+                        } catch (RuntimeException ignored) {
+                        }
+                        throw e;
+                    }
+                }
+            } catch (Exception ignored) {
+                // Fall through to legacy Download directory on OEM TVs without MediaStore Downloads
+            }
+        }
+        File downloadsDir =
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        if (downloadsDir != null && (downloadsDir.isDirectory() || downloadsDir.mkdirs())) {
+            File outFile = new File(downloadsDir, fileName);
+            try {
+                try (InputStream in = new FileInputStream(srcApk);
+                        OutputStream out = new FileOutputStream(outFile)) {
+                    copyStream(in, out);
+                }
+                try {
+                    MediaScannerConnection.scanFile(
+                            ctx,
+                            new String[] {outFile.getAbsolutePath()},
+                            new String[] {"application/vnd.android.package-archive"},
+                            null);
+                } catch (RuntimeException ignored) {
+                }
+                return "Download/" + fileName;
+            } catch (IOException | SecurityException ignored) {
+                // Fall back to app-scoped external Download directory when legacy storage is denied
+            }
+        }
+        File appExternal = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (appExternal != null && (appExternal.isDirectory() || appExternal.mkdirs())) {
+            File outFile = new File(appExternal, fileName);
+            try (InputStream in = new FileInputStream(srcApk);
+                    OutputStream out = new FileOutputStream(outFile)) {
+                copyStream(in, out);
+            }
+            return outFile.getAbsolutePath();
+        }
+        throw new IOException("系统 Download 目录不可写");
+    }
+
+    private static void copyStream(InputStream in, OutputStream out) throws IOException {
+        byte[] buf = new byte[32768];
+        int n;
+        while ((n = in.read(buf)) != -1) {
+            out.write(buf, 0, n);
+        }
+        out.flush();
     }
 
     void prepareInstall() {
@@ -681,16 +989,16 @@ final class UpdateScreen {
                                         updates.message = "校验完成，回到软件更新页后可继续安装";
                                         return;
                                     }
-                                    try {
-                                        updates.prefs
-                                                .edit()
-                                                .putInt("pending_code", release.code)
-                                                .apply();
-                                        a.startActivityForResult(installIntent(), INSTALL);
+                                    updates.prefs
+                                            .edit()
+                                            .putInt("pending_code", release.code)
+                                            .apply();
+                                    if (launchSystemInstaller()) {
                                         updates.message = "请在系统安装页面确认或返回";
-                                    } catch (RuntimeException error) {
+                                    } else {
                                         updates.prefs.edit().remove("pending_code").apply();
-                                        updates.message = "无法打开安装器，请从官方发布页下载安装";
+                                        updates.message = "电视系统拦截了直接安装，可保存到本机下载目录安装";
+                                        showInstallBlockedDialog();
                                     }
                                     refresh();
                                 });
@@ -708,7 +1016,13 @@ final class UpdateScreen {
     static void result(MainActivity a) {
         UpdateManager updates = UpdateManager.get(a);
         updates.prefs.edit().remove("pending_code").apply();
-        updates.message = "已返回应用；若取消安装，原版本继续保留";
+        if (a.isTvDevice()
+                && !canRequestPackageInstallsCompat(a)
+                && !hasUnknownSourcesSettingsActivity(a.getPackageManager(), a.getPackageName())) {
+            updates.message = "系统未完成安装。可确认「电视设置 → 账号与安全 → 安装未知来源的应用」已开启，或点击安装选择「保存到本机下载」通过电视媒体中心安装";
+        } else {
+            updates.message = "已返回应用；若取消安装，原版本继续保留";
+        }
         if (a.updateScreen != null) a.updateScreen.refresh();
     }
 }

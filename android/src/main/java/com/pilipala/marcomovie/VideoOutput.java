@@ -21,6 +21,8 @@ final class VideoOutput extends FrameLayout
     interface Listener {
         void available(Surface surface);
 
+        default void resized(int width, int height) {}
+
         void destroyed();
     }
 
@@ -70,13 +72,50 @@ final class VideoOutput extends FrameLayout
         }
     }
 
+    static boolean displaySupportsWideColorGamut(Context context) {
+        if (context == null || Build.VERSION.SDK_INT < 26) return false;
+        try {
+            WindowManager wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+            if (wm == null) return false;
+            Display display = wm.getDefaultDisplay();
+            return display != null && display.isWideColorGamut();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Pure-JVM policy for Activity window {@code COLOR_MODE_HDR}. On Android TV, {@link
+     * SurfaceView} passes HDR10 / HLG / DV dataspace directly through HWC video planes; switching
+     * the RGBA UI Activity window to {@code COLOR_MODE_HDR} on TV panels that only expose {@code
+     * ColorMode::NATIVE} (e.g., Amlogic Android 9 MiTV) triggers mixed GPU composition and visible
+     * HDR/SDR color flashing whenever HUD overlays invalidate.
+     */
+    static boolean shouldRequestWindowHdrColorMode(
+            int sdkInt,
+            boolean tvDevice,
+            boolean hdrSurfaceActive,
+            boolean displaySupportsHdr,
+            boolean displayWideColorGamut) {
+        if (sdkInt < 26 || !hdrSurfaceActive || !displaySupportsHdr) return false;
+        if (tvDevice) return false;
+        return displayWideColorGamut;
+    }
+
     static void setWindowHdrMode(Activity activity, boolean enableHdr) {
         if (activity == null || Build.VERSION.SDK_INT < 26) return;
         try {
             Window window = activity.getWindow();
             if (window == null) return;
+            boolean wantHdr =
+                    shouldRequestWindowHdrColorMode(
+                            Build.VERSION.SDK_INT,
+                            detectTvContext(activity),
+                            enableHdr,
+                            displaySupportsHdr(activity),
+                            displaySupportsWideColorGamut(activity));
             int desired =
-                    (enableHdr && displaySupportsHdr(activity))
+                    wantHdr
                             ? 2 /* ActivityInfo.COLOR_MODE_HDR */
                             : 0 /* ActivityInfo.COLOR_MODE_DEFAULT */;
             WindowManager.LayoutParams attrs = window.getAttributes();
@@ -102,7 +141,9 @@ final class VideoOutput extends FrameLayout
                         }
 
                         public void onSurfaceTextureSizeChanged(
-                                SurfaceTexture value, int w, int h) {}
+                                SurfaceTexture value, int w, int h) {
+                            if (listener != null) listener.resized(w, h);
+                        }
 
                         public boolean onSurfaceTextureDestroyed(SurfaceTexture value) {
                             gone();
@@ -124,7 +165,9 @@ final class VideoOutput extends FrameLayout
                                 }
 
                                 public void surfaceChanged(
-                                        SurfaceHolder holder, int format, int w, int h) {}
+                                        SurfaceHolder holder, int format, int w, int h) {
+                                    if (listener != null) listener.resized(w, h);
+                                }
 
                                 public void surfaceDestroyed(SurfaceHolder holder) {
                                     gone();

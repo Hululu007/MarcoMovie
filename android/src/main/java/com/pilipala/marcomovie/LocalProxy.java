@@ -17,9 +17,16 @@ public final class LocalProxy implements Closeable {
     final Cms.Config config;
     final ServerSocket server;
     final String token = UUID.randomUUID().toString().replace("-", "");
-    final ThreadPoolExecutor requests =
-            new ThreadPoolExecutor(4, 32, 60, TimeUnit.SECONDS, new SynchronousQueue<Runnable>());
+    final ThreadPoolExecutor requests = createRequestExecutor();
     final Map<Socket, RequestScope> activeRequests = new ConcurrentHashMap<>();
+
+    private static ThreadPoolExecutor createRequestExecutor() {
+        ThreadPoolExecutor pool =
+                new ThreadPoolExecutor(
+                        16, 64, 45, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(64));
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
+    }
 
     interface ScriptResolver {
         Object[] resolve(Map<String, String> params) throws Exception;
@@ -34,13 +41,40 @@ public final class LocalProxy implements Closeable {
         void accept(String path);
     }
 
+    interface RouteHandler {
+        boolean handle(
+                String path,
+                String method,
+                Map<String, String> queryParams,
+                Map<String, String> headers,
+                OutputStream out)
+                throws IOException;
+    }
+
+    static volatile ScriptResolver nativePythonProxy;
+    static volatile ScriptResolver webViewJsProxy;
+    static volatile RouteHandler hlsRouteHandler;
+    static volatile RouteHandler diskCacheRouteHandler;
+
+    private static Object[] resolveDefaultScript(Map<String, String> params) throws Exception {
+        if ("py".equalsIgnoreCase(params.get("do")) && nativePythonProxy != null) {
+            Object[] nativeRes = nativePythonProxy.resolve(params);
+            if (nativeRes != null) return nativeRes;
+        }
+        if (webViewJsProxy != null) {
+            Object[] webRes = webViewJsProxy.resolve(params);
+            if (webRes != null) return webRes;
+        }
+        return JsEngine.proxyFor(params);
+    }
+
     private final ScriptResolver scripts;
     private final SourceResolver sources;
     volatile DanmakuConsumer danmakuConsumer = CspEngine::onPluginDanmaku;
     volatile boolean closed;
 
     public LocalProxy(Application application, Cms.Config source) throws IOException {
-        this(application, source, JsEngine::proxyFor, CspEngine::proxy);
+        this(application, source, LocalProxy::resolveDefaultScript, CspEngine::proxy);
     }
 
     LocalProxy(Application application, Cms.Config source, ScriptResolver scripts)
@@ -65,9 +99,11 @@ public final class LocalProxy implements Closeable {
         Thread accept =
                 new Thread(
                         () -> {
+                            int consecutiveAcceptErrors = 0;
                             while (!closed)
                                 try {
                                     Socket socket = server.accept();
+                                    consecutiveAcceptErrors = 0;
                                     RequestScope scope = new RequestScope();
                                     activeRequests.put(socket, scope);
                                     try {
@@ -96,7 +132,25 @@ public final class LocalProxy implements Closeable {
                                         socket.close();
                                     }
                                 } catch (IOException e) {
-                                    if (!closed) close();
+                                    if (closed || server.isClosed()) {
+                                        if (!closed) close();
+                                        break;
+                                    }
+                                    consecutiveAcceptErrors++;
+                                    AppLog.w(
+                                            "LocalProxy",
+                                            "transient accept error #" + consecutiveAcceptErrors,
+                                            e);
+                                    if (consecutiveAcceptErrors >= 16) {
+                                        close();
+                                        break;
+                                    }
+                                    try {
+                                        Thread.sleep(Math.min(500L, 40L * consecutiveAcceptErrors));
+                                    } catch (InterruptedException ie) {
+                                        Thread.currentThread().interrupt();
+                                        break;
+                                    }
                                 }
                         },
                         "movie-loopback-proxy");
@@ -275,7 +329,7 @@ public final class LocalProxy implements Closeable {
             int emptyLeadingLines = 0;
             while (!closed) {
                 if (!firstRequest) {
-                    connection.setSoTimeout(15000);
+                    connection.setSoTimeout(5000);
                 }
                 String requestLine = lineOrNull(in, 8192);
                 if (requestLine == null) break;
@@ -310,7 +364,12 @@ public final class LocalProxy implements Closeable {
                 "/action".equals(path) && (method.equals("GET") || method.equals("POST"));
         boolean isProxyRoute =
                 "/proxy".equals(path) && (method.equals("GET") || method.equals("HEAD"));
-        if (!isProxyRoute && !isActionRoute) {
+        boolean isHlsRoute =
+                ("/hls".equals(path) || "/seg".equals(path))
+                        && (method.equals("GET") || method.equals("HEAD"));
+        boolean isDiskCacheRoute =
+                path.startsWith("/kcache/") && (method.equals("GET") || method.equals("HEAD"));
+        if (!isProxyRoute && !isActionRoute && !isHlsRoute && !isDiskCacheRoute) {
             AppLog.w("LocalProxy", "404 route method=" + method + " path=" + path, null);
             simple(out, 404, "Not found");
             return false;
@@ -427,16 +486,33 @@ public final class LocalProxy implements Closeable {
             }
             requestToken = queryParams.get("_mm_token");
         }
+        boolean requireToken = isJs || isHlsRoute || isDiskCacheRoute;
         if (!ProxyAddress.isAllowedRequest(
                 headers.get("host"),
                 headers.get("origin"),
                 headers.get("sec-fetch-site"),
                 requestToken,
                 token,
-                isJs)) {
+                requireToken)) {
             AppLog.w("LocalProxy", "403 rejected method=" + method + " path=" + path, null);
             simple(out, 403, "Forbidden");
             return false;
+        }
+        if (isHlsRoute) {
+            RouteHandler handler = hlsRouteHandler;
+            if (handler == null) {
+                simple(out, 404, "HLS proxy unavailable");
+                return false;
+            }
+            return handler.handle(path, method, queryParams, headers, out);
+        }
+        if (isDiskCacheRoute) {
+            RouteHandler handler = diskCacheRouteHandler;
+            if (handler == null) {
+                simple(out, 404, "Disk cache unavailable");
+                return false;
+            }
+            return handler.handle(path, method, queryParams, headers, out);
         }
         if (isActionRoute
                 || (("danmaku".equalsIgnoreCase(params.get("do"))
@@ -697,7 +773,7 @@ public final class LocalProxy implements Closeable {
             }
         }
         boolean keepAlive =
-                !closed && !clientWantsClose && !chainChunks && requests.getActiveCount() < 24;
+                !closed && !clientWantsClose && !chainChunks && requests.getActiveCount() < 28;
 
         try (InputStream payload = body) {
             StringBuilder head =

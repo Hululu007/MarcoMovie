@@ -293,12 +293,12 @@ final class WatchHistory {
                 JSONObject o = a.optJSONObject(i);
                 if (o == null) continue;
                 Entry e = new Entry();
-                e.site = o.optString("site");
-                e.id = o.optString("id");
-                e.title = o.optString("title");
-                e.poster = o.optString("poster");
-                e.line = o.optString("line");
-                e.episode = o.optString("episode");
+                e.site = Cms.optSafeString(o, "site");
+                e.id = Cms.optSafeString(o, "id");
+                e.title = Cms.optSafeString(o, "title");
+                e.poster = Cms.optSafeString(o, "poster");
+                e.line = Cms.optSafeString(o, "line");
+                e.episode = Cms.optSafeString(o, "episode");
                 e.index = Math.max(0, o.optInt("index"));
                 e.position = Math.max(0, o.optInt("position"));
                 e.duration = Math.max(0, o.optInt("duration"));

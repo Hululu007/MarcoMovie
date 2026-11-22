@@ -88,9 +88,46 @@ public final class Cms {
         public final Map<String, String> headers = new LinkedHashMap<>();
     }
 
+    public static final class SniffRule {
+        public String name = "";
+        public final List<String> hosts = new ArrayList<>();
+        public final List<String> regex = new ArrayList<>();
+        public final List<String> exclude = new ArrayList<>();
+        public String script = "";
+
+        boolean matchesHost(String pageUrl) {
+            if (hosts.isEmpty()) return true;
+            String host = "";
+            if (pageUrl != null && !pageUrl.isEmpty()) {
+                try {
+                    String h = new URI(pageUrl).getHost();
+                    host = h == null ? "" : h.toLowerCase(Locale.ROOT);
+                } catch (Exception ignored) {
+                }
+            }
+            if (host.isEmpty()) return false;
+            for (String h : hosts) {
+                if (h == null || h.trim().isEmpty()) continue;
+                String pattern = h.trim().toLowerCase(Locale.ROOT);
+                if ("*".equals(pattern)) return true;
+                if (pattern.startsWith("*.")) {
+                    String suffix = pattern.substring(1);
+                    if (host.endsWith(suffix) || host.equals(pattern.substring(2))) return true;
+                } else if (host.equals(pattern)
+                        || host.endsWith("." + pattern)
+                        || host.contains(pattern)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
     public static final class Config {
         public final List<Site> sites = new ArrayList<>();
         public final List<Parse> parses = new ArrayList<>();
+        public final List<SniffRule> rules = new ArrayList<>();
+        public final List<String> ads = new ArrayList<>();
         public String raw;
         public String spider;
         public String origin = "", warehouse = "";
@@ -181,6 +218,7 @@ public final class Cms {
             }
             if (api != null
                     && (api.startsWith("emby://")
+                            || api.startsWith("alist://")
                             || api.startsWith("catpaw://")
                             || (type == 4 && isHttp(api) && !isScriptOrJarApi(api)))) {
                 return STATUS_OK;
@@ -660,6 +698,20 @@ public final class Cms {
         return prefix + " 扩展片源";
     }
 
+    private static void appendStringList(List<String> target, Object raw) {
+        if (raw == null || raw == JSONObject.NULL) return;
+        if (raw instanceof JSONArray) {
+            JSONArray arr = (JSONArray) raw;
+            for (int i = 0; i < Math.min(500, arr.length()); i++) {
+                String v = arr.optString(i, "").trim();
+                if (!v.isEmpty() && !"null".equalsIgnoreCase(v)) target.add(v);
+            }
+        } else if (raw instanceof String) {
+            String s = ((String) raw).trim();
+            if (!s.isEmpty() && !"null".equalsIgnoreCase(s)) target.add(s);
+        }
+    }
+
     private static void copySafeHeaders(Map<String, String> target, Object headerObj) {
         if (headerObj instanceof String) {
             String str = ((String) headerObj).trim();
@@ -944,6 +996,27 @@ public final class Cms {
                 out.parses.add(p);
             }
         }
+        JSONArray rulesArr = root.optJSONArray("rules");
+        if (rulesArr != null) {
+            for (int i = 0; i < Math.min(200, rulesArr.length()); i++) {
+                JSONObject rj = rulesArr.optJSONObject(i);
+                if (rj == null) continue;
+                SniffRule rule = new SniffRule();
+                rule.name = optSafeString(rj, "name", "").trim();
+                rule.script = optSafeString(rj, "script", optSafeString(rj, "click", "")).trim();
+                appendStringList(rule.hosts, rj.opt("hosts"));
+                appendStringList(rule.hosts, rj.opt("host"));
+                appendStringList(rule.regex, rj.opt("regex"));
+                appendStringList(rule.exclude, rj.opt("exclude"));
+                if (!rule.hosts.isEmpty()
+                        || !rule.regex.isEmpty()
+                        || !rule.exclude.isEmpty()
+                        || !rule.script.isEmpty()) {
+                    out.rules.add(rule);
+                }
+            }
+        }
+        appendStringList(out.ads, root.opt("ads"));
         String defaultJsonParseUrl = "";
         for (Parse p : out.parses) {
             if (p.type == 1 || p.type == 2 || p.type == 3) {
@@ -2594,7 +2667,7 @@ public final class Cms {
                             String epName = Json.str(ep, "name", "正片");
                             segs.add(epName + "$" + epUrl);
                         }
-                        u = String.join("#", segs);
+                        u = joinStrings("#", segs);
                     }
                     if (u.isEmpty()) continue;
                     JSONObject pInfo = p.optJSONObject("player_info");
@@ -2608,8 +2681,8 @@ public final class Cms {
                     urls.add(u);
                 }
                 if (!froms.isEmpty()) {
-                    rawFrom = String.join("$$$", froms);
-                    rawUrl = String.join("$$$", urls);
+                    rawFrom = joinStrings("$$$", froms);
+                    rawUrl = joinStrings("$$$", urls);
                 }
             }
         }
@@ -2617,6 +2690,17 @@ public final class Cms {
         parsePlayLines(v, from, urls);
         prioritizeDirectStreamLines(v);
         return v;
+    }
+
+    private static String joinStrings(String delimiter, List<String> parts) {
+        if (parts == null || parts.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) sb.append(delimiter);
+            String item = parts.get(i);
+            if (item != null) sb.append(item);
+        }
+        return sb.toString();
     }
 
     private static Video videoXml(String block) {

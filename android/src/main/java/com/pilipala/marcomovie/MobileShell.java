@@ -3065,9 +3065,13 @@ final class MobileShell {
         channelScroll.addView(channelGridCol);
         page.addView(channelScroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        final int[] activeSrcIdx = {0};
+        final int[] activeSrcIdx = {
+            LivePreferences.resolveInitialSourceIndex(
+                    sources, a.prefs.getString(Prefs.LIVE_LAST_SOURCE_URL, ""))
+        };
         final int[] activeGroupIdx = {0};
         final LiveCatalog.Catalog[] activeCatalog = {null};
+        final boolean[] nextForceRefresh = {false};
         final Runnable[] loadSource = new Runnable[1];
         final int[] liveRequest = {0};
 
@@ -3099,6 +3103,8 @@ final class MobileShell {
         loadSource[0] =
                 () -> {
                     final int request = ++liveRequest[0];
+                    final boolean forceRefresh = nextForceRefresh[0];
+                    nextForceRefresh[0] = false;
                     a.cancelPageRequests();
                     activeCatalog[0] = null;
                     srcRow.removeAllViews();
@@ -3123,12 +3129,35 @@ final class MobileShell {
                                 v -> {
                                     activeSrcIdx[0] = idx;
                                     activeGroupIdx[0] = 0;
+                                    a.prefs
+                                            .edit()
+                                            .putString(
+                                                    Prefs.LIVE_LAST_SOURCE_URL,
+                                                    sources.get(idx).url == null
+                                                            ? ""
+                                                            : sources.get(idx).url)
+                                            .apply();
                                     loadSource[0].run();
                                 });
                         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
                         lp.rightMargin = a.dp(8);
                         srcRow.addView(chip, lp);
                     }
+                    TextView refreshChip = a.text("刷新", 12, 0xffe5e7eb);
+                    refreshChip.setTypeface(null, Typeface.BOLD);
+                    refreshChip.setPadding(a.dp(13), a.dp(5), a.dp(13), a.dp(5));
+                    refreshChip.setBackground(
+                            glassBg(0xcc262e2b, 0xb81a211f, a.dp(999), a.dp(0.7f), 0x2effffff));
+                    MobileDetailScreen.bindTouchFeedback(refreshChip);
+                    refreshChip.setOnClickListener(
+                            v -> {
+                                nextForceRefresh[0] = true;
+                                loadSource[0].run();
+                            });
+                    LinearLayout.LayoutParams refLp = new LinearLayout.LayoutParams(-2, -2);
+                    refLp.rightMargin = a.dp(8);
+                    srcRow.addView(refreshChip, refLp);
+
                     TextView importLiveChip = a.text("＋ 导入直播", 12, 0xff5ac8fa);
                     importLiveChip.setTypeface(null, Typeface.BOLD);
                     importLiveChip.setPadding(a.dp(13), a.dp(5), a.dp(13), a.dp(5));
@@ -3139,17 +3168,38 @@ final class MobileShell {
                             v -> SourceController.showLiveImportDialog(a));
                     srcRow.addView(importLiveChip, new LinearLayout.LayoutParams(-2, -2));
 
+                    final LiveCatalog.Source selectedSource = sources.get(activeSrcIdx[0]);
+                    if (!forceRefresh) {
+                        LiveCatalog.Catalog cached =
+                                LiveController.peekCachedCatalog(a, selectedSource);
+                        if (cached != null) {
+                            activeCatalog[0] = cached;
+                            a.liveSession = new LiveSession(selectedSource, cached);
+                            stateView.setVisibility(View.GONE);
+                            renderLiveGroupsAndChannels(
+                                    selectedSource,
+                                    cached,
+                                    activeGroupIdx,
+                                    searchInput.getText().toString().trim(),
+                                    searchInput,
+                                    120,
+                                    groupRow,
+                                    channelGridCol);
+                            return;
+                        }
+                    }
+
                     groupRow.removeAllViews();
                     channelGridCol.removeAllViews();
                     stateView.setVisibility(View.VISIBLE);
-                    stateView.setText("正在加载频道列表…");
-                    final LiveCatalog.Source selectedSource = sources.get(activeSrcIdx[0]);
+                    stateView.setText(forceRefresh ? "正在刷新频道列表…" : "正在加载频道列表…");
                     final int ticket = a.generation;
                     a.submitPage(
                             () -> {
                                 try {
                                     final LiveCatalog.Catalog catalog =
-                                            LiveController.loadCatalog(a, selectedSource);
+                                            LiveController.loadCatalog(
+                                                    a, selectedSource, forceRefresh);
                                     a.ui.post(
                                             () -> {
                                                 if (ticket != a.generation
@@ -3198,16 +3248,27 @@ final class MobileShell {
         channelGridCol.removeAllViews();
         if (catalog.groups.isEmpty()) return;
 
+        final java.util.Set<String> favorites = LivePreferences.loadFavorites(a);
+        final java.util.Set<String> blockedGroups = LivePreferences.loadBlockedGroups(a);
+        final List<LiveCatalog.Group> visibleGroups =
+                LivePreferences.buildDisplayGroups(catalog, favorites, blockedGroups, "");
+        if (selectedGroupHolder[0] >= visibleGroups.size()) {
+            selectedGroupHolder[0] = visibleGroups.isEmpty() ? -1 : 0;
+        }
+
         final int selectedGroupIdx = selectedGroupHolder[0];
         final String qLower = searchQuery == null ? "" : searchQuery.toLowerCase(Locale.ROOT);
+        int visibleChannelTotal = 0;
+        for (LiveCatalog.Group vg : visibleGroups) {
+            if (!LivePreferences.FAVORITES_GROUP_NAME.equals(vg.name)) {
+                visibleChannelTotal += vg.channels.size();
+            }
+        }
 
-        // Pill 0: All Channels
+        // Pill 0: All Channels (long-press restores hidden groups if any)
         boolean allActive = qLower.isEmpty() && selectedGroupIdx == -1;
         TextView allBtn =
-                a.text(
-                        "全部 (" + catalog.channelCount() + ")",
-                        12,
-                        allActive ? 0xff000000 : 0xffe5e7eb);
+                a.text("全部 (" + visibleChannelTotal + ")", 12, allActive ? 0xff000000 : 0xffe5e7eb);
         allBtn.setTypeface(null, allActive ? Typeface.BOLD : Typeface.NORMAL);
         allBtn.setPadding(a.dp(13), a.dp(5), a.dp(13), a.dp(5));
         allBtn.setBackground(
@@ -3236,16 +3297,17 @@ final class MobileShell {
         allLp.rightMargin = a.dp(7);
         groupRow.addView(allBtn, allLp);
 
-        for (int i = 0; i < catalog.groups.size(); i++) {
+        for (int i = 0; i < visibleGroups.size(); i++) {
             final int gIdx = i;
             boolean active = qLower.isEmpty() && i == selectedGroupIdx;
-            LiveCatalog.Group g = catalog.groups.get(i);
+            final LiveCatalog.Group g = visibleGroups.get(i);
+            final boolean isFavGroup = LivePreferences.FAVORITES_GROUP_NAME.equals(g.name);
             TextView gBtn =
                     a.text(
                             g.name + " (" + g.channels.size() + ")",
                             12,
-                            active ? 0xff000000 : 0xffe5e7eb);
-            gBtn.setTypeface(null, active ? Typeface.BOLD : Typeface.NORMAL);
+                            active ? 0xff000000 : (isFavGroup ? 0xfffbbf24 : 0xffe5e7eb));
+            gBtn.setTypeface(null, active || isFavGroup ? Typeface.BOLD : Typeface.NORMAL);
             gBtn.setSingleLine(true);
             gBtn.setPadding(a.dp(13), a.dp(5), a.dp(13), a.dp(5));
             gBtn.setBackground(
@@ -3270,16 +3332,58 @@ final class MobileShell {
                                 groupRow,
                                 channelGridCol);
                     });
+            if (!isFavGroup) {
+                gBtn.setOnLongClickListener(
+                        v -> {
+                            LivePreferences.toggleBlockedGroup(a, g.name);
+                            a.toast("已隐藏分组：" + g.name + "（点击右侧「已隐藏」可恢复）");
+                            selectedGroupHolder[0] = 0;
+                            renderLiveGroupsAndChannels(
+                                    source,
+                                    catalog,
+                                    selectedGroupHolder,
+                                    searchQuery,
+                                    searchInput,
+                                    120,
+                                    groupRow,
+                                    channelGridCol);
+                            return true;
+                        });
+            }
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
             lp.rightMargin = a.dp(7);
             groupRow.addView(gBtn, lp);
+        }
+
+        if (!blockedGroups.isEmpty()) {
+            TextView restoreBtn = a.text("已隐藏(" + blockedGroups.size() + ") · 恢复", 12, 0xff93c5fd);
+            restoreBtn.setPadding(a.dp(12), a.dp(5), a.dp(12), a.dp(5));
+            restoreBtn.setBackground(
+                    glassBg(0xcc202926, 0xb8161d1b, a.dp(999), a.dp(0.7f), 0x2effffff));
+            MobileDetailScreen.bindTouchFeedback(restoreBtn);
+            restoreBtn.setOnClickListener(
+                    v -> {
+                        LivePreferences.clearBlockedGroups(a);
+                        a.toast("已恢复全部隐藏分组");
+                        renderLiveGroupsAndChannels(
+                                source,
+                                catalog,
+                                selectedGroupHolder,
+                                searchQuery,
+                                searchInput,
+                                120,
+                                groupRow,
+                                channelGridCol);
+                    });
+            groupRow.addView(restoreBtn, new LinearLayout.LayoutParams(-2, -2));
         }
 
         // Collect channels to display
         List<LiveCatalog.Channel> displayList = new ArrayList<>();
         List<String> displayGroups = new ArrayList<>();
         if (!qLower.isEmpty()) {
-            for (LiveCatalog.Group g : catalog.groups) {
+            for (LiveCatalog.Group g : visibleGroups) {
+                if (LivePreferences.FAVORITES_GROUP_NAME.equals(g.name)) continue;
                 for (LiveCatalog.Channel ch : g.channels) {
                     if (ch.name.toLowerCase(Locale.ROOT).contains(qLower)
                             || g.name.toLowerCase(Locale.ROOT).contains(qLower)) {
@@ -3289,15 +3393,16 @@ final class MobileShell {
                 }
             }
         } else if (selectedGroupIdx == -1) {
-            for (LiveCatalog.Group g : catalog.groups) {
+            for (LiveCatalog.Group g : visibleGroups) {
+                if (LivePreferences.FAVORITES_GROUP_NAME.equals(g.name)) continue;
                 for (LiveCatalog.Channel ch : g.channels) {
                     displayList.add(ch);
                     displayGroups.add(g.name);
                 }
             }
-        } else {
-            int safeIdx = Math.max(0, Math.min(selectedGroupIdx, catalog.groups.size() - 1));
-            LiveCatalog.Group g = catalog.groups.get(safeIdx);
+        } else if (!visibleGroups.isEmpty()) {
+            int safeIdx = Math.max(0, Math.min(selectedGroupIdx, visibleGroups.size() - 1));
+            LiveCatalog.Group g = visibleGroups.get(safeIdx);
             for (LiveCatalog.Channel ch : g.channels) {
                 displayList.add(ch);
                 displayGroups.add(g.name);
@@ -3315,6 +3420,17 @@ final class MobileShell {
         final int cols = swDp >= 880 ? 4 : (swDp >= 580 ? 3 : 2);
         final int shownCount = Math.min(displayList.size(), Math.max(cols, maxVisibleCount));
         LinearLayout currentRow = null;
+        final Runnable rerender =
+                () ->
+                        renderLiveGroupsAndChannels(
+                                source,
+                                catalog,
+                                selectedGroupHolder,
+                                searchQuery,
+                                searchInput,
+                                maxVisibleCount,
+                                groupRow,
+                                channelGridCol);
 
         for (int i = 0; i < shownCount; i++) {
             if (i % cols == 0) {
@@ -3326,7 +3442,8 @@ final class MobileShell {
             }
             final LiveCatalog.Channel ch = displayList.get(i);
             final String groupName = displayGroups.get(i);
-            LinearLayout card = buildMobileLiveChannelCard(source, ch, groupName);
+            final boolean isFav = LivePreferences.isFavorite(favorites, ch);
+            LinearLayout card = buildMobileLiveChannelCard(source, ch, groupName, isFav, rerender);
             LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(0, -2, 1f);
             if (i % cols != cols - 1) {
                 cardLp.rightMargin = a.dp(10);
@@ -3374,7 +3491,11 @@ final class MobileShell {
     }
 
     private LinearLayout buildMobileLiveChannelCard(
-            final LiveCatalog.Source source, final LiveCatalog.Channel ch, final String groupName) {
+            final LiveCatalog.Source source,
+            final LiveCatalog.Channel ch,
+            final String groupName,
+            final boolean isFavorite,
+            final Runnable onStateChanged) {
         LinearLayout card = a.row();
         card.setGravity(Gravity.CENTER_VERTICAL);
         card.setPadding(a.dp(10), a.dp(10), a.dp(10), a.dp(10));
@@ -3389,7 +3510,11 @@ final class MobileShell {
 
         // Middle: Two-Line Info
         LinearLayout infoCol = a.vertical();
-        TextView name = a.text(ch.name, 13, MainActivity.WHITE);
+        TextView name =
+                a.text(
+                        isFavorite ? "★ " + ch.name : ch.name,
+                        13,
+                        isFavorite ? 0xfffef3c7 : MainActivity.WHITE);
         name.setTypeface(null, Typeface.BOLD);
         name.setSingleLine(true);
         name.setEllipsize(TextUtils.TruncateAt.END);
@@ -3417,29 +3542,39 @@ final class MobileShell {
                     if (ch.streams.isEmpty()) return;
                     a.playLive(source, ch, ch.streams.get(0));
                 });
-        if (ch.streams.size() > 1) {
-            card.setOnLongClickListener(
-                    v -> {
-                        String[] names = new String[ch.streams.size()];
-                        for (int n = 0; n < names.length; n++) {
+        card.setOnLongClickListener(
+                v -> {
+                    final boolean hasMulti = ch.streams.size() > 1;
+                    String[] actions = new String[1 + (hasMulti ? ch.streams.size() : 0)];
+                    actions[0] = isFavorite ? "☆ 取消收藏频道" : "★ 收藏此频道";
+                    if (hasMulti) {
+                        for (int n = 0; n < ch.streams.size(); n++) {
                             String lbl = ch.streams.get(n).label;
-                            names[n] =
-                                    "线路 "
+                            actions[n + 1] =
+                                    "播放线路 "
                                             + (n + 1)
                                             + (lbl != null && !lbl.trim().isEmpty()
                                                     ? " · " + lbl.trim()
                                                     : "");
                         }
-                        showDrawerPicker(
-                                a,
-                                ch.name + " · 选择直播线路",
-                                "长按频道可手动切换不同直播源线路",
-                                names,
-                                0,
-                                n -> a.playLive(source, ch, ch.streams.get(n)));
-                        return true;
-                    });
-        }
+                    }
+                    showDrawerPicker(
+                            a,
+                            ch.name,
+                            hasMulti ? "收藏频道或手动切换直播源线路" : "收藏后将在顶部分组置顶展示",
+                            actions,
+                            0,
+                            idx -> {
+                                if (idx == 0) {
+                                    boolean nowFav = LivePreferences.toggleFavorite(a, ch);
+                                    a.toast(nowFav ? "已收藏频道：" + ch.name : "已取消收藏：" + ch.name);
+                                    if (onStateChanged != null) onStateChanged.run();
+                                } else if (hasMulti && idx - 1 < ch.streams.size()) {
+                                    a.playLive(source, ch, ch.streams.get(idx - 1));
+                                }
+                            });
+                    return true;
+                });
         return card;
     }
 
@@ -3935,11 +4070,12 @@ final class MobileShell {
                 final int engine = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
                 final String[] engineNames = {
                     "Exo 播放器（Media3 · 4K HDR 与字幕增强）",
+                    "MPV 高画质内核（libmpv · HDR 映射 / Anime4K / ASS 字幕）",
                     "IJK 兼容模式（Media3 + FFmpeg · 直播与特殊封装优化）",
                     "Android 系统播放器"
                 };
-                final int[] engineVals = {0, 2, 1};
-                final int curEngIdx = engine == 2 ? 1 : (engine == 1 ? 2 : 0);
+                final int[] engineVals = {0, 3, 2, 1};
+                final int curEngIdx = engine == 3 ? 1 : (engine == 2 ? 2 : (engine == 1 ? 3 : 0));
                 addSettingCard(
                         body,
                         SettingIconView.ICON_ENGINE_CORE,
@@ -3990,6 +4126,66 @@ final class MobileShell {
                         "已关闭 · 默认兼容渲染模式",
                         tunnel,
                         next -> a.prefs.edit().putBoolean(Prefs.TUNNELED_PLAYBACK, next).apply());
+                final boolean hdrTm = a.prefs.getBoolean(Prefs.HDR_TONE_MAPPING, true);
+                addSettingToggleCard(
+                        body,
+                        SettingIconView.ICON_HDR_TUNNEL,
+                        "MPV HDR 自动色调映射",
+                        "已开启 · libplacebo 峰值动态映射",
+                        "已关闭 · 使用原始色彩输出",
+                        hdrTm,
+                        next -> a.prefs.edit().putBoolean(Prefs.HDR_TONE_MAPPING, next).apply());
+                final boolean anime4k = a.prefs.getBoolean(Prefs.ANIME4K_ENABLED, false);
+                addSettingToggleCard(
+                        body,
+                        SettingIconView.ICON_DECODER_CHIP,
+                        "MPV Anime4K 实时超分",
+                        "已开启 · CNN x2 动漫/高清锐化超分",
+                        "已关闭 · 默认画质渲染",
+                        anime4k,
+                        next -> a.prefs.edit().putBoolean(Prefs.ANIME4K_ENABLED, next).apply());
+                final boolean hlsProxy = a.prefs.getBoolean(Prefs.HLS_PROXY_ENABLED, true);
+                addSettingToggleCard(
+                        body,
+                        SettingIconView.ICON_ENGINE_CORE,
+                        "HLS 伪装分片实时修正代理",
+                        "已开启 · 自动剥离伪装 PNG/JPG 切片头",
+                        "已关闭 · 直连 m3u8 分片",
+                        hlsProxy,
+                        next -> a.prefs.edit().putBoolean(Prefs.HLS_PROXY_ENABLED, next).apply());
+                final boolean hlsAdStrip = a.prefs.getBoolean(Prefs.HLS_AD_STRIP, false);
+                addSettingToggleCard(
+                        body,
+                        SettingIconView.ICON_ENGINE_CORE,
+                        "HLS 点播广告分段过滤",
+                        "已开启 · 启发式剔除异域短插播广告段",
+                        "已关闭 · 保留完整播放列表",
+                        hlsAdStrip,
+                        next -> a.prefs.edit().putBoolean(Prefs.HLS_AD_STRIP, next).apply());
+                final boolean nativePy = a.prefs.getBoolean(Prefs.NATIVE_PYTHON_ENABLED, true);
+                addSettingToggleCard(
+                        body,
+                        SettingIconView.ICON_DECODER_CHIP,
+                        "内置 CPython 3.11 爬虫引擎",
+                        "已开启 · 原生执行 Python 3.11 扩展源",
+                        "已关闭 · 回退内置 Skulpt 解释器",
+                        nativePy,
+                        next -> {
+                            a.prefs.edit().putBoolean(Prefs.NATIVE_PYTHON_ENABLED, next).apply();
+                            a.closeEngines();
+                        });
+                final boolean wvJs = a.prefs.getBoolean(Prefs.WEBVIEW_JS_FALLBACK, true);
+                addSettingToggleCard(
+                        body,
+                        SettingIconView.ICON_ENGINE_CORE,
+                        "异步 JS 源 WebView 兜底",
+                        "已开启 · QuickJS 异常时自动切换 Blink WebView",
+                        "已关闭 · 仅使用 QuickJS 沙箱",
+                        wvJs,
+                        next -> {
+                            a.prefs.edit().putBoolean(Prefs.WEBVIEW_JS_FALLBACK, next).apply();
+                            a.closeEngines();
+                        });
                 final boolean autoNext = a.prefs.getBoolean(Prefs.AUTO_NEXT, true);
                 addSettingToggleCard(
                         body,
@@ -4518,8 +4714,12 @@ final class MobileShell {
             if (k.contains("settings-accounts") || t.contains("网盘")) return ICON_NETDISK;
             if (k.contains("settings-live-import") || t.contains("直播")) return ICON_LIVE_TV;
             if (k.contains("settings-import") || t.contains("配置源")) return ICON_LINK_CODE;
-            if (k.contains("settings-depots") || t.contains("线路") || t.contains("切换"))
-                return ICON_SWITCH_SOURCE;
+            if (k.contains("settings-depots")
+                    || k.contains(Prefs.TV_PLAYER_TOOLBAR_ORDER)
+                    || t.contains("线路")
+                    || t.contains("切换")
+                    || t.contains("工具条")
+                    || t.contains("按钮顺序")) return ICON_SWITCH_SOURCE;
             if (k.contains(Prefs.EXPERIMENTAL_CSP) || t.contains("扩展")) return ICON_PLUGIN_EXT;
             if (k.contains("settings-backup")
                     || k.contains("settings-restore")

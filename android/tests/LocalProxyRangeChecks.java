@@ -71,6 +71,7 @@ public final class LocalProxyRangeChecks {
         testDanmakuActionPushRoute();
         testDisguisedMp3VideoExtractorOrder();
         testClanUriAndApi23TlsSupport();
+        testChunkedProxyTransientTruncationRecovery();
         System.out.println("ALL " + passed + " LocalProxy + ChunkedProxyDataSource checks passed.");
     }
 
@@ -611,6 +612,92 @@ public final class LocalProxyRangeChecks {
                                                 .getJSONObject(0)
                                                 .getString("id")),
                 "CloudSync syncHistory=false syncs subscriptions while isolating local & remote history (#44)");
+    }
+
+    private static void testChunkedProxyTransientTruncationRecovery() throws Exception {
+        final long totalSize = 192 * 1024L;
+        final int chunkSize = 64 * 1024;
+        final AtomicInteger chunkCalls = new AtomicInteger();
+        final AtomicBoolean injectedDrop = new AtomicBoolean(false);
+
+        LocalProxy.SourceResolver flakyResolver =
+                (app, config, params) -> {
+                    int call = chunkCalls.incrementAndGet();
+                    long start = parseRangeStart(params);
+                    long end = Math.min(totalSize - 1L, start + chunkSize - 1L);
+                    int len = (int) (end - start + 1L);
+                    Map<String, String> h = new LinkedHashMap<>();
+                    h.put("Accept-Ranges", "bytes");
+                    h.put("Content-Range", "bytes " + start + "-" + end + "/" + totalSize);
+                    // On chunk #2, simulate a transient upstream netdisk TCP drop halfway through!
+                    if (start == chunkSize && injectedDrop.compareAndSet(false, true)) {
+                        byte[] truncated = generateSlice(start, len / 2);
+                        InputStream shortStream =
+                                new InputStream() {
+                                    int pos = 0;
+
+                                    @Override
+                                    public int read() {
+                                        return pos < truncated.length
+                                                ? (truncated[pos++] & 0xff)
+                                                : -1;
+                                    }
+
+                                    @Override
+                                    public int read(byte[] b, int off, int l) {
+                                        if (pos >= truncated.length) return -1;
+                                        int n = Math.min(l, truncated.length - pos);
+                                        System.arraycopy(truncated, pos, b, off, n);
+                                        pos += n;
+                                        return n;
+                                    }
+                                };
+                        // Declare full Content-Length so client sees unexpected EOF mid-chunk
+                        h.put("Content-Length", String.valueOf(len));
+                        return new Object[] {206, "video/x-matroska", shortStream, h};
+                    }
+                    return new Object[] {
+                        206,
+                        "video/x-matroska",
+                        new ByteArrayInputStream(generateSlice(start, len)),
+                        h
+                    };
+                };
+
+        try (LocalProxy proxy = new LocalProxy(null, null, params -> null, flakyResolver)) {
+            String url =
+                    "http://127.0.0.1:"
+                            + proxy.server.getLocalPort()
+                            + "/proxy?do=quark&id=flaky&_mm_token="
+                            + proxy.token;
+            DefaultHttpDataSource.Factory http =
+                    new DefaultHttpDataSource.Factory()
+                            .setConnectTimeoutMs(5000)
+                            .setReadTimeoutMs(5000);
+            DataSource ds = new MoviePlayer.ChunkedProxyDataSource.Factory(http).createDataSource();
+            long openedLen = ds.open(new DataSpec.Builder().setUri(Uri.parse(url)).build());
+            check(openedLen == totalSize, "flaky chunked MKV exposes full byte length");
+            byte[] buf = new byte[16 * 1024];
+            long offset = 0;
+            int n;
+            boolean bytesMatch = true;
+            while ((n = ds.read(buf, 0, buf.length)) != C.RESULT_END_OF_INPUT) {
+                for (int i = 0; i < n; i++) {
+                    if (buf[i] != expectedByteAt(offset + i)) {
+                        bytesMatch = false;
+                        break;
+                    }
+                }
+                offset += n;
+            }
+            ds.close();
+            check(
+                    injectedDrop.get()
+                            && offset == totalSize
+                            && bytesMatch
+                            && chunkCalls.get() >= 4,
+                    "ChunkedProxyDataSource transparently recovers mid-chunk upstream truncation with exact byte integrity");
+        }
     }
 
     private static final class HttpReply {

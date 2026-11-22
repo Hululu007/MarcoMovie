@@ -234,14 +234,30 @@ final class TvCuratedHome {
 
                 if (!cardSub.isEmpty()) {
                     String[] parts = cardSub.split("\\s*/\\s*");
-                    if (parts.length >= 2) v.area = parts[1].trim();
-                    if (parts.length >= 3) v.genre = parts[2].trim();
-                    if (parts.length >= 4) v.actor = parts[3].trim();
+                    int offset = 0;
+                    if (parts.length > 0 && YEAR_PATTERN.matcher(parts[0].trim()).matches()) {
+                        offset = 1;
+                    }
+                    if (parts.length > offset) {
+                        v.area = deduplicateMetadataSegment(parts[offset], " / ", 2);
+                    }
+                    if (parts.length > offset + 1) {
+                        v.genre = deduplicateMetadataSegment(parts[offset + 1], " ", 3);
+                    }
+                    if (parts.length > offset + 2) {
+                        v.actor = parts[offset + 2].trim();
+                    }
                 }
-                String info = item.optString("info", "").trim();
                 String desc = item.optString("description", "").trim();
-                if (desc.isEmpty()) desc = item.optString("null_rating_reason", "").trim();
-                if (desc.isEmpty()) desc = !info.isEmpty() ? info : cardSub;
+                if (desc.isEmpty()) {
+                    String info = item.optString("info", "").trim();
+                    if (!info.isEmpty() && !looksLikeMetadataSubtitle(info)) {
+                        desc = info;
+                    }
+                }
+                if (looksLikeMetadataSubtitle(desc)) {
+                    desc = "";
+                }
                 v.description = desc;
 
                 String episodesInfo = item.optString("episodes_info", "").trim();
@@ -258,6 +274,43 @@ final class TvCuratedHome {
         } catch (Throwable ignored) {
         }
         return out;
+    }
+
+    static String deduplicateMetadataSegment(String raw, String sep, int maxItems) {
+        if (raw == null || raw.trim().isEmpty()) return "";
+        String[] tokens = raw.trim().split("[,，、/|;；\\s]+");
+        java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
+        StringBuilder out = new StringBuilder();
+        int count = 0;
+        for (String token : tokens) {
+            String clean = token.trim();
+            if (clean.isEmpty()) continue;
+            if (!seen.add(ImmersivePoster.normalizeFactTokenKey(clean))) continue;
+            if (out.length() > 0) out.append(sep);
+            out.append(clean);
+            if (++count >= maxItems) break;
+        }
+        return out.toString();
+    }
+
+    /**
+     * Detects Douban's {@code card_subtitle} metadata strings (e.g. "2025 / 中国大陆 / 古装 权谋 / 演员")
+     * so they are never shown a second time as synopsis below the metadata badges.
+     */
+    static boolean looksLikeMetadataSubtitle(String text) {
+        if (text == null) return false;
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) return false;
+        String[] slashes = trimmed.split("\\s*/\\s*");
+        if (slashes.length >= 3 && trimmed.length() <= 140) {
+            if (YEAR_PATTERN.matcher(slashes[0].trim()).matches()) {
+                return true;
+            }
+            if (!trimmed.contains("。") && !trimmed.contains("！") && !trimmed.contains("？")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static Catalog buildCatalog(List<Cms.Video> dramas, List<Cms.Video> movies, boolean live) {

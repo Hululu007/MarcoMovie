@@ -46,6 +46,93 @@ final class HomeDock {
     private java.lang.ref.WeakReference<View> menuReturnRef;
     final float navScale, fitScale;
     final int crossDp, mainDp, cellDp;
+    final int sideMarginDp, topMarginDp, topSafeInsetDp;
+    private float runtimeOverflowScale = 1f;
+
+    static final class AdaptiveTopMetrics {
+        final float fitScale;
+        final int sideMarginDp;
+        final int topMarginDp;
+        final int crossDp;
+        final int cellDp;
+        final int topSafeInsetDp;
+
+        AdaptiveTopMetrics(
+                float fitScale,
+                int sideMarginDp,
+                int topMarginDp,
+                int crossDp,
+                int cellDp,
+                int topSafeInsetDp) {
+            this.fitScale = fitScale;
+            this.sideMarginDp = sideMarginDp;
+            this.topMarginDp = topMarginDp;
+            this.crossDp = crossDp;
+            this.cellDp = cellDp;
+            this.topSafeInsetDp = topSafeInsetDp;
+        }
+    }
+
+    /**
+     * Pure-JVM adaptive top navigation bar sizing across real TV resolutions (720p / 1080p / 4K /
+     * ultrawide), OEM DPI scales, system font scales, and user navigation scale preferences.
+     * Guarantees the left brand mark and right 8-item capsule never collide or clip.
+     */
+    static AdaptiveTopMetrics computeAdaptiveTopMetrics(
+            int windowWidthPx,
+            int windowHeightPx,
+            float density,
+            float fontScale,
+            float requestedNavScale,
+            int itemCount) {
+        float safeDensity = Math.max(0.5f, density);
+        float widthDp = Math.max(360f, windowWidthPx / safeDensity);
+        float heightDp = Math.max(240f, windowHeightPx / safeDensity);
+        int count = Math.max(1, itemCount);
+        float safeReq = Math.max(0.75f, Math.min(1.25f, requestedNavScale));
+        float safeFont = Math.max(0.85f, Math.min(1.35f, fontScale));
+
+        // Proportional viewport factor against standard 960x540 TV logical canvas.
+        float screenFactor = Math.min(widthDp / 960f, heightDp / 540f);
+        float clampedScreen = Math.max(0.74f, Math.min(1.18f, screenFactor));
+        int sideMargin = Math.max(20, Math.min(52, Math.round(widthDp * 0.045f)));
+        int topMargin = Math.max(10, Math.min(22, Math.round(heightDp * 0.029f)));
+
+        // Conservative width budget at scale=1.0: brand (~142dp) + 8 labeled pills (~604dp) + gap.
+        float brandAtOneDp = 28f + 9f + 105f * Math.max(1f, safeFont * 0.96f);
+        float itemAtOneDp = 20f + 18f + 4.5f + 27f * Math.max(1f, safeFont * 0.96f) + 4f;
+        float railAtOneDp = 16f + count * itemAtOneDp;
+        float minGapDp = Math.max(18f, Math.min(32f, widthDp * 0.025f));
+        float availableWidthDp = Math.max(220f, widthDp - sideMargin * 2f - minGapDp);
+        float maxScaleByWidth = availableWidthDp / (brandAtOneDp + railAtOneDp);
+
+        // Keep top bar height sleek (<= 10.5% of viewport height).
+        float maxScaleByHeight = (heightDp * 0.105f) / 46f;
+
+        float desired = safeReq * clampedScreen;
+        float fit = Math.min(desired, Math.min(maxScaleByWidth, maxScaleByHeight));
+        fit = Math.max(0.60f, Math.min(1.22f, fit));
+
+        int cross = Math.max(32, Math.round(46f * fit));
+        int cell = Math.max(26, Math.round(38f * fit));
+        int safeTopInset = topMargin + cross + Math.max(20, Math.round(22f * fit));
+        return new AdaptiveTopMetrics(fit, sideMargin, topMargin, cross, cell, safeTopInset);
+    }
+
+    int topSafeInsetPx() {
+        if (tvTopLabeled) return a.dp(topSafeInsetDp);
+        if (topMode) return a.dp(crossDp + 34);
+        return a.dp(24);
+    }
+
+    int leftSafeInsetPx() {
+        if (tvLeft) return a.dp(Math.max(84, crossDp + 34));
+        return a.dp(sideMarginDp);
+    }
+
+    int rightSafeInsetPx() {
+        return a.dp(sideMarginDp);
+    }
 
     static String[] tvNavLabels() {
         return new String[] {"首页", "搜索", "历史", "直播", "我的", "网盘", "投屏", "设置"};
@@ -124,25 +211,51 @@ final class HomeDock {
                 tvTopLabeled
                         ? 630
                         : (a.isTvDevice() ? (horizontal ? 374 : 368) : (horizontal ? 342 : 338));
-        float density = Math.max(0.5f, a.getResources().getDisplayMetrics().density);
-        int windowMainDp =
-                Math.max(
-                        260,
-                        Math.round((horizontal ? a.windowWidth() : a.windowHeight()) / density)
-                                - (tvTopLabeled ? 220 : 32));
-        fitScale =
-                tvLeft
-                        ? TvRailMetrics.fit(
-                                navScale,
-                                Math.max(1, a.windowHeight() - a.dp(32)),
-                                density,
-                                items.length)
-                        : Math.round(rawMainBase * navScale) > windowMainDp
-                                ? Math.min(navScale, windowMainDp / (float) rawMainBase)
-                                : navScale;
-        cellDp = Math.round((tvTopLabeled ? 38 : (a.isTvDevice() ? 42 : 38)) * fitScale);
-        crossDp = Math.round((tvTopLabeled ? 46 : (a.isTvDevice() ? 56 : 50)) * fitScale);
-        mainDp = Math.round(rawMainBase * fitScale);
+        android.util.DisplayMetrics dm = a.getResources().getDisplayMetrics();
+        float density = Math.max(0.5f, dm.density);
+        float fontScale =
+                a.getResources().getConfiguration() != null
+                        ? a.getResources().getConfiguration().fontScale
+                        : 1f;
+        if (tvTopLabeled) {
+            AdaptiveTopMetrics m =
+                    computeAdaptiveTopMetrics(
+                            a.windowWidth(),
+                            a.windowHeight(),
+                            density,
+                            fontScale,
+                            navScale,
+                            items.length);
+            fitScale = m.fitScale;
+            sideMarginDp = m.sideMarginDp;
+            topMarginDp = m.topMarginDp;
+            crossDp = m.crossDp;
+            cellDp = m.cellDp;
+            topSafeInsetDp = m.topSafeInsetDp;
+            mainDp = Math.round(rawMainBase * fitScale);
+        } else {
+            int windowMainDp =
+                    Math.max(
+                            260,
+                            Math.round((horizontal ? a.windowWidth() : a.windowHeight()) / density)
+                                    - 32);
+            fitScale =
+                    tvLeft
+                            ? TvRailMetrics.fit(
+                                    navScale,
+                                    Math.max(1, a.windowHeight() - a.dp(32)),
+                                    density,
+                                    items.length)
+                            : Math.round(rawMainBase * navScale) > windowMainDp
+                                    ? Math.min(navScale, windowMainDp / (float) rawMainBase)
+                                    : navScale;
+            sideMarginDp = a.isTvDevice() ? 44 : 18;
+            topMarginDp = 16;
+            cellDp = Math.round((a.isTvDevice() ? 42 : 38) * fitScale);
+            crossDp = Math.round((a.isTvDevice() ? 56 : 50) * fitScale);
+            topSafeInsetDp = topMode ? crossDp + 34 : 24;
+            mainDp = Math.round(rawMainBase * fitScale);
+        }
         rail =
                 new LinearLayout(a) {
                     @Override
@@ -157,6 +270,7 @@ final class HomeDock {
                         if (tvTopLabeled) {
                             setPivotX(getWidth());
                             setPivotY(0f);
+                            reconcileTopOverflow();
                         }
                         selection.refresh();
                     }
@@ -195,13 +309,16 @@ final class HomeDock {
                             });
             topScrim.setBackground(scrimBg);
             topScrim.setAlpha(computeTopScrimAlpha(0f));
-            a.root.addView(topScrim, new FrameLayout.LayoutParams(-1, a.dp(146), Gravity.TOP));
+            a.root.addView(
+                    topScrim,
+                    new FrameLayout.LayoutParams(
+                            -1, a.dp(Math.max(108, topSafeInsetDp + 52)), Gravity.TOP));
 
             topBrandPill = buildTopBrandPill();
             FrameLayout.LayoutParams brandLp =
                     new FrameLayout.LayoutParams(-2, a.dp(crossDp), Gravity.TOP | Gravity.LEFT);
-            brandLp.leftMargin = a.dp(44);
-            brandLp.topMargin = a.dp(16);
+            brandLp.leftMargin = a.dp(sideMarginDp);
+            brandLp.topMargin = a.dp(topMarginDp);
             a.root.addView(topBrandPill, brandLp);
 
             boolean reducedTrans = a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
@@ -253,12 +370,12 @@ final class HomeDock {
                                         Gravity.LEFT | Gravity.TOP);
         if (bottomMode) size.bottomMargin = a.dp(14);
         else if (tvTopLabeled) {
-            size.topMargin = a.dp(16);
-            size.rightMargin = a.dp(44);
-        } else if (topMode) size.topMargin = a.dp(16);
+            size.topMargin = a.dp(topMarginDp);
+            size.rightMargin = a.dp(sideMarginDp);
+        } else if (topMode) size.topMargin = a.dp(topMarginDp);
         else {
             size.leftMargin = a.dp(12);
-            size.topMargin = a.dp(16);
+            size.topMargin = a.dp(topMarginDp);
         }
         a.root.addView(rail, size);
         if (topMode && !tvTopLabeled) {
@@ -327,6 +444,7 @@ final class HomeDock {
                 pillItem.setId(View.generateViewId());
                 pillItem.setContentDescription(labels[i]);
                 pillItem.setGravity(Gravity.CENTER);
+                UiCompat.setDefaultFocusHighlightEnabled(pillItem, false);
                 pillItem.setFocusable(true);
                 pillItem.setFocusableInTouchMode(true);
                 pillItem.setClickable(true);
@@ -353,6 +471,7 @@ final class HomeDock {
                                 labels[i],
                                 12.8f * fitScale,
                                 i == 0 ? MainActivity.WHITE : 0xbce2ebf7);
+                lbl.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, a.dp(12.8f * fitScale));
                 lbl.setTypeface(null, Typeface.BOLD);
                 lbl.setSingleLine(true);
                 lbl.setIncludeFontPadding(false);
@@ -384,6 +503,7 @@ final class HomeDock {
             icon.setTag(keys[i]);
             icon.setId(View.generateViewId());
             icon.setContentDescription(labels[i]);
+            UiCompat.setDefaultFocusHighlightEnabled(icon, false);
             icon.setFocusable(true);
             icon.setFocusableInTouchMode(true);
             icon.setClickable(true);
@@ -480,6 +600,7 @@ final class HomeDock {
         pill.addView(mark, iconLp);
 
         brandText = a.text("Marco Movie", 16f * fitScale, MainActivity.WHITE);
+        brandText.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, a.dp(16f * fitScale));
         brandText.setTag("home-brand-word");
         brandText.setTypeface(null, Typeface.BOLD);
         brandText.setSingleLine(true);
@@ -487,6 +608,25 @@ final class HomeDock {
         brandText.setShadowLayer(a.dp(8), 0, a.dp(2), 0xb8000000);
         pill.addView(brandText);
         return pill;
+    }
+
+    /** Runtime safety guard: if OEM font metrics still push rail near brand, scale both cleanly. */
+    private void reconcileTopOverflow() {
+        if (!tvTopLabeled || topBrandPill == null || a.root == null) return;
+        int rootW = a.root.getWidth();
+        int brandW = topBrandPill.getWidth();
+        int railW = rail.getWidth();
+        if (rootW <= 0 || brandW <= 0 || railW <= 0) return;
+        int marginPx = a.dp(sideMarginDp);
+        int minGapPx = a.dp(16);
+        int available = rootW - marginPx * 2 - minGapPx;
+        int needed = brandW + railW;
+        float nextOverflow = needed > available && available > 0 ? available / (float) needed : 1f;
+        nextOverflow = Math.max(0.65f, Math.min(1f, nextOverflow));
+        if (Math.abs(nextOverflow - runtimeOverflowScale) > 0.01f) {
+            runtimeOverflowScale = nextOverflow;
+            applyTopShrink(lastScrollProgress < 0f ? 0f : lastScrollProgress, false);
+        }
     }
 
     private void updateTopFocusBoost(boolean focused) {
@@ -511,7 +651,7 @@ final class HomeDock {
                 topFocused
                         ? Math.max(0.58f, computeTopScrimAlpha(progress))
                         : computeTopScrimAlpha(progress);
-        float targetScale = 1f - 0.08f * effective;
+        float targetScale = (1f - 0.08f * effective) * runtimeOverflowScale;
         float targetTy = -a.dp(4) * effective;
         float brandAlpha = 1f - 0.08f * effective;
         float railAlpha = topFocused ? 1f : (1f - 0.06f * effective);

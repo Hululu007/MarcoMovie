@@ -11,6 +11,7 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -190,21 +191,63 @@ final class CatalogScreen {
     }
 
     static String historyLabel(WatchHistory.Entry e) {
-        return e.episode
-                + " · "
-                + (e.complete()
+        if (e == null) return "";
+        String ep = e.episode == null ? "" : e.episode.trim();
+        String prog =
+                e.complete()
                         ? "已看完"
                         : PlaybackController.formatTime(e.position)
                                 + (e.duration > 0
                                         ? " / " + PlaybackController.formatTime(e.duration)
-                                        : ""));
+                                        : "");
+        return ep.isEmpty() ? prog : ep + " · " + prog;
+    }
+
+    static List<Cms.Site> collectAlternativeHistorySites(MainActivity a, String failedSiteKey) {
+        if (a == null || a.config == null || a.config.sites == null) {
+            return java.util.Collections.emptyList();
+        }
+        List<Cms.Site> pool = new ArrayList<>();
+        for (Cms.Site s : SourcePreferences.prioritized(a, a.config.sites)) {
+            if (s == null || !s.searchable || !a.available(s)) continue;
+            if (SourceController.isConfigOrNetdiskSite(s)) continue;
+            pool.add(s);
+        }
+        String selectedKey = a.prefs != null ? a.prefs.getString(Prefs.SELECTED_SITE, "") : "";
+        return HistoryResumeMatcher.rankAlternativeSites(
+                pool, failedSiteKey, selectedKey, a.isTvDevice() ? 8 : 12);
+    }
+
+    static boolean hasAlternativeHistorySources(MainActivity a, String failedSiteKey) {
+        return !collectAlternativeHistorySites(a, failedSiteKey).isEmpty();
     }
 
     static void resumeHistory(MainActivity a, WatchHistory.Entry e) {
+        if (a == null || e == null) return;
+        if (a.config == null) {
+            String origin = a.prefs != null ? a.prefs.getString(Prefs.ORIGIN, "") : "";
+            if (origin != null && !origin.trim().isEmpty()) {
+                a.toast("正在加载片源配置，请稍后再点击继续观看");
+            } else {
+                a.notice("当前尚未导入片源配置，导入片源后即可继续观看该历史记录。");
+            }
+            return;
+        }
         Cms.Site site = null;
-        if (a.config != null) for (Cms.Site s : a.config.sites) if (s.key.equals(e.site)) site = s;
+        for (Cms.Site s : a.config.sites) {
+            if (s != null && s.key != null && s.key.equals(e.site)) {
+                site = s;
+                break;
+            }
+        }
         if (site == null || !a.available(site)) {
-            if (a.config != null && e.title != null && !e.title.trim().isEmpty()) {
+            if (e.title != null
+                    && !e.title.trim().isEmpty()
+                    && hasAlternativeHistorySources(a, e.site)) {
+                resumeHistoryFromAlternativeSources(a, e, e.site, "原片源不在当前订阅中", false);
+                return;
+            }
+            if (e.title != null && !e.title.trim().isEmpty()) {
                 if (!a.isTvDevice()) {
                     a.toast("原片源不在当前订阅中，已自动全网搜索该影片");
                     a.openSearch(e.title);
@@ -222,6 +265,8 @@ final class CatalogScreen {
             return;
         }
         final Cms.Site selected = site;
+        a.historyFallbackBookmark = WatchHistory.cloneEntry(e);
+        a.historyFallbackInFlight = false;
         Cms.Video listing = new Cms.Video();
         listing.id = e.id;
         listing.title = e.title;
@@ -229,34 +274,320 @@ final class CatalogScreen {
         a.open(new MainActivity.Screen(() -> a.detail(selected, listing)), true);
     }
 
+    private static final class AltHistoryHit {
+        final Cms.Site site;
+        final Cms.Video video;
+        final int score;
+
+        AltHistoryHit(Cms.Site site, Cms.Video video, int score) {
+            this.site = site;
+            this.video = video;
+            this.score = score;
+        }
+    }
+
+    static void resumeHistoryFromAlternativeSources(
+            final MainActivity a,
+            final WatchHistory.Entry rawBookmark,
+            final String failedSiteKey,
+            final String reason,
+            final boolean replaceCurrentScreen) {
+        if (a == null || rawBookmark == null || a.isFinishing()) return;
+        final WatchHistory.Entry bookmark = WatchHistory.cloneEntry(rawBookmark);
+        final String title = bookmark.title == null ? "" : bookmark.title.trim();
+        if (title.isEmpty()) {
+            a.historyFallbackInFlight = false;
+            a.notice("该观看记录缺少片名，无法自动匹配其他片源。");
+            return;
+        }
+        final List<Cms.Site> candidates = collectAlternativeHistorySites(a, failedSiteKey);
+        if (candidates.isEmpty()) {
+            a.historyFallbackInFlight = false;
+            new AppDialog.Builder(a)
+                    .setTitle("原片源暂不可用")
+                    .setMessage(reason + "，当前没有其他可用片源可自动切换，是否前往全网搜索「" + title + "」？")
+                    .setPositiveButton("全网搜索", (d, w) -> a.openSearch(title))
+                    .setNegativeButton("保留记录", null)
+                    .show();
+            return;
+        }
+
+        a.historyFallbackInFlight = true;
+        final TvSearchContext ctx = new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
+        final java.util.concurrent.atomic.AtomicBoolean cancelled =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        final java.util.concurrent.atomic.AtomicBoolean resolvedOk =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        final SearchCoordinator[] coordRef = new SearchCoordinator[1];
+
+        final TextView statusText =
+                a.text(
+                        reason + "，正在从其他 " + candidates.size() + " 个片源自动匹配《" + title + "》…",
+                        14.5f,
+                        MainActivity.WHITE);
+        statusText.setLineSpacing(a.dp(4), 1f);
+        final AppDialog progressDialog =
+                new AppDialog.Builder(a)
+                        .setTitle("自动切换可用片源")
+                        .setView(statusText)
+                        .setNegativeButton(
+                                "取消",
+                                (d, w) -> {
+                                    cancelled.set(true);
+                                    a.historyFallbackInFlight = false;
+                                    if (coordRef[0] != null) coordRef[0].close();
+                                })
+                        .create();
+        progressDialog.setOnCancelListener(
+                d -> {
+                    cancelled.set(true);
+                    a.historyFallbackInFlight = false;
+                    if (coordRef[0] != null) coordRef[0].close();
+                });
+        progressDialog.show();
+
+        final List<AltHistoryHit> hits = new ArrayList<>();
+        final int[] finishedCount = {0};
+        final boolean[] detailChecking = {false};
+        final boolean[] allDone = {false};
+        final Runnable[] tryNextHitRef = new Runnable[1];
+
+        final Runnable handleAllExhausted =
+                () -> {
+                    if (cancelled.get() || resolvedOk.get() || a.isFinishing()) return;
+                    a.historyFallbackInFlight = false;
+                    if (coordRef[0] != null) coordRef[0].close();
+                    if (progressDialog.isShowing()) progressDialog.dismiss();
+                    new AppDialog.Builder(a)
+                            .setTitle("未找到可直接续播的备用源")
+                            .setMessage("已尝试当前订阅中的其他片源，暂未匹配到《" + title + "》的可播剧集。是否打开全网搜索手动挑选？")
+                            .setPositiveButton("全网搜索", (d, w) -> a.openSearch(title))
+                            .setNegativeButton("保留记录", null)
+                            .show();
+                };
+
+        tryNextHitRef[0] =
+                () -> {
+                    if (cancelled.get()
+                            || resolvedOk.get()
+                            || detailChecking[0]
+                            || a.isFinishing()
+                            || !ctx.matches(a.config, a.privateMode, a.engineEpoch)) {
+                        return;
+                    }
+                    if (hits.isEmpty()) {
+                        if (allDone[0]) handleAllExhausted.run();
+                        return;
+                    }
+                    detailChecking[0] = true;
+                    final AltHistoryHit hit = hits.remove(0);
+                    statusText.setText("已匹配到「" + hit.site.name + "」，正在拉取剧集并恢复上次进度…");
+                    a.details.execute(
+                            () -> {
+                                Cms.Video detailVideo = null;
+                                try {
+                                    boolean hasLines =
+                                            hit.video.lines != null && !hit.video.lines.isEmpty();
+                                    if (hasLines) {
+                                        detailVideo = hit.video;
+                                    } else {
+                                        SourceEngine eng =
+                                                SourceController.engine(a, hit.site, ctx);
+                                        Cms.Listing list = Cms.listing(eng.detail(hit.video.id));
+                                        if (!list.videos.isEmpty()) {
+                                            detailVideo = list.videos.get(0);
+                                        }
+                                    }
+                                    if (detailVideo != null) {
+                                        if (detailVideo.id == null
+                                                || detailVideo.id.trim().isEmpty()) {
+                                            detailVideo.id = hit.video.id;
+                                        }
+                                        if (detailVideo.title == null
+                                                || detailVideo.title.isEmpty()) {
+                                            detailVideo.title =
+                                                    hit.video.title != null
+                                                                    && !hit.video.title.isEmpty()
+                                                            ? hit.video.title
+                                                            : title;
+                                        }
+                                        if (detailVideo.poster == null
+                                                || detailVideo.poster.isEmpty()) {
+                                            detailVideo.poster =
+                                                    hit.video.poster != null
+                                                                    && !hit.video.poster.isEmpty()
+                                                            ? hit.video.poster
+                                                            : bookmark.poster;
+                                        }
+                                    }
+                                } catch (Throwable ignored) {
+                                    detailVideo = null;
+                                }
+                                final Cms.Video readyVideo = detailVideo;
+                                final HistoryResumeMatcher.EpisodeMatch matched =
+                                        readyVideo != null
+                                                ? HistoryResumeMatcher.matchEpisode(
+                                                        readyVideo, bookmark)
+                                                : null;
+                                a.ui.post(
+                                        () -> {
+                                            detailChecking[0] = false;
+                                            if (cancelled.get()
+                                                    || resolvedOk.get()
+                                                    || a.isFinishing()
+                                                    || !ctx.matches(
+                                                            a.config, a.privateMode, a.engineEpoch))
+                                                return;
+                                            if (readyVideo != null && matched != null) {
+                                                resolvedOk.set(true);
+                                                if (coordRef[0] != null) coordRef[0].close();
+                                                if (progressDialog.isShowing()) {
+                                                    progressDialog.dismiss();
+                                                }
+                                                int resumePos = bookmark.resume();
+                                                String oldKey = bookmark.key();
+                                                String newKey = hit.site.key + "\n" + readyVideo.id;
+                                                a.migratingHistoryOldKey =
+                                                        oldKey.equals(newKey) ? null : oldKey;
+                                                a.historyFallbackBookmark = null;
+                                                a.resumeAt = resumePos;
+                                                if (replaceCurrentScreen
+                                                        && a.current != null
+                                                        && !a.current.player) {
+                                                    a.open(
+                                                            new MainActivity.Screen(
+                                                                    () ->
+                                                                            a.detail(
+                                                                                    hit.site,
+                                                                                    readyVideo,
+                                                                                    readyVideo)),
+                                                            false);
+                                                } else if (a.current == null || !a.current.player) {
+                                                    a.open(
+                                                            new MainActivity.Screen(
+                                                                    () ->
+                                                                            a.detail(
+                                                                                    hit.site,
+                                                                                    readyVideo,
+                                                                                    readyVideo)),
+                                                            true);
+                                                }
+                                                String epHint =
+                                                        matched.episode.name != null
+                                                                        && !matched.episode
+                                                                                .name
+                                                                                .trim()
+                                                                                .isEmpty()
+                                                                ? " · "
+                                                                        + matched.episode.name
+                                                                                .trim()
+                                                                : "";
+                                                String posHint =
+                                                        resumePos > 0
+                                                                ? "（续播 "
+                                                                        + PlaybackController
+                                                                                .formatTime(
+                                                                                        resumePos)
+                                                                        + "）"
+                                                                : "";
+                                                a.toast(
+                                                        "原源已失效，已自动切换至「"
+                                                                + hit.site.name
+                                                                + "」"
+                                                                + epHint
+                                                                + posHint);
+                                                a.resolvePlayer(
+                                                        hit.site,
+                                                        readyVideo,
+                                                        matched.line,
+                                                        matched.episode);
+                                            } else {
+                                                tryNextHitRef[0].run();
+                                            }
+                                        });
+                            });
+                };
+
+        int maxConc = a.isTvDevice() ? 1 : 2;
+        SearchCoordinator.configureThreads(a.prefs.getInt(Prefs.SEARCH_THREADS, 6));
+        SearchCoordinator coordinator =
+                new SearchCoordinator(
+                        (site, q) -> {
+                            SourceEngine eng = SourceController.engine(a, site, ctx);
+                            return Cms.listing(eng.search(q, 1)).videos;
+                        },
+                        (site, videos, outcome) ->
+                                a.ui.post(
+                                        () -> {
+                                            if (cancelled.get()
+                                                    || resolvedOk.get()
+                                                    || a.isFinishing()) return;
+                                            finishedCount[0]++;
+                                            if (videos != null && !videos.isEmpty()) {
+                                                Cms.Video bestCand = null;
+                                                int bestScore = 54;
+                                                for (Cms.Video cand : videos) {
+                                                    int sc =
+                                                            HistoryResumeMatcher.scoreTitleMatch(
+                                                                    bookmark, cand);
+                                                    if (sc > bestScore) {
+                                                        bestScore = sc;
+                                                        bestCand = cand;
+                                                    }
+                                                }
+                                                if (bestCand != null) {
+                                                    hits.add(
+                                                            new AltHistoryHit(
+                                                                    site, bestCand, bestScore));
+                                                    java.util.Collections.sort(
+                                                            hits,
+                                                            (x, y) ->
+                                                                    Integer.compare(
+                                                                            y.score, x.score));
+                                                    if (!detailChecking[0]) {
+                                                        tryNextHitRef[0].run();
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            if (!detailChecking[0]) {
+                                                statusText.setText(
+                                                        reason
+                                                                + "，正在匹配《"
+                                                                + title
+                                                                + "》其他片源（"
+                                                                + finishedCount[0]
+                                                                + "/"
+                                                                + candidates.size()
+                                                                + "）…");
+                                            }
+                                            if (finishedCount[0] >= candidates.size()) {
+                                                allDone[0] = true;
+                                                if (!detailChecking[0]) {
+                                                    tryNextHitRef[0].run();
+                                                }
+                                            }
+                                        }),
+                        6000,
+                        15000,
+                        8,
+                        maxConc);
+        coordRef[0] = coordinator;
+        coordinator.start(candidates, title);
+    }
+
     static void playBookmark(
             MainActivity a, Cms.Site site, Cms.Video video, WatchHistory.Entry bookmark) {
-        Cms.Line line = null;
-        for (Cms.Line candidate : video.lines)
-            if (candidate.name.equals(bookmark.line)) {
-                line = candidate;
-                break;
-            }
-        if (line == null && !video.lines.isEmpty()) {
-            line = video.lines.get(0);
-        }
-        Cms.Episode episode = null;
-        if (line != null) {
-            for (Cms.Episode candidate : line.episodes)
-                if (candidate.name.equals(bookmark.episode)) {
-                    episode = candidate;
-                    break;
-                }
-            if (episode == null && bookmark.index >= 0 && bookmark.index < line.episodes.size()) {
-                episode = line.episodes.get(bookmark.index);
-            }
-        }
-        if (episode == null) {
+        HistoryResumeMatcher.EpisodeMatch matched =
+                HistoryResumeMatcher.matchEpisode(video, bookmark);
+        if (matched == null) {
             a.notice("上次的线路或集数已变更，请在下方重新选集。");
             return;
         }
+        a.historyFallbackBookmark = WatchHistory.cloneEntry(bookmark);
+        a.historyFallbackInFlight = false;
         a.resumeAt = bookmark.resume();
-        a.resolvePlayer(site, video, line, episode);
+        a.resolvePlayer(site, video, matched.line, matched.episode);
     }
 
     private static String historyProgressBadge(WatchHistory.Entry e) {

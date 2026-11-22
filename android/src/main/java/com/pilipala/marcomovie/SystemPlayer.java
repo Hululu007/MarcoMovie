@@ -321,7 +321,201 @@ public final class SystemPlayer extends MoviePlayer {
     @Override
     public String videoResolution() {
         return onMain(
-                () -> !released && width > 0 && height > 0 ? width + " × " + height : "分辨率未知");
+                () -> {
+                    if (released || width <= 0 || height <= 0) return "分辨率未知";
+                    int longEdge = Math.max(width, height);
+                    String tier =
+                            longEdge >= 3800
+                                    ? "4K "
+                                    : longEdge >= 2500
+                                            ? "2K "
+                                            : longEdge >= 1900
+                                                    ? "1080P "
+                                                    : longEdge >= 1200 ? "720P " : "";
+                    StringBuilder sb = new StringBuilder();
+                    sb.append(tier).append(width).append(" × ").append(height);
+                    String vTag = detectVideoRangeOrCodecLabel();
+                    if (!vTag.isEmpty()) sb.append(" · ").append(vTag);
+                    String aTag = detectAudioLabel();
+                    if (!aTag.isEmpty()) sb.append(" · ").append(aTag);
+                    return sb.toString();
+                });
+    }
+
+    @Override
+    public String activeVideoMimeType() {
+        return onMain(
+                () -> {
+                    if (released || !prepared) return "";
+                    try {
+                        MediaPlayer.TrackInfo[] info = nativePlayer.getTrackInfo();
+                        for (MediaPlayer.TrackInfo track : info) {
+                            if (track == null
+                                    || track.getTrackType()
+                                            != MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_VIDEO)
+                                continue;
+                            MediaFormat fmt = track.getFormat();
+                            if (fmt == null) continue;
+                            String m = fmt.getString(MediaFormat.KEY_MIME);
+                            if (m != null && !m.isEmpty()) return m;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    return "";
+                });
+    }
+
+    @Override
+    public boolean isHdrVideo() {
+        return onMain(
+                () -> {
+                    if (released || !prepared) return false;
+                    try {
+                        MediaPlayer.TrackInfo[] info = nativePlayer.getTrackInfo();
+                        for (MediaPlayer.TrackInfo track : info) {
+                            if (track == null
+                                    || track.getTrackType()
+                                            != MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_VIDEO)
+                                continue;
+                            MediaFormat fmt = track.getFormat();
+                            if (fmt == null) continue;
+                            String m = fmt.getString(MediaFormat.KEY_MIME);
+                            if (m != null && m.toLowerCase(Locale.ROOT).contains("dolby-vision")) {
+                                return true;
+                            }
+                            if (Build.VERSION.SDK_INT >= 24) {
+                                if (fmt.containsKey(MediaFormat.KEY_COLOR_TRANSFER)) {
+                                    int tr = fmt.getInteger(MediaFormat.KEY_COLOR_TRANSFER);
+                                    if (tr == MediaFormat.COLOR_TRANSFER_ST2084
+                                            || tr == MediaFormat.COLOR_TRANSFER_HLG) {
+                                        return true;
+                                    }
+                                }
+                                if (fmt.containsKey(MediaFormat.KEY_COLOR_STANDARD)
+                                        && fmt.getInteger(MediaFormat.KEY_COLOR_STANDARD)
+                                                == MediaFormat.COLOR_STANDARD_BT2020) {
+                                    return true;
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    // Amlogic/OEM MediaPlayer often strips color keys from TrackInfo; infer HDR
+                    // from episode/line metadata on HD/4K streams so TV HDR flicker guard engages.
+                    String meta = combinedMetadataLower();
+                    return (width >= 1920 || height >= 1080)
+                            && (meta.contains("hdr")
+                                    || meta.contains("dovi")
+                                    || meta.contains("dolby vision")
+                                    || meta.contains("dolby.vision")
+                                    || meta.contains("杜比视界")
+                                    || meta.contains("hlg")
+                                    || meta.contains("dv."));
+                });
+    }
+
+    private String combinedMetadataLower() {
+        StringBuilder sb = new StringBuilder();
+        if (options != null) {
+            String ep = options.optString("_episodeName", "");
+            String line = options.optString("_lineName", "");
+            if (!ep.isEmpty()) sb.append(ep).append(' ');
+            if (!line.isEmpty()) sb.append(line).append(' ');
+        }
+        if (mediaUri != null) {
+            String path = mediaUri.getPath();
+            if (path != null) sb.append(path);
+        }
+        return sb.toString().toLowerCase(Locale.ROOT);
+    }
+
+    private String detectVideoRangeOrCodecLabel() {
+        String codecLabel = "";
+        try {
+            if (prepared) {
+                for (MediaPlayer.TrackInfo track : nativePlayer.getTrackInfo()) {
+                    if (track == null
+                            || track.getTrackType() != MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_VIDEO)
+                        continue;
+                    MediaFormat fmt = track.getFormat();
+                    if (fmt == null) continue;
+                    String m = fmt.getString(MediaFormat.KEY_MIME);
+                    String ml = m == null ? "" : m.toLowerCase(Locale.ROOT);
+                    if (ml.contains("dolby-vision")) return "DOLBY VISION";
+                    if (Build.VERSION.SDK_INT >= 24
+                            && fmt.containsKey(MediaFormat.KEY_COLOR_TRANSFER)) {
+                        int tr = fmt.getInteger(MediaFormat.KEY_COLOR_TRANSFER);
+                        if (tr == MediaFormat.COLOR_TRANSFER_ST2084) return "HDR10";
+                        if (tr == MediaFormat.COLOR_TRANSFER_HLG) return "HLG HDR";
+                    }
+                    if (ml.contains("hevc") || ml.contains("h265")) codecLabel = "HEVC";
+                    else if (ml.contains("av01") || ml.contains("av1")) codecLabel = "AV1";
+                    else if (ml.contains("avc") || ml.contains("h264")) codecLabel = "H.264";
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        String meta = combinedMetadataLower();
+        if (meta.contains("dolby vision")
+                || meta.contains("dolby.vision")
+                || meta.contains("dovi")
+                || meta.contains("杜比视界")
+                || meta.contains("dv.")) {
+            return "DOLBY VISION";
+        }
+        if (meta.contains("hdr10+") || meta.contains("hdr10plus")) return "HDR10+";
+        if (meta.contains("hdr")) return "HDR10";
+        if (meta.contains("hlg")) return "HLG HDR";
+        return codecLabel;
+    }
+
+    private String detectAudioLabel() {
+        try {
+            if (prepared) {
+                MediaPlayer.TrackInfo[] info = nativePlayer.getTrackInfo();
+                int sel =
+                        nativePlayer.getSelectedTrack(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO);
+                MediaPlayer.TrackInfo chosen = (sel >= 0 && sel < info.length) ? info[sel] : null;
+                if (chosen == null) {
+                    for (MediaPlayer.TrackInfo t : info) {
+                        if (t != null
+                                && t.getTrackType()
+                                        == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
+                            chosen = t;
+                            break;
+                        }
+                    }
+                }
+                if (chosen != null && chosen.getFormat() != null) {
+                    MediaFormat fmt = chosen.getFormat();
+                    String m = fmt.getString(MediaFormat.KEY_MIME);
+                    String ml = m == null ? "" : m.toLowerCase(Locale.ROOT);
+                    int ch =
+                            fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)
+                                    ? fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                                    : 0;
+                    String chTag =
+                            ch >= 8
+                                    ? " 7.1"
+                                    : ch == 6
+                                            ? " 5.1"
+                                            : ch == 2
+                                                    ? " 2.0"
+                                                    : ch == 1
+                                                            ? " 1.0"
+                                                            : (ch > 0 ? " " + ch + "CH" : "");
+                    if (ml.contains("eac3-joc")) return "DD+ ATMOS" + chTag;
+                    if (ml.contains("eac3")) return "DD+" + chTag;
+                    if (ml.contains("ac3")) return "DOLBY AUDIO" + chTag;
+                    if (ml.contains("truehd")) return "TRUEHD" + chTag;
+                    if (ml.contains("dts")) return "DTS" + chTag;
+                    if (ml.contains("flac")) return "FLAC" + chTag;
+                    if (ml.contains("mp4a") || ml.contains("aac")) return "AAC" + chTag;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return "";
     }
 
     @Override
@@ -652,7 +846,7 @@ public final class SystemPlayer extends MoviePlayer {
     public List<String> mediaBadges() {
         return onMain(
                 () -> {
-                    List<String> out = new ArrayList<>(2);
+                    List<String> out = new ArrayList<>(4);
                     if (released) return out;
                     int longEdge = Math.max(width, height);
                     String tier =
@@ -668,6 +862,10 @@ public final class SystemPlayer extends MoviePlayer {
                                                                     ? height + "P"
                                                                     : "");
                     if (!tier.isEmpty()) out.add(tier);
+                    String vTag = detectVideoRangeOrCodecLabel();
+                    if (!vTag.isEmpty()) out.add(vTag);
+                    String aTag = detectAudioLabel();
+                    if (!aTag.isEmpty()) out.add(aTag);
                     out.add("系统播放");
                     return out;
                 });
