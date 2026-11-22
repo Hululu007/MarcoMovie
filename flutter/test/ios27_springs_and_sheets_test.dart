@@ -510,6 +510,129 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
+
+    testWidgets(
+      'Ios27PageRoute left-edge drag from x=6 and x=12 pops cleanly without mid-swipe freeze',
+      (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final navKey = GlobalKey<NavigatorState>();
+        await tester.pumpWidget(
+          MaterialApp(
+            navigatorKey: navKey,
+            home: const Scaffold(
+              body: Center(child: Text('Root Page')),
+            ),
+          ),
+        );
+
+        for (final startX in const [6.0, 12.0]) {
+          late Ios27PageRoute<void> pushedRoute;
+          pushedRoute = Ios27PageRoute<void>(
+            builder: (_) => Scaffold(
+              body: Center(child: Text('Pushed @$startX')),
+            ),
+          );
+          navKey.currentState!.push(pushedRoute);
+          await tester.pumpAndSettle();
+          expect(find.text('Pushed @$startX'), findsOneWidget);
+          expect(navKey.currentState!.canPop(), isTrue);
+
+          // Small drag -> release rebounds back cleanly without locking navigator.
+          final cancelGesture = await tester.startGesture(Offset(startX, 400));
+          await cancelGesture.moveBy(const Offset(40, 0));
+          await tester.pump();
+          expect(navKey.currentState!.userGestureInProgress, isTrue);
+          await cancelGesture.up();
+          await tester.pumpAndSettle();
+          expect(pushedRoute.animation?.status, AnimationStatus.completed);
+          expect(navKey.currentState!.userGestureInProgress, isFalse);
+          expect(navKey.currentState!.canPop(), isTrue);
+
+          // Full drag +200px from x=startX -> release pops cleanly.
+          final popGesture = await tester.startGesture(Offset(startX, 400));
+          for (var i = 0; i < 5; i++) {
+            await popGesture.moveBy(const Offset(40, 0));
+            await tester.pump(const Duration(milliseconds: 16));
+          }
+          expect(navKey.currentState!.userGestureInProgress, isTrue);
+          await popGesture.up();
+          await tester.pumpAndSettle();
+
+          expect(pushedRoute.animation?.status, AnimationStatus.dismissed);
+          expect(navKey.currentState!.userGestureInProgress, isFalse);
+          expect(navKey.currentState!.canPop(), isFalse);
+          expect(find.text('Pushed @$startX'), findsNothing);
+        }
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'PosterExpandRoute left-edge fling from x=12 dismisses cleanly and clears activeCardId',
+      (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final navKey = GlobalKey<NavigatorState>();
+        await tester.pumpWidget(
+          MaterialApp(
+            navigatorKey: navKey,
+            home: Scaffold(
+              body: Center(
+                child: Builder(
+                  builder: (ctx) => GestureDetector(
+                    key: const ValueKey('edge-zoom-card'),
+                    onTap: () {
+                      Navigator.of(ctx).push(
+                        PosterExpandRoute<void>(
+                          initialSourceRect: PosterExpandRoute.captureRect(ctx)!,
+                          sourceCardId: 'edge-card-12',
+                          builder: (_) => const Scaffold(
+                            key: ValueKey('edge-zoom-detail'),
+                            body: Center(child: Text('Edge Zoom Detail')),
+                          ),
+                        ),
+                      );
+                    },
+                    child: const SizedBox(
+                      width: 120,
+                      height: 180,
+                      child: ColoredBox(color: Colors.teal),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.byKey(const ValueKey('edge-zoom-card')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('edge-zoom-detail')), findsOneWidget);
+        expect(PosterExpandRegistry.activeCardId.value, 'edge-card-12');
+        expect(navKey.currentState!.canPop(), isTrue);
+
+        // Start horizontal fling inside the 24pt edge strip at x=12pt.
+        await tester.flingFrom(
+          const Offset(12, 400),
+          const Offset(240, 0),
+          1200.0,
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('edge-zoom-detail')), findsNothing);
+        expect(navKey.currentState!.userGestureInProgress, isFalse);
+        expect(navKey.currentState!.canPop(), isFalse);
+        expect(PosterExpandRegistry.activeCardId.value, isNull);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
   });
 }
 

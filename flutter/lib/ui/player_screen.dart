@@ -355,6 +355,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   VocalLoudnessPreset _vocalLoudness = VocalLoudnessPreset.off;
   bool _iosLargeBuffer = false;
   bool _usingAvPlayer = false;
+  bool _fallbackInFlight = false;
   String _lastAvExternalAudioUrl = '';
   final List<StreamSubscription<dynamic>> _iosAvSubscriptions = [];
   int? _avPhysicalMemoryBytes;
@@ -890,7 +891,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       avCtrl.addListener(_onIosAvPlayerChanged);
       _iosAvSubscriptions.add(
         avCtrl.onFallbackToMpvRequested.listen((event) {
-          if (!mounted || event.isStaticPrecheck || !_usingAvPlayer) return;
+          if (!mounted ||
+              event.isStaticPrecheck ||
+              !_usingAvPlayer ||
+              _fallbackInFlight) {
+            return;
+          }
           unawaited(_handleRuntimeFallbackToMpv(event));
         }),
       );
@@ -1474,7 +1480,10 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _handleRuntimeFallbackToMpv(FallbackToMpvRequested event) async {
     final avCtrl = _iosAvPlayerController;
-    if (!mounted || avCtrl == null) return;
+    if (!mounted || avCtrl == null || !_usingAvPlayer || _fallbackInFlight) {
+      return;
+    }
+    _fallbackInFlight = true;
     final resumeMs = event.positionMs > 0
         ? event.positionMs
         : (_position.inMilliseconds > 0
@@ -1483,10 +1492,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     final url = _activeResolvedMediaUrl;
     final headers = _activeResolvedHeaders;
     final session = _playSession;
-    await avCtrl.stop();
-    if (!mounted || session != _playSession) return;
+    _usingAvPlayer = false;
     setState(() {
-      _usingAvPlayer = false;
       _loading = true;
       _playing = false;
       _buffering = false;
@@ -1494,29 +1501,35 @@ class _PlayerScreenState extends State<PlayerScreen>
       _wasAvBuffering = false;
       _wasAvCompleted = false;
     });
-    _showHud(
-      event.reason.isNotEmpty
-          ? event.reason
-          : 'Apple 原生内核不支持当前片源，已无缝切回 MPV 续播',
-    );
-    await _applyPlayerKernel(_playerKernel);
-    if (!mounted || session != _playSession || url.isEmpty) return;
-    await _changeMedia(session, () async {
-      _allowEvents = true;
-      _activeMediaUri = Media(url).uri;
-      await _player.open(
-        Media(
-          url,
-          httpHeaders: headers,
-          start: resumeMs > 0 ? Duration(milliseconds: resumeMs) : null,
-        ),
-        play: !_castController.isCasting,
+    try {
+      await avCtrl.stop();
+      if (!mounted || session != _playSession) return;
+      _showHud(
+        event.reason.isNotEmpty
+            ? event.reason
+            : 'Apple 原生内核不支持当前片源，已无缝切回 MPV 续播',
       );
-      if (_lastAvExternalAudioUrl.isNotEmpty) {
-        await _player.setAudioTrack(AudioTrack.uri(_lastAvExternalAudioUrl));
-      }
-      await _player.setRate(_isLiveStream ? 1.0 : _normalSpeed);
-    });
+      await _applyPlayerKernel(_playerKernel);
+      if (!mounted || session != _playSession || url.isEmpty) return;
+      await _changeMedia(session, () async {
+        _allowEvents = true;
+        _activeMediaUri = Media(url).uri;
+        await _player.open(
+          Media(
+            url,
+            httpHeaders: headers,
+            start: resumeMs > 0 ? Duration(milliseconds: resumeMs) : null,
+          ),
+          play: !_castController.isCasting,
+        );
+        if (_lastAvExternalAudioUrl.isNotEmpty) {
+          await _player.setAudioTrack(AudioTrack.uri(_lastAvExternalAudioUrl));
+        }
+        await _player.setRate(_isLiveStream ? 1.0 : _normalSpeed);
+      });
+    } finally {
+      _fallbackInFlight = false;
+    }
   }
 
   Future<void> _toggleIosEngine() async {

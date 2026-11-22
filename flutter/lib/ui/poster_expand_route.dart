@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:ui' show lerpDouble;
 
+import 'package:flutter/gestures.dart' show DragStartBehavior;
 import 'package:flutter/material.dart';
 
 import 'motion/ios27_springs.dart';
@@ -1030,6 +1031,7 @@ class _PosterExpandZoomGestureWrapperState<T>
               width: 24,
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
+                dragStartBehavior: DragStartBehavior.down,
                 onHorizontalDragStart: _onHorizontalDragStart,
                 onHorizontalDragUpdate: _onHorizontalDragUpdate,
                 onHorizontalDragEnd: _onHorizontalDragEnd,

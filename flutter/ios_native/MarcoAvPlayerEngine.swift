@@ -716,18 +716,21 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     fallbackEmittedForCurrentItem = true
     let posMs = max(pendingStartPositionMs, currentPositionMs())
     queuePlayer?.pause()
-    emitEvent([
-      "type": "fallbackToMpv",
-      "positionMs": posMs,
-      "reason": reason,
-    ])
-    methodChannel?.invokeMethod(
-      "onFallbackToMpv",
-      arguments: [
+    if eventSink != nil {
+      emitEvent([
+        "type": "fallbackToMpv",
         "positionMs": posMs,
         "reason": reason,
-      ]
-    )
+      ])
+    } else {
+      methodChannel?.invokeMethod(
+        "onFallbackToMpv",
+        arguments: [
+          "positionMs": posMs,
+          "reason": reason,
+        ]
+      )
+    }
   }
 
   private func stopPlayback() {

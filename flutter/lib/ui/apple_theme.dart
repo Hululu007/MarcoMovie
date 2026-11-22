@@ -10,6 +10,7 @@ import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
+import 'package:flutter/gestures.dart' show DragStartBehavior;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -172,7 +173,7 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
       linearTransition: true,
       child: child,
     );
-    if (fullscreenDialog || !popGestureEnabled) {
+    if (fullscreenDialog || isFirst) {
       return transition;
     }
     return _Ios27SwipeBackWrapper<T>(
@@ -255,10 +256,24 @@ class _Ios27SwipeBackWrapperState<T> extends State<_Ios27SwipeBackWrapper<T>> {
   bool _dragging = false;
   double _dragDx = 0.0;
 
+  @override
+  void dispose() {
+    if (_dragging) {
+      _dragging = false;
+      final nav = widget.route.navigator;
+      if (nav != null && nav.userGestureInProgress) {
+        nav.didStopUserGesture();
+      }
+    }
+    super.dispose();
+  }
+
   void _onDragStart(DragStartDetails details) {
+    if (_dragging) return;
     final nav = widget.route.navigator;
     if (widget.route.isFirst ||
         !widget.route.isCurrent ||
+        !widget.route.popGestureEnabled ||
         nav == null ||
         nav.userGestureInProgress) {
       return;
@@ -305,6 +320,7 @@ class _Ios27SwipeBackWrapperState<T> extends State<_Ios27SwipeBackWrapper<T>> {
           width: 24,
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
+            dragStartBehavior: DragStartBehavior.down,
             onHorizontalDragStart: _onDragStart,
             onHorizontalDragUpdate: _onDragUpdate,
             onHorizontalDragEnd: _onDragEnd,

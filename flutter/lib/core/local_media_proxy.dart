@@ -189,16 +189,20 @@ class DiskBlockCache {
   DiskBlockCache({
     Directory? directory,
     int maxBytes = defaultMaxBytes,
+    int maxFullResponseCacheBytes = defaultMaxFullResponseCacheBytes,
   })  : _explicitDirectory = directory,
-        _maxBytes = math.max(0, maxBytes);
+        _maxBytes = math.max(0, maxBytes),
+        _maxFullResponseCacheBytes = math.max(1, maxFullResponseCacheBytes);
 
   static const int blockSize = 256 * 1024; // 256 KiB
   static const int defaultMaxBytes = 256 * 1024 * 1024; // 256 MB
-  static const int _maxFullResponseCacheBytes = 64 * 1024 * 1024;
+  static const int defaultMaxFullResponseCacheBytes = 64 * 1024 * 1024;
+  static const int _streamFlushThresholdBytes = 1024 * 1024;
 
   static final DiskBlockCache shared = DiskBlockCache();
 
   final Directory? _explicitDirectory;
+  final int _maxFullResponseCacheBytes;
   int _maxBytes;
   int _currentBytes = 0;
   int _generation = 0;
@@ -211,6 +215,9 @@ class DiskBlockCache {
       LinkedHashMap<String, _CachedBlockEntry>();
   final Map<String, _CachedObjectMeta> _metaByKey =
       <String, _CachedObjectMeta>{};
+  final Set<String> _nonCacheablePassthroughKeys = <String>{};
+  final Map<String, Future<void>> _inFlightInitialProbes =
+      <String, Future<void>>{};
   final Map<String, Future<Uint8List>> _inFlightBlocks =
       <String, Future<Uint8List>>{};
 
@@ -306,6 +313,7 @@ class DiskBlockCache {
     _generation++;
     _entries.clear();
     _metaByKey.clear();
+    _nonCacheablePassthroughKeys.clear();
     _currentBytes = 0;
     final dir = await _resolveDirectory();
     if (await dir.exists()) {
@@ -491,7 +499,27 @@ class DiskBlockCache {
     return null;
   }
 
-  Future<Uint8List> _readStreamBytes(Stream<List<int>> stream, {int? maxBytes}) async {
+  static int? _parseContentLength(Map<String, String> headers) {
+    final raw = headers['content-length'];
+    if (raw == null || raw.trim().isEmpty) return null;
+    final parsed = int.tryParse(raw.trim());
+    return (parsed != null && parsed >= 0) ? parsed : null;
+  }
+
+  static bool _isHlsPlaylistResponse(Uri finalTarget, String? contentType) {
+    final lowerUrl = '${finalTarget.path}?${finalTarget.query}'.toLowerCase();
+    if (finalTarget.path.toLowerCase().endsWith('.m3u8') ||
+        lowerUrl.contains('.m3u8')) {
+      return true;
+    }
+    final mime = (contentType ?? '').toLowerCase();
+    return mime.contains('mpegurl') || mime.contains('x-mpegurl');
+  }
+
+  Future<Uint8List> _readStreamBytes(
+    Stream<List<int>> stream, {
+    int? maxBytes,
+  }) async {
     final builder = BytesBuilder(copy: false);
     await for (final chunk in stream.timeout(const Duration(seconds: 30))) {
       if (maxBytes != null && builder.length + chunk.length > maxBytes) {
@@ -500,6 +528,143 @@ class DiskBlockCache {
       builder.add(chunk);
     }
     return builder.takeBytes();
+  }
+
+  Future<Uint8List> _readPrefixFromIterator(
+    StreamIterator<List<int>> iter, {
+    int minBytes = LocalMediaLease._sniffPrefixBytes,
+  }) async {
+    final builder = BytesBuilder(copy: false);
+    while (builder.length < minBytes) {
+      final hasNext = await iter.moveNext().timeout(const Duration(seconds: 30));
+      if (!hasNext) break;
+      final chunk = iter.current;
+      if (chunk.isEmpty) continue;
+      builder.add(chunk);
+      final current = builder.toBytes();
+      if (LocalMediaLease._startsWithM3u8Magic(current) ||
+          !LocalMediaLease._couldBeM3u8Prefix(current)) {
+        return builder.takeBytes();
+      }
+    }
+    return builder.takeBytes();
+  }
+
+  Future<Uint8List> _drainBoundedPlaylistFromIterator(
+    StreamIterator<List<int>> iter,
+    Uint8List initialPrefix,
+  ) async {
+    if (initialPrefix.length > LocalMediaLease._maxPlaylistBytes) {
+      throw const FormatException('媒体播放列表体积超出安全上限');
+    }
+    final builder = BytesBuilder(copy: false)..add(initialPrefix);
+    while (await iter.moveNext().timeout(const Duration(seconds: 30))) {
+      final chunk = iter.current;
+      if (builder.length + chunk.length > LocalMediaLease._maxPlaylistBytes) {
+        throw const FormatException('媒体播放列表体积超出安全上限');
+      }
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
+
+  Future<void> _streamUpstreamSlice(
+    HttpRequest request,
+    StreamIterator<List<int>> iter, {
+    required String contentType,
+    required int? totalLength,
+    required int reqStart,
+    required int? reqEnd,
+    required bool hasRange,
+    Uint8List? alreadyReadPrefix,
+    List<int>? extraChunk,
+  }) async {
+    final int? effectiveEnd;
+    if (hasRange && totalLength != null) {
+      if (totalLength == 0) {
+        request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+        request.response.headers.set('content-range', 'bytes */0');
+        return;
+      }
+      final candidateEnd = math.min(reqEnd ?? (totalLength - 1), totalLength - 1);
+      if (reqStart >= totalLength || candidateEnd < reqStart) {
+        request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+        request.response.headers.set('content-range', 'bytes */$totalLength');
+        return;
+      }
+      effectiveEnd = candidateEnd;
+      request.response.bufferOutput = false;
+      request.response.statusCode = HttpStatus.partialContent;
+      if (contentType.isNotEmpty) {
+        request.response.headers.set(HttpHeaders.contentTypeHeader, contentType);
+      }
+      request.response.headers.set('accept-ranges', 'bytes');
+      request.response.headers.set('cache-control', 'no-store');
+      request.response.headers
+          .set('content-range', 'bytes $reqStart-$effectiveEnd/$totalLength');
+      request.response.contentLength = effectiveEnd - reqStart + 1;
+    } else {
+      effectiveEnd = null;
+      request.response.bufferOutput = false;
+      request.response.statusCode = HttpStatus.ok;
+      if (contentType.isNotEmpty) {
+        request.response.headers.set(HttpHeaders.contentTypeHeader, contentType);
+      }
+      request.response.headers.set('cache-control', 'no-store');
+      if (totalLength != null) {
+        request.response.contentLength = totalLength;
+      }
+    }
+
+    var streamOffset = 0;
+    var pendingFlushBytes = 0;
+    final effectiveStart = (hasRange && totalLength != null) ? reqStart : 0;
+
+    Future<bool> forwardChunk(List<int> chunk) async {
+      if (chunk.isEmpty) return true;
+      final chunkStart = streamOffset;
+      final chunkEnd = streamOffset + chunk.length - 1;
+      streamOffset += chunk.length;
+      if (effectiveEnd != null && chunkStart > effectiveEnd) {
+        return false;
+      }
+      if (chunkEnd < effectiveStart) {
+        return true;
+      }
+      final sliceStart = math.max(0, effectiveStart - chunkStart);
+      final sliceEnd = effectiveEnd != null
+          ? math.min(chunk.length, effectiveEnd - chunkStart + 1)
+          : chunk.length;
+      if (sliceEnd > sliceStart) {
+        final Uint8List outSlice;
+        if (sliceStart == 0 && sliceEnd == chunk.length) {
+          outSlice = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
+        } else {
+          outSlice = Uint8List.sublistView(
+            chunk is Uint8List ? chunk : Uint8List.fromList(chunk),
+            sliceStart,
+            sliceEnd,
+          );
+        }
+        request.response.add(outSlice);
+        pendingFlushBytes += outSlice.length;
+        if (pendingFlushBytes >= _streamFlushThresholdBytes) {
+          pendingFlushBytes = 0;
+          await request.response.flush().timeout(const Duration(seconds: 30));
+        }
+      }
+      return effectiveEnd == null || streamOffset <= effectiveEnd;
+    }
+
+    if (alreadyReadPrefix != null && alreadyReadPrefix.isNotEmpty) {
+      if (!await forwardChunk(alreadyReadPrefix)) return;
+    }
+    if (extraChunk != null && extraChunk.isNotEmpty) {
+      if (!await forwardChunk(extraChunk)) return;
+    }
+    while (await iter.moveNext().timeout(const Duration(seconds: 30))) {
+      if (!await forwardChunk(iter.current)) break;
+    }
   }
 
   Future<void> _cacheFullBodyIntoBlocks(
@@ -597,10 +762,28 @@ class DiskBlockCache {
           await retryRes.stream.listen((_) {}).cancel();
           throw HttpException('Upstream returned HTTP $code after 416 retry');
         }
-        final retryBytes = await _readStreamBytes(retryRes.stream);
         final ct = retryRes.headers['content-type'] ??
             meta?.contentType ??
             'application/octet-stream';
+        final retryLen = _parseContentLength(retryRes.headers);
+        if (retryLen != null && retryLen > _maxFullResponseCacheBytes) {
+          await retryRes.stream.listen((_) {}).cancel();
+          _nonCacheablePassthroughKeys.add(cacheKey);
+          await _saveMeta(
+            cacheKey,
+            _CachedObjectMeta(
+              totalLength: retryLen,
+              contentType: ct,
+              supportsRanges: false,
+            ),
+            generation,
+          );
+          throw const FormatException('非 Range 响应超出缓存上限，请切换直通流');
+        }
+        final retryBytes = await _readStreamBytes(
+          retryRes.stream,
+          maxBytes: _maxFullResponseCacheBytes,
+        );
         await _cacheFullBodyIntoBlocks(
           cacheKey,
           retryBytes,
@@ -618,7 +801,25 @@ class DiskBlockCache {
         final ct = response.headers['content-type'] ??
             meta?.contentType ??
             'application/octet-stream';
-        final bytes = await _readStreamBytes(response.stream);
+        final respLen = _parseContentLength(response.headers);
+        if (respLen != null && respLen > _maxFullResponseCacheBytes) {
+          await response.stream.listen((_) {}).cancel();
+          _nonCacheablePassthroughKeys.add(cacheKey);
+          await _saveMeta(
+            cacheKey,
+            _CachedObjectMeta(
+              totalLength: respLen,
+              contentType: ct,
+              supportsRanges: false,
+            ),
+            generation,
+          );
+          throw const FormatException('非 Range 响应超出缓存上限，请切换直通流');
+        }
+        final bytes = await _readStreamBytes(
+          response.stream,
+          maxBytes: _maxFullResponseCacheBytes,
+        );
         await _cacheFullBodyIntoBlocks(
           cacheKey,
           bytes,
@@ -676,6 +877,228 @@ class DiskBlockCache {
     }
   }
 
+  Future<void> _servePassthrough(
+    HttpRequest request, {
+    required String cacheKey,
+    required ({int? start, int? end, int? suffixLength, bool valid}) parsedRange,
+    required String? rangeHeader,
+    required _CachedObjectMeta? meta,
+    required Future<(http.StreamedResponse, Uri)> Function({
+      String? range,
+      String? ifRange,
+      required bool allowRange,
+    }) fetchUpstream,
+    required void Function(int statusCode, String host) onUpstreamStatus,
+    Future<void> Function(Uri finalTarget, String playlistText)?
+        onHlsPlaylistDetected,
+    void Function(Uri finalTarget)? onHlsHeadDetected,
+  }) async {
+    final hasRange = rangeHeader != null && rangeHeader.trim().isNotEmpty;
+    final knownNoRange = meta != null && !meta.supportsRanges;
+    var (res, finalTarget) = await fetchUpstream(
+      range: knownNoRange ? null : rangeHeader,
+      ifRange: knownNoRange
+          ? null
+          : request.headers.value(HttpHeaders.ifRangeHeader),
+      allowRange: !knownNoRange,
+    );
+    onUpstreamStatus(res.statusCode, finalTarget.host);
+    if (res.statusCode == HttpStatus.requestedRangeNotSatisfiable &&
+        !knownNoRange) {
+      await res.stream.listen((_) {}).cancel();
+      final (retryRes, retryTarget) = await fetchUpstream(
+        range: null,
+        allowRange: false,
+      );
+      onUpstreamStatus(retryRes.statusCode, retryTarget.host);
+      res = retryRes;
+      finalTarget = retryTarget;
+    }
+
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      request.response.statusCode = res.statusCode;
+      await res.stream.listen((_) {}).cancel();
+      return;
+    }
+
+    final isDeclaredHls =
+        _isHlsPlaylistResponse(finalTarget, res.headers['content-type']);
+    if (request.method == 'HEAD') {
+      if (isDeclaredHls && onHlsHeadDetected != null) {
+        onHlsHeadDetected(finalTarget);
+        request.response.statusCode = HttpStatus.ok;
+        request.response.headers
+            .set(HttpHeaders.contentTypeHeader, 'application/vnd.apple.mpegurl');
+        await res.stream.listen((_) {}).cancel();
+        return;
+      }
+      request.response.statusCode = res.statusCode;
+      for (final k in const [
+        'content-type',
+        'content-length',
+        'content-range',
+        'accept-ranges',
+      ]) {
+        final v = res.headers[k];
+        if (v != null && v.isNotEmpty) request.response.headers.set(k, v);
+      }
+      await res.stream.listen((_) {}).cancel();
+      return;
+    }
+
+    if (isDeclaredHls && onHlsPlaylistDetected != null) {
+      final body = await _readStreamBytes(
+        res.stream,
+        maxBytes: LocalMediaLease._maxPlaylistBytes,
+      );
+      if (LocalMediaLease._startsWithM3u8Magic(body)) {
+        await onHlsPlaylistDetected(
+          finalTarget,
+          utf8.decode(body, allowMalformed: true),
+        );
+        return;
+      }
+      request.response.statusCode = res.statusCode;
+      final ct = res.headers['content-type'];
+      if (ct != null && ct.isNotEmpty) {
+        request.response.headers.set(HttpHeaders.contentTypeHeader, ct);
+      }
+      request.response.contentLength = body.length;
+      request.response.add(body);
+      return;
+    }
+
+    final iter = StreamIterator<List<int>>(res.stream);
+    try {
+      Uint8List? prefix;
+      if (res.statusCode == HttpStatus.ok &&
+          onHlsPlaylistDetected != null &&
+          (parsedRange.start ?? 0) == 0 &&
+          parsedRange.suffixLength == null) {
+        prefix = await _readPrefixFromIterator(iter);
+        if (LocalMediaLease._startsWithM3u8Magic(prefix)) {
+          final full = await _drainBoundedPlaylistFromIterator(iter, prefix);
+          await onHlsPlaylistDetected(
+            finalTarget,
+            utf8.decode(full, allowMalformed: true),
+          );
+          return;
+        }
+      }
+
+      if (res.statusCode == HttpStatus.partialContent) {
+        request.response.bufferOutput = false;
+        request.response.statusCode = res.statusCode;
+        for (final k in const [
+          'content-type',
+          'content-length',
+          'content-range',
+          'accept-ranges',
+        ]) {
+          final v = res.headers[k];
+          if (v != null && v.isNotEmpty) request.response.headers.set(k, v);
+        }
+        if (prefix != null && prefix.isNotEmpty) {
+          request.response.add(prefix);
+        }
+        var pending = 0;
+        while (await iter.moveNext().timeout(const Duration(seconds: 30))) {
+          final chunk = iter.current;
+          request.response.add(chunk);
+          pending += chunk.length;
+          if (pending >= _streamFlushThresholdBytes) {
+            pending = 0;
+            await request.response.flush().timeout(const Duration(seconds: 30));
+          }
+        }
+        return;
+      }
+
+      final ct = res.headers['content-type'] ??
+          meta?.contentType ??
+          'application/octet-stream';
+      final totalLen = _parseContentLength(res.headers) ??
+          ((meta != null && meta.totalLength >= 0) ? meta.totalLength : null);
+      int reqStart = 0;
+      int? reqEnd;
+      if (hasRange && totalLen != null) {
+        if (parsedRange.suffixLength != null) {
+          reqStart = math.max(0, totalLen - parsedRange.suffixLength!);
+          reqEnd = totalLen - 1;
+        } else {
+          reqStart = parsedRange.start ?? 0;
+          reqEnd = parsedRange.end;
+        }
+      }
+      await _streamUpstreamSlice(
+        request,
+        iter,
+        contentType: ct,
+        totalLength: totalLen,
+        reqStart: reqStart,
+        reqEnd: reqEnd,
+        hasRange: hasRange,
+        alreadyReadPrefix: prefix,
+      );
+    } finally {
+      try {
+        await iter.cancel();
+      } catch (_) {}
+    }
+  }
+
+  void _writeSliceResponse(
+    HttpRequest request, {
+    required Uint8List fullBytes,
+    required String contentType,
+    required ({int? start, int? end, int? suffixLength, bool valid}) parsedRange,
+    required bool hasRange,
+  }) {
+    final totalLength = fullBytes.length;
+    if (totalLength == 0) {
+      if (hasRange) {
+        request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+        request.response.headers.set('content-range', 'bytes */0');
+        return;
+      }
+      request.response.statusCode = HttpStatus.ok;
+      request.response.contentLength = 0;
+      return;
+    }
+    int reqStart;
+    int reqEnd;
+    if (!hasRange) {
+      reqStart = 0;
+      reqEnd = totalLength - 1;
+    } else if (parsedRange.suffixLength != null) {
+      reqStart = math.max(0, totalLength - parsedRange.suffixLength!);
+      reqEnd = totalLength - 1;
+    } else {
+      reqStart = parsedRange.start!;
+      reqEnd = math.min(parsedRange.end ?? (totalLength - 1), totalLength - 1);
+    }
+    if (reqStart >= totalLength || reqEnd < reqStart) {
+      request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+      request.response.headers.set('content-range', 'bytes */$totalLength');
+      return;
+    }
+    final responseLen = reqEnd - reqStart + 1;
+    request.response.bufferOutput = false;
+    request.response.statusCode =
+        hasRange ? HttpStatus.partialContent : HttpStatus.ok;
+    if (contentType.isNotEmpty) {
+      request.response.headers.set(HttpHeaders.contentTypeHeader, contentType);
+    }
+    request.response.headers.set('accept-ranges', 'bytes');
+    request.response.headers.set('cache-control', 'no-store');
+    if (hasRange) {
+      request.response.headers
+          .set('content-range', 'bytes $reqStart-$reqEnd/$totalLength');
+    }
+    request.response.contentLength = responseLen;
+    request.response.add(Uint8List.sublistView(fullBytes, reqStart, reqEnd + 1));
+  }
+
   Future<void> serveRequest(
     HttpRequest request, {
     required String cacheKey,
@@ -685,6 +1108,9 @@ class DiskBlockCache {
       required bool allowRange,
     }) fetchUpstream,
     required void Function(int statusCode, String host) onUpstreamStatus,
+    Future<void> Function(Uri finalTarget, String playlistText)?
+        onHlsPlaylistDetected,
+    void Function(Uri finalTarget)? onHlsHeadDetected,
   }) async {
     await ensureInitialized();
     final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
@@ -693,106 +1119,445 @@ class DiskBlockCache {
       request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
       return;
     }
+    final hasRange = rangeHeader != null && rangeHeader.trim().isNotEmpty;
 
-    if (_maxBytes <= 0) {
-      final (res, finalTarget) = await fetchUpstream(
-        range: rangeHeader,
-        ifRange: request.headers.value(HttpHeaders.ifRangeHeader),
-        allowRange: true,
+    var meta = await _loadMeta(cacheKey);
+    if (meta == null && !_nonCacheablePassthroughKeys.contains(cacheKey)) {
+      final pendingProbe = _inFlightInitialProbes[cacheKey];
+      if (pendingProbe != null) {
+        await pendingProbe;
+        meta = await _loadMeta(cacheKey);
+      }
+    }
+    final isPassthrough = _maxBytes <= 0 ||
+        _nonCacheablePassthroughKeys.contains(cacheKey) ||
+        (meta != null &&
+            !meta.supportsRanges &&
+            (meta.totalLength > _maxFullResponseCacheBytes ||
+                meta.totalLength < 0));
+    if (isPassthrough) {
+      await _servePassthrough(
+        request,
+        cacheKey: cacheKey,
+        parsedRange: parsedRange,
+        rangeHeader: rangeHeader,
+        meta: meta,
+        fetchUpstream: fetchUpstream,
+        onUpstreamStatus: onUpstreamStatus,
+        onHlsPlaylistDetected: onHlsPlaylistDetected,
+        onHlsHeadDetected: onHlsHeadDetected,
       );
-      onUpstreamStatus(res.statusCode, finalTarget.host);
-      if (res.statusCode == HttpStatus.requestedRangeNotSatisfiable) {
-        await res.stream.listen((_) {}).cancel();
-        final (retryRes, retryTarget) = await fetchUpstream(
-          range: null,
-          allowRange: false,
-        );
-        onUpstreamStatus(retryRes.statusCode, retryTarget.host);
-        request.response.statusCode = retryRes.statusCode;
-        final ct = retryRes.headers['content-type'];
-        if (ct != null && ct.isNotEmpty) {
-          request.response.headers.set(HttpHeaders.contentTypeHeader, ct);
-        }
-        if (request.method == 'HEAD') {
-          await retryRes.stream.listen((_) {}).cancel();
-          return;
-        }
-        await for (final chunk in retryRes.stream) {
-          request.response.add(chunk);
-        }
-        return;
-      }
-      request.response.statusCode = res.statusCode;
-      for (final k in const [
-        'content-type',
-        'content-length',
-        'content-range',
-        'accept-ranges',
-      ]) {
-        final v = res.headers[k];
-        if (v != null && v.isNotEmpty) request.response.headers.set(k, v);
-      }
-      if (request.method == 'HEAD') {
-        await res.stream.listen((_) {}).cancel();
-        return;
-      }
-      await for (final chunk in res.stream) {
-        request.response.add(chunk);
-      }
       return;
     }
 
-    var meta = await _loadMeta(cacheKey);
-    Uint8List? preFetchedFullBody;
+    final prefetchedBlocks = <int, Uint8List>{};
 
-    // Probe block 0 (or target start block) if total length is not yet cached.
+    // Initial probe (meta == null): handle HEAD, HLS playlist bypass, bounded
+    // 200 OK / 416 retry streaming without full-RAM buffering, or 206 block 0.
     if (meta == null) {
-      final probeStart = parsedRange.start ?? 0;
-      final probeBlockIndex = probeStart ~/ blockSize;
-      await _getOrFetchBlock(
-        cacheKey: cacheKey,
-        blockIndex: probeBlockIndex,
-        fetchUpstream: ({range, ifRange, required allowRange}) async {
-          final result = await fetchUpstream(
-            range: range,
-            ifRange: ifRange,
-            allowRange: allowRange,
+      if (request.method == 'HEAD') {
+        final (res, finalTarget) = await fetchUpstream(
+          range: rangeHeader,
+          ifRange: request.headers.value(HttpHeaders.ifRangeHeader),
+          allowRange: true,
+        );
+        onUpstreamStatus(res.statusCode, finalTarget.host);
+        await res.stream.listen((_) {}).cancel();
+        if (_isHlsPlaylistResponse(finalTarget, res.headers['content-type']) &&
+            onHlsHeadDetected != null) {
+          onHlsHeadDetected(finalTarget);
+          request.response.statusCode = HttpStatus.ok;
+          request.response.headers.set(
+            HttpHeaders.contentTypeHeader,
+            'application/vnd.apple.mpegurl',
           );
-          onUpstreamStatus(result.$1.statusCode, result.$2.host);
-          return result;
-        },
-        onFullFallback: (bytes, ct, total) async {
-          preFetchedFullBody = bytes;
-        },
-      );
-      meta = await _loadMeta(cacheKey);
+          return;
+        }
+        request.response.statusCode = res.statusCode;
+        for (final k in const [
+          'content-type',
+          'content-length',
+          'content-range',
+          'accept-ranges',
+        ]) {
+          final v = res.headers[k];
+          if (v != null && v.isNotEmpty) request.response.headers.set(k, v);
+        }
+        return;
+      }
+
+      final probeCompleter = Completer<void>();
+      _inFlightInitialProbes[cacheKey] = probeCompleter.future;
+      void releaseInitialProbe() {
+        if (!probeCompleter.isCompleted) {
+          probeCompleter.complete();
+        }
+        if (identical(_inFlightInitialProbes[cacheKey], probeCompleter.future)) {
+          _inFlightInitialProbes.remove(cacheKey);
+        }
+      }
+
+      try {
+        final generation = _generation;
+        final probeStart = parsedRange.start ?? 0;
+        final probeBlockIndex = probeStart ~/ blockSize;
+        final probeBlockStart = probeBlockIndex * blockSize;
+        final probeBlockEnd = probeBlockStart + blockSize - 1;
+
+        var (res, finalTarget) = await fetchUpstream(
+          range: 'bytes=$probeBlockStart-$probeBlockEnd',
+          allowRange: true,
+        );
+        onUpstreamStatus(res.statusCode, finalTarget.host);
+
+        if (res.statusCode == HttpStatus.requestedRangeNotSatisfiable) {
+          final crTotal =
+              _parseTotalLengthFromContentRange(res.headers['content-range']);
+          await res.stream.listen((_) {}).cancel();
+          if (crTotal != null && probeBlockStart >= crTotal) {
+            meta = _CachedObjectMeta(
+              totalLength: crTotal,
+              contentType:
+                  res.headers['content-type'] ?? 'application/octet-stream',
+              supportsRanges: true,
+            );
+            await _saveMeta(cacheKey, meta, generation);
+          } else {
+            final (retryRes, retryTarget) = await fetchUpstream(
+              range: null,
+              allowRange: false,
+            );
+            onUpstreamStatus(retryRes.statusCode, retryTarget.host);
+            res = retryRes;
+            finalTarget = retryTarget;
+          }
+        }
+
+        if (meta == null) {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            request.response.statusCode = res.statusCode;
+            await res.stream.listen((_) {}).cancel();
+            return;
+          }
+
+          final isDeclaredHls =
+              _isHlsPlaylistResponse(finalTarget, res.headers['content-type']);
+          if (isDeclaredHls && onHlsPlaylistDetected != null) {
+            if (res.statusCode == HttpStatus.partialContent) {
+              final crTotal = _parseTotalLengthFromContentRange(
+                res.headers['content-range'],
+              );
+              final blockBytes = await _readStreamBytes(
+                res.stream,
+                maxBytes: blockSize + 1024,
+              );
+              final isComplete =
+                  (crTotal != null && blockBytes.length >= crTotal) ||
+                      (crTotal == null && blockBytes.length < blockSize);
+              Uint8List playlistBytes;
+              Uri playlistTarget = finalTarget;
+              if (isComplete && probeBlockIndex == 0) {
+                playlistBytes = blockBytes;
+              } else {
+                final (fullRes, fullTarget) = await fetchUpstream(
+                  range: null,
+                  allowRange: false,
+                );
+                onUpstreamStatus(fullRes.statusCode, fullTarget.host);
+                playlistTarget = fullTarget;
+                playlistBytes = await _readStreamBytes(
+                  fullRes.stream,
+                  maxBytes: LocalMediaLease._maxPlaylistBytes,
+                );
+              }
+              if (LocalMediaLease._startsWithM3u8Magic(playlistBytes)) {
+                releaseInitialProbe();
+                await onHlsPlaylistDetected(
+                  playlistTarget,
+                  utf8.decode(playlistBytes, allowMalformed: true),
+                );
+                return;
+              }
+              request.response.statusCode = HttpStatus.ok;
+              final ct = res.headers['content-type'];
+              if (ct != null && ct.isNotEmpty) {
+                request.response.headers.set(HttpHeaders.contentTypeHeader, ct);
+              }
+              request.response.contentLength = playlistBytes.length;
+              request.response.add(playlistBytes);
+              return;
+            } else {
+              final playlistBytes = await _readStreamBytes(
+                res.stream,
+                maxBytes: LocalMediaLease._maxPlaylistBytes,
+              );
+              if (LocalMediaLease._startsWithM3u8Magic(playlistBytes)) {
+                releaseInitialProbe();
+                await onHlsPlaylistDetected(
+                  finalTarget,
+                  utf8.decode(playlistBytes, allowMalformed: true),
+                );
+                return;
+              }
+              request.response.statusCode = res.statusCode;
+              final ct = res.headers['content-type'];
+              if (ct != null && ct.isNotEmpty) {
+                request.response.headers.set(HttpHeaders.contentTypeHeader, ct);
+              }
+              request.response.contentLength = playlistBytes.length;
+              request.response.add(playlistBytes);
+              return;
+            }
+          }
+
+          if (res.statusCode == HttpStatus.ok) {
+            final ct = res.headers['content-type'] ?? 'application/octet-stream';
+            final contentLen = _parseContentLength(res.headers);
+            final iter = StreamIterator<List<int>>(res.stream);
+            try {
+              Uint8List prefix = Uint8List(0);
+              if (onHlsPlaylistDetected != null && probeBlockStart == 0) {
+                prefix = await _readPrefixFromIterator(iter);
+                if (LocalMediaLease._startsWithM3u8Magic(prefix)) {
+                  final fullPlaylist =
+                      await _drainBoundedPlaylistFromIterator(iter, prefix);
+                  releaseInitialProbe();
+                  await onHlsPlaylistDetected(
+                    finalTarget,
+                    utf8.decode(fullPlaylist, allowMalformed: true),
+                  );
+                  return;
+                }
+              }
+
+              if (contentLen != null && contentLen > _maxFullResponseCacheBytes) {
+                await _saveMeta(
+                  cacheKey,
+                  _CachedObjectMeta(
+                    totalLength: contentLen,
+                    contentType: ct,
+                    supportsRanges: false,
+                  ),
+                  generation,
+                );
+                releaseInitialProbe();
+                int reqStart = 0;
+                int? reqEnd;
+                if (hasRange) {
+                  if (parsedRange.suffixLength != null) {
+                    reqStart =
+                        math.max(0, contentLen - parsedRange.suffixLength!);
+                    reqEnd = contentLen - 1;
+                  } else {
+                    reqStart = parsedRange.start ?? 0;
+                    reqEnd = parsedRange.end;
+                  }
+                }
+                await _streamUpstreamSlice(
+                  request,
+                  iter,
+                  contentType: ct,
+                  totalLength: contentLen,
+                  reqStart: reqStart,
+                  reqEnd: reqEnd,
+                  hasRange: hasRange,
+                  alreadyReadPrefix: prefix,
+                );
+                return;
+              }
+
+              final builder = BytesBuilder(copy: false);
+              if (prefix.isNotEmpty) {
+                if (prefix.length > _maxFullResponseCacheBytes) {
+                  _nonCacheablePassthroughKeys.add(cacheKey);
+                  if (contentLen != null) {
+                    await _saveMeta(
+                      cacheKey,
+                      _CachedObjectMeta(
+                        totalLength: contentLen,
+                        contentType: ct,
+                        supportsRanges: false,
+                      ),
+                      generation,
+                    );
+                  }
+                  releaseInitialProbe();
+                  int reqStart = 0;
+                  int? reqEnd;
+                  if (hasRange && contentLen != null) {
+                    if (parsedRange.suffixLength != null) {
+                      reqStart =
+                          math.max(0, contentLen - parsedRange.suffixLength!);
+                      reqEnd = contentLen - 1;
+                    } else {
+                      reqStart = parsedRange.start ?? 0;
+                      reqEnd = parsedRange.end;
+                    }
+                  }
+                  await _streamUpstreamSlice(
+                    request,
+                    iter,
+                    contentType: ct,
+                    totalLength: contentLen,
+                    reqStart: reqStart,
+                    reqEnd: reqEnd,
+                    hasRange: hasRange,
+                    alreadyReadPrefix: prefix,
+                  );
+                  return;
+                }
+                builder.add(prefix);
+              }
+
+              while (
+                  await iter.moveNext().timeout(const Duration(seconds: 30))) {
+                final chunk = iter.current;
+                if (builder.length + chunk.length > _maxFullResponseCacheBytes) {
+                  _nonCacheablePassthroughKeys.add(cacheKey);
+                  if (contentLen != null) {
+                    await _saveMeta(
+                      cacheKey,
+                      _CachedObjectMeta(
+                        totalLength: contentLen,
+                        contentType: ct,
+                        supportsRanges: false,
+                      ),
+                      generation,
+                    );
+                  }
+                  releaseInitialProbe();
+                  int reqStart = 0;
+                  int? reqEnd;
+                  if (hasRange && contentLen != null) {
+                    if (parsedRange.suffixLength != null) {
+                      reqStart =
+                          math.max(0, contentLen - parsedRange.suffixLength!);
+                      reqEnd = contentLen - 1;
+                    } else {
+                      reqStart = parsedRange.start ?? 0;
+                      reqEnd = parsedRange.end;
+                    }
+                  }
+                  await _streamUpstreamSlice(
+                    request,
+                    iter,
+                    contentType: ct,
+                    totalLength: contentLen,
+                    reqStart: reqStart,
+                    reqEnd: reqEnd,
+                    hasRange: hasRange,
+                    alreadyReadPrefix: builder.takeBytes(),
+                    extraChunk: chunk,
+                  );
+                  return;
+                }
+                builder.add(chunk);
+              }
+
+              final fullBytes = builder.takeBytes();
+              await _cacheFullBodyIntoBlocks(
+                cacheKey,
+                fullBytes,
+                ct,
+                false,
+                generation,
+              );
+              releaseInitialProbe();
+              _writeSliceResponse(
+                request,
+                fullBytes: fullBytes,
+                contentType: ct,
+                parsedRange: parsedRange,
+                hasRange: hasRange,
+              );
+              return;
+            } finally {
+              try {
+                await iter.cancel();
+              } catch (_) {}
+            }
+          }
+
+          if (res.statusCode != HttpStatus.partialContent) {
+            request.response.statusCode = res.statusCode;
+            await res.stream.listen((_) {}).cancel();
+            return;
+          }
+
+          final ct = res.headers['content-type'] ?? 'application/octet-stream';
+          final crHeader = res.headers['content-range'];
+          final totalFromHeader = _parseTotalLengthFromContentRange(crHeader);
+          final blockBytes = await _readStreamBytes(
+            res.stream,
+            maxBytes: blockSize + 1024,
+          );
+          if (probeBlockIndex == 0 &&
+              onHlsPlaylistDetected != null &&
+              LocalMediaLease._startsWithM3u8Magic(blockBytes)) {
+            final isComplete =
+                (totalFromHeader != null &&
+                        blockBytes.length >= totalFromHeader) ||
+                    (totalFromHeader == null && blockBytes.length < blockSize);
+            Uint8List playlistBytes;
+            Uri playlistTarget = finalTarget;
+            if (isComplete) {
+              playlistBytes = blockBytes;
+            } else {
+              final (fullRes, fullTarget) = await fetchUpstream(
+                range: null,
+                allowRange: false,
+              );
+              onUpstreamStatus(fullRes.statusCode, fullTarget.host);
+              playlistTarget = fullTarget;
+              playlistBytes = await _readStreamBytes(
+                fullRes.stream,
+                maxBytes: LocalMediaLease._maxPlaylistBytes,
+              );
+            }
+            releaseInitialProbe();
+            await onHlsPlaylistDetected(
+              playlistTarget,
+              utf8.decode(playlistBytes, allowMalformed: true),
+            );
+            return;
+          }
+
+          final inferredTotal = totalFromHeader ??
+              (blockBytes.length < blockSize
+                  ? probeBlockStart + blockBytes.length
+                  : null);
+          if (blockBytes.isNotEmpty) {
+            await _writeCachedBlock(
+                cacheKey, probeBlockIndex, blockBytes, generation);
+            prefetchedBlocks[probeBlockIndex] = blockBytes;
+          }
+          if (inferredTotal != null) {
+            meta = _CachedObjectMeta(
+              totalLength: inferredTotal,
+              contentType: ct,
+              supportsRanges: true,
+            );
+            await _saveMeta(cacheKey, meta, generation);
+          }
+        }
+      } finally {
+        releaseInitialProbe();
+      }
     }
 
     if (meta == null) {
       // Unknown total length: fall back to direct upstream passthrough.
-      final (res, finalTarget) = await fetchUpstream(
-        range: rangeHeader,
-        ifRange: request.headers.value(HttpHeaders.ifRangeHeader),
-        allowRange: true,
+      await _servePassthrough(
+        request,
+        cacheKey: cacheKey,
+        parsedRange: parsedRange,
+        rangeHeader: rangeHeader,
+        meta: null,
+        fetchUpstream: fetchUpstream,
+        onUpstreamStatus: onUpstreamStatus,
+        onHlsPlaylistDetected: onHlsPlaylistDetected,
+        onHlsHeadDetected: onHlsHeadDetected,
       );
-      onUpstreamStatus(res.statusCode, finalTarget.host);
-      request.response.statusCode = res.statusCode;
-      for (final k in const [
-        'content-type',
-        'content-length',
-        'content-range',
-        'accept-ranges',
-      ]) {
-        final v = res.headers[k];
-        if (v != null && v.isNotEmpty) request.response.headers.set(k, v);
-      }
-      if (request.method == 'HEAD') {
-        await res.stream.listen((_) {}).cancel();
-        return;
-      }
-      await for (final chunk in res.stream) {
-        request.response.add(chunk);
-      }
       return;
     }
 
@@ -810,7 +1575,6 @@ class DiskBlockCache {
 
     int reqStart;
     int reqEnd;
-    final hasRange = rangeHeader != null && rangeHeader.trim().isNotEmpty;
     if (!hasRange) {
       reqStart = 0;
       reqEnd = totalLength - 1;
@@ -849,32 +1613,39 @@ class DiskBlockCache {
       return;
     }
 
-    if (preFetchedFullBody != null) {
-      request.response.add(
-        Uint8List.sublistView(preFetchedFullBody!, reqStart, reqEnd + 1),
-      );
-      return;
-    }
-
     final firstBlock = reqStart ~/ blockSize;
     final lastBlock = reqEnd ~/ blockSize;
+    Uint8List? preFetchedFullBody;
     for (var b = firstBlock; b <= lastBlock; b++) {
-      final blockData = await _getOrFetchBlock(
-        cacheKey: cacheKey,
-        blockIndex: b,
-        fetchUpstream: ({range, ifRange, required allowRange}) async {
-          final result = await fetchUpstream(
-            range: range,
-            ifRange: ifRange,
-            allowRange: allowRange,
-          );
-          onUpstreamStatus(result.$1.statusCode, result.$2.host);
-          return result;
-        },
-        onFullFallback: (bytes, ct, total) async {
-          preFetchedFullBody = bytes;
-        },
-      );
+      final Uint8List blockData;
+      if (preFetchedFullBody != null) {
+        final bStart = b * blockSize;
+        if (bStart >= preFetchedFullBody!.length) {
+          blockData = Uint8List(0);
+        } else {
+          final bEnd = math.min(bStart + blockSize, preFetchedFullBody!.length);
+          blockData = Uint8List.sublistView(preFetchedFullBody!, bStart, bEnd);
+        }
+      } else if (prefetchedBlocks.containsKey(b)) {
+        blockData = prefetchedBlocks[b]!;
+      } else {
+        blockData = await _getOrFetchBlock(
+          cacheKey: cacheKey,
+          blockIndex: b,
+          fetchUpstream: ({range, ifRange, required allowRange}) async {
+            final result = await fetchUpstream(
+              range: range,
+              ifRange: ifRange,
+              allowRange: allowRange,
+            );
+            onUpstreamStatus(result.$1.statusCode, result.$2.host);
+            return result;
+          },
+          onFullFallback: (bytes, ct, total) async {
+            preFetchedFullBody = bytes;
+          },
+        );
+      }
       final blockBase = b * blockSize;
       final sliceStart = math.max(0, reqStart - blockBase);
       final sliceEnd = math.min(blockData.length, reqEnd - blockBase + 1);
@@ -1654,6 +2425,19 @@ class LocalMediaLease {
             if (status >= 200 && status < 300) {
               _lastUpstreamError = null;
             }
+          },
+          onHlsHeadDetected: (finalTarget) {
+            _targets[request.uri.path] =
+                _RegisteredTarget(finalTarget, _TargetKind.playlist);
+          },
+          onHlsPlaylistDetected: (finalTarget, playlistText) async {
+            _targets[request.uri.path] =
+                _RegisteredTarget(finalTarget, _TargetKind.playlist);
+            await _respondPlaylist(
+              request.response,
+              playlistText,
+              finalTarget,
+            );
           },
         );
         return;

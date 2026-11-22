@@ -359,5 +359,270 @@ https://video.test/part2.ts
       expect(body.toBytes(), payload.sublist(100, 600));
       expect(seenRanges, ['bytes=0-262143', null]);
     });
+
+    test(
+      'extensionless HLS URL with enableDiskCache bypasses /kcache/ block caching, rewrites relative segments without 403, and strips VOD ads',
+      () async {
+        const m3u8 = '''
+#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:6
+#EXTINF:5.0,
+seg0.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4.0,
+https://ad-node.test/ads/promo.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5.0,
+seg1.ts
+#EXT-X-ENDLIST
+''';
+        final seg0Bytes = makeDeterministicPayload(188 * 2);
+        final seg1Bytes = makeDeterministicPayload(188 * 3);
+        final seenSegHeaders = <String, String?>{};
+
+        final upstreamClient = MockClient((http.Request request) async {
+          if (request.url.toString() == 'https://vod.test/play?id=1') {
+            return http.Response(
+              m3u8,
+              200,
+              headers: {'content-type': 'application/vnd.apple.mpegurl'},
+            );
+          }
+          if (request.url.toString() == 'https://vod.test/seg0.ts') {
+            seenSegHeaders['referer'] = request.headers['Referer'] ?? request.headers['referer'];
+            return http.Response.bytes(
+              seg0Bytes,
+              200,
+              headers: {'content-type': 'video/mp2t'},
+            );
+          }
+          if (request.url.toString() == 'https://vod.test/seg1.ts') {
+            return http.Response.bytes(
+              seg1Bytes,
+              200,
+              headers: {'content-type': 'video/mp2t'},
+            );
+          }
+          return http.Response('not found', 404);
+        });
+
+        final cache = DiskBlockCache(directory: tempDir);
+        final lease = await LocalMediaLease.open(
+          target: Uri.parse('https://vod.test/play?id=1'),
+          headers: const {'Referer': 'https://vod.test/'},
+          isCancelled: () => false,
+          client: upstreamClient,
+          removeHlsAds: true,
+          enableDiskCache: true,
+          diskCache: cache,
+        );
+        addTearDown(lease.close);
+
+        final ioClient = HttpClient();
+        addTearDown(() => ioClient.close(force: true));
+        final req = await ioClient.getUrl(lease.url);
+        req.headers.set('range', 'bytes=0-262143');
+        final res = await req.close();
+        final playlistBody = await utf8.decodeStream(res);
+
+        expect(res.statusCode, 200);
+        expect(res.headers.value(HttpHeaders.contentTypeHeader), contains('mpegurl'));
+        expect(playlistBody, isNot(contains('ad-node.test')));
+        expect(lease.removedHlsAdSegments, 1);
+        expect(cache.cachedBlockCount, 0);
+        expect(cache.currentBytes, 0);
+
+        // Every segment line must be rewritten to a valid local proxy URL (not 403).
+        final segLines = playlistBody
+            .split('\n')
+            .map((l) => l.trim())
+            .where((l) => l.isNotEmpty && !l.startsWith('#'))
+            .toList();
+        expect(segLines, hasLength(2));
+        expect(segLines[0], startsWith('http://127.0.0.1:'));
+        expect(segLines[0], isNot(contains('/kcache/')));
+
+        final segReq = await ioClient.getUrl(Uri.parse(segLines[0]));
+        final segRes = await segReq.close();
+        final fetchedSeg0 = await segRes.fold<BytesBuilder>(
+          BytesBuilder(),
+          (b, c) => b..add(c),
+        );
+        expect(segRes.statusCode, 200);
+        expect(fetchedSeg0.toBytes(), seg0Bytes);
+        expect(seenSegHeaders['referer'], 'https://vod.test/');
+      },
+    );
+
+    test(
+      '302-redirected extensionless VOD HLS without mpegurl Content-Type is detected via #EXTM3U and rewritten cleanly',
+      () async {
+        const m3u8 = '''
+#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXTINF:6.0,
+chunk0.ts
+#EXT-X-ENDLIST
+''';
+        final chunk0Bytes = makeDeterministicPayload(188);
+        final upstreamClient = MockClient((http.Request request) async {
+          if (request.url.toString() == 'https://entry.test/go') {
+            return http.Response(
+              '',
+              302,
+              headers: {'location': 'https://cdn.vod.test/stream/index.m3u8'},
+            );
+          }
+          if (request.url.toString() == 'https://cdn.vod.test/stream/index.m3u8') {
+            return http.Response(
+              m3u8,
+              200,
+              headers: {'content-type': 'text/plain'},
+            );
+          }
+          if (request.url.toString() == 'https://cdn.vod.test/stream/chunk0.ts') {
+            return http.Response.bytes(chunk0Bytes, 200);
+          }
+          return http.Response('not found', 404);
+        });
+
+        final cache = DiskBlockCache(directory: tempDir);
+        final lease = await LocalMediaLease.open(
+          target: Uri.parse('https://entry.test/go'),
+          isCancelled: () => false,
+          client: upstreamClient,
+          enableDiskCache: true,
+          diskCache: cache,
+        );
+        addTearDown(lease.close);
+
+        final ioClient = HttpClient();
+        addTearDown(() => ioClient.close(force: true));
+        final req = await ioClient.getUrl(lease.url);
+        final res = await req.close();
+        final body = await utf8.decodeStream(res);
+
+        expect(res.statusCode, 200);
+        expect(cache.cachedBlockCount, 0);
+        final segLines = body
+            .split('\n')
+            .map((l) => l.trim())
+            .where((l) => l.isNotEmpty && !l.startsWith('#'))
+            .toList();
+        expect(segLines, hasLength(1));
+
+        final segReq = await ioClient.getUrl(Uri.parse(segLines.single));
+        final segRes = await segReq.close();
+        final gotBytes = await segRes.fold<BytesBuilder>(
+          BytesBuilder(),
+          (b, c) => b..add(c),
+        );
+        expect(segRes.statusCode, 200);
+        expect(gotBytes.toBytes(), chunk0Bytes);
+      },
+    );
+
+    test(
+      'non-Range 200 OK exceeding full-response cache cap streams cleanly without FormatException or OOM',
+      () async {
+        // 1.5 MiB payload against a 512 KiB full-response cache cap.
+        const totalSize = 1536 * 1024;
+        const capBytes = 512 * 1024;
+        final payload = makeDeterministicPayload(totalSize);
+        var upstreamCalls = 0;
+
+        final upstreamClient = MockClient.streaming((request, bodyStream) async {
+          upstreamCalls++;
+          final stream = Stream<List<int>>.fromIterable([
+            for (var off = 0; off < payload.length; off += 64 * 1024)
+              payload.sublist(off, (off + 64 * 1024).clamp(0, payload.length)),
+          ]);
+          return http.StreamedResponse(
+            stream,
+            HttpStatus.ok,
+            contentLength: payload.length,
+            headers: {
+              'content-type': 'video/mp4',
+              'content-length': '${payload.length}',
+            },
+          );
+        });
+
+        final cache = DiskBlockCache(
+          directory: tempDir,
+          maxBytes: 16 * 1024 * 1024,
+          maxFullResponseCacheBytes: capBytes,
+        );
+        final lease = await LocalMediaLease.open(
+          target: Uri.parse('https://cdn.test/large-no-range.mp4'),
+          isCancelled: () => false,
+          client: upstreamClient,
+          enableDiskCache: true,
+          diskCache: cache,
+        );
+        addTearDown(lease.close);
+
+        final ioClient = HttpClient();
+        addTearDown(() => ioClient.close(force: true));
+
+        // 1. First Range request: streams exact slice [0..65535] with 206.
+        final req1 = await ioClient.getUrl(lease.url);
+        req1.headers.set('range', 'bytes=0-65535');
+        final res1 = await req1.close();
+        final got1 = await res1.fold<BytesBuilder>(
+          BytesBuilder(),
+          (b, c) => b..add(c),
+        );
+        expect(res1.statusCode, 206);
+        expect(res1.headers.value('content-range'), 'bytes 0-65535/$totalSize');
+        expect(got1.toBytes(), payload.sublist(0, 65536));
+        expect(cache.cachedBlockCount, 0);
+
+        // 2. Second Range request at offset > capBytes: uses direct passthrough cleanly.
+        final req2 = await ioClient.getUrl(lease.url);
+        req2.headers.set('range', 'bytes=800000-865535');
+        final res2 = await req2.close();
+        final got2 = await res2.fold<BytesBuilder>(
+          BytesBuilder(),
+          (b, c) => b..add(c),
+        );
+        expect(res2.statusCode, 206);
+        expect(res2.headers.value('content-range'), 'bytes 800000-865535/$totalSize');
+        expect(got2.toBytes(), payload.sublist(800000, 865536));
+        expect(upstreamCalls, 2);
+
+        // 3. Chunked 200 OK without Content-Length exceeding cap also streams cleanly without FormatException.
+        final chunkedClient = MockClient.streaming((request, bodyStream) async {
+          final stream = Stream<List<int>>.fromIterable([
+            for (var off = 0; off < payload.length; off += 64 * 1024)
+              payload.sublist(off, (off + 64 * 1024).clamp(0, payload.length)),
+          ]);
+          return http.StreamedResponse(
+            stream,
+            HttpStatus.ok,
+            headers: {'content-type': 'video/mp4'},
+          );
+        });
+        final chunkedLease = await LocalMediaLease.open(
+          target: Uri.parse('https://cdn.test/chunked-large.mp4'),
+          isCancelled: () => false,
+          client: chunkedClient,
+          enableDiskCache: true,
+          diskCache: cache,
+        );
+        addTearDown(chunkedLease.close);
+
+        final req3 = await ioClient.getUrl(chunkedLease.url);
+        req3.headers.set('range', 'bytes=0-1023');
+        final res3 = await req3.close();
+        final got3 = await res3.fold<BytesBuilder>(
+          BytesBuilder(),
+          (b, c) => b..add(c),
+        );
+        expect(res3.statusCode, 200);
+        expect(got3.toBytes(), payload);
+      },
+    );
   });
 }

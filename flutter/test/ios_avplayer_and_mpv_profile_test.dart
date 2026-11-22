@@ -286,6 +286,76 @@ void main() {
       expect(fallbacks.single.reason, contains('unsupported audio'));
     });
 
+    test('deduplicates fallbackToMpv + onFallbackToMpv per opened item and resets on next open()', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'getTelemetry') {
+          return <String, dynamic>{
+            'thermalState': 'nominal',
+            'physicalMemoryBytes': 6442450944,
+            'isPipSupported': true,
+            'isPipActive': false,
+            'isAirPlayActive': false,
+          };
+        }
+        return true;
+      });
+
+      final ctrl = IosAvPlayerController(
+        platformOverride: TargetPlatform.iOS,
+        isOhosOverride: false,
+        isWebOverride: false,
+      );
+      addTearDown(ctrl.dispose);
+
+      final fallbacks = <FallbackToMpvRequested>[];
+      ctrl.onFallbackToMpvRequested.listen(fallbacks.add);
+
+      expect(
+        await ctrl.open('https://cdn.example/video1.mp4'),
+        isTrue,
+      );
+
+      // Emit via EventChannel path first, then duplicate via MethodChannel onFallbackToMpv.
+      ctrl.handleNativeEvent(const <Object?, Object?>{
+        'type': 'fallbackToMpv',
+        'positionMs': 12345,
+        'reason': 'AVPlayer failed',
+      });
+      const codec = StandardMethodCodec();
+      await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .handlePlatformMessage(
+        channel.name,
+        codec.encodeMethodCall(
+          const MethodCall('onFallbackToMpv', <String, dynamic>{
+            'positionMs': 12345,
+            'reason': 'AVPlayer failed',
+          }),
+        ),
+        (_) {},
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(fallbacks, hasLength(1));
+      expect(fallbacks.single.positionMs, 12345);
+
+      // Opening a second item resets the per-item deduplication flag.
+      expect(
+        await ctrl.open('https://cdn.example/video2.mp4'),
+        isTrue,
+      );
+      ctrl.handleNativeEvent(const <Object?, Object?>{
+        'type': 'fallbackToMpv',
+        'positionMs': 54321,
+        'reason': 'Second item failed',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(fallbacks, hasLength(2));
+      expect(fallbacks.last.positionMs, 54321);
+      expect(fallbacks.last.reason, 'Second item failed');
+    });
+
     test('PiP lifecycle, AirPlay 2 state & thermal telemetry streams update controller state', () async {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (call) async {

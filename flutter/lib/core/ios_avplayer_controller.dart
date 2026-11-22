@@ -235,6 +235,7 @@ class IosAvPlayerController extends ChangeNotifier {
   StreamSubscription<dynamic>? _eventSub;
   bool _initialized = false;
   bool _disposed = false;
+  bool _fallbackEmittedForCurrentItem = false;
 
   bool _playing = false;
   bool _buffering = false;
@@ -555,7 +556,8 @@ class IosAvPlayerController extends ChangeNotifier {
         _buffering = false;
         _hasError = true;
         _lastError = reason;
-        if (!_fallbackCtrl.isClosed) {
+        if (!_fallbackEmittedForCurrentItem && !_fallbackCtrl.isClosed) {
+          _fallbackEmittedForCurrentItem = true;
           _fallbackCtrl.add(
             FallbackToMpvRequested(
               positionMs: posMs,
@@ -629,6 +631,7 @@ class IosAvPlayerController extends ChangeNotifier {
   }) async {
     if (_disposed) return false;
     await initialize();
+    _fallbackEmittedForCurrentItem = false;
 
     final precheck = checkUrlCompatibility(
       url,
@@ -639,7 +642,8 @@ class IosAvPlayerController extends ChangeNotifier {
     if (!precheck.supported) {
       final reason = precheck.reason ?? 'AVPlayer 不支持当前格式';
       _lastError = reason;
-      if (!_fallbackCtrl.isClosed) {
+      if (!_fallbackEmittedForCurrentItem && !_fallbackCtrl.isClosed) {
+        _fallbackEmittedForCurrentItem = true;
         _fallbackCtrl.add(
           FallbackToMpvRequested(
             positionMs: startPosition.inMilliseconds,
@@ -677,7 +681,8 @@ class IosAvPlayerController extends ChangeNotifier {
     } catch (e) {
       _hasError = true;
       _lastError = e.toString();
-      if (!_fallbackCtrl.isClosed) {
+      if (!_fallbackEmittedForCurrentItem && !_fallbackCtrl.isClosed) {
+        _fallbackEmittedForCurrentItem = true;
         _fallbackCtrl.add(
           FallbackToMpvRequested(
             positionMs: startPosition.inMilliseconds,

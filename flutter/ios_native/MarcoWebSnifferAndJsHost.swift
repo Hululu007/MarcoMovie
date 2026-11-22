@@ -310,7 +310,11 @@ private final class HeadlessMediaWebSniffer: NSObject, WKNavigationDelegate, WKU
   static func clearAdBlockCache(completion: @escaping () -> Void) {
     DispatchQueue.main.async {
       compiledRuleCache.removeAll()
-      WKContentRuleListStore.default().getAvailableContentRuleListIdentifiers { ids in
+      guard let store = WKContentRuleListStore.default() else {
+        completion()
+        return
+      }
+      store.getAvailableContentRuleListIdentifiers { ids in
         guard let ids = ids, !ids.isEmpty else {
           completion()
           return
@@ -318,7 +322,7 @@ private final class HeadlessMediaWebSniffer: NSObject, WKNavigationDelegate, WKU
         let group = DispatchGroup()
         for id in ids where id.hasPrefix("marco-ads-") {
           group.enter()
-          WKContentRuleListStore.default().removeContentRuleList(forIdentifier: id) { _ in
+          store.removeContentRuleList(forIdentifier: id) { _ in
             group.leave()
           }
         }
@@ -360,20 +364,26 @@ private final class HeadlessMediaWebSniffer: NSObject, WKNavigationDelegate, WKU
 
   private func isAdOrExcluded(_ raw: String) -> Bool {
     let lower = raw.lowercased()
-    if let host = URL(string: raw)?.host?.lowercased() {
-      for ad in ads {
-        if host == ad || host.hasSuffix("." + ad) || lower.contains(ad) {
+    let host = URL(string: raw)?.host?.lowercased()
+    let rawRange = NSRange(location: 0, length: raw.utf16.count)
+    for ad in ads {
+      if ad.hasPrefix("regex:") {
+        let body = String(ad.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !body.isEmpty,
+           let re = try? NSRegularExpression(pattern: body, options: [.caseInsensitive]),
+           re.firstMatch(in: raw, options: [], range: rawRange) != nil {
           return true
         }
+        continue
       }
-    } else {
-      for ad in ads where lower.contains(ad) {
+      if let host = host, (host == ad || host.hasSuffix("." + ad) || lower.contains(ad)) {
+        return true
+      } else if lower.contains(ad) {
         return true
       }
     }
-    let nsRange = NSRange(location: 0, length: raw.utf16.count)
     for ex in activeExcludeRegexes {
-      if ex.firstMatch(in: raw, options: [], range: nsRange) != nil {
+      if ex.firstMatch(in: raw, options: [], range: rawRange) != nil {
         return true
       }
     }
@@ -411,13 +421,13 @@ private final class HeadlessMediaWebSniffer: NSObject, WKNavigationDelegate, WKU
 
   private static func buildContentBlockerJson(for ads: [String]) -> (id: String, json: String)? {
     let normalized = Array(Set(ads.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter {
-      !$0.isEmpty && $0 != "*" && $0 != "." && $0.unicodeScalars.allSatisfy { $0.isASCII }
+      !$0.isEmpty && $0 != "*" && $0 != "." && !$0.hasPrefix("regex:") && $0.unicodeScalars.allSatisfy { $0.isASCII }
     })).sorted()
     if normalized.isEmpty { return nil }
 
     var ruleObjects: [[String: Any]] = []
     let specialChars = CharacterSet(charactersIn: "^$.+?()[]{}|\\")
-    for pattern in normalized.prefix(512) {
+    for pattern in normalized.prefix(256) {
       var escaped = ""
       for scalar in pattern.unicodeScalars {
         if scalar == "*" {
@@ -428,16 +438,22 @@ private final class HeadlessMediaWebSniffer: NSObject, WKNavigationDelegate, WKU
           escaped += String(scalar)
         }
       }
-      let urlFilter: String
       if pattern.contains("/") {
-        urlFilter = "^https?://[^/]*" + escaped
+        ruleObjects.append([
+          "trigger": ["url-filter": "^https?://[^/]*" + escaped],
+          "action": ["type": "block"]
+        ])
       } else {
-        urlFilter = "^https?://([^/]+\\.)?" + escaped + "([/:?#]|$)"
+        let hostPrefix = "^https?://([^/]+\\.)?" + escaped
+        ruleObjects.append([
+          "trigger": ["url-filter": hostPrefix + "[/:?#]"],
+          "action": ["type": "block"]
+        ])
+        ruleObjects.append([
+          "trigger": ["url-filter": hostPrefix + "$"],
+          "action": ["type": "block"]
+        ])
       }
-      ruleObjects.append([
-        "trigger": ["url-filter": urlFilter],
-        "action": ["type": "block"]
-      ])
     }
     guard !ruleObjects.isEmpty,
           let data = try? JSONSerialization.data(withJSONObject: ruleObjects, options: []),
@@ -752,14 +768,6 @@ private final class MarcoOffscreenWebJsHost: NSObject, WKNavigationDelegate, WKS
   private var queue: [PendingJob] = []
   private var activeHttpTasks: [URLSessionDataTask] = []
   private var activeJobAbort: ((String) -> Void)?
-  private lazy var urlSession: URLSession = {
-    let config = URLSessionConfiguration.ephemeral
-    config.timeoutIntervalForRequest = 12
-    config.timeoutIntervalForResource = 25
-    config.httpCookieAcceptPolicy = .never
-    config.httpShouldSetCookies = false
-    return URLSession(configuration: config)
-  }()
 
   private static let bootstrapHtml = """
   <!DOCTYPE html>
@@ -1031,8 +1039,8 @@ private final class MarcoOffscreenWebJsHost: NSObject, WKNavigationDelegate, WKS
         case .success(let value):
           if let str = value as? String {
             finish(str, nil)
-          } else if let obj = value,
-                    let data = try? JSONSerialization.data(withJSONObject: obj, options: []),
+          } else if JSONSerialization.isValidJSONObject(value),
+                    let data = try? JSONSerialization.data(withJSONObject: value, options: []),
                     let jsonStr = String(data: data, encoding: .utf8) {
             finish(jsonStr, nil)
           } else {
