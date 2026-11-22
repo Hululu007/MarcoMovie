@@ -893,4 +893,92 @@ void main() {
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
+
+  testWidgets(
+    'bottom Dock renders bespoke animated vector icons for all 4 tabs and settles selection animations cleanly in Light & Dark',
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(false);
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      const dockItems = <(IconData, IconData, String)>[
+        (
+          CupertinoIcons.play_rectangle,
+          CupertinoIcons.play_rectangle_fill,
+          '主页',
+        ),
+        (
+          CupertinoIcons.dot_radiowaves_left_right,
+          CupertinoIcons.dot_radiowaves_left_right,
+          '直播',
+        ),
+        (
+          CupertinoIcons.square_stack_3d_up,
+          CupertinoIcons.square_stack_3d_up_fill,
+          '片库',
+        ),
+        (CupertinoIcons.gear_alt, CupertinoIcons.gear_alt_fill, '设置'),
+      ];
+      final selectedIdx = ValueNotifier<int>(0);
+      final themeMode = ValueNotifier<ThemeMode>(ThemeMode.dark);
+      addTearDown(() {
+        selectedIdx.dispose();
+        themeMode.dispose();
+      });
+
+      await tester.pumpWidget(
+        ValueListenableBuilder<ThemeMode>(
+          valueListenable: themeMode,
+          builder: (_, mode, __) => MaterialApp(
+            themeMode: mode,
+            theme: ThemeData.light(useMaterial3: true),
+            darkTheme: ThemeData.dark(useMaterial3: true),
+            home: Scaffold(
+              bottomNavigationBar: Center(
+                heightFactor: 1,
+                child: ValueListenableBuilder<int>(
+                  valueListenable: selectedIdx,
+                  builder: (_, idx, __) => AppleLiquidGlassDock(
+                    selectedIndex: idx,
+                    onSelect: (next) => selectedIdx.value = next,
+                    isLandscape: false,
+                    items: dockItems,
+                    onSearch: () {},
+                  ),
+                ),
+              ),
+              body: const SizedBox.expand(),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      for (final mode in const [ThemeMode.dark, ThemeMode.light]) {
+        themeMode.value = mode;
+        await tester.pumpAndSettle();
+        expect(find.byType(MarcoAnimatedDockIcon), findsNWidgets(4));
+        for (final key in const [
+          'marco-dock-icon-home',
+          'marco-dock-icon-live',
+          'marco-dock-icon-library',
+          'marco-dock-icon-settings',
+        ]) {
+          expect(find.byKey(ValueKey(key)), findsOneWidget);
+        }
+
+        // Tap each tab in turn and verify mid-animation frame + clean settle.
+        for (final label in const ['直播', '片库', '设置', '主页']) {
+          await tester.tap(find.text(label));
+          await tester.pump(const Duration(milliseconds: 120));
+          expect(tester.takeException(), isNull);
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+        }
+      }
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
 }

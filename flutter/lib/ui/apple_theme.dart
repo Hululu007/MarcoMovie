@@ -1354,10 +1354,11 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
     final n = math.max(widget.items.length, 1);
 
     final isDark = ApplePalette.isDarkOf(context);
-    final dockActiveFg = isDark ? Colors.white : AppleColors.systemBlue;
+    final dockActiveFg =
+        isDark ? const Color(0xFF5CB8FF) : AppleColors.systemBlue;
     final dockInactiveFg = isDark
-        ? Colors.white.withValues(alpha: 0.84)
-        : const Color(0xFF1C1E24).withValues(alpha: 0.82);
+        ? Colors.white.withValues(alpha: 0.70)
+        : const Color(0xFF2C303A).withValues(alpha: 0.76);
 
     BoxDecoration glassDeco(double radius) => BoxDecoration(
           borderRadius: BorderRadius.circular(radius),
@@ -1466,13 +1467,13 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
                                   borderRadius:
                                       BorderRadius.circular(lensH * 0.5),
                                   color: isDark
-                                      ? Colors.white.withValues(alpha: 0.16)
-                                      : Colors.black.withValues(alpha: 0.07),
+                                      ? const Color(0x383894FF)
+                                      : const Color(0x1F007AFF),
                                   border: Border.all(
                                     color: isDark
-                                        ? Colors.white.withValues(alpha: 0.18)
-                                        : Colors.black.withValues(alpha: 0.06),
-                                    width: 0.5,
+                                        ? const Color(0x478CCCFF)
+                                        : const Color(0x29007AFF),
+                                    width: 0.55,
                                   ),
                                 ),
                               ),
@@ -1488,16 +1489,29 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
                                           mainAxisAlignment:
                                               MainAxisAlignment.center,
                                           children: [
-                                            Icon(
-                                              i == _safeIndex
+                                            MarcoAnimatedDockIcon(
+                                              kind: MarcoAnimatedDockIcon
+                                                  .resolveKind(
+                                                explicitKind:
+                                                    widget.nativeItems !=
+                                                                null &&
+                                                            i <
+                                                                widget
+                                                                    .nativeItems!
+                                                                    .length
+                                                        ? widget.nativeItems![i]
+                                                            .kind
+                                                        : null,
+                                                label: widget.items[i].$3,
+                                                icon: widget.items[i].$1,
+                                              ),
+                                              fallbackIcon: i == _safeIndex
                                                   ? widget.items[i].$2
                                                   : widget.items[i].$1,
-                                              size: 20.5,
-                                              color: i == _safeIndex
-                                                  ? dockActiveFg
-                                                  : dockInactiveFg,
+                                              selected: i == _safeIndex,
+                                              size: 24,
                                             ),
-                                            const SizedBox(height: 3),
+                                            const SizedBox(height: 2.5),
                                             Text(
                                               widget.items[i].$3,
                                               maxLines: 1,
@@ -1944,11 +1958,21 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
 
   Widget _item(int index) {
     final item = widget.items[index];
+    final activeIdx = _lastDragSelectedIndex ?? _safeIndex;
+    final explicitKind = widget.nativeItems != null &&
+            index < widget.nativeItems!.length
+        ? widget.nativeItems![index].kind
+        : null;
     return _DockItem(
       icon: item.$1,
       selectedIcon: item.$2,
       label: item.$3,
-      selected: index == _safeIndex,
+      kind: MarcoAnimatedDockIcon.resolveKind(
+        explicitKind: explicitKind,
+        label: item.$3,
+        icon: item.$1,
+      ),
+      selected: index == activeIdx,
       onTap: () => widget.onSelect(index),
     );
   }
@@ -2013,7 +2037,7 @@ class _DockSearchCircleButtonState extends State<_DockSearchCircleButton> {
   }
 }
 
-/// Translucent inner capsule lens behind the selected tab (iOS 26 style).
+/// Luminous tinted inner capsule lens behind the selected tab (iOS 26/27 style).
 class _DockSelectionLens extends StatelessWidget {
   const _DockSelectionLens();
   @override
@@ -2026,7 +2050,7 @@ class _DockSelectionLens extends StatelessWidget {
     return CustomPaint(
       foregroundPainter: _LiquidRimPainter(
         shape: shape,
-        strength: isDark ? 0.42 : 0.65,
+        strength: isDark ? 0.54 : 0.72,
         lightMode: !isDark,
       ),
       child: DecoratedBox(
@@ -2037,12 +2061,12 @@ class _DockSelectionLens extends StatelessWidget {
             end: Alignment.bottomCenter,
             colors: isDark
                 ? const [
-                    Color(0x66000000),
-                    Color(0x4A000000),
+                    Color(0x423896FF),
+                    Color(0x2A2068CC),
                   ]
                 : const [
-                    Color(0x1A007AFF),
-                    Color(0x0E007AFF),
+                    Color(0x26007AFF),
+                    Color(0x14007AFF),
                   ],
           ),
         ),
@@ -2051,16 +2075,809 @@ class _DockSelectionLens extends StatelessWidget {
   }
 }
 
+/// Custom icon archetypes for the 4 bottom Dock tabs (`主页` / `直播` / `片库` / `设置`).
+enum MarcoDockIconKind { home, live, library, settings }
+
+/// Bespoke 24x24pt layered animated vector tab icon mirroring native iOS
+/// `MarcoAnimatedTabIconView` pixel-for-pixel on iOS 15–18, landscape, Split
+/// View, desktop, and iOS 26+ route-transition placeholders.
+class MarcoAnimatedDockIcon extends StatefulWidget {
+  final MarcoDockIconKind? kind;
+  final IconData fallbackIcon;
+  final bool selected;
+  final double size;
+  final int pulseTick;
+
+  const MarcoAnimatedDockIcon({
+    super.key,
+    required this.kind,
+    required this.fallbackIcon,
+    required this.selected,
+    this.size = 24.0,
+    this.pulseTick = 0,
+  });
+
+  static MarcoDockIconKind? resolveKind({
+    String? explicitKind,
+    required String label,
+    required IconData icon,
+  }) {
+    switch (explicitKind?.toLowerCase()) {
+      case 'home':
+        return MarcoDockIconKind.home;
+      case 'live':
+        return MarcoDockIconKind.live;
+      case 'library':
+        return MarcoDockIconKind.library;
+      case 'settings':
+        return MarcoDockIconKind.settings;
+    }
+    if (label.contains('主页') ||
+        icon == CupertinoIcons.play_rectangle ||
+        icon == CupertinoIcons.play_rectangle_fill) {
+      return MarcoDockIconKind.home;
+    }
+    if (label.contains('直播') ||
+        icon == CupertinoIcons.dot_radiowaves_left_right) {
+      return MarcoDockIconKind.live;
+    }
+    if (label.contains('片库') ||
+        icon == CupertinoIcons.square_stack_3d_up ||
+        icon == CupertinoIcons.square_stack_3d_up_fill) {
+      return MarcoDockIconKind.library;
+    }
+    if (label.contains('设置') ||
+        icon == CupertinoIcons.gear_alt ||
+        icon == CupertinoIcons.gear_alt_fill) {
+      return MarcoDockIconKind.settings;
+    }
+    return null;
+  }
+
+  @override
+  State<MarcoAnimatedDockIcon> createState() => _MarcoAnimatedDockIconState();
+}
+
+class _MarcoAnimatedDockIconState extends State<MarcoAnimatedDockIcon>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 620),
+      value: 1.0,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant MarcoAnimatedDockIcon oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final becameSelected = !oldWidget.selected && widget.selected;
+    final repulsed =
+        widget.selected && oldWidget.pulseTick != widget.pulseTick;
+    if (becameSelected || repulsed) {
+      final reduceMotion =
+          MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+      if (reduceMotion) {
+        _ctrl.value = 1.0;
+      } else {
+        _ctrl.forward(from: 0.0);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = ApplePalette.isDarkOf(context);
+    final activePrimary =
+        isDark ? const Color(0xFF40A6FF) : AppleColors.systemBlue;
+    final activeSecondary =
+        isDark ? const Color(0xFF76D6FF) : const Color(0xFF38B6FF);
+    final liveRed =
+        isDark ? const Color(0xFFFF453A) : const Color(0xFFFF3B30);
+    final inactiveColor = isDark
+        ? Colors.white.withValues(alpha: 0.70)
+        : const Color(0xFF2C303A).withValues(alpha: 0.74);
+
+    if (widget.kind == null) {
+      return AnimatedBuilder(
+        animation: _ctrl,
+        builder: (context, child) {
+          final scale = widget.selected
+              ? _evalKeyframes(
+                  _ctrl.value,
+                  const [0.0, 0.44, 0.76, 1.0],
+                  const [0.84, 1.14, 0.97, 1.0],
+                )
+              : 1.0;
+          return Transform.scale(scale: scale, child: child);
+        },
+        child: Icon(
+          widget.fallbackIcon,
+          size: widget.size * 0.88,
+          color: widget.selected ? activePrimary : inactiveColor,
+        ),
+      );
+    }
+
+    return SizedBox(
+      width: widget.size,
+      height: widget.size,
+      child: AnimatedBuilder(
+        animation: _ctrl,
+        builder: (context, _) => CustomPaint(
+          key: ValueKey('marco-dock-icon-${widget.kind!.name}'),
+          painter: _MarcoDockIconPainter(
+            kind: widget.kind!,
+            selected: widget.selected,
+            progress: _ctrl.value,
+            activePrimary: activePrimary,
+            activeSecondary: activeSecondary,
+            liveRed: liveRed,
+            inactiveColor: inactiveColor,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+double _evalKeyframes(double t, List<double> times, List<double> values) {
+  final clamped = t.clamp(0.0, 1.0);
+  for (var i = 0; i < times.length - 1; i++) {
+    final t0 = times[i];
+    final t1 = times[i + 1];
+    if (clamped <= t1 || i == times.length - 2) {
+      final span = math.max(t1 - t0, 1e-6);
+      final local = ((clamped - t0) / span).clamp(0.0, 1.0);
+      final eased = Curves.easeOutCubic.transform(local);
+      return values[i] + (values[i + 1] - values[i]) * eased;
+    }
+  }
+  return values.last;
+}
+
+class _MarcoDockIconPainter extends CustomPainter {
+  final MarcoDockIconKind kind;
+  final bool selected;
+  final double progress;
+  final Color activePrimary;
+  final Color activeSecondary;
+  final Color liveRed;
+  final Color inactiveColor;
+
+  const _MarcoDockIconPainter({
+    required this.kind,
+    required this.selected,
+    required this.progress,
+    required this.activePrimary,
+    required this.activeSecondary,
+    required this.liveRed,
+    required this.inactiveColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final scale = math.min(size.width, size.height) / 24.0;
+    canvas.save();
+    canvas.translate(
+      (size.width - 24.0 * scale) * 0.5,
+      (size.height - 24.0 * scale) * 0.5,
+    );
+    canvas.scale(scale, scale);
+
+    switch (kind) {
+      case MarcoDockIconKind.home:
+        _paintHome(canvas);
+      case MarcoDockIconKind.live:
+        _paintLive(canvas);
+      case MarcoDockIconKind.library:
+        _paintLibrary(canvas);
+      case MarcoDockIconKind.settings:
+        _paintSettings(canvas);
+    }
+
+    canvas.restore();
+  }
+
+  void _withPivot(
+    Canvas canvas,
+    Offset pivot, {
+    double scaleX = 1.0,
+    double scaleY = 1.0,
+    double translateX = 0.0,
+    double translateY = 0.0,
+    double rotation = 0.0,
+    required VoidCallback draw,
+  }) {
+    canvas.save();
+    canvas.translate(pivot.dx + translateX, pivot.dy + translateY);
+    if (rotation != 0.0) canvas.rotate(rotation);
+    if (scaleX != 1.0 || scaleY != 1.0) canvas.scale(scaleX, scaleY);
+    canvas.translate(-pivot.dx, -pivot.dy);
+    draw();
+    canvas.restore();
+  }
+
+  void _paintHome(Canvas canvas) {
+    final t = selected ? progress : 1.0;
+    final screenScale = selected
+        ? _evalKeyframes(
+            t,
+            const [0.0, 0.42, 0.76, 1.0],
+            const [0.82, 1.12, 0.97, 1.0],
+          )
+        : 1.0;
+    final standScaleX = selected
+        ? _evalKeyframes(
+            t,
+            const [0.0, 0.48, 0.78, 1.0],
+            const [0.38, 1.14, 0.98, 1.0],
+          )
+        : 1.0;
+    final playTx = selected
+        ? _evalKeyframes(
+            t,
+            const [0.0, 0.46, 0.78, 1.0],
+            const [-2.4, 0.9, -0.2, 0.0],
+          )
+        : 0.0;
+    final playScale = selected
+        ? _evalKeyframes(
+            t,
+            const [0.0, 0.46, 0.78, 1.0],
+            const [0.55, 1.18, 0.96, 1.0],
+          )
+        : 1.0;
+
+    // Curved cinema stand arc
+    _withPivot(
+      canvas,
+      const Offset(12.0, 19.6),
+      scaleX: standScaleX,
+      draw: () {
+        final p = Path()
+          ..moveTo(8.1, 20.5)
+          ..quadraticBezierTo(12.0, 18.8, 15.9, 20.5);
+        canvas.drawPath(
+          p,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeCap = StrokeCap.round
+            ..strokeWidth = selected ? 2.05 : 1.75
+            ..color = selected
+                ? activeSecondary
+                : inactiveColor.withValues(alpha: inactiveColor.a * 0.74),
+        );
+      },
+    );
+
+    // Sculpted rounded cinema screen
+    _withPivot(
+      canvas,
+      const Offset(12.0, 10.7),
+      scaleX: screenScale,
+      scaleY: screenScale,
+      draw: () {
+        final rrect = RRect.fromRectAndRadius(
+          const Rect.fromLTWH(2.3, 3.9, 19.4, 13.6),
+          const Radius.circular(4.3),
+        );
+        if (selected) {
+          canvas.drawRRect(rrect, Paint()..color = activePrimary);
+        } else {
+          canvas.drawRRect(
+            rrect,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.85
+              ..color = inactiveColor,
+          );
+        }
+      },
+    );
+
+    // Play triangle
+    _withPivot(
+      canvas,
+      const Offset(12.2, 10.7),
+      translateX: playTx,
+      scaleX: playScale,
+      scaleY: playScale,
+      draw: () {
+        final tri = Path()
+          ..moveTo(10.0, 8.3)
+          ..lineTo(15.3, 10.7)
+          ..lineTo(10.0, 13.1)
+          ..close();
+        if (selected) {
+          canvas.drawPath(tri, Paint()..color = Colors.white);
+          canvas.drawPath(
+            tri,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeJoin = StrokeJoin.round
+              ..strokeWidth = 0.9
+              ..color = Colors.white,
+          );
+        } else {
+          canvas.drawPath(
+            tri,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeJoin = StrokeJoin.round
+              ..strokeCap = StrokeCap.round
+              ..strokeWidth = 1.55
+              ..color = inactiveColor,
+          );
+        }
+      },
+    );
+
+    // Top-right 4-point cinema sparkle (selected only)
+    if (selected) {
+      final st = ((t - 0.10) / 0.90).clamp(0.0, 1.0);
+      final spScale = _evalKeyframes(
+        st,
+        const [0.0, 0.52, 0.80, 1.0],
+        const [0.01, 1.35, 0.92, 1.0],
+      );
+      final spRot = _evalKeyframes(
+        st,
+        const [0.0, 0.54, 0.82, 1.0],
+        const [-0.78, 0.24, -0.05, 0.0],
+      );
+      _withPivot(
+        canvas,
+        const Offset(20.6, 3.4),
+        scaleX: spScale,
+        scaleY: spScale,
+        rotation: spRot,
+        draw: () {
+          final star = Path();
+          const sr = 2.75;
+          const ir = 0.78;
+          for (var k = 0; k < 8; k++) {
+            final a = k * (math.pi / 4.0);
+            final rr = k.isEven ? sr : ir;
+            final pt = Offset(
+              20.6 + math.cos(a) * rr,
+              3.4 + math.sin(a) * rr,
+            );
+            if (k == 0) {
+              star.moveTo(pt.dx, pt.dy);
+            } else {
+              star.lineTo(pt.dx, pt.dy);
+            }
+          }
+          star.close();
+          canvas.drawPath(star, Paint()..color = activeSecondary);
+        },
+      );
+    }
+  }
+
+  void _paintLive(Canvas canvas) {
+    final t = selected ? progress : 1.0;
+    const bc = Offset(12.0, 10.6);
+
+    final innerT = ((t - 0.08) / 0.82).clamp(0.0, 1.0);
+    final outerT = ((t - 0.20) / 0.80).clamp(0.0, 1.0);
+
+    final outerScale = selected
+        ? _evalKeyframes(
+            outerT,
+            const [0.0, 0.50, 0.80, 1.0],
+            const [0.64, 1.20, 0.98, 1.0],
+          )
+        : 1.0;
+    final outerAlpha = selected
+        ? _evalKeyframes(outerT, const [0.0, 0.44, 1.0], const [0.12, 1.0, 1.0])
+        : 0.56;
+
+    final innerScale = selected
+        ? _evalKeyframes(
+            innerT,
+            const [0.0, 0.48, 0.78, 1.0],
+            const [0.68, 1.16, 0.98, 1.0],
+          )
+        : 1.0;
+    final innerAlpha = selected
+        ? _evalKeyframes(innerT, const [0.0, 0.42, 1.0], const [0.22, 1.0, 1.0])
+        : 1.0;
+
+    // Outer broadcast wave arcs
+    _withPivot(
+      canvas,
+      bc,
+      scaleX: outerScale,
+      scaleY: outerScale,
+      draw: () {
+        final paint = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = selected ? 1.9 : 1.8
+          ..color = (selected ? activeSecondary : inactiveColor).withValues(
+            alpha: (selected ? 1.0 : inactiveColor.a) * outerAlpha,
+          );
+        final rect = Rect.fromCircle(center: bc, radius: 8.5);
+        canvas.drawArc(
+          rect,
+          138.0 * math.pi / 180.0,
+          84.0 * math.pi / 180.0,
+          false,
+          paint,
+        );
+        canvas.drawArc(
+          rect,
+          -42.0 * math.pi / 180.0,
+          84.0 * math.pi / 180.0,
+          false,
+          paint,
+        );
+      },
+    );
+
+    // Inner broadcast wave arcs
+    _withPivot(
+      canvas,
+      bc,
+      scaleX: innerScale,
+      scaleY: innerScale,
+      draw: () {
+        final paint = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = selected ? 1.95 : 1.85
+          ..color = (selected ? activePrimary : inactiveColor).withValues(
+            alpha: (selected ? 1.0 : inactiveColor.a) * innerAlpha,
+          );
+        final rect = Rect.fromCircle(center: bc, radius: 5.25);
+        canvas.drawArc(
+          rect,
+          140.0 * math.pi / 180.0,
+          80.0 * math.pi / 180.0,
+          false,
+          paint,
+        );
+        canvas.drawArc(
+          rect,
+          -40.0 * math.pi / 180.0,
+          80.0 * math.pi / 180.0,
+          false,
+          paint,
+        );
+      },
+    );
+
+    // Broadcast dish stand
+    final standPath = Path()
+      ..moveTo(12.0, 14.0)
+      ..lineTo(12.0, 19.6)
+      ..moveTo(8.2, 20.6)
+      ..quadraticBezierTo(12.0, 18.8, 15.8, 20.6);
+    canvas.drawPath(
+      standPath,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = selected ? 1.95 : 1.8
+        ..color = selected ? activePrimary : inactiveColor,
+    );
+
+    // Crimson Live Halo + Center Beacon
+    if (selected) {
+      final haloScale = _evalKeyframes(
+        t,
+        const [0.0, 0.45, 0.78, 1.0],
+        const [0.55, 1.72, 1.08, 1.0],
+      );
+      final haloAlpha = _evalKeyframes(
+        t,
+        const [0.0, 0.48, 0.78, 1.0],
+        const [0.42, 0.14, 0.28, 0.28],
+      );
+      _withPivot(
+        canvas,
+        bc,
+        scaleX: haloScale,
+        scaleY: haloScale,
+        draw: () {
+          canvas.drawCircle(
+            bc,
+            4.0,
+            Paint()..color = liveRed.withValues(alpha: haloAlpha),
+          );
+        },
+      );
+      final beaconScale = _evalKeyframes(
+        t,
+        const [0.0, 0.38, 0.72, 1.0],
+        const [0.58, 1.38, 0.94, 1.0],
+      );
+      _withPivot(
+        canvas,
+        bc,
+        scaleX: beaconScale,
+        scaleY: beaconScale,
+        draw: () {
+          canvas.drawCircle(bc, 2.35, Paint()..color = liveRed);
+        },
+      );
+    } else {
+      canvas.drawCircle(bc, 2.15, Paint()..color = inactiveColor);
+    }
+  }
+
+  void _paintLibrary(Canvas canvas) {
+    final t = selected ? progress : 1.0;
+    final midT = ((t - 0.04) / 0.90).clamp(0.0, 1.0);
+    final backT = ((t - 0.12) / 0.88).clamp(0.0, 1.0);
+
+    final backTy = selected
+        ? _evalKeyframes(
+            backT,
+            const [0.0, 0.48, 0.80, 1.0],
+            const [5.2, -2.3, 0.4, 0.0],
+          )
+        : 0.0;
+    final backSx = selected
+        ? _evalKeyframes(
+            backT,
+            const [0.0, 0.48, 0.80, 1.0],
+            const [0.74, 1.08, 0.98, 1.0],
+          )
+        : 1.0;
+
+    final midTy = selected
+        ? _evalKeyframes(
+            midT,
+            const [0.0, 0.46, 0.78, 1.0],
+            const [3.2, -1.5, 0.3, 0.0],
+          )
+        : 0.0;
+    final midSx = selected
+        ? _evalKeyframes(
+            midT,
+            const [0.0, 0.46, 0.78, 1.0],
+            const [0.84, 1.06, 0.99, 1.0],
+          )
+        : 1.0;
+
+    final frontScale = selected
+        ? _evalKeyframes(
+            t,
+            const [0.0, 0.42, 0.76, 1.0],
+            const [0.86, 1.09, 0.98, 1.0],
+          )
+        : 1.0;
+    final bmSy = selected
+        ? _evalKeyframes(
+            t,
+            const [0.0, 0.46, 0.78, 1.0],
+            const [0.42, 1.16, 0.96, 1.0],
+          )
+        : 1.0;
+
+    // Back card 3
+    _withPivot(
+      canvas,
+      const Offset(12.0, 4.1),
+      translateY: backTy,
+      scaleX: backSx,
+      draw: () {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            const Rect.fromLTWH(6.6, 3.1, 10.8, 2.0),
+            const Radius.circular(1.0),
+          ),
+          Paint()
+            ..color = selected
+                ? activeSecondary.withValues(alpha: 0.52)
+                : inactiveColor.withValues(alpha: inactiveColor.a * 0.46),
+        );
+      },
+    );
+
+    // Mid card 2
+    _withPivot(
+      canvas,
+      const Offset(12.0, 7.2),
+      translateY: midTy,
+      scaleX: midSx,
+      draw: () {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            const Rect.fromLTWH(4.5, 6.1, 15.0, 2.15),
+            const Radius.circular(1.08),
+          ),
+          Paint()
+            ..color = selected
+                ? activeSecondary.withValues(alpha: 0.84)
+                : inactiveColor.withValues(alpha: inactiveColor.a * 0.72),
+        );
+      },
+    );
+
+    // Front card 1
+    _withPivot(
+      canvas,
+      const Offset(12.0, 15.2),
+      scaleX: frontScale,
+      scaleY: frontScale,
+      draw: () {
+        final card = RRect.fromRectAndRadius(
+          const Rect.fromLTWH(2.5, 9.4, 19.0, 11.6),
+          const Radius.circular(3.7),
+        );
+        if (selected) {
+          canvas.drawRRect(card, Paint()..color = activePrimary);
+        } else {
+          canvas.drawRRect(
+            card,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.85
+              ..color = inactiveColor,
+          );
+        }
+      },
+    );
+
+    // Bookmark ribbon inside front card
+    _withPivot(
+      canvas,
+      const Offset(12.0, 9.4),
+      scaleY: bmSy,
+      draw: () {
+        final bm = Path()
+          ..moveTo(9.3, 9.4)
+          ..lineTo(14.7, 9.4)
+          ..lineTo(14.7, 16.5)
+          ..lineTo(12.0, 14.4)
+          ..lineTo(9.3, 16.5)
+          ..close();
+        if (selected) {
+          canvas.drawPath(bm, Paint()..color = Colors.white);
+        } else {
+          canvas.drawPath(
+            bm,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeJoin = StrokeJoin.round
+              ..strokeCap = StrokeCap.round
+              ..strokeWidth = 1.55
+              ..color = inactiveColor,
+          );
+        }
+      },
+    );
+  }
+
+  void _paintSettings(Canvas canvas) {
+    final t = selected ? progress : 1.0;
+    const sixtyDeg = math.pi / 3.0;
+    final rot = selected
+        ? _evalKeyframes(
+            t,
+            const [0.0, 0.48, 0.78, 1.0],
+            const [0.0, sixtyDeg * 1.18, sixtyDeg * 0.95, sixtyDeg],
+          )
+        : 0.0;
+    final gearScale = selected
+        ? _evalKeyframes(
+            t,
+            const [0.0, 0.42, 0.76, 1.0],
+            const [0.86, 1.11, 0.98, 1.0],
+          )
+        : 1.0;
+
+    final gear = Path();
+    const samples = 96;
+    for (var i = 0; i < samples; i++) {
+      final th = (2.0 * math.pi * i) / samples - math.pi * 0.5;
+      final wave = math.cos(6.0 * th);
+      final shaped = (wave >= 0 ? 1.0 : -1.0) * math.pow(wave.abs(), 0.54);
+      final r = 8.0 + 1.55 * shaped;
+      final pt = Offset(12.0 + r * math.cos(th), 12.0 + r * math.sin(th));
+      if (i == 0) {
+        gear.moveTo(pt.dx, pt.dy);
+      } else {
+        gear.lineTo(pt.dx, pt.dy);
+      }
+    }
+    gear.close();
+
+    _withPivot(
+      canvas,
+      const Offset(12.0, 12.0),
+      scaleX: gearScale,
+      scaleY: gearScale,
+      rotation: rot,
+      draw: () {
+        if (selected) {
+          gear.addOval(
+            Rect.fromCircle(center: const Offset(12.0, 12.0), radius: 3.65),
+          );
+          gear.fillType = PathFillType.evenOdd;
+          canvas.drawPath(gear, Paint()..color = activePrimary);
+        } else {
+          canvas.drawPath(
+            gear,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeJoin = StrokeJoin.round
+              ..strokeWidth = 1.85
+              ..color = inactiveColor,
+          );
+          canvas.drawCircle(
+            const Offset(12.0, 12.0),
+            3.25,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.75
+              ..color = inactiveColor,
+          );
+        }
+      },
+    );
+
+    if (selected) {
+      final jt = ((t - 0.10) / 0.90).clamp(0.0, 1.0);
+      final jScale = _evalKeyframes(
+        jt,
+        const [0.0, 0.48, 0.80, 1.0],
+        const [0.20, 1.34, 0.94, 1.0],
+      );
+      _withPivot(
+        canvas,
+        const Offset(12.0, 12.0),
+        scaleX: jScale,
+        scaleY: jScale,
+        draw: () {
+          canvas.drawCircle(
+            const Offset(12.0, 12.0),
+            1.75,
+            Paint()..color = activeSecondary,
+          );
+        },
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _MarcoDockIconPainter old) {
+    return old.kind != kind ||
+        old.selected != selected ||
+        old.progress != progress ||
+        old.activePrimary != activePrimary ||
+        old.activeSecondary != activeSecondary ||
+        old.liveRed != liveRed ||
+        old.inactiveColor != inactiveColor;
+  }
+}
+
 class _DockItem extends StatefulWidget {
   final IconData icon;
   final IconData selectedIcon;
   final String label;
+  final MarcoDockIconKind? kind;
   final bool selected;
   final VoidCallback onTap;
   const _DockItem({
     required this.icon,
     required this.selectedIcon,
     required this.label,
+    required this.kind,
     required this.selected,
     required this.onTap,
   });
@@ -2070,46 +2887,53 @@ class _DockItem extends StatefulWidget {
 
 class _DockItemState extends State<_DockItem> {
   bool _pressed = false;
+  int _pulseTick = 0;
 
   @override
   Widget build(BuildContext context) {
     const duration = Duration(milliseconds: 240);
     final palette = ApplePalette.of(context);
     final selected = widget.selected;
-    final color = palette.isDark
-        ? (selected ? const Color(0xFFFFFFFF) : const Color(0xD6F5F5F7))
-        : (selected ? palette.accent : const Color(0xFF4B4B55));
+    final labelColor = palette.isDark
+        ? (selected
+            ? const Color(0xFF5CB8FF)
+            : Colors.white.withValues(alpha: 0.70))
+        : (selected
+            ? AppleColors.systemBlue
+            : const Color(0xFF2C303A).withValues(alpha: 0.76));
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTapDown: (_) => setState(() => _pressed = true),
       onTapCancel: () => setState(() => _pressed = false),
       onTapUp: (_) => setState(() => _pressed = false),
-      onTap: widget.onTap,
+      onTap: () {
+        if (selected) {
+          setState(() => _pulseTick++);
+        }
+        widget.onTap();
+      },
       child: AnimatedScale(
-        scale: _pressed ? 0.9 : 1.0,
-        duration: const Duration(milliseconds: 160),
-        curve: Curves.easeOut,
+        scale: _pressed ? 0.90 : 1.0,
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOutCubic,
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            TweenAnimationBuilder<Color?>(
-              tween: ColorTween(end: color),
-              duration: duration,
-              curve: Curves.easeOut,
-              builder: (context, value, _) => Icon(
-                selected ? widget.selectedIcon : widget.icon,
-                size: 21,
-                color: value ?? color,
-              ),
+            MarcoAnimatedDockIcon(
+              kind: widget.kind,
+              fallbackIcon: selected ? widget.selectedIcon : widget.icon,
+              selected: selected,
+              size: 24,
+              pulseTick: _pulseTick,
             ),
-            const SizedBox(height: 3),
+            const SizedBox(height: 2.5),
             AnimatedDefaultTextStyle(
               duration: duration,
               curve: Curves.easeOut,
               style: DefaultTextStyle.of(context).style.merge(
                 TextStyle(
-                  color: color,
-                  fontSize: 10,
+                  color: labelColor,
+                  fontSize: 10.5,
                   fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
                   letterSpacing: 0.1,
                 ),

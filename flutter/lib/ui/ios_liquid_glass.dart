@@ -367,17 +367,20 @@ class IosNativeDockItem {
   final String label;
   final String symbol;
   final String? selectedSymbol;
+  final String? kind;
 
   const IosNativeDockItem({
     required this.label,
     required this.symbol,
     this.selectedSymbol,
+    this.kind,
   });
 
   Map<String, dynamic> toMap() => <String, dynamic>{
         'label': label,
         'symbol': symbol,
         'selectedSymbol': selectedSymbol ?? symbol,
+        if (kind != null && kind!.isNotEmpty) 'kind': kind,
       };
 }
 

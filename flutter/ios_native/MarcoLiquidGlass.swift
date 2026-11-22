@@ -2387,19 +2387,596 @@ private final class MarcoTraitAwareHostView: UIView {
   }
 }
 
+/// Bespoke 24x24pt CoreAnimation layered vector tab icon for the 4 bottom Dock
+/// tabs (`主页` / `直播` / `片库` / `设置`) with rich dual-tone selected styling
+/// and distinctive per-tab spring micro-animations (cinema screen pop + sparkle,
+/// live crimson broadcast wave ripple, 3-layer library card fan, and 60°
+/// mechanical precision gear turn). Adapts natively to Light & Dark Mode.
+private final class MarcoAnimatedTabIconView: UIView {
+  enum Kind: String {
+    case home
+    case live
+    case library
+    case settings
+    case fallback
+
+    static func resolve(kind: String?, symbol: String, label: String) -> Kind {
+      if let k = kind?.lowercased(), let parsed = Kind(rawValue: k) {
+        return parsed
+      }
+      let sym = symbol.lowercased()
+      if sym.contains("play.rectangle") || sym.contains("house") || label.contains("主页") {
+        return .home
+      }
+      if sym.contains("radiowaves") || sym.contains("antenna") || sym.contains("tv") || label.contains("直播") {
+        return .live
+      }
+      if sym.contains("square.stack") || sym.contains("film") || sym.contains("bookmark") || label.contains("片库") {
+        return .library
+      }
+      if sym.contains("gear") || sym.contains("slider") || label.contains("设置") {
+        return .settings
+      }
+      return .fallback
+    }
+  }
+
+  private let canvasLayer = CALayer()
+  // Home layers
+  private let homeScreenLayer = CAShapeLayer()
+  private let homePlayLayer = CAShapeLayer()
+  private let homeStandLayer = CAShapeLayer()
+  private let homeSparkleLayer = CAShapeLayer()
+  // Live layers
+  private let liveOuterWaveLayer = CAShapeLayer()
+  private let liveInnerWaveLayer = CAShapeLayer()
+  private let liveStandLayer = CAShapeLayer()
+  private let liveHaloLayer = CAShapeLayer()
+  private let liveBeaconLayer = CAShapeLayer()
+  // Library layers
+  private let libBackCardLayer = CAShapeLayer()
+  private let libMidCardLayer = CAShapeLayer()
+  private let libFrontCardLayer = CAShapeLayer()
+  private let libBookmarkLayer = CAShapeLayer()
+  // Settings layers
+  private let settingsGearLayer = CAShapeLayer()
+  private let settingsHoleLayer = CAShapeLayer()
+  private let settingsJewelLayer = CAShapeLayer()
+  // Fallback SF Symbol
+  private let fallbackImageView = UIImageView()
+
+  private var currentKind: Kind = .home
+  private var isSelectedState: Bool = false
+  private var isDarkState: Bool = true
+  private var fallbackSymbol: String = "circle"
+
+  override var intrinsicContentSize: CGSize {
+    return CGSize(width: 24.0, height: 24.0)
+  }
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    backgroundColor = .clear
+    isOpaque = false
+    isUserInteractionEnabled = false
+    clipsToBounds = false
+
+    canvasLayer.frame = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
+    canvasLayer.masksToBounds = false
+    layer.addSublayer(canvasLayer)
+
+    let scale = max(MarcoLiquidGlassSupport.activeWindow()?.windowScene?.screen.scale ?? 3.0, 2.0)
+    func setup(_ sl: CAShapeLayer, pivot: CGPoint) {
+      sl.bounds = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
+      sl.anchorPoint = CGPoint(x: pivot.x / 24.0, y: pivot.y / 24.0)
+      sl.position = pivot
+      sl.contentsScale = scale
+      sl.lineCap = .round
+      sl.lineJoin = .round
+      sl.isHidden = true
+      canvasLayer.addSublayer(sl)
+    }
+
+    setup(homeStandLayer, pivot: CGPoint(x: 12.0, y: 19.6))
+    setup(homeScreenLayer, pivot: CGPoint(x: 12.0, y: 10.7))
+    setup(homePlayLayer, pivot: CGPoint(x: 12.2, y: 10.7))
+    setup(homeSparkleLayer, pivot: CGPoint(x: 20.6, y: 3.4))
+
+    setup(liveOuterWaveLayer, pivot: CGPoint(x: 12.0, y: 10.6))
+    setup(liveInnerWaveLayer, pivot: CGPoint(x: 12.0, y: 10.6))
+    setup(liveStandLayer, pivot: CGPoint(x: 12.0, y: 17.5))
+    setup(liveHaloLayer, pivot: CGPoint(x: 12.0, y: 10.6))
+    setup(liveBeaconLayer, pivot: CGPoint(x: 12.0, y: 10.6))
+
+    setup(libBackCardLayer, pivot: CGPoint(x: 12.0, y: 4.1))
+    setup(libMidCardLayer, pivot: CGPoint(x: 12.0, y: 7.2))
+    setup(libFrontCardLayer, pivot: CGPoint(x: 12.0, y: 15.2))
+    setup(libBookmarkLayer, pivot: CGPoint(x: 12.0, y: 9.4))
+
+    setup(settingsGearLayer, pivot: CGPoint(x: 12.0, y: 12.0))
+    setup(settingsHoleLayer, pivot: CGPoint(x: 12.0, y: 12.0))
+    setup(settingsJewelLayer, pivot: CGPoint(x: 12.0, y: 12.0))
+
+    fallbackImageView.contentMode = .scaleAspectFit
+    fallbackImageView.isHidden = true
+    fallbackImageView.frame = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
+    addSubview(fallbackImageView)
+
+    buildStaticPaths()
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    let displayScale = window?.windowScene?.screen.scale ?? traitCollection.displayScale
+    guard displayScale >= 1.0 else { return }
+    for sub in canvasLayer.sublayers ?? [] {
+      sub.contentsScale = displayScale
+    }
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let sx = bounds.width > 0 ? bounds.width / 24.0 : 1.0
+    let sy = bounds.height > 0 ? bounds.height / 24.0 : 1.0
+    let s = min(sx, sy)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    canvasLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+    canvasLayer.transform = CATransform3DMakeScale(s, s, 1.0)
+    fallbackImageView.frame = bounds
+    CATransaction.commit()
+  }
+
+  private func buildStaticPaths() {
+    // 1. Home: Cinema Screen + Sculpted Play Triangle + Curved Stand + 4-pt Sparkle
+    homeScreenLayer.path = UIBezierPath(
+      roundedRect: CGRect(x: 2.3, y: 3.9, width: 19.4, height: 13.6),
+      cornerRadius: 4.3
+    ).cgPath
+
+    let playPath = UIBezierPath()
+    playPath.move(to: CGPoint(x: 10.0, y: 8.3))
+    playPath.addLine(to: CGPoint(x: 15.3, y: 10.7))
+    playPath.addLine(to: CGPoint(x: 10.0, y: 13.1))
+    playPath.close()
+    homePlayLayer.path = playPath.cgPath
+
+    let standPath = UIBezierPath()
+    standPath.move(to: CGPoint(x: 8.1, y: 20.5))
+    standPath.addQuadCurve(to: CGPoint(x: 15.9, y: 20.5), controlPoint: CGPoint(x: 12.0, y: 18.8))
+    homeStandLayer.path = standPath.cgPath
+
+    let sparklePath = UIBezierPath()
+    let sc = CGPoint(x: 20.6, y: 3.4)
+    let sr: Double = 2.75
+    let ir: Double = 0.78
+    for k in 0..<8 {
+      let a = Double(k) * (Double.pi / 4.0)
+      let rr = (k % 2 == 0) ? sr : ir
+      let pt = CGPoint(
+        x: sc.x + CGFloat(Foundation.cos(a) * rr),
+        y: sc.y + CGFloat(Foundation.sin(a) * rr)
+      )
+      if k == 0 { sparklePath.move(to: pt) } else { sparklePath.addLine(to: pt) }
+    }
+    sparklePath.close()
+    homeSparkleLayer.path = sparklePath.cgPath
+
+    // 2. Live: Broadcast Beacon + Dual Concentric Wave Arcs + Dish Stand
+    let bc = CGPoint(x: 12.0, y: 10.6)
+    let outerArc = UIBezierPath()
+    let deg42 = 42.0 * Double.pi / 180.0
+    let deg138 = 138.0 * Double.pi / 180.0
+    let deg222 = 222.0 * Double.pi / 180.0
+    outerArc.addArc(withCenter: bc, radius: 8.5, startAngle: CGFloat(deg138), endAngle: CGFloat(deg222), clockwise: true)
+    outerArc.move(to: CGPoint(x: bc.x + CGFloat(Foundation.cos(-deg42) * 8.5), y: bc.y + CGFloat(Foundation.sin(-deg42) * 8.5)))
+    outerArc.addArc(withCenter: bc, radius: 8.5, startAngle: CGFloat(-deg42), endAngle: CGFloat(deg42), clockwise: true)
+    liveOuterWaveLayer.path = outerArc.cgPath
+
+    let innerArc = UIBezierPath()
+    let deg40 = 40.0 * Double.pi / 180.0
+    let deg140 = 140.0 * Double.pi / 180.0
+    let deg220 = 220.0 * Double.pi / 180.0
+    innerArc.addArc(withCenter: bc, radius: 5.25, startAngle: CGFloat(deg140), endAngle: CGFloat(deg220), clockwise: true)
+    innerArc.move(to: CGPoint(x: bc.x + CGFloat(Foundation.cos(-deg40) * 5.25), y: bc.y + CGFloat(Foundation.sin(-deg40) * 5.25)))
+    innerArc.addArc(withCenter: bc, radius: 5.25, startAngle: CGFloat(-deg40), endAngle: CGFloat(deg40), clockwise: true)
+    liveInnerWaveLayer.path = innerArc.cgPath
+
+    let liveStand = UIBezierPath()
+    liveStand.move(to: CGPoint(x: 12.0, y: 14.0))
+    liveStand.addLine(to: CGPoint(x: 12.0, y: 19.6))
+    liveStand.move(to: CGPoint(x: 8.2, y: 20.6))
+    liveStand.addQuadCurve(to: CGPoint(x: 15.8, y: 20.6), controlPoint: CGPoint(x: 12.0, y: 18.8))
+    liveStandLayer.path = liveStand.cgPath
+
+    liveHaloLayer.path = UIBezierPath(ovalIn: CGRect(x: bc.x - 4.0, y: bc.y - 4.0, width: 8.0, height: 8.0)).cgPath
+    liveBeaconLayer.path = UIBezierPath(ovalIn: CGRect(x: bc.x - 2.35, y: bc.y - 2.35, width: 4.7, height: 4.7)).cgPath
+
+    // 3. Library: 3-Layer Film Collection Deck + Bookmark Ribbon
+    libBackCardLayer.path = UIBezierPath(
+      roundedRect: CGRect(x: 6.6, y: 3.1, width: 10.8, height: 2.0),
+      cornerRadius: 1.0
+    ).cgPath
+    libMidCardLayer.path = UIBezierPath(
+      roundedRect: CGRect(x: 4.5, y: 6.1, width: 15.0, height: 2.15),
+      cornerRadius: 1.08
+    ).cgPath
+    libFrontCardLayer.path = UIBezierPath(
+      roundedRect: CGRect(x: 2.5, y: 9.4, width: 19.0, height: 11.6),
+      cornerRadius: 3.7
+    ).cgPath
+
+    let bm = UIBezierPath()
+    bm.move(to: CGPoint(x: 9.3, y: 9.4))
+    bm.addLine(to: CGPoint(x: 14.7, y: 9.4))
+    bm.addLine(to: CGPoint(x: 14.7, y: 16.5))
+    bm.addLine(to: CGPoint(x: 12.0, y: 14.4))
+    bm.addLine(to: CGPoint(x: 9.3, y: 16.5))
+    bm.close()
+    libBookmarkLayer.path = bm.cgPath
+
+    // 4. Settings: Sculpted 6-Lobe Apple Precision Gear + Inner Ring + Center Jewel
+    let gearPath = buildSculptedGearPath(includeInnerHole: true)
+    settingsGearLayer.path = gearPath.cgPath
+    settingsGearLayer.fillRule = .evenOdd
+    settingsHoleLayer.path = UIBezierPath(ovalIn: CGRect(x: 8.75, y: 8.75, width: 6.5, height: 6.5)).cgPath
+    settingsJewelLayer.path = UIBezierPath(ovalIn: CGRect(x: 10.25, y: 10.25, width: 3.5, height: 3.5)).cgPath
+  }
+
+  private func buildSculptedGearPath(includeInnerHole: Bool) -> UIBezierPath {
+    let path = UIBezierPath()
+    let samples = 96
+    for i in 0..<samples {
+      let th = (2.0 * Double.pi * Double(i)) / Double(samples) - Double.pi * 0.5
+      let wave = Foundation.cos(6.0 * th)
+      let shaped = (wave >= 0 ? 1.0 : -1.0) * Foundation.pow(abs(wave), 0.54)
+      let r = 8.0 + 1.55 * shaped
+      let pt = CGPoint(x: 12.0 + r * Foundation.cos(th), y: 12.0 + r * Foundation.sin(th))
+      if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
+    }
+    path.close()
+    if includeInnerHole {
+      let hole = UIBezierPath(ovalIn: CGRect(x: 8.35, y: 8.35, width: 7.3, height: 7.3))
+      path.append(hole)
+    }
+    return path
+  }
+
+  func configure(kind: Kind, selected: Bool, dark: Bool, fallbackSymbol: String) {
+    self.currentKind = kind
+    self.isSelectedState = selected
+    self.isDarkState = dark
+    self.fallbackSymbol = fallbackSymbol
+
+    let activePrimary: UIColor = dark
+      ? UIColor(red: 0.25, green: 0.65, blue: 1.0, alpha: 1.0)
+      : UIColor.systemBlue
+    let activeSecondary: UIColor = dark
+      ? UIColor(red: 0.46, green: 0.84, blue: 1.0, alpha: 1.0)
+      : UIColor(red: 0.22, green: 0.71, blue: 1.0, alpha: 1.0)
+    let liveBeaconRed: UIColor = dark
+      ? UIColor(red: 1.0, green: 0.27, blue: 0.23, alpha: 1.0)
+      : UIColor(red: 1.0, green: 0.23, blue: 0.19, alpha: 1.0)
+    let inactiveColor: UIColor = dark
+      ? UIColor.white.withAlphaComponent(0.70)
+      : UIColor(red: 0.17, green: 0.19, blue: 0.23, alpha: 0.74)
+
+    let allShapeLayers: [CAShapeLayer] = [
+      homeScreenLayer, homePlayLayer, homeStandLayer, homeSparkleLayer,
+      liveOuterWaveLayer, liveInnerWaveLayer, liveStandLayer, liveHaloLayer, liveBeaconLayer,
+      libBackCardLayer, libMidCardLayer, libFrontCardLayer, libBookmarkLayer,
+      settingsGearLayer, settingsHoleLayer, settingsJewelLayer,
+    ]
+
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    for sl in allShapeLayers {
+      sl.isHidden = true
+    }
+    fallbackImageView.isHidden = true
+
+    switch kind {
+    case .home:
+      homeScreenLayer.isHidden = false
+      homePlayLayer.isHidden = false
+      homeStandLayer.isHidden = false
+      homeSparkleLayer.isHidden = !selected
+
+      if selected {
+        homeScreenLayer.fillColor = activePrimary.cgColor
+        homeScreenLayer.strokeColor = nil
+        homeScreenLayer.lineWidth = 0.0
+
+        homePlayLayer.fillColor = UIColor.white.cgColor
+        homePlayLayer.strokeColor = UIColor.white.cgColor
+        homePlayLayer.lineWidth = 0.9
+
+        homeStandLayer.fillColor = nil
+        homeStandLayer.strokeColor = activeSecondary.cgColor
+        homeStandLayer.lineWidth = 2.05
+
+        homeSparkleLayer.fillColor = activeSecondary.cgColor
+        homeSparkleLayer.strokeColor = nil
+      } else {
+        homeScreenLayer.fillColor = nil
+        homeScreenLayer.strokeColor = inactiveColor.cgColor
+        homeScreenLayer.lineWidth = 1.85
+
+        homePlayLayer.fillColor = nil
+        homePlayLayer.strokeColor = inactiveColor.cgColor
+        homePlayLayer.lineWidth = 1.55
+
+        homeStandLayer.fillColor = nil
+        homeStandLayer.strokeColor = inactiveColor.withAlphaComponent(0.74).cgColor
+        homeStandLayer.lineWidth = 1.75
+      }
+
+    case .live:
+      liveOuterWaveLayer.isHidden = false
+      liveInnerWaveLayer.isHidden = false
+      liveStandLayer.isHidden = false
+      liveBeaconLayer.isHidden = false
+      liveHaloLayer.isHidden = !selected
+
+      liveOuterWaveLayer.fillColor = nil
+      liveInnerWaveLayer.fillColor = nil
+      liveStandLayer.fillColor = nil
+
+      if selected {
+        liveOuterWaveLayer.strokeColor = activeSecondary.cgColor
+        liveOuterWaveLayer.lineWidth = 1.9
+        liveInnerWaveLayer.strokeColor = activePrimary.cgColor
+        liveInnerWaveLayer.lineWidth = 1.95
+        liveStandLayer.strokeColor = activePrimary.cgColor
+        liveStandLayer.lineWidth = 1.95
+        liveHaloLayer.fillColor = liveBeaconRed.withAlphaComponent(0.28).cgColor
+        liveHaloLayer.strokeColor = nil
+        liveBeaconLayer.fillColor = liveBeaconRed.cgColor
+        liveBeaconLayer.strokeColor = nil
+      } else {
+        liveOuterWaveLayer.strokeColor = inactiveColor.withAlphaComponent(0.56).cgColor
+        liveOuterWaveLayer.lineWidth = 1.8
+        liveInnerWaveLayer.strokeColor = inactiveColor.cgColor
+        liveInnerWaveLayer.lineWidth = 1.85
+        liveStandLayer.strokeColor = inactiveColor.cgColor
+        liveStandLayer.lineWidth = 1.8
+        liveBeaconLayer.fillColor = inactiveColor.cgColor
+        liveBeaconLayer.strokeColor = nil
+      }
+
+    case .library:
+      libBackCardLayer.isHidden = false
+      libMidCardLayer.isHidden = false
+      libFrontCardLayer.isHidden = false
+      libBookmarkLayer.isHidden = false
+
+      if selected {
+        libBackCardLayer.fillColor = activeSecondary.withAlphaComponent(0.52).cgColor
+        libBackCardLayer.strokeColor = nil
+        libMidCardLayer.fillColor = activeSecondary.withAlphaComponent(0.84).cgColor
+        libMidCardLayer.strokeColor = nil
+        libFrontCardLayer.fillColor = activePrimary.cgColor
+        libFrontCardLayer.strokeColor = nil
+        libFrontCardLayer.lineWidth = 0.0
+        libBookmarkLayer.fillColor = UIColor.white.cgColor
+        libBookmarkLayer.strokeColor = nil
+      } else {
+        libBackCardLayer.fillColor = inactiveColor.withAlphaComponent(0.46).cgColor
+        libBackCardLayer.strokeColor = nil
+        libMidCardLayer.fillColor = inactiveColor.withAlphaComponent(0.72).cgColor
+        libMidCardLayer.strokeColor = nil
+        libFrontCardLayer.fillColor = nil
+        libFrontCardLayer.strokeColor = inactiveColor.cgColor
+        libFrontCardLayer.lineWidth = 1.85
+        libBookmarkLayer.fillColor = nil
+        libBookmarkLayer.strokeColor = inactiveColor.cgColor
+        libBookmarkLayer.lineWidth = 1.55
+      }
+
+    case .settings:
+      settingsGearLayer.isHidden = false
+      settingsHoleLayer.isHidden = selected
+      settingsJewelLayer.isHidden = !selected
+
+      if selected {
+        settingsGearLayer.path = buildSculptedGearPath(includeInnerHole: true).cgPath
+        settingsGearLayer.fillColor = activePrimary.cgColor
+        settingsGearLayer.strokeColor = nil
+        settingsGearLayer.lineWidth = 0.0
+        settingsJewelLayer.fillColor = activeSecondary.cgColor
+        settingsJewelLayer.strokeColor = nil
+      } else {
+        settingsGearLayer.path = buildSculptedGearPath(includeInnerHole: false).cgPath
+        settingsGearLayer.fillColor = nil
+        settingsGearLayer.strokeColor = inactiveColor.cgColor
+        settingsGearLayer.lineWidth = 1.85
+        settingsHoleLayer.fillColor = nil
+        settingsHoleLayer.strokeColor = inactiveColor.cgColor
+        settingsHoleLayer.lineWidth = 1.75
+      }
+
+    case .fallback:
+      fallbackImageView.isHidden = false
+      let cfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: selected ? .semibold : .medium)
+      fallbackImageView.image = UIImage(systemName: fallbackSymbol, withConfiguration: cfg)
+      fallbackImageView.tintColor = selected ? activePrimary : inactiveColor
+    }
+    CATransaction.commit()
+  }
+
+  /// Plays this tab's signature tactile spring micro-animation on selection.
+  func playSelectAnimation() {
+    guard !UIAccessibility.isReduceMotionEnabled else { return }
+    let now = canvasLayer.convertTime(CACurrentMediaTime(), from: nil)
+
+    func keyframe(
+      _ keyPath: String,
+      values: [Any],
+      times: [NSNumber],
+      duration: CFTimeInterval,
+      delay: CFTimeInterval = 0.0
+    ) -> CAKeyframeAnimation {
+      let anim = CAKeyframeAnimation(keyPath: keyPath)
+      anim.values = values
+      anim.keyTimes = times
+      anim.duration = duration
+      anim.beginTime = delay > 0 ? now + delay : 0
+      anim.fillMode = .backwards
+      anim.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+      return anim
+    }
+
+    switch currentKind {
+    case .home:
+      homeScreenLayer.removeAllAnimations()
+      homePlayLayer.removeAllAnimations()
+      homeStandLayer.removeAllAnimations()
+      homeSparkleLayer.removeAllAnimations()
+
+      homeScreenLayer.add(
+        keyframe("transform.scale", values: [0.82, 1.12, 0.97, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.52),
+        forKey: "marcoHomePop"
+      )
+      homePlayLayer.add(
+        keyframe("transform.translation.x", values: [-2.4, 0.9, -0.2, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52),
+        forKey: "marcoHomePlaySlide"
+      )
+      homePlayLayer.add(
+        keyframe("transform.scale", values: [0.55, 1.18, 0.96, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52),
+        forKey: "marcoHomePlayScale"
+      )
+      homeStandLayer.add(
+        keyframe("transform.scale.x", values: [0.38, 1.14, 0.98, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.48),
+        forKey: "marcoHomeStand"
+      )
+      homeSparkleLayer.add(
+        keyframe("transform.scale", values: [0.01, 1.35, 0.92, 1.0], times: [0, 0.52, 0.80, 1.0], duration: 0.56, delay: 0.06),
+        forKey: "marcoHomeSparkleScale"
+      )
+      homeSparkleLayer.add(
+        keyframe("transform.rotation.z", values: [-0.78, 0.24, -0.05, 0.0], times: [0, 0.54, 0.82, 1.0], duration: 0.56, delay: 0.06),
+        forKey: "marcoHomeSparkleSpin"
+      )
+
+    case .live:
+      liveBeaconLayer.removeAllAnimations()
+      liveHaloLayer.removeAllAnimations()
+      liveInnerWaveLayer.removeAllAnimations()
+      liveOuterWaveLayer.removeAllAnimations()
+
+      liveBeaconLayer.add(
+        keyframe("transform.scale", values: [0.58, 1.38, 0.94, 1.0], times: [0, 0.38, 0.72, 1.0], duration: 0.54),
+        forKey: "marcoLiveBeacon"
+      )
+      liveHaloLayer.add(
+        keyframe("transform.scale", values: [0.55, 1.72, 1.08, 1.0], times: [0, 0.45, 0.78, 1.0], duration: 0.64),
+        forKey: "marcoLiveHaloScale"
+      )
+      liveHaloLayer.add(
+        keyframe("opacity", values: [0.9, 0.25, 0.85, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.64),
+        forKey: "marcoLiveHaloFade"
+      )
+      liveInnerWaveLayer.add(
+        keyframe("transform.scale", values: [0.68, 1.16, 0.98, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.50, delay: 0.05),
+        forKey: "marcoLiveInnerScale"
+      )
+      liveInnerWaveLayer.add(
+        keyframe("opacity", values: [0.22, 1.0, 1.0], times: [0, 0.42, 1.0], duration: 0.50, delay: 0.05),
+        forKey: "marcoLiveInnerFade"
+      )
+      liveOuterWaveLayer.add(
+        keyframe("transform.scale", values: [0.64, 1.20, 0.98, 1.0], times: [0, 0.50, 0.80, 1.0], duration: 0.52, delay: 0.13),
+        forKey: "marcoLiveOuterScale"
+      )
+      liveOuterWaveLayer.add(
+        keyframe("opacity", values: [0.12, 1.0, 1.0], times: [0, 0.44, 1.0], duration: 0.52, delay: 0.13),
+        forKey: "marcoLiveOuterFade"
+      )
+
+    case .library:
+      libFrontCardLayer.removeAllAnimations()
+      libBookmarkLayer.removeAllAnimations()
+      libMidCardLayer.removeAllAnimations()
+      libBackCardLayer.removeAllAnimations()
+
+      libFrontCardLayer.add(
+        keyframe("transform.scale", values: [0.86, 1.09, 0.98, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.50),
+        forKey: "marcoLibFront"
+      )
+      libBookmarkLayer.add(
+        keyframe("transform.scale.y", values: [0.42, 1.16, 0.96, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.50),
+        forKey: "marcoLibBookmark"
+      )
+      libMidCardLayer.add(
+        keyframe("transform.translation.y", values: [3.2, -1.5, 0.3, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52, delay: 0.03),
+        forKey: "marcoLibMidY"
+      )
+      libMidCardLayer.add(
+        keyframe("transform.scale.x", values: [0.84, 1.06, 0.99, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52, delay: 0.03),
+        forKey: "marcoLibMidScale"
+      )
+      libBackCardLayer.add(
+        keyframe("transform.translation.y", values: [5.2, -2.3, 0.4, 0.0], times: [0, 0.48, 0.80, 1.0], duration: 0.54, delay: 0.08),
+        forKey: "marcoLibBackY"
+      )
+      libBackCardLayer.add(
+        keyframe("transform.scale.x", values: [0.74, 1.08, 0.98, 1.0], times: [0, 0.48, 0.80, 1.0], duration: 0.54, delay: 0.08),
+        forKey: "marcoLibBackScale"
+      )
+
+    case .settings:
+      settingsGearLayer.removeAllAnimations()
+      settingsJewelLayer.removeAllAnimations()
+
+      // 60° (pi/3) clockwise turn aligns cleanly with 6-lobe rotational symmetry!
+      let sixtyDeg = CGFloat.pi / 3.0
+      settingsGearLayer.add(
+        keyframe(
+          "transform.rotation.z",
+          values: [0.0, sixtyDeg * 1.18, sixtyDeg * 0.95, sixtyDeg],
+          times: [0, 0.48, 0.78, 1.0],
+          duration: 0.58
+        ),
+        forKey: "marcoSettingsRotate"
+      )
+      settingsGearLayer.add(
+        keyframe("transform.scale", values: [0.86, 1.11, 0.98, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.54),
+        forKey: "marcoSettingsScale"
+      )
+      settingsJewelLayer.add(
+        keyframe("transform.scale", values: [0.20, 1.34, 0.94, 1.0], times: [0, 0.48, 0.80, 1.0], duration: 0.54, delay: 0.06),
+        forKey: "marcoSettingsJewel"
+      )
+
+    case .fallback:
+      fallbackImageView.layer.removeAllAnimations()
+      fallbackImageView.layer.add(
+        keyframe("transform.scale", values: [0.84, 1.14, 0.97, 1.0], times: [0, 0.44, 0.76, 1.0], duration: 0.48),
+        forKey: "marcoFallbackBounce"
+      )
+    }
+  }
+}
+
 /// Full-height (62pt) native iOS 26 Liquid Glass 4-tab capsule using `UIGlassEffect`
 /// directly so it matches the 62pt trailing search circle and Apple's iOS 26
-/// floating tab bar proportions, complete with an elevated refractive
-/// `UIGlassEffect(style: .clear)` press-and-slide optical lens bubble.
+/// floating tab bar proportions, complete with custom animated vector tab icons
+/// and an elevated refractive `UIGlassEffect(style: .clear)` press-and-slide lens.
 private final class MarcoNativeLiquidTabCapsuleView: UIView {
   struct TabSpec {
     let label: String
     let symbol: String
     let selectedSymbol: String
+    let kind: MarcoAnimatedTabIconView.Kind
   }
 
   private final class SlotView: UIView {
-    let iconView = UIImageView()
+    let iconView = MarcoAnimatedTabIconView()
     let titleLabel = UILabel()
     private let stack = UIStackView()
 
@@ -2409,17 +2986,16 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       isAccessibilityElement = true
       accessibilityTraits = .button
 
-      iconView.contentMode = .scaleAspectFit
-      iconView.tintColor = .white
+      iconView.translatesAutoresizingMaskIntoConstraints = false
 
       titleLabel.font = UIFont.systemFont(ofSize: 10.5, weight: .medium)
       titleLabel.textAlignment = .center
       titleLabel.lineBreakMode = .byTruncatingTail
-      titleLabel.textColor = UIColor.white.withAlphaComponent(0.84)
+      titleLabel.textColor = UIColor.white.withAlphaComponent(0.72)
 
       stack.axis = .vertical
       stack.alignment = .center
-      stack.spacing = 3.0
+      stack.spacing = 2.5
       stack.isUserInteractionEnabled = false
       stack.translatesAutoresizingMaskIntoConstraints = false
       stack.addArrangedSubview(iconView)
@@ -2427,11 +3003,30 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       addSubview(stack)
 
       NSLayoutConstraint.activate([
+        iconView.widthAnchor.constraint(equalToConstant: 24.0),
+        iconView.heightAnchor.constraint(equalToConstant: 24.0),
         stack.centerXAnchor.constraint(equalTo: centerXAnchor),
         stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4.0),
         stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4.0),
       ])
+    }
+
+    func playSelectedMotion() {
+      iconView.playSelectAnimation()
+      guard !UIAccessibility.isReduceMotionEnabled else { return }
+      titleLabel.transform = CGAffineTransform(translationX: 0, y: 1.6).scaledBy(x: 0.94, y: 0.94)
+      UIView.animate(
+        withDuration: 0.34,
+        delay: 0.0,
+        usingSpringWithDamping: 0.68,
+        initialSpringVelocity: 0.8,
+        options: [.beginFromCurrentState, .allowUserInteraction],
+        animations: {
+          self.titleLabel.transform = .identity
+        },
+        completion: nil
+      )
     }
 
     @available(*, unavailable)
@@ -2604,20 +3199,23 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       highlightedIndex = index
       applySlotAppearances(activeIndex: index)
       positionLens(slotPosition: CGFloat(index), animated: animated && changed, lifted: false)
+      if animated && changed && index < slotViews.count {
+        slotViews[index].playSelectedMotion()
+      }
     }
   }
 
   private func applySlotAppearances(activeIndex: Int) {
     let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
-    let normalCfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: .medium)
-    let selectedCfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: .semibold)
-    let activeColor: UIColor = dark ? .white : UIColor.systemBlue
-    let inactiveColor: UIColor = dark
-      ? UIColor.white.withAlphaComponent(0.84)
-      : UIColor(red: 0.12, green: 0.13, blue: 0.17, alpha: 0.86)
+    let activeLabelColor: UIColor = dark
+      ? UIColor(red: 0.36, green: 0.72, blue: 1.0, alpha: 1.0)
+      : UIColor.systemBlue
+    let inactiveLabelColor: UIColor = dark
+      ? UIColor.white.withAlphaComponent(0.70)
+      : UIColor(red: 0.17, green: 0.19, blue: 0.23, alpha: 0.76)
     selectionLensView.layer.borderColor = (dark
-      ? UIColor.white.withAlphaComponent(0.18)
-      : UIColor.black.withAlphaComponent(0.06)).cgColor
+      ? UIColor(red: 0.55, green: 0.80, blue: 1.0, alpha: 0.28)
+      : UIColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 0.16)).cgColor
     scrubbingLensShadowView.layer.shadowOpacity = dark ? 0.34 : 0.16
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
@@ -2636,9 +3234,13 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       let spec = specs[idx]
       let isSelected = idx == activeIndex
       let symName = isSelected ? spec.selectedSymbol : spec.symbol
-      slot.iconView.image = UIImage(systemName: symName, withConfiguration: isSelected ? selectedCfg : normalCfg)
-      slot.iconView.tintColor = isSelected ? activeColor : inactiveColor
-      slot.titleLabel.textColor = isSelected ? activeColor : inactiveColor
+      slot.iconView.configure(
+        kind: spec.kind,
+        selected: isSelected,
+        dark: dark,
+        fallbackSymbol: symName
+      )
+      slot.titleLabel.textColor = isSelected ? activeLabelColor : inactiveLabelColor
       slot.titleLabel.font = UIFont.systemFont(ofSize: 10.5, weight: isSelected ? .semibold : .medium)
       slot.accessibilityTraits = isSelected ? [.button, .selected] : [.button]
     }
@@ -2684,8 +3286,8 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       self.selectionLensView.transform = .identity
       let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
       self.selectionLensView.backgroundColor = dark
-        ? UIColor.white.withAlphaComponent(0.18)
-        : UIColor.black.withAlphaComponent(0.08)
+        ? UIColor(red: 0.22, green: 0.58, blue: 1.0, alpha: 0.22)
+        : UIColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 0.12)
       self.selectionLensView.alpha = lifted ? 0.0 : 1.0
 
       self.scrubbingLensShadowView.bounds = liftedBounds
@@ -2754,6 +3356,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     selectionFeedback.prepare()
     let pt = touch.location(in: self)
     let (idx, _) = indexForX(pt.x)
+    let prevHighlighted = highlightedIndex
     isScrubbing = true
     highlightedIndex = idx
     scrubContinuousSlot = CGFloat(idx)
@@ -2762,6 +3365,9 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     scrubVelocityX = 0
     applySlotAppearances(activeIndex: idx)
     positionLens(slotPosition: CGFloat(idx), animated: true, lifted: true)
+    if idx != prevHighlighted && idx < slotViews.count {
+      slotViews[idx].playSelectedMotion()
+    }
   }
 
   override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -2781,6 +3387,9 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       highlightedIndex = idx
       selectionFeedback.selectionChanged()
       applySlotAppearances(activeIndex: idx)
+      if idx < slotViews.count {
+        slotViews[idx].playSelectedMotion()
+      }
     }
     positionLens(slotPosition: continuous, animated: false, lifted: true)
   }
@@ -2799,6 +3408,9 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     positionLens(slotPosition: CGFloat(target), animated: true, lifted: false)
     if changed {
       UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    } else if target < slotViews.count {
+      // Re-tapping the already-selected tab still gives a delightful micro-pop!
+      slotViews[target].playSelectedMotion()
     }
     onSelect?(target)
   }
@@ -3034,7 +3646,7 @@ private final class MarcoDockContainerView: UIView {
   }
 
   private func configureSearchButton() {
-    let symbolConfig = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .medium)
+    let symbolConfig = UIImage.SymbolConfiguration(pointSize: 21.5, weight: .semibold)
     let icon = UIImage(systemName: "magnifyingglass", withConfiguration: symbolConfig)
     let fg: UIColor = MarcoLiquidGlassSupport.adaptiveGlassForeground(for: self)
     searchButton.configure(
@@ -3259,10 +3871,16 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
         let title = (item["label"] as? String) ?? ""
         let symbol = (item["symbol"] as? String) ?? "circle"
         let selectedSymbol = (item["selectedSymbol"] as? String) ?? symbol
+        let kind = MarcoAnimatedTabIconView.Kind.resolve(
+          kind: item["kind"] as? String,
+          symbol: symbol,
+          label: title
+        )
         return MarcoNativeLiquidTabCapsuleView.TabSpec(
           label: title,
           symbol: symbol,
-          selectedSymbol: selectedSymbol
+          selectedSymbol: selectedSymbol,
+          kind: kind
         )
       }
       container.tabCapsule.setItems(specs)

@@ -2204,20 +2204,24 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         label: '主页',
         symbol: 'play.rectangle',
         selectedSymbol: 'play.rectangle.fill',
+        kind: 'home',
       ),
       IosNativeDockItem(
         label: '直播',
         symbol: 'dot.radiowaves.left.and.right',
+        kind: 'live',
       ),
       IosNativeDockItem(
         label: '片库',
         symbol: 'square.stack.3d.up',
         selectedSymbol: 'square.stack.3d.up.fill',
+        kind: 'library',
       ),
       IosNativeDockItem(
         label: '设置',
         symbol: 'gearshape',
         selectedSymbol: 'gearshape.fill',
+        kind: 'settings',
       ),
     ];
     final safeTabIndex = _tabIndex.clamp(0, dockItems.length - 1);
