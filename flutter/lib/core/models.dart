@@ -1002,9 +1002,10 @@ class CmsEpisode {
 }
 
 class CmsLine {
+  final String id;
   final String name;
   final List<CmsEpisode> episodes;
-  const CmsLine({required this.name, required this.episodes});
+  const CmsLine({this.id = '', required this.name, required this.episodes});
 }
 
 class CmsVideo {

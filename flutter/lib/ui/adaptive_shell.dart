@@ -222,6 +222,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   bool _iosHeroPullArmed = false;
   final Map<String, Color> _iosHeroAmbientColors = {};
   final Set<String> _iosHeroAmbientPending = {};
+  final Map<int, bool> _rexShelfLightInkCache = {};
   int _currentPage = 1;
   int _pageCount = 1;
   bool _homeLoading = false;
@@ -1231,23 +1232,326 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (palette.isDark) {
       return hsl
           .withSaturation(
-            hasChroma ? (hsl.saturation * 1.12).clamp(0.16, 0.50) : 0.06,
+            hasChroma ? (hsl.saturation * 1.18).clamp(0.18, 0.56) : 0.06,
           )
-          .withLightness((hsl.lightness * 0.62).clamp(0.11, 0.20))
+          .withLightness((hsl.lightness * 0.62).clamp(0.10, 0.22))
           .toColor();
     }
     return hsl
         .withSaturation(
-          hasChroma ? (hsl.saturation * 1.02).clamp(0.12, 0.48) : 0.06,
+          hasChroma ? (hsl.saturation * 1.12).clamp(0.16, 0.56) : 0.06,
         )
-        .withLightness(hsl.lightness.clamp(0.24, 0.68))
+        .withLightness(hsl.lightness.clamp(0.24, 0.54))
         .toColor();
   }
 
-  /// Whether foreground ink over [atmo] (Hero title/dots & first shelf header)
+  static const double _kRexAuraTopExtend = 280.0;
+  static const double _kRexAuraSolidPastHero = 42.0;
+
+  double _currentHomeScrollOffset() {
+    return _homeScrollController.positions.length == 1
+        ? _homeScrollController.offset
+        : 0.0;
+  }
+
+  /// Smooth scroll-driven transition factor (`0.0` at top = full-screen Hero
+  /// atmosphere rendered all the way to the bottom edge like Rex; `1.0` once
+  /// scrolled past the Hero = pure Light/Dark page background).
+  double _rexHeroScrollFadeForOffset(double rawOffset, double heroHeight) {
+    final scrollDown = math.max(0.0, rawOffset);
+    final fadeStart = heroHeight * 0.06;
+    final fadeSpan = math.max(heroHeight * 0.78, 160.0);
+    final linear = ((scrollDown - fadeStart) / fadeSpan).clamp(0.0, 1.0);
+    return Curves.easeInOutCubic.transform(linear);
+  }
+
+  /// Single source of truth for Layer 0's full-screen tonal gradient, Layer 0's
+  /// solid-to-dissolve Hero top aura, and the Hero billboard's bottom dissolve
+  /// edge color. Keeping all three derived from the same calculation guarantees
+  /// pixel-exact color continuity across the Hero bottom boundary at every
+  /// scroll offset, theme mode, poster hue, and viewport height.
+  ({
+    Color liveEdgeColor,
+    Color fullScreenTopTone,
+    Color fullScreenMidTone,
+    Color fullScreenBotTone,
+    double auraTotalHeight,
+    double auraSolidEndStop,
+  }) _computeRexBackdropMetrics({
+    required Color liveAtmo,
+    required ApplePalette palette,
+    required double heroHeight,
+    required double scrollOffset,
+  }) {
+    final overscroll = math.max(0.0, -scrollOffset);
+    final stretchedHeight = heroHeight + overscroll;
+    final scrollFade = _rexHeroScrollFadeForOffset(scrollOffset, heroHeight);
+
+    final liveHsl = HSLColor.fromColor(liveAtmo);
+    final deepBottomBase = palette.isDark
+        ? Color.lerp(liveAtmo, Colors.black, 0.26)!
+        : liveHsl
+            .withLightness(
+              (liveHsl.lightness * 0.88).clamp(0.18, 0.50),
+            )
+            .toColor();
+    final midBase = Color.lerp(liveAtmo, deepBottomBase, 0.38)!;
+
+    final liveEdgeColor = Color.lerp(liveAtmo, palette.background, scrollFade)!;
+    final fullScreenMidTone =
+        Color.lerp(midBase, palette.background, scrollFade)!;
+    final fullScreenBotTone =
+        Color.lerp(deepBottomBase, palette.background, scrollFade)!;
+
+    final auraDissolveHeight = palette.isDark ? 260.0 : 200.0;
+    final solidHeight =
+        _kRexAuraTopExtend + stretchedHeight + _kRexAuraSolidPastHero;
+    final auraTotalHeight = solidHeight + auraDissolveHeight;
+    final auraSolidEndStop = (solidHeight / auraTotalHeight).clamp(0.45, 0.94);
+
+    return (
+      liveEdgeColor: liveEdgeColor,
+      fullScreenTopTone: liveEdgeColor,
+      fullScreenMidTone: fullScreenMidTone,
+      fullScreenBotTone: fullScreenBotTone,
+      auraTotalHeight: auraTotalHeight,
+      auraSolidEndStop: auraSolidEndStop,
+    );
+  }
+
+  /// Evaluates the exact composited Layer 0 backdrop color at [viewportY] so
+  /// shelf headers, card titles, and translucent secondary labels choose ink
+  /// against the true rendered background at every scroll offset.
+  Color _sampleRexBackdropColorAtY({
+    required double viewportY,
+    required double viewportHeight,
+    required double heroHeight,
+    required double scrollOffset,
+    required Color liveAtmo,
+    required ApplePalette palette,
+  }) {
+    final metrics = _computeRexBackdropMetrics(
+      liveAtmo: liveAtmo,
+      palette: palette,
+      heroHeight: heroHeight,
+      scrollOffset: scrollOffset,
+    );
+    final scrollDown = math.max(0.0, scrollOffset);
+    final auraTop = -_kRexAuraTopExtend - scrollDown;
+    final tAura = (viewportY - auraTop) / metrics.auraTotalHeight;
+    if (tAura <= metrics.auraSolidEndStop) {
+      return metrics.liveEdgeColor;
+    }
+
+    final safeH = math.max(viewportHeight, 1.0);
+    final tBg = (viewportY / safeH).clamp(0.0, 1.0);
+    final Color baseBg = tBg <= 0.62
+        ? Color.lerp(
+            metrics.fullScreenTopTone,
+            metrics.fullScreenMidTone,
+            tBg / 0.62,
+          )!
+        : Color.lerp(
+            metrics.fullScreenMidTone,
+            metrics.fullScreenBotTone,
+            (tBg - 0.62) / 0.38,
+          )!;
+
+    if (tAura >= 1.0) {
+      return baseBg;
+    }
+    final s0 = metrics.auraSolidEndStop;
+    final tail = math.max(1.0 - s0, 1e-6);
+    final u = ((tAura - s0) / tail).clamp(0.0, 1.0);
+    const stopPos = <double>[0.0, 0.18, 0.40, 0.64, 0.84, 1.0];
+    const stopAlpha = <double>[1.0, 0.86, 0.58, 0.28, 0.09, 0.0];
+    var alpha = 0.0;
+    for (var i = 0; i < stopPos.length - 1; i++) {
+      if (u <= stopPos[i + 1]) {
+        final segT = (u - stopPos[i]) / (stopPos[i + 1] - stopPos[i]);
+        alpha = stopAlpha[i] + (stopAlpha[i + 1] - stopAlpha[i]) * segT;
+        break;
+      }
+    }
+    return Color.alphaBlend(
+      metrics.liveEdgeColor.withValues(alpha: alpha),
+      baseBg,
+    );
+  }
+
+  static double _wcagContrastRatio(Color foreground, Color background) {
+    final effectiveFg = foreground.a < 0.999
+        ? Color.alphaBlend(foreground, background)
+        : foreground;
+    final l1 = effectiveFg.computeLuminance();
+    final l2 = background.computeLuminance();
+    final lighter = math.max(l1, l2);
+    final darker = math.min(l1, l2);
+    return (lighter + 0.05) / (darker + 0.05);
+  }
+
+  static Color _ensureSecondaryContrast(
+    Color primaryInk,
+    Color background, {
+    required double preferredAlpha,
+    required double minContrast,
+    required bool preferLight,
+  }) {
+    final baseCandidate = primaryInk.withValues(alpha: preferredAlpha);
+    if (_wcagContrastRatio(baseCandidate, background) >= minContrast) {
+      return baseCandidate;
+    }
+    final opaqueBase = primaryInk.withValues(alpha: 1.0);
+    if (_wcagContrastRatio(opaqueBase, background) >= minContrast) {
+      var lo = preferredAlpha;
+      var hi = 1.0;
+      for (var i = 0; i < 8; i++) {
+        final mid = (lo + hi) * 0.5;
+        if (_wcagContrastRatio(primaryInk.withValues(alpha: mid), background) >=
+            minContrast) {
+          hi = mid;
+        } else {
+          lo = mid;
+        }
+      }
+      return primaryInk.withValues(alpha: hi);
+    }
+    final extreme = preferLight ? Colors.white : Colors.black;
+    var lo = preferredAlpha;
+    var hi = 1.0;
+    for (var i = 0; i < 8; i++) {
+      final mid = (lo + hi) * 0.5;
+      if (_wcagContrastRatio(extreme.withValues(alpha: mid), background) >=
+          minContrast) {
+        hi = mid;
+      } else {
+        lo = mid;
+      }
+    }
+    return extreme.withValues(alpha: hi);
+  }
+
+  /// Resolves high-contrast primary and secondary inks against a sampled
+  /// Layer 0 backdrop pair ([primaryBg] for titles, [secondaryBg] for normal /
+  /// secondary copy), using a narrow luminance hysteresis band (`[0.175, 0.177]`)
+  /// so continuous scrolling never flickers while keeping normal & translucent
+  /// text at >= 4.5:1.
+  ({Color primary, Color secondary, bool useLight})
+      _resolveRexInksForBackdropBand({
+    required int hysteresisSlotKey,
+    required Color primaryBg,
+    required Color secondaryBg,
+    required ApplePalette palette,
+  }) {
+    if (palette.isDark) {
+      final primary = palette.labelPrimary;
+      final lightestBg = primaryBg.computeLuminance() >
+              secondaryBg.computeLuminance()
+          ? primaryBg
+          : secondaryBg;
+      final secondary = _ensureSecondaryContrast(
+        primary,
+        lightestBg,
+        preferredAlpha: 0.78,
+        minContrast: 4.8,
+        preferLight: true,
+      );
+      _rexShelfLightInkCache[hysteresisSlotKey] = true;
+      return (primary: primary, secondary: secondary, useLight: true);
+    }
+
+    final textLum = secondaryBg.computeLuminance();
+    final prevLight = _rexShelfLightInkCache[hysteresisSlotKey];
+    final bool useLight;
+    if (prevLight == null) {
+      useLight = textLum < 0.176;
+    } else if (prevLight) {
+      useLight = textLum < 0.177;
+    } else {
+      useLight = textLum <= 0.175;
+    }
+    _rexShelfLightInkCache[hysteresisSlotKey] = useLight;
+
+    if (useLight) {
+      const primary = Colors.white;
+      final lightestBg = primaryBg.computeLuminance() >
+              secondaryBg.computeLuminance()
+          ? primaryBg
+          : secondaryBg;
+      final secondary = _ensureSecondaryContrast(
+        primary,
+        lightestBg,
+        preferredAlpha: 0.80,
+        minContrast: 4.65,
+        preferLight: true,
+      );
+      return (primary: primary, secondary: secondary, useLight: true);
+    }
+
+    final darkestBg = secondaryBg.computeLuminance() <
+            primaryBg.computeLuminance()
+        ? secondaryBg
+        : primaryBg;
+    final primary = _wcagContrastRatio(palette.labelPrimary, darkestBg) >= 4.60
+        ? palette.labelPrimary
+        : Colors.black;
+    final secondary = _ensureSecondaryContrast(
+      primary,
+      darkestBg,
+      preferredAlpha: 0.78,
+      minContrast: 4.65,
+      preferLight: false,
+    );
+    return (primary: primary, secondary: secondary, useLight: false);
+  }
+
+  /// Resolves high-contrast primary and secondary shelf inks against the exact
+  /// composited Layer 0 backdrop behind [shelfSlotIndex], using a narrow
+  /// luminance hysteresis band (`[0.175, 0.177]`) so continuous scrolling never
+  /// flickers while guaranteeing >= 4.5:1 contrast for normal & secondary text.
+  ({Color primary, Color secondary}) _resolveRexShelfInks({
+    required int shelfSlotIndex,
+    required Color liveAtmo,
+    required ApplePalette palette,
+    required double heroHeight,
+    required double viewportHeight,
+    required double scrollOffset,
+  }) {
+    final scrollDown = math.max(0.0, scrollOffset);
+    final shelfTopY = heroHeight - scrollDown + 14.0 + shelfSlotIndex * 235.0;
+    final headerY = (shelfTopY + 14.0).clamp(0.0, viewportHeight);
+    final cardTextY = (shelfTopY + 185.0).clamp(0.0, viewportHeight);
+
+    final headerBg = _sampleRexBackdropColorAtY(
+      viewportY: headerY,
+      viewportHeight: viewportHeight,
+      heroHeight: heroHeight,
+      scrollOffset: scrollOffset,
+      liveAtmo: liveAtmo,
+      palette: palette,
+    );
+    final cardBg = _sampleRexBackdropColorAtY(
+      viewportY: cardTextY,
+      viewportHeight: viewportHeight,
+      heroHeight: heroHeight,
+      scrollOffset: scrollOffset,
+      liveAtmo: liveAtmo,
+      palette: palette,
+    );
+
+    final resolved = _resolveRexInksForBackdropBand(
+      hysteresisSlotKey: shelfSlotIndex,
+      primaryBg: headerBg,
+      secondaryBg: cardBg,
+      palette: palette,
+    );
+    return (primary: resolved.primary, secondary: resolved.secondary);
+  }
+
+  /// Whether foreground ink over [atmo] (Hero title/dots & upper shelves)
   /// should use crisp white (`true`) or deep charcoal (`false`).
   bool _useLightInkForHeroAtmo(Color atmo, bool isDark) {
-    return isDark || atmo.computeLuminance() < 0.27;
+    return isDark || atmo.computeLuminance() < 0.185;
   }
 
   /// Live horizontal-swipe interpolated Rex Hero atmosphere color across
@@ -2799,7 +3103,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           );
           final iosHeroHeight = viewport.iosHomeHeroHeight(maxH);
 
-          List<Widget> buildSourceCatalogSlivers() {
+          List<Widget> buildSourceCatalogSlivers({int? rexSectionSlotIndex}) {
+            final useRexCardInk =
+                showIosImmersiveHero && rexSectionSlotIndex != null;
+            final gridExtent = viewport.posterGridExtent(
+              useSidebar: useSidebar,
+              density: widget.storage.gridDensity,
+            );
+            final gridWidth =
+                math.max(1.0, constraints.maxWidth - horizontalPad * 2);
+            final crossAxisCount =
+                ((gridWidth + 12.0) / (gridExtent + 12.0)).ceil().clamp(1, 12);
+            final tileWidth =
+                (gridWidth - 12.0 * (crossAxisCount - 1)) / crossAxisCount;
+            final tileHeight = tileWidth / 0.56;
+
             return [
               if (_homeError != null)
                 SliverFillRemaining(
@@ -2863,10 +3181,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                   sliver: SliverGrid(
                     gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                      maxCrossAxisExtent: viewport.posterGridExtent(
-                        useSidebar: useSidebar,
-                        density: widget.storage.gridDensity,
-                      ),
+                      maxCrossAxisExtent: gridExtent,
                       mainAxisSpacing: 16,
                       crossAxisSpacing: 12,
                       childAspectRatio: 0.56,
@@ -2874,7 +3189,81 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     delegate: SliverChildBuilderDelegate(
                       (context, index) {
                         final video = _homeVideos[index];
-                        return _buildVideoCard(_activeSite!, video);
+                        if (!useRexCardInk) {
+                          return _buildVideoCard(_activeSite!, video);
+                        }
+                        final site = _activeSite!;
+                        final cardKey =
+                            'vcard_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_';
+                        final row = index ~/ crossAxisCount;
+                        return AnimatedBuilder(
+                          key: ValueKey(cardKey),
+                          animation: Listenable.merge([
+                            _iosHeroPageController,
+                            _homeScrollController,
+                          ]),
+                          builder: (cardCtx, _) {
+                            final rawOffset = _currentHomeScrollOffset();
+                            final scrollFade = _rexHeroScrollFadeForOffset(
+                              rawOffset,
+                              iosHeroHeight,
+                            );
+                            if (scrollFade >= 0.999) {
+                              return _buildVideoCard(
+                                site,
+                                video,
+                                includeOuterKey: false,
+                              );
+                            }
+                            final palette = ApplePalette.of(cardCtx);
+                            final liveAtmo = _resolveLiveRexHeroAtmo(
+                              heroCandidates,
+                              palette,
+                            );
+                            final scrollDown = math.max(0.0, rawOffset);
+                            final titleContentY = iosHeroHeight +
+                                rexSectionSlotIndex * 235.0 +
+                                104.0 +
+                                row * (tileHeight + 16.0) +
+                                tileHeight -
+                                28.0;
+                            final subContentY = titleContentY + 16.0;
+                            final titleY =
+                                (titleContentY - scrollDown).clamp(0.0, maxH);
+                            final subY =
+                                (subContentY - scrollDown).clamp(0.0, maxH);
+                            final titleBg = _sampleRexBackdropColorAtY(
+                              viewportY: titleY,
+                              viewportHeight: maxH,
+                              heroHeight: iosHeroHeight,
+                              scrollOffset: rawOffset,
+                              liveAtmo: liveAtmo,
+                              palette: palette,
+                            );
+                            final subBg = _sampleRexBackdropColorAtY(
+                              viewportY: subY,
+                              viewportHeight: maxH,
+                              heroHeight: iosHeroHeight,
+                              scrollOffset: rawOffset,
+                              liveAtmo: liveAtmo,
+                              palette: palette,
+                            );
+                            final inks = _resolveRexInksForBackdropBand(
+                              hysteresisSlotKey:
+                                  1000 + rexSectionSlotIndex * 100 + row,
+                              primaryBg: titleBg,
+                              secondaryBg: subBg,
+                              palette: palette,
+                            );
+                            return _buildVideoCard(
+                              site,
+                              video,
+                              includeOuterKey: false,
+                              titleColorOverride: inks.primary,
+                              subtitleColorOverride: inks.secondary,
+                            );
+                          },
+                        );
                       },
                       childCount: _homeVideos.length,
                       findChildIndexCallback: (Key key) {
@@ -2979,26 +3368,38 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             var emittedCount = 0;
 
             Widget wrapFirstHeroShelfHeader(
-              Widget Function(Color? headerInk) builder,
+              Widget Function(Color? headerInk, Color? secondaryInk) builder,
             ) {
-              if (!(emittedCount == 0 && showIosImmersiveHero)) {
-                return builder(null);
+              if (!showIosImmersiveHero) {
+                return builder(null, null);
               }
+              final slotIndex = emittedCount;
               return AnimatedBuilder(
-                animation: _iosHeroPageController,
+                animation: Listenable.merge([
+                  _iosHeroPageController,
+                  _homeScrollController,
+                ]),
                 builder: (context, _) {
                   final palette = ApplePalette.of(context);
+                  final rawOffset = _currentHomeScrollOffset();
+                  final scrollFade =
+                      _rexHeroScrollFadeForOffset(rawOffset, iosHeroHeight);
+                  if (scrollFade >= 0.999) {
+                    return builder(null, null);
+                  }
                   final liveAtmo = _resolveLiveRexHeroAtmo(
                     heroCandidates,
                     palette,
                   );
-                  final useLight = _useLightInkForHeroAtmo(
-                    liveAtmo,
-                    palette.isDark,
+                  final inks = _resolveRexShelfInks(
+                    shelfSlotIndex: slotIndex,
+                    liveAtmo: liveAtmo,
+                    palette: palette,
+                    heroHeight: iosHeroHeight,
+                    viewportHeight: maxH,
+                    scrollOffset: rawOffset,
                   );
-                  return builder(
-                    useLight ? Colors.white : const Color(0xFF141821),
-                  );
+                  return builder(inks.primary, inks.secondary);
                 },
               );
             }
@@ -3014,12 +3415,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     SliverToBoxAdapter(
                       key: const ValueKey('home-section-watch_history'),
                       child: wrapFirstHeroShelfHeader(
-                        (headerInk) => _buildHomeHistoryShelf(
+                        (headerInk, secondaryInk) => _buildHomeHistoryShelf(
                           context,
                           history: history,
                           horizontalPad: horizontalPad,
                           topSpacing: isFirstUnderHero ? 14 : 16,
                           headerInkOverride: headerInk,
+                          secondaryInkOverride: secondaryInk,
                         ),
                       ),
                     ),
@@ -3042,12 +3444,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           top: isFirstUnderHero ? 14 : 22,
                         ),
                         child: wrapFirstHeroShelfHeader(
-                          (headerInk) => CuratedDiscoverySection(
+                          (headerInk, secondaryInk) => CuratedDiscoverySection(
                             visibleSectionIds: [sectionId],
                             hasUserSources: hasSearchable,
                             loadLive:
                                 !Platform.environment.containsKey('FLUTTER_TEST'),
                             headerInkOverride: headerInk,
+                            secondaryInkOverride: secondaryInk,
                             onOpenVideo: (video) => _openVideoDetail(
                               CuratedDiscoveryService.curatedSiteSentinel,
                               video,
@@ -3082,12 +3485,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   SliverToBoxAdapter(
                     key: const ValueKey('home-section-source_updates'),
                     child: wrapFirstHeroShelfHeader(
-                      (headerInk) => _buildHomeSourceUpdatesHeader(
+                      (headerInk, secondaryInk) =>
+                          _buildHomeSourceUpdatesHeader(
                         context,
                         horizontalPad: horizontalPad,
                         topPadding: topPad,
                         bottomPadding: 10,
                         headerInkOverride: headerInk,
+                        secondaryInkOverride: secondaryInk,
                       ),
                     ),
                   ),
@@ -3105,7 +3510,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                   ),
                 );
-                slivers.addAll(buildSourceCatalogSlivers());
+                slivers.addAll(
+                  buildSourceCatalogSlivers(
+                    rexSectionSlotIndex: emittedCount,
+                  ),
+                );
                 emittedCount++;
               }
             }
@@ -3444,78 +3853,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           heroCandidates,
                           palette,
                         );
-                        final rawOffset =
-                            _homeScrollController.positions.length == 1
-                                ? _homeScrollController.offset
-                                : 0.0;
-                        final overscroll = math.max(0.0, -rawOffset);
+                        final rawOffset = _currentHomeScrollOffset();
                         final scrollDown = math.max(0.0, rawOffset);
-                        final stretchedHeight = iosHeroHeight + overscroll;
-
-                        const auraTopExtend = 280.0;
-                        const auraSolidPastHero = 42.0;
-                        final auraDissolveHeight =
-                            palette.isDark ? 340.0 : 186.0;
-                        final auraTotalHeight = auraTopExtend +
-                            stretchedHeight +
-                            auraSolidPastHero +
-                            auraDissolveHeight;
-                        final solidEndStop = ((auraTopExtend +
-                                    stretchedHeight +
-                                    auraSolidPastHero) /
-                                auraTotalHeight)
-                            .clamp(0.45, 0.88);
+                        final metrics = _computeRexBackdropMetrics(
+                          liveAtmo: liveAtmo,
+                          palette: palette,
+                          heroHeight: iosHeroHeight,
+                          scrollOffset: rawOffset,
+                        );
+                        final edge = metrics.liveEdgeColor;
+                        final solidEndStop = metrics.auraSolidEndStop;
                         final tail = 1.0 - solidEndStop;
-
-                        // Rex-style full-screen unified tonal background driven by
-                        // liveAtmo so the entire viewport shares one cohesive mood
-                        // with zero abrupt cutoff below the hero billboard while
-                        // preserving crisp ink contrast on all lower shelves.
-                        final Color fullScreenTopTone;
-                        final Color fullScreenMidTone;
-                        final Color fullScreenBotTone;
-                        if (palette.isDark) {
-                          fullScreenTopTone = Color.lerp(
-                            palette.background,
-                            liveAtmo,
-                            0.68,
-                          )!;
-                          fullScreenMidTone = Color.lerp(
-                            palette.background,
-                            liveAtmo,
-                            0.42,
-                          )!;
-                          fullScreenBotTone = Color.lerp(
-                            palette.background,
-                            liveAtmo,
-                            0.24,
-                          )!;
-                        } else {
-                          final liveHsl = HSLColor.fromColor(liveAtmo);
-                          final lightTonalTint = liveHsl
-                              .withSaturation(
-                                (liveHsl.saturation * 0.92).clamp(0.08, 0.42),
-                              )
-                              .withLightness(
-                                liveHsl.lightness.clamp(0.76, 0.89),
-                              )
-                              .toColor();
-                          fullScreenTopTone = Color.lerp(
-                            palette.background,
-                            lightTonalTint,
-                            0.58,
-                          )!;
-                          fullScreenMidTone = Color.lerp(
-                            palette.background,
-                            lightTonalTint,
-                            0.38,
-                          )!;
-                          fullScreenBotTone = Color.lerp(
-                            palette.background,
-                            lightTonalTint,
-                            0.22,
-                          )!;
-                        }
 
                         return Stack(
                           fit: StackFit.expand,
@@ -3530,20 +3878,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     begin: Alignment.topCenter,
                                     end: Alignment.bottomCenter,
                                     colors: [
-                                      fullScreenTopTone,
-                                      fullScreenMidTone,
-                                      fullScreenBotTone,
+                                      metrics.fullScreenTopTone,
+                                      metrics.fullScreenMidTone,
+                                      metrics.fullScreenBotTone,
                                     ],
-                                    stops: const [0.0, 0.56, 1.0],
+                                    stops: const [0.0, 0.62, 1.0],
                                   ),
                                 ),
                               ),
                             ),
                             Positioned(
-                              top: -auraTopExtend - scrollDown,
+                              top: -_kRexAuraTopExtend - scrollDown,
                               left: 0,
                               right: 0,
-                              height: auraTotalHeight,
+                              height: metrics.auraTotalHeight,
                               child: DecoratedBox(
                                 key: const ValueKey(
                                   'ios-hero-top-ambient-aura',
@@ -3553,13 +3901,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     begin: Alignment.topCenter,
                                     end: Alignment.bottomCenter,
                                     colors: [
-                                      liveAtmo,
-                                      liveAtmo,
-                                      liveAtmo.withValues(alpha: 0.86),
-                                      liveAtmo.withValues(alpha: 0.58),
-                                      liveAtmo.withValues(alpha: 0.28),
-                                      liveAtmo.withValues(alpha: 0.09),
-                                      liveAtmo.withValues(alpha: 0.0),
+                                      edge,
+                                      edge,
+                                      edge.withValues(alpha: 0.86),
+                                      edge.withValues(alpha: 0.58),
+                                      edge.withValues(alpha: 0.28),
+                                      edge.withValues(alpha: 0.09),
+                                      edge.withValues(alpha: 0.0),
                                     ],
                                     stops: [
                                       0.0,
@@ -3839,12 +4187,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required double horizontalPad,
     required double topSpacing,
     Color? headerInkOverride,
+    Color? secondaryInkOverride,
   }) {
     final titleColor =
         headerInkOverride ?? ApplePalette.of(context).labelPrimary;
-    final actionColor = headerInkOverride == Colors.white
-        ? Colors.white.withValues(alpha: 0.84)
-        : AppleColors.systemBlue;
+    final actionColor = secondaryInkOverride ??
+        (headerInkOverride != null &&
+                headerInkOverride.computeLuminance() > 0.48
+            ? headerInkOverride.withValues(alpha: 0.86)
+            : AppleColors.systemBlue);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -3908,12 +4259,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required double topPadding,
     required double bottomPadding,
     Color? headerInkOverride,
+    Color? secondaryInkOverride,
   }) {
     final palette = ApplePalette.of(context);
     final titleColor = headerInkOverride ?? palette.labelPrimary;
-    final subColor = headerInkOverride != null
-        ? headerInkOverride.withValues(alpha: 0.72)
-        : palette.labelTertiary;
+    final subColor = secondaryInkOverride ??
+        (headerInkOverride != null
+            ? headerInkOverride.withValues(alpha: 0.84)
+            : palette.labelSecondary);
     return Padding(
       key: const ValueKey('home-source-updates-header'),
       padding: EdgeInsets.fromLTRB(
@@ -4186,9 +4539,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final bool isShortHero = heroHeight < 460;
 
     final activeAtmo = _resolveRexHeroAtmosphere(activeFeatured, palette);
-    final activeUseLight = _useLightInkForHeroAtmo(activeAtmo, isDark);
-    final activeDotInk =
-        activeUseLight ? Colors.white : const Color(0xFF141821);
 
     Widget buildHeroChromeFade({required Widget child}) {
       return ValueListenableBuilder<double>(
@@ -4219,6 +4569,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               : 0.0;
           final overscroll = math.max(0.0, -rawOffset);
           final stretchedHeight = heroHeight + overscroll;
+          final activeLiveEdgeColor = _computeRexBackdropMetrics(
+            liveAtmo: activeAtmo,
+            palette: palette,
+            heroHeight: heroHeight,
+            scrollOffset: rawOffset,
+          ).liveEdgeColor;
+          final activeUseLight =
+              _useLightInkForHeroAtmo(activeLiveEdgeColor, isDark);
+          final activeDotInk =
+              activeUseLight ? Colors.white : const Color(0xFF141821);
           final stretchScale =
               (1.0 + (overscroll / math.max(heroHeight, 1.0)) * 0.68)
                   .clamp(1.0, 1.44);
@@ -4253,43 +4613,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     final featured = featuredList[index];
                     final itemAtmo =
                         _resolveRexHeroAtmosphere(featured, palette);
-                    final useLightInk =
-                        _useLightInkForHeroAtmo(itemAtmo, isDark);
-                    final primaryInk =
-                        useLightInk ? Colors.white : const Color(0xFF141821);
-                    final secondaryInk = useLightInk
-                        ? Colors.white.withValues(alpha: 0.90)
-                        : const Color(0xFF141821).withValues(alpha: 0.80);
-                    final bodyInk = useLightInk
-                        ? Colors.white.withValues(alpha: 0.80)
-                        : const Color(0xFF141821).withValues(alpha: 0.72);
-                    final titleShadows = useLightInk
-                        ? const [
-                            Shadow(
-                              color: Color(0x99000000),
-                              blurRadius: 14,
-                              offset: Offset(0, 2),
-                            ),
-                          ]
-                        : const [
-                            Shadow(
-                              color: Color(0x45FFFFFF),
-                              blurRadius: 10,
-                            ),
-                          ];
-                    final subShadows = useLightInk
-                        ? const [
-                            Shadow(
-                              color: Color(0x88000000),
-                              blurRadius: 8,
-                            ),
-                          ]
-                        : const [
-                            Shadow(
-                              color: Color(0x38FFFFFF),
-                              blurRadius: 6,
-                            ),
-                          ];
+                    final posterLookupKey =
+                        '${featured.poster}|${featured.title}|${featured.year}';
                     final heroCardId =
                         'ios_hero_${site.key}_${featured.id.isNotEmpty ? featured.id : featured.title}_$index';
                     final metaParts = <String>[
@@ -4395,12 +4720,23 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               child: IgnorePointer(
                                 child: buildHeroChromeFade(
                                   child: AnimatedBuilder(
-                                    animation: _iosHeroPageController,
+                                    animation: Listenable.merge([
+                                      _iosHeroPageController,
+                                      _homeScrollController,
+                                    ]),
                                     builder: (context, _) {
                                       final liveAtmo = _resolveLiveRexHeroAtmo(
                                         featuredList,
                                         palette,
                                       );
+                                      final liveEdgeColor =
+                                          _computeRexBackdropMetrics(
+                                        liveAtmo: liveAtmo,
+                                        palette: palette,
+                                        heroHeight: heroHeight,
+                                        scrollOffset:
+                                            _currentHomeScrollOffset(),
+                                      ).liveEdgeColor;
                                       return DecoratedBox(
                                         key: const ValueKey(
                                           'ios-hero-bottom-ambient-gradient',
@@ -4410,14 +4746,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                             begin: Alignment.topCenter,
                                             end: Alignment.bottomCenter,
                                             colors: [
-                                              liveAtmo.withValues(alpha: 0.0),
-                                              liveAtmo.withValues(alpha: 0.05),
-                                              liveAtmo.withValues(alpha: 0.18),
-                                              liveAtmo.withValues(alpha: 0.44),
-                                              liveAtmo.withValues(alpha: 0.72),
-                                              liveAtmo.withValues(alpha: 0.90),
-                                              liveAtmo.withValues(alpha: 0.98),
-                                              liveAtmo,
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.0,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.05,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.18,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.44,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.72,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.90,
+                                              ),
+                                              liveEdgeColor.withValues(
+                                                alpha: 0.98,
+                                              ),
+                                              liveEdgeColor,
                                             ],
                                             stops: const [
                                               0.0,
@@ -4439,172 +4789,348 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             ),
 
                             Positioned(
-                              left: horizontalPad + 6,
-                              right: horizontalPad + 6,
-                              bottom: featuredList.length > 1
-                                  ? (isShortHero ? 26 : 30)
-                                  : (isShortHero ? 14 : 16),
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              height: stretchedHeight * 0.62,
                               child: buildHeroChromeFade(
-                                child: Center(
-                                  child: ConstrainedBox(
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 520,
-                                    ),
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.center,
+                                child: AnimatedBuilder(
+                                  animation: Listenable.merge([
+                                    _iosHeroPageController,
+                                    _homeScrollController,
+                                  ]),
+                                  builder: (context, _) {
+                                    final liveAtmo = _resolveLiveRexHeroAtmo(
+                                      featuredList,
+                                      palette,
+                                    );
+                                    final liveEdgeColor =
+                                        _computeRexBackdropMetrics(
+                                      liveAtmo: liveAtmo,
+                                      palette: palette,
+                                      heroHeight: heroHeight,
+                                      scrollOffset: _currentHomeScrollOffset(),
+                                    ).liveEdgeColor;
+                                    final hasLoadedPoster =
+                                        _iosHeroAmbientColors
+                                                .containsKey(posterLookupKey) ||
+                                            PosterLoader.peekMemory(
+                                                  featured.poster,
+                                                  title: site
+                                                          .isEffectivelyPrivate
+                                                      ? ''
+                                                      : featured.title,
+                                                  year: site
+                                                          .isEffectivelyPrivate
+                                                      ? ''
+                                                      : featured.year,
+                                                  preferHd: true,
+                                                ) !=
+                                                null;
+                                    // At the title's position inside the bottom
+                                    // 58% dissolve, the gradient covers ~60% of
+                                    // a loaded poster and 100% liveEdgeColor
+                                    // when the poster image is missing.
+                                    final effectiveHeroBg = hasLoadedPoster
+                                        ? Color.alphaBlend(
+                                            liveEdgeColor.withValues(
+                                              alpha: 0.60,
+                                            ),
+                                            itemAtmo,
+                                          )
+                                        : liveEdgeColor;
+                                    final heroInks =
+                                        _resolveRexInksForBackdropBand(
+                                      hysteresisSlotKey: -100 - index,
+                                      primaryBg: effectiveHeroBg,
+                                      secondaryBg: effectiveHeroBg,
+                                      palette: palette,
+                                    );
+                                    final useLightInk = heroInks.useLight;
+                                    final primaryInk = heroInks.primary;
+                                    final secondaryInk = heroInks.secondary;
+                                    final bodyInk = heroInks.secondary;
+                                    final titleShadows = useLightInk
+                                        ? const [
+                                            Shadow(
+                                              color: Color(0x99000000),
+                                              blurRadius: 14,
+                                              offset: Offset(0, 2),
+                                            ),
+                                          ]
+                                        : const [
+                                            Shadow(
+                                              color: Color(0x45FFFFFF),
+                                              blurRadius: 10,
+                                            ),
+                                          ];
+                                    final subShadows = useLightInk
+                                        ? const [
+                                            Shadow(
+                                              color: Color(0x88000000),
+                                              blurRadius: 8,
+                                            ),
+                                          ]
+                                        : const [
+                                            Shadow(
+                                              color: Color(0x38FFFFFF),
+                                              blurRadius: 6,
+                                            ),
+                                          ];
+                                    final scrimTint = useLightInk
+                                        ? Colors.black
+                                        : liveEdgeColor;
+                                    final scrimHeight = math.min(
+                                      math.max(0.0, stretchedHeight * 0.60 - 22),
+                                      (stretchedHeight * 0.50).clamp(180.0, 275.0),
+                                    );
+                                    return Stack(
+                                      fit: StackFit.expand,
+                                      clipBehavior: Clip.none,
                                       children: [
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 9.5,
-                                            vertical: 4,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: useLightInk
-                                                ? Colors.white
-                                                    .withValues(alpha: 0.16)
-                                                : Colors.black
-                                                    .withValues(alpha: 0.08),
-                                            borderRadius: BorderRadius.circular(
-                                              999,
-                                            ),
-                                            border: Border.all(
-                                              color: useLightInk
-                                                  ? Colors.white
-                                                      .withValues(alpha: 0.24)
-                                                  : Colors.black
-                                                      .withValues(alpha: 0.14),
-                                              width: 0.6,
-                                            ),
-                                          ),
-                                          child: Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Icon(
-                                                CupertinoIcons.sparkles,
-                                                color: useLightInk
-                                                    ? const Color(0xFF5AC8FA)
-                                                    : AppleColors.systemBlue,
-                                                size: 11.5,
-                                              ),
-                                              const SizedBox(width: 4),
-                                              Flexible(
-                                                child: Text(
-                                                  '今日首推 · ${site.name}',
-                                                  maxLines: 1,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                  style: TextStyle(
-                                                    color: primaryInk,
-                                                    fontSize: 11,
-                                                    fontWeight: FontWeight.w600,
+                                        // Localized title-band legibility scrim
+                                        // over loaded posters: shields 2-line
+                                        // Hero typography from bright/dark local
+                                        // poster highlights while tapering to
+                                        // 0.0 at bottom: 22 so the Hero bottom
+                                        // seam at bottom: 0 remains untouched.
+                                        if (hasLoadedPoster && scrimHeight > 0)
+                                          Positioned(
+                                            left: 0,
+                                            right: 0,
+                                            bottom: 22,
+                                            height: scrimHeight,
+                                            child: IgnorePointer(
+                                              child: DecoratedBox(
+                                                key: const ValueKey(
+                                                  'ios-hero-title-contrast-scrim',
+                                                ),
+                                                decoration: BoxDecoration(
+                                                  gradient: LinearGradient(
+                                                    begin: Alignment.topCenter,
+                                                    end: Alignment.bottomCenter,
+                                                    colors: [
+                                                      scrimTint.withValues(
+                                                        alpha: 0.0,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.24,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.54,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.56,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.42,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.14,
+                                                      ),
+                                                      scrimTint.withValues(
+                                                        alpha: 0.0,
+                                                      ),
+                                                    ],
+                                                    stops: const [
+                                                      0.0,
+                                                      0.14,
+                                                      0.32,
+                                                      0.58,
+                                                      0.78,
+                                                      0.92,
+                                                      1.0,
+                                                    ],
                                                   ),
                                                 ),
                                               ),
-                                            ],
-                                          ),
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Text(
-                                          featured.title,
-                                          maxLines: 2,
-                                          textAlign: TextAlign.center,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                            color: primaryInk,
-                                            fontSize: heroHeight < 460 ? 22 : 25,
-                                            fontWeight: FontWeight.w800,
-                                            letterSpacing: -0.5,
-                                            height: 1.15,
-                                            shadows: titleShadows,
-                                          ),
-                                        ),
-                                        if (metaParts.isNotEmpty) ...[
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            metaParts.join(' · '),
-                                            maxLines: 1,
-                                            textAlign: TextAlign.center,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: secondaryInk,
-                                              fontSize: 12.5,
-                                              fontWeight: FontWeight.w600,
-                                              letterSpacing: 0.1,
-                                              shadows: subShadows,
                                             ),
                                           ),
-                                        ],
-                                        if (infoLine.isNotEmpty) ...[
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            infoLine,
-                                            maxLines: 1,
-                                            textAlign: TextAlign.center,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: bodyInk,
-                                              fontSize: 12,
-                                              height: 1.32,
-                                              shadows: subShadows,
-                                            ),
-                                          ),
-                                        ],
-                                        const SizedBox(height: 10),
-                                        ApplePressableScale(
-                                          pressedScale: 0.94,
-                                          onTap: () => _openVideoDetail(
-                                            site,
-                                            featured,
-                                            sourceContext: heroTapCtx,
-                                            sourceRadius: 0.0,
-                                            sourceCardId: heroCardId,
-                                            isFullBleedHero: true,
-                                            ambientColor: itemAtmo,
-                                          ),
-                                          child: Container(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 20,
-                                              vertical: 8.5,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              color: AppleColors.systemBlue,
-                                              borderRadius:
-                                                  BorderRadius.circular(999),
-                                              boxShadow: const [
-                                                BoxShadow(
-                                                  color: Color(0x4D0A84FF),
-                                                  blurRadius: 14,
-                                                  offset: Offset(0, 4),
-                                                ),
-                                              ],
-                                            ),
-                                            child: const Row(
-                                              mainAxisSize: MainAxisSize.min,
-                                              children: [
-                                                Icon(
-                                                  CupertinoIcons.play_fill,
-                                                  color: Colors.white,
-                                                  size: 13,
-                                                ),
-                                                SizedBox(width: 5),
-                                                Text(
-                                                  '立即观看',
-                                                  style: TextStyle(
-                                                    color: Colors.white,
-                                                    fontSize: 13.5,
-                                                    fontWeight: FontWeight.w700,
-                                                    letterSpacing: -0.1,
+                                        Positioned(
+                                          left: horizontalPad + 6,
+                                          right: horizontalPad + 6,
+                                          bottom: featuredList.length > 1
+                                              ? (isShortHero ? 26 : 30)
+                                              : (isShortHero ? 14 : 16),
+                                          child: Center(
+                                            child: ConstrainedBox(
+                                              constraints: const BoxConstraints(
+                                                maxWidth: 520,
+                                              ),
+                                              child: Column(
+                                                mainAxisSize: MainAxisSize.min,
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.center,
+                                                children: [
+                                                  Container(
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                      horizontal: 9.5,
+                                                      vertical: 4,
+                                                    ),
+                                                    decoration: BoxDecoration(
+                                                      color: useLightInk
+                                                          ? Colors.white.withValues(
+                                                              alpha: 0.16,
+                                                            )
+                                                          : Colors.black.withValues(
+                                                              alpha: 0.08,
+                                                            ),
+                                                      borderRadius:
+                                                          BorderRadius.circular(999),
+                                                      border: Border.all(
+                                                        color: useLightInk
+                                                            ? Colors.white.withValues(
+                                                                alpha: 0.24,
+                                                              )
+                                                            : Colors.black.withValues(
+                                                                alpha: 0.14,
+                                                              ),
+                                                        width: 0.6,
+                                                      ),
+                                                    ),
+                                                    child: Row(
+                                                      mainAxisSize: MainAxisSize.min,
+                                                      children: [
+                                                        Icon(
+                                                          CupertinoIcons.sparkles,
+                                                          color: useLightInk
+                                                              ? const Color(
+                                                                  0xFF5AC8FA,
+                                                                )
+                                                              : AppleColors
+                                                                  .systemBlue,
+                                                          size: 11.5,
+                                                        ),
+                                                        const SizedBox(width: 4),
+                                                        Flexible(
+                                                          child: Text(
+                                                            '今日首推 · ${site.name}',
+                                                            maxLines: 1,
+                                                            overflow:
+                                                                TextOverflow.ellipsis,
+                                                            style: TextStyle(
+                                                              color: primaryInk,
+                                                              fontSize: 11,
+                                                              fontWeight:
+                                                                  FontWeight.w600,
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
                                                   ),
-                                                ),
-                                              ],
+                                                  const SizedBox(height: 6),
+                                                  Text(
+                                                    featured.title,
+                                                    maxLines: 2,
+                                                    textAlign: TextAlign.center,
+                                                    overflow: TextOverflow.ellipsis,
+                                                    style: TextStyle(
+                                                      color: primaryInk,
+                                                      fontSize:
+                                                          heroHeight < 460 ? 22 : 25,
+                                                      fontWeight: FontWeight.w800,
+                                                      letterSpacing: -0.5,
+                                                      height: 1.15,
+                                                      shadows: titleShadows,
+                                                    ),
+                                                  ),
+                                                  if (metaParts.isNotEmpty) ...[
+                                                    const SizedBox(height: 4),
+                                                    Text(
+                                                      metaParts.join(' · '),
+                                                      maxLines: 1,
+                                                      textAlign: TextAlign.center,
+                                                      overflow: TextOverflow.ellipsis,
+                                                      style: TextStyle(
+                                                        color: secondaryInk,
+                                                        fontSize: 12.5,
+                                                        fontWeight: FontWeight.w600,
+                                                        letterSpacing: 0.1,
+                                                        shadows: subShadows,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                  if (infoLine.isNotEmpty) ...[
+                                                    const SizedBox(height: 4),
+                                                    Text(
+                                                      infoLine,
+                                                      maxLines: 1,
+                                                      textAlign: TextAlign.center,
+                                                      overflow: TextOverflow.ellipsis,
+                                                      style: TextStyle(
+                                                        color: bodyInk,
+                                                        fontSize: 12,
+                                                        height: 1.32,
+                                                        shadows: subShadows,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                  const SizedBox(height: 10),
+                                                  ApplePressableScale(
+                                                    pressedScale: 0.94,
+                                                    onTap: () => _openVideoDetail(
+                                                      site,
+                                                      featured,
+                                                      sourceContext: heroTapCtx,
+                                                      sourceRadius: 0.0,
+                                                      sourceCardId: heroCardId,
+                                                      isFullBleedHero: true,
+                                                      ambientColor: itemAtmo,
+                                                    ),
+                                                    child: Container(
+                                                      padding:
+                                                          const EdgeInsets.symmetric(
+                                                        horizontal: 20,
+                                                        vertical: 8.5,
+                                                      ),
+                                                      decoration: BoxDecoration(
+                                                        color: AppleColors.systemBlue,
+                                                        borderRadius:
+                                                            BorderRadius.circular(
+                                                          999,
+                                                        ),
+                                                        boxShadow: const [
+                                                          BoxShadow(
+                                                            color: Color(0x4D0A84FF),
+                                                            blurRadius: 14,
+                                                            offset: Offset(0, 4),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                      child: const Row(
+                                                        mainAxisSize:
+                                                            MainAxisSize.min,
+                                                        children: [
+                                                          Icon(
+                                                            CupertinoIcons.play_fill,
+                                                            color: Colors.white,
+                                                            size: 13,
+                                                          ),
+                                                          SizedBox(width: 5),
+                                                          Text(
+                                                            '立即观看',
+                                                            style: TextStyle(
+                                                              color: Colors.white,
+                                                              fontSize: 13.5,
+                                                              fontWeight:
+                                                                  FontWeight.w700,
+                                                              letterSpacing: -0.1,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
                                             ),
                                           ),
                                         ),
                                       ],
-                                    ),
-                                  ),
+                                    );
+                                  },
                                 ),
                               ),
                             ),
@@ -6023,12 +6549,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     String cardIdPrefix = 'vcard',
     void Function(BuildContext posterContext, double radius, String cardId)?
         onTapWithSource,
+    bool includeOuterKey = true,
+    Color? titleColorOverride,
+    Color? subtitleColorOverride,
   }) {
     final cardKey =
         '${cardIdPrefix}_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_${badge ?? ""}';
     BuildContext? posterCtx;
     return RepaintBoundary(
-      key: ValueKey(cardKey),
+      key: includeOuterKey ? ValueKey(cardKey) : null,
       child: ApplePressableScale(
         pressedScale: 0.945,
         pressedOpacity: 0.90,
@@ -6165,7 +6694,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: ApplePalette.of(context).labelPrimary,
+                color: titleColorOverride ??
+                    ApplePalette.of(context).labelPrimary,
                 fontSize: 13,
                 fontWeight: FontWeight.w600,
                 letterSpacing: -0.2,
@@ -6194,7 +6724,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: ApplePalette.of(context).labelSecondary,
+                  color: subtitleColorOverride ??
+                      ApplePalette.of(context).labelSecondary,
                   fontSize: 11,
                 ),
               ),

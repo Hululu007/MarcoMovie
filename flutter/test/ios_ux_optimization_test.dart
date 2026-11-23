@@ -2173,7 +2173,12 @@ class _RecordingNavigatorObserver extends NavigatorObserver {
 
 class _IosHomeRedesignClient extends CmsClient {
   @override
-  Future<CmsVideo> fetchDetail(CmsSite site, CmsVideo video) async => video;
+  Future<CmsVideo> fetchDetail(
+    CmsSite site,
+    CmsVideo video, {
+    bool forceRefresh = false,
+  }) async =>
+      video;
 
   @override
   Future<(List<CmsCategory>, CmsListing)> fetchHome(CmsSite site) async {

@@ -74,7 +74,11 @@ class WindowsFixtureClient extends CmsClient {
 
   @override
   Future<(CmsSite, CmsVideo)> playableDetail(
-          CmsSite source, CmsVideo item, Iterable<CmsSite> candidates) async =>
+    CmsSite source,
+    CmsVideo item,
+    Iterable<CmsSite> candidates, {
+    bool forceRefresh = false,
+  }) async =>
       (source, fixtureVideo);
   @override
   Future<CmsListing> fetchSearch(CmsSite site, String keyword,

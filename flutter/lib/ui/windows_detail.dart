@@ -164,7 +164,7 @@ extension _WindowsDetail on _DetailScreenState {
     required bool compact,
     required WatchHistoryEntry? bookmark,
   }) {
-    final hasLines = _video.lines.isNotEmpty;
+    final hasLines = !_loading && _video.lines.any((l) => l.episodes.isNotEmpty);
     final activeLine = hasLines
         ? _video.lines[_selectedLine.clamp(0, _video.lines.length - 1)]
         : null;
@@ -638,7 +638,7 @@ extension _WindowsDetail on _DetailScreenState {
   }
 
   Widget _windowsCollapsibleControlsPanel(WatchHistoryEntry? bookmark) {
-    final hasLines = _video.lines.isNotEmpty;
+    final hasLines = !_loading && _video.lines.any((l) => l.episodes.isNotEmpty);
     final lineIndex =
         hasLines ? _selectedLine.clamp(0, _video.lines.length - 1) : 0;
     final activeLine = hasLines ? _video.lines[lineIndex] : null;
@@ -791,11 +791,9 @@ extension _WindowsDetail on _DetailScreenState {
                                         child: _windowsCinemaActionPill(
                                           label,
                                           selected: i == lineIndex,
-                                          onPressed: () => _updateWindowsState(() {
-                                            _selectedLine = i;
-                                            _selectedPage = 0;
-                                            _selectedInLineSeason = null;
-                                          }),
+                                          onPressed: () => _updateWindowsState(
+                                            () => _selectLineManually(i),
+                                          ),
                                         ),
                                       ),
                                     );

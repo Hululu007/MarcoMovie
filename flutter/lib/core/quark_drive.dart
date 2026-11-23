@@ -303,6 +303,9 @@ class QuarkDriveClient {
           onArchiveSeen: () => archiveOnly = true,
           onShareStatus: (s) => shareStatus ??= s);
       if (files.isEmpty && initialRoot != '0') {
+        incomplete = false;
+        archiveOnly = false;
+        shareStatus = null;
         files = await _walkShare(client, pwdId, token,
             root: '0',
             isCancelled: isCancelled,
@@ -318,8 +321,14 @@ class QuarkDriveClient {
       }
       if (files.isEmpty && shareStatus != null && shareStatus != 1) {
         throw const QuarkDriveException(
-          'invalid_share',
+          'share_expired',
           '原夸克分享链接已取消或已失效',
+        );
+      }
+      if (files.isEmpty && incomplete) {
+        throw const QuarkDriveException(
+          'incomplete_share',
+          '夸克分享目录尚未返回完整文件，请稍后重试',
         );
       }
       return [
@@ -355,7 +364,10 @@ class QuarkDriveClient {
     final data = payload['data'];
     final token = data is Map ? data['stoken'] : null;
     if (token is! String || token.isEmpty || token.length > 16384) {
-      throw const QuarkDriveException('invalid_share', '夸克分享已失效或需要提取码');
+      throw const QuarkDriveException(
+        'missing_share_token',
+        '夸克分享暂未返回访问令牌或需要提取码',
+      );
     }
     return token;
   }

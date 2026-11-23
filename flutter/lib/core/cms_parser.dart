@@ -1902,12 +1902,13 @@ class CmsParser {
     ];
   }
   static List<CmsCategory> _parseXmlCategories(String xml) {
+    final cleanedXml = stripXmlComments(xml);
     final categories = <CmsCategory>[];
     final tagPattern = RegExp(
       r'''<ty\b[^>]*\bid\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</ty>''',
       caseSensitive: false,
     );
-    for (final match in tagPattern.allMatches(xml)) {
+    for (final match in tagPattern.allMatches(cleanedXml)) {
       final id = (match.group(1) ?? '').trim();
       final name = _cleanXmlText(match.group(2) ?? '');
       if (id.isNotEmpty && name.isNotEmpty) {
@@ -1944,6 +1945,33 @@ class CmsParser {
     return null;
   }
 
+  /// Extracts the raw video list from a decoded CMS JSON payload, skipping
+  /// `null` placeholder `list` fields (e.g. `{"list": null, "data": {"list": [...]}}`
+  /// or `{"data": {"list": null, "vod_id": ..., "vod_name": ...}}`) while
+  /// preserving non-null invalid values so detail validation can reject them.
+  static Object? extractRawVideoList(Map<String, dynamic> decoded) {
+    final topList = decoded['list'];
+    if (topList != null) return topList;
+    final dataField = decoded['data'];
+    if (dataField is List) return dataField;
+    if (dataField is Map) {
+      final dataList = dataField['list'];
+      if (dataList != null) return dataList;
+      if (dataField['vod_id'] != null || dataField['vod_name'] != null) {
+        return [dataField];
+      }
+    }
+    return null;
+  }
+
+  static String _firstNonEmptyField(Iterable<Object?> values) {
+    for (final value in values) {
+      final text = (value ?? '').toString().trim();
+      if (text.isNotEmpty) return text;
+    }
+    return '';
+  }
+
   static CmsListing parseListing(String rawJson) {
     final trimmed = rawJson.trimLeft();
     if (trimmed.startsWith('<')) {
@@ -1967,15 +1995,7 @@ class CmsParser {
                 (total > 0 && limit > 0 ? '${(total + limit - 1) ~/ limit}' : '1'))
             .toString()) ??
         1;
-    final dataField = decoded['data'];
-    final rawList = decoded['list'] ??
-        (dataField is List
-            ? dataField
-            : (dataField is Map
-                ? (dataField['list'] is List
-                    ? dataField['list']
-                    : (dataField['vod_id'] != null || dataField['vod_name'] != null ? [dataField] : null))
-                : null));
+    final rawList = extractRawVideoList(decoded);
     if (rawList is! List) {
       return CmsListing(page: page, pageCount: pageCount);
     }
@@ -1986,18 +2006,22 @@ class CmsParser {
       final title = (item['vod_name'] ?? '').toString().trim();
       var playFrom = (item['vod_play_from'] ?? '').toString();
       var playUrl = (item['vod_play_url'] ?? '').toString();
+      List<String>? structuredLineIds;
       if (playUrl.trim().isEmpty && item['vod_url_with_player'] is List) {
         final froms = <String>[];
         final urls = <String>[];
+        final ids = <String>[];
         for (final p in item['vod_url_with_player'] as List) {
           if (p is! Map) continue;
           final u = (p['url'] ?? '').toString().trim();
           if (u.isEmpty) continue;
           froms.add((p['name'] ?? p['code'] ?? '默认线路').toString().trim());
+          ids.add(_firstNonEmptyField([p['code'], p['from'], p['id']]));
           urls.add(u);
         }
         playFrom = froms.join(r'$$$');
         playUrl = urls.join(r'$$$');
+        structuredLineIds = ids;
       }
       if (playUrl.trim().isEmpty && item['vod_play_list'] != null) {
         final rawPlayList = item['vod_play_list'];
@@ -2006,6 +2030,7 @@ class CmsParser {
             : (rawPlayList is Map ? rawPlayList.values : const []);
         final froms = <String>[];
         final urls = <String>[];
+        final ids = <String>[];
         for (final p in entries) {
           if (p is! Map) continue;
           String u = (p['url'] ?? '').toString().trim();
@@ -2024,13 +2049,23 @@ class CmsParser {
           final showName = pInfo is Map
               ? (pInfo['show'] ?? pInfo['from'] ?? '').toString().trim()
               : '';
+          // Prefer confirmed stable source identifiers (`from`, `player_info.from`,
+          // `code`); never use MacCMS positional `sid` (1, 2, ...) as a stable ID.
+          final rawCode = _firstNonEmptyField([
+            p['from'],
+            if (pInfo is Map) pInfo['from'],
+            p['code'],
+            p['id'],
+          ]);
           froms.add(showName.isNotEmpty
               ? showName
               : (p['from'] ?? p['name'] ?? '默认线路').toString().trim());
+          ids.add(rawCode);
           urls.add(u);
         }
         playFrom = froms.join(r'$$$');
         playUrl = urls.join(r'$$$');
+        structuredLineIds = ids;
       }
       if (id.isEmpty && title.isEmpty) continue;
       final remarks = (item['vod_remarks'] ?? '').toString().trim();
@@ -2059,6 +2094,7 @@ class CmsParser {
           lines: item['lines'] is List ? _structuredLines(item['lines'] as List) : _parseLines(
             playFrom,
             playUrl,
+            lineIds: structuredLineIds,
           ),
         ),
       );
@@ -2072,15 +2108,24 @@ class CmsParser {
   static List<CmsLine> _structuredLines(List values) => [
     for (final line in values.whereType<Map>())
       if (line['episodes'] is List)
-        CmsLine(name: (line['name'] ?? '').toString(), episodes: [
-          for (final episode in (line['episodes'] as List).whereType<Map>())
-            if ((episode['url'] ?? '').toString().isNotEmpty)
-              CmsEpisode(name: (episode['name'] ?? '').toString(),
-                url: episode['url'].toString(),
-                headers: episode['headers'] is Map
-                    ? (episode['headers'] as Map).map((k, v) => MapEntry(k.toString(), v.toString()))
-                    : const {}),
-        ]),
+        CmsLine(
+          id: _firstNonEmptyField([
+            line['id'],
+            line['code'],
+            line['flag'],
+            line['from'],
+          ]),
+          name: (line['name'] ?? '').toString(),
+          episodes: [
+            for (final episode in (line['episodes'] as List).whereType<Map>())
+              if ((episode['url'] ?? '').toString().isNotEmpty)
+                CmsEpisode(name: (episode['name'] ?? '').toString(),
+                  url: episode['url'].toString(),
+                  headers: episode['headers'] is Map
+                      ? (episode['headers'] as Map).map((k, v) => MapEntry(k.toString(), v.toString()))
+                      : const {}),
+          ],
+        ),
   ];
 
   static bool isBrokenPosterUrl(String url) {
@@ -2201,88 +2246,437 @@ class CmsParser {
     }
     return upgradePosterUrlToHd(cleaned);
   }
-  static CmsListing _parseXmlListing(String xml) {
-    int page = 1;
-    int pageCount = 1;
-    final listOpen =
-        RegExp(r'<list\b([^>]*)>', caseSensitive: false).firstMatch(xml);
-    if (listOpen != null) {
-      final attrs = listOpen.group(1) ?? '';
-      final pgMatch =
-          RegExp(r'''\bpage\s*=\s*["']?(\d+)''', caseSensitive: false)
-              .firstMatch(attrs);
-      final pcMatch = RegExp(
-        r'''\bpagecount\s*=\s*["']?(\d+)''',
-        caseSensitive: false,
-      ).firstMatch(attrs);
-      if (pgMatch != null) page = int.tryParse(pgMatch.group(1) ?? '1') ?? 1;
-      if (pcMatch != null) {
-        pageCount = int.tryParse(pcMatch.group(1) ?? '1') ?? 1;
+  static final RegExp _xmlTagNameRe = RegExp(r'^[a-z_][a-z0-9_:\-.]*$');
+  static const _xmlVideoFieldTags = <String>{
+    'id',
+    'name',
+    'pic',
+    'note',
+    'year',
+    'area',
+    'actor',
+    'des',
+    'douban',
+  };
+  static const _xmlDesHtmlVoidTags = <String>{'br', 'hr', 'img'};
+
+  /// Strips real XML `<!-- ... -->` comments outside `<![CDATA[...]]>` blocks
+  /// and quoted tag attributes so commented-out nodes never leak into parsers.
+  static String stripXmlComments(String xml) {
+    final out = StringBuffer();
+    var i = 0;
+    final len = xml.length;
+    while (i < len) {
+      final lt = xml.indexOf('<', i);
+      if (lt < 0) {
+        out.write(xml.substring(i));
+        break;
       }
+      if (lt > i) {
+        out.write(xml.substring(i, lt));
+      }
+      if (xml.startsWith('<![CDATA[', lt)) {
+        final end = xml.indexOf(']]>', lt + 9);
+        if (end < 0) {
+          out.write(xml.substring(lt));
+          break;
+        }
+        out.write(xml.substring(lt, end + 3));
+        i = end + 3;
+        continue;
+      }
+      if (xml.startsWith('<!--', lt)) {
+        final end = xml.indexOf('-->', lt + 4);
+        if (end < 0) {
+          break;
+        }
+        i = end + 3;
+        continue;
+      }
+      var j = lt + 1;
+      int? quoteChar;
+      while (j < len) {
+        final ch = xml.codeUnitAt(j);
+        if (quoteChar != null) {
+          if (ch == quoteChar) quoteChar = null;
+        } else if (ch == 0x22 || ch == 0x27) {
+          quoteChar = ch;
+        } else if (ch == 0x3E) {
+          break;
+        }
+        j++;
+      }
+      if (j >= len) {
+        out.write(xml.substring(lt));
+        break;
+      }
+      out.write(xml.substring(lt, j + 1));
+      i = j + 1;
     }
+    return out.toString();
+  }
+
+  /// Single-pass XML scanner shared by both `parseListing` (lenient) and
+  /// `CmsClient._parseCmsDetailResponse` (`strict: true`). Skips `<!--...-->`
+  /// comments completely, preserves `<![CDATA[...]]>` payloads verbatim, and
+  /// validates tag nesting and hierarchy in strict mode.
+  static ({CmsListing listing, int videoElementCount}) parseXmlListing(
+    String raw, {
+    bool strict = false,
+  }) {
+    final xml = raw.trimLeft();
+    if (strict &&
+        RegExp(r'^<(?:!doctype\s+html|html)\b', caseSensitive: false)
+            .hasMatch(xml)) {
+      throw const FormatException('片源返回了网页而非详情数据');
+    }
+
+    final stack = <String>[];
+    var completedRoots = 0;
+    var sawList = false;
+    var videoElementCount = 0;
+    var page = 1;
+    var pageCount = 1;
     final videos = <CmsVideo>[];
-    final videoPattern = RegExp(
-      r'<video\b[^>]*>([\s\S]*?)</video>',
+
+    final pageAttrRe = RegExp(
+      r'''\bpage\s*=\s*["']?(\d+)''',
       caseSensitive: false,
     );
-    final ddPattern = RegExp(
-      r'''<dd\b([^>]*)>([\s\S]*?)</dd>''',
+    final pageCountAttrRe = RegExp(
+      r'''\bpagecount\s*=\s*["']?(\d+)''',
       caseSensitive: false,
     );
-    final flagPattern = RegExp(
+    final flagAttrRe = RegExp(
       r'''\bflag\s*=\s*["']([^"']*)["']''',
       caseSensitive: false,
     );
-    for (final vMatch in videoPattern.allMatches(xml)) {
-      final block = vMatch.group(1) ?? '';
-      final id = _extractXmlTag(block, 'id');
-      final title = _extractXmlTag(block, 'name');
-      if (id.isEmpty && title.isEmpty) continue;
-      final fromParts = <String>[];
-      final urlParts = <String>[];
-      for (final dd in ddPattern.allMatches(block)) {
-        final ddAttrs = dd.group(1) ?? '';
-        final flagMatch = flagPattern.firstMatch(ddAttrs);
-        final flag = (flagMatch?.group(1) ?? '').trim();
-        final body = _cleanXmlText(dd.group(2) ?? '');
-        if (body.isNotEmpty) {
-          fromParts.add(flag.isEmpty ? '线路 ${fromParts.length + 1}' : flag);
-          urlParts.add(body);
+
+    var inVideo = false;
+    var videoDepth = -1;
+    final videoFields = <String, StringBuffer>{};
+    final videoDdLines = <({String flag, String body})>[];
+    String? activeFieldTag;
+    var fieldDepth = -1;
+    String? activeDdFlag;
+    StringBuffer? activeDdBuf;
+    var ddDepth = -1;
+
+    void appendContent(String text) {
+      if (text.isEmpty) return;
+      if (activeDdBuf != null) {
+        activeDdBuf!.write(text);
+      } else if (activeFieldTag != null) {
+        videoFields[activeFieldTag!]?.write(text);
+      }
+    }
+
+    void finalizeVideo() {
+      final id = (videoFields['id']?.toString() ?? '').trim();
+      final title = (videoFields['name']?.toString() ?? '').trim();
+      if (id.isNotEmpty || title.isNotEmpty) {
+        final fromParts = <String>[];
+        final urlParts = <String>[];
+        for (final dd in videoDdLines) {
+          final body = dd.body.trim();
+          if (body.isNotEmpty) {
+            fromParts
+                .add(dd.flag.isEmpty ? '线路 ${fromParts.length + 1}' : dd.flag);
+            urlParts.add(body);
+          }
+        }
+        final xmlRemarks = (videoFields['note']?.toString() ?? '').trim();
+        final xmlDesc = _cleanHtml((videoFields['des']?.toString() ?? '').trim());
+        final xmlScoreText = '$xmlRemarks $xmlDesc';
+        videos.add(
+          CmsVideo(
+            id: id,
+            title: title,
+            poster:
+                _cleanPosterUrl((videoFields['pic']?.toString() ?? '').trim()),
+            remarks: xmlRemarks,
+            year: (videoFields['year']?.toString() ?? '').trim(),
+            area: (videoFields['area']?.toString() ?? '').trim(),
+            actor: (videoFields['actor']?.toString() ?? '').trim(),
+            description: xmlDesc,
+            doubanScore: _parseCmsDoubanField(
+                  (videoFields['douban']?.toString() ?? '').trim(),
+                ) ??
+                extractDoubanScoreFromText(xmlScoreText),
+            rtScore: extractRtScoreFromText(xmlScoreText),
+            lines: _parseLines(fromParts.join(r'$$$'), urlParts.join(r'$$$')),
+          ),
+        );
+      }
+      inVideo = false;
+      videoDepth = -1;
+      videoFields.clear();
+      videoDdLines.clear();
+      activeFieldTag = null;
+      fieldDepth = -1;
+      activeDdFlag = null;
+      activeDdBuf = null;
+      ddDepth = -1;
+    }
+
+    var i = 0;
+    final len = xml.length;
+    while (i < len) {
+      final lt = xml.indexOf('<', i);
+      if (lt < 0) {
+        final trailing = xml.substring(i);
+        if (strict && stack.isEmpty && trailing.trim().isNotEmpty) {
+          throw const FormatException('片源返回的 XML 根节点外存在异常内容');
+        }
+        appendContent(trailing);
+        break;
+      }
+      if (lt > i) {
+        final text = xml.substring(i, lt);
+        if (strict && stack.isEmpty && text.trim().isNotEmpty) {
+          throw const FormatException('片源返回的 XML 根节点外存在异常内容');
+        }
+        appendContent(text);
+      }
+      if (xml.startsWith('<!--', lt)) {
+        final end = xml.indexOf('-->', lt + 4);
+        if (end < 0) {
+          if (strict) {
+            throw const FormatException('片源返回的 XML 注释被截断');
+          }
+          break;
+        }
+        i = end + 3;
+        continue;
+      }
+      if (xml.startsWith('<![CDATA[', lt)) {
+        final end = xml.indexOf(']]>', lt + 9);
+        if (end < 0) {
+          if (strict) {
+            throw const FormatException('片源返回的 XML CDATA 块被截断');
+          }
+          break;
+        }
+        if (strict && stack.isEmpty) {
+          throw const FormatException('片源返回的 XML CDATA 块位于根节点之外');
+        }
+        appendContent(xml.substring(lt + 9, end));
+        i = end + 3;
+        continue;
+      }
+      if (xml.startsWith('<?', lt)) {
+        final end = xml.indexOf('?>', lt + 2);
+        if (end < 0) {
+          if (strict) {
+            throw const FormatException('片源返回的 XML 声明被截断');
+          }
+          break;
+        }
+        i = end + 2;
+        continue;
+      }
+      if (xml.startsWith('<!', lt)) {
+        final end = xml.indexOf('>', lt + 2);
+        if (end < 0) {
+          if (strict) {
+            throw const FormatException('片源返回的 XML 声明被截断');
+          }
+          break;
+        }
+        i = end + 1;
+        continue;
+      }
+
+      // Scan tag up to closing `>`, respecting quoted attribute values.
+      var j = lt + 1;
+      int? quoteChar;
+      while (j < len) {
+        final ch = xml.codeUnitAt(j);
+        if (quoteChar != null) {
+          if (ch == quoteChar) quoteChar = null;
+        } else if (ch == 0x22 || ch == 0x27) {
+          quoteChar = ch;
+        } else if (ch == 0x3E) {
+          break;
+        }
+        j++;
+      }
+      if (j >= len) {
+        if (strict) {
+          throw const FormatException('片源返回的 XML 标签被截断');
+        }
+        break;
+      }
+      final inside = xml.substring(lt + 1, j).trim();
+      i = j + 1;
+      if (inside.isEmpty) {
+        if (strict) {
+          throw const FormatException('片源返回了空的 XML 标签');
+        }
+        continue;
+      }
+
+      final isClosing = inside.startsWith('/');
+      final isSelfClosing = !isClosing && inside.endsWith('/');
+      final body = (isClosing
+              ? inside.substring(1)
+              : (isSelfClosing
+                  ? inside.substring(0, inside.length - 1)
+                  : inside))
+          .trim();
+      final nameEnd = body.indexOf(RegExp(r'[\s/]'));
+      if (isClosing && nameEnd >= 0) {
+        if (stack.contains('des')) {
+          continue;
+        }
+        if (strict) {
+          throw const FormatException('片源返回的 XML 闭合标签格式损坏');
+        }
+        continue;
+      }
+      final tagName =
+          (nameEnd < 0 ? body : body.substring(0, nameEnd)).toLowerCase();
+      final attrs = nameEnd < 0 ? '' : body.substring(nameEnd);
+      if (!_xmlTagNameRe.hasMatch(tagName)) {
+        if (stack.contains('des')) {
+          continue;
+        }
+        if (strict) {
+          throw const FormatException('片源返回的 XML 标签格式损坏');
+        }
+        continue;
+      }
+
+      if (isClosing) {
+        if (_xmlDesHtmlVoidTags.contains(tagName) && stack.contains('des')) {
+          continue;
+        }
+        if (strict) {
+          if (stack.isEmpty || stack.last != tagName) {
+            throw const FormatException('片源返回的 XML 详情标签嵌套错误');
+          }
+          stack.removeLast();
+          if (stack.isEmpty) {
+            completedRoots++;
+          }
+        } else {
+          final matchIdx = stack.lastIndexOf(tagName);
+          if (matchIdx >= 0) {
+            stack.removeRange(matchIdx, stack.length);
+          }
+        }
+        if (activeDdBuf != null && stack.length <= ddDepth) {
+          videoDdLines.add((
+            flag: activeDdFlag ?? '',
+            body: activeDdBuf!.toString().trim(),
+          ));
+          activeDdBuf = null;
+          activeDdFlag = null;
+          ddDepth = -1;
+        }
+        if (activeFieldTag != null && stack.length <= fieldDepth) {
+          activeFieldTag = null;
+          fieldDepth = -1;
+        }
+        if (inVideo && stack.length <= videoDepth) {
+          finalizeVideo();
+        }
+        continue;
+      }
+
+      if (_xmlDesHtmlVoidTags.contains(tagName) && stack.contains('des')) {
+        continue;
+      }
+
+      if (strict) {
+        if (stack.isEmpty && completedRoots > 0) {
+          throw const FormatException('片源返回的 XML 根节点不合法');
+        }
+        if (tagName == 'list' && stack.isNotEmpty && stack.last != 'rss') {
+          throw const FormatException('片源返回的 XML list 节点位置错误');
+        } else if (tagName == 'video' && !stack.contains('list')) {
+          throw const FormatException('片源返回的 XML video 节点缺少 list 容器');
+        } else if (tagName == 'dl' && !stack.contains('video')) {
+          throw const FormatException('片源返回的 XML 播放列表节点嵌套错误');
+        } else if (tagName == 'dd' &&
+            !stack.contains('dl') &&
+            !stack.contains('video')) {
+          throw const FormatException('片源返回的 XML 播放线路节点嵌套错误');
         }
       }
-      final xmlRemarks = _extractXmlTag(block, 'note');
-      final xmlDesc = _cleanHtml(_extractXmlTag(block, 'des'));
-      final xmlScoreText = '$xmlRemarks $xmlDesc';
-      videos.add(
-        CmsVideo(
-          id: id,
-          title: title,
-          poster: _cleanPosterUrl(_extractXmlTag(block, 'pic')),
-          remarks: xmlRemarks,
-          year: _extractXmlTag(block, 'year'),
-          area: _extractXmlTag(block, 'area'),
-          actor: _extractXmlTag(block, 'actor'),
-          description: xmlDesc,
-          doubanScore: _parseCmsDoubanField(_extractXmlTag(block, 'douban')) ??
-              extractDoubanScoreFromText(xmlScoreText),
-          rtScore: extractRtScoreFromText(xmlScoreText),
-          lines: _parseLines(fromParts.join(r'$$$'), urlParts.join(r'$$$')),
-        ),
-      );
+
+      if (tagName == 'list') {
+        if (!sawList) {
+          final pgMatch = pageAttrRe.firstMatch(attrs);
+          final pcMatch = pageCountAttrRe.firstMatch(attrs);
+          if (pgMatch != null) {
+            page = int.tryParse(pgMatch.group(1) ?? '1') ?? 1;
+          }
+          if (pcMatch != null) {
+            pageCount = int.tryParse(pcMatch.group(1) ?? '1') ?? 1;
+          }
+        }
+        sawList = true;
+      } else if (tagName == 'video' && !inVideo) {
+        videoElementCount++;
+        if (!isSelfClosing) {
+          inVideo = true;
+          videoDepth = stack.length;
+          videoFields.clear();
+          videoDdLines.clear();
+          activeFieldTag = null;
+          fieldDepth = -1;
+          activeDdFlag = null;
+          activeDdBuf = null;
+          ddDepth = -1;
+        }
+      } else if (inVideo && !isSelfClosing) {
+        if (tagName == 'dd' && activeDdBuf == null) {
+          final flagMatch = flagAttrRe.firstMatch(attrs);
+          activeDdFlag = (flagMatch?.group(1) ?? '').trim();
+          activeDdBuf = StringBuffer();
+          ddDepth = stack.length;
+        } else if (activeFieldTag == null &&
+            activeDdBuf == null &&
+            stack.length == videoDepth + 1 &&
+            _xmlVideoFieldTags.contains(tagName) &&
+            !videoFields.containsKey(tagName)) {
+          activeFieldTag = tagName;
+          fieldDepth = stack.length;
+          videoFields[tagName] = StringBuffer();
+        }
+      }
+
+      if (isSelfClosing) {
+        if (stack.isEmpty) {
+          completedRoots++;
+        }
+      } else {
+        stack.add(tagName);
+      }
     }
-    return CmsListing(
-      page: page < 1 ? 1 : page,
-      pageCount: pageCount < 1 ? 1 : pageCount,
-      videos: videos,
+
+    if (strict) {
+      if (stack.isNotEmpty) {
+        throw const FormatException('片源返回的 XML 详情数据不完整');
+      }
+      if (!sawList) {
+        throw const FormatException('片源返回的 XML 缺少有效的 list 节点');
+      }
+    }
+
+    return (
+      listing: CmsListing(
+        page: page < 1 ? 1 : page,
+        pageCount: pageCount < 1 ? 1 : pageCount,
+        videos: videos,
+      ),
+      videoElementCount: videoElementCount,
     );
   }
-  static String _extractXmlTag(String block, String tag) {
-    final m = RegExp(
-      '<$tag\\b[^>]*>([\\s\\S]*?)</$tag>',
-      caseSensitive: false,
-    ).firstMatch(block);
-    return m == null ? '' : _cleanXmlText(m.group(1) ?? '');
-  }
+
+  static CmsListing _parseXmlListing(String xml) =>
+      parseXmlListing(xml, strict: false).listing;
   static String _cleanXmlText(String raw) {
     var s = raw.trim();
     final cdata = RegExp(r'^<!\[CDATA\[([\s\S]*?)\]\]>$').firstMatch(s);
@@ -2315,7 +2709,11 @@ class CmsParser {
     }
     return trimmed;
   }
-  static List<CmsLine> _parseLines(String playFrom, String playUrl) {
+  static List<CmsLine> _parseLines(
+    String playFrom,
+    String playUrl, {
+    List<String>? lineIds,
+  }) {
     if (playUrl.trim().isEmpty) return const [];
     final fromParts = playFrom.split(r'$$$');
     final urlParts = playUrl.split(r'$$$');
@@ -2323,9 +2721,12 @@ class CmsParser {
     for (int i = 0; i < urlParts.length; i++) {
       final rawGroup = urlParts[i].trim();
       if (rawGroup.isEmpty) continue;
-      final lineName = i < fromParts.length && fromParts[i].trim().isNotEmpty
-          ? friendlyLineName(fromParts[i].trim())
-          : '线路 ${i + 1}';
+      final rawFrom = i < fromParts.length ? fromParts[i].trim() : '';
+      final lineName =
+          rawFrom.isNotEmpty ? friendlyLineName(rawFrom) : '线路 ${i + 1}';
+      final explicitId =
+          lineIds != null && i < lineIds.length ? lineIds[i].trim() : '';
+      final lineId = explicitId.isNotEmpty ? explicitId : rawFrom;
       final episodes = <CmsEpisode>[];
       for (final segment in rawGroup.split('#')) {
         final s = segment.trim();
@@ -2345,7 +2746,7 @@ class CmsParser {
         }
       }
       if (episodes.isNotEmpty) {
-        lines.add(CmsLine(name: lineName, episodes: episodes));
+        lines.add(CmsLine(id: lineId, name: lineName, episodes: episodes));
       }
     }
     if (lines.length > 1) {

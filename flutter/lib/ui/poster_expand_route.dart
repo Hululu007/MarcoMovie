@@ -114,6 +114,10 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   final bool forBackdrop;
   final Alignment posterAlignment;
   final Color ambientColor;
+  /// Whether vertical pull-down overscroll triggers `.zoom` route dismissal.
+  /// Disabled by default so Detail screens can use pull-down strictly for
+  /// refreshing while reserving back navigation for left-edge swipe & Back.
+  final bool enableVerticalPullDismiss;
 
   /// Critically damped zero-overshoot iOS 27 smooth spring curve.
   static final Curve _smoothSpringCurve = Ios27Spring.smooth.curve;
@@ -162,6 +166,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     this.forBackdrop = false,
     this.posterAlignment = Alignment.center,
     this.ambientColor = const Color(0xFF0E1016),
+    this.enableVerticalPullDismiss = false,
     super.settings,
   });
 
@@ -1012,6 +1017,29 @@ class _PosterExpandZoomGestureWrapperState<T>
 
   @override
   Widget build(BuildContext context) {
+    final stack = Stack(
+      fit: StackFit.expand,
+      children: [
+        widget.child,
+        Positioned(
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: 28,
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            dragStartBehavior: DragStartBehavior.down,
+            onHorizontalDragStart: _onHorizontalDragStart,
+            onHorizontalDragUpdate: _onHorizontalDragUpdate,
+            onHorizontalDragEnd: _onHorizontalDragEnd,
+            onHorizontalDragCancel: _onHorizontalDragCancel,
+          ),
+        ),
+      ],
+    );
+    if (!widget.route.enableVerticalPullDismiss) {
+      return stack;
+    }
     return NotificationListener<ScrollNotification>(
       onNotification: _handleScrollNotification,
       child: GestureDetector(
@@ -1020,26 +1048,7 @@ class _PosterExpandZoomGestureWrapperState<T>
         onVerticalDragUpdate: _onVerticalDragUpdate,
         onVerticalDragEnd: (d) => _finishPullDrag(d.primaryVelocity ?? 0.0),
         onVerticalDragCancel: _cancelPullDrag,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            widget.child,
-            Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: 24,
-              child: GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                dragStartBehavior: DragStartBehavior.down,
-                onHorizontalDragStart: _onHorizontalDragStart,
-                onHorizontalDragUpdate: _onHorizontalDragUpdate,
-                onHorizontalDragEnd: _onHorizontalDragEnd,
-                onHorizontalDragCancel: _onHorizontalDragCancel,
-              ),
-            ),
-          ],
-        ),
+        child: stack,
       ),
     );
   }

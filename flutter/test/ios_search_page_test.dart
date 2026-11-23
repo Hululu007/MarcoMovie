@@ -43,7 +43,12 @@ class _MultiSourceSearchClient extends CmsClient {
   }
 
   @override
-  Future<CmsVideo> fetchDetail(CmsSite site, CmsVideo video) async => video;
+  Future<CmsVideo> fetchDetail(
+    CmsSite site,
+    CmsVideo video, {
+    bool forceRefresh = false,
+  }) async =>
+      video;
 }
 
 void main() {

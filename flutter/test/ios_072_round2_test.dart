@@ -17,6 +17,7 @@ import 'package:marco_movie/ui/apple_theme.dart';
 import 'package:marco_movie/ui/cloud_sync_panel.dart';
 import 'package:marco_movie/ui/ios_settings.dart';
 import 'package:marco_movie/ui/netdisk_sheet.dart';
+import 'package:marco_movie/ui/poster_expand_route.dart';
 import 'package:marco_movie/ui/poster_image.dart';
 import 'package:marco_movie/ui/windows_appearance.dart';
 
@@ -529,6 +530,71 @@ void main() {
           twoCapitals.first.coverUrl,
           'https://img2.doubanio.com/view/photo/l/public/p2937593221.jpg',
         );
+      },
+    );
+
+    testWidgets(
+      'Detail PosterExpandRoute disables vertical pull-down dismiss by default and only pops on left-edge swipe or Back button',
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Center(
+                child: Builder(
+                  builder: (ctx) => GestureDetector(
+                    key: const ValueKey('detail-source-card'),
+                    onTap: () {
+                      Navigator.of(ctx).push(
+                        PosterExpandRoute<void>(
+                          initialSourceRect: PosterExpandRoute.captureRect(ctx)!,
+                          sourceCardId: 'detail-card-no-pull',
+                          builder: (_) => const Scaffold(
+                            key: ValueKey('detail-no-pull-page'),
+                            body: Center(child: Text('Detail Page')),
+                          ),
+                        ),
+                      );
+                    },
+                    child: const SizedBox(
+                      width: 120,
+                      height: 180,
+                      child: ColoredBox(color: Colors.indigo),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.byKey(const ValueKey('detail-source-card')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('detail-no-pull-page')), findsOneWidget);
+
+        // Strong downward fling must NOT dismiss Detail route (reserved for pull-to-refresh).
+        await tester.fling(
+          find.byKey(const ValueKey('detail-no-pull-page')),
+          const Offset(0, 280),
+          1200.0,
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('detail-no-pull-page')), findsOneWidget);
+
+        // Left-edge inward swipe from x = 10 pops cleanly.
+        await tester.flingFrom(
+          const Offset(10, 420),
+          const Offset(240, 0),
+          1100.0,
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('detail-no-pull-page')), findsNothing);
+        expect(PosterExpandRegistry.activeCardId.value, isNull);
       },
     );
   });

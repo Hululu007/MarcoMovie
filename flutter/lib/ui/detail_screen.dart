@@ -7,7 +7,8 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, visibleForTesting;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show SystemUiOverlayStyle;
+import 'package:flutter/scheduler.dart' show SchedulerPhase;
+import 'package:flutter/services.dart' show HapticFeedback, SystemUiOverlayStyle;
 import '../core/cms_client.dart';
 import '../core/cms_parser.dart';
 import '../core/csp_bridge.dart';
@@ -152,14 +153,33 @@ class _OtherSourceResultsState extends State<_OtherSourceResults> {
   }
 }
 
+enum _DetailPullRefreshPhase { idle, armed, refreshing }
+
+typedef _LineIdentitySnapshot = ({
+  String siteKey,
+  String videoId,
+  String lineId,
+  String lineName,
+  bool idWasUnique,
+  bool nameWasUnique,
+  List<String> episodeUrls,
+  List<String> distinguishingUrls,
+  List<String> episodeNames,
+});
+
 class _DetailScreenState extends State<DetailScreen> {
+  static const double _kPullRefreshArmThreshold = 72.0;
+  static const double _kPullRefreshDisarmThreshold = 48.0;
+
   late CmsSite _activeSite;
   late CmsVideo _video;
+  late CmsVideo _detailSeedVideo;
   bool _loading = true;
   String? _error;
   Object? _errorCause;
   String? _curatedUnavailableMessage;
   int _selectedLine = 0;
+  _LineIdentitySnapshot? _manualLineSelection;
   int _selectedPage = 0;
   int? _selectedInLineSeason;
   EpisodeScrapeOverride _episodeScrapeOverride = const EpisodeScrapeOverride();
@@ -176,6 +196,10 @@ class _DetailScreenState extends State<DetailScreen> {
   late bool _descending;
   late bool _isFavorite;
   final ValueNotifier<double> _scrollOffset = ValueNotifier<double>(0.0);
+  final ValueNotifier<double> _pullOverscroll = ValueNotifier<double>(0.0);
+  final ValueNotifier<_DetailPullRefreshPhase> _pullRefreshPhase =
+      ValueNotifier<_DetailPullRefreshPhase>(_DetailPullRefreshPhase.idle);
+  bool _pullRefreshing = false;
   final ScrollController _seasonsScrollController = ScrollController();
   final ScrollController _quickEpisodesScrollController = ScrollController();
   final ScrollController _previewCardsScrollController = ScrollController();
@@ -198,6 +222,9 @@ class _DetailScreenState extends State<DetailScreen> {
     if (WoggSource.supports(site) ||
         CspBridge.isDoubanSite(site) ||
         CspBridge.isMyDriveSite(site)) {
+      return false;
+    }
+    if (CmsClient.hasUnverifiedCloudLines(video)) {
       return false;
     }
     if (site.isScriptOrJarApi) {
@@ -231,6 +258,64 @@ class _DetailScreenState extends State<DetailScreen> {
   bool _windowsDarkSurfaceApplied = false;
 
   void _updateWindowsState(VoidCallback change) => setState(change);
+  static CmsVideo _stripVideoLines(CmsVideo video) => CmsVideo(
+        id: video.id,
+        title: video.title,
+        poster: video.poster,
+        remarks: video.remarks,
+        year: video.year,
+        area: video.area,
+        actor: video.actor,
+        description: video.description,
+        tag: video.tag,
+        doubanScore: video.doubanScore,
+        rtScore: video.rtScore,
+        sourceWarnings: video.sourceWarnings,
+      );
+
+  CmsVideo _sanitizeInitialVideo(CmsSite site, CmsVideo raw) {
+    final normalized = WoggSource.normalizeCachedVideoLabels(site, raw);
+    if (normalized.lines.isEmpty) {
+      return normalized;
+    }
+    final hasId = normalized.id.trim().isNotEmpty;
+    if (hasId &&
+        (widget.client.hasAuthoritativeEmptyDetail(site, normalized) ||
+            widget.client.hasPendingDetailRetry(site, normalized))) {
+      return _stripVideoLines(normalized);
+    }
+    if (!_canShowInitialLinesImmediately(site, normalized)) {
+      final freshCached = hasId
+          ? widget.client.peekFreshCachedDetail(site, normalized)
+          : null;
+      if (freshCached != null &&
+          freshCached.lines.any((l) => l.episodes.isNotEmpty)) {
+        return WoggSource.normalizeCachedVideoLabels(site, freshCached);
+      }
+      return _stripVideoLines(normalized);
+    }
+    return normalized;
+  }
+
+  /// Returns the video payload to hand to `CmsClient.playableDetail`.
+  ///
+  /// `_video` intentionally strips unverified cloud-share lines before network
+  /// resolution so UI and playback buttons never expose stale or unexpanded
+  /// URLs. For M3U inline share cards (whose only input is the raw card URL)
+  /// and cards whose initial lines were stripped pending verification, retain
+  /// the raw `_detailSeedVideo` for the client request.
+  CmsVideo _detailRequestVideoFor(CmsSite site, CmsVideo current) {
+    if (_detailSeedVideo.id != current.id) {
+      return current;
+    }
+    if (current.lines.isEmpty ||
+        widget.client.isM3uVodSite(site) ||
+        current.id.trim().isEmpty) {
+      return _detailSeedVideo;
+    }
+    return current;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -242,7 +327,8 @@ class _DetailScreenState extends State<DetailScreen> {
       });
     }
     _activeSite = widget.site;
-    _video = WoggSource.normalizeCachedVideoLabels(widget.site, widget.initialVideo);
+    _detailSeedVideo = widget.initialVideo;
+    _video = _sanitizeInitialVideo(widget.site, widget.initialVideo);
     _episodeScrapeOverride = widget.storage.getEpisodeScrapeOverride(
       siteKey: _activeSite.key,
       videoId: _video.id,
@@ -254,7 +340,7 @@ class _DetailScreenState extends State<DetailScreen> {
         seasonNumber: curInfo.seasonNumber,
         seasonLabel: curInfo.seasonLabel,
         site: _activeSite,
-        video: _video,
+        video: _detailSeedVideo,
       ),
     ];
     _descending = widget.storage.episodesDescending;
@@ -393,6 +479,8 @@ class _DetailScreenState extends State<DetailScreen> {
     PosterLoader.metadataRevision.removeListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryChanged);
     _scrollOffset.dispose();
+    _pullOverscroll.dispose();
+    _pullRefreshPhase.dispose();
     _seasonsScrollController.dispose();
     _quickEpisodesScrollController.dispose();
     _previewCardsScrollController.dispose();
@@ -571,44 +659,456 @@ class _DetailScreenState extends State<DetailScreen> {
     return picked;
   }
 
-  Future<void> _loadDetail() async {
+  _LineIdentitySnapshot _captureLineIdentity(
+    List<CmsLine> lines,
+    int index, {
+    String? siteKey,
+    String? videoId,
+  }) {
+    final line = lines[index];
+    final trimmedId = line.id.trim();
+    final idCount = trimmedId.isEmpty
+        ? 0
+        : lines.where((l) => l.id.trim() == trimmedId).length;
+    final nameCount = lines.where((l) => l.name == line.name).length;
+    // URLs already shared with same-name (or same-ID) sibling lines at snapshot
+    // time must NOT be used as evidence that a surviving sibling is this line.
+    final siblingSharedUrls = <String>{};
+    for (var j = 0; j < lines.length; j++) {
+      if (j == index) continue;
+      final sameName = lines[j].name == line.name;
+      final sameId = trimmedId.isNotEmpty && lines[j].id.trim() == trimmedId;
+      if (!sameName && !sameId) continue;
+      for (final ep in lines[j].episodes) {
+        final u = ep.url.trim();
+        if (u.isNotEmpty) siblingSharedUrls.add(u);
+      }
+    }
+    final episodeUrls = <String>[
+      for (final ep in line.episodes) ep.url.trim(),
+    ];
+    final distinguishingUrls = <String>[
+      for (final u in episodeUrls)
+        if (u.isNotEmpty && !siblingSharedUrls.contains(u)) u,
+    ];
+    return (
+      siteKey: siteKey ?? _activeSite.key,
+      videoId: videoId ?? _video.id,
+      lineId: trimmedId,
+      lineName: line.name,
+      idWasUnique: trimmedId.isNotEmpty && idCount == 1,
+      nameWasUnique: nameCount == 1,
+      episodeUrls: episodeUrls,
+      distinguishingUrls: distinguishingUrls,
+      episodeNames: [
+        for (final ep in line.episodes) ep.name.trim(),
+      ],
+    );
+  }
+
+  void _selectLineManually(int index) {
+    if (index < 0 || index >= _video.lines.length) return;
+    _selectedLine = index;
+    _manualLineSelection = _captureLineIdentity(_video.lines, index);
+    _selectedPage = 0;
+    _selectedInLineSeason = null;
+  }
+
+  int? _matchPlayableLineByName(
+    List<CmsLine> lines,
+    String lineName, {
+    required CmsSite siteOverride,
+  }) {
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].name == lineName &&
+          _lineUnavailableReason(lines[i], siteOverride: siteOverride) ==
+              null) {
+        return i;
+      }
+    }
+    return null;
+  }
+
+  static bool _sameEpisodeUrlList(
+    List<CmsEpisode> episodes,
+    List<String> expectedUrls,
+  ) {
+    if (episodes.length != expectedUrls.length) return false;
+    for (var i = 0; i < episodes.length; i++) {
+      if (episodes[i].url.trim() != expectedUrls[i]) return false;
+    }
+    return true;
+  }
+
+  int? _matchLineIndexByIdentity(
+    List<CmsLine> lines,
+    _LineIdentitySnapshot snapshot, {
+    CmsSite? siteOverride,
+    String? videoIdOverride,
+    bool requirePlayable = false,
+  }) {
+    final currentSite = siteOverride ?? _activeSite;
+    final currentVideoId = videoIdOverride ?? _video.id;
+    if (currentSite.key != snapshot.siteKey ||
+        currentVideoId != snapshot.videoId) {
+      return null;
+    }
+    bool isEligible(int idx) =>
+        !requirePlayable ||
+        _lineUnavailableReason(lines[idx], siteOverride: currentSite) == null;
+
+    List<int>? narrowedCandidates;
+    if (snapshot.idWasUnique && snapshot.lineId.isNotEmpty) {
+      final idMatches = <int>[
+        for (var idx = 0; idx < lines.length; idx++)
+          if (lines[idx].id.trim() == snapshot.lineId) idx,
+      ];
+      if (idMatches.length == 1) {
+        final matched = idMatches.single;
+        return isEligible(matched) ? matched : null;
+      }
+      if (idMatches.isEmpty) {
+        if (lines.any((l) => l.id.trim().isNotEmpty)) {
+          return null;
+        }
+      } else {
+        narrowedCandidates = idMatches;
+      }
+    }
+
+    final candidates = narrowedCandidates ??
+        <int>[
+          for (var idx = 0; idx < lines.length; idx++)
+            if (lines[idx].name == snapshot.lineName) idx,
+        ];
+    if (candidates.isEmpty) {
+      return null;
+    }
+
+    if (snapshot.episodeUrls.isNotEmpty) {
+      final exactMatches = <int>[
+        for (final idx in candidates)
+          if (_sameEpisodeUrlList(lines[idx].episodes, snapshot.episodeUrls))
+            idx,
+      ];
+      if (exactMatches.length == 1) {
+        final matched = exactMatches.single;
+        return isEligible(matched) ? matched : null;
+      }
+      if (exactMatches.length > 1) {
+        return null;
+      }
+
+      final snapshotUrlSet = <String>{
+        for (final u in snapshot.distinguishingUrls)
+          if (u.isNotEmpty) u,
+      };
+      if (snapshotUrlSet.isNotEmpty) {
+        var bestOverlap = 0;
+        final bestIndices = <int>[];
+        for (final idx in candidates) {
+          final candidateUrlSet = <String>{
+            for (final ep in lines[idx].episodes)
+              if (ep.url.trim().isNotEmpty) ep.url.trim(),
+          };
+          final overlap = candidateUrlSet.intersection(snapshotUrlSet).length;
+          if (overlap > bestOverlap) {
+            bestOverlap = overlap;
+            bestIndices
+              ..clear()
+              ..add(idx);
+          } else if (overlap > 0 && overlap == bestOverlap) {
+            bestIndices.add(idx);
+          }
+        }
+        if (bestOverlap > 0) {
+          if (bestIndices.length == 1) {
+            final matched = bestIndices.single;
+            return isEligible(matched) ? matched : null;
+          }
+          return null;
+        }
+      }
+    }
+
+    // Only fall back to display-name-only match when the display name was
+    // unique at snapshot time AND remains unique now. If duplicate display
+    // names existed, a lone surviving line with disjoint episode URLs cannot
+    // be assumed to be the original line.
+    if (snapshot.nameWasUnique && candidates.length == 1) {
+      final matched = candidates.single;
+      return isEligible(matched) ? matched : null;
+    }
+    return null;
+  }
+
+  (int lineIndex, int episodeIndex)? _resolveEpisodeTargetByIdentity({
+    required _LineIdentitySnapshot snapshotLineIdentity,
+    required CmsEpisode snapshotEpisode,
+  }) {
+    final lineIdx = _matchLineIndexByIdentity(
+      _video.lines,
+      snapshotLineIdentity,
+    );
+    if (lineIdx == null) {
+      return null;
+    }
+    final line = _video.lines[lineIdx];
+    final targetUrl = snapshotEpisode.url.trim();
+    final targetName = snapshotEpisode.name;
+
+    final exactBoth = <int>[
+      for (var j = 0; j < line.episodes.length; j++)
+        if (line.episodes[j].name == targetName &&
+            line.episodes[j].url.trim() == targetUrl)
+          j,
+    ];
+    if (exactBoth.length == 1) return (lineIdx, exactBoth.single);
+    if (exactBoth.length > 1) return null;
+
+    if (targetUrl.isNotEmpty) {
+      final byUrl = <int>[
+        for (var j = 0; j < line.episodes.length; j++)
+          if (line.episodes[j].url.trim() == targetUrl) j,
+      ];
+      if (byUrl.length == 1) return (lineIdx, byUrl.single);
+      if (byUrl.length > 1) return null;
+    }
+
+    final trimmedTargetName = targetName.trim();
+    if (trimmedTargetName.isNotEmpty) {
+      final snapshotNameCount = snapshotLineIdentity.episodeNames
+          .where((name) => name == trimmedTargetName)
+          .length;
+      if (snapshotNameCount == 1) {
+        final byName = <int>[
+          for (var j = 0; j < line.episodes.length; j++)
+            if (line.episodes[j].name.trim() == trimmedTargetName) j,
+        ];
+        if (byName.length == 1) return (lineIdx, byName.single);
+      }
+    }
+    return null;
+  }
+
+  Future<void> _handleDetailPullRefresh() async {
+    if (_pullRefreshing || !mounted) return;
+    _pullRefreshing = true;
+    _pullRefreshPhase.value = _DetailPullRefreshPhase.refreshing;
+    setState(() {});
+    try {
+      await _loadDetail(forceRefresh: true);
+    } finally {
+      _pullRefreshing = false;
+      if (mounted) {
+        _pullRefreshPhase.value = _DetailPullRefreshPhase.idle;
+        setState(() {});
+      }
+    }
+  }
+
+  void _setScrollMetricSafe(ValueNotifier<double> notifier, double value) {
+    if (WidgetsBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && notifier.value != value) {
+          notifier.value = value;
+        }
+      });
+      return;
+    }
+    notifier.value = value;
+  }
+
+  void _triggerPullRefreshFromGesture() {
+    if (_pullRefreshing ||
+        _pullRefreshPhase.value != _DetailPullRefreshPhase.armed) {
+      return;
+    }
+    if (WidgetsBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_pullRefreshing) {
+          _pullRefreshPhase.value = _DetailPullRefreshPhase.refreshing;
+          unawaited(_handleDetailPullRefresh());
+        }
+      });
+      return;
+    }
+    _pullRefreshPhase.value = _DetailPullRefreshPhase.refreshing;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_pullRefreshing) {
+        unawaited(_handleDetailPullRefresh());
+      }
+    });
+  }
+
+  bool _handleDetailScrollNotification(ScrollNotification notification) {
+    if (notification.metrics.axis != Axis.vertical) return false;
+    final pixels = notification.metrics.pixels;
+    final nextOffset = pixels.clamp(0.0, 500.0);
+    if ((_scrollOffset.value - nextOffset).abs() > 0.5) {
+      _setScrollMetricSafe(_scrollOffset, nextOffset);
+    }
+    final overscroll = math.max(0.0, -pixels);
+    if ((_pullOverscroll.value - overscroll).abs() > 0.5 ||
+        (overscroll == 0.0 && _pullOverscroll.value != 0.0)) {
+      _setScrollMetricSafe(_pullOverscroll, overscroll);
+    }
+    if (notification is ScrollUpdateNotification) {
+      if (notification.dragDetails != null) {
+        if (_pullRefreshPhase.value == _DetailPullRefreshPhase.idle &&
+            !_pullRefreshing &&
+            overscroll >= _kPullRefreshArmThreshold) {
+          _pullRefreshPhase.value = _DetailPullRefreshPhase.armed;
+          HapticFeedback.mediumImpact();
+        } else if (_pullRefreshPhase.value == _DetailPullRefreshPhase.armed &&
+            overscroll < _kPullRefreshDisarmThreshold) {
+          _pullRefreshPhase.value = _DetailPullRefreshPhase.idle;
+        }
+      } else if (_pullRefreshPhase.value == _DetailPullRefreshPhase.armed) {
+        _triggerPullRefreshFromGesture();
+      }
+    } else if (notification is ScrollEndNotification) {
+      if (_pullRefreshPhase.value == _DetailPullRefreshPhase.armed) {
+        _triggerPullRefreshFromGesture();
+      }
+    }
+    return false;
+  }
+
+  Widget _buildDetailPullRefreshPill(double topPad) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([_pullOverscroll, _pullRefreshPhase]),
+      builder: (context, _) {
+        final overscroll = _pullOverscroll.value;
+        final phase = _pullRefreshPhase.value;
+        final isRefreshing =
+            _pullRefreshing || phase == _DetailPullRefreshPhase.refreshing;
+        final isArmed = phase == _DetailPullRefreshPhase.armed;
+        final pullProgress = ((overscroll - 12.0) / 60.0).clamp(0.0, 1.0);
+        final showPill = isRefreshing || isArmed || pullProgress > 0.06;
+        if (!showPill) return const SizedBox.shrink();
+        final opacity = (isRefreshing || isArmed) ? 1.0 : pullProgress;
+        final label = isRefreshing
+            ? '正在刷新详情'
+            : (isArmed ? '松手立即刷新' : '下拉刷新详情');
+        return Positioned(
+          top: topPad + 54 + (overscroll * 0.24).clamp(0.0, 26.0),
+          left: 0,
+          right: 0,
+          child: IgnorePointer(
+            child: Center(
+              child: Opacity(
+                opacity: opacity,
+                child: Container(
+                  key: const ValueKey('detail-pull-refresh-pill'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 5.5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.66),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.22),
+                      width: 0.6,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const CupertinoActivityIndicator(
+                        radius: 7.5,
+                        color: Colors.white,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        label,
+                        textScaler: TextScaler.noScaling,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _loadDetail({bool forceRefresh = false}) async {
     _cancelDetailWork();
     final epoch = ++_detailEpoch;
     final abort = _detailAbort = Completer<void>();
     final targetSite = _activeSite;
     final targetVideo = _video;
-    final showImmediately = _canShowInitialLinesImmediately(
-      targetSite,
-      targetVideo,
-    );
-    int initialImmediateLine = _selectedLine;
-    if (showImmediately && targetVideo.lines.isNotEmpty) {
-      final immediateBookmark = _findBookmark(targetVideo);
-      if (immediateBookmark != null) {
-        final found = targetVideo.lines.indexWhere(
-          (l) => l.name == immediateBookmark.line,
+    final requestVideo = _detailRequestVideoFor(targetSite, targetVideo);
+    if (forceRefresh) {
+      _lineUnavailableCache.clear();
+    }
+    final _LineIdentitySnapshot? preservedLineOnStart =
+        forceRefresh && targetVideo.lines.isNotEmpty
+            ? _captureLineIdentity(
+                targetVideo.lines,
+                _selectedLine.clamp(0, targetVideo.lines.length - 1),
+                siteKey: targetSite.key,
+                videoId: targetVideo.id,
+              )
+            : null;
+    final hasFreshCache = !forceRefresh &&
+        targetVideo.lines.any((l) => l.episodes.isNotEmpty) &&
+        widget.client.peekFreshCachedDetail(targetSite, targetVideo) != null;
+    final showImmediately = hasFreshCache ||
+        _canShowInitialLinesImmediately(
+          targetSite,
+          targetVideo,
         );
-        initialImmediateLine = found >= 0 &&
-                _lineUnavailableReason(
-                      targetVideo.lines[found],
-                      siteOverride: targetSite,
-                    ) ==
-                    null
-            ? found
-            : _pickRecommendedPlayableLineIndex(
+    final keepExistingVisible = forceRefresh && targetVideo.lines.isNotEmpty;
+    int initialImmediateLine = _selectedLine;
+    if (!forceRefresh && showImmediately && targetVideo.lines.isNotEmpty) {
+      final manual = _manualLineSelection;
+      final manualMatch = manual != null
+          ? _matchLineIndexByIdentity(
+              targetVideo.lines,
+              manual,
+              siteOverride: targetSite,
+              videoIdOverride: targetVideo.id,
+              requirePlayable: true,
+            )
+          : null;
+      if (manualMatch != null) {
+        initialImmediateLine = manualMatch;
+      } else {
+        final immediateBookmark = _findBookmark(targetVideo);
+        if (immediateBookmark != null) {
+          final found = _matchPlayableLineByName(
+            targetVideo.lines,
+            immediateBookmark.line,
+            siteOverride: targetSite,
+          );
+          initialImmediateLine = found ??
+              _pickRecommendedPlayableLineIndex(
                 targetVideo.lines,
                 siteOverride: targetSite,
               );
-      } else {
-        initialImmediateLine = _pickRecommendedPlayableLineIndex(
-          targetVideo.lines,
-          siteOverride: targetSite,
-        );
+        } else {
+          initialImmediateLine = _pickRecommendedPlayableLineIndex(
+            targetVideo.lines,
+            siteOverride: targetSite,
+          );
+        }
       }
     }
     setState(() {
-      _loading = !showImmediately;
-      if (showImmediately) {
+      _loading = !(showImmediately || keepExistingVisible);
+      if (!forceRefresh && showImmediately) {
         _selectedLine = initialImmediateLine;
       }
       _error = null;
@@ -621,49 +1121,113 @@ class _DetailScreenState extends State<DetailScreen> {
         targetVideo: targetVideo,
         epoch: epoch,
         abort: abort,
+        forceRefresh: forceRefresh,
       );
       return;
     }
     try {
       final (owner, detailed) = await widget.client.runSourceOperation(
-        () => widget.client.playableDetail(targetSite, targetVideo,
-            widget.storage.prioritizeSites(widget.storage.loadSavedConfig()?.availableSites ?? const [])),
+        () => widget.client.playableDetail(
+          targetSite,
+          requestVideo,
+          widget.storage.prioritizeSites(
+            widget.storage.loadSavedConfig()?.availableSites ?? const [],
+          ),
+          forceRefresh: forceRefresh,
+        ),
         cancellation: abort,
       );
-      if (!mounted || abort.isCompleted || epoch != _detailEpoch ||
+      if (!mounted ||
+          abort.isCompleted ||
+          epoch != _detailEpoch ||
           targetSite.key != _activeSite.key ||
           targetVideo.id != _video.id) {
         return;
       }
+      final switchedTarget =
+          owner.key != targetSite.key || detailed.id != targetVideo.id;
       _activeSite = owner;
-      _isFavorite = widget.storage.isFavorite(owner.key, detailed.id, forPrivate: owner.isEffectivelyPrivate);
-      final bookmark = _findBookmark(detailed);
+      if (switchedTarget) {
+        _detailSeedVideo = detailed;
+      }
+      _isFavorite = widget.storage.isFavorite(
+        owner.key,
+        detailed.id,
+        forPrivate: owner.isEffectivelyPrivate,
+      );
       int initialLine = 0;
-      if (bookmark != null && detailed.lines.isNotEmpty) {
-        final found =
-            detailed.lines.indexWhere((l) => l.name == bookmark.line);
-        initialLine = found >= 0 &&
-                _lineUnavailableReason(
-                      detailed.lines[found],
-                      siteOverride: owner,
-                    ) ==
-                    null
-            ? found
-            : _pickRecommendedPlayableLineIndex(
+      var manualSelectionLost = false;
+      if (detailed.lines.isNotEmpty) {
+        final latestManual = _manualLineSelection;
+        final sameIdentity =
+            owner.key == targetSite.key && detailed.id == targetVideo.id;
+        final manualMatchesVideo = latestManual != null &&
+            latestManual.siteKey == owner.key &&
+            latestManual.videoId == detailed.id;
+        _LineIdentitySnapshot? preferredLineIdentity;
+        if (manualMatchesVideo) {
+          preferredLineIdentity = latestManual;
+        } else if (forceRefresh &&
+            sameIdentity &&
+            preservedLineOnStart != null) {
+          preferredLineIdentity = preservedLineOnStart;
+        }
+        final matchedPreferred = preferredLineIdentity != null
+            ? _matchLineIndexByIdentity(
                 detailed.lines,
+                preferredLineIdentity,
                 siteOverride: owner,
-              );
-      } else if (detailed.lines.isNotEmpty) {
-        initialLine = _pickRecommendedPlayableLineIndex(
-          detailed.lines,
-          siteOverride: owner,
-        );
+                videoIdOverride: detailed.id,
+                requirePlayable: true,
+              )
+            : null;
+        if (matchedPreferred != null) {
+          initialLine = matchedPreferred;
+          if (manualMatchesVideo) {
+            _manualLineSelection = _captureLineIdentity(
+              detailed.lines,
+              matchedPreferred,
+              siteKey: owner.key,
+              videoId: detailed.id,
+            );
+          }
+        } else {
+          if (manualMatchesVideo) {
+            _manualLineSelection = null;
+            manualSelectionLost = true;
+          }
+          final bookmark = _findBookmark(detailed);
+          if (bookmark != null) {
+            final found = _matchPlayableLineByName(
+              detailed.lines,
+              bookmark.line,
+              siteOverride: owner,
+            );
+            initialLine = found ??
+                _pickRecommendedPlayableLineIndex(
+                  detailed.lines,
+                  siteOverride: owner,
+                );
+          } else {
+            initialLine = _pickRecommendedPlayableLineIndex(
+              detailed.lines,
+              siteOverride: owner,
+            );
+          }
+        }
+      } else if (_manualLineSelection != null &&
+          _manualLineSelection!.siteKey == owner.key &&
+          _manualLineSelection!.videoId == detailed.id) {
+        _manualLineSelection = null;
       }
       setState(() {
         _video = detailed;
         _selectedLine = initialLine;
         _loading = false;
       });
+      if (manualSelectionLost) {
+        _toast('原播放线路已变更或下架，请重新选择');
+      }
       _mergeSeasonCandidates(_activeSite, [detailed]);
       if (detailed.title.trim().isNotEmpty) {
         _warmRatings(detailed.title, year: detailed.year);
@@ -671,11 +1235,25 @@ class _DetailScreenState extends State<DetailScreen> {
         unawaited(_discoverRelatedSeasons(detailed.title));
       }
     } catch (e) {
-      if (!mounted || abort.isCompleted || epoch != _detailEpoch ||
-          targetSite != _activeSite || targetVideo.id != _video.id) return;
+      if (!mounted ||
+          abort.isCompleted ||
+          epoch != _detailEpoch ||
+          targetSite.key != _activeSite.key ||
+          targetVideo.id != _video.id) {
+        return;
+      }
+      final clearedByPendingRetry =
+          widget.client.hasPendingDetailRetry(targetSite, targetVideo);
       setState(() {
         _loading = false;
-        if (!showImmediately || _video.lines.isEmpty) {
+        if (clearedByPendingRetry && _video.lines.isNotEmpty) {
+          _video = _stripVideoLines(_video);
+          _manualLineSelection = null;
+          _selectedLine = 0;
+        }
+        if (clearedByPendingRetry ||
+            !(showImmediately || keepExistingVisible) ||
+            _video.lines.isEmpty) {
           _error = '读取详情失败：${CmsClient.cleanErrorMessage(e)}';
           _errorCause = e;
         }
@@ -690,6 +1268,7 @@ class _DetailScreenState extends State<DetailScreen> {
     required CmsVideo targetVideo,
     required int epoch,
     required Completer<void> abort,
+    bool forceRefresh = false,
   }) async {
     if (targetVideo.title.trim().isNotEmpty) {
       _warmRatings(targetVideo.title, year: targetVideo.year);
@@ -773,6 +1352,7 @@ class _DetailScreenState extends State<DetailScreen> {
           bestMatch!.site,
           bestMatch!.video,
           userSites,
+          forceRefresh: forceRefresh,
         ),
         cancellation: abort,
       );
@@ -805,6 +1385,11 @@ class _DetailScreenState extends State<DetailScreen> {
         sourceWarnings: detailed.sourceWarnings,
       );
       _activeSite = owner;
+      _detailSeedVideo =
+          bestMatch!.site.key == owner.key &&
+                  bestMatch!.video.id == mergedVideo.id
+              ? bestMatch!.video
+              : mergedVideo;
       _isFavorite = widget.storage.isFavorite(
         owner.key,
         mergedVideo.id,
@@ -910,11 +1495,12 @@ class _DetailScreenState extends State<DetailScreen> {
       for (final item in _relatedSeasons) item.seasonNumber: item,
     };
     final curInfo = CmsParser.parseSeriesSeasonInfo(_video.title);
+    final currentSeed = _detailRequestVideoFor(_activeSite, _video);
     bySeason[curInfo.seasonNumber] = (
       seasonNumber: curInfo.seasonNumber,
       seasonLabel: curInfo.seasonLabel,
       site: _activeSite,
-      video: _video,
+      video: currentSeed,
     );
     for (final cand in candidates) {
       if (!CmsParser.isSameFranchiseSeasonCandidate(_video.title, cand.title)) {
@@ -940,7 +1526,7 @@ class _DetailScreenState extends State<DetailScreen> {
           seasonNumber: candInfo.seasonNumber,
           seasonLabel: candInfo.seasonLabel,
           site: _activeSite,
-          video: _video,
+          video: currentSeed,
         );
       } else if (existing.site.key != _activeSite.key &&
           candidateSite.key == _activeSite.key) {
@@ -978,8 +1564,10 @@ class _DetailScreenState extends State<DetailScreen> {
     }
     setState(() {
       _activeSite = option.site;
-      _video = WoggSource.normalizeCachedVideoLabels(option.site, option.video);
+      _detailSeedVideo = option.video;
+      _video = _sanitizeInitialVideo(option.site, option.video);
       _selectedLine = 0;
+      _manualLineSelection = null;
       _selectedPage = 0;
       _selectedInLineSeason = null;
       _externalSynopsis = '';
@@ -1212,7 +1800,7 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   Future<void> _openPlayer(int lineIdx, int epIdx, {int? resumeMs}) async {
-    if (_video.lines.isEmpty) return;
+    if (_loading || _video.lines.isEmpty) return;
     final targetSite = _activeSite;
     final targetVideo = _video;
     final safeLine = lineIdx.clamp(0, _video.lines.length - 1);
@@ -1357,7 +1945,7 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   void _playPrimaryAction(WatchHistoryEntry? bookmark) {
-    if (_video.lines.isEmpty) return;
+    if (_loading || _video.lines.isEmpty) return;
     if (bookmark != null && WoggSource.supports(_activeSite)) {
       final target = WoggSource.resolveCachedBookmarkTarget(_activeSite, _video, bookmark);
       if (target == null || target.$1 != _selectedLine) {
@@ -1368,10 +1956,15 @@ class _DetailScreenState extends State<DetailScreen> {
       return;
     }
     if (bookmark != null) {
-      final foundLine =
-          _video.lines.indexWhere((l) => l.name == bookmark.line);
-      final lineIdx = (foundLine < 0 ? _selectedLine : foundLine)
-          .clamp(0, _video.lines.length - 1);
+      final safeSelected = _selectedLine.clamp(0, _video.lines.length - 1);
+      final lineIdx = _video.lines[safeSelected].name == bookmark.line
+          ? safeSelected
+          : (() {
+              final foundLine =
+                  _video.lines.indexWhere((l) => l.name == bookmark.line);
+              return (foundLine < 0 ? safeSelected : foundLine)
+                  .clamp(0, _video.lines.length - 1);
+            })();
       final eps = _video.lines[lineIdx].episodes;
       final byNameIdx = eps.indexWhere((e) => e.name == bookmark.episode);
       final epIdx = (byNameIdx >= 0 ? byNameIdx : bookmark.index).clamp(
@@ -1625,11 +2218,15 @@ class _DetailScreenState extends State<DetailScreen> {
       if (!_loading) _searchOtherSources();
       return;
     }
-    final safeLineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
+    final capturedSiteKey = _activeSite.key;
+    final capturedVideoId = _video.id;
+    final capturedSiteName = _activeSite.name;
+    final capturedLines = List<CmsLine>.of(_video.lines);
+    final safeLineIdx = _selectedLine.clamp(0, capturedLines.length - 1);
 
     showIos27LiquidSheet<void>(
       context: context,
-      title: '切换播放源 (${_video.lines.length})',
+      title: '切换播放源 (${capturedLines.length})',
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, updateSheet) {
           final palette = ApplePalette.of(ctx);
@@ -1654,7 +2251,7 @@ class _DetailScreenState extends State<DetailScreen> {
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        '当前站点：${_activeSite.name} · 共 ${_video.lines.length} 条播放线路',
+                        '当前站点：$capturedSiteName · 共 ${capturedLines.length} 条播放线路',
                         style: TextStyle(
                           color: palette.labelSecondary,
                           fontSize: 13.5,
@@ -1665,11 +2262,11 @@ class _DetailScreenState extends State<DetailScreen> {
                   ],
                 ),
               ),
-              for (int i = 0; i < _video.lines.length; i++) ...[
+              for (int i = 0; i < capturedLines.length; i++) ...[
                 if (i > 0) const SizedBox(height: 8),
                 Builder(
                   builder: (_) {
-                    final line = _video.lines[i];
+                    final line = capturedLines[i];
                     final selected = i == safeLineIdx;
                     final lineReason = _lineUnavailableReason(line);
                     final lineSpec = OhosRuntime.isOhos
@@ -1680,7 +2277,7 @@ class _DetailScreenState extends State<DetailScreen> {
                           );
                     final baseSubtitle = lineReason != null
                         ? '共 ${line.episodes.length} 集 · $lineReason'
-                        : '共 ${line.episodes.length} 集 · ${_activeSite.name}';
+                        : '共 ${line.episodes.length} 集 · $capturedSiteName';
                     final tile = Container(
                       decoration: BoxDecoration(
                         color: selected
@@ -1736,11 +2333,22 @@ class _DetailScreenState extends State<DetailScreen> {
                               ),
                         onTap: () {
                           Navigator.of(ctx).pop();
-                          setState(() {
-                            _selectedLine = i;
-                            _selectedPage = 0;
-                            _selectedInLineSeason = null;
-                          });
+                          if (!mounted) return;
+                          final snapshotLineIdentity = _captureLineIdentity(
+                            capturedLines,
+                            i,
+                            siteKey: capturedSiteKey,
+                            videoId: capturedVideoId,
+                          );
+                          final resolvedIdx = _matchLineIndexByIdentity(
+                            _video.lines,
+                            snapshotLineIdentity,
+                          );
+                          if (resolvedIdx == null) {
+                            _toast('播放线路已变更或下架，请重新选择');
+                            return;
+                          }
+                          setState(() => _selectLineManually(resolvedIdx));
                         },
                       ),
                     );
@@ -1780,8 +2388,17 @@ class _DetailScreenState extends State<DetailScreen> {
 
   void _showAllEpisodesGridSheet(WatchHistoryEntry? bookmark) {
     if (_video.lines.isEmpty) return;
-    final safeLineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
-    final line = _video.lines[safeLineIdx];
+    final capturedSiteKey = _activeSite.key;
+    final capturedVideoId = _video.id;
+    final capturedLines = List<CmsLine>.of(_video.lines);
+    final safeLineIdx = _selectedLine.clamp(0, capturedLines.length - 1);
+    final line = capturedLines[safeLineIdx];
+    final snapshotLineIdentity = _captureLineIdentity(
+      capturedLines,
+      safeLineIdx,
+      siteKey: capturedSiteKey,
+      videoId: capturedVideoId,
+    );
     final scraped = _scrapeLine(line);
     final activeIndices = _activeEpisodeIndicesFor(line);
     final total = activeIndices.length;
@@ -1835,7 +2452,20 @@ class _DetailScreenState extends State<DetailScreen> {
                 return;
               }
               Navigator.of(ctx).pop();
-              _openPlayer(safeLineIdx, originalIdx);
+              if (!mounted) return;
+              final target = _resolveEpisodeTargetByIdentity(
+                snapshotLineIdentity: snapshotLineIdentity,
+                snapshotEpisode: ep,
+              );
+              if (target == null) {
+                _toast('剧集列表已更新或目标已下架，请重新选择');
+                return;
+              }
+              final (resolvedLineIdx, resolvedEpIdx) = target;
+              if (_selectedLine != resolvedLineIdx) {
+                setState(() => _selectedLine = resolvedLineIdx);
+              }
+              _openPlayer(resolvedLineIdx, resolvedEpIdx);
             },
             child: Builder(
               builder: (cellCtx) {
@@ -2334,18 +2964,11 @@ class _DetailScreenState extends State<DetailScreen> {
                 context: context,
                 removeTop: true,
                 child: NotificationListener<ScrollNotification>(
-                  onNotification: (notification) {
-                    if (notification.metrics.axis == Axis.vertical) {
-                      final next =
-                          notification.metrics.pixels.clamp(0.0, 500.0);
-                      if ((_scrollOffset.value - next).abs() > 0.5) {
-                        _scrollOffset.value = next;
-                      }
-                    }
-                    return false;
-                  },
+                  onNotification: _handleDetailScrollNotification,
                   child: SingleChildScrollView(
-                    physics: const BouncingScrollPhysics(),
+                    physics: const BouncingScrollPhysics(
+                      parent: AlwaysScrollableScrollPhysics(),
+                    ),
                     padding: const EdgeInsets.only(bottom: 44),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2441,6 +3064,8 @@ class _DetailScreenState extends State<DetailScreen> {
                   ),
                 ),
               ),
+
+              _buildDetailPullRefreshPill(topPad),
 
               // 4. Floating Liquid Glass Top Navigation Bar (Back on Left, Source Picker + Download/Favorite on Right)
               Positioned(
@@ -3190,7 +3815,7 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   Widget _buildPortraitActionRow(WatchHistoryEntry? bookmark) {
-    final hasLines = _video.lines.isNotEmpty;
+    final hasLines = !_loading && _video.lines.any((l) => l.episodes.isNotEmpty);
     final curatedBlocked = _curatedUnavailableMessage != null && !hasLines;
     final selectedBookmark = hasLines &&
             bookmark?.line ==
@@ -4261,18 +4886,11 @@ class _DetailScreenState extends State<DetailScreen> {
                 context: context,
                 removeTop: true,
                 child: NotificationListener<ScrollNotification>(
-                  onNotification: (notification) {
-                    if (notification.metrics.axis == Axis.vertical) {
-                      final next =
-                          notification.metrics.pixels.clamp(0.0, 500.0);
-                      if ((_scrollOffset.value - next).abs() > 0.5) {
-                        _scrollOffset.value = next;
-                      }
-                    }
-                    return false;
-                  },
+                  onNotification: _handleDetailScrollNotification,
                   child: SingleChildScrollView(
-                    physics: const BouncingScrollPhysics(),
+                    physics: const BouncingScrollPhysics(
+                      parent: AlwaysScrollableScrollPhysics(),
+                    ),
                     padding: const EdgeInsets.only(bottom: 44),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -4357,6 +4975,8 @@ class _DetailScreenState extends State<DetailScreen> {
                   ),
                 ),
               ),
+
+              _buildDetailPullRefreshPill(topPad),
 
               // 4. Floating Liquid Glass Top Navigation Bar (Back on Left, Source Picker + Download/Favorite on Right)
               Positioned(

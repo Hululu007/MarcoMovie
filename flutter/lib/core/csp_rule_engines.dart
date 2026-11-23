@@ -799,6 +799,33 @@ class CspRuleEngines {
     return CmsListing(page: page, pageCount: 1, videos: videos);
   }
 
+  static void _validateRuleDetailHtml(String html) {
+    final trimmed = html.trim();
+    if (trimmed.isEmpty) {
+      throw const FormatException('规则详情页内容为空');
+    }
+    _checkChallenge(trimmed);
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        final decoded = jsonDecode(trimmed);
+        if (decoded is Map || decoded is List) {
+          throw const FormatException('规则详情页返回了 JSON 错误而非 HTML 页面');
+        }
+      } on FormatException catch (e) {
+        if (e.message == '规则详情页返回了 JSON 错误而非 HTML 页面') rethrow;
+      }
+    }
+    if (!RegExp(r'<[a-zA-Z!/?][^>]*>').hasMatch(trimmed)) {
+      throw const FormatException('规则详情页未返回有效的 HTML 内容');
+    }
+    if (RegExp(
+      r'<title[^>]*>\s*(?:(?:403|404|500|502|503|504)\b|[^<]*(?:bad\s+gateway|service\s+(?:temporarily\s+)?unavailable|internal\s+server\s+error))',
+      caseSensitive: false,
+    ).hasMatch(trimmed)) {
+      throw const FormatException('规则详情页返回了源站错误页');
+    }
+  }
+
   static Future<CmsVideo> _xbpqDetail(
     CmsSite site,
     Map<String, dynamic> rule,
@@ -810,7 +837,7 @@ class CspRuleEngines {
     final detailUrl = _resolveHref(origin, fallback.id);
     if (!detailUrl.startsWith('http')) return fallback;
     final html = await fetchText(detailUrl, headers: headers);
-    _checkChallenge(html);
+    _validateRuleDetailHtml(html);
 
     final tabR = (rule['线路数组'] ?? 'class="module-tab-item&&</div>||data-dropdown-value=&&</div>').toString();
     final tabTitleR = (rule['线路标题'] ?? '<span>&&</span>||>&&<').toString();
@@ -873,7 +900,7 @@ class CspRuleEngines {
       actor: actor.isEmpty ? fallback.actor : actor,
       description: desc.isEmpty ? fallback.description : desc,
       tag: fallback.tag,
-      lines: lines.isEmpty ? fallback.lines : lines,
+      lines: lines,
     );
   }
 
@@ -1112,10 +1139,12 @@ class CspRuleEngines {
     final url = _resolveHref(origin, fallback.id);
     if (!url.startsWith('http')) return fallback;
     final html = await fetchText(url, headers: headers);
-    _checkChallenge(html);
+    _validateRuleDetailHtml(html);
     final doc = html_parser.parse(html);
     final body = doc.body;
-    if (body == null) return fallback;
+    if (body == null) {
+      throw const FormatException('规则详情页无法解析');
+    }
 
     final tabSel = (rule['线路列表数组规则'] ?? '.module-tab-item').toString();
     final tabTitleR = (rule['线路标题'] ?? 'Text').toString();
@@ -1170,7 +1199,7 @@ class CspRuleEngines {
       actor: fallback.actor,
       description: desc.isEmpty ? fallback.description : desc,
       tag: fallback.tag,
-      lines: lines.isEmpty ? fallback.lines : lines,
+      lines: lines,
     );
   }
 
@@ -1414,10 +1443,12 @@ class CspRuleEngines {
     final detailUrl = _resolveHref(origin, dtTpl.replaceAll('{vid}', fallback.id));
     if (!detailUrl.startsWith('http')) return fallback;
     final html = await fetchText(detailUrl, headers: headers);
-    _checkChallenge(html);
+    _validateRuleDetailHtml(html);
     final doc = html_parser.parse(html);
     final body = doc.body;
-    if (body == null) return fallback;
+    if (body == null) {
+      throw const FormatException('规则详情页无法解析');
+    }
 
     final fromNodes = _xpathNodes(body, (rule['dtFromNode'] ?? '').toString());
     final fromNameXp = (rule['dtFromName'] ?? '/text()').toString();
@@ -1466,7 +1497,7 @@ class CspRuleEngines {
       actor: fallback.actor,
       description: desc.isEmpty ? fallback.description : desc,
       tag: fallback.tag,
-      lines: lines.isEmpty ? fallback.lines : lines,
+      lines: lines,
     );
   }
 }

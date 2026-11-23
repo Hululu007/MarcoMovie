@@ -21,8 +21,9 @@ class _InstantDetailClient extends CmsClient {
   Future<(CmsSite, CmsVideo)> playableDetail(
     CmsSite source,
     CmsVideo item,
-    Iterable<CmsSite> candidates,
-  ) async =>
+    Iterable<CmsSite> candidates, {
+    bool forceRefresh = false,
+  }) async =>
       (source, item);
 
   @override

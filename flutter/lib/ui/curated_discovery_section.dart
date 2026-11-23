@@ -53,6 +53,7 @@ class CuratedDiscoverySection extends StatefulWidget {
   final bool loadLive;
   final List<String>? visibleSectionIds;
   final Color? headerInkOverride;
+  final Color? secondaryInkOverride;
 
   static const List<String> defaultDiscoverySectionIds = <String>[
     StorageService.homeSectionWidescreenRadar,
@@ -71,6 +72,7 @@ class CuratedDiscoverySection extends StatefulWidget {
     this.loadLive = true,
     this.visibleSectionIds,
     this.headerInkOverride,
+    this.secondaryInkOverride,
   });
 
   @override
@@ -196,6 +198,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
     final dcSpec = _specById('dc');
 
     final hdrInk = widget.headerInkOverride;
+    final subInk = widget.secondaryInkOverride;
     return switch (sectionId) {
       StorageService.homeSectionWidescreenRadar => _LandscapeDiscoveryShelf(
           key: Key('curated-module-${trendingSpec.id}'),
@@ -204,6 +207,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
           items: _itemsFor(trendingSpec.id),
           palette: palette,
           headerInkOverride: hdrInk,
+          secondaryInkOverride: subInk,
           onOpenAll: () => _openCollectionWithWall(
             trendingSpec,
             customTitle: '光影风向标',
@@ -219,6 +223,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
               palette: palette,
               badgeText: '藤蔓特辑',
               inkOverride: hdrInk,
+              secondaryInkOverride: subInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -303,6 +308,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
           items: _itemsFor(cnHotSpec.id),
           palette: palette,
           headerInkOverride: hdrInk,
+          secondaryInkOverride: subInk,
           showRankBadges: true,
           onOpenAll: () => _openCollectionWithWall(
             cnHotSpec,
@@ -318,6 +324,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
               title: '灵感片单',
               palette: palette,
               inkOverride: hdrInk,
+              secondaryInkOverride: subInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -384,6 +391,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
               palette: palette,
               badgeText: widget.hasUserSources ? '点播自动匹配片源' : '需添加片源播放',
               inkOverride: hdrInk,
+              secondaryInkOverride: subInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -437,6 +445,7 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
               title: '口碑典藏馆',
               palette: palette,
               inkOverride: hdrInk,
+              secondaryInkOverride: subInk,
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -538,6 +547,7 @@ class _SectionHeaderRow extends StatelessWidget {
   final String? badgeText;
   final VoidCallback? onTapChevron;
   final Color? inkOverride;
+  final Color? secondaryInkOverride;
 
   const _SectionHeaderRow({
     required this.title,
@@ -545,14 +555,20 @@ class _SectionHeaderRow extends StatelessWidget {
     this.badgeText,
     this.onTapChevron,
     this.inkOverride,
+    this.secondaryInkOverride,
   });
 
   @override
   Widget build(BuildContext context) {
     final titleColor = inkOverride ?? palette.labelPrimary;
-    final chevronColor = inkOverride != null
-        ? inkOverride!.withValues(alpha: 0.72)
-        : palette.labelTertiary;
+    final chevronColor = secondaryInkOverride ??
+        (inkOverride != null
+            ? inkOverride!.withValues(alpha: 0.78)
+            : palette.labelSecondary);
+    final badgeFg = inkOverride ?? palette.accent;
+    final badgeBg = inkOverride != null
+        ? inkOverride!.withValues(alpha: 0.14)
+        : palette.accent.withValues(alpha: 0.12);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
@@ -572,7 +588,7 @@ class _SectionHeaderRow extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 7.5, vertical: 2.5),
                 decoration: BoxDecoration(
-                  color: palette.accent.withValues(alpha: 0.12),
+                  color: badgeBg,
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Text(
@@ -580,7 +596,7 @@ class _SectionHeaderRow extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: palette.accent,
+                    color: badgeFg,
                     fontSize: 10.5,
                     fontWeight: FontWeight.w600,
                   ),
@@ -613,6 +629,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
   final List<CmsVideo> items;
   final ApplePalette palette;
   final Color? headerInkOverride;
+  final Color? secondaryInkOverride;
   final bool showRankBadges;
   final VoidCallback onOpenAll;
   final CuratedCardOpenCallback onOpenVideo;
@@ -624,6 +641,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
     required this.items,
     required this.palette,
     this.headerInkOverride,
+    this.secondaryInkOverride,
     this.showRankBadges = false,
     required this.onOpenAll,
     required this.onOpenVideo,
@@ -640,6 +658,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
           palette: palette,
           onTapChevron: onOpenAll,
           inkOverride: headerInkOverride,
+          secondaryInkOverride: secondaryInkOverride,
         ),
         const SizedBox(height: 10),
         SizedBox(
@@ -658,6 +677,8 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
                 cardId: cid,
                 accentColor: accentColor,
                 palette: palette,
+                inkOverride: headerInkOverride,
+                secondaryInkOverride: secondaryInkOverride,
                 rankNumber: showRankBadges ? index + 1 : null,
                 onTap: (cardCtx) {
                   HapticFeedback.selectionClick();
@@ -679,6 +700,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
   final List<CmsVideo> items;
   final ApplePalette palette;
   final Color? headerInkOverride;
+  final Color? secondaryInkOverride;
   final VoidCallback onOpenAll;
   final CuratedCardOpenCallback onOpenVideo;
 
@@ -689,6 +711,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
     required this.items,
     required this.palette,
     this.headerInkOverride,
+    this.secondaryInkOverride,
     required this.onOpenAll,
     required this.onOpenVideo,
   });
@@ -704,6 +727,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
           palette: palette,
           onTapChevron: onOpenAll,
           inkOverride: headerInkOverride,
+          secondaryInkOverride: secondaryInkOverride,
         ),
         const SizedBox(height: 10),
         SizedBox(
@@ -721,6 +745,8 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
                 video: video,
                 cardId: cid,
                 palette: palette,
+                inkOverride: headerInkOverride,
+                secondaryInkOverride: secondaryInkOverride,
                 onTap: (cardCtx) {
                   HapticFeedback.selectionClick();
                   onOpenVideo(video, cardCtx, 14.0, cid);
@@ -738,12 +764,16 @@ class _CuratedLandscapeCard extends StatelessWidget {
   final CmsVideo video;
   final String cardId;
   final ApplePalette palette;
+  final Color? inkOverride;
+  final Color? secondaryInkOverride;
   final void Function(BuildContext cardContext) onTap;
 
   const _CuratedLandscapeCard({
     required this.video,
     required this.cardId,
     required this.palette,
+    this.inkOverride,
+    this.secondaryInkOverride,
     required this.onTap,
   });
 
@@ -864,7 +894,7 @@ class _CuratedLandscapeCard extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: palette.labelPrimary,
+                color: inkOverride ?? palette.labelPrimary,
                 fontSize: 13.5,
                 fontWeight: FontWeight.w700,
                 letterSpacing: -0.15,
@@ -878,7 +908,10 @@ class _CuratedLandscapeCard extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: palette.labelTertiary,
+                    color: secondaryInkOverride ??
+                        (inkOverride != null
+                            ? inkOverride!.withValues(alpha: 0.84)
+                            : palette.labelSecondary),
                     fontSize: 11,
                   ),
                 ),
@@ -1929,6 +1962,8 @@ class _CuratedPosterCard extends StatelessWidget {
   final String cardId;
   final Color accentColor;
   final ApplePalette palette;
+  final Color? inkOverride;
+  final Color? secondaryInkOverride;
   final int? rankNumber;
   final void Function(BuildContext cardContext) onTap;
 
@@ -1937,6 +1972,8 @@ class _CuratedPosterCard extends StatelessWidget {
     required this.cardId,
     required this.accentColor,
     required this.palette,
+    this.inkOverride,
+    this.secondaryInkOverride,
     this.rankNumber,
     required this.onTap,
   });
@@ -2072,7 +2109,7 @@ class _CuratedPosterCard extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: palette.labelPrimary,
+                color: inkOverride ?? palette.labelPrimary,
                 fontSize: 12.5,
                 fontWeight: FontWeight.w600,
               ),
@@ -2082,7 +2119,10 @@ class _CuratedPosterCard extends StatelessWidget {
                 video.year,
                 maxLines: 1,
                 style: TextStyle(
-                  color: palette.labelTertiary,
+                  color: secondaryInkOverride ??
+                      (inkOverride != null
+                          ? inkOverride!.withValues(alpha: 0.84)
+                          : palette.labelSecondary),
                   fontSize: 10.5,
                 ),
               ),
