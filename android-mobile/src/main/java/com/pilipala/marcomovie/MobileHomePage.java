@@ -50,16 +50,15 @@ final class MobileHomePage {
 
         long acquire(LoadingMarkerStore store, String siteKey) {
             String clean = siteKey == null ? "" : siteKey;
-            long token;
             synchronized (lock) {
-                token = seq.incrementAndGet();
+                long token = seq.incrementAndGet();
                 activeToken = token;
                 activeSite = clean;
+                if (store != null) {
+                    store.writeMarker(clean);
+                }
+                return token;
             }
-            if (store != null) {
-                store.writeMarker(clean);
-            }
-            return token;
         }
 
         boolean releaseIfOwner(LoadingMarkerStore store, long token) {
@@ -69,24 +68,24 @@ final class MobileHomePage {
                 }
                 activeToken = 0L;
                 activeSite = "";
+                if (store != null) {
+                    store.writeMarker("");
+                }
+                return true;
             }
-            if (store != null) {
-                store.writeMarker("");
-            }
-            return true;
         }
 
         void clearOnNormalStop(LoadingMarkerStore store) {
             synchronized (lock) {
                 activeToken = 0L;
                 activeSite = "";
-            }
-            if (store != null) {
-                store.writeMarker("");
+                if (store != null) {
+                    store.writeMarker("");
+                }
             }
         }
 
-        synchronized String activeSiteForTest() {
+        String activeSiteForTest() {
             synchronized (lock) {
                 return activeSite;
             }
@@ -125,48 +124,67 @@ final class MobileHomePage {
      * Resolves initial home listings for both XML/JSON CMS and script sources. Standard Apple CMS
      * v10 {@code ?ac=list} omits {@code vod_pic}; when the home response contains videos without
      * any poster URL, enriches via {@link SourceEngine#homeVideos()} ({@code ?ac=detail&pg=1}) or
-     * the first category before falling back to the posterless list. When no initial videos exist
-     * and every fallback path fails with an exception, rethrows the error instead of masking a
-     * broken source as an empty library.
+     * the first category before falling back to the posterless list.
+     *
+     * <p>An empty response from optional {@link SourceEngine#homeVideos()} (which defaults to
+     * {@code {"list":[]}} for engines such as {@link HttpT4Engine}) never masks a subsequent
+     * failure of the required first-category request:
+     *
+     * <ul>
+     *   <li>Home 200 categories + optional {@code homeVideos()} empty + {@code category()} fails
+     *       (e.g. HTTP 503): rethrows the category failure so UI shows an error with switch-source
+     *       recovery.
+     *   <li>Home 200 categories + {@code category()} 200 genuinely empty: returns empty listing.
+     *   <li>Displayable recommended videos already returned by home / {@code homeVideos()}: returns
+     *       those videos even if category enrichment fails.
+     * </ul>
      */
     static Cms.Listing resolveHomeListing(
             SourceEngine eng, String homeRaw, List<Cms.Category> parsedCats) throws Exception {
         Cms.Listing cand = HomeScreen.parseHomeListing(homeRaw);
         boolean hasPosters = hasAnyPoster(cand.videos);
-        Throwable fallbackError = null;
-        boolean fallbackSucceeded = false;
+        Throwable homeVideosError = null;
+        boolean categoryAttempted = false;
+        boolean categorySucceeded = false;
+        Throwable categoryError = null;
         if (cand.videos.isEmpty() || !hasPosters) {
             try {
                 Cms.Listing enriched = Cms.listing(eng.homeVideos());
-                fallbackSucceeded = true;
                 if (!enriched.videos.isEmpty()
                         && (cand.videos.isEmpty() || hasAnyPoster(enriched.videos))) {
                     cand = enriched;
                     hasPosters = hasAnyPoster(cand.videos);
                 }
             } catch (Throwable err) {
-                fallbackError = err;
+                homeVideosError = err;
             }
         }
         if ((cand.videos.isEmpty() || !hasPosters) && parsedCats != null && !parsedCats.isEmpty()) {
+            categoryAttempted = true;
             try {
                 Cms.Listing byCat = Cms.listing(eng.category(parsedCats.get(0).id, 1));
-                fallbackSucceeded = true;
+                categorySucceeded = true;
                 if (!byCat.videos.isEmpty()
                         && (cand.videos.isEmpty() || hasAnyPoster(byCat.videos))) {
                     cand = byCat;
                 }
             } catch (Throwable err) {
-                fallbackError = err;
+                categoryError = err;
             }
         }
-        if (cand.videos.isEmpty() && !fallbackSucceeded && fallbackError != null) {
-            if (fallbackError instanceof Exception) {
-                throw (Exception) fallbackError;
+        if (cand.videos.isEmpty()) {
+            Throwable primaryError =
+                    categoryAttempted
+                            ? (!categorySucceeded ? categoryError : null)
+                            : homeVideosError;
+            if (primaryError != null) {
+                if (primaryError instanceof Exception) {
+                    throw (Exception) primaryError;
+                }
+                throw new IOException(
+                        primaryError.getMessage() != null ? primaryError.getMessage() : "列表读取失败",
+                        primaryError);
             }
-            throw new IOException(
-                    fallbackError.getMessage() != null ? fallbackError.getMessage() : "列表读取失败",
-                    fallbackError);
         }
         return cand;
     }

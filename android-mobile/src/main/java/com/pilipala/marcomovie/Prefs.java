@@ -87,6 +87,7 @@ final class Prefs {
     static final String PREFERRED_SITE = "preferred_site_identity";
     static final String PREFERRED_LINE = "preferred_line";
     static final String LOADING_SITE = "loading_site";
+    static final String CONFIRMED_CRASH_SITE = "confirmed_crash_site";
     static final String EXPERIMENTAL_CSP = "experimental_csp";
     static final String ONLY_ALLOW_HTTPS_PLUGINS = "only_allow_https_plugins";
     static final String FAVORITES = "favorites";

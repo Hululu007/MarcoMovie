@@ -313,6 +313,192 @@ public final class R10InlineProgressCheck {
     )
 
 
+def run_r10_init_fallback_harness(work_dir: Path, base_cp: list[Path]) -> None:
+    """Exercise REAL PlaybackController.createPlayerWithPlan when MPV init throws, with AUTO_SWITCH_KERNEL OFF vs ON."""
+    r10f_dir = work_dir / "r10-init-fallback"
+    r10f_src = r10f_dir / "src"
+    r10f_classes = r10f_dir / "classes"
+    r10f_src.mkdir(parents=True, exist_ok=True)
+    r10f_classes.mkdir(parents=True, exist_ok=True)
+
+    activity_java = r10f_src / "android/app/Activity.java"
+    activity_java.parent.mkdir(parents=True, exist_ok=True)
+    activity_java.write_text(
+        """package android.app;
+public class Activity extends android.content.Context {}
+""",
+        encoding="utf-8",
+    )
+
+    main_java = r10f_src / "com/pilipala/marcomovie/MainActivity.java"
+    main_java.parent.mkdir(parents=True, exist_ok=True)
+    main_java.write_text(
+        """package com.pilipala.marcomovie;
+import android.content.SharedPreferences;
+public class MainActivity extends android.app.Activity {
+    public SharedPreferences mobilePrefsForTest;
+    boolean isTvDevice() { return false; }
+    SharedPreferences mobilePrefs() { return mobilePrefsForTest; }
+}
+""",
+        encoding="utf-8",
+    )
+
+    movie_player_java = r10f_src / "com/pilipala/marcomovie/MoviePlayer.java"
+    movie_player_java.write_text(
+        """package com.pilipala.marcomovie;
+import android.content.Context;
+public class MoviePlayer {
+    public static int backupCreations;
+    public MoviePlayer(Context ctx) {
+        if (getClass() == MoviePlayer.class) {
+            backupCreations++;
+        }
+    }
+    public MoviePlayer(Context ctx, int fallbackMode, boolean preferIjk) {
+        if (getClass() == MoviePlayer.class) {
+            backupCreations++;
+        }
+    }
+    public static MoviePlayer createIjk(Context ctx) { return new MoviePlayer(ctx); }
+}
+""",
+        encoding="utf-8",
+    )
+
+    mpv_player_java = r10f_src / "com/pilipala/marcomovie/MpvPlayer.java"
+    mpv_player_java.write_text(
+        """package com.pilipala.marcomovie;
+import android.content.Context;
+public class MpvPlayer extends MoviePlayer {
+    public static int mpvAttempts;
+    public MpvPlayer(Context ctx) {
+        super(ctx);
+        mpvAttempts++;
+        throw new UnsatisfiedLinkError("mock libmpv init failure");
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    test_java = r10f_src / "com/pilipala/marcomovie/R10InitFallbackCheck.java"
+    test_java.write_text(
+        """package com.pilipala.marcomovie;
+
+import android.content.SharedPreferences;
+import java.lang.reflect.Proxy;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.json.JSONObject;
+
+public final class R10InitFallbackCheck {
+    private static void check(boolean cond, String label) {
+        if (!cond) throw new AssertionError("FAIL: " + label);
+        System.out.println("PASS " + label);
+    }
+
+    private static SharedPreferences togglePrefs(final AtomicBoolean autoSwitch) {
+        return (SharedPreferences)
+                Proxy.newProxyInstance(
+                        SharedPreferences.class.getClassLoader(),
+                        new Class<?>[] {SharedPreferences.class},
+                        (proxy, method, args) -> {
+                            if ("getBoolean".equals(method.getName())
+                                    && Prefs.AUTO_SWITCH_KERNEL.equals(args[0])) {
+                                return autoSwitch.get();
+                            }
+                            if (method.getReturnType() == boolean.class) return Boolean.FALSE;
+                            if (method.getReturnType() == int.class) return 0;
+                            if (method.getReturnType() == long.class) return 0L;
+                            if (method.getReturnType() == float.class) return 0f;
+                            return null;
+                        });
+    }
+
+    public static void main(String[] args) {
+        final AtomicBoolean autoSwitch = new AtomicBoolean(false);
+        MainActivity a = new MainActivity();
+        a.mobilePrefsForTest = togglePrefs(autoSwitch);
+        Cms.Episode ep = new Cms.Episode();
+        ep.name = "E1";
+        ep.url = "https://media.example/1.mp4";
+        PlaybackController.EnginePlan mpvPlan =
+                PlaybackController.planEngine(
+                        PlaybackController.ENGINE_MPV, new JSONObject(), true);
+        check(
+                mpvPlan.engine == PlaybackController.ENGINE_MPV,
+                "R10 Round-2 setup: planEngine selects MPV when user chose MPV");
+
+        // 1. AUTO_SWITCH_KERNEL = false: MPV init throws -> MUST NOT create Media3 backup (0)
+        //    and MUST surface MPV failure message!
+        autoSwitch.set(false);
+        MoviePlayer.backupCreations = 0;
+        MpvPlayer.mpvAttempts = 0;
+        MoviePlayer[] outOff = new MoviePlayer[1];
+        Throwable caughtOff = null;
+        try {
+            PlaybackController.createPlayerWithPlan(a, ep, mpvPlan, outOff);
+        } catch (Throwable err) {
+            caughtOff = err;
+        }
+        String uiMsgOff = caughtOff == null ? "" : SourceController.message(caughtOff);
+        check(
+                caughtOff != null
+                        && MpvPlayer.mpvAttempts == 1
+                        && MoviePlayer.backupCreations == 0
+                        && outOff[0] == null
+                        && uiMsgOff.contains("MPV")
+                        && uiMsgOff.contains("已关闭自动切核"),
+                "R10 Round-2 (autoSwitch=false): MPV init error shows MPV failure and backup Media3 creations=0");
+
+        // 2. AUTO_SWITCH_KERNEL = true: MPV init throws -> allows fallback to Media3 and exposes actual engine label!
+        autoSwitch.set(true);
+        MoviePlayer.backupCreations = 0;
+        MpvPlayer.mpvAttempts = 0;
+        MoviePlayer[] outOn = new MoviePlayer[1];
+        PlaybackController.EnginePlan actualOn =
+                PlaybackController.createPlayerWithPlan(a, ep, mpvPlan, outOn);
+        check(
+                MpvPlayer.mpvAttempts == 1
+                        && MoviePlayer.backupCreations == 1
+                        && outOn[0] != null
+                        && outOn[0].getClass() == MoviePlayer.class
+                        && actualOn.engine == PlaybackController.ENGINE_MEDIA3
+                        && "Media3".equals(actualOn.engineLabel)
+                        && actualOn.fallbackReason.contains("Media3"),
+                "R10 Round-2 (autoSwitch=true): MPV init error falls back to Media3 (creations=1) and reports actual kernel Media3");
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    cp = os.pathsep.join(str(p) for p in [r10f_classes, *base_cp])
+    subprocess.run(
+        [
+            JAVAC,
+            "-encoding",
+            "UTF-8",
+            "-cp",
+            cp,
+            "-d",
+            str(r10f_classes),
+            str(activity_java),
+            str(main_java),
+            str(movie_player_java),
+            str(mpv_player_java),
+            str(test_java),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [JAVA, "-Dfile.encoding=UTF-8", "-cp", cp, "com.pilipala.marcomovie.R10InitFallbackCheck"],
+        cwd=ROOT,
+        check=True,
+        timeout=40,
+    )
+
+
 def run_r9_same_name_import_harness(work_dir: Path, base_cp: list[Path]) -> None:
     """Exercise REAL SourceController.importLocalUri with concurrent same-named source.py imports + private-space switch."""
     r9_dir = work_dir / "r9-same-name-import"
@@ -931,6 +1117,9 @@ public class ContextWrapper extends Context {
 
         # Verify R10 real MobileInlinePlayer.captureResumePosition() bytecode
         run_r10_inline_progress_harness(work_dir, runtime_cp)
+
+        # Verify R10 real PlaybackController.createPlayerWithPlan MPV init fallback vs AUTO_SWITCH_KERNEL
+        run_r10_init_fallback_harness(work_dir, runtime_cp)
 
         # Verify R11 CI & dual-ephemeral-key isolation
         verify_r11_update_isolation_ci(work_dir)

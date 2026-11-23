@@ -734,6 +734,118 @@ public final class ReworkR6ToR12Checks {
                 homeSrc.contains("SourceController.stageMessage(\"列表读取失败\", e)")
                         && homeSrc.contains("recoverSwitchBtn.setVisibility(View.VISIBLE)"),
                 "R8 wiring: MobileHomePage error branch displays stage failure and keeps switch-source CTA visible");
+
+        // 4. Round-2 R8: Real HttpT4Engine (which inherits default SourceEngine.homeVideos() ->
+        //    {"list":[]}) against local HttpServer covering all 3 distinguishable scenarios:
+        //    (a) home=200 categories + optional homeVideos empty + category=503 -> MUST throw!
+        //    (b) home=200 categories + optional homeVideos empty + category=200 {"list":[]} ->
+        // empty OK!
+        //    (c) home=200 with displayable recommended videos + category=503 -> display
+        // recommended!
+        final AtomicInteger t4Mode = new AtomicInteger(0);
+        HttpServer t4Server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        t4Server.createContext(
+                "/api",
+                ex -> {
+                    String q = ex.getRequestURI().getRawQuery();
+                    boolean isHome = q != null && q.contains("filter=true");
+                    int mode = t4Mode.get();
+                    int code;
+                    String body;
+                    if (isHome) {
+                        code = 200;
+                        if (mode == 2) {
+                            body =
+                                    "{\"class\":[{\"type_id\":\"1\",\"type_name\":\"电影\"}],"
+                                            + "\"list\":[{\"vod_id\":\"rec1\",\"vod_name\":\"推荐影片\",\"vod_pic\":\"https://img.example/rec1.jpg\"}]}";
+                        } else {
+                            body = "{\"class\":[{\"type_id\":\"1\",\"type_name\":\"电影\"}]}";
+                        }
+                    } else if (mode == 1) {
+                        code = 200;
+                        body = "{\"list\":[]}";
+                    } else {
+                        code = 503;
+                        body = "category unavailable";
+                    }
+                    byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+                    ex.sendResponseHeaders(code, bytes.length);
+                    try (OutputStream os = ex.getResponseBody()) {
+                        os.write(bytes);
+                    }
+                });
+        t4Server.start();
+        try {
+            Cms.Site t4Site = new Cms.Site();
+            t4Site.type = 4;
+            t4Site.key = "t4_fixture";
+            t4Site.api = "http://127.0.0.1:" + t4Server.getAddress().getPort() + "/api";
+            HttpT4Engine realT4 = new HttpT4Engine(t4Site);
+
+            // (a) home 200 categories + default empty homeVideos + category 503 -> throws 503!
+            t4Mode.set(0);
+            String homeRaw503 = realT4.home();
+            boolean t4Threw503 = false;
+            String t4StageMsg = "";
+            try {
+                MobileHomePage.resolveHomeListing(realT4, homeRaw503, Cms.categories(homeRaw503));
+            } catch (Exception e) {
+                t4Threw503 = true;
+                t4StageMsg = SourceController.stageMessage("列表读取失败", e);
+            }
+            check(
+                    t4Threw503 && t4StageMsg.contains("503"),
+                    "R8 Round-2 (HttpT4Engine): home=200 + default homeVideos empty + category=503 throws actionable 503 error (not empty library)");
+
+            // (b) home 200 categories + category 200 {"list":[]} -> genuinely empty success!
+            t4Mode.set(1);
+            String homeRawEmpty = realT4.home();
+            Cms.Listing t4Empty =
+                    MobileHomePage.resolveHomeListing(
+                            realT4, homeRawEmpty, Cms.categories(homeRawEmpty));
+            check(
+                    t4Empty != null && t4Empty.videos.isEmpty(),
+                    "R8 Round-2 (HttpT4Engine): home=200 + category=200 empty succeeds cleanly with 0 videos");
+
+            // (c) home 200 with displayable recommended videos + category 503 -> shows recommended!
+            t4Mode.set(2);
+            String homeRawRec = realT4.home();
+            Cms.Listing t4Rec =
+                    MobileHomePage.resolveHomeListing(
+                            realT4, homeRawRec, Cms.categories(homeRawRec));
+            check(
+                    t4Rec != null
+                            && t4Rec.videos.size() == 1
+                            && "推荐影片".equals(t4Rec.videos.get(0).title),
+                    "R8 Round-2 (HttpT4Engine): displayable recommended videos remain visible when category returns 503");
+
+            // (c2) home 200 categories + homeVideos() returns posterless recommendations +
+            //      category() fails 503 -> still displays recommendations instead of failing!
+            SourceEngine recFallbackSrc =
+                    (SourceEngine)
+                            Proxy.newProxyInstance(
+                                    SourceEngine.class.getClassLoader(),
+                                    new Class<?>[] {SourceEngine.class},
+                                    (proxy, method, args) -> {
+                                        if ("homeVideos".equals(method.getName())) {
+                                            return "{\"list\":[{\"vod_id\":\"rec2\",\"vod_name\":\"推荐无图片\",\"vod_pic\":\"\"}]}";
+                                        }
+                                        if ("category".equals(method.getName())) {
+                                            throw new IOException("来源返回 HTTP 503");
+                                        }
+                                        return "{\"list\":[]}";
+                                    });
+            Cms.Listing recKeep =
+                    MobileHomePage.resolveHomeListing(
+                            recFallbackSrc, catsOnlyHome, Collections.singletonList(cat));
+            check(
+                    recKeep != null
+                            && recKeep.videos.size() == 1
+                            && "推荐无图片".equals(recKeep.videos.get(0).title),
+                    "R8 Round-2: existing recommended videos from homeVideos() are preserved even when category enrichment fails");
+        } finally {
+            t4Server.stop(0);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1135,6 +1247,22 @@ public final class ReworkR6ToR12Checks {
         check(
                 captureIdx > 0 && restartIdx > captureIdx,
                 "R10 wiring: MobileInlinePlayer error fallback captures resume position BEFORE startResolvedStream");
+        String pcSrc =
+                new String(
+                        Files.readAllBytes(new File(srcRoot, "PlaybackController.java").toPath()),
+                        StandardCharsets.UTF_8);
+        check(
+                pcSrc.contains("if (!shouldAutoSwitchKernel(a))")
+                        && pcSrc.contains("a.toast(actualPlan.fallbackReason);")
+                        && inlineSrc.contains("a.toast(actualPlan.fallbackReason);")
+                        && inlineSrc.contains("actualPlan.engineLabel"),
+                "R10 Round-2 wiring: init factory checks shouldAutoSwitchKernel and both inline/fullscreen surface actual fallback engine");
+        String mpvOffMsg =
+                SourceController.message(
+                        new IllegalStateException("MPV 初始化失败（已关闭自动切核），请手动切换内核或开启自动切核"));
+        check(
+                mpvOffMsg.contains("MPV") && mpvOffMsg.contains("已关闭自动切核"),
+                "R10 Round-2: SourceController.message preserves MPV init failure message verbatim");
     }
 
     // -------------------------------------------------------------------------
@@ -1176,7 +1304,92 @@ public final class ReworkR6ToR12Checks {
                                 MainActivity.EXIT_REASON_UNKNOWN),
                 "R12: normal onStop clears loading marker; OS reclaim after backgrounding is not a crash");
 
-        // 3. Even if OS reclaims abruptly (API 30+ REASON_LOW_MEMORY=3, REASON_FREEZER=14,
+        // 3. Round-2 R12: Interleaved concurrent threads (delayed acquire A vs acquire B, and
+        //    delayed release A vs acquire B) MUST serialize ownership + marker write so disk
+        //    marker ALWAYS belongs to the current active owner B and A never clears B!
+        final MobileHomePage.LoadingSiteGuard raceGuard = new MobileHomePage.LoadingSiteGuard();
+        final AtomicReference<String> persisted = new AtomicReference<>("");
+        final CountDownLatch beforeAWrite = new CountDownLatch(1);
+        final CountDownLatch allowAWrite = new CountDownLatch(1);
+        final CountDownLatch bDone1 = new CountDownLatch(1);
+        Thread tA1 =
+                new Thread(
+                        () ->
+                                raceGuard.acquire(
+                                        k -> {
+                                            beforeAWrite.countDown();
+                                            try {
+                                                allowAWrite.await(5, TimeUnit.SECONDS);
+                                            } catch (InterruptedException ignored) {
+                                            }
+                                            persisted.set(k);
+                                        },
+                                        "A"));
+        tA1.start();
+        check(
+                beforeAWrite.await(5, TimeUnit.SECONDS),
+                "R12 Round-2: delayed acquire A entered write");
+        Thread tB1 =
+                new Thread(
+                        () -> {
+                            raceGuard.acquire(persisted::set, "B");
+                            bDone1.countDown();
+                        });
+        tB1.start();
+        // Wait briefly to confirm B contends behind A's serialized lock, then release A
+        bDone1.await(200, TimeUnit.MILLISECONDS);
+        allowAWrite.countDown();
+        tA1.join(5000);
+        tB1.join(5000);
+        check(
+                "B".equals(raceGuard.activeSiteForTest()) && "B".equals(persisted.get()),
+                "R12 Round-2: interleaved delayed acquire A vs acquire B leaves runtime owner=B AND persisted=B");
+
+        long tokOldA = raceGuard.acquire(persisted::set, "A");
+        final CountDownLatch beforeAClear = new CountDownLatch(1);
+        final CountDownLatch allowAClear = new CountDownLatch(1);
+        final CountDownLatch bDone2 = new CountDownLatch(1);
+        Thread tRelA =
+                new Thread(
+                        () ->
+                                raceGuard.releaseIfOwner(
+                                        k -> {
+                                            beforeAClear.countDown();
+                                            try {
+                                                allowAClear.await(5, TimeUnit.SECONDS);
+                                            } catch (InterruptedException ignored) {
+                                            }
+                                            persisted.set(k);
+                                        },
+                                        tokOldA));
+        tRelA.start();
+        check(
+                beforeAClear.await(5, TimeUnit.SECONDS),
+                "R12 Round-2: delayed release A entered write");
+        Thread tB2 =
+                new Thread(
+                        () -> {
+                            raceGuard.acquire(persisted::set, "B");
+                            bDone2.countDown();
+                        });
+        tB2.start();
+        bDone2.await(200, TimeUnit.MILLISECONDS);
+        allowAClear.countDown();
+        tRelA.join(5000);
+        tB2.join(5000);
+        check(
+                "B".equals(raceGuard.activeSiteForTest()) && "B".equals(persisted.get()),
+                "R12 Round-2: interleaved delayed release A vs acquire B never clears B's disk marker (owner=B, persisted=B)");
+
+        // 4. Android 6-10 (EXIT_REASON_UNKNOWN=0) without explicit crash evidence MUST preserve
+        //    user's selected/preferred site (NOT misclassify unknown exit as a crash!).
+        check(
+                !MainActivity.shouldTreatLoadingSiteAsCrash("B", MainActivity.EXIT_REASON_UNKNOWN)
+                        && !MainActivity.shouldTreatLoadingSiteAsCrash(
+                                "B", "", MainActivity.EXIT_REASON_UNKNOWN),
+                "R12 Round-2: Android 6-10 EXIT_REASON_UNKNOWN without crash evidence preserves user's selected site");
+
+        // 5. Even if OS reclaims abruptly (API 30+ REASON_LOW_MEMORY=3, REASON_FREEZER=14,
         //    REASON_USER_REQUESTED=10, REASON_USER_STOPPED=11) with LOADING_SITE still set,
         //    startup does NOT treat it as a crash and preserves SELECTED_SITE / PREFERRED_SITE!
         for (int benignReason : new int[] {1, 3, 10, 11, 14, 16}) {
@@ -1187,25 +1400,33 @@ public final class ReworkR6ToR12Checks {
                             + " does not misclassify slow load as crash");
         }
 
-        // 4. Attributable crash (REASON_SIGNALED=2, REASON_CRASH=4, REASON_CRASH_NATIVE=5,
-        //    REASON_ANR=6, or API<30 EXIT_REASON_UNKNOWN=0 when foreground died before onStop)
-        //    triggers crash recovery and clears crashed site!
-        for (int crashReason : new int[] {0, 2, 4, 5, 6}) {
+        // 6. Attributable crash evidence:
+        //    (a) API 30+ crash exit reasons (REASON_SIGNALED=2, CRASH=4, CRASH_NATIVE=5, ANR=6)
+        //    (b) Explicit uncaught crash evidence (CONFIRMED_CRASH_SITE) on ANY API including API
+        // 23-29!
+        for (int crashReason : new int[] {2, 4, 5, 6}) {
             check(
                     MainActivity.shouldTreatLoadingSiteAsCrash("site_bad", crashReason),
-                    "R12: crash exit reason=" + crashReason + " triggers recovery");
+                    "R12: attributable crash exit reason=" + crashReason + " triggers recovery");
         }
+        check(
+                MainActivity.shouldTreatLoadingSiteAsCrash(
+                        "site_bad", "site_bad", MainActivity.EXIT_REASON_UNKNOWN),
+                "R12 Round-2: explicit CONFIRMED_CRASH_SITE triggers recovery even on Android 6-10 (EXIT_REASON_UNKNOWN)");
+
         prefs.edit()
                 .putString(Prefs.LOADING_SITE, "site_bad")
+                .putString(Prefs.CONFIRMED_CRASH_SITE, "site_bad")
                 .putString(Prefs.SELECTED_SITE, "site_bad")
                 .putString(Prefs.PREFERRED_SITE, "site_bad\n坏源")
                 .apply();
         MainActivity.clearRecoveredCrashSite(prefs);
         check(
                 "".equals(prefs.getString(Prefs.LOADING_SITE, ""))
+                        && "".equals(prefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""))
                         && "".equals(prefs.getString(Prefs.SELECTED_SITE, ""))
                         && "".equals(prefs.getString(Prefs.PREFERRED_SITE, "")),
-                "R12: attributable crash recovery clears crashed loading/selected/preferred site");
+                "R12: attributable crash recovery clears crashed loading/confirmed/selected/preferred site");
 
         // Static wiring check: MainActivity.onStop clears loading marker on normal stop
         String mainSrc =
@@ -1214,8 +1435,9 @@ public final class ReworkR6ToR12Checks {
                         StandardCharsets.UTF_8);
         check(
                 mainSrc.contains("MobileHomePage.clearLoadingSiteOnNormalStop(this)")
-                        && mainSrc.contains("shouldTreatLoadingSiteAsCrash("),
-                "R12 wiring: MainActivity clears loading marker on normal onStop and checks exit reason on boot");
+                        && mainSrc.contains("shouldTreatLoadingSiteAsCrash(")
+                        && mainSrc.contains("Prefs.CONFIRMED_CRASH_SITE"),
+                "R12 wiring: MainActivity clears loading marker on normal onStop, records confirmed crashes, and checks exit reason on boot");
     }
 
     public static void main(String[] args) throws Exception {

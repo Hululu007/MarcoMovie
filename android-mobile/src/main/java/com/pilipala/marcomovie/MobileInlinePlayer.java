@@ -482,6 +482,10 @@ final class MobileInlinePlayer {
                                                         + actualPlan.engineLabel
                                                         + "): "
                                                         + actualPlan.fallbackReason);
+                                        a.toast(actualPlan.fallbackReason);
+                                        statusLabel.setVisibility(View.VISIBLE);
+                                        statusLabel.setText(
+                                                "已切换至 " + actualPlan.engineLabel + " 内核，正在加载…");
                                     }
                                     mp.setSurface(renderSurface);
                                     mp.setOnPreparedListener(

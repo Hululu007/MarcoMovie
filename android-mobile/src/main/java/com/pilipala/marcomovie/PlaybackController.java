@@ -1301,6 +1301,7 @@ final class PlaybackController {
                                                                         + "): "
                                                                         + actualPlan
                                                                                 .fallbackReason);
+                                                        a.toast(actualPlan.fallbackReason);
                                                     }
                                                     ready.configureDefaultAudio();
                                                     ready.setDataSource(
@@ -2553,6 +2554,15 @@ final class PlaybackController {
             try {
                 candidate = new MpvPlayer(a);
             } catch (Throwable mpvInitErr) {
+                if (!shouldAutoSwitchKernel(a)) {
+                    AppLog.w(
+                            "PlaybackController",
+                            "MPV init failed with auto-switch kernel disabled",
+                            mpvInitErr);
+                    outPlayer[0] = null;
+                    throw new IllegalStateException(
+                            "MPV 初始化失败（已关闭自动切核），请手动切换内核或开启自动切核", mpvInitErr);
+                }
                 AppLog.w(
                         "PlaybackController",
                         "MPV init failed, falling back to Media3",

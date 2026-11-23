@@ -653,7 +653,8 @@ final class SourceController {
                         || s.startsWith("剧集返回")
                         || s.startsWith("媒体地址返回")
                         || s.startsWith("此剧集")
-                        || s.startsWith("当前片源"))) return s;
+                        || s.startsWith("当前片源")
+                        || s.startsWith("MPV "))) return s;
         return "连接超时、来源不可达或数据格式不受支持。请检查配置与网络后重试。";
     }
 

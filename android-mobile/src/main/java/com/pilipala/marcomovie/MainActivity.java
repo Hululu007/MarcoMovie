@@ -756,6 +756,7 @@ public final class MainActivity extends Activity {
                             activity.prefs
                                     .edit()
                                     .putString(Prefs.LOADING_SITE, currentSite)
+                                    .putString(Prefs.CONFIRMED_CRASH_SITE, currentSite)
                                     .commit();
                         }
                     }
@@ -1041,12 +1042,14 @@ public final class MainActivity extends Activity {
         final int priorBootCrashes = recordStartupBootGuard(getCacheDir());
         final int priorExitReason = queryLastProcessExitReason();
         final String pendingLoadingSite = prefs.getString(Prefs.LOADING_SITE, "");
+        final String confirmedCrashSite = prefs.getString(Prefs.CONFIRMED_CRASH_SITE, "");
         final boolean priorLoadingCrash =
-                shouldTreatLoadingSiteAsCrash(pendingLoadingSite, priorExitReason);
+                shouldTreatLoadingSiteAsCrash(
+                        pendingLoadingSite, confirmedCrashSite, priorExitReason);
         if (!pendingLoadingSite.isEmpty() && !priorLoadingCrash) {
-            // Previous process exited cleanly or via OS memory/freezer reclaim while a slow home
-            // request was still in flight; clear only the transient loading marker and keep user's
-            // selected/preferred site intact.
+            // Previous process exited cleanly, via OS memory/freezer reclaim, or on API 23-29
+            // without crash evidence while a slow home request was in flight; clear only the
+            // transient loading marker and keep user's selected/preferred site intact.
             prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
         }
         if (priorBootCrashes >= 1 || priorLoadingCrash) {
@@ -1163,8 +1166,12 @@ public final class MainActivity extends Activity {
                         ui.post(
                                 () -> {
                                     if (isFinishing() || isDestroyed()) return;
+                                    final String confirmedCrashed =
+                                            prefs.getString(Prefs.CONFIRMED_CRASH_SITE, "");
                                     final String crashedSite =
-                                            prefs.getString(Prefs.LOADING_SITE, "");
+                                            confirmedCrashed != null && !confirmedCrashed.isEmpty()
+                                                    ? confirmedCrashed
+                                                    : prefs.getString(Prefs.LOADING_SITE, "");
                                     boolean recoveredFromCrash =
                                             priorLoadingCrash
                                                     && crashedSite != null
@@ -3059,17 +3066,31 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Determines whether a leftover {@link Prefs#LOADING_SITE} marker represents an attributable
-     * crash rather than normal backgrounding or OS process reclaim.
+     * Determines whether a leftover {@link Prefs#LOADING_SITE} marker has explicit crash evidence
+     * from {@code ApplicationExitInfo} (API 30+ {@code REASON_SIGNALED / CRASH / CRASH_NATIVE /
+     * ANR}). On API 23–29 where {@code ApplicationExitInfo} is unavailable ({@link
+     * #EXIT_REASON_UNKNOWN}), returns {@code false} so normal OS background kills preserve the
+     * user's selected/preferred site unless explicit uncaught-crash evidence was recorded via
+     * {@link Prefs#CONFIRMED_CRASH_SITE}.
      */
     static boolean shouldTreatLoadingSiteAsCrash(String loadingSite, int lastExitReason) {
         if (loadingSite == null || loadingSite.trim().isEmpty()) {
             return false;
         }
-        if (isKnownBenignExitReason(lastExitReason)) {
-            return false;
+        return isAttributableCrashExitReason(lastExitReason);
+    }
+
+    /**
+     * Evaluates crash attribution using both explicit uncaught-crash evidence ({@link
+     * Prefs#CONFIRMED_CRASH_SITE}, available on all Android versions including API 23–29) and API
+     * 30+ {@code ApplicationExitInfo} crash exit reasons.
+     */
+    static boolean shouldTreatLoadingSiteAsCrash(
+            String loadingSite, String confirmedCrashSite, int lastExitReason) {
+        if (confirmedCrashSite != null && !confirmedCrashSite.trim().isEmpty()) {
+            return true;
         }
-        return true;
+        return shouldTreatLoadingSiteAsCrash(loadingSite, lastExitReason);
     }
 
     private int queryLastProcessExitReason() {
@@ -3091,11 +3112,18 @@ public final class MainActivity extends Activity {
 
     static void clearRecoveredCrashSite(SharedPreferences prefs) {
         if (prefs == null) return;
-        String crashed = prefs.getString(Prefs.LOADING_SITE, "");
+        String confirmed = prefs.getString(Prefs.CONFIRMED_CRASH_SITE, "");
+        String crashed =
+                confirmed != null && !confirmed.isEmpty()
+                        ? confirmed
+                        : prefs.getString(Prefs.LOADING_SITE, "");
         String selected = prefs.getString(Prefs.SELECTED_SITE, "");
         String preferred = prefs.getString(Prefs.PREFERRED_SITE, "");
         SharedPreferences.Editor editor =
-                prefs.edit().putString(Prefs.LOADING_SITE, "").putString(Prefs.SELECTED_SITE, "");
+                prefs.edit()
+                        .putString(Prefs.LOADING_SITE, "")
+                        .putString(Prefs.CONFIRMED_CRASH_SITE, "")
+                        .putString(Prefs.SELECTED_SITE, "");
         if (preferred != null && !preferred.isEmpty()) {
             String badKey = crashed != null && !crashed.isEmpty() ? crashed : selected;
             if (badKey != null
