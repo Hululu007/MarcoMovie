@@ -699,7 +699,7 @@ private struct TvPlayerContentView: View {
                 hudBannerView
             }
             #if !os(tvOS)
-            else if !currentSession.isLiveStream && !currentSession.video.lines.isEmpty && coordinator.errorMessage == nil {
+            if !showHudBanner && !currentSession.isLiveStream && !currentSession.video.lines.isEmpty && coordinator.errorMessage == nil {
                 HStack {
                     Spacer()
                     Button {
