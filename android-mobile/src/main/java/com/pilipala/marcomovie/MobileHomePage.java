@@ -592,19 +592,13 @@ final class MobileHomePage {
                                 .setNegativeButton("取消", null)
                                 .setPositiveButton(
                                         "移除",
-                                        (d, w) -> {
-                                            a.prefs
-                                                    .edit()
-                                                    .putString(
-                                                            Prefs.WATCH_HISTORY,
-                                                            WatchHistory.remove(
-                                                                    a.prefs.getString(
-                                                                            Prefs.WATCH_HISTORY,
-                                                                            "[]"),
-                                                                    e.key()))
-                                                    .apply();
-                                            renderContinueWatchingStrip(a, parent);
-                                        })
+                                        (d, w) ->
+                                                CloudSyncDialog.removeHistoryWithTombstone(
+                                                        a,
+                                                        e.key(),
+                                                        () ->
+                                                                renderContinueWatchingStrip(
+                                                                        a, parent)))
                                 .show();
                         return true;
                     });

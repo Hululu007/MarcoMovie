@@ -76,7 +76,7 @@ final class MobileRootShell {
         settingsSubPage = 0;
         settingsHighlightKey = "";
         pendingSearchKeyword = "";
-        MobileSearchPage.clearCachedResults();
+        MobileSearchPage.invalidateSession();
     }
 
     static void show(MainActivity a) {
@@ -533,6 +533,9 @@ final class MobileRootShell {
     }
 
     void switchTab(int index) {
+        if (activeTab == TAB_SEARCH && index != TAB_SEARCH) {
+            MobileSearchPage.onPageExit();
+        }
         activeTab = index;
         MobileShell.syncFromRootTab(index);
         expandDock();

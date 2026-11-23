@@ -53,6 +53,18 @@ final class ConfigStore {
         directory = target;
     }
 
+    static final class CommitResult {
+        final boolean accepted;
+        final long seq;
+        final Future<Boolean> future;
+
+        CommitResult(boolean accepted, long seq, Future<Boolean> future) {
+            this.accepted = accepted;
+            this.seq = seq;
+            this.future = future;
+        }
+    }
+
     long latestWriteSeq() {
         return writeSeq.get();
     }
@@ -62,8 +74,34 @@ final class ConfigStore {
             final PointerSnapshot nextPointers,
             final PointerStore pointerStore,
             final FailureCallback onFailure) {
+        return saveInternal(-1L, raw, nextPointers, pointerStore, onFailure).future;
+    }
+
+    /**
+     * Atomically commits {@code raw} and {@code nextPointers} only if no newer config write has
+     * occurred since {@code expectedSeq}. Returns {@code accepted == false} without mutating
+     * pointers or disk when stale.
+     */
+    CommitResult saveIfExpectedSeq(
+            final long expectedSeq,
+            final String raw,
+            final PointerSnapshot nextPointers,
+            final PointerStore pointerStore,
+            final FailureCallback onFailure) {
+        return saveInternal(expectedSeq, raw, nextPointers, pointerStore, onFailure);
+    }
+
+    private CommitResult saveInternal(
+            final long expectedSeq,
+            final String raw,
+            final PointerSnapshot nextPointers,
+            final PointerStore pointerStore,
+            final FailureCallback onFailure) {
         final long seq;
         synchronized (pointerLock) {
+            if (expectedSeq >= 0L && writeSeq.get() != expectedSeq) {
+                return new CommitResult(false, writeSeq.get(), completedFalse());
+            }
             if (confirmedPointers == null && pointerStore != null) {
                 confirmedPointers = pointerStore.readCurrentPointers();
             }
@@ -72,42 +110,73 @@ final class ConfigStore {
                 pointerStore.applyPointers(nextPointers);
             }
         }
-        return WRITE_EXECUTOR.submit(
-                new Callable<Boolean>() {
-                    @Override
-                    public Boolean call() {
-                        if (seq < writeSeq.get()) {
-                            return Boolean.FALSE;
-                        }
-                        try {
-                            write(raw);
-                            synchronized (pointerLock) {
-                                confirmedPointers = nextPointers;
-                            }
-                            return Boolean.TRUE;
-                        } catch (Exception error) {
-                            AppLog.w(
-                                    "ConfigStore",
-                                    "Sequenced config write #" + seq + " failed",
-                                    error);
-                            PointerSnapshot rollback = null;
-                            boolean notify = false;
-                            synchronized (pointerLock) {
-                                if (seq == writeSeq.get()) {
-                                    rollback = confirmedPointers;
-                                    if (pointerStore != null && rollback != null) {
-                                        pointerStore.applyPointers(rollback);
+        Future<Boolean> future =
+                WRITE_EXECUTOR.submit(
+                        new Callable<Boolean>() {
+                            @Override
+                            public Boolean call() {
+                                if (seq < writeSeq.get()) {
+                                    return Boolean.FALSE;
+                                }
+                                try {
+                                    write(raw);
+                                    synchronized (pointerLock) {
+                                        confirmedPointers = nextPointers;
                                     }
-                                    notify = true;
+                                    return Boolean.TRUE;
+                                } catch (Exception error) {
+                                    AppLog.w(
+                                            "ConfigStore",
+                                            "Sequenced config write #" + seq + " failed",
+                                            error);
+                                    PointerSnapshot rollback = null;
+                                    boolean notify = false;
+                                    synchronized (pointerLock) {
+                                        if (seq == writeSeq.get()) {
+                                            rollback = confirmedPointers;
+                                            if (pointerStore != null && rollback != null) {
+                                                pointerStore.applyPointers(rollback);
+                                            }
+                                            notify = true;
+                                        }
+                                    }
+                                    if (notify && onFailure != null) {
+                                        onFailure.onWriteFailed(seq, error, rollback);
+                                    }
+                                    return Boolean.FALSE;
                                 }
                             }
-                            if (notify && onFailure != null) {
-                                onFailure.onWriteFailed(seq, error, rollback);
-                            }
-                            return Boolean.FALSE;
-                        }
-                    }
-                });
+                        });
+        return new CommitResult(true, seq, future);
+    }
+
+    private static Future<Boolean> completedFalse() {
+        return new Future<Boolean>() {
+            @Override
+            public boolean cancel(boolean mayInterruptIfRunning) {
+                return false;
+            }
+
+            @Override
+            public boolean isCancelled() {
+                return false;
+            }
+
+            @Override
+            public boolean isDone() {
+                return true;
+            }
+
+            @Override
+            public Boolean get() {
+                return Boolean.FALSE;
+            }
+
+            @Override
+            public Boolean get(long timeout, java.util.concurrent.TimeUnit unit) {
+                return Boolean.FALSE;
+            }
+        };
     }
 
     void writeSequenced(final String raw, final PointerSnapshot confirmedAfterWrite)

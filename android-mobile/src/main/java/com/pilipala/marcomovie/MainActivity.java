@@ -552,6 +552,8 @@ public final class MainActivity extends Activity {
 
     boolean reduced, prepared, playing, foreground;
     int generation;
+    final java.util.concurrent.atomic.AtomicLong configImportSeq =
+            new java.util.concurrent.atomic.AtomicLong();
     static final int MAX_HOME_SNAPSHOTS = 8;
     final Map<String, SourceEngine> engines = new HashMap<>();
     final SingleFlight<SourceEngine> engineInitializations = new SingleFlight<>();
@@ -1034,6 +1036,7 @@ public final class MainActivity extends Activity {
             applyMobileSystemBars(false);
         }
         prefs = getSharedPreferences(privateMode ? "movie-private" : Prefs.FILE, MODE_PRIVATE);
+        cleanupLegacyPrivateHistory(getSharedPreferences("movie-private", MODE_PRIVATE));
         final int priorBootCrashes = recordStartupBootGuard(getCacheDir());
         final boolean priorLoadingCrash = !prefs.getString(Prefs.LOADING_SITE, "").isEmpty();
         if (priorBootCrashes >= 1 || priorLoadingCrash) {
@@ -1049,9 +1052,13 @@ public final class MainActivity extends Activity {
                     .putBoolean("tv_top_nav_default_v1", true)
                     .apply();
         }
-        WatchHistory.historyCorrupted = prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
-        if (WatchHistory.historyCorrupted) {
-            ui.post(() -> toast("检测到观看历史数据损坏，已自动备份至本地。为保护数据，已暂停历史更新与云端覆盖。"));
+        if (privateMode) {
+            WatchHistory.historyCorrupted = false;
+        } else {
+            WatchHistory.historyCorrupted = prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
+            if (WatchHistory.historyCorrupted) {
+                ui.post(() -> toast("检测到观看历史数据损坏，已自动备份至本地。为保护数据，已暂停历史更新与云端覆盖。"));
+            }
         }
         reduced = prefs.getBoolean(Prefs.REDUCED, false);
         configOrigin = prefs.getString("origin", "");
@@ -3014,7 +3021,46 @@ public final class MainActivity extends Activity {
         editor.commit();
     }
 
+    /**
+     * Targeted cleanup for legacy private search & watch-history entries written by earlier
+     * mobile candidates. Preserves private subscriptions, selected site, favorites, and all public
+     * preferences untouched.
+     */
+    static boolean cleanupLegacyPrivateHistory(SharedPreferences privatePrefs) {
+        if (privatePrefs == null) return false;
+        boolean hasLegacy =
+                privatePrefs.contains(Prefs.GLOBAL_SEARCH_HISTORY)
+                        || privatePrefs.contains(Prefs.WATCH_HISTORY)
+                        || privatePrefs.contains(WatchHistory.CORRUPTED_PREF);
+        if (!hasLegacy) return false;
+        privatePrefs
+                .edit()
+                .remove(Prefs.GLOBAL_SEARCH_HISTORY)
+                .remove(Prefs.WATCH_HISTORY)
+                .remove(WatchHistory.CORRUPTED_PREF)
+                .apply();
+        return true;
+    }
+
     WatchHistory.Persistence historyPersistence() {
+        if (privateMode) {
+            return new WatchHistory.Persistence() {
+                @Override
+                public String readRaw() {
+                    return "[]";
+                }
+
+                @Override
+                public boolean readCorruptedPref() {
+                    return false;
+                }
+
+                @Override
+                public void writeState(String historyJson, boolean corrupted) {
+                    // Private mode never persists watch history to disk.
+                }
+            };
+        }
         final SharedPreferences targetPrefs = prefs;
         return new WatchHistory.Persistence() {
             @Override

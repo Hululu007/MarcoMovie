@@ -465,11 +465,13 @@ final class UiWidgets {
             a.toast("请输入有效的配置网址或源码内容");
             return;
         }
+        final long importSeq = SourceController.beginConfigImport(a);
+        final boolean snapshotPrivate = a.privateMode;
         a.toast("正在读取并解析配置…");
         a.worker.execute(
                 () -> {
                     try {
-                        String origin = a.configOrigin;
+                        String origin = "";
                         String rawJson = pasted;
                         if (Cms.isHttp(pasted)) {
                             origin = Cms.normalizeHttp(pasted);
@@ -480,6 +482,14 @@ final class UiWidgets {
                                         LocalSourcePackage.open(a.getFilesDir(), bytes);
                                 a.ui.post(
                                         () -> {
+                                            if (a.isFinishing()
+                                                    || a.isDestroyed()
+                                                    || a.switchingPrivacy
+                                                    || a.privateMode != snapshotPrivate
+                                                    || !SourceController.isCurrentConfigImport(
+                                                            a, importSeq)) {
+                                                return;
+                                            }
                                             try {
                                                 SourceController.applyLocalPackage(a, pkg);
                                             } catch (Exception ex) {
@@ -508,6 +518,14 @@ final class UiWidgets {
                             final String savedOrigin = origin;
                             a.ui.post(
                                     () -> {
+                                        if (a.isFinishing()
+                                                || a.isDestroyed()
+                                                || a.switchingPrivacy
+                                                || a.privateMode != snapshotPrivate
+                                                || !SourceController.isCurrentConfigImport(
+                                                        a, importSeq)) {
+                                            return;
+                                        }
                                         try {
                                             a.saveConfig(parsed, savedOrigin);
                                             a.toast("配置导入成功（共 " + parsed.sites.size() + " 个片源）");

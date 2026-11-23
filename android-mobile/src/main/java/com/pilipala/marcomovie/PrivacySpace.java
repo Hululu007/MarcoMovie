@@ -274,11 +274,20 @@ final class PrivacySpace {
 
     static void switchSpace(MainActivity a, boolean privateMode) {
         if (a.markerHost != null) a.markerHost.abort();
-        a.savePlaybackHistory(true);
+        if (!a.privateMode) {
+            a.savePlaybackHistory(true);
+            if (a.inlinePlayer != null) {
+                a.inlinePlayer.flushHistoryProgress();
+            }
+        }
+        if (a.inlinePlayer != null) {
+            a.inlinePlayer.detach();
+            a.inlinePlayer = null;
+        }
+        a.switchingPrivacy = true;
+        a.generation++; // Revoke queued page/player callbacks before recreate reaches onStop.
+        CloudSyncDialog.cancel(a);
         if (a.isTvDevice()) {
-            a.switchingPrivacy = true;
-            a.generation++; // Revoke queued page/player callbacks before recreate reaches onStop.
-            CloudSyncDialog.cancel(a);
             a.stopWeb();
             a.stopCastService();
             a.stopSpiderGateway();
@@ -290,6 +299,8 @@ final class PrivacySpace {
         }
         a.cancelPageRequests();
         a.closeEngines();
+        MainActivity.cleanupLegacyPrivateHistory(
+                a.getSharedPreferences("movie-private", Context.MODE_PRIVATE));
         // Discard only transient derived state. Public/private persisted user data is retained.
         a.ui.removeCallbacks(a.learnPendingTitles);
         a.pendingTitles.clear();
@@ -300,9 +311,9 @@ final class PrivacySpace {
             SubtitlePreferenceStore.clearPrivateRecords();
             VideoMarkerRepository.clearPrivate();
         }
-        a.switchingPrivacy = true;
         MobileShell.activeTab = 0;
         MobileShell.clearSearchSession();
+        MobileRootShell.resetStaticState();
         a.recreate();
     }
 }

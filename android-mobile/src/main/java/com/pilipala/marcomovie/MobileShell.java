@@ -62,7 +62,8 @@ final class MobileShell {
             activeSearchCoordinator = null;
         }
         pendingSearchKeyword = "";
-        MobileSearchPage.clearCachedResults();
+        MobileRootShell.pendingSearchKeyword = "";
+        MobileSearchPage.invalidateSession();
     }
 
     static void show(MainActivity a) {

@@ -959,25 +959,17 @@ final class MobileDetailScreen {
                                             ratings.rtPercent));
 
                     favTopBtn.setOnClickListener(
-                            view -> {
-                                a.prefs
-                                        .edit()
-                                        .putString(
-                                                Prefs.FAVORITES,
-                                                Favorites.toggle(
-                                                        a.prefs.getString(Prefs.FAVORITES, "[]"),
-                                                        s.key,
-                                                        v))
-                                        .apply();
-                                boolean faved =
-                                        Favorites.contains(
-                                                a.prefs.getString(Prefs.FAVORITES, "[]"),
-                                                s.key,
-                                                v.id);
-                                favTopBtn.setText(faved ? "♥" : "♡");
-                                favTopBtn.setTextColor(faved ? 0xffff453a : Color.WHITE);
-                                a.toast(faved ? "已加入收藏片库" : "已从片库移除");
-                            });
+                            view ->
+                                    CloudSyncDialog.toggleFavoriteWithTombstone(
+                                            a,
+                                            s.key,
+                                            v,
+                                            faved -> {
+                                                favTopBtn.setText(faved ? "♥" : "♡");
+                                                favTopBtn.setTextColor(
+                                                        faved ? 0xffff453a : Color.WHITE);
+                                                a.toast(faved ? "已加入收藏片库" : "已从片库移除");
+                                            }));
 
                     // Centered Expandable Synopsis
                     String descRaw = v.description == null ? "" : v.description.trim();

@@ -1102,7 +1102,8 @@ final class PlaybackController {
         if (v != null && !bookmarkId.isEmpty() && (v.id == null || v.id.trim().isEmpty())) {
             v.id = bookmarkId;
         }
-        if (s.key != null
+        if (!a.privateMode
+                && s.key != null
                 && !s.key.equals("live")
                 && !bookmarkId.isEmpty()
                 && a.activeLine != null
@@ -1444,8 +1445,10 @@ final class PlaybackController {
                                                                         || !oldKey.equals(
                                                                                 a.playingBookmark
                                                                                         .key())) {
-                                                                    a.removeWatchHistory(
-                                                                            oldKey, null);
+                                                                    CloudSyncDialog
+                                                                            .removeHistoryWithTombstone(
+                                                                                    a, oldKey,
+                                                                                    null);
                                                                 }
                                                             }
                                                             boolean hdr = mp.isHdrVideo();

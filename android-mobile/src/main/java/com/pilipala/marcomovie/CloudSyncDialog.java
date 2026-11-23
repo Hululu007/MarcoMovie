@@ -42,20 +42,36 @@ import java.util.concurrent.atomic.AtomicReference;
 final class CloudSyncDialog {
     static final CloudSync.SyncRuntime RUNTIME = new CloudSync.SyncRuntime();
     private static final ExecutorService SYNC_EXEC = RUNTIME.syncExec;
-    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static volatile Handler mainHandler;
+
+    private static Handler mainHandler() {
+        Handler h = mainHandler;
+        if (h == null) {
+            h = new Handler(Looper.getMainLooper());
+            mainHandler = h;
+        }
+        return h;
+    }
+
     private static final CloudSync.DelayScheduler MAIN_SCHEDULER =
             new CloudSync.DelayScheduler() {
                 @Override
                 public void postDelayed(Runnable task, long delayMs) {
-                    MAIN.postDelayed(task, delayMs);
+                    mainHandler().postDelayed(task, delayMs);
                 }
 
                 @Override
                 public void removeCallbacks(Runnable task) {
-                    MAIN.removeCallbacks(task);
+                    mainHandler().removeCallbacks(task);
                 }
             };
+
+    interface BooleanCallback {
+        void onResult(boolean value);
+    }
+
     private static final AtomicBoolean IN_FLIGHT = new AtomicBoolean(false);
+    private static final AtomicBoolean PENDING_RESYNC = new AtomicBoolean(false);
     private static WeakReference<AppDialog> activeDialogRef;
     private static WeakReference<MainActivity> activeDialogOwnerRef;
     private static WeakReference<MainActivity> lastExitPushActivityRef;
@@ -128,6 +144,202 @@ final class CloudSyncDialog {
         return mode + (lastStatus.isEmpty() ? "" : " · " + lastStatus);
     }
 
+    /**
+     * Atomically removes one watch-history item and records its {@code hist:} tombstone in a single
+     * {@link WatchHistory#STORAGE_EXECUTOR} step so {@link CloudSync#mergeSerial} can never
+     * interleave and resurrect the deleted item.
+     */
+    static boolean removeHistoryWithTombstoneSync(
+            SharedPreferences prefs, boolean privateMode, String itemKey, long deletedAt) {
+        if (prefs == null || itemKey == null || itemKey.isEmpty()) return false;
+        String currentJson = prefs.getString(Prefs.WATCH_HISTORY, "[]");
+        long entryUpdated = 0L;
+        for (WatchHistory.Entry e : WatchHistory.read(currentJson)) {
+            if (itemKey.equals(e.key())) {
+                entryUpdated = Math.max(entryUpdated, e.updated);
+                break;
+            }
+        }
+        String nextJson = WatchHistory.remove(currentJson, itemKey);
+        SharedPreferences.Editor ed = prefs.edit();
+        if (nextJson != null) {
+            ed.putString(Prefs.WATCH_HISTORY, nextJson);
+        }
+        if (!privateMode) {
+            String nextTombs =
+                    CloudSync.Tombstones.recordHistoryDelete(
+                            prefs.getString(Prefs.SYNC_TOMBSTONES, ""),
+                            itemKey,
+                            Math.max(deletedAt, entryUpdated));
+            ed.putString(Prefs.SYNC_TOMBSTONES, nextTombs);
+        }
+        ed.apply();
+        return true;
+    }
+
+    static void removeHistoryWithTombstone(
+            final MainActivity a, final String itemKey, final Runnable onUiComplete) {
+        if (a == null || a.prefs == null || itemKey == null || itemKey.isEmpty()) {
+            if (onUiComplete != null) mainHandler().post(onUiComplete);
+            return;
+        }
+        final SharedPreferences prefs = a.prefs;
+        final boolean isPrivate = a.privateMode;
+        final long deletedAt = System.currentTimeMillis();
+        WatchHistory.STORAGE_EXECUTOR.execute(
+                () -> {
+                    try {
+                        removeHistoryWithTombstoneSync(prefs, isPrivate, itemKey, deletedAt);
+                    } catch (Exception e) {
+                        AppLog.w("CloudSync", "Atomic history remove with tombstone failed", e);
+                    }
+                    mainHandler()
+                            .post(
+                                    () -> {
+                                        if (onUiComplete != null
+                                                && !a.isFinishing()
+                                                && !a.isDestroyed()) {
+                                            onUiComplete.run();
+                                        }
+                                        if (!isPrivate) {
+                                            scheduleAutoPush(a, true);
+                                        }
+                                    });
+                });
+    }
+
+    /**
+     * Atomically clears all local watch history and records {@code hist:} tombstones for every
+     * cleared item in one {@link WatchHistory#STORAGE_EXECUTOR} step.
+     */
+    static int clearHistoryWithTombstoneSync(
+            SharedPreferences prefs, boolean privateMode, long clearedAt) {
+        if (prefs == null) return 0;
+        List<WatchHistory.Entry> previous =
+                WatchHistory.read(prefs.getString(Prefs.WATCH_HISTORY, "[]"));
+        WatchHistory.setCorrupted(false);
+        SharedPreferences.Editor ed =
+                prefs.edit()
+                        .putString(Prefs.WATCH_HISTORY, "[]")
+                        .putBoolean(WatchHistory.CORRUPTED_PREF, false);
+        if (!privateMode && !previous.isEmpty()) {
+            String nextTombs =
+                    CloudSync.Tombstones.recordHistoryClear(
+                            prefs.getString(Prefs.SYNC_TOMBSTONES, ""), previous, clearedAt);
+            ed.putString(Prefs.SYNC_TOMBSTONES, nextTombs);
+        }
+        ed.apply();
+        return previous.size();
+    }
+
+    static void clearHistoryWithTombstone(final MainActivity a, final Runnable onUiComplete) {
+        if (a == null || a.prefs == null) {
+            if (onUiComplete != null) mainHandler().post(onUiComplete);
+            return;
+        }
+        final SharedPreferences prefs = a.prefs;
+        final boolean isPrivate = a.privateMode;
+        final long clearedAt = System.currentTimeMillis();
+        WatchHistory.STORAGE_EXECUTOR.execute(
+                () -> {
+                    int clearedCount = 0;
+                    try {
+                        clearedCount = clearHistoryWithTombstoneSync(prefs, isPrivate, clearedAt);
+                    } catch (Exception e) {
+                        AppLog.w("CloudSync", "Atomic history clear with tombstones failed", e);
+                    }
+                    final boolean shouldPush = !isPrivate && clearedCount > 0;
+                    mainHandler()
+                            .post(
+                                    () -> {
+                                        if (onUiComplete != null
+                                                && !a.isFinishing()
+                                                && !a.isDestroyed()) {
+                                            onUiComplete.run();
+                                        }
+                                        if (shouldPush) {
+                                            scheduleAutoPush(a, true);
+                                        }
+                                    });
+                });
+    }
+
+    /**
+     * Atomically toggles a favorite and persists its {@code add:} / {@code fav:} tombstone in one
+     * {@link WatchHistory#STORAGE_EXECUTOR} step before scheduling auto-push.
+     */
+    static boolean toggleFavoriteWithTombstoneSync(
+            SharedPreferences prefs,
+            boolean privateMode,
+            String siteKey,
+            Cms.Video video,
+            long now) {
+        if (prefs == null
+                || siteKey == null
+                || siteKey.isEmpty()
+                || video == null
+                || video.id == null
+                || video.id.isEmpty()) {
+            return false;
+        }
+        String currentFavs = prefs.getString(Prefs.FAVORITES, "[]");
+        String nextFavs = Favorites.toggle(currentFavs, siteKey, video);
+        boolean nowFavorited = Favorites.contains(nextFavs, siteKey, video.id);
+        SharedPreferences.Editor ed = prefs.edit().putString(Prefs.FAVORITES, nextFavs);
+        if (!privateMode) {
+            String itemKey = siteKey + "\n" + video.id;
+            String nextTombs =
+                    CloudSync.Tombstones.recordFavoriteToggle(
+                            prefs.getString(Prefs.SYNC_TOMBSTONES, ""), itemKey, nowFavorited, now);
+            ed.putString(Prefs.SYNC_TOMBSTONES, nextTombs);
+        }
+        ed.apply();
+        return nowFavorited;
+    }
+
+    static void toggleFavoriteWithTombstone(
+            final MainActivity a,
+            final String siteKey,
+            final Cms.Video video,
+            final BooleanCallback onUiComplete) {
+        if (a == null
+                || a.prefs == null
+                || siteKey == null
+                || siteKey.isEmpty()
+                || video == null
+                || video.id == null
+                || video.id.isEmpty()) {
+            return;
+        }
+        final SharedPreferences prefs = a.prefs;
+        final boolean isPrivate = a.privateMode;
+        final long now = System.currentTimeMillis();
+        WatchHistory.STORAGE_EXECUTOR.execute(
+                () -> {
+                    boolean faved = false;
+                    try {
+                        faved =
+                                toggleFavoriteWithTombstoneSync(
+                                        prefs, isPrivate, siteKey, video, now);
+                    } catch (Exception e) {
+                        AppLog.w("CloudSync", "Atomic favorite toggle with tombstone failed", e);
+                    }
+                    final boolean finalFaved = faved;
+                    mainHandler()
+                            .post(
+                                    () -> {
+                                        if (onUiComplete != null
+                                                && !a.isFinishing()
+                                                && !a.isDestroyed()) {
+                                            onUiComplete.onResult(finalFaved);
+                                        }
+                                        if (!isPrivate) {
+                                            scheduleAutoPush(a, true);
+                                        }
+                                    });
+                });
+    }
+
     /** Records a local watch-history deletion tombstone and schedules an auto-push. */
     static void onHistoryDeleted(final MainActivity a, final String itemKey) {
         if (a == null || a.privateMode || a.prefs == null || itemKey == null || itemKey.isEmpty())
@@ -146,7 +358,7 @@ final class CloudSyncDialog {
                     } catch (Exception e) {
                         AppLog.w("CloudSync", "Failed to persist history deletion tombstone", e);
                     }
-                    MAIN.post(() -> scheduleAutoPush(a, true));
+                    mainHandler().post(() -> scheduleAutoPush(a, true));
                 });
     }
 
@@ -170,13 +382,13 @@ final class CloudSyncDialog {
                     } catch (Exception e) {
                         AppLog.w("CloudSync", "Failed to persist history clear tombstones", e);
                     }
-                    MAIN.post(() -> scheduleAutoPush(a, true));
+                    mainHandler().post(() -> scheduleAutoPush(a, true));
                 });
     }
 
     /** Records a local favorite addition/removal timestamp and schedules auto-push. */
     static void onFavoriteToggled(
-            MainActivity a, String siteKey, String videoId, final boolean nowFavorited) {
+            final MainActivity a, String siteKey, String videoId, final boolean nowFavorited) {
         if (a == null
                 || a.privateMode
                 || a.prefs == null
@@ -200,12 +412,12 @@ final class CloudSyncDialog {
                     } catch (Exception e) {
                         AppLog.w("CloudSync", "Failed to persist favorite tombstone", e);
                     }
+                    mainHandler().post(() -> scheduleAutoPush(a, true));
                 });
-        scheduleAutoPush(a, true);
     }
 
     /** Clears any prior deletion tombstone when a public subscription is imported or updated. */
-    static void onSubscriptionSaved(MainActivity a, String origin, String raw) {
+    static void onSubscriptionSaved(final MainActivity a, String origin, String raw) {
         if (a == null || a.privateMode || a.prefs == null) return;
         if (ConfigLibrary.isLocalFileOrigin(origin)) return;
         try {
@@ -214,6 +426,7 @@ final class CloudSyncDialog {
             if (cleanUrl.isEmpty() && publicRaw.isEmpty()) return;
             final String subId = ConfigLibrary.identity(cleanUrl, publicRaw);
             final SharedPreferences prefs = a.prefs;
+            final boolean shouldPush = isSyncSubscriptionsEnabled(a);
             WatchHistory.STORAGE_EXECUTOR.execute(
                     () -> {
                         try {
@@ -224,21 +437,22 @@ final class CloudSyncDialog {
                         } catch (Exception e) {
                             AppLog.w("CloudSync", "Failed to persist subscription upsert", e);
                         }
+                        if (shouldPush) {
+                            mainHandler().post(() -> scheduleAutoPush(a, true));
+                        }
                     });
-            if (isSyncSubscriptionsEnabled(a)) {
-                scheduleAutoPush(a, true);
-            }
         } catch (Exception e) {
             AppLog.w("CloudSync", "onSubscriptionSaved failed", e);
         }
     }
 
     /** Records a subscription deletion tombstone so deleted subscriptions do not resurrect. */
-    static void onSubscriptionDeleted(MainActivity a, final String subId) {
+    static void onSubscriptionDeleted(final MainActivity a, final String subId) {
         if (a == null || a.privateMode || a.prefs == null || subId == null || subId.isEmpty())
             return;
         final SharedPreferences prefs = a.prefs;
         final long now = System.currentTimeMillis();
+        final boolean shouldPush = isSyncSubscriptionsEnabled(a);
         WatchHistory.STORAGE_EXECUTOR.execute(
                 () -> {
                     try {
@@ -249,10 +463,10 @@ final class CloudSyncDialog {
                     } catch (Exception e) {
                         AppLog.w("CloudSync", "Failed to persist subscription delete tombstone", e);
                     }
+                    if (shouldPush) {
+                        mainHandler().post(() -> scheduleAutoPush(a, true));
+                    }
                 });
-        if (isSyncSubscriptionsEnabled(a)) {
-            scheduleAutoPush(a, true);
-        }
     }
 
     /** Schedules a background WebDAV sync when automatic cloud sync is enabled. */
@@ -371,26 +585,27 @@ final class CloudSyncDialog {
             return;
         if (!isConfigured(a) || !a.prefs.getBoolean(Prefs.WEBDAV_AUTO, true)) return;
         final WeakReference<MainActivity> weakAct = new WeakReference<>(a);
-        MAIN.postDelayed(
-                () -> {
-                    MainActivity act = weakAct.get();
-                    if (act != null
-                            && !act.isFinishing()
-                            && !act.isDestroyed()
-                            && !act.privateMode) {
-                        runWebdavSync(
-                                act,
-                                true,
-                                () -> {
-                                    if (act.current != null
-                                            && act.current.home
-                                            && act.player == null) {
-                                        act.refresh();
-                                    }
-                                });
-                    }
-                },
-                1800L);
+        mainHandler()
+                .postDelayed(
+                        () -> {
+                            MainActivity act = weakAct.get();
+                            if (act != null
+                                    && !act.isFinishing()
+                                    && !act.isDestroyed()
+                                    && !act.privateMode) {
+                                runWebdavSync(
+                                        act,
+                                        true,
+                                        () -> {
+                                            if (act.current != null
+                                                    && act.current.home
+                                                    && act.player == null) {
+                                                act.refresh();
+                                            }
+                                        });
+                            }
+                        },
+                        1800L);
     }
 
     /** Collects non-private subscriptions from {@link ConfigLibrary} and active config. */
@@ -865,7 +1080,12 @@ final class CloudSyncDialog {
 
     static void runWebdavSync(
             final MainActivity a, final boolean silent, final Runnable onComplete) {
-        if (a == null || a.isDestroyed() || a.isFinishing() || a.privateMode || a.prefs == null) {
+        if (a == null
+                || a.isDestroyed()
+                || a.isFinishing()
+                || a.privateMode
+                || a.switchingPrivacy
+                || a.prefs == null) {
             if (!silent && a != null && !a.isDestroyed() && !a.isFinishing() && a.privateMode) {
                 a.toast("隐私空间数据不参与网络同步");
             }
@@ -879,7 +1099,11 @@ final class CloudSyncDialog {
             return;
         }
         if (!IN_FLIGHT.compareAndSet(false, true)) {
-            if (!silent) a.toast("正在同步中，请稍候…");
+            if (silent) {
+                PENDING_RESYNC.set(true);
+            } else {
+                a.toast("正在同步中，请稍候…");
+            }
             return;
         }
         if (!silent) a.toast("正在与 WebDAV 云端双向同步…");
@@ -889,7 +1113,11 @@ final class CloudSyncDialog {
         SYNC_EXEC.execute(
                 () -> {
                     MainActivity act = weakAct.get();
-                    if (act == null || act.isDestroyed() || act.isFinishing()) {
+                    if (act == null
+                            || act.isDestroyed()
+                            || act.isFinishing()
+                            || act.privateMode
+                            || act.switchingPrivacy) {
                         IN_FLIGHT.set(false);
                         return;
                     }
@@ -937,8 +1165,12 @@ final class CloudSyncDialog {
                                 pass,
                                 remoteJson -> {
                                     MainActivity cur = weakAct.get();
-                                    if (cur == null || cur.isDestroyed() || cur.isFinishing()) {
-                                        throw new java.io.IOException("页面已销毁，终止同步");
+                                    if (cur == null
+                                            || cur.isDestroyed()
+                                            || cur.isFinishing()
+                                            || cur.privateMode
+                                            || cur.switchingPrivacy) {
+                                        throw new java.io.IOException("页面已销毁或切换空间，终止同步");
                                     }
                                     CloudSync.MergeResult res =
                                             mergeAndPersistLocal(cur, remoteJson, now);
@@ -1000,6 +1232,16 @@ final class CloudSyncDialog {
                         }
                     } finally {
                         IN_FLIGHT.set(false);
+                        if (PENDING_RESYNC.getAndSet(false)) {
+                            MainActivity nextAct = weakAct.get();
+                            if (nextAct != null
+                                    && !nextAct.isDestroyed()
+                                    && !nextAct.isFinishing()
+                                    && !nextAct.privateMode
+                                    && !nextAct.switchingPrivacy) {
+                                mainHandler().post(() -> scheduleAutoPush(nextAct, true));
+                            }
+                        }
                     }
                 });
     }
@@ -1064,6 +1306,13 @@ final class CloudSyncDialog {
                                 });
                     } finally {
                         IN_FLIGHT.set(false);
+                        if (PENDING_RESYNC.getAndSet(false)
+                                && !a.isDestroyed()
+                                && !a.isFinishing()
+                                && !a.privateMode
+                                && !a.switchingPrivacy) {
+                            mainHandler().post(() -> scheduleAutoPush(a, true));
+                        }
                     }
                 });
     }

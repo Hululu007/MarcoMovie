@@ -45,9 +45,51 @@ final class MobileInlinePlayer {
     private boolean prepared;
     private boolean userSeeking;
     private boolean closed;
+    static final long CHECKPOINT_INTERVAL_MS = 15_000L;
+
+    static final class ProgressCheckpointPolicy {
+        private long lastWriteAtMs;
+        private int lastSavedPosMs = -1;
+        private String lastEpisodeKey = "";
+
+        boolean shouldWrite(long nowMs, int posMs, int durMs, String episodeKey, boolean force) {
+            if (durMs <= 0) return false;
+            String ep = episodeKey == null ? "" : episodeKey;
+            boolean episodeChanged = !ep.equals(lastEpisodeKey);
+            if (force) {
+                if (!episodeChanged
+                        && lastSavedPosMs >= 0
+                        && Math.abs(posMs - lastSavedPosMs) < 500) {
+                    return false;
+                }
+                lastWriteAtMs = nowMs;
+                lastSavedPosMs = posMs;
+                lastEpisodeKey = ep;
+                return true;
+            }
+            if (posMs < 1000 && lastSavedPosMs < 0) return false;
+            if (episodeChanged
+                    || lastWriteAtMs == 0L
+                    || nowMs - lastWriteAtMs >= CHECKPOINT_INTERVAL_MS) {
+                lastWriteAtMs = nowMs;
+                lastSavedPosMs = posMs;
+                lastEpisodeKey = ep;
+                return true;
+            }
+            return false;
+        }
+
+        void reset() {
+            lastWriteAtMs = 0L;
+            lastSavedPosMs = -1;
+            lastEpisodeKey = "";
+        }
+    }
+
     private int introEndSec = -1;
     private int outroStartSec = -1;
     private boolean introSkipped;
+    private final ProgressCheckpointPolicy checkpointPolicy = new ProgressCheckpointPolicy();
 
     private final Runnable ticker =
             new Runnable() {
@@ -77,7 +119,7 @@ final class MobileInlinePlayer {
                             stepNextEpisode();
                             return;
                         }
-                        saveHistoryProgress(pos, dur);
+                        saveHistoryProgress(pos, dur, false);
                     } catch (Exception ignored) {
                     }
                     a.ui.postDelayed(this, 1000);
@@ -386,6 +428,7 @@ final class MobileInlinePlayer {
         }
         int idx = activeLine.episodes.indexOf(rawEpisode);
         if (idx >= 0 && idx + 1 < activeLine.episodes.size()) {
+            flushHistoryProgress();
             Cms.Episode next = activeLine.episodes.get(idx + 1);
             a.resumeAt = 0;
             startEpisode(site, video, activeLine, next, 0, true, 1, idx + 2);
@@ -397,6 +440,7 @@ final class MobileInlinePlayer {
         if (player.isPlaying()) {
             player.pause();
             playPauseBtn.setText("▶");
+            flushHistoryProgress();
         } else {
             player.start();
             playPauseBtn.setText("❚❚");
@@ -407,6 +451,18 @@ final class MobileInlinePlayer {
         if (player != null && prepared && player.isPlaying()) {
             player.pause();
             playPauseBtn.setText("▶");
+            flushHistoryProgress();
+        }
+    }
+
+    void flushHistoryProgress() {
+        if (player == null || !prepared) return;
+        try {
+            saveHistoryProgress(
+                    Math.max(0, player.getCurrentPosition()),
+                    Math.max(0, player.getDuration()),
+                    true);
+        } catch (Exception ignored) {
         }
     }
 
@@ -417,6 +473,7 @@ final class MobileInlinePlayer {
         Cms.Episode raw = rawEpisode;
         Cms.Episode res = resolvedEpisode;
         int pos = (player != null && prepared) ? Math.max(0, player.getCurrentPosition()) : 0;
+        flushHistoryProgress();
         detach();
         if (onClosed != null) onClosed.run();
         a.activeLine = l;
@@ -429,8 +486,21 @@ final class MobileInlinePlayer {
         }
     }
 
-    private void saveHistoryProgress(int pos, int dur) {
-        if (site == null || video == null || activeLine == null || rawEpisode == null || dur <= 0) {
+    private void saveHistoryProgress(int pos, int dur, boolean force) {
+        if (a.privateMode || a.switchingPrivacy) {
+            return;
+        }
+        if (site == null
+                || "live".equals(site.key)
+                || video == null
+                || activeLine == null
+                || rawEpisode == null
+                || dur <= 0) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        String epKey = site.key + "\n" + video.id + "\n" + activeLine.name + "\n" + rawEpisode.name;
+        if (!checkpointPolicy.shouldWrite(now, pos, dur, epKey, force)) {
             return;
         }
         WatchHistory.Entry entry = new WatchHistory.Entry();
@@ -443,18 +513,15 @@ final class MobileInlinePlayer {
         entry.index = activeLine.episodes.indexOf(rawEpisode);
         entry.position = pos;
         entry.duration = dur;
-        entry.updated = System.currentTimeMillis();
-        a.prefs
-                .edit()
-                .putString(
-                        Prefs.WATCH_HISTORY,
-                        WatchHistory.upsert(a.prefs.getString(Prefs.WATCH_HISTORY, "[]"), entry))
-                .apply();
+        entry.updated = now;
+        WatchHistory.enqueueUpsert(a.historyPersistence(), entry);
+        CloudSyncDialog.scheduleAutoPush(a, force);
     }
 
     private void releaseInternalPlayer() {
         a.ui.removeCallbacks(ticker);
         prepared = false;
+        checkpointPolicy.reset();
         if (player != null) {
             try {
                 player.release();
@@ -465,6 +532,7 @@ final class MobileInlinePlayer {
     }
 
     void detach() {
+        flushHistoryProgress();
         closed = true;
         releaseInternalPlayer();
         if (a.inlinePlayer == this) {

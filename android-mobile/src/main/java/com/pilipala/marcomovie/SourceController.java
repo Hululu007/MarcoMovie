@@ -198,6 +198,7 @@ final class SourceController {
     static void closeEngines(MainActivity a) {
         if (a.markerHost != null) a.markerHost.abort();
         GlobalSearchScreen.invalidateContext(a);
+        MobileSearchPage.invalidateSession();
         a.liveSession = null;
         CspEngine.resetActiveProxy();
         if (a.detailPrefetch != null) a.detailPrefetch.cancel(true);
@@ -1200,11 +1201,21 @@ final class SourceController {
                 new ArrayList<SubscriptionManager.SourceBundle>(ordered.values()));
     }
 
+    static long beginConfigImport(MainActivity a) {
+        return a == null ? 0L : a.configImportSeq.incrementAndGet();
+    }
+
+    static boolean isCurrentConfigImport(MainActivity a, long seq) {
+        return a != null && seq > 0L && a.configImportSeq.get() == seq;
+    }
+
     /** Merges user-selected saved subscriptions from {@link ConfigLibrary} into auto-grouped tabs. */
     static void mergeSavedSubscriptions(
             final MainActivity a, final List<ConfigLibrary.Entry> chosen) {
         if (a == null || chosen == null || chosen.isEmpty()) return;
         final ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
+        final long importSeq = beginConfigImport(a);
+        final boolean snapshotPrivate = a.privateMode;
         a.toast("正在合并 " + chosen.size() + " 个订阅并自动分组…");
         a.worker.execute(
                 () -> {
@@ -1222,7 +1233,13 @@ final class SourceController {
                                 SubscriptionManager.mergeSources(bundles);
                         a.ui.post(
                                 () -> {
-                                    if (a.isFinishing() || a.isDestroyed()) return;
+                                    if (a.isFinishing()
+                                            || a.isDestroyed()
+                                            || a.switchingPrivacy
+                                            || a.privateMode != snapshotPrivate
+                                            || !isCurrentConfigImport(a, importSeq)) {
+                                        return;
+                                    }
                                     try {
                                         saveConfig(a, merged.config, merged.origin);
                                         a.toast(
@@ -1239,7 +1256,7 @@ final class SourceController {
                     } catch (Exception err) {
                         a.ui.post(
                                 () -> {
-                                    if (!a.isFinishing()) {
+                                    if (!a.isFinishing() && isCurrentConfigImport(a, importSeq)) {
                                         a.notice("合并订阅失败：" + a.message(err));
                                     }
                                 });
@@ -1302,8 +1319,13 @@ final class SourceController {
         if (force) {
             a.toast("正在检查并更新全部订阅源…");
         }
-        final String snapshotOrigin = a.configOrigin == null ? "" : a.configOrigin;
+        final String snapshotOrigin = a.configOrigin == null ? "" : a.configOrigin.trim();
         final String snapshotRaw = a.config != null && a.config.raw != null ? a.config.raw : "";
+        final Cms.Config snapshotConfig = a.config;
+        final boolean snapshotPrivate = a.privateMode;
+        final int snapshotEpoch = a.engineEpoch;
+        final long snapshotWriteSeq = a.configStore.latestWriteSeq();
+        final long snapshotImportSeq = a.configImportSeq.get();
         final ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
         a.worker.execute(
                 () -> {
@@ -1333,37 +1355,105 @@ final class SourceController {
                         } else {
                             statusText = stamp + " · 已检查 " + summary.checkedCount + " 个订阅，均为最新";
                         }
-                        if (summary.checkedCount == 0
-                                || summary.failedCount < summary.checkedCount) {
-                            a.prefs
-                                    .edit()
-                                    .putLong(Prefs.SUBSCRIPTION_LAST_AUTO_UPDATE, now)
-                                    .putString(Prefs.SUBSCRIPTION_LAST_AUTO_STATUS, statusText)
-                                    .apply();
-                        } else {
-                            a.prefs
-                                    .edit()
-                                    .putString(Prefs.SUBSCRIPTION_LAST_AUTO_STATUS, statusText)
-                                    .apply();
-                        }
+                        final String finalStatusText = statusText;
+                        final boolean recordLastUpdate =
+                                summary.checkedCount == 0
+                                        || summary.failedCount < summary.checkedCount;
 
                         if (summary.activeChanged && !summary.updatedActiveRaw.isEmpty()) {
+                            final String targetOrigin =
+                                    summary.updatedActiveOrigin == null
+                                            ? ""
+                                            : summary.updatedActiveOrigin.trim();
                             final Cms.Config fresh =
-                                    Cms.parseConfig(
-                                            summary.updatedActiveRaw, summary.updatedActiveOrigin);
-                            a.configStore.write(fresh.raw);
+                                    Cms.parseConfig(summary.updatedActiveRaw, targetOrigin);
                             a.ui.post(
                                     () -> {
-                                        if (a.isFinishing() || a.isDestroyed()) return;
+                                        if (a.isFinishing()
+                                                || a.isDestroyed()
+                                                || a.switchingPrivacy
+                                                || a.privateMode != snapshotPrivate) {
+                                            return;
+                                        }
+                                        if (recordLastUpdate) {
+                                            a.prefs
+                                                    .edit()
+                                                    .putLong(
+                                                            Prefs.SUBSCRIPTION_LAST_AUTO_UPDATE,
+                                                            now)
+                                                    .putString(
+                                                            Prefs.SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                            finalStatusText)
+                                                    .apply();
+                                        } else {
+                                            a.prefs
+                                                    .edit()
+                                                    .putString(
+                                                            Prefs.SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                            finalStatusText)
+                                                    .apply();
+                                        }
+                                        String liveOrigin =
+                                                a.configOrigin == null ? "" : a.configOrigin.trim();
+                                        boolean stillSameActive =
+                                                a.configStore.latestWriteSeq() == snapshotWriteSeq
+                                                        && a.configImportSeq.get()
+                                                                == snapshotImportSeq
+                                                        && a.config == snapshotConfig
+                                                        && a.engineEpoch == snapshotEpoch
+                                                        && snapshotOrigin.equals(liveOrigin);
+                                        if (!stillSameActive) {
+                                            AppLog.i(
+                                                    "SourceController",
+                                                    "Discarding stale subscription auto-update for "
+                                                            + snapshotOrigin);
+                                            return;
+                                        }
+                                        SourcePicker.applyEdits(a, fresh, targetOrigin);
+                                        String currentKey =
+                                                a.prefs.getString(Prefs.SELECTED_SITE, "");
+                                        boolean hasSelected = false;
+                                        Cms.Site firstAvailable = null;
+                                        for (Cms.Site s : fresh.sites) {
+                                            if (available(a, fresh, s)) {
+                                                if (firstAvailable == null) firstAvailable = s;
+                                                if (s.key.equals(currentKey)) hasSelected = true;
+                                            }
+                                        }
+                                        final String nextSelectedSite =
+                                                !hasSelected && firstAvailable != null
+                                                        ? firstAvailable.key
+                                                        : (hasSelected ? currentKey : null);
+                                        ConfigStore.PointerSnapshot nextPointers =
+                                                new ConfigStore.PointerSnapshot(
+                                                        targetOrigin,
+                                                        nextSelectedSite,
+                                                        new SavedState(fresh, targetOrigin));
+                                        ConfigStore.CommitResult commit =
+                                                a.configStore.saveIfExpectedSeq(
+                                                        snapshotWriteSeq,
+                                                        fresh.raw,
+                                                        nextPointers,
+                                                        pointerStoreFor(a),
+                                                        (seq, error, rolledBackTo) ->
+                                                                AppLog.w(
+                                                                        "SourceController",
+                                                                        "Sequenced auto-update write failed",
+                                                                        error));
+                                        if (!commit.accepted) {
+                                            AppLog.i(
+                                                    "SourceController",
+                                                    "Skipped stale auto-update commit (writeSeq advanced)");
+                                            return;
+                                        }
                                         boolean playingNow =
                                                 a.player != null
+                                                        || a.inlinePlayer != null
                                                         || (a.current != null && a.current.player);
                                         if (!playingNow) {
-                                            SourcePicker.applyEdits(
-                                                    a, fresh, summary.updatedActiveOrigin);
                                             closeEngines(a);
                                             a.config = fresh;
-                                            a.configOrigin = summary.updatedActiveOrigin;
+                                            a.configOrigin = targetOrigin;
                                             if (a.current != null && a.current.home) {
                                                 a.refresh();
                                             }
@@ -1374,20 +1464,47 @@ final class SourceController {
                                                     "Daily subscription update saved; deferring live reload during playback");
                                         }
                                     });
-                        } else if (force) {
-                            final String msg =
-                                    summary.checkedCount == 0
-                                            ? "当前没有可在线刷新的 HTTP 订阅源"
-                                            : summary.updatedCount > 0
-                                                    ? ("已更新 " + summary.updatedCount + " 个订阅源")
-                                                    : summary.failedCount == summary.checkedCount
-                                                            ? "订阅刷新失败，原配置已保留"
-                                                            : "全部订阅源已是最新（共检查 "
-                                                                    + summary.checkedCount
-                                                                    + " 个）";
+                        } else {
                             a.ui.post(
                                     () -> {
-                                        if (!a.isFinishing()) {
+                                        if (a.isFinishing()
+                                                || a.isDestroyed()
+                                                || a.switchingPrivacy
+                                                || a.privateMode != snapshotPrivate) {
+                                            return;
+                                        }
+                                        if (recordLastUpdate) {
+                                            a.prefs
+                                                    .edit()
+                                                    .putLong(
+                                                            Prefs.SUBSCRIPTION_LAST_AUTO_UPDATE,
+                                                            now)
+                                                    .putString(
+                                                            Prefs.SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                            finalStatusText)
+                                                    .apply();
+                                        } else {
+                                            a.prefs
+                                                    .edit()
+                                                    .putString(
+                                                            Prefs.SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                            finalStatusText)
+                                                    .apply();
+                                        }
+                                        if (force) {
+                                            final String msg =
+                                                    summary.checkedCount == 0
+                                                            ? "当前没有可在线刷新的 HTTP 订阅源"
+                                                            : summary.updatedCount > 0
+                                                                    ? ("已更新 "
+                                                                            + summary.updatedCount
+                                                                            + " 个订阅源")
+                                                                    : summary.failedCount
+                                                                                    == summary.checkedCount
+                                                                            ? "订阅刷新失败，原配置已保留"
+                                                                            : "全部订阅源已是最新（共检查 "
+                                                                                    + summary.checkedCount
+                                                                                    + " 个）";
                                             a.toast(msg);
                                             if (a.current != null && !a.current.player) {
                                                 a.refresh();
@@ -2311,6 +2428,7 @@ final class SourceController {
     }
 
     static void saveConfig(MainActivity a, Cms.Config c, String origin) throws Exception {
+        a.configImportSeq.incrementAndGet();
         if (!c.warehouse.isEmpty()) origin = c.warehouse;
         else if (!c.origin.isEmpty()) origin = c.origin;
         if (origin == null) origin = "";

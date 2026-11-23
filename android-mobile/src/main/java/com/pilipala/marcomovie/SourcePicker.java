@@ -1570,6 +1570,8 @@ final class SourcePicker {
                             }
                             int rowIdx = index - (canMergeAll ? 1 : 0);
                             String url = rows.optJSONObject(rowIdx).optString("url");
+                            final long importSeq = SourceController.beginConfigImport(a);
+                            final boolean snapshotPrivate = a.privateMode;
                             a.toast("正在读取子仓库…");
                             a.worker.execute(
                                     () -> {
@@ -1591,8 +1593,16 @@ final class SourcePicker {
                                                     Cms.parseConfig(combined, selected.origin);
                                             a.ui.post(
                                                     () -> {
-                                                        if (a.isFinishing() || a.config != previous)
+                                                        if (a.isFinishing()
+                                                                || a.isDestroyed()
+                                                                || a.switchingPrivacy
+                                                                || a.privateMode != snapshotPrivate
+                                                                || a.config != previous
+                                                                || !SourceController
+                                                                        .isCurrentConfigImport(
+                                                                                a, importSeq)) {
                                                             return;
+                                                        }
                                                         try {
                                                             SourceController.saveConfig(
                                                                     a, ready, ready.origin);
@@ -1603,7 +1613,10 @@ final class SourcePicker {
                                         } catch (Exception e) {
                                             a.ui.post(
                                                     () -> {
-                                                        if (!a.isFinishing())
+                                                        if (!a.isFinishing()
+                                                                && SourceController
+                                                                        .isCurrentConfigImport(
+                                                                                a, importSeq))
                                                             a.notice("子仓库读取失败，已保留原线路");
                                                     });
                                         }
@@ -1645,6 +1658,8 @@ final class SourcePicker {
                                 a.notice("请至少勾选 2 个子仓库");
                                 return;
                             }
+                            final long importSeq = SourceController.beginConfigImport(a);
+                            final boolean snapshotPrivate = a.privateMode;
                             a.toast("正在读取 " + specs.size() + " 个子仓库并自动分组…");
                             a.worker.execute(
                                     () -> {
@@ -1654,7 +1669,15 @@ final class SourcePicker {
                                                             a, specs, false);
                                             a.ui.post(
                                                     () -> {
-                                                        if (a.isFinishing()) return;
+                                                        if (a.isFinishing()
+                                                                || a.isDestroyed()
+                                                                || a.switchingPrivacy
+                                                                || a.privateMode != snapshotPrivate
+                                                                || !SourceController
+                                                                        .isCurrentConfigImport(
+                                                                                a, importSeq)) {
+                                                            return;
+                                                        }
                                                         try {
                                                             SourceController.saveConfig(
                                                                     a,
@@ -1672,7 +1695,10 @@ final class SourcePicker {
                                         } catch (Exception e) {
                                             a.ui.post(
                                                     () -> {
-                                                        if (!a.isFinishing()) {
+                                                        if (!a.isFinishing()
+                                                                && SourceController
+                                                                        .isCurrentConfigImport(
+                                                                                a, importSeq)) {
                                                             a.notice("子仓库合并失败：" + a.message(e));
                                                         }
                                                     });

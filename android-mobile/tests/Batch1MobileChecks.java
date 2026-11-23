@@ -135,7 +135,7 @@ public final class Batch1MobileChecks {
                         + "signal 6 (SIGABRT), code -1 (SI_QUEUE) from pid 1234\n"
                         + "Abort message: 'FORTIFY: pthread_join called with invalid pthread_t'\n"
                         + "  #00 pc 000000000002598 /data/app/lib/arm64/libplayer.so (Java_dev_jdtech_mpv_MPVLib_destroy+76) (BuildId: 0123456789abcdef0123456789abcdef)\n"
-                        + "  url=https://secret.example.com/private?token=abc123\n";
+                        + "  url=https://secret.example/private?token=abc123\n";
         String parsedText =
                 CrashReportStore.extractSanitizedNativeTrace(
                         textTrace.getBytes(StandardCharsets.UTF_8));
