@@ -13,6 +13,7 @@ import '../core/cms_parser.dart';
 import '../core/csp_bridge.dart';
 import '../core/curated_discovery.dart';
 import '../core/download_service.dart';
+import '../core/episode_scraper.dart';
 import '../core/media_badges.dart';
 import '../core/models.dart';
 import '../core/ohos_runtime.dart';
@@ -22,6 +23,7 @@ import '../core/wogg_source.dart';
 import 'apple_theme.dart';
 import 'cast_avatar_section.dart';
 import 'desktop_horizontal_scroller.dart';
+import 'episode_scrape_sheet.dart';
 import 'favorite_postcard_animation.dart';
 import 'ios_liquid_glass.dart';
 import 'media_badge.dart';
@@ -160,6 +162,7 @@ class _DetailScreenState extends State<DetailScreen> {
   int _selectedLine = 0;
   int _selectedPage = 0;
   int? _selectedInLineSeason;
+  EpisodeScrapeOverride _episodeScrapeOverride = const EpisodeScrapeOverride();
   List<({int seasonNumber, String seasonLabel, CmsSite site, CmsVideo video})>
       _relatedSeasons = const [];
   bool _discoveringSeasons = false;
@@ -240,6 +243,11 @@ class _DetailScreenState extends State<DetailScreen> {
     }
     _activeSite = widget.site;
     _video = WoggSource.normalizeCachedVideoLabels(widget.site, widget.initialVideo);
+    _episodeScrapeOverride = widget.storage.getEpisodeScrapeOverride(
+      siteKey: _activeSite.key,
+      videoId: _video.id,
+      videoTitle: _video.title,
+    );
     final curInfo = CmsParser.parseSeriesSeasonInfo(_video.title);
     _relatedSeasons = [
       (
@@ -295,6 +303,50 @@ class _DetailScreenState extends State<DetailScreen> {
 
   String get _publicLookupTitle =>
       _activeSite.isEffectivelyPrivate ? '' : _video.title;
+
+  String get _effectiveScrapeTitle {
+    if (_activeSite.isEffectivelyPrivate) return _video.title;
+    final custom = _episodeScrapeOverride.customTitle.trim();
+    return custom.isNotEmpty ? custom : _video.title;
+  }
+
+  ScrapedLineResult _scrapeLine(CmsLine line) {
+    return EpisodeScraper.scrapeLine(
+      line.episodes,
+      override: _episodeScrapeOverride,
+      seriesTitle: _effectiveScrapeTitle,
+    );
+  }
+
+  Future<void> _openEpisodeScrapeSheet() async {
+    if (_video.lines.isEmpty) return;
+    final safeLineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
+    final line = _video.lines[safeLineIdx];
+    final next = await showEpisodeScrapeSheet(
+      context: context,
+      seriesTitle: _video.title,
+      year: _video.year,
+      episodes: line.episodes,
+      currentOverride: _episodeScrapeOverride,
+      isVariety: _isVarietyShow,
+    );
+    if (next == null || !mounted) return;
+    await widget.storage.setEpisodeScrapeOverride(
+      siteKey: _activeSite.key,
+      videoId: _video.id,
+      videoTitle: _video.title,
+      override: next,
+    );
+    if (!mounted) return;
+    setState(() {
+      _episodeScrapeOverride = next;
+      _selectedPage = 0;
+    });
+    if (!_activeSite.isEffectivelyPrivate && !_isVarietyShow) {
+      unawaited(PosterLoader.fetchSeriesEpisodeMetadata(_effectiveScrapeTitle));
+    }
+    _toast(next.isDefault ? '已恢复默认剧集顺序' : '已应用剧集刮削与集数校准');
+  }
 
   String get _currentPosterIdentity =>
       '${_activeSite.key}|${_video.id}|${_video.poster}|$_publicLookupTitle|${_video.year}';
@@ -1082,24 +1134,40 @@ class _DetailScreenState extends State<DetailScreen> {
   /// 2. Uses real subtitle from CMS episode name if present
   /// 3. Uses real episode title from verified 360 Baike / Bilibili PGC / Bangumi if present
   /// 4. Falls back cleanly to `第 X 集` / `第 X 期` (never fabricated text)
-  String _formatEpisodeCardHeadline(String cleanEpName, int oneBasedIndex) {
+  String _formatEpisodeCardHeadline(
+    String cleanEpName,
+    int oneBasedIndex, {
+    ScrapedEpisodeInfo? scrapedInfo,
+  }) {
+    if (scrapedInfo != null && scrapedInfo.isSpecial) {
+      final tag = scrapedInfo.specialTag ?? '特辑';
+      if (scrapedInfo.cleanSubtitle.isNotEmpty &&
+          scrapedInfo.cleanSubtitle != tag) {
+        return '$tag · ${scrapedInfo.cleanSubtitle}';
+      }
+      return cleanEpName.trim().isNotEmpty ? cleanEpName.trim() : tag;
+    }
+    final epNum = scrapedInfo?.effectiveEpisodeNumber ?? oneBasedIndex;
     if (_isVarietyShow) {
       final trimmed = cleanEpName.trim();
       if (trimmed.isNotEmpty &&
           !RegExp(r'^(?:[Ee][Pp]?\s*)?\d+$').hasMatch(trimmed)) {
         return trimmed;
       }
-      return '第 $oneBasedIndex 期';
+      return '第 $epNum 期';
     }
     final embedded = _extractEmbeddedSubtitle(cleanEpName);
     if (embedded.isNotEmpty) {
-      return 'E$oneBasedIndex · $embedded';
+      return 'E$epNum · $embedded';
     }
-    final realMeta = PosterLoader.peekEpisodeMeta(_video.title, oneBasedIndex);
+    final realMeta = PosterLoader.peekEpisodeMeta(_effectiveScrapeTitle, epNum);
     if (realMeta != null && realMeta.title.trim().isNotEmpty) {
-      return 'E$oneBasedIndex · ${realMeta.title.trim()}';
+      return 'E$epNum · ${realMeta.title.trim()}';
     }
-    return '第 $oneBasedIndex 集';
+    if (scrapedInfo != null && scrapedInfo.cleanSubtitle.isNotEmpty) {
+      return 'E$epNum · ${scrapedInfo.cleanSubtitle}';
+    }
+    return '第 $epNum 集';
   }
 
   /// Resolves the authentic per-episode plot synopsis (`分集剧情`).
@@ -1107,8 +1175,13 @@ class _DetailScreenState extends State<DetailScreen> {
   /// display fake/repeated series slogans or mismatched plots under episode cards.
   String _resolveAuthenticEpisodeSummary(
     int oneBasedIndex,
-    String cleanEpName,
-  ) {
+    String cleanEpName, {
+    ScrapedEpisodeInfo? scrapedInfo,
+  }) {
+    if (scrapedInfo != null && scrapedInfo.isSpecial) {
+      return '';
+    }
+    final epNum = scrapedInfo?.effectiveEpisodeNumber ?? oneBasedIndex;
     if (_isVarietyShow) {
       final embedded = _extractEmbeddedSubtitle(cleanEpName);
       if (embedded.length >= 16 && embedded != cleanEpName.trim()) {
@@ -1116,7 +1189,7 @@ class _DetailScreenState extends State<DetailScreen> {
       }
       return '';
     }
-    final realMeta = PosterLoader.peekEpisodeMeta(_video.title, oneBasedIndex);
+    final realMeta = PosterLoader.peekEpisodeMeta(_effectiveScrapeTitle, epNum);
     if (realMeta != null && realMeta.summary.trim().isNotEmpty) {
       return realMeta.summary.trim();
     }
@@ -1262,17 +1335,25 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   List<int> _activeEpisodeIndicesFor(CmsLine line) {
+    final scraped = _scrapeLine(line);
     final inLine = CmsParser.extractInLineSeasons(line.episodes);
     if (inLine.length >= 2) {
       final activeNum = _selectedInLineSeason ?? inLine.first.seasonNumber;
+      List<int> seasonIndices = inLine.first.episodeIndexes;
       for (final s in inLine) {
         if (s.seasonNumber == activeNum) {
-          return s.episodeIndexes;
+          seasonIndices = s.episodeIndexes;
+          break;
         }
       }
-      return inLine.first.episodeIndexes;
+      final seasonSet = seasonIndices.toSet();
+      final filtered = [
+        for (final idx in scraped.visibleRawIndices)
+          if (seasonSet.contains(idx)) idx,
+      ];
+      return filtered.isNotEmpty ? filtered : seasonIndices;
     }
-    return List<int>.generate(line.episodes.length, (i) => i, growable: false);
+    return scraped.visibleRawIndices;
   }
 
   void _playPrimaryAction(WatchHistoryEntry? bookmark) {
@@ -1701,6 +1782,7 @@ class _DetailScreenState extends State<DetailScreen> {
     if (_video.lines.isEmpty) return;
     final safeLineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
     final line = _video.lines[safeLineIdx];
+    final scraped = _scrapeLine(line);
     final activeIndices = _activeEpisodeIndicesFor(line);
     final total = activeIndices.length;
     showIos27LiquidSheet<void>(
@@ -1720,12 +1802,19 @@ class _DetailScreenState extends State<DetailScreen> {
           final posIdx = _descending ? (total - 1 - idx) : idx;
           final originalIdx = activeIndices[posIdx];
           final ep = line.episodes[originalIdx];
+          final epInfo = scraped.infoForRawIndex(originalIdx);
           final unavailReason = _episodeUnavailableReason(ep);
           final isUnavailable = unavailReason != null;
           final isBookmarked = !isUnavailable &&
               bookmark != null &&
               bookmark.line == line.name &&
               bookmark.index == originalIdx;
+          final cellLabel = epInfo != null
+              ? epInfo.compactLabel(
+                  isVariety: _isVarietyShow,
+                  singleItemMovie: total <= 1,
+                )
+              : ep.name;
           final cell = GestureDetector(
             onTap: () {
               if (unavailReason != null) {
@@ -1770,7 +1859,7 @@ class _DetailScreenState extends State<DetailScreen> {
                   ),
                   alignment: Alignment.center,
                   child: Text(
-                    isUnavailable ? '${ep.name} (不可解析)' : ep.name,
+                    isUnavailable ? '$cellLabel (不可解析)' : cellLabel,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -3238,6 +3327,7 @@ class _DetailScreenState extends State<DetailScreen> {
   Widget _buildPortraitEpisodesSection(WatchHistoryEntry? bookmark) {
     final safeLineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
     final line = _video.lines[safeLineIdx];
+    final scraped = _scrapeLine(line);
     final inLineSeasons = CmsParser.extractInLineSeasons(line.episodes);
     final hasInLineSeasons = inLineSeasons.length >= 2;
     final activeIndices = _activeEpisodeIndicesFor(line);
@@ -3266,8 +3356,14 @@ class _DetailScreenState extends State<DetailScreen> {
       final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
       final originalIdx = activeIndices[posIdx];
       final ep = line.episodes[originalIdx];
-      final (cleanTitle, _) = _parseEpisodeDisplay(ep.name, posIdx + 1);
-      if (_resolveAuthenticEpisodeSummary(posIdx + 1, cleanTitle).isNotEmpty) {
+      final epInfo = scraped.infoForRawIndex(originalIdx);
+      final epNum = epInfo?.effectiveEpisodeNumber ?? (posIdx + 1);
+      final (cleanTitle, _) = _parseEpisodeDisplay(ep.name, epNum);
+      if (_resolveAuthenticEpisodeSummary(
+        epNum,
+        cleanTitle,
+        scrapedInfo: epInfo,
+      ).isNotEmpty) {
         anyHasSummary = true;
         break;
       }
@@ -3333,7 +3429,57 @@ class _DetailScreenState extends State<DetailScreen> {
                 ),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 5),
+            GestureDetector(
+              key: const ValueKey('detail_episode_scrape_button'),
+              onTap: _openEpisodeScrapeSheet,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 8,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: _episodeScrapeOverride.enabled ||
+                          !_episodeScrapeOverride.isDefault
+                      ? const Color(0x400A84FF)
+                      : const Color(0x24FFFFFF),
+                  borderRadius: BorderRadius.circular(999),
+                  border: Border.all(
+                    color: _episodeScrapeOverride.enabled ||
+                            !_episodeScrapeOverride.isDefault
+                        ? const Color(0x9964B5FF)
+                        : const Color(0x30FFFFFF),
+                    width: 0.6,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      CupertinoIcons.sparkles,
+                      color: _episodeScrapeOverride.enabled ||
+                              !_episodeScrapeOverride.isDefault
+                          ? const Color(0xFF8CC8FF)
+                          : const Color(0xE6FFFFFF),
+                      size: 12,
+                    ),
+                    const SizedBox(width: 3),
+                    Text(
+                      '刮削',
+                      style: TextStyle(
+                        color: _episodeScrapeOverride.enabled ||
+                                !_episodeScrapeOverride.isDefault
+                            ? Colors.white
+                            : const Color(0xE6FFFFFF),
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 5),
             GestureDetector(
               onTap: () {
                 final next = !_descending;
@@ -3345,7 +3491,7 @@ class _DetailScreenState extends State<DetailScreen> {
               },
               child: Container(
                 padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
+                  horizontal: 8,
                   vertical: 5,
                 ),
                 decoration: BoxDecoration(
@@ -3371,7 +3517,7 @@ class _DetailScreenState extends State<DetailScreen> {
                       _descending ? '倒序' : '正序',
                       style: const TextStyle(
                         color: Color(0xE6FFFFFF),
-                        fontSize: 12,
+                        fontSize: 11.5,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -3379,12 +3525,12 @@ class _DetailScreenState extends State<DetailScreen> {
                 ),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 5),
             GestureDetector(
               onTap: () => _showAllEpisodesGridSheet(bookmark),
               child: Container(
                 padding: const EdgeInsets.symmetric(
-                  horizontal: 11,
+                  horizontal: 9,
                   vertical: 5,
                 ),
                 decoration: BoxDecoration(
@@ -3403,12 +3549,14 @@ class _DetailScreenState extends State<DetailScreen> {
                       color: Color(0xE6FFFFFF),
                       size: 12,
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 3.5),
                     Text(
-                      '全部剧集 ($total)',
+                      MediaQuery.sizeOf(context).width < 360
+                          ? '全部($total)'
+                          : '全部剧集 ($total)',
                       style: const TextStyle(
                         color: Color(0xE6FFFFFF),
-                        fontSize: 12,
+                        fontSize: 11.5,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -3566,6 +3714,7 @@ class _DetailScreenState extends State<DetailScreen> {
               final visualIdx = start + idx;
               final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
               final originalIdx = activeIndices[posIdx];
+              final epInfo = scraped.infoForRawIndex(originalIdx);
               final unavailReason =
                   _episodeUnavailableReason(line.episodes[originalIdx]);
               final isUnavailable = unavailReason != null;
@@ -3595,7 +3744,7 @@ class _DetailScreenState extends State<DetailScreen> {
                   ),
                   alignment: Alignment.center,
                   child: Text(
-                    '${posIdx + 1}',
+                    epInfo?.shortPillLabel ?? '${posIdx + 1}',
                     style: TextStyle(
                       color: isCurrent
                           ? const Color(0xFF121215)
@@ -3631,14 +3780,19 @@ class _DetailScreenState extends State<DetailScreen> {
               final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
               final originalIdx = activeIndices[posIdx];
               final ep = line.episodes[originalIdx];
+              final epInfo = scraped.infoForRawIndex(originalIdx);
+              final epNum = epInfo?.effectiveEpisodeNumber ?? (posIdx + 1);
               final unavailReason = _episodeUnavailableReason(ep);
               final isUnavailable = unavailReason != null;
               final isCurrent = !isUnavailable && originalIdx == currentActiveEpIdx;
               final (cleanTitle, parsedBadge) =
-                  _parseEpisodeDisplay(ep.name, posIdx + 1);
-              final specBadge = isUnavailable ? '不可解析' : parsedBadge;
-              final unitLabel =
-                  _isVarietyShow ? '第${posIdx + 1}期' : '第${posIdx + 1}集';
+                  _parseEpisodeDisplay(ep.name, epNum);
+              final specBadge = isUnavailable
+                  ? '不可解析'
+                  : (parsedBadge ?? epInfo?.qualityBadge);
+              final unitLabel = (epInfo != null && epInfo.isSpecial)
+                  ? (epInfo.specialTag ?? '特辑')
+                  : (_isVarietyShow ? '第$epNum期' : '第$epNum集');
               final subMeta = isUnavailable
                   ? unavailReason
                   : [
@@ -3646,11 +3800,15 @@ class _DetailScreenState extends State<DetailScreen> {
                       unitLabel,
                       if (specBadge != null) specBadge,
                     ].join(' · ');
-              final headline =
-                  _formatEpisodeCardHeadline(cleanTitle, posIdx + 1);
-              final epDesc = _resolveAuthenticEpisodeSummary(
-                posIdx + 1,
+              final headline = _formatEpisodeCardHeadline(
                 cleanTitle,
+                epNum,
+                scrapedInfo: epInfo,
+              );
+              final epDesc = _resolveAuthenticEpisodeSummary(
+                epNum,
+                cleanTitle,
+                scrapedInfo: epInfo,
               );
 
               final card = GestureDetector(
@@ -3681,9 +3839,11 @@ class _DetailScreenState extends State<DetailScreen> {
                               fit: StackFit.expand,
                               children: [
                                 EpisodeStillImage(
-                                  seriesTitle: _publicLookupTitle,
+                                  seriesTitle: _activeSite.isEffectivelyPrivate
+                                      ? ''
+                                      : _effectiveScrapeTitle,
                                   year: _video.year,
-                                  episodeIndex: posIdx,
+                                  episodeIndex: math.max(0, epNum - 1),
                                   fallbackPosterUrl: _video.poster,
                                   placeholder: _posterPlaceholder(
                                     _resolveBaseAmbientColor(),
@@ -3758,7 +3918,8 @@ class _DetailScreenState extends State<DetailScreen> {
                                             ),
                                             const SizedBox(width: 3),
                                             Text(
-                                              'E${(posIdx + 1).toString().padLeft(2, '0')}',
+                                              epInfo?.badgeLabel ??
+                                                  'E${(posIdx + 1).toString().padLeft(2, '0')}',
                                               style: TextStyle(
                                                 color: isCurrent
                                                     ? const Color(0xFF121215)

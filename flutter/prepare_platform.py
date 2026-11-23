@@ -1312,26 +1312,24 @@ def main() -> None:
                 'UIInterfaceOrientationLandscapeLeft',
                 'UIInterfaceOrientationLandscapeRight',
             ])
-            # iOS 27.1 SDK / iPhone Duo mandates UIScene lifecycle; preserve Flutter 3.47+
-            # generated manifests verbatim and provide a valid fallback if absent.
-            scene_delegate_class = (
-                '$(PRODUCT_MODULE_NAME).SceneDelegate'
-                if (ios_runner / 'SceneDelegate.swift').exists()
-                else 'FlutterSceneDelegate'
-            )
-            info.setdefault('UIApplicationSceneManifest', {
-                'UIApplicationSupportsMultipleScenes': False,
-                'UISceneConfigurations': {
-                    'UIWindowSceneSessionRoleApplication': [
-                        {
-                            'UISceneClassName': 'UIWindowScene',
-                            'UISceneConfigurationName': 'flutter',
-                            'UISceneDelegateClassName': scene_delegate_class,
-                            'UISceneStoryboardFile': 'Main',
-                        },
-                    ],
-                },
-            })
+            # Preserve Flutter 3.47+ generated UIScene manifests verbatim; only add a
+            # scene manifest when SceneDelegate.swift is actually present in the runner.
+            # Injecting FlutterSceneDelegate onto a classic Flutter 3.38 AppDelegate
+            # runner breaks iOS 14 & iPad cold launch (window nil / black screen).
+            if (ios_runner / 'SceneDelegate.swift').exists():
+                info.setdefault('UIApplicationSceneManifest', {
+                    'UIApplicationSupportsMultipleScenes': False,
+                    'UISceneConfigurations': {
+                        'UIWindowSceneSessionRoleApplication': [
+                            {
+                                'UISceneClassName': 'UIWindowScene',
+                                'UISceneConfigurationName': 'flutter',
+                                'UISceneDelegateClassName': '$(PRODUCT_MODULE_NAME).SceneDelegate',
+                                'UISceneStoryboardFile': 'Main',
+                            },
+                        ],
+                    },
+                })
             info.setdefault('NSAppTransportSecurity', {})['NSAllowsArbitraryLoads'] = True
             ios_plist.write_bytes(plistlib.dumps(info, sort_keys=False))
         ios_storyboard = ios_runner / "Base.lproj" / "Main.storyboard"
@@ -1404,7 +1402,8 @@ def main() -> None:
                     "  }\n\n"
                     "  private var orientationObserver: NSObjectProtocol?\n"
                     "  private weak var orientationChannel: FlutterMethodChannel?\n"
-                    "  private var marcoOrientationMask: UIInterfaceOrientationMask?\n\n"
+                    "  private var marcoOrientationMask: UIInterfaceOrientationMask?\n"
+                    "  private var lastReportedGeometrySize: CGSize = .zero\n\n"
                     "  deinit {\n"
                     "    if let obs = orientationObserver {\n"
                     "      NotificationCenter.default.removeObserver(obs)\n"
@@ -1412,13 +1411,25 @@ def main() -> None:
                     "    }\n"
                     "  }\n\n"
                     "  override var supportedInterfaceOrientations: UIInterfaceOrientationMask {\n"
+                    "    if UIDevice.current.userInterfaceIdiom == .pad {\n"
+                    "      return super.supportedInterfaceOrientations\n"
+                    "    }\n"
                     "    return marcoOrientationMask ?? super.supportedInterfaceOrientations\n"
+                    "  }\n\n"
+                    "  override func viewDidLayoutSubviews() {\n"
+                    "    super.viewDidLayoutSubviews()\n"
+                    "    let sz = view.bounds.size\n"
+                    "    if sz.width > 0, sz.height > 0, sz != lastReportedGeometrySize {\n"
+                    "      lastReportedGeometrySize = sz\n"
+                    "      MarcoLiquidGlassSupport.notifyWindowGeometryChanged(size: sz)\n"
+                    "    }\n"
                     "  }\n\n"
                     "  override func viewWillTransition(\n"
                     "    to size: CGSize,\n"
                     "    with coordinator: UIViewControllerTransitionCoordinator\n"
                     "  ) {\n"
                     "    super.viewWillTransition(to: size, with: coordinator)\n"
+                    "    lastReportedGeometrySize = size\n"
                     "    MarcoLiquidGlassSupport.notifyWindowGeometryChanged(size: size)\n"
                     "    coordinator.animate(alongsideTransition: { [weak self] _ in\n"
                     "      self?.setNeedsStatusBarAppearanceUpdate()\n"
@@ -1426,7 +1437,10 @@ def main() -> None:
                     "  }\n\n"
                     "  override func viewSafeAreaInsetsDidChange() {\n"
                     "    super.viewSafeAreaInsetsDidChange()\n"
-                    "    MarcoLiquidGlassSupport.notifyWindowGeometryChanged(size: view.bounds.size)\n"
+                    "    if view.bounds.size.width > 0, view.bounds.size.height > 0 {\n"
+                    "      lastReportedGeometrySize = view.bounds.size\n"
+                    "      MarcoLiquidGlassSupport.notifyWindowGeometryChanged(size: view.bounds.size)\n"
+                    "    }\n"
                     "  }\n\n"
                     "  func setPhysicalOrientationMonitoring(_ enabled: Bool, channel: FlutterMethodChannel) {\n"
                     "    if let obs = orientationObserver {\n"
@@ -1462,6 +1476,12 @@ def main() -> None:
                     "    }\n"
                     "  }\n\n"
                     "  func applyRequestedOrientation(_ mode: String) {\n"
+                    "    // iPadOS multitasking (UIRequiresFullScreen = false) manages window geometry\n"
+                    "    // through the system; forcing an orientation mask on iPad can stall UIKit.\n"
+                    "    if UIDevice.current.userInterfaceIdiom == .pad {\n"
+                    "      marcoOrientationMask = nil\n"
+                    "      return\n"
+                    "    }\n"
                     "    let mask: UIInterfaceOrientationMask\n"
                     "    let fallbackRaw: Int?\n"
                     "    switch mode {\n"
@@ -1542,7 +1562,7 @@ def main() -> None:
         text = ios_app_fw_plist.read_text(encoding="utf-8")
         text = re.sub(
             r"(<key>MinimumOSVersion</key>\s*<string>)[^<]+(</string>)",
-            r"\g<1>15.0\g<2>",
+            r"\g<1>14.0\g<2>",
             text,
         )
         ios_app_fw_plist.write_text(text, encoding="utf-8")
@@ -1552,23 +1572,22 @@ def main() -> None:
             text = xcconfig.read_text(encoding="utf-8")
             text = re.sub(
                 r"(?m)^IPHONEOS_DEPLOYMENT_TARGET\s*=.*$",
-                "IPHONEOS_DEPLOYMENT_TARGET = 15.0",
+                "IPHONEOS_DEPLOYMENT_TARGET = 14.0",
                 text,
             )
-            text = re.sub(
-                r"(?m)^OTHER_LDFLAGS\s*=\s*\$\(inherited\)\s+-Wl,-no_fixup_chains\s*$\n?",
-                "",
-                text,
-            )
-            if "IPHONEOS_DEPLOYMENT_TARGET = 15.0" not in text:
-                text = text.rstrip() + "\nIPHONEOS_DEPLOYMENT_TARGET = 15.0\n"
+            if "IPHONEOS_DEPLOYMENT_TARGET = 14.0" not in text:
+                text = text.rstrip() + "\nIPHONEOS_DEPLOYMENT_TARGET = 14.0\n"
+            if "-Wl,-no_fixup_chains" not in text:
+                text = text.rstrip() + "\nOTHER_LDFLAGS = $(inherited) -Wl,-no_fixup_chains\n"
+            if "-fno-objc-msgsend-selector-stubs" not in text:
+                text = text.rstrip() + "\nOTHER_CFLAGS = $(inherited) -fno-objc-msgsend-selector-stubs\n"
             xcconfig.write_text(text, encoding="utf-8")
     ios_pbx = ROOT / "ios" / "Runner.xcodeproj" / "project.pbxproj"
     if ios_pbx.exists():
         text = ios_pbx.read_text(encoding="utf-8")
         text = re.sub(
             r"IPHONEOS_DEPLOYMENT_TARGET\s*=\s*[0-9.]+;",
-            "IPHONEOS_DEPLOYMENT_TARGET = 15.0;",
+            "IPHONEOS_DEPLOYMENT_TARGET = 14.0;",
             text,
         )
         ios_pbx.write_text(text, encoding="utf-8")
@@ -1577,15 +1596,21 @@ def main() -> None:
         text = ios_podfile.read_text(encoding="utf-8")
         text = re.sub(
             r"#?\s*platform\s+:ios\s*,\s*'[^']+'",
-            "platform :ios, '15.0'",
+            "platform :ios, '14.0'",
             text,
         )
-        if "Gem::Version.new('15.0')" not in text and "flutter_additional_ios_build_settings(target)" in text:
+        if "no_fixup_chains" not in text and "flutter_additional_ios_build_settings(target)" in text:
             text = text.replace(
                 "flutter_additional_ios_build_settings(target)",
                 "flutter_additional_ios_build_settings(target)\n"
                 "    target.build_configurations.each do |config|\n"
-                "      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0' if Gem::Version.new(config.build_settings.fetch('IPHONEOS_DEPLOYMENT_TARGET', '0')) < Gem::Version.new('15.0')\n"
+                "      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0' if Gem::Version.new(config.build_settings.fetch('IPHONEOS_DEPLOYMENT_TARGET', '0')) < Gem::Version.new('14.0')\n"
+                "      ldflags = Array(config.build_settings['OTHER_LDFLAGS'] || '$(inherited)')\n"
+                "      ldflags << '-Wl,-no_fixup_chains' unless ldflags.any? { |f| f.to_s.include?('no_fixup_chains') }\n"
+                "      config.build_settings['OTHER_LDFLAGS'] = ldflags\n"
+                "      cflags = Array(config.build_settings['OTHER_CFLAGS'] || '$(inherited)')\n"
+                "      cflags << '-fno-objc-msgsend-selector-stubs' unless cflags.any? { |f| f.to_s.include?('fno-objc-msgsend-selector-stubs') }\n"
+                "      config.build_settings['OTHER_CFLAGS'] = cflags\n"
                 "    end",
             )
         ios_podfile.write_text(text, encoding="utf-8")

@@ -13,6 +13,7 @@ import 'catpaw_host.dart';
 import 'windows_appearance_preferences.dart';
 import 'cms_parser.dart';
 import 'csp_bridge.dart';
+import 'episode_scraper.dart';
 import 'ios_avplayer_controller.dart';
 import 'ios_mpv_profile.dart';
 import 'local_media_proxy.dart';
@@ -141,6 +142,8 @@ class StorageService {
   static const String keyCachedAdHosts = 'cached_ad_hosts_v1';
   static const String keyHlsAdStripEnabled = 'hls_ad_strip_enabled';
   static const String keyDiskCacheMaxMb = 'disk_cache_max_mb';
+  static const String keyEpisodeScrapeOverrides = 'episode_scrape_overrides_v1';
+  static const int maxEpisodeScrapeRecords = 300;
   static const List<int> allowedDiskCacheMbOptions = <int>[0, 256, 512, 1024, 2048];
   static const int defaultDiskCacheMaxMb = 512;
   static const int maxVideoSkipRecords = 500;
@@ -5432,5 +5435,65 @@ class StorageService {
     await _writeSecret(keySpiderGatewayToken, clean.token);
     SpiderPluginRegistry.instance.setGatewayConfig(clean);
     _invalidateConfigCache();
+  }
+
+  Map<String, dynamic> _loadEpisodeScrapeOverrideMap() {
+    final raw = _prefs.getString(keyEpisodeScrapeOverrides);
+    if (raw == null || raw.trim().isEmpty) return <String, dynamic>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {}
+    return <String, dynamic>{};
+  }
+
+  /// Reads the saved per-series [EpisodeScrapeOverride] (or defaults if none).
+  EpisodeScrapeOverride getEpisodeScrapeOverride({
+    required String siteKey,
+    required String videoId,
+    required String videoTitle,
+  }) {
+    final map = _loadEpisodeScrapeOverrideMap();
+    if (map.isEmpty) return const EpisodeScrapeOverride();
+    final primaryKey = EpisodeScraper.storageKey(
+      siteKey: siteKey,
+      videoId: videoId,
+      videoTitle: videoTitle,
+    );
+    final raw = map[primaryKey] ??
+        map[EpisodeScraper.storageKey(
+          siteKey: '',
+          videoId: '',
+          videoTitle: videoTitle,
+        )];
+    if (raw is Map) {
+      return EpisodeScrapeOverride.fromJson(Map<String, dynamic>.from(raw));
+    }
+    return const EpisodeScrapeOverride();
+  }
+
+  /// Persists or clears the per-series [EpisodeScrapeOverride].
+  Future<void> setEpisodeScrapeOverride({
+    required String siteKey,
+    required String videoId,
+    required String videoTitle,
+    required EpisodeScrapeOverride override,
+  }) async {
+    final map = _loadEpisodeScrapeOverrideMap();
+    final key = EpisodeScraper.storageKey(
+      siteKey: siteKey,
+      videoId: videoId,
+      videoTitle: videoTitle,
+    );
+    map.remove(key);
+    if (!override.isDefault) {
+      map[key] = override.toJson();
+      while (map.length > maxEpisodeScrapeRecords) {
+        map.remove(map.keys.first);
+      }
+    }
+    await _prefs.setString(keyEpisodeScrapeOverrides, jsonEncode(map));
   }
 }

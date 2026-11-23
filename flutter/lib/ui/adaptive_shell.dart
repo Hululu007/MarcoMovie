@@ -3399,8 +3399,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         final stretchedHeight = iosHeroHeight + overscroll;
 
                         const auraTopExtend = 280.0;
-                        const auraSolidPastHero = 26.0;
-                        const auraDissolveHeight = 148.0;
+                        const auraSolidPastHero = 42.0;
+                        final auraDissolveHeight =
+                            palette.isDark ? 340.0 : 186.0;
                         final auraTotalHeight = auraTopExtend +
                             stretchedHeight +
                             auraSolidPastHero +
@@ -3409,12 +3410,81 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     stretchedHeight +
                                     auraSolidPastHero) /
                                 auraTotalHeight)
-                            .clamp(0.55, 0.92);
+                            .clamp(0.45, 0.88);
                         final tail = 1.0 - solidEndStop;
+
+                        // Rex-style full-screen unified tonal background driven by
+                        // liveAtmo so the entire viewport shares one cohesive mood
+                        // with zero abrupt cutoff below the hero billboard while
+                        // preserving crisp ink contrast on all lower shelves.
+                        final Color fullScreenTopTone;
+                        final Color fullScreenMidTone;
+                        final Color fullScreenBotTone;
+                        if (palette.isDark) {
+                          fullScreenTopTone = Color.lerp(
+                            palette.background,
+                            liveAtmo,
+                            0.68,
+                          )!;
+                          fullScreenMidTone = Color.lerp(
+                            palette.background,
+                            liveAtmo,
+                            0.42,
+                          )!;
+                          fullScreenBotTone = Color.lerp(
+                            palette.background,
+                            liveAtmo,
+                            0.24,
+                          )!;
+                        } else {
+                          final liveHsl = HSLColor.fromColor(liveAtmo);
+                          final lightTonalTint = liveHsl
+                              .withSaturation(
+                                (liveHsl.saturation * 0.92).clamp(0.08, 0.42),
+                              )
+                              .withLightness(
+                                liveHsl.lightness.clamp(0.76, 0.89),
+                              )
+                              .toColor();
+                          fullScreenTopTone = Color.lerp(
+                            palette.background,
+                            lightTonalTint,
+                            0.58,
+                          )!;
+                          fullScreenMidTone = Color.lerp(
+                            palette.background,
+                            lightTonalTint,
+                            0.38,
+                          )!;
+                          fullScreenBotTone = Color.lerp(
+                            palette.background,
+                            lightTonalTint,
+                            0.22,
+                          )!;
+                        }
 
                         return Stack(
                           fit: StackFit.expand,
                           children: [
+                            Positioned.fill(
+                              child: DecoratedBox(
+                                key: const ValueKey(
+                                  'ios-hero-rex-full-tonal-bg',
+                                ),
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      fullScreenTopTone,
+                                      fullScreenMidTone,
+                                      fullScreenBotTone,
+                                    ],
+                                    stops: const [0.0, 0.56, 1.0],
+                                  ),
+                                ),
+                              ),
+                            ),
                             Positioned(
                               top: -auraTopExtend - scrollDown,
                               left: 0,
@@ -3431,10 +3501,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     colors: [
                                       liveAtmo,
                                       liveAtmo,
-                                      liveAtmo.withValues(alpha: 0.80),
-                                      liveAtmo.withValues(alpha: 0.50),
-                                      liveAtmo.withValues(alpha: 0.22),
-                                      liveAtmo.withValues(alpha: 0.06),
+                                      liveAtmo.withValues(alpha: 0.86),
+                                      liveAtmo.withValues(alpha: 0.58),
+                                      liveAtmo.withValues(alpha: 0.28),
+                                      liveAtmo.withValues(alpha: 0.09),
                                       liveAtmo.withValues(alpha: 0.0),
                                     ],
                                     stops: [
@@ -4186,41 +4256,37 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         child: Stack(
                           fit: StackFit.expand,
                           children: [
-                            // Full-bleed crisp HD artwork with opaque poster
-                            // ambient backing (zero white ShaderMask cutout).
+                            // Full-bleed crisp HD artwork backed by Layer 0's live
+                            // interpolated atmosphere (never per-slide opaque backing
+                            // that splits at the bottom edge during swipes).
                             Positioned.fill(
                               child: PosterExpandSourceCard(
                                 cardId: heroCardId,
                                 child: ClipRect(
-                                  child: ColoredBox(
-                                    color: itemAtmo,
-                                    child: Transform.scale(
-                                      key: const ValueKey(
-                                        'ios-hero-stretch-zoom',
+                                  child: Transform.scale(
+                                    key: const ValueKey(
+                                      'ios-hero-stretch-zoom',
+                                    ),
+                                    scale: stretchScale,
+                                    alignment: const Alignment(0.0, -0.08),
+                                    child: PosterImage(
+                                      url: featured.poster,
+                                      title: site.isEffectivelyPrivate
+                                          ? ''
+                                          : featured.title,
+                                      year: site.isEffectivelyPrivate
+                                          ? ''
+                                          : featured.year,
+                                      highRes: true,
+                                      strictHighRes: true,
+                                      fit: BoxFit.cover,
+                                      alignment: const Alignment(0.0, -0.22),
+                                      onBytesLoaded: (bytes) =>
+                                          _updateHeroAmbientFromBytes(
+                                        featured,
+                                        bytes,
                                       ),
-                                      scale: stretchScale,
-                                      alignment: const Alignment(0.0, -0.08),
-                                      child: PosterImage(
-                                        url: featured.poster,
-                                        title: site.isEffectivelyPrivate
-                                            ? ''
-                                            : featured.title,
-                                        year: site.isEffectivelyPrivate
-                                            ? ''
-                                            : featured.year,
-                                        highRes: true,
-                                        strictHighRes: true,
-                                        fit: BoxFit.cover,
-                                        alignment: const Alignment(0.0, -0.22),
-                                        onBytesLoaded: (bytes) =>
-                                            _updateHeroAmbientFromBytes(
-                                          featured,
-                                          bytes,
-                                        ),
-                                        placeholder: ColoredBox(
-                                          color: itemAtmo,
-                                        ),
-                                      ),
+                                      placeholder: const SizedBox.shrink(),
                                     ),
                                   ),
                                 ),
@@ -4254,48 +4320,57 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ),
                             ),
 
-                            // Rex-style silky 8-stop single-color atmospheric
-                            // dissolve strictly below the faces: ends at 100%
-                            // solid `itemAtmo` matching Layer 0 pixel-for-pixel
-                            // with zero seam, zero Mach band, and zero rounded
-                            // sheet cliff in BOTH Light Mode and Dark Mode.
+                            // Rex-style live-interpolated 8-stop atmospheric dissolve
+                            // strictly below the faces: uses liveAtmo (matching Layer 0
+                            // pixel-for-pixel AT EVERY FRAME OF EVERY HORIZONTAL SWIPE!)
+                            // so there is ZERO horizontal bottom cut line mid-swipe
+                            // AND zero seam at rest in BOTH Light Mode and Dark Mode.
                             Positioned(
                               left: 0,
                               right: 0,
                               bottom: 0,
-                              height: stretchedHeight * 0.54,
+                              height: stretchedHeight * 0.58,
                               child: IgnorePointer(
                                 child: buildHeroChromeFade(
-                                  child: DecoratedBox(
-                                    key: const ValueKey(
-                                      'ios-hero-bottom-ambient-gradient',
-                                    ),
-                                    decoration: BoxDecoration(
-                                      gradient: LinearGradient(
-                                        begin: Alignment.topCenter,
-                                        end: Alignment.bottomCenter,
-                                        colors: [
-                                          itemAtmo.withValues(alpha: 0.0),
-                                          itemAtmo.withValues(alpha: 0.06),
-                                          itemAtmo.withValues(alpha: 0.20),
-                                          itemAtmo.withValues(alpha: 0.46),
-                                          itemAtmo.withValues(alpha: 0.72),
-                                          itemAtmo.withValues(alpha: 0.90),
-                                          itemAtmo.withValues(alpha: 0.98),
-                                          itemAtmo,
-                                        ],
-                                        stops: const [
-                                          0.0,
-                                          0.14,
-                                          0.30,
-                                          0.48,
-                                          0.66,
-                                          0.82,
-                                          0.93,
-                                          1.0,
-                                        ],
-                                      ),
-                                    ),
+                                  child: AnimatedBuilder(
+                                    animation: _iosHeroPageController,
+                                    builder: (context, _) {
+                                      final liveAtmo = _resolveLiveRexHeroAtmo(
+                                        featuredList,
+                                        palette,
+                                      );
+                                      return DecoratedBox(
+                                        key: const ValueKey(
+                                          'ios-hero-bottom-ambient-gradient',
+                                        ),
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            begin: Alignment.topCenter,
+                                            end: Alignment.bottomCenter,
+                                            colors: [
+                                              liveAtmo.withValues(alpha: 0.0),
+                                              liveAtmo.withValues(alpha: 0.05),
+                                              liveAtmo.withValues(alpha: 0.18),
+                                              liveAtmo.withValues(alpha: 0.44),
+                                              liveAtmo.withValues(alpha: 0.72),
+                                              liveAtmo.withValues(alpha: 0.90),
+                                              liveAtmo.withValues(alpha: 0.98),
+                                              liveAtmo,
+                                            ],
+                                            stops: const [
+                                              0.0,
+                                              0.14,
+                                              0.30,
+                                              0.48,
+                                              0.66,
+                                              0.82,
+                                              0.93,
+                                              1.0,
+                                            ],
+                                          ),
+                                        ),
+                                      );
+                                    },
                                   ),
                                 ),
                               ),

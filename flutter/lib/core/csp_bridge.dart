@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'cms_parser.dart';
 import 'csp_rule_engines.dart';
+import 'episode_scraper.dart';
 import 'trailer_source.dart';
 import 'models.dart';
 import 'wogg_netdisk_adapter.dart';
@@ -443,33 +444,9 @@ class CspBridge {
   }
 
   /// Extracts a 1-based episode number from Netdisk / VOD episode labels such as
-  /// `JJC.S01E02 [1.30GB]`, `E01 [5.38GB]`, `[4K HDR] 第03集`, or `第12集`.
+  /// `JJC.S01E02 [1.30GB]`, `E01 [5.38GB]`, `[4K HDR] 第03集`, `第五集`, or `第12集`.
   static int extractEpisodeNumber(String episodeName, int fallbackIndex) {
-    final stripped = episodeName
-        .replaceAll(RegExp(r'\[[^\]]*\]'), ' ')
-        .replaceAll(RegExp(r'\b(?:4[kK]|1080[pP]|2160[pP]|720[pP]|HDR\d*|x26[45]|H\.?26[45]|HEVC|AAC|DDP\d*(?:\.\d+)?)\b'), ' ')
-        .trim();
-    final seMatch = RegExp(r'[Ss]\d{1,2}[Ee](\d{1,4})').firstMatch(stripped);
-    if (seMatch != null) {
-      final n = int.tryParse(seMatch.group(1) ?? '');
-      if (n != null && n > 0) return n;
-    }
-    final cnMatch = RegExp(r'第\s*(\d{1,4})\s*[集话期章节回]').firstMatch(stripped);
-    if (cnMatch != null) {
-      final n = int.tryParse(cnMatch.group(1) ?? '');
-      if (n != null && n > 0) return n;
-    }
-    final epMatch = RegExp(r'(?:^|[^a-zA-Z0-9])[Ee][Pp]?(\d{1,4})(?!\d)').firstMatch(stripped);
-    if (epMatch != null) {
-      final n = int.tryParse(epMatch.group(1) ?? '');
-      if (n != null && n > 0) return n;
-    }
-    final numOnly = RegExp(r'^\s*#?(\d{1,4})(?:\s|$)').firstMatch(stripped);
-    if (numOnly != null) {
-      final n = int.tryParse(numOnly.group(1) ?? '');
-      if (n != null && n > 0) return n;
-    }
-    return fallbackIndex + 1;
+    return EpisodeScraper.extractEpisodeNumber(episodeName, fallbackIndex);
   }
 
   /// Finds the best matching episode index in [targetLine] for [sourceEpisodeName].

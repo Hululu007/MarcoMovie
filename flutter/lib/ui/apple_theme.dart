@@ -2539,73 +2539,136 @@ class _MarcoDockIconPainter extends CustomPainter {
 
   void _paintHome(Canvas canvas) {
     final t = selected ? progress : 1.0;
-    final screenScale = selected
+    final houseScale = selected
         ? _evalKeyframes(
             t,
             const [0.0, 0.42, 0.76, 1.0],
-            const [0.82, 1.12, 0.97, 1.0],
-          )
-        : 1.0;
-    final standScaleX = selected
-        ? _evalKeyframes(
-            t,
-            const [0.0, 0.48, 0.78, 1.0],
-            const [0.38, 1.14, 0.98, 1.0],
+            const [0.84, 1.11, 0.97, 1.0],
           )
         : 1.0;
     final playTx = selected
         ? _evalKeyframes(
             t,
             const [0.0, 0.46, 0.78, 1.0],
-            const [-2.4, 0.9, -0.2, 0.0],
+            const [-2.0, 0.8, -0.2, 0.0],
           )
         : 0.0;
     final playScale = selected
         ? _evalKeyframes(
             t,
             const [0.0, 0.46, 0.78, 1.0],
-            const [0.55, 1.18, 0.96, 1.0],
+            const [0.58, 1.18, 0.96, 1.0],
           )
         : 1.0;
 
-    // Curved cinema stand arc
+    // Sculpted rounded cinema house silhouette
     _withPivot(
       canvas,
-      const Offset(12.0, 19.6),
-      scaleX: standScaleX,
+      const Offset(12.0, 12.2),
+      scaleX: houseScale,
+      scaleY: houseScale,
       draw: () {
-        final p = Path()
-          ..moveTo(8.1, 20.5)
-          ..quadraticBezierTo(12.0, 18.8, 15.9, 20.5);
-        canvas.drawPath(
-          p,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeCap = StrokeCap.round
-            ..strokeWidth = selected ? 2.05 : 1.75
-            ..color = selected
-                ? activeSecondary
-                : inactiveColor.withValues(alpha: inactiveColor.a * 0.74),
-        );
+        final house = Path()
+          ..moveTo(4.0, 11.1)
+          ..quadraticBezierTo(4.0, 9.5, 5.3, 8.5)
+          ..lineTo(10.6, 4.2)
+          ..quadraticBezierTo(12.0, 3.1, 13.4, 4.2)
+          ..lineTo(18.7, 8.5)
+          ..quadraticBezierTo(20.0, 9.5, 20.0, 11.1)
+          ..lineTo(20.0, 17.3)
+          ..quadraticBezierTo(20.0, 20.4, 16.9, 20.4)
+          ..lineTo(7.1, 20.4)
+          ..quadraticBezierTo(4.0, 20.4, 4.0, 17.3)
+          ..close();
+        if (selected) {
+          canvas.drawPath(house, Paint()..color = activePrimary);
+          final accent = Path()
+            ..moveTo(10.0, 7.4)
+            ..quadraticBezierTo(12.0, 6.1, 14.0, 7.4);
+          canvas.drawPath(
+            accent,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeCap = StrokeCap.round
+              ..strokeWidth = 1.4
+              ..color = Colors.white.withValues(alpha: 0.45),
+          );
+        } else {
+          canvas.drawPath(
+            house,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeJoin = StrokeJoin.round
+              ..strokeCap = StrokeCap.round
+              ..strokeWidth = 1.85
+              ..color = inactiveColor,
+          );
+        }
       },
     );
 
-    // Sculpted rounded cinema screen
+    // Centered play aperture triangle
     _withPivot(
       canvas,
-      const Offset(12.0, 10.7),
-      scaleX: screenScale,
-      scaleY: screenScale,
+      const Offset(12.2, 13.8),
+      translateX: playTx,
+      scaleX: playScale,
+      scaleY: playScale,
       draw: () {
-        final rrect = RRect.fromRectAndRadius(
-          const Rect.fromLTWH(2.3, 3.9, 19.4, 13.6),
-          const Radius.circular(4.3),
+        final tri = Path()
+          ..moveTo(10.2, 11.3)
+          ..lineTo(15.1, 13.8)
+          ..lineTo(10.2, 16.3)
+          ..close();
+        final fill = selected ? Colors.white : inactiveColor;
+        canvas.drawPath(tri, Paint()..color = fill);
+        canvas.drawPath(
+          tri,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeJoin = StrokeJoin.round
+            ..strokeWidth = selected ? 0.9 : 0.7
+            ..color = fill,
+        );
+      },
+    );
+  }
+
+  void _paintLive(Canvas canvas) {
+    final t = selected ? progress : 1.0;
+    const bc = Offset(12.0, 12.0);
+    final frameScale = selected
+        ? _evalKeyframes(
+            t,
+            const [0.0, 0.42, 0.76, 1.0],
+            const [0.86, 1.09, 0.98, 1.0],
+          )
+        : 1.0;
+    final waveT = ((t - 0.08) / 0.85).clamp(0.0, 1.0);
+    final waveScale = selected
+        ? _evalKeyframes(
+            waveT,
+            const [0.0, 0.48, 0.78, 1.0],
+            const [0.72, 1.16, 0.98, 1.0],
+          )
+        : 1.0;
+
+    // Rounded broadcast monitor frame
+    _withPivot(
+      canvas,
+      bc,
+      scaleX: frameScale,
+      scaleY: frameScale,
+      draw: () {
+        final frame = RRect.fromRectAndRadius(
+          const Rect.fromLTWH(2.6, 4.8, 18.8, 14.4),
+          const Radius.circular(4.8),
         );
         if (selected) {
-          canvas.drawRRect(rrect, Paint()..color = activePrimary);
+          canvas.drawRRect(frame, Paint()..color = activePrimary);
         } else {
           canvas.drawRRect(
-            rrect,
+            frame,
             Paint()
               ..style = PaintingStyle.stroke
               ..strokeWidth = 1.85
@@ -2615,205 +2678,44 @@ class _MarcoDockIconPainter extends CustomPainter {
       },
     );
 
-    // Play triangle
-    _withPivot(
-      canvas,
-      const Offset(12.2, 10.7),
-      translateX: playTx,
-      scaleX: playScale,
-      scaleY: playScale,
-      draw: () {
-        final tri = Path()
-          ..moveTo(10.0, 8.3)
-          ..lineTo(15.3, 10.7)
-          ..lineTo(10.0, 13.1)
-          ..close();
-        if (selected) {
-          canvas.drawPath(tri, Paint()..color = Colors.white);
-          canvas.drawPath(
-            tri,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeJoin = StrokeJoin.round
-              ..strokeWidth = 0.9
-              ..color = Colors.white,
-          );
-        } else {
-          canvas.drawPath(
-            tri,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeJoin = StrokeJoin.round
-              ..strokeCap = StrokeCap.round
-              ..strokeWidth = 1.55
-              ..color = inactiveColor,
-          );
-        }
-      },
-    );
-
-    // Top-right 4-point cinema sparkle (selected only)
-    if (selected) {
-      final st = ((t - 0.10) / 0.90).clamp(0.0, 1.0);
-      final spScale = _evalKeyframes(
-        st,
-        const [0.0, 0.52, 0.80, 1.0],
-        const [0.01, 1.35, 0.92, 1.0],
-      );
-      final spRot = _evalKeyframes(
-        st,
-        const [0.0, 0.54, 0.82, 1.0],
-        const [-0.78, 0.24, -0.05, 0.0],
-      );
-      _withPivot(
-        canvas,
-        const Offset(20.6, 3.4),
-        scaleX: spScale,
-        scaleY: spScale,
-        rotation: spRot,
-        draw: () {
-          final star = Path();
-          const sr = 2.75;
-          const ir = 0.78;
-          for (var k = 0; k < 8; k++) {
-            final a = k * (math.pi / 4.0);
-            final rr = k.isEven ? sr : ir;
-            final pt = Offset(
-              20.6 + math.cos(a) * rr,
-              3.4 + math.sin(a) * rr,
-            );
-            if (k == 0) {
-              star.moveTo(pt.dx, pt.dy);
-            } else {
-              star.lineTo(pt.dx, pt.dy);
-            }
-          }
-          star.close();
-          canvas.drawPath(star, Paint()..color = activeSecondary);
-        },
-      );
-    }
-  }
-
-  void _paintLive(Canvas canvas) {
-    final t = selected ? progress : 1.0;
-    const bc = Offset(12.0, 10.6);
-
-    final innerT = ((t - 0.08) / 0.82).clamp(0.0, 1.0);
-    final outerT = ((t - 0.20) / 0.80).clamp(0.0, 1.0);
-
-    final outerScale = selected
-        ? _evalKeyframes(
-            outerT,
-            const [0.0, 0.50, 0.80, 1.0],
-            const [0.64, 1.20, 0.98, 1.0],
-          )
-        : 1.0;
-    final outerAlpha = selected
-        ? _evalKeyframes(outerT, const [0.0, 0.44, 1.0], const [0.12, 1.0, 1.0])
-        : 0.56;
-
-    final innerScale = selected
-        ? _evalKeyframes(
-            innerT,
-            const [0.0, 0.48, 0.78, 1.0],
-            const [0.68, 1.16, 0.98, 1.0],
-          )
-        : 1.0;
-    final innerAlpha = selected
-        ? _evalKeyframes(innerT, const [0.0, 0.42, 1.0], const [0.22, 1.0, 1.0])
-        : 1.0;
-
-    // Outer broadcast wave arcs
+    // Interior symmetric broadcast arcs
     _withPivot(
       canvas,
       bc,
-      scaleX: outerScale,
-      scaleY: outerScale,
+      scaleX: waveScale,
+      scaleY: waveScale,
       draw: () {
         final paint = Paint()
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
-          ..strokeWidth = selected ? 1.9 : 1.8
-          ..color = (selected ? activeSecondary : inactiveColor).withValues(
-            alpha: (selected ? 1.0 : inactiveColor.a) * outerAlpha,
-          );
-        final rect = Rect.fromCircle(center: bc, radius: 8.5);
+          ..strokeWidth = selected ? 1.75 : 1.7
+          ..color = selected
+              ? Colors.white.withValues(alpha: 0.92)
+              : inactiveColor.withValues(alpha: inactiveColor.a * 0.82);
+        final rect = Rect.fromCircle(center: bc, radius: 4.7);
         canvas.drawArc(
           rect,
-          138.0 * math.pi / 180.0,
-          84.0 * math.pi / 180.0,
+          136.0 * math.pi / 180.0,
+          88.0 * math.pi / 180.0,
           false,
           paint,
         );
         canvas.drawArc(
           rect,
-          -42.0 * math.pi / 180.0,
-          84.0 * math.pi / 180.0,
-          false,
-          paint,
-        );
-      },
-    );
-
-    // Inner broadcast wave arcs
-    _withPivot(
-      canvas,
-      bc,
-      scaleX: innerScale,
-      scaleY: innerScale,
-      draw: () {
-        final paint = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = selected ? 1.95 : 1.85
-          ..color = (selected ? activePrimary : inactiveColor).withValues(
-            alpha: (selected ? 1.0 : inactiveColor.a) * innerAlpha,
-          );
-        final rect = Rect.fromCircle(center: bc, radius: 5.25);
-        canvas.drawArc(
-          rect,
-          140.0 * math.pi / 180.0,
-          80.0 * math.pi / 180.0,
-          false,
-          paint,
-        );
-        canvas.drawArc(
-          rect,
-          -40.0 * math.pi / 180.0,
-          80.0 * math.pi / 180.0,
+          -44.0 * math.pi / 180.0,
+          88.0 * math.pi / 180.0,
           false,
           paint,
         );
       },
     );
 
-    // Broadcast dish stand
-    final standPath = Path()
-      ..moveTo(12.0, 14.0)
-      ..lineTo(12.0, 19.6)
-      ..moveTo(8.2, 20.6)
-      ..quadraticBezierTo(12.0, 18.8, 15.8, 20.6);
-    canvas.drawPath(
-      standPath,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round
-        ..strokeWidth = selected ? 1.95 : 1.8
-        ..color = selected ? activePrimary : inactiveColor,
-    );
-
-    // Crimson Live Halo + Center Beacon
+    // Center live beacon
     if (selected) {
       final haloScale = _evalKeyframes(
         t,
         const [0.0, 0.45, 0.78, 1.0],
-        const [0.55, 1.72, 1.08, 1.0],
-      );
-      final haloAlpha = _evalKeyframes(
-        t,
-        const [0.0, 0.48, 0.78, 1.0],
-        const [0.42, 0.14, 0.28, 0.28],
+        const [0.55, 1.62, 1.06, 1.0],
       );
       _withPivot(
         canvas,
@@ -2823,8 +2725,8 @@ class _MarcoDockIconPainter extends CustomPainter {
         draw: () {
           canvas.drawCircle(
             bc,
-            4.0,
-            Paint()..color = liveRed.withValues(alpha: haloAlpha),
+            3.6,
+            Paint()..color = liveRed.withValues(alpha: 0.32),
           );
         },
       );
@@ -2839,49 +2741,39 @@ class _MarcoDockIconPainter extends CustomPainter {
         scaleX: beaconScale,
         scaleY: beaconScale,
         draw: () {
-          canvas.drawCircle(bc, 2.35, Paint()..color = liveRed);
+          canvas.drawCircle(bc, 2.0, Paint()..color = liveRed);
+          canvas.drawCircle(
+            bc,
+            2.0,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 0.85
+              ..color = Colors.white,
+          );
         },
       );
     } else {
-      canvas.drawCircle(bc, 2.15, Paint()..color = inactiveColor);
+      canvas.drawCircle(bc, 2.0, Paint()..color = inactiveColor);
     }
   }
 
   void _paintLibrary(Canvas canvas) {
     final t = selected ? progress : 1.0;
-    final midT = ((t - 0.04) / 0.90).clamp(0.0, 1.0);
-    final backT = ((t - 0.12) / 0.88).clamp(0.0, 1.0);
-
+    final backT = ((t - 0.06) / 0.90).clamp(0.0, 1.0);
+    final backTx = selected
+        ? _evalKeyframes(
+            backT,
+            const [0.0, 0.46, 0.78, 1.0],
+            const [-2.6, 1.0, -0.2, 0.0],
+          )
+        : 0.0;
     final backTy = selected
         ? _evalKeyframes(
             backT,
-            const [0.0, 0.48, 0.80, 1.0],
-            const [5.2, -2.3, 0.4, 0.0],
+            const [0.0, 0.46, 0.78, 1.0],
+            const [2.6, -1.0, 0.2, 0.0],
           )
         : 0.0;
-    final backSx = selected
-        ? _evalKeyframes(
-            backT,
-            const [0.0, 0.48, 0.80, 1.0],
-            const [0.74, 1.08, 0.98, 1.0],
-          )
-        : 1.0;
-
-    final midTy = selected
-        ? _evalKeyframes(
-            midT,
-            const [0.0, 0.46, 0.78, 1.0],
-            const [3.2, -1.5, 0.3, 0.0],
-          )
-        : 0.0;
-    final midSx = selected
-        ? _evalKeyframes(
-            midT,
-            const [0.0, 0.46, 0.78, 1.0],
-            const [0.84, 1.06, 0.99, 1.0],
-          )
-        : 1.0;
-
     final frontScale = selected
         ? _evalKeyframes(
             t,
@@ -2889,198 +2781,158 @@ class _MarcoDockIconPainter extends CustomPainter {
             const [0.86, 1.09, 0.98, 1.0],
           )
         : 1.0;
-    final bmSy = selected
-        ? _evalKeyframes(
-            t,
-            const [0.0, 0.46, 0.78, 1.0],
-            const [0.42, 1.16, 0.96, 1.0],
-          )
-        : 1.0;
 
-    // Back card 3
+    // Peeking rear cinema card
     _withPivot(
       canvas,
-      const Offset(12.0, 4.1),
+      const Offset(13.6, 9.6),
+      translateX: backTx,
       translateY: backTy,
-      scaleX: backSx,
       draw: () {
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(
-            const Rect.fromLTWH(6.6, 3.1, 10.8, 2.0),
-            const Radius.circular(1.0),
-          ),
-          Paint()
-            ..color = selected
-                ? activeSecondary.withValues(alpha: 0.52)
-                : inactiveColor.withValues(alpha: inactiveColor.a * 0.46),
+        final backCard = RRect.fromRectAndRadius(
+          const Rect.fromLTWH(7.2, 3.4, 13.0, 13.6),
+          const Radius.circular(3.4),
         );
+        if (selected) {
+          canvas.drawRRect(
+            backCard,
+            Paint()..color = activeSecondary.withValues(alpha: 0.62),
+          );
+        } else {
+          canvas.drawRRect(
+            backCard,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.65
+              ..color = inactiveColor.withValues(alpha: inactiveColor.a * 0.55),
+          );
+        }
       },
     );
 
-    // Mid card 2
+    // Sculpted front poster card + curated media lines
     _withPivot(
       canvas,
-      const Offset(12.0, 7.2),
-      translateY: midTy,
-      scaleX: midSx,
-      draw: () {
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(
-            const Rect.fromLTWH(4.5, 6.1, 15.0, 2.15),
-            const Radius.circular(1.08),
-          ),
-          Paint()
-            ..color = selected
-                ? activeSecondary.withValues(alpha: 0.84)
-                : inactiveColor.withValues(alpha: inactiveColor.a * 0.72),
-        );
-      },
-    );
-
-    // Front card 1
-    _withPivot(
-      canvas,
-      const Offset(12.0, 15.2),
+      const Offset(10.6, 13.6),
       scaleX: frontScale,
       scaleY: frontScale,
       draw: () {
-        final card = RRect.fromRectAndRadius(
-          const Rect.fromLTWH(2.5, 9.4, 19.0, 11.6),
-          const Radius.circular(3.7),
+        final frontCard = RRect.fromRectAndRadius(
+          const Rect.fromLTWH(3.8, 6.8, 13.6, 13.8),
+          const Radius.circular(3.6),
         );
         if (selected) {
-          canvas.drawRRect(card, Paint()..color = activePrimary);
+          canvas.drawRRect(frontCard, Paint()..color = activePrimary);
         } else {
           canvas.drawRRect(
-            card,
+            frontCard,
             Paint()
               ..style = PaintingStyle.stroke
               ..strokeWidth = 1.85
               ..color = inactiveColor,
           );
         }
-      },
-    );
-
-    // Bookmark ribbon inside front card
-    _withPivot(
-      canvas,
-      const Offset(12.0, 9.4),
-      scaleY: bmSy,
-      draw: () {
-        final bm = Path()
-          ..moveTo(9.3, 9.4)
-          ..lineTo(14.7, 9.4)
-          ..lineTo(14.7, 16.5)
-          ..lineTo(12.0, 14.4)
-          ..lineTo(9.3, 16.5)
-          ..close();
-        if (selected) {
-          canvas.drawPath(bm, Paint()..color = Colors.white);
-        } else {
-          canvas.drawPath(
-            bm,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeJoin = StrokeJoin.round
-              ..strokeCap = StrokeCap.round
-              ..strokeWidth = 1.55
-              ..color = inactiveColor,
-          );
-        }
+        final detailPaint = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = selected ? 1.85 : 1.65
+          ..color = selected ? Colors.white : inactiveColor;
+        canvas.drawLine(
+          const Offset(7.3, 11.7),
+          const Offset(13.9, 11.7),
+          detailPaint,
+        );
+        canvas.drawLine(
+          const Offset(7.3, 15.5),
+          const Offset(11.8, 15.5),
+          detailPaint,
+        );
       },
     );
   }
 
   void _paintSettings(Canvas canvas) {
     final t = selected ? progress : 1.0;
-    const sixtyDeg = math.pi / 3.0;
-    final rot = selected
+    final topTx = selected
         ? _evalKeyframes(
             t,
             const [0.0, 0.48, 0.78, 1.0],
-            const [0.0, sixtyDeg * 1.18, sixtyDeg * 0.95, sixtyDeg],
+            const [-4.0, 1.1, -0.25, 0.0],
           )
         : 0.0;
-    final gearScale = selected
+    final botT = ((t - 0.06) / 0.92).clamp(0.0, 1.0);
+    final botTx = selected
         ? _evalKeyframes(
-            t,
-            const [0.0, 0.42, 0.76, 1.0],
-            const [0.86, 1.11, 0.98, 1.0],
+            botT,
+            const [0.0, 0.48, 0.78, 1.0],
+            const [4.0, -1.1, 0.25, 0.0],
           )
-        : 1.0;
+        : 0.0;
 
-    final gear = Path();
-    const samples = 96;
-    for (var i = 0; i < samples; i++) {
-      final th = (2.0 * math.pi * i) / samples - math.pi * 0.5;
-      final wave = math.cos(6.0 * th);
-      final shaped = (wave >= 0 ? 1.0 : -1.0) * math.pow(wave.abs(), 0.54);
-      final r = 8.0 + 1.55 * shaped;
-      final pt = Offset(12.0 + r * math.cos(th), 12.0 + r * math.sin(th));
-      if (i == 0) {
-        gear.moveTo(pt.dx, pt.dy);
-      } else {
-        gear.lineTo(pt.dx, pt.dy);
-      }
-    }
-    gear.close();
+    final trackPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = selected ? 2.1 : 1.85
+      ..color = selected
+          ? activePrimary.withValues(alpha: 0.45)
+          : inactiveColor;
+    canvas.drawLine(const Offset(3.6, 8.2), const Offset(20.4, 8.2), trackPaint);
+    canvas.drawLine(const Offset(3.6, 15.8), const Offset(20.4, 15.8), trackPaint);
 
+    // Top slider knob
     _withPivot(
       canvas,
-      const Offset(12.0, 12.0),
-      scaleX: gearScale,
-      scaleY: gearScale,
-      rotation: rot,
+      const Offset(15.2, 8.2),
+      translateX: topTx,
       draw: () {
         if (selected) {
-          gear.addOval(
-            Rect.fromCircle(center: const Offset(12.0, 12.0), radius: 3.65),
+          canvas.drawCircle(
+            const Offset(15.2, 8.2),
+            2.75,
+            Paint()..color = activePrimary,
           );
-          gear.fillType = PathFillType.evenOdd;
-          canvas.drawPath(gear, Paint()..color = activePrimary);
         } else {
-          canvas.drawPath(
-            gear,
-            Paint()
-              ..style = PaintingStyle.stroke
-              ..strokeJoin = StrokeJoin.round
-              ..strokeWidth = 1.85
-              ..color = inactiveColor,
+          canvas.drawCircle(
+            const Offset(15.2, 8.2),
+            2.75,
+            Paint()..color = Colors.transparent,
           );
           canvas.drawCircle(
-            const Offset(12.0, 12.0),
-            3.25,
+            const Offset(15.2, 8.2),
+            2.75,
             Paint()
               ..style = PaintingStyle.stroke
-              ..strokeWidth = 1.75
+              ..strokeWidth = 1.85
               ..color = inactiveColor,
           );
         }
       },
     );
 
-    if (selected) {
-      final jt = ((t - 0.10) / 0.90).clamp(0.0, 1.0);
-      final jScale = _evalKeyframes(
-        jt,
-        const [0.0, 0.48, 0.80, 1.0],
-        const [0.20, 1.34, 0.94, 1.0],
-      );
-      _withPivot(
-        canvas,
-        const Offset(12.0, 12.0),
-        scaleX: jScale,
-        scaleY: jScale,
-        draw: () {
+    // Bottom slider knob
+    _withPivot(
+      canvas,
+      const Offset(8.8, 15.8),
+      translateX: botTx,
+      draw: () {
+        if (selected) {
           canvas.drawCircle(
-            const Offset(12.0, 12.0),
-            1.75,
+            const Offset(8.8, 15.8),
+            2.75,
             Paint()..color = activeSecondary,
           );
-        },
-      );
-    }
+        } else {
+          canvas.drawCircle(
+            const Offset(8.8, 15.8),
+            2.75,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.85
+              ..color = inactiveColor,
+          );
+        }
+      },
+    );
   }
 
   @override

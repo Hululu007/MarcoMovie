@@ -2160,11 +2160,16 @@ class PosterLoader {
   /// 2. Bilibili PGC (`api.bilibili.com/x/web-interface/search/type` `media_bangumi` & `media_ft`)
   /// 3. Bangumi Official Open API (`api.bgm.tv/v0/episodes`)
   static Future<Map<int, EpisodeRealMeta>> fetchSeriesEpisodeMetadata(
-    String rawTitle,
-  ) {
+    String rawTitle, {
+    bool forceRefresh = false,
+  }) {
     final clean = _cleanTitle(rawTitle);
     if (clean.isEmpty) {
       return SynchronousFuture<Map<int, EpisodeRealMeta>>(const {});
+    }
+    if (forceRefresh) {
+      _seriesEpisodeMetaCache.remove(clean);
+      _inflightEpisodeMeta.remove(clean);
     }
     final cached = _seriesEpisodeMetaCache[clean];
     if (cached != null && cached.isNotEmpty) {

@@ -1,5 +1,6 @@
+import 'dart:async';
 import 'dart:io';
-import 'dart:ui' show PointerDeviceKind;
+import 'dart:ui' show PlatformDispatcher, PointerDeviceKind;
 import 'package:window_manager/window_manager.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
@@ -20,8 +21,21 @@ import 'ui/windows_appearance.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   AppLog.init();
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    debugPrint('FlutterError: ${details.exceptionAsString()}');
+  };
+  PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+    debugPrint('Uncaught platform error: $error');
+    return true;
+  };
   await OhosRuntime.ensureInitialized();
-  await IosLiquidGlassBridge.ensureInitialized();
+  try {
+    await IosLiquidGlassBridge.ensureInitialized()
+        .timeout(const Duration(seconds: 2));
+  } catch (e) {
+    debugPrint('IosLiquidGlassBridge init skipped: $e');
+  }
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     await windowManager.ensureInitialized();
     await windowManager.setMinimumSize(const Size(720, 520));
@@ -55,13 +69,17 @@ Future<void> main() async {
   GlassworkBackdrop.reduceTransparency.value = false;
   GlassworkBackdrop.intensity.value = 0.68;
   AppleTheme.mode.value = AppleTheme.fromPref(storage.appThemeMode);
-  await IosLiquidGlassBridge.setAppearanceMode(storage.appThemeMode);
+  unawaited(
+    IosLiquidGlassBridge.setAppearanceMode(storage.appThemeMode)
+        .timeout(const Duration(seconds: 2))
+        .catchError((_) {}),
+  );
   final client = CmsClient();
-  try {
-    await DownloadService.instance.init(client);
-  } catch (e) {
-    debugPrint('DownloadService init warning: $e');
-  }
+  unawaited(
+    DownloadService.instance.init(client).catchError((Object e) {
+      debugPrint('DownloadService init warning: $e');
+    }),
+  );
   runApp(MarcoMovieApp(storage: storage, client: client));
 }
 class AppScrollBehavior extends MaterialScrollBehavior {

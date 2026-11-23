@@ -28,7 +28,9 @@ private enum MarcoLiquidGlassSupport {
     if let anyKey = scenes.flatMap({ $0.windows }).first(where: { $0.isKeyWindow }) {
       return anyKey
     }
-    return activeScene?.windows.first ?? scenes.flatMap({ $0.windows }).first
+    return activeScene?.windows.first
+      ?? scenes.flatMap({ $0.windows }).first
+      ?? (UIApplication.shared.delegate?.window ?? nil)
   }
 
   static func activeWindowBounds(for view: UIView? = nil) -> CGRect {
@@ -80,7 +82,9 @@ private enum MarcoLiquidGlassSupport {
       // Forced-dark media overlay subtree (Detail / Hero / Player): keep .dark intact.
       return
     }
-    if view.overrideUserInterfaceStyle != style {
+    // Never mutate FlutterView / Metal surface layers during cold launch on iPadOS/iOS.
+    let className = NSStringFromClass(type(of: view))
+    if !className.contains("Flutter") && view.overrideUserInterfaceStyle != style {
       view.overrideUserInterfaceStyle = style
     }
     if let seg = view as? UISegmentedControl {
@@ -119,15 +123,19 @@ private enum MarcoLiquidGlassSupport {
     let winBg: UIColor = isEffectiveDark
       ? UIColor.black
       : UIColor(red: 0.914, green: 0.925, blue: 0.949, alpha: 1.0)
+    var visitedWindows: [UIWindow] = []
     for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
-      for win in scene.windows {
-        win.overrideUserInterfaceStyle = style
-        win.backgroundColor = winBg
-        win.rootViewController?.view.backgroundColor = winBg
-        restyleNativeViews(in: win, style: style)
-        if let marcoVC = win.rootViewController as? MarcoFlutterViewController {
-          marcoVC.marcoPreferredInterfaceStyle = style
-        }
+      visitedWindows.append(contentsOf: scene.windows)
+    }
+    if visitedWindows.isEmpty, let legacyWin = UIApplication.shared.delegate?.window ?? nil {
+      visitedWindows.append(legacyWin)
+    }
+    for win in visitedWindows {
+      win.overrideUserInterfaceStyle = style
+      win.backgroundColor = winBg
+      restyleNativeViews(in: win, style: style)
+      if let marcoVC = win.rootViewController as? MarcoFlutterViewController {
+        marcoVC.marcoPreferredInterfaceStyle = style
       }
     }
     NotificationCenter.default.post(name: appearanceChangedNotification, object: nil)
@@ -141,11 +149,21 @@ private enum MarcoLiquidGlassSupport {
 
   static func presentNativeAirPlayPicker() {
     guard let host = topPresenter() else { return }
-    let picker = hiddenAirPlayPicker ?? AVRoutePickerView(frame: CGRect(x: -100, y: -100, width: 44, height: 44))
+    let bounds = host.view.bounds
+    let anchorFrame = CGRect(
+      x: max(8.0, bounds.midX - 22.0),
+      y: max(8.0, bounds.midY - 22.0),
+      width: 44.0,
+      height: 44.0
+    )
+    let picker = hiddenAirPlayPicker ?? AVRoutePickerView(frame: anchorFrame)
     hiddenAirPlayPicker = picker
+    picker.frame = anchorFrame
     picker.prioritizesVideoDevices = true
-    picker.isHidden = true
-    if picker.superview == nil {
+    picker.alpha = 0.001
+    picker.isUserInteractionEnabled = false
+    if picker.superview !== host.view {
+      picker.removeFromSuperview()
       host.view.addSubview(picker)
     }
     for sub in picker.subviews {
@@ -676,14 +694,27 @@ private enum MarcoLiquidGlassSupport {
 
       let image = symbol.flatMap { UIImage(systemName: $0) }
       let attrs: UIMenuElement.Attributes = destructive ? [.destructive] : []
-      let action = UIAction(
-        title: label,
-        subtitle: (subtitle?.isEmpty ?? true) ? nil : subtitle,
-        image: image,
-        attributes: attrs,
-        state: checked ? .on : .off
-      ) { _ in
-        onSelect(id)
+      let action: UIAction
+      if #available(iOS 15.0, *) {
+        action = UIAction(
+          title: label,
+          subtitle: (subtitle?.isEmpty ?? true) ? nil : subtitle,
+          image: image,
+          attributes: attrs,
+          state: checked ? .on : .off
+        ) { _ in
+          onSelect(id)
+        }
+      } else {
+        let combined = (subtitle?.isEmpty ?? true) ? label : "\(label) · \(subtitle!)"
+        action = UIAction(
+          title: combined,
+          image: image,
+          attributes: attrs,
+          state: checked ? .on : .off
+        ) { _ in
+          onSelect(id)
+        }
       }
       currentBucket.append(action)
     }
@@ -1085,7 +1116,10 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   private let isPopoverPresentation: Bool
   private let forceDarkSurface: Bool
   private let sections: [OptionSection]
-  private let tableView = UITableView(frame: .zero, style: .insetGrouped)
+  private let tableView: UITableView
+  private var compactHeaderView: UIView?
+  private var compactHeaderLabel: UILabel?
+  private var compactHeaderDivider: UIView?
 
   private var completion: FlutterResult?
   private var resolved = false
@@ -1105,8 +1139,14 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
       let dark = useDarkColors
       tableView.separatorColor = dark
+        ? UIColor.white.withAlphaComponent(0.10)
+        : UIColor.black.withAlphaComponent(0.08)
+      compactHeaderLabel?.textColor = dark
+        ? UIColor.white.withAlphaComponent(0.92)
+        : UIColor.label
+      compactHeaderDivider?.backgroundColor = dark
         ? UIColor.white.withAlphaComponent(0.12)
-        : UIColor.black.withAlphaComponent(0.10)
+        : UIColor.black.withAlphaComponent(0.08)
       tableView.reloadData()
     }
   }
@@ -1119,10 +1159,10 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     coordinator.animate(alongsideTransition: { [weak self] _ in
       guard let self = self else { return }
       if self.isPopoverPresentation, let nav = self.navigationController {
-        let maxW = min(Double(size.width) - 24.0, 278.0)
-        let maxH = min(Double(size.height) * 0.72, 340.0)
+        let maxW = min(Double(size.width) - 24.0, 306.0)
+        let maxH = min(Double(size.height) * 0.84, 380.0)
         nav.preferredContentSize = CGSize(
-          width: max(220.0, min(Double(nav.preferredContentSize.width), maxW)),
+          width: max(236.0, min(Double(nav.preferredContentSize.width), maxW)),
           height: min(Double(nav.preferredContentSize.height), max(maxH, 160.0))
         )
       }
@@ -1161,15 +1201,17 @@ private final class MarcoNativeOptionSheetController: UIViewController,
        let aw = (anchor["width"] as? NSNumber)?.doubleValue,
        let ah = (anchor["height"] as? NSNumber)?.doubleValue {
       nav.modalPresentationStyle = .popover
+      nav.setNavigationBarHidden(true, animated: false)
       let itemCount = vc.sections.reduce(0) { $0 + $1.items.count }
       let sectionHeaderCount = vc.sections.filter { !$0.title.isEmpty }.count
       let subtitleRows = vc.sections.flatMap { $0.items }.filter { $0.subtitle != nil }.count
-      let rawHeight = 52.0 + Double(itemCount) * 44.0 + Double(subtitleRows) * 14.0 + Double(sectionHeaderCount) * 28.0 + 16.0
-      let maxH = min(Double(host.view.bounds.height) * 0.72, 340.0)
-      let maxW = min(Double(host.view.bounds.width) - 24.0, 278.0)
+      let headerH = vc.sheetTitle.isEmpty ? 6.0 : 34.0
+      let rawHeight = headerH + Double(itemCount) * 36.0 + Double(subtitleRows) * 11.0 + Double(sectionHeaderCount) * 22.0 + 10.0
+      let maxH = min(Double(host.view.bounds.height) * 0.84, 380.0)
+      let maxW = min(Double(host.view.bounds.width) - 24.0, 306.0)
       nav.preferredContentSize = CGSize(
-        width: max(226.0, maxW),
-        height: min(max(rawHeight, 132.0), max(maxH, 160.0))
+        width: max(240.0, maxW),
+        height: min(max(rawHeight, 118.0), max(maxH, 160.0))
       )
       if let popover = nav.popoverPresentationController {
         popover.delegate = vc
@@ -1186,7 +1228,7 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     } else {
       nav.modalPresentationStyle = .pageSheet
       nav.presentationController?.delegate = vc
-      if let sheet = nav.sheetPresentationController {
+      if #available(iOS 15.0, *), let sheet = nav.sheetPresentationController {
         sheet.detents = [.medium(), .large()]
         sheet.prefersGrabberVisible = true
         sheet.preferredCornerRadius = 32.0
@@ -1219,6 +1261,7 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     self.forceOpaque = (args["forceOpaque"] as? Bool) ?? false
     self.isPopoverPresentation = isPopover
     self.forceDarkSurface = (args["forceDark"] as? Bool) ?? isPopover
+    self.tableView = UITableView(frame: .zero, style: isPopover ? .plain : .insetGrouped)
     let rawItems = (args["items"] as? [[String: Any]]) ?? []
     var builtSections: [OptionSection] = []
     var currentKey: Int?
@@ -1322,10 +1365,20 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     tableView.overrideUserInterfaceStyle = overrideUserInterfaceStyle
     tableView.backgroundColor = .clear
     tableView.separatorColor = dark
-      ? UIColor.white.withAlphaComponent(0.12)
-      : UIColor.black.withAlphaComponent(0.10)
+      ? UIColor.white.withAlphaComponent(isPopoverPresentation ? 0.10 : 0.12)
+      : UIColor.black.withAlphaComponent(isPopoverPresentation ? 0.08 : 0.10)
+    if isPopoverPresentation {
+      tableView.separatorInset = UIEdgeInsets(top: 0, left: 36, bottom: 0, right: 12)
+      tableView.rowHeight = UITableView.automaticDimension
+      tableView.estimatedRowHeight = 36.0
+      tableView.contentInset = UIEdgeInsets(top: 2, left: 0, bottom: 6, right: 0)
+      tableView.tableFooterView = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 0.5))
+      if #available(iOS 15.0, *) {
+        tableView.sectionHeaderTopPadding = 4.0
+      }
+    }
     #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
+    if #available(iOS 26.0, *), !isPopoverPresentation {
       tableView.cornerConfiguration = .corners(radius: .containerConcentric(minimum: 20.0))
     }
     #endif
@@ -1341,12 +1394,59 @@ private final class MarcoNativeOptionSheetController: UIViewController,
       object: nil
     )
 
-    NSLayoutConstraint.activate([
-      tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-      tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-      tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-      tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-    ])
+    if isPopoverPresentation && !sheetTitle.isEmpty {
+      let header = UIView()
+      header.translatesAutoresizingMaskIntoConstraints = false
+      header.backgroundColor = .clear
+
+      let titleLbl = UILabel()
+      titleLbl.translatesAutoresizingMaskIntoConstraints = false
+      titleLbl.text = sheetTitle
+      titleLbl.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+      titleLbl.textAlignment = .center
+      titleLbl.textColor = dark ? UIColor.white.withAlphaComponent(0.92) : UIColor.label
+      header.addSubview(titleLbl)
+
+      let divider = UIView()
+      divider.translatesAutoresizingMaskIntoConstraints = false
+      divider.backgroundColor = dark
+        ? UIColor.white.withAlphaComponent(0.12)
+        : UIColor.black.withAlphaComponent(0.08)
+      header.addSubview(divider)
+
+      view.addSubview(header)
+      compactHeaderView = header
+      compactHeaderLabel = titleLbl
+      compactHeaderDivider = divider
+
+      NSLayoutConstraint.activate([
+        header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+        header.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+        header.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+        header.heightAnchor.constraint(equalToConstant: 32.0),
+
+        titleLbl.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 12.0),
+        titleLbl.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -12.0),
+        titleLbl.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+
+        divider.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+        divider.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+        divider.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+        divider.heightAnchor.constraint(equalToConstant: 0.5),
+
+        tableView.topAnchor.constraint(equalTo: header.bottomAnchor),
+        tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+        tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      ])
+    } else {
+      NSLayoutConstraint.activate([
+        tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+        tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+        tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      ])
+    }
   }
 
   @objc private func handleSceneActivationChanged() {
@@ -1365,8 +1465,37 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   }
 
   func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+    if isPopoverPresentation { return nil }
     let title = sections[section].title
     return title.isEmpty ? nil : title
+  }
+
+  func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+    if !isPopoverPresentation { return UITableView.automaticDimension }
+    return sections[section].title.isEmpty ? 0.0 : 21.0
+  }
+
+  func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+    guard isPopoverPresentation else { return nil }
+    let title = sections[section].title
+    guard !title.isEmpty else { return nil }
+    let dark = useDarkColors
+    let container = UIView()
+    container.backgroundColor = .clear
+    let label = UILabel()
+    label.translatesAutoresizingMaskIntoConstraints = false
+    label.text = title
+    label.font = UIFont.systemFont(ofSize: 10.5, weight: .semibold)
+    label.textColor = dark
+      ? UIColor.white.withAlphaComponent(0.50)
+      : UIColor.secondaryLabel
+    container.addSubview(label)
+    NSLayoutConstraint.activate([
+      label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12.0),
+      label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12.0),
+      label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2.0),
+    ])
+    return container
   }
 
   func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -1375,22 +1504,42 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     let dark = useDarkColors
     var cfg = cell.defaultContentConfiguration()
     cfg.text = item.title
+    cfg.textProperties.numberOfLines = isPopoverPresentation ? 1 : 2
+    cfg.textProperties.lineBreakMode = .byTruncatingTail
     cfg.textProperties.color = item.destructive
       ? UIColor.systemRed
       : (dark ? UIColor.white : UIColor.label)
     cfg.textProperties.font = UIFont.systemFont(
-      ofSize: isPopoverPresentation ? 14.5 : 15.0,
-      weight: item.checked ? .semibold : .regular
+      ofSize: isPopoverPresentation ? 13.0 : 15.0,
+      weight: item.checked ? .semibold : .medium
     )
     if let sub = item.subtitle {
       cfg.secondaryText = sub
+      cfg.secondaryTextProperties.numberOfLines = 1
+      cfg.secondaryTextProperties.lineBreakMode = .byTruncatingTail
       cfg.secondaryTextProperties.color = dark
-        ? UIColor.white.withAlphaComponent(0.66)
+        ? UIColor.white.withAlphaComponent(0.60)
         : UIColor.secondaryLabel
-      cfg.secondaryTextProperties.font = UIFont.systemFont(ofSize: 12.0, weight: .regular)
+      cfg.secondaryTextProperties.font = UIFont.systemFont(
+        ofSize: isPopoverPresentation ? 10.5 : 12.0,
+        weight: .regular
+      )
+    }
+    if isPopoverPresentation {
+      cfg.directionalLayoutMargins = NSDirectionalEdgeInsets(
+        top: 5.5,
+        leading: 12.0,
+        bottom: 5.5,
+        trailing: 10.0
+      )
+      cfg.imageToTextPadding = 9.0
+      cfg.textToSecondaryTextVerticalPadding = 1.5
     }
     if let symbol = item.symbol {
-      let symCfg = UIImage.SymbolConfiguration(pointSize: 15.5, weight: .medium)
+      let symCfg = UIImage.SymbolConfiguration(
+        pointSize: isPopoverPresentation ? 13.5 : 15.5,
+        weight: .medium
+      )
       cfg.image = UIImage(systemName: symbol, withConfiguration: symCfg)
       cfg.imageProperties.tintColor = item.destructive
         ? UIColor.systemRed
@@ -1401,10 +1550,14 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     cell.contentConfiguration = cfg
     cell.accessoryType = item.checked ? .checkmark : .none
     cell.tintColor = UIColor.systemBlue
-    let alpha: CGFloat = isOpaqueMode ? 0.96 : (isPopoverPresentation ? 0.42 : 0.72)
-    cell.backgroundColor = dark
-      ? UIColor(white: 0.16, alpha: alpha)
-      : UIColor(white: 1.0, alpha: isOpaqueMode ? 0.98 : 0.78)
+    if isPopoverPresentation {
+      cell.backgroundColor = .clear
+    } else {
+      let alpha: CGFloat = isOpaqueMode ? 0.96 : 0.72
+      cell.backgroundColor = dark
+        ? UIColor(white: 0.16, alpha: alpha)
+        : UIColor(white: 1.0, alpha: isOpaqueMode ? 0.98 : 0.78)
+    }
     return cell
   }
 
@@ -1548,7 +1701,7 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     nav.modalPresentationStyle = .pageSheet
     nav.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     nav.presentationController?.delegate = vc
-    if let sheet = nav.sheetPresentationController {
+    if #available(iOS 15.0, *), let sheet = nav.sheetPresentationController {
       sheet.detents = [.medium(), .large()]
       sheet.prefersGrabberVisible = true
       sheet.preferredCornerRadius = 32.0
@@ -1736,36 +1889,47 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
 
   private func applyChipStyle(_ button: UIButton, title: String, selected: Bool) {
     let dark = MarcoLiquidGlassSupport.isEffectiveDark
-    var titleAttr = AttributedString(title)
-    titleAttr.font = UIFont.systemFont(ofSize: 13.0, weight: selected ? .bold : .medium)
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      var cfg = selected ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
-      cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = selected
-        ? .white
-        : (dark ? UIColor.white.withAlphaComponent(0.88) : UIColor.label)
-      if selected {
-        cfg.baseBackgroundColor = UIColor.systemBlue
+    let fg: UIColor = selected
+      ? .white
+      : (dark ? UIColor.white.withAlphaComponent(0.88) : UIColor.label)
+    let bg: UIColor = selected
+      ? UIColor.systemBlue
+      : (dark ? UIColor(white: 0.22, alpha: 0.85) : UIColor.secondarySystemFill)
+    let font = UIFont.systemFont(ofSize: 13.0, weight: selected ? .bold : .medium)
+    if #available(iOS 15.0, *) {
+      var titleAttr = AttributedString(title)
+      titleAttr.font = font
+      #if compiler(>=6.2)
+      if #available(iOS 26.0, *) {
+        var cfg = selected ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
+        cfg.attributedTitle = titleAttr
+        cfg.baseForegroundColor = fg
+        if selected {
+          cfg.baseBackgroundColor = UIColor.systemBlue
+        }
+        cfg.cornerStyle = .capsule
+        cfg.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 13, bottom: 7, trailing: 13)
+        button.configuration = cfg
+        button.cornerConfiguration = .capsule()
+        return
       }
+      #endif
+      var cfg = UIButton.Configuration.filled()
+      cfg.attributedTitle = titleAttr
+      cfg.baseForegroundColor = fg
+      cfg.baseBackgroundColor = bg
       cfg.cornerStyle = .capsule
       cfg.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 13, bottom: 7, trailing: 13)
       button.configuration = cfg
-      button.cornerConfiguration = .capsule()
-      return
+    } else {
+      button.setTitle(title, for: .normal)
+      button.titleLabel?.font = font
+      button.setTitleColor(fg, for: .normal)
+      button.backgroundColor = bg
+      button.contentEdgeInsets = UIEdgeInsets(top: 7, left: 13, bottom: 7, right: 13)
+      button.layer.cornerRadius = 15.0
+      button.layer.masksToBounds = true
     }
-    #endif
-    var cfg = UIButton.Configuration.filled()
-    cfg.attributedTitle = titleAttr
-    cfg.baseForegroundColor = selected
-      ? .white
-      : (dark ? UIColor.white.withAlphaComponent(0.86) : UIColor.label)
-    cfg.baseBackgroundColor = selected
-      ? UIColor.systemBlue
-      : (dark ? UIColor(white: 0.22, alpha: 0.85) : UIColor.secondarySystemFill)
-    cfg.cornerStyle = .capsule
-    cfg.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 13, bottom: 7, trailing: 13)
-    button.configuration = cfg
   }
 
   private func refreshSelectionStyles() {
@@ -1997,29 +2161,40 @@ private final class MarcoNativePinSheetController: UIViewController {
     titleLabel.textColor = dark ? .white : UIColor.label
     for btn in digitButtons {
       btn.overrideUserInterfaceStyle = style
-      if var cfg = btn.configuration {
-        cfg.baseForegroundColor = dark ? .white : UIColor.label
-        if #unavailable(iOS 26.0) {
-          cfg.baseBackgroundColor = dark
-            ? UIColor(white: 0.22, alpha: 0.85)
-            : UIColor.secondarySystemFill
+      let fg = dark ? UIColor.white : UIColor.label
+      let bg = dark ? UIColor(white: 0.22, alpha: 0.85) : UIColor.secondarySystemFill
+      if #available(iOS 15.0, *) {
+        if var cfg = btn.configuration {
+          cfg.baseForegroundColor = fg
+          if #unavailable(iOS 26.0) {
+            cfg.baseBackgroundColor = bg
+          }
+          btn.configuration = cfg
         }
-        btn.configuration = cfg
+      } else {
+        btn.setTitleColor(fg, for: .normal)
+        btn.backgroundColor = bg
       }
     }
     cancelButton.overrideUserInterfaceStyle = style
-    if var cfg = cancelButton.configuration {
-      cfg.baseForegroundColor = dark
-        ? UIColor.white.withAlphaComponent(0.78)
-        : UIColor.secondaryLabel
-      cancelButton.configuration = cfg
+    let cancelFg = dark ? UIColor.white.withAlphaComponent(0.78) : UIColor.secondaryLabel
+    if #available(iOS 15.0, *) {
+      if var cfg = cancelButton.configuration {
+        cfg.baseForegroundColor = cancelFg
+        cancelButton.configuration = cfg
+      }
+    } else {
+      cancelButton.setTitleColor(cancelFg, for: .normal)
     }
     backspaceButton.overrideUserInterfaceStyle = style
-    if var cfg = backspaceButton.configuration {
-      cfg.baseForegroundColor = dark
-        ? UIColor.white.withAlphaComponent(0.84)
-        : UIColor.label
-      backspaceButton.configuration = cfg
+    let backFg = dark ? UIColor.white.withAlphaComponent(0.84) : UIColor.label
+    if #available(iOS 15.0, *) {
+      if var cfg = backspaceButton.configuration {
+        cfg.baseForegroundColor = backFg
+        backspaceButton.configuration = cfg
+      }
+    } else {
+      backspaceButton.tintColor = backFg
     }
   }
 
@@ -2314,39 +2489,47 @@ private final class MarcoNativePinSheetController: UIViewController {
     btn.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     btn.tag = Int(digit) ?? 0
     btn.accessibilityLabel = digit
-    var titleAttr = AttributedString(digit)
-    titleAttr.font = UIFont.monospacedDigitSystemFont(ofSize: 28.0, weight: .medium)
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      var cfg = UIButton.Configuration.glass()
-      cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = dark ? .white : UIColor.label
-      cfg.cornerStyle = .capsule
-      cfg.contentInsets = .zero
-      btn.configuration = cfg
-      btn.cornerConfiguration = .capsule()
-    } else {
+    let font = UIFont.monospacedDigitSystemFont(ofSize: 28.0, weight: .medium)
+    let fg: UIColor = dark ? .white : UIColor.label
+    let bg: UIColor = dark ? UIColor(white: 0.22, alpha: 0.85) : UIColor.secondarySystemFill
+    if #available(iOS 15.0, *) {
+      var titleAttr = AttributedString(digit)
+      titleAttr.font = font
+      #if compiler(>=6.2)
+      if #available(iOS 26.0, *) {
+        var cfg = UIButton.Configuration.glass()
+        cfg.attributedTitle = titleAttr
+        cfg.baseForegroundColor = fg
+        cfg.cornerStyle = .capsule
+        cfg.contentInsets = .zero
+        btn.configuration = cfg
+        btn.cornerConfiguration = .capsule()
+      } else {
+        var cfg = UIButton.Configuration.filled()
+        cfg.attributedTitle = titleAttr
+        cfg.baseForegroundColor = fg
+        cfg.baseBackgroundColor = bg
+        cfg.cornerStyle = .capsule
+        cfg.contentInsets = .zero
+        btn.configuration = cfg
+      }
+      #else
       var cfg = UIButton.Configuration.filled()
       cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = dark ? .white : UIColor.label
-      cfg.baseBackgroundColor = dark
-        ? UIColor(white: 0.22, alpha: 0.85)
-        : UIColor.secondarySystemFill
+      cfg.baseForegroundColor = fg
+      cfg.baseBackgroundColor = bg
       cfg.cornerStyle = .capsule
       cfg.contentInsets = .zero
       btn.configuration = cfg
+      #endif
+    } else {
+      btn.setTitle(digit, for: .normal)
+      btn.titleLabel?.font = font
+      btn.setTitleColor(fg, for: .normal)
+      btn.backgroundColor = bg
+      btn.layer.cornerRadius = size * 0.5
+      btn.layer.masksToBounds = true
     }
-    #else
-    var cfg = UIButton.Configuration.filled()
-    cfg.attributedTitle = titleAttr
-    cfg.baseForegroundColor = dark ? .white : UIColor.label
-    cfg.baseBackgroundColor = dark
-      ? UIColor(white: 0.22, alpha: 0.85)
-      : UIColor.secondarySystemFill
-    cfg.cornerStyle = .capsule
-    cfg.contentInsets = .zero
-    btn.configuration = cfg
-    #endif
     btn.addTarget(self, action: #selector(digitTapped(_:)), for: .touchUpInside)
     NSLayoutConstraint.activate([
       btn.widthAnchor.constraint(equalToConstant: size),
@@ -2360,15 +2543,21 @@ private final class MarcoNativePinSheetController: UIViewController {
     cancelButton.translatesAutoresizingMaskIntoConstraints = false
     cancelButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     cancelButton.accessibilityLabel = "取消"
-    var titleAttr = AttributedString("取消")
-    titleAttr.font = UIFont.systemFont(ofSize: 16.0, weight: .semibold)
-    var cfg = UIButton.Configuration.plain()
-    cfg.attributedTitle = titleAttr
-    cfg.baseForegroundColor = dark
-      ? UIColor.white.withAlphaComponent(0.78)
-      : UIColor.secondaryLabel
-    cfg.contentInsets = .zero
-    cancelButton.configuration = cfg
+    let font = UIFont.systemFont(ofSize: 16.0, weight: .semibold)
+    let fg = dark ? UIColor.white.withAlphaComponent(0.78) : UIColor.secondaryLabel
+    if #available(iOS 15.0, *) {
+      var titleAttr = AttributedString("取消")
+      titleAttr.font = font
+      var cfg = UIButton.Configuration.plain()
+      cfg.attributedTitle = titleAttr
+      cfg.baseForegroundColor = fg
+      cfg.contentInsets = .zero
+      cancelButton.configuration = cfg
+    } else {
+      cancelButton.setTitle("取消", for: .normal)
+      cancelButton.titleLabel?.font = font
+      cancelButton.setTitleColor(fg, for: .normal)
+    }
     cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
     NSLayoutConstraint.activate([
       cancelButton.widthAnchor.constraint(equalToConstant: size),
@@ -2382,13 +2571,18 @@ private final class MarcoNativePinSheetController: UIViewController {
     backspaceButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     backspaceButton.accessibilityLabel = "删除"
     let symCfg = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .medium)
-    var cfg = UIButton.Configuration.plain()
-    cfg.image = UIImage(systemName: "delete.left.fill", withConfiguration: symCfg)
-    cfg.baseForegroundColor = dark
-      ? UIColor.white.withAlphaComponent(0.84)
-      : UIColor.label
-    cfg.contentInsets = .zero
-    backspaceButton.configuration = cfg
+    let img = UIImage(systemName: "delete.left.fill", withConfiguration: symCfg)
+    let fg = dark ? UIColor.white.withAlphaComponent(0.84) : UIColor.label
+    if #available(iOS 15.0, *) {
+      var cfg = UIButton.Configuration.plain()
+      cfg.image = img
+      cfg.baseForegroundColor = fg
+      cfg.contentInsets = .zero
+      backspaceButton.configuration = cfg
+    } else {
+      backspaceButton.setImage(img, for: .normal)
+      backspaceButton.tintColor = fg
+    }
     backspaceButton.addTarget(self, action: #selector(backspaceTapped), for: .touchUpInside)
     NSLayoutConstraint.activate([
       backspaceButton.widthAnchor.constraint(equalToConstant: size),
@@ -2691,26 +2885,24 @@ private final class MarcoAnimatedTabIconView: UIView {
   }
 
   private let canvasLayer = CALayer()
-  // Home layers
-  private let homeScreenLayer = CAShapeLayer()
+  // Home layers (Sculpted Cinema House + Centered Play Aperture + Peak Accent)
+  private let homeHouseLayer = CAShapeLayer()
   private let homePlayLayer = CAShapeLayer()
-  private let homeStandLayer = CAShapeLayer()
-  private let homeSparkleLayer = CAShapeLayer()
-  // Live layers
-  private let liveOuterWaveLayer = CAShapeLayer()
-  private let liveInnerWaveLayer = CAShapeLayer()
-  private let liveStandLayer = CAShapeLayer()
+  private let homeAccentLayer = CAShapeLayer()
+  // Live layers (Rounded Broadcast Frame + Symmetric Interior Signal Arcs + Crimson Beacon)
+  private let liveFrameLayer = CAShapeLayer()
+  private let liveWaveLayer = CAShapeLayer()
   private let liveHaloLayer = CAShapeLayer()
   private let liveBeaconLayer = CAShapeLayer()
-  // Library layers
+  // Library layers (Overlapping Cinema Poster Deck + Film Reel Bars)
   private let libBackCardLayer = CAShapeLayer()
-  private let libMidCardLayer = CAShapeLayer()
   private let libFrontCardLayer = CAShapeLayer()
-  private let libBookmarkLayer = CAShapeLayer()
-  // Settings layers
-  private let settingsGearLayer = CAShapeLayer()
-  private let settingsHoleLayer = CAShapeLayer()
-  private let settingsJewelLayer = CAShapeLayer()
+  private let libDetailLayer = CAShapeLayer()
+  // Settings layers (Apple Control-Center Precision Sliders)
+  private let settingsTrackTopLayer = CAShapeLayer()
+  private let settingsTrackBotLayer = CAShapeLayer()
+  private let settingsKnobTopLayer = CAShapeLayer()
+  private let settingsKnobBotLayer = CAShapeLayer()
   // Fallback SF Symbol
   private let fallbackImageView = UIImageView()
 
@@ -2746,25 +2938,23 @@ private final class MarcoAnimatedTabIconView: UIView {
       canvasLayer.addSublayer(sl)
     }
 
-    setup(homeStandLayer, pivot: CGPoint(x: 12.0, y: 19.6))
-    setup(homeScreenLayer, pivot: CGPoint(x: 12.0, y: 10.7))
-    setup(homePlayLayer, pivot: CGPoint(x: 12.2, y: 10.7))
-    setup(homeSparkleLayer, pivot: CGPoint(x: 20.6, y: 3.4))
+    setup(homeHouseLayer, pivot: CGPoint(x: 12.0, y: 12.2))
+    setup(homePlayLayer, pivot: CGPoint(x: 12.2, y: 13.8))
+    setup(homeAccentLayer, pivot: CGPoint(x: 12.0, y: 4.5))
 
-    setup(liveOuterWaveLayer, pivot: CGPoint(x: 12.0, y: 10.6))
-    setup(liveInnerWaveLayer, pivot: CGPoint(x: 12.0, y: 10.6))
-    setup(liveStandLayer, pivot: CGPoint(x: 12.0, y: 17.5))
-    setup(liveHaloLayer, pivot: CGPoint(x: 12.0, y: 10.6))
-    setup(liveBeaconLayer, pivot: CGPoint(x: 12.0, y: 10.6))
+    setup(liveFrameLayer, pivot: CGPoint(x: 12.0, y: 12.0))
+    setup(liveWaveLayer, pivot: CGPoint(x: 12.0, y: 12.0))
+    setup(liveHaloLayer, pivot: CGPoint(x: 12.0, y: 12.0))
+    setup(liveBeaconLayer, pivot: CGPoint(x: 12.0, y: 12.0))
 
-    setup(libBackCardLayer, pivot: CGPoint(x: 12.0, y: 4.1))
-    setup(libMidCardLayer, pivot: CGPoint(x: 12.0, y: 7.2))
-    setup(libFrontCardLayer, pivot: CGPoint(x: 12.0, y: 15.2))
-    setup(libBookmarkLayer, pivot: CGPoint(x: 12.0, y: 9.4))
+    setup(libBackCardLayer, pivot: CGPoint(x: 13.6, y: 9.6))
+    setup(libFrontCardLayer, pivot: CGPoint(x: 10.6, y: 13.6))
+    setup(libDetailLayer, pivot: CGPoint(x: 10.6, y: 13.6))
 
-    setup(settingsGearLayer, pivot: CGPoint(x: 12.0, y: 12.0))
-    setup(settingsHoleLayer, pivot: CGPoint(x: 12.0, y: 12.0))
-    setup(settingsJewelLayer, pivot: CGPoint(x: 12.0, y: 12.0))
+    setup(settingsTrackTopLayer, pivot: CGPoint(x: 12.0, y: 8.2))
+    setup(settingsTrackBotLayer, pivot: CGPoint(x: 12.0, y: 15.8))
+    setup(settingsKnobTopLayer, pivot: CGPoint(x: 15.2, y: 8.2))
+    setup(settingsKnobBotLayer, pivot: CGPoint(x: 8.8, y: 15.8))
 
     fallbackImageView.contentMode = .scaleAspectFit
     fallbackImageView.isHidden = true
@@ -2802,118 +2992,81 @@ private final class MarcoAnimatedTabIconView: UIView {
   }
 
   private func buildStaticPaths() {
-    // 1. Home: Cinema Screen + Sculpted Play Triangle + Curved Stand + 4-pt Sparkle
-    homeScreenLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 2.3, y: 3.9, width: 19.4, height: 13.6),
-      cornerRadius: 4.3
-    ).cgPath
+    // 1. Home: Sculpted Rounded Cinema House + Centered Play Aperture
+    let house = UIBezierPath()
+    house.move(to: CGPoint(x: 4.0, y: 11.1))
+    house.addQuadCurve(to: CGPoint(x: 5.3, y: 8.5), controlPoint: CGPoint(x: 4.0, y: 9.5))
+    house.addLine(to: CGPoint(x: 10.6, y: 4.2))
+    house.addQuadCurve(to: CGPoint(x: 13.4, y: 4.2), controlPoint: CGPoint(x: 12.0, y: 3.1))
+    house.addLine(to: CGPoint(x: 18.7, y: 8.5))
+    house.addQuadCurve(to: CGPoint(x: 20.0, y: 11.1), controlPoint: CGPoint(x: 20.0, y: 9.5))
+    house.addLine(to: CGPoint(x: 20.0, y: 17.3))
+    house.addQuadCurve(to: CGPoint(x: 16.9, y: 20.4), controlPoint: CGPoint(x: 20.0, y: 20.4))
+    house.addLine(to: CGPoint(x: 7.1, y: 20.4))
+    house.addQuadCurve(to: CGPoint(x: 4.0, y: 17.3), controlPoint: CGPoint(x: 4.0, y: 20.4))
+    house.close()
+    homeHouseLayer.path = house.cgPath
 
     let playPath = UIBezierPath()
-    playPath.move(to: CGPoint(x: 10.0, y: 8.3))
-    playPath.addLine(to: CGPoint(x: 15.3, y: 10.7))
-    playPath.addLine(to: CGPoint(x: 10.0, y: 13.1))
+    playPath.move(to: CGPoint(x: 10.2, y: 11.3))
+    playPath.addLine(to: CGPoint(x: 15.1, y: 13.8))
+    playPath.addLine(to: CGPoint(x: 10.2, y: 16.3))
     playPath.close()
     homePlayLayer.path = playPath.cgPath
 
-    let standPath = UIBezierPath()
-    standPath.move(to: CGPoint(x: 8.1, y: 20.5))
-    standPath.addQuadCurve(to: CGPoint(x: 15.9, y: 20.5), controlPoint: CGPoint(x: 12.0, y: 18.8))
-    homeStandLayer.path = standPath.cgPath
+    let accent = UIBezierPath()
+    accent.move(to: CGPoint(x: 10.0, y: 7.4))
+    accent.addQuadCurve(to: CGPoint(x: 14.0, y: 7.4), controlPoint: CGPoint(x: 12.0, y: 6.1))
+    homeAccentLayer.path = accent.cgPath
 
-    let sparklePath = UIBezierPath()
-    let sc = CGPoint(x: 20.6, y: 3.4)
-    let sr: Double = 2.75
-    let ir: Double = 0.78
-    for k in 0..<8 {
-      let a = Double(k) * (Double.pi / 4.0)
-      let rr = (k % 2 == 0) ? sr : ir
-      let pt = CGPoint(
-        x: sc.x + CGFloat(Foundation.cos(a) * rr),
-        y: sc.y + CGFloat(Foundation.sin(a) * rr)
-      )
-      if k == 0 { sparklePath.move(to: pt) } else { sparklePath.addLine(to: pt) }
-    }
-    sparklePath.close()
-    homeSparkleLayer.path = sparklePath.cgPath
-
-    // 2. Live: Broadcast Beacon + Dual Concentric Wave Arcs + Dish Stand
-    let bc = CGPoint(x: 12.0, y: 10.6)
-    let outerArc = UIBezierPath()
-    let deg42 = 42.0 * Double.pi / 180.0
-    let deg138 = 138.0 * Double.pi / 180.0
-    let deg222 = 222.0 * Double.pi / 180.0
-    outerArc.addArc(withCenter: bc, radius: 8.5, startAngle: CGFloat(deg138), endAngle: CGFloat(deg222), clockwise: true)
-    outerArc.move(to: CGPoint(x: bc.x + CGFloat(Foundation.cos(-deg42) * 8.5), y: bc.y + CGFloat(Foundation.sin(-deg42) * 8.5)))
-    outerArc.addArc(withCenter: bc, radius: 8.5, startAngle: CGFloat(-deg42), endAngle: CGFloat(deg42), clockwise: true)
-    liveOuterWaveLayer.path = outerArc.cgPath
-
-    let innerArc = UIBezierPath()
-    let deg40 = 40.0 * Double.pi / 180.0
-    let deg140 = 140.0 * Double.pi / 180.0
-    let deg220 = 220.0 * Double.pi / 180.0
-    innerArc.addArc(withCenter: bc, radius: 5.25, startAngle: CGFloat(deg140), endAngle: CGFloat(deg220), clockwise: true)
-    innerArc.move(to: CGPoint(x: bc.x + CGFloat(Foundation.cos(-deg40) * 5.25), y: bc.y + CGFloat(Foundation.sin(-deg40) * 5.25)))
-    innerArc.addArc(withCenter: bc, radius: 5.25, startAngle: CGFloat(-deg40), endAngle: CGFloat(deg40), clockwise: true)
-    liveInnerWaveLayer.path = innerArc.cgPath
-
-    let liveStand = UIBezierPath()
-    liveStand.move(to: CGPoint(x: 12.0, y: 14.0))
-    liveStand.addLine(to: CGPoint(x: 12.0, y: 19.6))
-    liveStand.move(to: CGPoint(x: 8.2, y: 20.6))
-    liveStand.addQuadCurve(to: CGPoint(x: 15.8, y: 20.6), controlPoint: CGPoint(x: 12.0, y: 18.8))
-    liveStandLayer.path = liveStand.cgPath
-
-    liveHaloLayer.path = UIBezierPath(ovalIn: CGRect(x: bc.x - 4.0, y: bc.y - 4.0, width: 8.0, height: 8.0)).cgPath
-    liveBeaconLayer.path = UIBezierPath(ovalIn: CGRect(x: bc.x - 2.35, y: bc.y - 2.35, width: 4.7, height: 4.7)).cgPath
-
-    // 3. Library: 3-Layer Film Collection Deck + Bookmark Ribbon
-    libBackCardLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 6.6, y: 3.1, width: 10.8, height: 2.0),
-      cornerRadius: 1.0
+    // 2. Live: Rounded Cinema Broadcast Frame + Symmetric Interior Wave Arcs + Live Dot
+    liveFrameLayer.path = UIBezierPath(
+      roundedRect: CGRect(x: 2.6, y: 4.8, width: 18.8, height: 14.4),
+      cornerRadius: 4.8
     ).cgPath
-    libMidCardLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 4.5, y: 6.1, width: 15.0, height: 2.15),
-      cornerRadius: 1.08
+
+    let bc = CGPoint(x: 12.0, y: 12.0)
+    let wave = UIBezierPath()
+    let deg44 = 44.0 * Double.pi / 180.0
+    let deg136 = 136.0 * Double.pi / 180.0
+    let deg224 = 224.0 * Double.pi / 180.0
+    wave.addArc(withCenter: bc, radius: 4.7, startAngle: CGFloat(deg136), endAngle: CGFloat(deg224), clockwise: true)
+    wave.move(to: CGPoint(x: bc.x + CGFloat(Foundation.cos(-deg44) * 4.7), y: bc.y + CGFloat(Foundation.sin(-deg44) * 4.7)))
+    wave.addArc(withCenter: bc, radius: 4.7, startAngle: CGFloat(-deg44), endAngle: CGFloat(deg44), clockwise: true)
+    liveWaveLayer.path = wave.cgPath
+
+    liveHaloLayer.path = UIBezierPath(ovalIn: CGRect(x: bc.x - 3.6, y: bc.y - 3.6, width: 7.2, height: 7.2)).cgPath
+    liveBeaconLayer.path = UIBezierPath(ovalIn: CGRect(x: bc.x - 2.0, y: bc.y - 2.0, width: 4.0, height: 4.0)).cgPath
+
+    // 3. Library: Sculpted Dual-Layer Poster Deck + Curated Film Bars
+    libBackCardLayer.path = UIBezierPath(
+      roundedRect: CGRect(x: 7.2, y: 3.4, width: 13.0, height: 13.6),
+      cornerRadius: 3.4
     ).cgPath
     libFrontCardLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 2.5, y: 9.4, width: 19.0, height: 11.6),
-      cornerRadius: 3.7
+      roundedRect: CGRect(x: 3.8, y: 6.8, width: 13.6, height: 13.8),
+      cornerRadius: 3.6
     ).cgPath
+    let detail = UIBezierPath()
+    detail.move(to: CGPoint(x: 7.3, y: 11.7))
+    detail.addLine(to: CGPoint(x: 13.9, y: 11.7))
+    detail.move(to: CGPoint(x: 7.3, y: 15.5))
+    detail.addLine(to: CGPoint(x: 11.8, y: 15.5))
+    libDetailLayer.path = detail.cgPath
 
-    let bm = UIBezierPath()
-    bm.move(to: CGPoint(x: 9.3, y: 9.4))
-    bm.addLine(to: CGPoint(x: 14.7, y: 9.4))
-    bm.addLine(to: CGPoint(x: 14.7, y: 16.5))
-    bm.addLine(to: CGPoint(x: 12.0, y: 14.4))
-    bm.addLine(to: CGPoint(x: 9.3, y: 16.5))
-    bm.close()
-    libBookmarkLayer.path = bm.cgPath
+    // 4. Settings: Modern Apple Precision Control Sliders
+    let topTrack = UIBezierPath()
+    topTrack.move(to: CGPoint(x: 3.6, y: 8.2))
+    topTrack.addLine(to: CGPoint(x: 20.4, y: 8.2))
+    settingsTrackTopLayer.path = topTrack.cgPath
 
-    // 4. Settings: Sculpted 6-Lobe Apple Precision Gear + Inner Ring + Center Jewel
-    let gearPath = buildSculptedGearPath(includeInnerHole: true)
-    settingsGearLayer.path = gearPath.cgPath
-    settingsGearLayer.fillRule = .evenOdd
-    settingsHoleLayer.path = UIBezierPath(ovalIn: CGRect(x: 8.75, y: 8.75, width: 6.5, height: 6.5)).cgPath
-    settingsJewelLayer.path = UIBezierPath(ovalIn: CGRect(x: 10.25, y: 10.25, width: 3.5, height: 3.5)).cgPath
-  }
+    let botTrack = UIBezierPath()
+    botTrack.move(to: CGPoint(x: 3.6, y: 15.8))
+    botTrack.addLine(to: CGPoint(x: 20.4, y: 15.8))
+    settingsTrackBotLayer.path = botTrack.cgPath
 
-  private func buildSculptedGearPath(includeInnerHole: Bool) -> UIBezierPath {
-    let path = UIBezierPath()
-    let samples = 96
-    for i in 0..<samples {
-      let th = (2.0 * Double.pi * Double(i)) / Double(samples) - Double.pi * 0.5
-      let wave = Foundation.cos(6.0 * th)
-      let shaped = (wave >= 0 ? 1.0 : -1.0) * Foundation.pow(abs(wave), 0.54)
-      let r = 8.0 + 1.55 * shaped
-      let pt = CGPoint(x: 12.0 + r * Foundation.cos(th), y: 12.0 + r * Foundation.sin(th))
-      if i == 0 { path.move(to: pt) } else { path.addLine(to: pt) }
-    }
-    path.close()
-    if includeInnerHole {
-      let hole = UIBezierPath(ovalIn: CGRect(x: 8.35, y: 8.35, width: 7.3, height: 7.3))
-      path.append(hole)
-    }
-    return path
+    settingsKnobTopLayer.path = UIBezierPath(ovalIn: CGRect(x: 12.45, y: 5.45, width: 5.5, height: 5.5)).cgPath
+    settingsKnobBotLayer.path = UIBezierPath(ovalIn: CGRect(x: 6.05, y: 13.05, width: 5.5, height: 5.5)).cgPath
   }
 
   func configure(kind: Kind, selected: Bool, dark: Bool, fallbackSymbol: String) {
@@ -2932,14 +3085,17 @@ private final class MarcoAnimatedTabIconView: UIView {
       ? UIColor(red: 1.0, green: 0.27, blue: 0.23, alpha: 1.0)
       : UIColor(red: 1.0, green: 0.23, blue: 0.19, alpha: 1.0)
     let inactiveColor: UIColor = dark
-      ? UIColor.white.withAlphaComponent(0.70)
-      : UIColor(red: 0.17, green: 0.19, blue: 0.23, alpha: 0.74)
+      ? UIColor.white.withAlphaComponent(0.74)
+      : UIColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 0.78)
+    let surfaceCutout: UIColor = dark
+      ? UIColor(red: 0.10, green: 0.11, blue: 0.14, alpha: 1.0)
+      : UIColor.white
 
     let allShapeLayers: [CAShapeLayer] = [
-      homeScreenLayer, homePlayLayer, homeStandLayer, homeSparkleLayer,
-      liveOuterWaveLayer, liveInnerWaveLayer, liveStandLayer, liveHaloLayer, liveBeaconLayer,
-      libBackCardLayer, libMidCardLayer, libFrontCardLayer, libBookmarkLayer,
-      settingsGearLayer, settingsHoleLayer, settingsJewelLayer,
+      homeHouseLayer, homePlayLayer, homeAccentLayer,
+      liveFrameLayer, liveWaveLayer, liveHaloLayer, liveBeaconLayer,
+      libBackCardLayer, libFrontCardLayer, libDetailLayer,
+      settingsTrackTopLayer, settingsTrackBotLayer, settingsKnobTopLayer, settingsKnobBotLayer,
     ]
 
     CATransaction.begin()
@@ -2951,122 +3107,132 @@ private final class MarcoAnimatedTabIconView: UIView {
 
     switch kind {
     case .home:
-      homeScreenLayer.isHidden = false
+      homeHouseLayer.isHidden = false
       homePlayLayer.isHidden = false
-      homeStandLayer.isHidden = false
-      homeSparkleLayer.isHidden = !selected
+      homeAccentLayer.isHidden = !selected
 
       if selected {
-        homeScreenLayer.fillColor = activePrimary.cgColor
-        homeScreenLayer.strokeColor = nil
-        homeScreenLayer.lineWidth = 0.0
+        homeHouseLayer.fillColor = activePrimary.cgColor
+        homeHouseLayer.strokeColor = nil
+        homeHouseLayer.lineWidth = 0.0
 
         homePlayLayer.fillColor = UIColor.white.cgColor
         homePlayLayer.strokeColor = UIColor.white.cgColor
         homePlayLayer.lineWidth = 0.9
 
-        homeStandLayer.fillColor = nil
-        homeStandLayer.strokeColor = activeSecondary.cgColor
-        homeStandLayer.lineWidth = 2.05
-
-        homeSparkleLayer.fillColor = activeSecondary.cgColor
-        homeSparkleLayer.strokeColor = nil
+        homeAccentLayer.fillColor = nil
+        homeAccentLayer.strokeColor = UIColor.white.withAlphaComponent(0.45).cgColor
+        homeAccentLayer.lineWidth = 1.4
       } else {
-        homeScreenLayer.fillColor = nil
-        homeScreenLayer.strokeColor = inactiveColor.cgColor
-        homeScreenLayer.lineWidth = 1.85
+        homeHouseLayer.fillColor = nil
+        homeHouseLayer.strokeColor = inactiveColor.cgColor
+        homeHouseLayer.lineWidth = 1.85
 
-        homePlayLayer.fillColor = nil
+        homePlayLayer.fillColor = inactiveColor.cgColor
         homePlayLayer.strokeColor = inactiveColor.cgColor
-        homePlayLayer.lineWidth = 1.55
-
-        homeStandLayer.fillColor = nil
-        homeStandLayer.strokeColor = inactiveColor.withAlphaComponent(0.74).cgColor
-        homeStandLayer.lineWidth = 1.75
+        homePlayLayer.lineWidth = 0.7
       }
 
     case .live:
-      liveOuterWaveLayer.isHidden = false
-      liveInnerWaveLayer.isHidden = false
-      liveStandLayer.isHidden = false
+      liveFrameLayer.isHidden = false
+      liveWaveLayer.isHidden = false
       liveBeaconLayer.isHidden = false
       liveHaloLayer.isHidden = !selected
 
-      liveOuterWaveLayer.fillColor = nil
-      liveInnerWaveLayer.fillColor = nil
-      liveStandLayer.fillColor = nil
-
+      liveWaveLayer.fillColor = nil
       if selected {
-        liveOuterWaveLayer.strokeColor = activeSecondary.cgColor
-        liveOuterWaveLayer.lineWidth = 1.9
-        liveInnerWaveLayer.strokeColor = activePrimary.cgColor
-        liveInnerWaveLayer.lineWidth = 1.95
-        liveStandLayer.strokeColor = activePrimary.cgColor
-        liveStandLayer.lineWidth = 1.95
-        liveHaloLayer.fillColor = liveBeaconRed.withAlphaComponent(0.28).cgColor
+        liveFrameLayer.fillColor = activePrimary.cgColor
+        liveFrameLayer.strokeColor = nil
+        liveFrameLayer.lineWidth = 0.0
+
+        liveWaveLayer.strokeColor = UIColor.white.withAlphaComponent(0.92).cgColor
+        liveWaveLayer.lineWidth = 1.75
+
+        liveHaloLayer.fillColor = liveBeaconRed.withAlphaComponent(0.32).cgColor
         liveHaloLayer.strokeColor = nil
+
         liveBeaconLayer.fillColor = liveBeaconRed.cgColor
-        liveBeaconLayer.strokeColor = nil
+        liveBeaconLayer.strokeColor = UIColor.white.cgColor
+        liveBeaconLayer.lineWidth = 0.85
       } else {
-        liveOuterWaveLayer.strokeColor = inactiveColor.withAlphaComponent(0.56).cgColor
-        liveOuterWaveLayer.lineWidth = 1.8
-        liveInnerWaveLayer.strokeColor = inactiveColor.cgColor
-        liveInnerWaveLayer.lineWidth = 1.85
-        liveStandLayer.strokeColor = inactiveColor.cgColor
-        liveStandLayer.lineWidth = 1.8
+        liveFrameLayer.fillColor = nil
+        liveFrameLayer.strokeColor = inactiveColor.cgColor
+        liveFrameLayer.lineWidth = 1.85
+
+        liveWaveLayer.strokeColor = inactiveColor.withAlphaComponent(0.82).cgColor
+        liveWaveLayer.lineWidth = 1.7
+
         liveBeaconLayer.fillColor = inactiveColor.cgColor
         liveBeaconLayer.strokeColor = nil
+        liveBeaconLayer.lineWidth = 0.0
       }
 
     case .library:
       libBackCardLayer.isHidden = false
-      libMidCardLayer.isHidden = false
       libFrontCardLayer.isHidden = false
-      libBookmarkLayer.isHidden = false
+      libDetailLayer.isHidden = false
 
       if selected {
-        libBackCardLayer.fillColor = activeSecondary.withAlphaComponent(0.52).cgColor
+        libBackCardLayer.fillColor = activeSecondary.withAlphaComponent(0.62).cgColor
         libBackCardLayer.strokeColor = nil
-        libMidCardLayer.fillColor = activeSecondary.withAlphaComponent(0.84).cgColor
-        libMidCardLayer.strokeColor = nil
+        libBackCardLayer.lineWidth = 0.0
+
         libFrontCardLayer.fillColor = activePrimary.cgColor
         libFrontCardLayer.strokeColor = nil
         libFrontCardLayer.lineWidth = 0.0
-        libBookmarkLayer.fillColor = UIColor.white.cgColor
-        libBookmarkLayer.strokeColor = nil
+
+        libDetailLayer.fillColor = nil
+        libDetailLayer.strokeColor = UIColor.white.cgColor
+        libDetailLayer.lineWidth = 1.85
       } else {
-        libBackCardLayer.fillColor = inactiveColor.withAlphaComponent(0.46).cgColor
-        libBackCardLayer.strokeColor = nil
-        libMidCardLayer.fillColor = inactiveColor.withAlphaComponent(0.72).cgColor
-        libMidCardLayer.strokeColor = nil
-        libFrontCardLayer.fillColor = nil
+        libBackCardLayer.fillColor = nil
+        libBackCardLayer.strokeColor = inactiveColor.withAlphaComponent(0.55).cgColor
+        libBackCardLayer.lineWidth = 1.65
+
+        libFrontCardLayer.fillColor = surfaceCutout.withAlphaComponent(0.01).cgColor
         libFrontCardLayer.strokeColor = inactiveColor.cgColor
         libFrontCardLayer.lineWidth = 1.85
-        libBookmarkLayer.fillColor = nil
-        libBookmarkLayer.strokeColor = inactiveColor.cgColor
-        libBookmarkLayer.lineWidth = 1.55
+
+        libDetailLayer.fillColor = nil
+        libDetailLayer.strokeColor = inactiveColor.cgColor
+        libDetailLayer.lineWidth = 1.65
       }
 
     case .settings:
-      settingsGearLayer.isHidden = false
-      settingsHoleLayer.isHidden = selected
-      settingsJewelLayer.isHidden = !selected
+      settingsTrackTopLayer.isHidden = false
+      settingsTrackBotLayer.isHidden = false
+      settingsKnobTopLayer.isHidden = false
+      settingsKnobBotLayer.isHidden = false
+
+      settingsTrackTopLayer.fillColor = nil
+      settingsTrackBotLayer.fillColor = nil
 
       if selected {
-        settingsGearLayer.path = buildSculptedGearPath(includeInnerHole: true).cgPath
-        settingsGearLayer.fillColor = activePrimary.cgColor
-        settingsGearLayer.strokeColor = nil
-        settingsGearLayer.lineWidth = 0.0
-        settingsJewelLayer.fillColor = activeSecondary.cgColor
-        settingsJewelLayer.strokeColor = nil
+        settingsTrackTopLayer.strokeColor = activePrimary.withAlphaComponent(0.45).cgColor
+        settingsTrackTopLayer.lineWidth = 2.1
+        settingsTrackBotLayer.strokeColor = activePrimary.withAlphaComponent(0.45).cgColor
+        settingsTrackBotLayer.lineWidth = 2.1
+
+        settingsKnobTopLayer.fillColor = activePrimary.cgColor
+        settingsKnobTopLayer.strokeColor = nil
+        settingsKnobTopLayer.lineWidth = 0.0
+
+        settingsKnobBotLayer.fillColor = activeSecondary.cgColor
+        settingsKnobBotLayer.strokeColor = nil
+        settingsKnobBotLayer.lineWidth = 0.0
       } else {
-        settingsGearLayer.path = buildSculptedGearPath(includeInnerHole: false).cgPath
-        settingsGearLayer.fillColor = nil
-        settingsGearLayer.strokeColor = inactiveColor.cgColor
-        settingsGearLayer.lineWidth = 1.85
-        settingsHoleLayer.fillColor = nil
-        settingsHoleLayer.strokeColor = inactiveColor.cgColor
-        settingsHoleLayer.lineWidth = 1.75
+        settingsTrackTopLayer.strokeColor = inactiveColor.cgColor
+        settingsTrackTopLayer.lineWidth = 1.85
+        settingsTrackBotLayer.strokeColor = inactiveColor.cgColor
+        settingsTrackBotLayer.lineWidth = 1.85
+
+        settingsKnobTopLayer.fillColor = surfaceCutout.cgColor
+        settingsKnobTopLayer.strokeColor = inactiveColor.cgColor
+        settingsKnobTopLayer.lineWidth = 1.85
+
+        settingsKnobBotLayer.fillColor = surfaceCutout.cgColor
+        settingsKnobBotLayer.strokeColor = inactiveColor.cgColor
+        settingsKnobBotLayer.lineWidth = 1.85
       }
 
     case .fallback:
@@ -3102,124 +3268,75 @@ private final class MarcoAnimatedTabIconView: UIView {
 
     switch currentKind {
     case .home:
-      homeScreenLayer.removeAllAnimations()
+      homeHouseLayer.removeAllAnimations()
       homePlayLayer.removeAllAnimations()
-      homeStandLayer.removeAllAnimations()
-      homeSparkleLayer.removeAllAnimations()
+      homeAccentLayer.removeAllAnimations()
 
-      homeScreenLayer.add(
-        keyframe("transform.scale", values: [0.82, 1.12, 0.97, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.52),
+      homeHouseLayer.add(
+        keyframe("transform.scale", values: [0.84, 1.11, 0.97, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.50),
         forKey: "marcoHomePop"
       )
       homePlayLayer.add(
-        keyframe("transform.translation.x", values: [-2.4, 0.9, -0.2, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52),
+        keyframe("transform.translation.x", values: [-2.0, 0.8, -0.2, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.50),
         forKey: "marcoHomePlaySlide"
       )
       homePlayLayer.add(
-        keyframe("transform.scale", values: [0.55, 1.18, 0.96, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52),
+        keyframe("transform.scale", values: [0.58, 1.18, 0.96, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.50),
         forKey: "marcoHomePlayScale"
-      )
-      homeStandLayer.add(
-        keyframe("transform.scale.x", values: [0.38, 1.14, 0.98, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.48),
-        forKey: "marcoHomeStand"
-      )
-      homeSparkleLayer.add(
-        keyframe("transform.scale", values: [0.01, 1.35, 0.92, 1.0], times: [0, 0.52, 0.80, 1.0], duration: 0.56, delay: 0.06),
-        forKey: "marcoHomeSparkleScale"
-      )
-      homeSparkleLayer.add(
-        keyframe("transform.rotation.z", values: [-0.78, 0.24, -0.05, 0.0], times: [0, 0.54, 0.82, 1.0], duration: 0.56, delay: 0.06),
-        forKey: "marcoHomeSparkleSpin"
       )
 
     case .live:
+      liveFrameLayer.removeAllAnimations()
       liveBeaconLayer.removeAllAnimations()
       liveHaloLayer.removeAllAnimations()
-      liveInnerWaveLayer.removeAllAnimations()
-      liveOuterWaveLayer.removeAllAnimations()
+      liveWaveLayer.removeAllAnimations()
 
+      liveFrameLayer.add(
+        keyframe("transform.scale", values: [0.86, 1.09, 0.98, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.48),
+        forKey: "marcoLiveFrame"
+      )
       liveBeaconLayer.add(
         keyframe("transform.scale", values: [0.58, 1.38, 0.94, 1.0], times: [0, 0.38, 0.72, 1.0], duration: 0.54),
         forKey: "marcoLiveBeacon"
       )
       liveHaloLayer.add(
-        keyframe("transform.scale", values: [0.55, 1.72, 1.08, 1.0], times: [0, 0.45, 0.78, 1.0], duration: 0.64),
+        keyframe("transform.scale", values: [0.55, 1.62, 1.06, 1.0], times: [0, 0.45, 0.78, 1.0], duration: 0.62),
         forKey: "marcoLiveHaloScale"
       )
-      liveHaloLayer.add(
-        keyframe("opacity", values: [0.9, 0.25, 0.85, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.64),
-        forKey: "marcoLiveHaloFade"
-      )
-      liveInnerWaveLayer.add(
-        keyframe("transform.scale", values: [0.68, 1.16, 0.98, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.50, delay: 0.05),
-        forKey: "marcoLiveInnerScale"
-      )
-      liveInnerWaveLayer.add(
-        keyframe("opacity", values: [0.22, 1.0, 1.0], times: [0, 0.42, 1.0], duration: 0.50, delay: 0.05),
-        forKey: "marcoLiveInnerFade"
-      )
-      liveOuterWaveLayer.add(
-        keyframe("transform.scale", values: [0.64, 1.20, 0.98, 1.0], times: [0, 0.50, 0.80, 1.0], duration: 0.52, delay: 0.13),
-        forKey: "marcoLiveOuterScale"
-      )
-      liveOuterWaveLayer.add(
-        keyframe("opacity", values: [0.12, 1.0, 1.0], times: [0, 0.44, 1.0], duration: 0.52, delay: 0.13),
-        forKey: "marcoLiveOuterFade"
+      liveWaveLayer.add(
+        keyframe("transform.scale", values: [0.72, 1.16, 0.98, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.50, delay: 0.05),
+        forKey: "marcoLiveWaveScale"
       )
 
     case .library:
       libFrontCardLayer.removeAllAnimations()
-      libBookmarkLayer.removeAllAnimations()
-      libMidCardLayer.removeAllAnimations()
       libBackCardLayer.removeAllAnimations()
+      libDetailLayer.removeAllAnimations()
 
       libFrontCardLayer.add(
-        keyframe("transform.scale", values: [0.86, 1.09, 0.98, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.50),
+        keyframe("transform.scale", values: [0.86, 1.09, 0.98, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.48),
         forKey: "marcoLibFront"
       )
-      libBookmarkLayer.add(
-        keyframe("transform.scale.y", values: [0.42, 1.16, 0.96, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.50),
-        forKey: "marcoLibBookmark"
-      )
-      libMidCardLayer.add(
-        keyframe("transform.translation.y", values: [3.2, -1.5, 0.3, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52, delay: 0.03),
-        forKey: "marcoLibMidY"
-      )
-      libMidCardLayer.add(
-        keyframe("transform.scale.x", values: [0.84, 1.06, 0.99, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52, delay: 0.03),
-        forKey: "marcoLibMidScale"
+      libBackCardLayer.add(
+        keyframe("transform.translation.x", values: [-2.6, 1.0, -0.2, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52, delay: 0.04),
+        forKey: "marcoLibBackX"
       )
       libBackCardLayer.add(
-        keyframe("transform.translation.y", values: [5.2, -2.3, 0.4, 0.0], times: [0, 0.48, 0.80, 1.0], duration: 0.54, delay: 0.08),
+        keyframe("transform.translation.y", values: [2.6, -1.0, 0.2, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52, delay: 0.04),
         forKey: "marcoLibBackY"
-      )
-      libBackCardLayer.add(
-        keyframe("transform.scale.x", values: [0.74, 1.08, 0.98, 1.0], times: [0, 0.48, 0.80, 1.0], duration: 0.54, delay: 0.08),
-        forKey: "marcoLibBackScale"
       )
 
     case .settings:
-      settingsGearLayer.removeAllAnimations()
-      settingsJewelLayer.removeAllAnimations()
+      settingsKnobTopLayer.removeAllAnimations()
+      settingsKnobBotLayer.removeAllAnimations()
 
-      // 60° (pi/3) clockwise turn aligns cleanly with 6-lobe rotational symmetry!
-      let sixtyDeg = CGFloat.pi / 3.0
-      settingsGearLayer.add(
-        keyframe(
-          "transform.rotation.z",
-          values: [0.0, sixtyDeg * 1.18, sixtyDeg * 0.95, sixtyDeg],
-          times: [0, 0.48, 0.78, 1.0],
-          duration: 0.58
-        ),
-        forKey: "marcoSettingsRotate"
+      settingsKnobTopLayer.add(
+        keyframe("transform.translation.x", values: [-4.0, 1.1, -0.25, 0.0], times: [0, 0.48, 0.78, 1.0], duration: 0.52),
+        forKey: "marcoSettingsTopSlide"
       )
-      settingsGearLayer.add(
-        keyframe("transform.scale", values: [0.86, 1.11, 0.98, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.54),
-        forKey: "marcoSettingsScale"
-      )
-      settingsJewelLayer.add(
-        keyframe("transform.scale", values: [0.20, 1.34, 0.94, 1.0], times: [0, 0.48, 0.80, 1.0], duration: 0.54, delay: 0.06),
-        forKey: "marcoSettingsJewel"
+      settingsKnobBotLayer.add(
+        keyframe("transform.translation.x", values: [4.0, -1.1, 0.25, 0.0], times: [0, 0.48, 0.78, 1.0], duration: 0.52, delay: 0.04),
+        forKey: "marcoSettingsBotSlide"
       )
 
     case .fallback:
@@ -3785,20 +3902,12 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       contentParent = fallbackContainerView
     }
 
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      nativeTabBar.delegate = self
-      nativeTabBar.isTranslucent = true
-      nativeTabBar.itemPositioning = .fill
-      nativeTabBar.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
-      nativeTabBar.cornerConfiguration = .capsule()
-      contentParent.addSubview(nativeTabBar)
-    } else {
-      contentParent.addSubview(legacyTabCapsule)
-    }
-    #else
+    // Always mount the custom height-matched Liquid Glass tab capsule (which
+    // uses native UIGlassEffect(style: .regular) + .capsule() + interactive
+    // scrubbing lens on iOS 26+, and crisp blur material on iOS 14–25) so the
+    // 4-tab capsule strictly matches the circular Search button's exact height
+    // and displays our redesigned vector icons across every iOS & iPadOS version.
     contentParent.addSubview(legacyTabCapsule)
-    #endif
 
     legacyTabCapsule.onSelect = { [weak self] idx in
       guard let self = self else { return }
@@ -3896,15 +4005,24 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     }
     #endif
     let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
-    var cfg = UIButton.Configuration.filled()
-    cfg.image = image
-    cfg.baseForegroundColor = fg
-    cfg.baseBackgroundColor = dark
+    let bg = dark
       ? UIColor(white: 0.16, alpha: 0.88)
       : UIColor(white: 0.98, alpha: 0.92)
-    cfg.cornerStyle = .capsule
-    cfg.contentInsets = .zero
-    button.configuration = cfg
+    if #available(iOS 15.0, *) {
+      var cfg = UIButton.Configuration.filled()
+      cfg.image = image
+      cfg.baseForegroundColor = fg
+      cfg.baseBackgroundColor = bg
+      cfg.cornerStyle = .capsule
+      cfg.contentInsets = .zero
+      button.configuration = cfg
+    } else {
+      button.setImage(image, for: .normal)
+      button.tintColor = fg
+      button.backgroundColor = bg
+      button.layer.cornerRadius = 31.0
+      button.layer.masksToBounds = true
+    }
   }
 
   @objc private func handleAppearanceChanged() {
@@ -4006,11 +4124,6 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
   }
 
   private func activeTabView() -> UIView {
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      return nativeTabBar
-    }
-    #endif
     return legacyTabCapsule
   }
 
@@ -4091,7 +4204,7 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
   func setRootDockVisible(_ visible: Bool, animated: Bool) {
     isChromeVisible = visible
     isUserInteractionEnabled = visible
-    let isTopWide = isRootHost && adaptiveTopOnWide && (bounds.width >= 600.0 || bounds.width > bounds.height)
+    let isTopWide = isRootHost && adaptiveTopOnWide && (bounds.width > bounds.height && bounds.width >= 600.0)
     let hiddenOffsetY: CGFloat = isTopWide ? -96.0 : 120.0
     let targetTransform = visible ? CGAffineTransform.identity : CGAffineTransform(translationX: 0.0, y: hiddenOffsetY)
     let targetAlpha: CGFloat = visible ? (MarcoLiquidGlassSupport.isSceneActive ? 1.0 : 0.86) : 0.0
@@ -4165,7 +4278,7 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
 
     // Determine whether we are embedded inside a 76pt PlatformView slice or full-screen root host.
     let isEmbeddedSlice = !isRootHost || totalH <= 140.0
-    let isWideTopLayout = !isEmbeddedSlice && adaptiveTopOnWide && (totalW >= 600.0 || totalW > totalH)
+    let isWideTopLayout = !isEmbeddedSlice && adaptiveTopOnWide && (totalW > totalH && totalW >= 600.0)
 
     let chromeBounds: CGRect
     if isEmbeddedSlice {
@@ -4608,34 +4721,50 @@ private final class MarcoNativeGlassButtonControl: UIView {
         self.trailingAccessoryView.isHidden = true
       }
 
-      var titleAttr: AttributedString?
-      if isCapsule && !label.isEmpty {
-        var attr = AttributedString(label)
-        attr.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
-        titleAttr = attr
-      }
-
       let useProminent = prominent || tintColor != nil
 
-      #if compiler(>=6.2)
-      if #available(iOS 26.0, *) {
-        var cfg = useProminent ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
-        cfg.image = leadingImg
-        cfg.attributedTitle = titleAttr
-        cfg.baseForegroundColor = foregroundColor
-        if let tint = tintColor {
-          cfg.baseBackgroundColor = tint
-        } else if forceDark {
-          cfg.baseBackgroundColor = UIColor(white: 0.10, alpha: 0.35)
+      if #available(iOS 15.0, *) {
+        var titleAttr: AttributedString?
+        if isCapsule && !label.isEmpty {
+          var attr = AttributedString(label)
+          attr.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+          titleAttr = attr
         }
-        cfg.imagePadding = isCapsule ? 5.0 : 0.0
-        cfg.cornerStyle = .capsule
-        cfg.contentInsets = isCapsule
-          ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
-          : .zero
-        self.button.configuration = cfg
-        self.button.cornerConfiguration = .capsule()
-      } else {
+
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+          var cfg = useProminent ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
+          cfg.image = leadingImg
+          cfg.attributedTitle = titleAttr
+          cfg.baseForegroundColor = foregroundColor
+          if let tint = tintColor {
+            cfg.baseBackgroundColor = tint
+          } else if forceDark {
+            cfg.baseBackgroundColor = UIColor(white: 0.10, alpha: 0.35)
+          }
+          cfg.imagePadding = isCapsule ? 5.0 : 0.0
+          cfg.cornerStyle = .capsule
+          cfg.contentInsets = isCapsule
+            ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
+            : .zero
+          self.button.configuration = cfg
+          self.button.cornerConfiguration = .capsule()
+        } else {
+          var cfg = useProminent ? UIButton.Configuration.filled() : UIButton.Configuration.plain()
+          cfg.image = leadingImg
+          cfg.attributedTitle = titleAttr
+          cfg.baseForegroundColor = foregroundColor
+          if let tint = tintColor {
+            cfg.baseBackgroundColor = tint
+          }
+          cfg.imagePadding = isCapsule ? 5.0 : 0.0
+          cfg.cornerStyle = .capsule
+          cfg.contentInsets = isCapsule
+            ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
+            : .zero
+          self.button.configuration = cfg
+        }
+        #else
         var cfg = useProminent ? UIButton.Configuration.filled() : UIButton.Configuration.plain()
         cfg.image = leadingImg
         cfg.attributedTitle = titleAttr
@@ -4649,22 +4778,18 @@ private final class MarcoNativeGlassButtonControl: UIView {
           ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
           : .zero
         self.button.configuration = cfg
+        #endif
+      } else {
+        self.button.setImage(leadingImg, for: .normal)
+        self.button.setTitle(isCapsule ? label : nil, for: .normal)
+        self.button.titleLabel?.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+        self.button.tintColor = foregroundColor
+        self.button.setTitleColor(foregroundColor, for: .normal)
+        self.button.backgroundColor = useProminent ? (tintColor ?? UIColor.systemBlue) : .clear
+        self.button.contentEdgeInsets = isCapsule
+          ? UIEdgeInsets(top: 0.0, left: 12.0, bottom: 0.0, right: hasTrailing ? 26.0 : 12.0)
+          : .zero
       }
-      #else
-      var cfg = useProminent ? UIButton.Configuration.filled() : UIButton.Configuration.plain()
-      cfg.image = leadingImg
-      cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = foregroundColor
-      if let tint = tintColor {
-        cfg.baseBackgroundColor = tint
-      }
-      cfg.imagePadding = isCapsule ? 5.0 : 0.0
-      cfg.cornerStyle = .capsule
-      cfg.contentInsets = isCapsule
-        ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
-        : .zero
-      self.button.configuration = cfg
-      #endif
 
       if let menu = menu {
         self.button.menu = menu
@@ -5122,29 +5247,34 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
       }
       let label = (item["accessibilityLabel"] as? String) ?? symbol
       let img = UIImage(systemName: symbol, withConfiguration: symCfg)
-      #if compiler(>=6.2)
-      if #available(iOS 26.0, *) {
-        var cfg = UIButton.Configuration.glass()
-        cfg.image = img
-        cfg.baseForegroundColor = tint
-        cfg.cornerStyle = .capsule
-        cfg.contentInsets = .zero
-        btn.configuration = cfg
-        btn.cornerConfiguration = .capsule()
-      } else {
+      if #available(iOS 15.0, *) {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+          var cfg = UIButton.Configuration.glass()
+          cfg.image = img
+          cfg.baseForegroundColor = tint
+          cfg.cornerStyle = .capsule
+          cfg.contentInsets = .zero
+          btn.configuration = cfg
+          btn.cornerConfiguration = .capsule()
+        } else {
+          var cfg = UIButton.Configuration.plain()
+          cfg.image = img
+          cfg.baseForegroundColor = tint
+          cfg.contentInsets = .zero
+          btn.configuration = cfg
+        }
+        #else
         var cfg = UIButton.Configuration.plain()
         cfg.image = img
         cfg.baseForegroundColor = tint
         cfg.contentInsets = .zero
         btn.configuration = cfg
+        #endif
+      } else {
+        btn.setImage(img, for: .normal)
+        btn.tintColor = tint
       }
-      #else
-      var cfg = UIButton.Configuration.plain()
-      cfg.image = img
-      cfg.baseForegroundColor = tint
-      cfg.contentInsets = .zero
-      btn.configuration = cfg
-      #endif
       btn.accessibilityLabel = label
     }
   }

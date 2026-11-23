@@ -34,11 +34,11 @@ Future<T?> showIosGlassPopover<T>({
   required Rect? anchorRect,
   required String title,
   required WidgetBuilder builder,
-  double maxWidth = 300,
-  double maxHeight = 320,
+  double maxWidth = 306,
+  double maxHeight = 336,
   bool forceDark = true,
   Widget? trailing,
-  EdgeInsetsGeometry contentPadding = const EdgeInsets.fromLTRB(12, 6, 12, 12),
+  EdgeInsetsGeometry contentPadding = const EdgeInsets.fromLTRB(8, 4, 8, 8),
 }) {
   return Navigator.of(context, rootNavigator: false).push<T>(
     _Ios27MorphingPopoverRoute<T>(
@@ -268,7 +268,7 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay>
     final maxAvailableH = showBelow ? spaceBelow : spaceAbove;
     final bubbleMaxH = math.min(
       maxHeight,
-      maxAvailableH.clamp(120.0, screen.height * 0.72),
+      maxAvailableH.clamp(120.0, screen.height * 0.82),
     );
 
     final rawLeft = anchor.center.dx - bubbleW / 2;
@@ -395,7 +395,7 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay>
               children: [
                 if (title.isNotEmpty || trailing != null) ...[
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 11, 10, 8),
+                    padding: const EdgeInsets.fromLTRB(12, 8, 10, 6),
                     child: Row(
                       children: [
                         Expanded(
@@ -405,7 +405,7 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay>
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               color: titleColor,
-                              fontSize: 13.5,
+                              fontSize: 12.5,
                               fontWeight: FontWeight.w700,
                               letterSpacing: -0.1,
                             ),
@@ -415,7 +415,7 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay>
                       ],
                     ),
                   ),
-                  Divider(height: 1, thickness: 0.6, color: dividerColor),
+                  Divider(height: 1, thickness: 0.5, color: dividerColor),
                 ],
                 Flexible(
                   child: Padding(

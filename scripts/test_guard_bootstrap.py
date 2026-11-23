@@ -330,6 +330,169 @@ class ReaderChecks(unittest.TestCase):
         self.assertEqual(res['masks'][f'0:{len(plain_a)}'], mask_a)
         self.assertEqual(res['masks'][f'{len(plain_a)}:{len(plain_b)}'], mask_b)
 
+    def test_wex_structural_fallback_renamed_merge_and_dex039(self):
+        """Updated WEX JARs with renamed merge classes, shifted units, and DEX 039 must extract cleanly."""
+        strings = sorted([
+            '<clinit>', '<init>', 'AES/CBC/PKCS5Padding',
+            'Lcom/github/catvod/spider/AiNewWogg;',
+            'Lcom/github/catvod/spider/merge/x9/z;',
+            'Ljava/lang/Object;',
+            'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36',
+            'V', 'http://127.0.0.1:9',
+            'http://127.0.0.1:9/api.txt', 'http://127.0.0.1:9/item.txt',
+            'init', 'iv1234567890abcd', 'key1234567890abc',
+            'wogg', 'z',
+        ])
+        s_idx = {s: i for i, s in enumerate(strings)}
+        types = sorted([
+            'Lcom/github/catvod/spider/AiNewWogg;',
+            'Lcom/github/catvod/spider/merge/x9/z;',
+            'Ljava/lang/Object;', 'V',
+        ], key=lambda t: s_idx[t])
+        t_idx = {t: i for i, t in enumerate(types)}
+        protos = [(s_idx['V'], t_idx['V'], [])]
+        methods = sorted([
+            (t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['<init>']),
+            (t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['init']),
+            (t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['z']),
+            (t_idx['Lcom/github/catvod/spider/merge/x9/z;'], 0, s_idx['<clinit>']),
+            (t_idx['Lcom/github/catvod/spider/merge/x9/z;'], 0, s_idx['z']),
+        ], key=lambda m: (m[0], m[2], m[1]))
+        m_idx = {m: i for i, m in enumerate(methods)}
+
+        def encode_code(regs, units):
+            return struct.pack('<HHHHI', regs, 0, 0, 0, 0) + struct.pack('<I', len(units)) + b''.join(
+                struct.pack('<H', u & 0xffff) for u in units
+            )
+
+        # Shift units with leading nop (0x0000) so exact offsets differ from pinned profile.
+        wogg_ctor = [0x0000, 0x0000, 0x001a, s_idx['http://127.0.0.1:9'], 0x000e]
+        wogg_init = [0x0000, 0x001a, s_idx['wogg'], 0x000e]
+        wogg_ua = [0x0000, 0x001a, s_idx['Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36'], 0x000e]
+        merge_clinit = [
+            0x0000,
+            0x001a, s_idx['http://127.0.0.1:9/api.txt'],
+            0x001a, s_idx['http://127.0.0.1:9/item.txt'],
+            0x000e,
+        ]
+        merge_aes = [
+            0x001a, s_idx['AES/CBC/PKCS5Padding'],
+            0x001a, s_idx['key1234567890abc'],
+            0x001a, s_idx['iv1234567890abcd'],
+            0x001a, s_idx['Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36'],
+            0x000e,
+        ]
+
+        str_ids_off = 0x70
+        type_ids_off = str_ids_off + len(strings) * 4
+        proto_ids_off = type_ids_off + len(types) * 4
+        field_ids_off = proto_ids_off + len(protos) * 12
+        method_ids_off = field_ids_off
+        class_defs_off = method_ids_off + len(methods) * 8
+        data_off = class_defs_off + 2 * 32
+
+        data = bytearray()
+        def pad4():
+            while (data_off + len(data)) % 4:
+                data.append(0)
+
+        str_data_offs = []
+        for s in strings:
+            str_data_offs.append(data_off + len(data))
+            data.extend(uleb(len(s)))
+            data.extend(s.encode('utf-8'))
+            data.append(0)
+
+        code_offs = {}
+        for key, units in [
+            ((t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['<init>']), wogg_ctor),
+            ((t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['init']), wogg_init),
+            ((t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['z']), wogg_ua),
+            ((t_idx['Lcom/github/catvod/spider/merge/x9/z;'], 0, s_idx['<clinit>']), merge_clinit),
+            ((t_idx['Lcom/github/catvod/spider/merge/x9/z;'], 0, s_idx['z']), merge_aes),
+        ]:
+            pad4()
+            code_offs[key] = data_off + len(data)
+            data.extend(encode_code(2, units))
+
+        def write_class_data(direct_items):
+            off = data_off + len(data)
+            data.extend(uleb(0) + uleb(0) + uleb(len(direct_items)) + uleb(0))
+            prev = 0
+            for midx, flags, coff in sorted(direct_items):
+                data.extend(uleb(midx - prev) + uleb(flags) + uleb(coff))
+                prev = midx
+            return off
+
+        wogg_cd = write_class_data([
+            (m_idx[(t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['<init>'])], 0x10001, code_offs[(t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['<init>'])]),
+            (m_idx[(t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['init'])], 0x0001, code_offs[(t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['init'])]),
+            (m_idx[(t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['z'])], 0x0009, code_offs[(t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 0, s_idx['z'])]),
+        ])
+        merge_cd = write_class_data([
+            (m_idx[(t_idx['Lcom/github/catvod/spider/merge/x9/z;'], 0, s_idx['<clinit>'])], 0x10008, code_offs[(t_idx['Lcom/github/catvod/spider/merge/x9/z;'], 0, s_idx['<clinit>'])]),
+            (m_idx[(t_idx['Lcom/github/catvod/spider/merge/x9/z;'], 0, s_idx['z'])], 0x0009, code_offs[(t_idx['Lcom/github/catvod/spider/merge/x9/z;'], 0, s_idx['z'])]),
+        ])
+
+        dex = bytearray(data_off + len(data))
+        struct.pack_into('<8s24x18I', dex, 0, b'dex\n039\x00', len(dex), 0x70, 0x12345678,
+                         0, 0, 0, len(strings), str_ids_off, len(types), type_ids_off,
+                         len(protos), proto_ids_off, 0, 0,
+                         len(methods), method_ids_off, 2, class_defs_off)
+        struct.pack_into('<II', dex, 0x68, len(data), data_off)
+        for i, off in enumerate(str_data_offs):
+            struct.pack_into('<I', dex, str_ids_off + i * 4, off)
+        for i, t in enumerate(types):
+            struct.pack_into('<I', dex, type_ids_off + i * 4, s_idx[t])
+        struct.pack_into('<III', dex, proto_ids_off, s_idx['V'], t_idx['V'], 0)
+        for i, (cls, prt, nam) in enumerate(methods):
+            struct.pack_into('<HHI', dex, method_ids_off + i * 8, cls, prt, nam)
+        struct.pack_into('<8I', dex, class_defs_off,
+                         t_idx['Lcom/github/catvod/spider/AiNewWogg;'], 1, t_idx['Ljava/lang/Object;'],
+                         0, 0xffffffff, 0, wogg_cd, 0)
+        struct.pack_into('<8I', dex, class_defs_off + 32,
+                         t_idx['Lcom/github/catvod/spider/merge/x9/z;'], 1, t_idx['Ljava/lang/Object;'],
+                         0, 0xffffffff, 0, merge_cd, 0)
+        dex[data_off:] = data
+        dex_bytes = checksum(dex)
+
+        # Wrap inside synthetic WEX guard archive using exact inverse of unwrapWexGuard.
+        inner_zip = archive([('classes.dex', dex_bytes)], zipfile.ZIP_DEFLATED)
+        def wrap_wex(raw):
+            swap = {2: 9, 9: 2, 4: 8, 8: 4}
+            inv = bytearray(256)
+            for b in range(256):
+                s = swap.get(b, b)
+                x = s ^ 0x5f
+                t = ((x >> 1) | ((x & 1) << 7)) & 0xff
+                inv[t] = b
+            return bytes(inv[b] for b in raw)
+
+        wex_jar = archive([
+            ('assets/wexguard_v8.so', b'synthetic-recompiled-native'),
+            ('assets/wexshinidie.guard', wrap_wex(inner_zip)),
+        ], zipfile.ZIP_DEFLATED)
+
+        # Also test plain unguarded JAR with classes.dex directly.
+        plain_jar = archive([('classes.dex', dex_bytes)], zipfile.ZIP_DEFLATED)
+
+        for label, jar_bytes in [('guarded', wex_jar), ('plain', plain_jar)]:
+            file = self.root / f'wex_{label}.jar'
+            file.write_bytes(jar_bytes)
+            js = "const fs=require('node:fs');const w=require(process.argv[1]);const b=fs.readFileSync(process.argv[2]);try{console.log(JSON.stringify({value:w.extractWex(b,'wexwogg-v1','')}));}catch(e){console.log(JSON.stringify({error:e.message}));}"
+            out = json.loads(subprocess.check_output(
+                [NODE, '--jitless', '-e', js, str(ROOT/'shared/catpaw/drpy-wex-extractor.cjs'), str(file)],
+                stderr=subprocess.DEVNULL,
+            ))
+            self.assertNotIn('error', out, (label, out))
+            val = out['value']
+            self.assertEqual(val['origin'], 'http://127.0.0.1:9')
+            self.assertEqual(val['siteKey'], 'wogg')
+            self.assertEqual(val['apiTxt0'], 'http://127.0.0.1:9/api.txt')
+            self.assertEqual(val['itemTxt0'], 'http://127.0.0.1:9/item.txt')
+            self.assertEqual(val['remoteAesKey'], 'key1234567890abc')
+            self.assertEqual(val['remoteAesIv'], 'iv1234567890abcd')
+
 class HostChecks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

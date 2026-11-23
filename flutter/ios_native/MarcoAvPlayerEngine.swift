@@ -1,7 +1,6 @@
-// MARK: - iOS 15+ Native Low-Power AVPlayer Engine (PiP + AirPlay 2 + EDR/XDR + Thermal Telemetry)
+// MARK: - iOS 14+ Native Low-Power AVPlayer Engine (PiP + AirPlay 2 + EDR/XDR + Thermal Telemetry)
 // Injected into AppDelegate.swift by prepare_platform.py (requires `import AVFoundation` and `import AVKit`).
 
-@available(iOS 15.0, *)
 enum MarcoAvPlayerEngine {
   static let methodChannelName = "marco_movie/ios_avplayer"
   static let eventChannelName = "marco_movie/ios_avplayer_events"
@@ -32,7 +31,9 @@ enum MarcoAvPlayerEngine {
     if let anyKey = scenes.flatMap({ $0.windows }).first(where: { $0.isKeyWindow }) {
       return anyKey
     }
-    return activeScene?.windows.first ?? scenes.flatMap({ $0.windows }).first
+    return activeScene?.windows.first
+      ?? scenes.flatMap({ $0.windows }).first
+      ?? (UIApplication.shared.delegate?.window ?? nil)
   }
 
   static func topPresenter() -> UIViewController? {
@@ -74,7 +75,6 @@ enum MarcoAvPlayerEngine {
   }
 }
 
-@available(iOS 15.0, *)
 private final class MarcoAvPlayerLayerContainerView: UIView {
   let playerLayer = AVPlayerLayer()
 
@@ -101,7 +101,6 @@ private final class MarcoAvPlayerLayerContainerView: UIView {
   }
 }
 
-@available(iOS 15.0, *)
 private final class MarcoAvPlayerPlatformView: NSObject, FlutterPlatformView {
   private let container: MarcoAvPlayerLayerContainerView
   private weak var coordinator: MarcoAvPlayerCoordinator?
@@ -122,7 +121,6 @@ private final class MarcoAvPlayerPlatformView: NSObject, FlutterPlatformView {
   }
 }
 
-@available(iOS 15.0, *)
 private final class MarcoAvPlayerViewFactory: NSObject, FlutterPlatformViewFactory {
   private let coordinator: MarcoAvPlayerCoordinator
 
@@ -144,7 +142,6 @@ private final class MarcoAvPlayerViewFactory: NSObject, FlutterPlatformViewFacto
   }
 }
 
-@available(iOS 15.0, *)
 private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AVPictureInPictureControllerDelegate {
   private var methodChannel: FlutterMethodChannel?
   private var eventSink: FlutterEventSink?
@@ -300,7 +297,9 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       return
     }
     controller.delegate = self
-    controller.canStartPictureInPictureAutomaticallyFromInline = autoPipEnabled
+    if #available(iOS 14.2, *) {
+      controller.canStartPictureInPictureAutomaticallyFromInline = autoPipEnabled
+    }
     pipController = controller
     pipPossibleObservation = controller.observe(\.isPictureInPicturePossible, options: [.new]) { [weak self] _, _ in
       DispatchQueue.main.async {
@@ -460,7 +459,9 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       let enabled = (call.arguments as? Bool) ?? true
       DispatchQueue.main.async { [weak self] in
         self?.autoPipEnabled = enabled
-        self?.pipController?.canStartPictureInPictureAutomaticallyFromInline = enabled
+        if #available(iOS 14.2, *) {
+          self?.pipController?.canStartPictureInPictureAutomaticallyFromInline = enabled
+        }
         result(nil)
       }
 
@@ -530,8 +531,13 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     preferredBufferSec: Double,
     result: @escaping FlutterResult
   ) {
-    guard let url = URL(string: urlString) else {
+    guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
       result(FlutterError(code: "INVALID_URL", message: "Invalid media URL", details: urlString))
+      return
+    }
+    let scheme = (url.scheme ?? "").lowercased()
+    if scheme != "http" && scheme != "https" && scheme != "file" {
+      result(false)
       return
     }
 
@@ -811,11 +817,21 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
 
   private func presentAirPlayPicker() {
     guard let host = MarcoAvPlayerEngine.topPresenter() else { return }
-    let picker = hiddenAirPlayPicker ?? AVRoutePickerView(frame: CGRect(x: -100, y: -100, width: 44, height: 44))
+    let bounds = host.view.bounds
+    let anchorFrame = CGRect(
+      x: max(8.0, bounds.midX - 22.0),
+      y: max(8.0, bounds.midY - 22.0),
+      width: 44.0,
+      height: 44.0
+    )
+    let picker = hiddenAirPlayPicker ?? AVRoutePickerView(frame: anchorFrame)
     hiddenAirPlayPicker = picker
+    picker.frame = anchorFrame
     picker.prioritizesVideoDevices = true
-    picker.isHidden = true
-    if picker.superview == nil {
+    picker.alpha = 0.001
+    picker.isUserInteractionEnabled = false
+    if picker.superview !== host.view {
+      picker.removeFromSuperview()
       host.view.addSubview(picker)
     }
     for sub in picker.subviews {

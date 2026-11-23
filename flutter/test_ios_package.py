@@ -15,13 +15,13 @@ class DeploymentChecks(unittest.TestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.app = Path(self.folder.name)
-        (self.app / 'Info.plist').write_bytes(plistlib.dumps({'MinimumOSVersion': '15.0'}))
+        (self.app / 'Info.plist').write_bytes(plistlib.dumps({'MinimumOSVersion': '14.0'}))
 
     def binary(self, minimum, platform=2, filetype=2):
         return struct.pack('<8I', 0xfeedfacf, 0x100000c, 0, filetype, 1, 24, 0, 0) + struct.pack('<6I', 0x32, 24, platform, minimum, 0x1a0000, 0)
 
     def test_real_compatible_deployment_is_unchanged(self):
-        for minos in (0x0e0000, 0x0f0000):
+        for minos in (0x0d0000, 0x0e0000):
             blob = self.binary(minos)
             (self.app / 'Runner').write_bytes(blob)
             validate_app(self.app)
@@ -29,12 +29,12 @@ class DeploymentChecks(unittest.TestCase):
 
     def test_dsym_or_object_macho_rejected(self):
         for bad_type in (1, 10):
-            (self.app / 'Runner').write_bytes(self.binary(0x0f0000, filetype=bad_type))
+            (self.app / 'Runner').write_bytes(self.binary(0x0e0000, filetype=bad_type))
             with self.assertRaises(ValueError):
                 validate_app(self.app)
 
     def test_new_engine_is_rejected_instead_of_forging_minimum(self):
-        blob = self.binary(0x100000)
+        blob = self.binary(0x0f0000)
         (self.app / 'Runner').write_bytes(blob)
         with self.assertRaises(ValueError):
             validate_app(self.app)
@@ -185,9 +185,16 @@ class DeploymentChecks(unittest.TestCase):
             self.assertEqual(swift.count('case "discoverBonjourDevices":'), 1)
             self.assertEqual(swift.count('private final class MarcoBonjourScanner'), 1)
             self.assertEqual(swift.count('{'), swift.count('}'))
+            self.assertNotIn('@available(iOS 15.0, *)\nenum MarcoAvPlayerEngine', swift)
+            self.assertIn('if #available(iOS 14.2, *)', swift)
+            # Compact high-density popover & height-aligned dock / iPad portrait dock checks.
+            self.assertIn('setNavigationBarHidden(true, animated: false)', swift)
+            self.assertIn('return legacyTabCapsule', swift)
+            self.assertIn('totalW > totalH && totalW >= 600.0', swift)
             plist = plistlib.loads((runner / 'Info.plist').read_bytes())
             self.assertIs(plist['UIRequiresFullScreen'], False)
-            self.assertIn('UIApplicationSceneManifest', plist)
+            # Classic Flutter 3.38 AppDelegate runner without SceneDelegate.swift must NOT inject FlutterSceneDelegate
+            self.assertNotIn('UIApplicationSceneManifest', plist)
             self.assertIn('audio', plist['UIBackgroundModes'])
             self.assertIn('fetch', plist['UIBackgroundModes'])
             self.assertEqual(plist['UIBackgroundModes'].count('audio'), 1)
@@ -195,9 +202,12 @@ class DeploymentChecks(unittest.TestCase):
             for svc in ('_marcomovie-cast._tcp', '_airplay._tcp', '_lelink._tcp', '_googlecast._tcp', '_dlna._tcp', '_upnp._tcp'):
                 self.assertIn(svc, plist['NSBonjourServices'])
             app_fw_plist = plistlib.loads((flutter_ios / 'AppFrameworkInfo.plist').read_bytes())
-            self.assertEqual(app_fw_plist['MinimumOSVersion'], '15.0')
-            self.assertIn('IPHONEOS_DEPLOYMENT_TARGET = 15.0', (flutter_ios / 'Release.xcconfig').read_text(encoding='utf-8'))
-            self.assertIn('IPHONEOS_DEPLOYMENT_TARGET = 15.0;', (xcodeproj / 'project.pbxproj').read_text(encoding='utf-8'))
+            self.assertEqual(app_fw_plist['MinimumOSVersion'], '14.0')
+            release_xc = (flutter_ios / 'Release.xcconfig').read_text(encoding='utf-8')
+            self.assertIn('IPHONEOS_DEPLOYMENT_TARGET = 14.0', release_xc)
+            self.assertIn('-Wl,-no_fixup_chains', release_xc)
+            self.assertIn('-fno-objc-msgsend-selector-stubs', release_xc)
+            self.assertIn('IPHONEOS_DEPLOYMENT_TARGET = 14.0;', (xcodeproj / 'project.pbxproj').read_text(encoding='utf-8'))
 
     def test_ios_uiscene_implicit_engine_template_for_iphone_duo_idempotently(self):
         with tempfile.TemporaryDirectory() as temp:

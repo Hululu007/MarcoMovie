@@ -98,11 +98,13 @@ class IosAvPlayerPrecheckResult {
   final bool supported;
   final String? reason;
   final String? detectedExtension;
+  final bool silentFallback;
 
   const IosAvPlayerPrecheckResult({
     required this.supported,
     this.reason,
     this.detectedExtension,
+    this.silentFallback = false,
   });
 }
 
@@ -182,6 +184,19 @@ class IosAvPlayerController extends ChangeNotifier {
     'marco_movie/ios_avplayer_events',
   );
 
+  static const Set<String> incompatibleUrlSchemes = <String>{
+    'rtsp',
+    'rtsps',
+    'rtmp',
+    'rtmps',
+    'rtp',
+    'udp',
+    'mms',
+    'mmsh',
+    'mmst',
+    'igmp',
+  };
+
   static const Set<String> incompatibleContainerExtensions = <String>{
     '.mkv',
     '.flv',
@@ -195,6 +210,13 @@ class IosAvPlayerController extends ChangeNotifier {
     '.divx',
     '.asf',
     '.3gp',
+    '.smil',
+    '.ts',
+    '.m2ts',
+    '.mts',
+    '.mpeg',
+    '.mpg',
+    '.mxf',
   };
 
   static const Set<String> avPlayerNativeExtensions = <String>{
@@ -339,6 +361,28 @@ class IosAvPlayerController extends ChangeNotifier {
       );
     }
 
+    final uri = Uri.tryParse(cleanUrl);
+    final scheme = uri?.scheme.toLowerCase() ?? '';
+    if (scheme.isNotEmpty && incompatibleUrlSchemes.contains(scheme)) {
+      return IosAvPlayerPrecheckResult(
+        supported: false,
+        reason: '流媒体协议 $scheme:// 使用 MPV 内核解码',
+        detectedExtension: '$scheme://',
+        silentFallback: true,
+      );
+    }
+    if (scheme.isNotEmpty &&
+        scheme != 'http' &&
+        scheme != 'https' &&
+        scheme != 'file') {
+      return IosAvPlayerPrecheckResult(
+        supported: false,
+        reason: '协议 $scheme:// 使用 MPV 内核解码',
+        detectedExtension: '$scheme://',
+        silentFallback: true,
+      );
+    }
+
     final urlExt = _extractExtension(cleanUrl);
     if (urlExt != null) {
       if (incompatibleContainerExtensions.contains(urlExt)) {
@@ -346,6 +390,7 @@ class IosAvPlayerController extends ChangeNotifier {
           supported: false,
           reason: '容器格式 $urlExt 不受系统 AVPlayer 支持，已自动切换 MPV',
           detectedExtension: urlExt,
+          silentFallback: urlExt == '.smil' || urlExt == '.ts',
         );
       }
       if (avPlayerNativeExtensions.contains(urlExt)) {
@@ -358,7 +403,6 @@ class IosAvPlayerController extends ChangeNotifier {
 
     // Check query parameters (e.g. `?format=mkv` or `filename=video.flv`) when
     // the URL path has no explicit media extension.
-    final uri = Uri.tryParse(cleanUrl);
     if (uri != null) {
       for (final val in uri.queryParameters.values) {
         final trimmedVal = val.trim().toLowerCase();

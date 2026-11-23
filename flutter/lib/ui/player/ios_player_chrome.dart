@@ -461,6 +461,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                     width: 34,
                     height: 34,
                     borderRadius: 17,
+                    isCircle: true,
                     ios26Visual: ios26Visual,
                     reduceTransparency: reduceTransparency,
                     child: const Center(
@@ -520,16 +521,17 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                     widget.onLockTap();
                   },
                   child: _IosSpatialGlassSurface(
-                    width: 34,
-                    height: 34,
-                    borderRadius: 17,
+                    width: 32,
+                    height: 32,
+                    borderRadius: 16,
+                    isCircle: true,
                     ios26Visual: ios26Visual,
                     reduceTransparency: reduceTransparency,
                     child: const Center(
                       child: Icon(
                         CupertinoIcons.lock_open_fill,
                         color: Colors.white,
-                        size: 16,
+                        size: 15,
                       ),
                     ),
                   ),
@@ -577,10 +579,12 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
             onPointerDown: (_) => widget.onInteraction(),
             child: _IosSpatialGlassSurface(
               key: const Key('player-tool-dock-portrait'),
-              borderRadius: 16,
+              height: 36,
+              borderRadius: 18,
+              isCapsule: true,
               ios26Visual: ios26Visual,
               reduceTransparency: reduceTransparency,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
               child: Row(
                 children: [
                   if (!widget.isLive)
@@ -673,6 +677,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
             width: Ios26PlayerGlassMetrics.leftLockCirclePt,
             height: Ios26PlayerGlassMetrics.leftLockCirclePt,
             borderRadius: Ios26PlayerGlassMetrics.leftLockCirclePt * 0.5,
+            isCircle: true,
             ios26Visual: ios26Visual,
             reduceTransparency: reduceTransparency,
             child: const Center(
@@ -724,6 +729,8 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                   ? Ios26PlayerGlassMetrics.topCapsuleHeightPt
                   : null,
               borderRadius: Ios26PlayerGlassMetrics.topCapsuleRadiusPt,
+              isCircle: isCompactWidth,
+              isCapsule: !isCompactWidth,
               ios26Visual: ios26Visual,
               reduceTransparency: reduceTransparency,
               padding: isCompactWidth
@@ -1345,9 +1352,15 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
       child: _IosSpatialGlassSurface(
         key: dockKey,
         borderRadius: Ios26PlayerGlassMetrics.dockCapsuleRadiusPt,
+        isCapsule: widget.isLive,
         ios26Visual: ios26Visual,
         reduceTransparency: reduceTransparency,
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 5),
+        padding: EdgeInsets.fromLTRB(
+          14,
+          widget.isLive ? 5 : 5,
+          14,
+          widget.isLive ? 5 : 6,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1416,11 +1429,9 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
         padding: const EdgeInsets.symmetric(horizontal: 5),
         decoration: ShapeDecoration(
           color: action.active
-              ? AppleColors.systemBlue.withValues(alpha: 0.26)
+              ? AppleColors.systemBlue.withValues(alpha: 0.28)
               : Colors.transparent,
-          shape: ContinuousRectangleBorder(
-            borderRadius: BorderRadius.circular(pillRadius),
-          ),
+          shape: const StadiumBorder(),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -2031,6 +2042,8 @@ class _IosSpatialGlassSurface extends StatelessWidget {
   final bool reduceTransparency;
   final bool heroHighlight;
   final Color? tint;
+  final bool isCircle;
+  final bool isCapsule;
 
   const _IosSpatialGlassSurface({
     super.key,
@@ -2043,12 +2056,28 @@ class _IosSpatialGlassSurface extends StatelessWidget {
     this.padding,
     this.heroHighlight = false,
     this.tint,
+    this.isCircle = false,
+    this.isCapsule = false,
   });
+
+  ShapeBorder _resolveShape() {
+    final bool autoCircle = isCircle ||
+        (width != null &&
+            height != null &&
+            (width! - height!).abs() <= 0.5 &&
+            borderRadius >= width! * 0.45);
+    if (autoCircle) return const CircleBorder();
+    final bool autoCapsule = isCapsule ||
+        (height != null && borderRadius >= height! * 0.45);
+    if (autoCapsule) return const StadiumBorder();
+    return RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(borderRadius),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final radius = BorderRadius.circular(borderRadius);
-    final shape = ContinuousRectangleBorder(borderRadius: radius);
+    final shape = _resolveShape();
 
     if (reduceTransparency) {
       final base = tint != null
@@ -2059,10 +2088,31 @@ class _IosSpatialGlassSurface extends StatelessWidget {
           : (heroHighlight
               ? const Color(0xF526272E)
               : const Color(0xF51E1E22));
+      final borderedShape = shape is CircleBorder
+          ? CircleBorder(
+              side: BorderSide(
+                color: Colors.white.withValues(alpha: 0.48),
+                width: 1.0,
+              ),
+            )
+          : shape is StadiumBorder
+              ? StadiumBorder(
+                  side: BorderSide(
+                    color: Colors.white.withValues(alpha: 0.48),
+                    width: 1.0,
+                  ),
+                )
+              : RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(borderRadius),
+                  side: BorderSide(
+                    color: Colors.white.withValues(alpha: 0.48),
+                    width: 1.0,
+                  ),
+                );
       return DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: radius,
-          boxShadow: const [
+        decoration: ShapeDecoration(
+          shape: shape,
+          shadows: const [
             BoxShadow(
               color: Color(0x4D000000),
               blurRadius: 14,
@@ -2074,13 +2124,9 @@ class _IosSpatialGlassSurface extends StatelessWidget {
           width: width,
           height: height,
           padding: padding,
-          decoration: BoxDecoration(
-            borderRadius: radius,
+          decoration: ShapeDecoration(
+            shape: borderedShape,
             color: base,
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.48),
-              width: 1.0,
-            ),
           ),
           child: child,
         ),

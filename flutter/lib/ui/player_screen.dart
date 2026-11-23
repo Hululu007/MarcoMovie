@@ -21,6 +21,7 @@ import '../core/danmu/provider.dart';
 import '../core/danmu/segment_cache.dart';
 import '../core/emby_library.dart';
 import '../core/csp_bridge.dart';
+import '../core/episode_scraper.dart';
 import '../core/cloud_media_proxy.dart';
 import '../core/ios_avplayer_controller.dart';
 import '../core/ios_mpv_profile.dart';
@@ -41,6 +42,7 @@ import 'apple_theme.dart';
 import 'cast_avatar_section.dart';
 import 'danmu/danmu_layer.dart';
 import 'danmu/danmu_settings_sheet.dart';
+import 'episode_scrape_sheet.dart';
 import 'favorite_postcard_animation.dart';
 import 'ios_glass_popover.dart';
 import 'ios_liquid_glass.dart';
@@ -337,6 +339,60 @@ class _PlayerScreenState extends State<PlayerScreen>
   DanmuCancelToken? _danmuMatchToken;
   int _danmuSessionGen = 0;
   bool _danmuBoundForEpisode = false;
+  EpisodeScrapeOverride _episodeScrapeOverride = const EpisodeScrapeOverride();
+
+  String get _effectiveScrapeTitle {
+    if (widget.site.isEffectivelyPrivate) return widget.video.title;
+    final custom = _episodeScrapeOverride.customTitle.trim();
+    return custom.isNotEmpty ? custom : widget.video.title;
+  }
+
+  ScrapedLineResult _scrapeCurrentLine() {
+    return EpisodeScraper.scrapeLine(
+      _currentLine.episodes,
+      override: _episodeScrapeOverride,
+      seriesTitle: _effectiveScrapeTitle,
+    );
+  }
+
+  ScrapedEpisodeInfo _currentScrapedEpisode() {
+    return EpisodeScraper.parseEpisode(
+      _currentEpisode.name,
+      rawIndex: _episodeIndex,
+      episodeOffset: _episodeScrapeOverride.episodeOffset,
+      manualEpisodeNumber: _episodeScrapeOverride.manualEpisodeMap[_episodeIndex],
+      seriesTitle: _effectiveScrapeTitle,
+    );
+  }
+
+  Future<void> _showEpisodeScrapeSheet() async {
+    if (_isLiveStream || _currentLine.episodes.isEmpty) return;
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final next = await showEpisodeScrapeSheet(
+      context: context,
+      seriesTitle: widget.video.title,
+      year: widget.video.year,
+      episodes: _currentLine.episodes,
+      currentOverride: _episodeScrapeOverride,
+      forceDark: true,
+    );
+    if (next == null || !mounted) return;
+    await widget.storage.setEpisodeScrapeOverride(
+      siteKey: widget.site.key,
+      videoId: widget.video.id,
+      videoTitle: widget.video.title,
+      override: next,
+    );
+    if (!mounted) return;
+    setState(() => _episodeScrapeOverride = next);
+    _resetDanmuForEpisode();
+    final cur = _currentScrapedEpisode();
+    _showHud(
+      cur.isSpecial
+          ? '已更新剧集刮削（当前：${cur.specialTag ?? '特辑'}）'
+          : '已校准集数并重新匹配弹幕（第 ${cur.effectiveEpisodeNumber} 集）',
+    );
+  }
   OnboardingPrefs? _onboardingPrefs;
   bool _hasStartedVodPlayback = false;
   bool _firstPlayHintDismissedThisSession = false;
@@ -814,6 +870,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       0,
       _currentLine.episodes.length - 1,
     );
+    _episodeScrapeOverride = _isLiveStream
+        ? const EpisodeScrapeOverride()
+        : widget.storage.getEpisodeScrapeOverride(
+            siteKey: widget.site.key,
+            videoId: widget.video.id,
+            videoTitle: widget.video.title,
+          );
     _normalSpeed = _isLiveStream ? 1.0 : widget.storage.playSpeed;
     _skipIntroSec = widget.storage.getVideoSkipIntroSec(
       widget.site.key,
@@ -1507,6 +1570,85 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (mounted) setState(() {});
   }
 
+  static bool _isRtspFamilyUrl(String url) {
+    final scheme = Uri.tryParse(url.trim())?.scheme.toLowerCase() ?? '';
+    return scheme == 'rtsp' || scheme == 'rtsps';
+  }
+
+  static bool _isNonHttpStreamUrl(String url) {
+    final scheme = Uri.tryParse(url.trim())?.scheme.toLowerCase() ?? '';
+    return scheme.isNotEmpty &&
+        scheme != 'http' &&
+        scheme != 'https' &&
+        scheme != 'file';
+  }
+
+  static String _sanitizeFallbackReason(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) {
+      return 'Apple 原生内核不支持当前片源，已自动切换 MPV 续播';
+    }
+    final lower = trimmed.toLowerCase();
+    if (lower.contains('unsupported url') ||
+        trimmed.contains('不支持的URL') ||
+        trimmed.contains('不支持的 URL') ||
+        lower.contains('nsurlerror')) {
+      return '已自动切换至 MPV 内核播放';
+    }
+    return trimmed;
+  }
+
+  Future<void> _configureMpvStreamProperties(
+    String url,
+    Map<String, String> headers, {
+    bool isProxied = false,
+    bool preferUdpRtsp = false,
+  }) async {
+    try {
+      final dyn = _player.platform as dynamic;
+      final isRtsp = _isRtspFamilyUrl(url);
+      final isNonHttp = _isNonHttpStreamUrl(url);
+      await dyn.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
+      if (isRtsp) {
+        final transport = preferUdpRtsp ? 'udp' : 'tcp';
+        try {
+          await dyn.setProperty('rtsp-transport', transport);
+        } catch (_) {}
+        try {
+          await dyn.setProperty('network-timeout', '12');
+        } catch (_) {}
+        try {
+          await dyn.setProperty(
+            'demuxer-lavf-o',
+            'rtsp_transport=$transport,stimeout=10000000',
+          );
+        } catch (_) {}
+      } else {
+        try {
+          await dyn.setProperty('demuxer-lavf-o', '');
+        } catch (_) {}
+      }
+      final ua = headers.entries
+          .firstWhere(
+            (e) => e.key.toLowerCase() == 'user-agent',
+            orElse: () => const MapEntry('User-Agent', ''),
+          )
+          .value;
+      if (ua.isNotEmpty) {
+        await dyn.setProperty('user-agent', ua);
+      }
+      final ref = (isProxied || isNonHttp)
+          ? ''
+          : headers.entries
+              .firstWhere(
+                (e) => e.key.toLowerCase() == 'referer',
+                orElse: () => const MapEntry('Referer', ''),
+              )
+              .value;
+      await dyn.setProperty('referrer', ref);
+    } catch (_) {}
+  }
+
   Future<void> _handleRuntimeFallbackToMpv(FallbackToMpvRequested event) async {
     final avCtrl = _iosAvPlayerController;
     if (!mounted || avCtrl == null || !_usingAvPlayer || _fallbackInFlight) {
@@ -1533,20 +1675,19 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       await avCtrl.stop();
       if (!mounted || session != _playSession) return;
-      _showHud(
-        event.reason.isNotEmpty
-            ? event.reason
-            : 'Apple 原生内核不支持当前片源，已无缝切回 MPV 续播',
-      );
+      _showHud(_sanitizeFallbackReason(event.reason));
       await _applyPlayerKernel(_playerKernel);
       if (!mounted || session != _playSession || url.isEmpty) return;
       await _changeMedia(session, () async {
         _allowEvents = true;
         _activeMediaUri = Media(url).uri;
+        await _configureMpvStreamProperties(url, headers);
         await _player.open(
           Media(
             url,
-            httpHeaders: headers,
+            httpHeaders: _isNonHttpStreamUrl(url)
+                ? const <String, String>{}
+                : headers,
             start: resumeMs > 0 ? Duration(milliseconds: resumeMs) : null,
           ),
           play: !_castController.isCasting,
@@ -1946,6 +2087,16 @@ class _PlayerScreenState extends State<PlayerScreen>
         !_liveDirectFallbackTried) {
       _liveDirectFallbackTried = true;
       final scheme = Uri.tryParse(_activeStreamUrl)?.scheme.toLowerCase() ?? '';
+      if (scheme == 'rtsp' || scheme == 'rtsps') {
+        _showHud('正在切换 RTSP UDP 传输模式重试…');
+        unawaited(
+          _openCurrentEpisode(
+            resumeMs: 0,
+            preferUdpRtsp: true,
+          ),
+        );
+        return;
+      }
       final usedProxy =
           _localMedia.current != null || _activeEpisodeUsedLocalProxy;
       // Direct-first live playback on iOS/macOS/Android avoids unnecessary
@@ -2070,9 +2221,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     bool bypassLocalProxy = false,
     bool forceLiveLocalProxy = false,
     bool useAlternateLiveUa = false,
+    bool preferUdpRtsp = false,
   }) async {
     _startup.reset();
-    if (!bypassLocalProxy && !forceLiveLocalProxy && !useAlternateLiveUa) {
+    if (!bypassLocalProxy &&
+        !forceLiveLocalProxy &&
+        !useAlternateLiveUa &&
+        !preferUdpRtsp) {
       _liveDirectFallbackTried = false;
       _lastLiveUpstreamStatus = null;
     }
@@ -2149,7 +2304,19 @@ class _PlayerScreenState extends State<PlayerScreen>
         widget.storage.hlsAdStripEnabled;
     final canOpenDirectly = _isLiveStream
         ? (_currentEpisode.isLocalFile ||
-            const {'http', 'https', 'rtmp', 'rtsp'}.contains(
+            const {
+              'http',
+              'https',
+              'rtmp',
+              'rtmps',
+              'rtsp',
+              'rtsps',
+              'rtp',
+              'udp',
+              'mms',
+              'mmsh',
+              'mmst',
+            }.contains(
               Uri.tryParse(_currentEpisode.url.trim())?.scheme.toLowerCase(),
             ))
         : _currentEpisode.isDirectPlayable;
@@ -2435,7 +2602,8 @@ class _PlayerScreenState extends State<PlayerScreen>
               episodeName: _currentEpisode.name,
               lineName: _currentLine.name,
             );
-          } else if ((precheck.reason ?? '').isNotEmpty) {
+          } else if (!precheck.silentFallback &&
+              (precheck.reason ?? '').isNotEmpty) {
             _showHud(precheck.reason!);
           }
         }
@@ -2457,32 +2625,18 @@ class _PlayerScreenState extends State<PlayerScreen>
           } else {
             _usingAvPlayer = false;
           }
-          try {
-            final dyn = _player.platform as dynamic;
-            await dyn.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
-            final ua = headers.entries
-                .firstWhere(
-                  (e) => e.key.toLowerCase() == 'user-agent',
-                  orElse: () => const MapEntry('User-Agent', ''),
-                )
-                .value;
-            if (ua.isNotEmpty) {
-              await dyn.setProperty('user-agent', ua);
-            }
-            final ref = pendingLocalLease != null
-                ? ''
-                : headers.entries
-                    .firstWhere(
-                      (e) => e.key.toLowerCase() == 'referer',
-                      orElse: () => const MapEntry('Referer', ''),
-                    )
-                    .value;
-            await dyn.setProperty('referrer', ref);
-          } catch (_) {}
+          await _configureMpvStreamProperties(
+            effectiveOpenUrl,
+            headers,
+            isProxied: pendingLocalLease != null || pendingBlurayLease != null,
+            preferUdpRtsp: preferUdpRtsp,
+          );
           await _player.open(
             Media(
               effectiveOpenUrl,
-              httpHeaders: effectiveOpenHeaders,
+              httpHeaders: _isNonHttpStreamUrl(effectiveOpenUrl)
+                  ? const <String, String>{}
+                  : effectiveOpenHeaders,
               start: baseMedia.start,
             ),
             play: !_castController.isCasting,
@@ -4115,10 +4269,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     final effectiveDurMs = _duration.inMilliseconds > 0
         ? _duration.inMilliseconds
         : _lastKnownDurationMs;
+    final scrapedEp = _currentScrapedEpisode();
     final query = DanmuMatchQuery(
-      title: widget.video.title,
-      episodeTitle: _currentEpisode.name,
-      episodeIndex: _episodeIndex + 1,
+      title: _effectiveScrapeTitle,
+      episodeTitle: scrapedEp.danmuEpisodeTitle,
+      episodeIndex: scrapedEp.isSpecial ? 0 : scrapedEp.effectiveEpisodeNumber,
       durationSec: effectiveDurMs > 0 ? effectiveDurMs ~/ 1000 : 0,
     );
 
@@ -4445,152 +4600,125 @@ class _PlayerScreenState extends State<PlayerScreen>
               child: const SizedBox.expand(),
             ),
           ),
-        if (_hudText.isNotEmpty &&
-            speedCapsuleMode == SpeedCapsuleMode.hidden &&
-            desktopPreview == null)
-          Align(
-            alignment: const Alignment(0, -0.74),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: effectiveReduceTransparency
-                  ? Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 18,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xF51E1E22),
-                        borderRadius: BorderRadius.circular(999),
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.45),
-                          width: 0.9,
-                        ),
-                      ),
-                      child: Text(
-                        _hudText,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AppleColors.labelPrimary,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    )
-                  : AppleGlassSurface(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 18,
-                        vertical: 10,
-                      ),
-                      borderRadius: BorderRadius.circular(999),
-                      child: Text(
-                        _hudText,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AppleColors.labelPrimary,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-            ),
-          ),
-        if (_loading || _buffering)
-          Center(
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(
-                16,
-                (_desktop &&
-                        _controlsVisible &&
-                        !_screenLocked &&
-                        !widget.embedded)
-                    ? 152
-                    : 0,
-                16,
-                0,
-              ),
-              child: KeyedSubtree(
-                key: const Key('player-loading-indicator'),
-                child: effectiveReduceTransparency
-                    ? Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 22,
-                        vertical: 15,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xF51E1E22),
-                        borderRadius: BorderRadius.circular(999),
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.45),
-                          width: 0.9,
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          widget.loadingIndicator ??
-                              (!OhosRuntime.isOhos
-                                  ? const BrandLogoLoader(
-                                      key: Key('player-brand-logo-loader'),
-                                      size: 26,
-                                    )
-                                  : const CupertinoActivityIndicator(
-                                      radius: 11,
-                                    )),
-                          const SizedBox(width: 12),
-                          Flexible(
-                            child: Text(
-                              '正在加载 ${_currentEpisode.name}…',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: AppleColors.labelPrimary,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
+        // Bubble-free smoothly fading playback toast with adaptive contrast text.
+        Positioned.fill(
+          child: IgnorePointer(
+            child: Align(
+              alignment: const Alignment(0, -0.70),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 28),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  child: (_hudText.isNotEmpty &&
+                          speedCapsuleMode == SpeedCapsuleMode.hidden &&
+                          desktopPreview == null)
+                      ? Text(
+                          _hudText,
+                          key: ValueKey<String>('player-hud-toast:$_hudText'),
+                          maxLines: 2,
+                          textAlign: TextAlign.center,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xF7FFFFFF),
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.1,
+                            height: 1.32,
+                            shadows: [
+                              Shadow(
+                                color: Color(0xE0000000),
+                                blurRadius: 8,
+                                offset: Offset(0, 1.5),
                               ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    )
-                  : AppleGlassSurface(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 22,
-                        vertical: 15,
-                      ),
-                      borderRadius: BorderRadius.circular(999),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          widget.loadingIndicator ??
-                              (!OhosRuntime.isOhos
-                                  ? const BrandLogoLoader(
-                                      key: Key('player-brand-logo-loader'),
-                                      size: 26,
-                                    )
-                                  : const CupertinoActivityIndicator(
-                                      radius: 11,
-                                    )),
-                          const SizedBox(width: 12),
-                          Flexible(
-                            child: Text(
-                              '正在加载 ${_currentEpisode.name}…',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: AppleColors.labelPrimary,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
+                              Shadow(
+                                color: Color(0x9E000000),
+                                blurRadius: 20,
+                                offset: Offset(0, 2),
                               ),
-                            ),
+                            ],
                           ),
-                        ],
-                      ),
-                    ),
+                        )
+                      : const SizedBox.shrink(key: ValueKey<String>('player-hud-toast:empty')),
+                ),
               ),
             ),
           ),
+        ),
+        // Bubble-free smoothly fading loading indicator (zero white pill, clear of side lock button).
+        Positioned.fill(
+          child: IgnorePointer(
+            child: Center(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  showPortraitCompanion ? 54 : 32,
+                  (_desktop &&
+                          _controlsVisible &&
+                          !_screenLocked &&
+                          !widget.embedded)
+                      ? 152
+                      : 0,
+                  showPortraitCompanion ? 54 : 32,
+                  0,
+                ),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  child: (_loading || _buffering)
+                      ? KeyedSubtree(
+                          key: const Key('player-loading-indicator'),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              widget.loadingIndicator ??
+                                  (!OhosRuntime.isOhos
+                                      ? const BrandLogoLoader(
+                                          key: Key('player-brand-logo-loader'),
+                                          size: 22,
+                                        )
+                                      : const CupertinoActivityIndicator(
+                                          radius: 10,
+                                          color: Colors.white,
+                                        )),
+                              const SizedBox(width: 9),
+                              Flexible(
+                                child: Text(
+                                  '正在加载 ${_isLiveStream ? _currentEpisode.name : _currentScrapedEpisode().compactLabel(singleItemMovie: _currentLine.episodes.length <= 1)}…',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Color(0xF5FFFFFF),
+                                    fontSize: 13.5,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: 0.1,
+                                    shadows: [
+                                      Shadow(
+                                        color: Color(0xE0000000),
+                                        blurRadius: 8,
+                                        offset: Offset(0, 1.5),
+                                      ),
+                                      Shadow(
+                                        color: Color(0x9E000000),
+                                        blurRadius: 18,
+                                        offset: Offset(0, 2),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : const SizedBox.shrink(
+                          key: ValueKey<String>('player-loading-empty'),
+                        ),
+                ),
+              ),
+            ),
+          ),
+        ),
       ],
     );
 
@@ -5145,9 +5273,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                             ),
                           )
                         : screenSize.width * 9 / 16,
-                    child: KeyedSubtree(
-                      key: _playerStageKey,
-                      child: PlayerInteractionLayers(
+                    child: Theme(
+                      data: Theme.of(context).copyWith(
+                        brightness: Brightness.dark,
+                      ),
+                      child: KeyedSubtree(
+                        key: _playerStageKey,
+                        child: PlayerInteractionLayers(
                         controls: Stack(
                           fit: StackFit.expand,
                           children: [
@@ -5315,12 +5447,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                         surface: surfaceWidget,
                       ),
                     ),
+                    ),
                   )
                 else
                   Expanded(
-                    child: KeyedSubtree(
-                      key: _playerStageKey,
-                      child: PlayerInteractionLayers(
+                    child: Theme(
+                      data: Theme.of(context).copyWith(
+                        brightness: Brightness.dark,
+                      ),
+                      child: KeyedSubtree(
+                        key: _playerStageKey,
+                        child: PlayerInteractionLayers(
                         controls: Stack(
                           fit: StackFit.expand,
                           children: [
@@ -5679,6 +5816,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ),
                         surface: surfaceWidget,
                       ),
+                    ),
                     ),
                   ),
                 if (showPortraitCompanion)
@@ -6059,13 +6197,71 @@ class _PlayerScreenState extends State<PlayerScreen>
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    const Spacer(),
-                    Text(
-                      _currentLine.name,
-                      style: TextStyle(
-                        color: palette.accent,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          if (!_isLiveStream) ...[
+                            GestureDetector(
+                              key: const Key('ios-portrait-episode-scrape-btn'),
+                              onTap: () => unawaited(_showEpisodeScrapeSheet()),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: _episodeScrapeOverride.enabled ||
+                                          !_episodeScrapeOverride.isDefault
+                                      ? palette.accent.withValues(alpha: 0.18)
+                                      : glassChipBg,
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(
+                                    color: _episodeScrapeOverride.enabled ||
+                                            !_episodeScrapeOverride.isDefault
+                                        ? palette.accent.withValues(alpha: 0.6)
+                                        : glassCardBorder,
+                                    width: 0.75,
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      CupertinoIcons.sparkles,
+                                      size: 11.5,
+                                      color: palette.accent,
+                                    ),
+                                    const SizedBox(width: 3),
+                                    Text(
+                                      '刮削',
+                                      style: TextStyle(
+                                        color: palette.accent,
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                          ],
+                          Flexible(
+                            child: Text(
+                              _currentLine.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.end,
+                              style: TextStyle(
+                                color: palette.accent,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
@@ -6136,9 +6332,22 @@ class _PlayerScreenState extends State<PlayerScreen>
                 const SizedBox(height: 12),
                 LayoutBuilder(
                   builder: (context, constraints) {
-                    final maxNameLen = episodes.fold<int>(
+                    final scrapedLine = _scrapeCurrentLine();
+                    final visibleIndices = scrapedLine.visibleRawIndices;
+                    final displayLabels = <int, String>{
+                      for (final rawIdx in visibleIndices)
+                        rawIdx: scrapedLine.items[rawIdx].compactLabel(
+                          singleItemMovie: visibleIndices.length <= 1,
+                        ),
+                    };
+                    final maxNameLen = visibleIndices.fold<int>(
                       0,
-                      (prev, ep) => math.max(prev, ep.name.trim().length),
+                      (prev, rawIdx) => math.max(
+                        prev,
+                        (displayLabels[rawIdx] ?? episodes[rawIdx].name)
+                            .trim()
+                            .length,
+                      ),
                     );
                     const gap = 8.0;
                     final cols = maxNameLen <= 5
@@ -6154,7 +6363,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       spacing: gap,
                       runSpacing: gap,
                       children: [
-                        for (var i = 0; i < episodes.length; i++)
+                        for (final i in visibleIndices)
                           GestureDetector(
                             key: Key('ios-portrait-episode-$i'),
                             onTap: () {
@@ -6187,7 +6396,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                 ),
                               ),
                               child: Text(
-                                episodes[i].name,
+                                displayLabels[i] ?? episodes[i].name,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 textAlign: TextAlign.center,
@@ -9668,6 +9877,18 @@ class _PlayerScreenState extends State<PlayerScreen>
           section: 1,
         ),
         AppleNativePickerOption<String>(
+          value: 'episode_scrape',
+          title: '剧集刮削与集数校准',
+          subtitle: _episodeScrapeOverride.episodeOffset != 0
+              ? '当前第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集 · 偏移 ${_episodeScrapeOverride.episodeOffset > 0 ? '+${_episodeScrapeOverride.episodeOffset}' : '${_episodeScrapeOverride.episodeOffset}'}'
+              : (_currentScrapedEpisode().isSpecial
+                    ? '当前：${_currentScrapedEpisode().specialTag ?? '特辑'}'
+                    : '当前识别：第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集'),
+          symbol: 'sparkles',
+          checked: !_episodeScrapeOverride.isDefault,
+          section: 1,
+        ),
+        AppleNativePickerOption<String>(
           value: 'auto_next',
           title: '自动连播下一集',
           subtitle: _autoNext ? '已开启' : '已关闭',
@@ -9748,6 +9969,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           final next = !_hudPrefs.data.skipCountdown;
           unawaited(_hudPrefs.setSkipCountdown(next));
           _showHud(next ? '已开启跳过 3 秒倒计时' : '已切换为静默立即跳过');
+        case 'episode_scrape':
+          unawaited(_showEpisodeScrapeSheet());
         case 'auto_next':
           _toggleAutoNext();
         case 'repeat':
@@ -9804,44 +10027,131 @@ class _PlayerScreenState extends State<PlayerScreen>
     ValueChanged<String> handleAction, {
     Rect? anchorRect,
   }) {
-    Widget buildContent(BuildContext ctx) => ListView(
-      shrinkWrap: true,
-      padding: EdgeInsets.all(_useIos26PlayerChrome ? 4 : 16),
-      children: [
-        AppleGroupedSection(
-          children: [
-            for (final opt in options)
-              AppleGroupedTile(
-                icon: CupertinoIcons.slider_horizontal_3,
-                iconBgColor: opt.checked
-                    ? AppleColors.systemBlue
-                    : AppleColors.groupedTertiary,
-                title: opt.title,
-                subtitle: opt.subtitle,
-                trailing: opt.checked
-                    ? const Icon(
-                        CupertinoIcons.checkmark_alt,
-                        color: AppleColors.systemBlue,
-                        size: 18,
-                      )
-                    : null,
-                onTap: () {
-                  Navigator.of(ctx).pop();
-                  handleAction(opt.value);
-                },
+    Widget buildContent(BuildContext ctx) {
+      if (_useIos26PlayerChrome) {
+        return ListView.separated(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          itemCount: options.length,
+          separatorBuilder: (_, __) => Divider(
+            height: 1,
+            thickness: 0.5,
+            indent: 34,
+            color: Colors.white.withValues(alpha: 0.10),
+          ),
+          itemBuilder: (_, idx) {
+            final opt = options[idx];
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                Navigator.of(ctx).pop();
+                handleAction(opt.value);
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+                child: Row(
+                  children: [
+                    Icon(
+                      opt.checked
+                          ? CupertinoIcons.checkmark_circle_fill
+                          : CupertinoIcons.slider_horizontal_3,
+                      size: 15,
+                      color: opt.checked
+                          ? AppleColors.systemBlue
+                          : const Color(0xCCFFFFFF),
+                    ),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            opt.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12.5,
+                              fontWeight: opt.checked
+                                  ? FontWeight.w600
+                                  : FontWeight.w500,
+                              height: 1.2,
+                            ),
+                          ),
+                          if ((opt.subtitle ?? '').trim().isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 1.5),
+                              child: Text(
+                                opt.subtitle!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.62),
+                                  fontSize: 10.5,
+                                  height: 1.15,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    if (opt.checked)
+                      const Padding(
+                        padding: EdgeInsets.only(left: 6),
+                        child: Icon(
+                          CupertinoIcons.checkmark_alt,
+                          color: AppleColors.systemBlue,
+                          size: 14,
+                        ),
+                      ),
+                  ],
+                ),
               ),
-          ],
-        ),
-      ],
-    );
+            );
+          },
+        );
+      }
+      return ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: [
+              for (final opt in options)
+                AppleGroupedTile(
+                  icon: CupertinoIcons.slider_horizontal_3,
+                  iconBgColor: opt.checked
+                      ? AppleColors.systemBlue
+                      : AppleColors.groupedTertiary,
+                  title: opt.title,
+                  subtitle: opt.subtitle,
+                  trailing: opt.checked
+                      ? const Icon(
+                          CupertinoIcons.checkmark_alt,
+                          color: AppleColors.systemBlue,
+                          size: 18,
+                        )
+                      : null,
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    handleAction(opt.value);
+                  },
+                ),
+            ],
+          ),
+        ],
+      );
+    }
     if (_useIos26PlayerChrome) {
       showIosGlassPopover<void>(
         context: context,
         anchorRect: anchorRect,
         title: '播放选项',
-        maxWidth: 290,
-        maxHeight: 330,
+        maxWidth: 304,
+        maxHeight: 336,
         forceDark: true,
+        contentPadding: const EdgeInsets.fromLTRB(6, 2, 6, 6),
         builder: buildContent,
       );
       return;
@@ -10241,6 +10551,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       activeLineIndex: _lineIndex,
       activeEpisodeIndex: _episodeIndex,
       episodeUnavailableReason: episodeChecker,
+      scrapeOverride: _episodeScrapeOverride,
+      seriesTitle: _effectiveScrapeTitle,
+      onOpenScrape: _isLiveStream
+          ? null
+          : () {
+              Navigator.of(ctx).pop();
+              unawaited(_showEpisodeScrapeSheet());
+            },
       onSelect: (lineIdx, epIdx) {
         Navigator.of(ctx).pop();
         _failedLinesForEpisode.clear();
@@ -10329,6 +10647,9 @@ class PlayerEpisodePickerSheet extends StatefulWidget {
   final int activeLineIndex;
   final int activeEpisodeIndex;
   final String? Function(CmsEpisode episode)? episodeUnavailableReason;
+  final EpisodeScrapeOverride scrapeOverride;
+  final String seriesTitle;
+  final VoidCallback? onOpenScrape;
   final void Function(int lineIndex, int episodeIndex) onSelect;
 
   const PlayerEpisodePickerSheet({
@@ -10338,6 +10659,9 @@ class PlayerEpisodePickerSheet extends StatefulWidget {
     required this.activeLineIndex,
     required this.activeEpisodeIndex,
     this.episodeUnavailableReason,
+    this.scrapeOverride = const EpisodeScrapeOverride(),
+    this.seriesTitle = '',
+    this.onOpenScrape,
     required this.onSelect,
   });
 
@@ -10418,16 +10742,21 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
   @override
   Widget build(BuildContext context) {
     final episodes = _line.episodes;
-    final total = episodes.length;
+    final scraped = EpisodeScraper.scrapeLine(
+      episodes,
+      override: widget.scrapeOverride,
+      seriesTitle: widget.seriesTitle,
+    );
+    final orderedVisible = _descending
+        ? scraped.visibleRawIndices.reversed.toList(growable: false)
+        : scraped.visibleRawIndices;
+    final total = orderedVisible.length;
     final groupCount = total <= 0 ? 1 : ((total - 1) ~/ _groupSize) + 1;
     final safeGroup = _groupIndex.clamp(0, math.max(0, groupCount - 1)).toInt();
     final int startIdx = safeGroup * _groupSize;
     final int endIdx = math.min(startIdx + _groupSize, total);
 
-    final indices = <int>[for (int i = startIdx; i < endIdx; i++) i];
-    if (_descending) {
-      indices.sort((a, b) => b.compareTo(a));
-    }
+    final indices = orderedVisible.sublist(startIdx, endIdx);
 
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
@@ -10556,7 +10885,50 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                 ),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 6),
+            if (widget.onOpenScrape != null) ...[
+              GestureDetector(
+                onTap: widget.onOpenScrape,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 7,
+                  ),
+                  decoration: BoxDecoration(
+                    color: !widget.scrapeOverride.isDefault
+                        ? const Color(0x330A84FF)
+                        : const Color(0xCC26262C),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: !widget.scrapeOverride.isDefault
+                          ? AppleColors.systemBlue
+                          : const Color(0x30FFFFFF),
+                      width: 0.65,
+                    ),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        CupertinoIcons.sparkles,
+                        size: 12.5,
+                        color: Color(0xFF64B5FF),
+                      ),
+                      SizedBox(width: 3),
+                      Text(
+                        '刮削',
+                        style: TextStyle(
+                          color: AppleColors.labelPrimary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+            ],
               GestureDetector(
                 onTap: () => setState(() => _descending = !_descending),
                 child: Container(
@@ -10702,6 +11074,7 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                 itemBuilder: (ctx, idx) {
                   final epIndex = indices[idx];
                   final ep = episodes[epIndex];
+                  final epInfo = scraped.infoForRawIndex(epIndex);
                   final unavailReason =
                       widget.episodeUnavailableReason?.call(ep);
                   final isUnavailable = unavailReason != null;
@@ -10710,9 +11083,13 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                       _previewLineIndex == widget.activeLineIndex &&
                       epIndex == widget.activeEpisodeIndex;
                   final parsed = _ParsedEpisodeLabel.parse(ep.name, epIndex);
-                  final numBadge =
+                  final numBadge = epInfo?.badgeLabel ??
                       '#${(epIndex + 1).toString().padLeft(2, '0')}';
-                  final badgeText = isUnavailable ? '不可解析' : parsed.sizeBadge;
+                  final badgeText = isUnavailable
+                      ? '不可解析'
+                      : (parsed.sizeBadge.isNotEmpty
+                            ? parsed.sizeBadge
+                            : (epInfo?.qualityBadge ?? ''));
 
                   final tile = GestureDetector(
                     onTap: () {
@@ -10969,20 +11346,21 @@ class _CompanionActionChip extends StatelessWidget {
         },
         behavior: HitTestBehavior.opaque,
         child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 8),
+          height: 36,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
           decoration: BoxDecoration(
             color: active
                 ? color.withValues(alpha: palette.isDark ? 0.22 : 0.16)
                 : (palette.isDark
                     ? Colors.white.withValues(alpha: 0.085)
-                    : Colors.white.withValues(alpha: 0.56)),
-            borderRadius: BorderRadius.circular(13),
+                    : Colors.white.withValues(alpha: 0.62)),
+            borderRadius: BorderRadius.circular(999),
             border: Border.all(
               color: active
                   ? color.withValues(alpha: 0.5)
                   : (palette.isDark
                       ? Colors.white.withValues(alpha: 0.16)
-                      : Colors.white.withValues(alpha: 0.82)),
+                      : Colors.white.withValues(alpha: 0.85)),
               width: 0.85,
             ),
             boxShadow: palette.isDark
@@ -10995,19 +11373,21 @@ class _CompanionActionChip extends StatelessWidget {
                     ),
                   ],
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon, size: 17, color: color),
-              const SizedBox(height: 3),
-              Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: active ? color : palette.labelSecondary,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
+              Icon(icon, size: 15, color: color),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: active ? color : palette.labelPrimary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ],

@@ -1,4 +1,4 @@
-"""Validate real iOS 15 deployment targets (built with Xcode 26 SDK), then ad-hoc sign for sideloading."""
+"""Validate real iOS 14 deployment targets (built with Xcode 26/27 SDK), then ad-hoc sign for sideloading."""
 from pathlib import Path
 import plistlib
 import shutil
@@ -25,7 +25,7 @@ def validate_app(app_dir: Path) -> None:
         if path.name == 'Info.plist':
             metadata = plistlib.loads(path.read_bytes())
             minimum = metadata.get('MinimumOSVersion')
-            if minimum and tuple((list(map(int, minimum.split('.'))) + [0, 0])[:3]) > (15, 0, 0):
+            if minimum and tuple((list(map(int, minimum.split('.'))) + [0, 0])[:3]) > (14, 0, 0):
                 raise ValueError(f'{path}: requires iOS {minimum}')
         with path.open('rb') as stream:
             magic = stream.read(4)
@@ -59,10 +59,10 @@ def validate_app(app_dir: Path) -> None:
                     raise ValueError(f'{path}: truncated deployment command')
             if cmd == 0x32:
                 platform, minimum = struct.unpack_from('<II', data, pos + 8)
-                if platform != 2 or minimum > 0x000f0000:
+                if platform != 2 or minimum > 0x000e0000:
                     raise ValueError(f'{path}: incompatible platform {platform}, deployment target {minimum:#x}')
-            if cmd == 0x25 and struct.unpack_from('<I', data, pos + 8)[0] > 0x000f0000:
-                raise ValueError(f'{path}: deployment target exceeds iOS 15.0')
+            if cmd == 0x25 and struct.unpack_from('<I', data, pos + 8)[0] > 0x000e0000:
+                raise ValueError(f'{path}: deployment target exceeds iOS 14.0')
             pos += length
         if pos != 32 + size or not has_target:
             raise ValueError(f'{path}: missing deployment target or invalid command size')
