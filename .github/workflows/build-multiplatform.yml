@@ -66,6 +66,7 @@ jobs:
           python scripts/test_drpy_assets.py
           python scripts/update_drpy_assets.py --check
       - name: Check Java formatting
+        if: github.event_name != 'workflow_dispatch' || inputs.target != 'harmonyos'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -82,6 +83,7 @@ jobs:
           PY
           python scripts/format_java.py --check
       - name: Run pure-JVM regression checks
+        if: github.event_name != 'workflow_dispatch' || inputs.target != 'harmonyos'
         run: |
           python android-tv/tests/run_checks.py
           python android-tv/tests/run_direct_cms_import_checks.py
@@ -130,12 +132,20 @@ jobs:
           python scripts/test_t4_adapter.py
           node --jitless scripts/test_fy_adapter.cjs
           python scripts/test_fy_adapter.py
+      - name: Run HarmonyOS & Flutter Python checks
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'harmonyos'
+        run: |
+          python -m unittest discover -s flutter -p "test_*.py"
+          python scripts/test_platform_packages.py
+          python scripts/test_catpaw_host.py
+          python scripts/test_guard_bootstrap.py
+          python scripts/test_appgz_host.py
       - name: Run Flutter tri-platform conformance tests
         working-directory: flutter
         run: |
           python prepare_platform.py
           flutter pub get
-          flutter test test/conformance_test.dart test/harmonyos_and_tv_ui_test.dart
+          flutter test test/conformance_test.dart test/harmonyos_and_tv_ui_test.dart test/app_update_test.dart
       - name: Shared script runtime and native patch checks
         run: |
           node scripts/test_js_module_interop.cjs
