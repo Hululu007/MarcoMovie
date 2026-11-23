@@ -404,7 +404,7 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
         await _openServerForm(
           title: '连接 Plex 媒体库',
           accentColor: const Color(0xFFE5A00D),
-          addressHint: 'http://192.168.1.10:32400',
+          addressHint: 'http://plex.example:32400',
           fields: const [
             _FormFieldSpec('address', '服务器地址', 'http://plex.example:32400'),
             _FormFieldSpec('token', 'X-Plex-Token', '粘贴 Plex 访问令牌', obscure: true),
@@ -469,16 +469,16 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
         await _openServerForm(
           title: '添加 SMB / 局域网 NAS',
           accentColor: const Color(0xFF2563EB),
-          addressHint: '192.168.1.2',
+          addressHint: 'nas.example',
           fields: const [
-            _FormFieldSpec('host', '主机 IP 或域名', '如：192.168.1.2 或 nas.local'),
+            _FormFieldSpec('host', '主机 IP 或域名', '如：nas.example 或局域网主机 IP'),
             _FormFieldSpec('share', '共享目录名', '如：Movies 或 Video'),
             _FormFieldSpec('user', '用户名（可选）', 'SMB 登录账号'),
             _FormFieldSpec('pass', '密码（可选）', 'SMB 登录密码', obscure: true),
             _FormFieldSpec(
               'webdav',
               '伴随 WebDAV 地址（可选，用于目录浏览）',
-              'http://nas.local:5005/Movies/',
+              'https://dav.example:5006/Movies/',
             ),
           ],
           onConnect: (values, group, isPriv) => SmbNasLibrary.configure(
