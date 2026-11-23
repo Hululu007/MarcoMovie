@@ -1,15 +1,26 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:marco_movie/core/app_log.dart';
+import 'package:marco_movie/core/app_update.dart';
 import 'package:marco_movie/core/cms_client.dart';
+import 'package:marco_movie/core/local_media_proxy.dart';
 import 'package:marco_movie/core/models.dart';
 import 'package:marco_movie/core/ohos_runtime.dart';
+import 'package:marco_movie/core/secure_credential_store.dart';
 import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/core/video_kernel.dart';
+import 'package:marco_movie/ui/adaptive_shell.dart';
+import 'package:marco_movie/ui/cloud_sync_panel.dart';
 import 'package:marco_movie/ui/player_screen.dart';
 import 'package:marco_movie/ui/tv/tv_detail_screen.dart';
 import 'package:marco_movie/ui/tv/tv_focus_widgets.dart';
@@ -17,6 +28,8 @@ import 'package:marco_movie/ui/tv/tv_living_room_shell.dart';
 import 'package:marco_movie/ui/tv/tv_player_overlay.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+class _PassthroughHttpOverrides extends HttpOverrides {}
 
 class _StaticJsonHttpClient extends http.BaseClient {
   final String responseJson;
@@ -116,11 +129,17 @@ void main() {
 
   tearDown(() {
     OhosRuntime.resetForTesting();
+    AppUpdate.debugHttpClientOverride = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(OhosRuntime.systemChannel, null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
           const MethodChannel('com.pilipala.marcomovie/ohos_avplayer'),
+          null,
+        );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('dev.fluttercommunity.plus/package_info'),
           null,
         );
   });
@@ -1086,5 +1105,1570 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump(const Duration(seconds: 5));
     });
+  });
+
+  group('HarmonyOS 0.1.2 Upgrade Regressions (P0 / P1 / P2)', () {
+    testWidgets(
+      'P0-2 Credential storage: WebDAV password, long cookie (>2KB), lock-screen errors, legacy fallback migration & retry, zero plaintext leak',
+      (tester) async {
+        OhosRuntime.debugIsOhosOverride = true;
+        final assetStore = <String, String>{};
+        final legacyFallback = <String, String>{
+          StorageService.keyWebdavPass: 'LegacyWebDavPass_011!',
+        };
+        var deviceLocked = true;
+        var interruptFallbackDeleteOnce = true;
+
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(OhosRuntime.systemChannel, (call) async {
+          final args = call.arguments is Map
+              ? Map<String, dynamic>.from(call.arguments as Map)
+              : const <String, dynamic>{};
+          final key = args['key']?.toString() ?? '';
+          switch (call.method) {
+            case 'secureRead':
+              if (deviceLocked) {
+                throw PlatformException(
+                  code: '24000005',
+                  message:
+                      '系统安全存储当前不可用（设备锁屏或尚未首次解锁），请解锁后重试 (code=24000005)',
+                );
+              }
+              if (assetStore.containsKey(key)) {
+                legacyFallback.remove(key);
+                return assetStore[key];
+              }
+              final legacy = legacyFallback[key];
+              if (legacy == null) return null;
+              // Simulate verified write to Asset Store, then crash/interrupt before fallback delete on 1st try
+              assetStore[key] = legacy;
+              if (interruptFallbackDeleteOnce) {
+                interruptFallbackDeleteOnce = false;
+                return legacy;
+              }
+              legacyFallback.remove(key);
+              return legacy;
+            case 'secureWrite':
+              if (deviceLocked) {
+                throw PlatformException(
+                  code: '24000005',
+                  message:
+                      '系统安全存储当前不可用（设备锁屏或尚未首次解锁），请解锁后重试 (code=24000005)',
+                );
+              }
+              final val = args['value']?.toString() ?? '';
+              assetStore[key] = val;
+              legacyFallback.remove(key);
+              return true;
+            case 'secureDelete':
+              if (deviceLocked) {
+                throw PlatformException(
+                  code: '24000005',
+                  message:
+                      '系统安全存储当前不可用（设备锁屏或尚未首次解锁），请解锁后重试 (code=24000005)',
+                );
+              }
+              assetStore.remove(key);
+              legacyFallback.remove(key);
+              return true;
+          }
+          return null;
+        });
+
+        const backend = OhosSecureStorageBackend();
+        // 1) Locked device: read/write/delete must fail cleanly and leave legacy fallback untouched
+        await expectLater(
+          backend.read(StorageService.keyWebdavPass),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('24000005'),
+            ),
+          ),
+        );
+        expect(legacyFallback[StorageService.keyWebdavPass], 'LegacyWebDavPass_011!');
+
+        await expectLater(
+          backend.write(StorageService.keyQuarkCookie, 'SuperSecretCookieValue'),
+          throwsA(isA<FormatException>()),
+        );
+        expect(legacyFallback.containsKey(StorageService.keyQuarkCookie), isFalse);
+
+        // 2) Unlock: 1st read migrates into Asset Store; interrupted cleanup retried on 2nd read
+        deviceLocked = false;
+        expect(
+          await backend.read(StorageService.keyWebdavPass),
+          'LegacyWebDavPass_011!',
+        );
+        expect(assetStore[StorageService.keyWebdavPass], 'LegacyWebDavPass_011!');
+        expect(legacyFallback.containsKey(StorageService.keyWebdavPass), isTrue);
+        // Second read cleans up leftover fallback entry cleanly
+        expect(
+          await backend.read(StorageService.keyWebdavPass),
+          'LegacyWebDavPass_011!',
+        );
+        expect(legacyFallback.containsKey(StorageService.keyWebdavPass), isFalse);
+
+        // 3) Long Netdisk Cookie (> 3 KB) round-trip + restart persistence + logout
+        SharedPreferences.setMockInitialValues({});
+        final storage1 = await StorageService.init(
+          secureStore: DefaultSecureCredentialStore(backend: backend),
+        );
+        final longCookie = List.generate(
+          80,
+          (i) => '__puus_part_$i=${'A1b2C3d4E5f6G7h8' * 2}',
+        ).join('; ');
+        expect(utf8.encode(longCookie).length, greaterThan(3000));
+        await storage1.setNetdiskCredential('quark', longCookie);
+        expect(storage1.getNetdiskCred('quark'), longCookie);
+
+        // Verify ordinary SharedPreferences does NOT contain plaintext password or cookie
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString(StorageService.keyQuarkCookie), isNull);
+        expect(prefs.getString(StorageService.keyWebdavPass), isNull);
+        for (final k in prefs.getKeys()) {
+          final v = prefs.get(k)?.toString() ?? '';
+          expect(v, isNot(contains(longCookie)));
+          expect(v, isNot(contains('LegacyWebDavPass_011!')));
+        }
+
+        // Simulated restart reads persisted credentials from Asset Store
+        final storage2 = await StorageService.init(
+          secureStore: DefaultSecureCredentialStore(backend: backend),
+        );
+        expect(storage2.webdavPass, 'LegacyWebDavPass_011!');
+        expect(storage2.getNetdiskCred('quark'), longCookie);
+
+        // Lock device again: logout (delete) must fail honestly, keep cache intact, and show error in UI
+        deviceLocked = true;
+        await expectLater(
+          storage2.setNetdiskCredential('quark', ''),
+          throwsA(isA<FormatException>()),
+        );
+        expect(storage2.getNetdiskCred('quark'), longCookie);
+
+        // CloudSyncSettingsPanel displays real failure result when WebDAV save fails while locked
+        String? lastNoticeMsg;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: CloudSyncSettingsPanel(
+                  storage: storage2,
+                  onNotice: (_, msg) => lastNoticeMsg = msg,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.ensureVisible(find.text('仅保存配置'));
+        await tester.pump();
+        await tester.tap(find.text('仅保存配置'));
+        await tester.pumpAndSettle();
+        expect(lastNoticeMsg, isNotNull);
+        expect(lastNoticeMsg, contains('24000005'));
+        expect(lastNoticeMsg, isNot(contains('LegacyWebDavPass_011!')));
+        // Logs must never leak plaintext secrets
+        final recentLogs = await AppLog.instance.exportLogsFormatted();
+        expect(recentLogs, isNot(contains(longCookie)));
+        expect(recentLogs, isNot(contains('LegacyWebDavPass_011!')));
+
+        // Unlock & logout succeeds cleanly
+        deviceLocked = false;
+        await storage2.setNetdiskCredential('quark', '');
+        expect(storage2.getNetdiskCred('quark'), isEmpty);
+        expect(assetStore.containsKey(StorageService.keyQuarkCookie), isFalse);
+      },
+    );
+
+    testWidgets(
+      'P0-3 Smart Screen HarmonyOS independent update covers same/newer/offline/APK/bad-digest & unsigned install guide',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+        var installedVersion = '0.1.1';
+        final launchedUrls = <String>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(OhosRuntime.systemChannel, (call) async {
+          if (call.method == 'getPackageInfo') {
+            return <String, String>{
+              'appName': 'Marco Movie',
+              'packageName': 'com.pilipala.marcomovie',
+              'version': installedVersion,
+              'buildNumber': '1000002',
+            };
+          }
+          if (call.method == 'openExternalUrl') {
+            final args = Map<String, dynamic>.from(call.arguments as Map);
+            launchedUrls.add(args['url'].toString());
+            return true;
+          }
+          return null;
+        });
+
+        final validDigest = 'c' * 64;
+        var mode = 'newer';
+        AppUpdate.debugHttpClientOverride = MockClient((request) async {
+          if (mode == 'offline') {
+            throw const SocketException('offline');
+          }
+          if (mode == 'apk') {
+            if (request.url.host != 'api.github.com') {
+              return http.Response(
+                jsonEncode({
+                  'platform': 'harmonyos',
+                  'versionName': '0.1.2',
+                  'packages': {
+                    'MarcoMovie-0.1.2-harmonyos-universal.hap': {
+                      'size': 40000000,
+                      'sha256': validDigest,
+                      'url':
+                          'https://github.com/Pilipala9919/MarcoMovie/releases/download/v0.1.2/MarcoMovie-0.1.2-mobile.apk',
+                    },
+                  },
+                }),
+                200,
+              );
+            }
+            return http.Response('[]', 200);
+          }
+          if (mode == 'bad_digest') {
+            if (request.url.host != 'api.github.com') {
+              return http.Response(
+                jsonEncode({
+                  'platform': 'harmonyos',
+                  'versionName': '0.1.2',
+                  'packages': {
+                    'MarcoMovie-0.1.2-harmonyos-universal.hap': {
+                      'size': 40000000,
+                      'sha256': 'INVALID_SHA',
+                      'url':
+                          'https://github.com/Pilipala9919/MarcoMovie/releases/download/harmonyos-v0.1.2/MarcoMovie-0.1.2-harmonyos-universal.hap',
+                    },
+                  },
+                }),
+                200,
+              );
+            }
+            return http.Response('[]', 200);
+          }
+          expect(request.url.path, '/movie/updates/harmonyos.json');
+          return http.Response.bytes(
+            utf8.encode(
+              jsonEncode({
+                'schema': 1,
+                'platform': 'harmonyos',
+                'versionName': mode == 'same' ? '0.1.1' : '0.1.2',
+                'prerelease': false,
+                'notes': '# Marco Movie HarmonyOS NEXT 0.1.2\n- 恢复 API 12 兼容并修复安全凭据存储',
+                'packages': {
+                  'MarcoMovie-${mode == 'same' ? '0.1.1' : '0.1.2'}-harmonyos-universal.hap': {
+                    'size': 39546323,
+                    'sha256': validDigest,
+                    'url':
+                        'https://github.com/Pilipala9919/MarcoMovie/releases/download/harmonyos-v${mode == 'same' ? '0.1.1' : '0.1.2'}/MarcoMovie-${mode == 'same' ? '0.1.1' : '0.1.2'}-harmonyos-universal.hap',
+                  },
+                },
+                'release_url':
+                    'https://github.com/Pilipala9919/MarcoMovie/releases/tag/harmonyos-v${mode == 'same' ? '0.1.1' : '0.1.2'}',
+              }),
+            ),
+            200,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
+          );
+        });
+
+        tester.view.physicalSize = const Size(1920, 1080);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final client = CmsClient(client: _FakeCmsHttpClient());
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TvLivingRoomShell(storage: storage, client: client),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.text('设置'));
+        await tester.pump(const Duration(milliseconds: 150));
+        await tester.tap(find.text('版本与更新'));
+        await tester.pump(const Duration(milliseconds: 150));
+
+        expect(find.textContaining('当前已装版本：v0.1.1'), findsOneWidget);
+
+        // 1) Newer version -> shows release notes, SHA-256, unsigned signing guide, and opens HAP URL
+        await tester.tap(find.byKey(const ValueKey('tv-check-update-btn')));
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.textContaining('发现新版本 v0.1.2'), findsOneWidget);
+        expect(find.textContaining('MarcoMovie-0.1.2-harmonyos-universal.hap'), findsOneWidget);
+        expect(find.textContaining('DevEco Studio'), findsOneWidget);
+        expect(find.textContaining('hap-sign-tool'), findsOneWidget);
+        await tester.tap(find.byKey(const ValueKey('tv-download-hap-btn')));
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(
+          launchedUrls,
+          contains(
+            'https://github.com/Pilipala9919/MarcoMovie/releases/download/harmonyos-v0.1.2/MarcoMovie-0.1.2-harmonyos-universal.hap',
+          ),
+        );
+
+        // 2) Same version
+        mode = 'same';
+        await tester.tap(find.byKey(const ValueKey('tv-check-update-btn')));
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.textContaining('当前已是最新版本（v0.1.1）'), findsOneWidget);
+
+        // 3) Offline
+        mode = 'offline';
+        await tester.tap(find.byKey(const ValueKey('tv-check-update-btn')));
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.textContaining('暂时无法检查更新'), findsOneWidget);
+        expect(find.byKey(const ValueKey('tv-download-hap-btn')), findsNothing);
+
+        // 4) Returned APK rejected
+        mode = 'apk';
+        await tester.tap(find.byKey(const ValueKey('tv-check-update-btn')));
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.textContaining('暂时无法检查更新'), findsOneWidget);
+        expect(find.byKey(const ValueKey('tv-download-hap-btn')), findsNothing);
+
+        // 5) Bad SHA-256 digest rejected
+        mode = 'bad_digest';
+        await tester.tap(find.byKey(const ValueKey('tv-check-update-btn')));
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.textContaining('暂时无法检查更新'), findsOneWidget);
+        expect(find.byKey(const ValueKey('tv-download-hap-btn')), findsNothing);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 5));
+      },
+    );
+
+    testWidgets(
+      'P1-4 Smart Screen live TV auto-fails over A1 -> A2 preserving headers, stays on A when both fail, and enters B only on manual Next Channel',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+        final chA = LiveChannel(
+          name: '频道 A',
+          group: '测试分组',
+          urls: const [
+            'http://127.0.0.1:18080/a1.m3u8',
+            'http://127.0.0.1:18080/a2.m3u8',
+          ],
+          streams: const [
+            CmsEpisode(
+              name: '线路 1',
+              url: 'http://127.0.0.1:18080/a1.m3u8',
+              headers: {'Referer': 'https://a1.example/', 'User-Agent': 'Agent-A1'},
+            ),
+            CmsEpisode(
+              name: '线路 2',
+              url: 'http://127.0.0.1:18080/a2.m3u8',
+              headers: {'Referer': 'https://a2.example/', 'User-Agent': 'Agent-A2'},
+            ),
+          ],
+        );
+        final chB = LiveChannel(
+          name: '频道 B',
+          group: '测试分组',
+          urls: const ['http://127.0.0.1:18080/b1.m3u8'],
+          streams: const [
+            CmsEpisode(
+              name: '线路 1',
+              url: 'http://127.0.0.1:18080/b1.m3u8',
+              headers: {'Referer': 'https://b1.example/', 'User-Agent': 'Agent-B1'},
+            ),
+          ],
+        );
+        final group = LiveGroup(name: '测试分组', channels: [chA, chB]);
+
+        final openCalls = <Map<String, dynamic>>[];
+        const avChannel = MethodChannel('com.pilipala.marcomovie/ohos_avplayer');
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(avChannel, (call) async {
+          if (call.method == 'create') {
+            return <String, dynamic>{'playerId': 21, 'textureId': 210};
+          }
+          if (call.method == 'open') {
+            openCalls.add(Map<String, dynamic>.from(call.arguments as Map));
+          }
+          return true;
+        });
+
+        final ohosPlayer = OhosPlatformPlayer();
+        final debugPlayer = Player(platformPlayer: ohosPlayer);
+
+        final liveVideo = CmsVideo(
+          id: chA.name,
+          title: chA.name,
+          lines: [CmsLine(name: chA.group, episodes: chA.episodes)],
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(
+                key: 'live',
+                name: '测试直播',
+                type: 0,
+                api: '',
+              ),
+              video: liveVideo,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              isLive: true,
+              liveGroups: [group],
+              initialLiveChannel: chA,
+              debugPlayer: debugPlayer,
+              debugVideoSurface: const SizedBox.expand(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // 1) Initial playback opens A1 with A1's headers
+        expect(openCalls, isNotEmpty);
+        expect(openCalls.last['url'], 'http://127.0.0.1:18080/a1.m3u8');
+        final a1Headers = Map<String, dynamic>.from(openCalls.last['headers'] as Map);
+        expect(a1Headers['Referer'], 'https://a1.example/');
+        expect(a1Headers['User-Agent'], 'Agent-A1');
+
+        // 2) A1 fails (first error triggers direct/proxy retry, second error fails over to A2 — NEVER B!)
+        ohosPlayer.handleNativeEvent({'type': 'error', 'code': 5400103, 'message': 'A1 failed #1'});
+        await tester.pump(const Duration(milliseconds: 200));
+        ohosPlayer.handleNativeEvent({'type': 'error', 'code': 5400103, 'message': 'A1 failed #2'});
+        await tester.pump(const Duration(milliseconds: 250));
+
+        expect(openCalls.last['url'], 'http://127.0.0.1:18080/a2.m3u8');
+        final a2Headers = Map<String, dynamic>.from(openCalls.last['headers'] as Map);
+        expect(a2Headers['Referer'], 'https://a2.example/');
+        expect(a2Headers['User-Agent'], 'Agent-A2');
+        expect(openCalls.any((c) => c['url'].toString().contains('b1.m3u8')), isFalse);
+
+        // 3) A2 also fails -> stays on Channel A and shows Retry UI, STILL never jumps to B!
+        ohosPlayer.handleNativeEvent({'type': 'error', 'code': 5400103, 'message': 'A2 failed #1'});
+        await tester.pump(const Duration(milliseconds: 200));
+        ohosPlayer.handleNativeEvent({'type': 'error', 'code': 5400103, 'message': 'A2 failed #2'});
+        await tester.pump(const Duration(milliseconds: 250));
+
+        expect(find.text('重试播放'), findsOneWidget);
+        expect(find.text('频道 A'), findsWidgets);
+        expect(openCalls.any((c) => c['url'].toString().contains('b1.m3u8')), isFalse);
+
+        // 4) Manual Next Channel -> enters Channel B with B1's headers!
+        await tester.tap(find.byKey(const ValueKey('live-error-next-channel')));
+        await tester.pump(const Duration(milliseconds: 250));
+
+        expect(openCalls.last['url'], 'http://127.0.0.1:18080/b1.m3u8');
+        final b1Headers = Map<String, dynamic>.from(openCalls.last['headers'] as Map);
+        expect(b1Headers['Referer'], 'https://b1.example/');
+        expect(b1Headers['User-Agent'], 'Agent-B1');
+        expect(find.textContaining('频道 B'), findsWidgets);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 200));
+      },
+    );
+
+    test(
+      'P1-5a LocalMediaLease loopback proxy preserves Referer/UA across plain MP4 and HLS master -> sub -> segment',
+      () async {
+        await HttpOverrides.runWithHttpOverrides(() async {
+          final seenRequests = <String, Map<String, String>>{};
+          final upstreamClient = MockClient((req) async {
+            final path = req.url.path;
+            final headersLower = <String, String>{
+              for (final e in req.headers.entries)
+                e.key.toLowerCase(): e.value,
+            };
+            final ref = headersLower['referer'] ?? '';
+            final ua = headersLower['user-agent'] ?? '';
+            seenRequests[path] = {'referer': ref, 'user-agent': ua};
+            if (path == '/plain.mp4') {
+              return http.Response(
+                'FAKE-MP4-BYTES',
+                200,
+                headers: const {'content-type': 'video/mp4'},
+              );
+            }
+            if (ref != 'https://hls-origin.example/' ||
+                ua != 'MarcoOhosHeaderTest/1.0') {
+              return http.Response('missing required headers', 403);
+            }
+            if (path == '/master.m3u8') {
+              return http.Response(
+                '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nsub/index.m3u8\n',
+                200,
+                headers: const {
+                  'content-type': 'application/vnd.apple.mpegurl',
+                },
+              );
+            }
+            if (path == '/sub/index.m3u8') {
+              return http.Response(
+                '#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg0.ts\n#EXT-X-ENDLIST\n',
+                200,
+                headers: const {
+                  'content-type': 'application/vnd.apple.mpegurl',
+                },
+              );
+            }
+            if (path == '/sub/seg0.ts') {
+              return http.Response.bytes(
+                List<int>.filled(188, 0x47),
+                200,
+                headers: const {'content-type': 'video/mp2t'},
+              );
+            }
+            return http.Response('not found', 404);
+          });
+
+          // Plain MP4 through LocalMediaLease
+          final mp4Lease = await LocalMediaLease.open(
+            target: Uri.parse('https://hls-origin.example/plain.mp4'),
+            headers: const {'User-Agent': 'MarcoOhosHeaderTest/1.0'},
+            client: upstreamClient,
+            isCancelled: () => false,
+          );
+          addTearDown(mp4Lease.close);
+          final mp4Resp = await http.get(mp4Lease.url);
+          expect(mp4Resp.statusCode, 200);
+          expect(mp4Resp.body, 'FAKE-MP4-BYTES');
+
+          // Header-protected HLS master -> sub -> segment
+          final hlsLease = await LocalMediaLease.open(
+            target: Uri.parse('https://hls-origin.example/master.m3u8'),
+            headers: const {
+              'Referer': 'https://hls-origin.example/',
+              'User-Agent': 'MarcoOhosHeaderTest/1.0',
+            },
+            client: upstreamClient,
+            isCancelled: () => false,
+          );
+          addTearDown(hlsLease.close);
+          final masterResp = await http.get(hlsLease.url);
+          expect(masterResp.statusCode, 200);
+          final subUrlLine = masterResp.body
+              .split('\n')
+              .map((l) => l.trim())
+              .firstWhere((l) => l.startsWith('http://'));
+          final subResp = await http.get(Uri.parse(subUrlLine));
+          expect(subResp.statusCode, 200);
+          final segUrlLine = subResp.body
+              .split('\n')
+              .map((l) => l.trim())
+              .firstWhere((l) => l.startsWith('http://'));
+          final segResp = await http.get(Uri.parse(segUrlLine));
+          expect(segResp.statusCode, 200);
+          expect(segResp.bodyBytes.length, 188);
+          for (final expectedPath in [
+            '/master.m3u8',
+            '/sub/index.m3u8',
+            '/sub/seg0.ts',
+          ]) {
+            expect(
+              seenRequests[expectedPath]?['referer'],
+              'https://hls-origin.example/',
+            );
+            expect(
+              seenRequests[expectedPath]?['user-agent'],
+              'MarcoOhosHeaderTest/1.0',
+            );
+          }
+        }, _PassthroughHttpOverrides());
+      },
+    );
+
+    testWidgets(
+      'P1-5b Header-error propagation, AVPlayer API 12 speed tiers (0.5x-2.0x) consistency across episode switch, and background/foreground resume',
+      (tester) async {
+        // Speed options (no 2.5x/3.0x on OHOS), speed normalization on init & episode switch,
+        // header-preservation error display, seek/resume, and background/foreground recovery
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        await storage.setPlaySpeed(3.0); // Synced from another platform!
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'phone';
+
+        final calls = <MethodCall>[];
+        var failNextOpenWithHeaderError = false;
+        const avChannel = MethodChannel('com.pilipala.marcomovie/ohos_avplayer');
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(avChannel, (call) async {
+          calls.add(call);
+          if (call.method == 'create') {
+            return <String, dynamic>{'playerId': 31, 'textureId': 310};
+          }
+          if (call.method == 'open' && failNextOpenWithHeaderError) {
+            failNextOpenWithHeaderError = false;
+            throw PlatformException(
+              code: 'OHOS_AVPLAYER_ERROR',
+              message: '无法保留必要请求头打开播放源 (code=5400102)：Operation not allowed，请重试或切换线路',
+            );
+          }
+          return true;
+        });
+
+        final ohosPlayer = OhosPlatformPlayer();
+        final debugPlayer = Player(platformPlayer: ohosPlayer);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(
+                key: 'vod_site',
+                name: '测试点播',
+                type: 1,
+                api: 'http://127.0.0.1:18080/api',
+              ),
+              video: const CmsVideo(
+                id: 'v1',
+                title: '请求头与倍速测试片',
+                lines: [
+                  CmsLine(
+                    name: '默认线路',
+                    episodes: [
+                      CmsEpisode(
+                        name: '第01集',
+                        url: 'https://localhost/ep1.mp4',
+                        headers: {'Referer': 'https://origin.example/'},
+                      ),
+                      CmsEpisode(
+                        name: '第02集',
+                        url: 'https://localhost/ep2.mp4',
+                        headers: {'Referer': 'https://origin.example/'},
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: debugPlayer,
+              debugVideoSurface: const SizedBox.expand(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // 1) Synced 3.0x was normalized to AVPlayer API 12 max executable 2.0x
+        final rateCalls = calls.where((c) => c.method == 'setRate').toList();
+        expect(rateCalls, isNotEmpty);
+        expect(
+          (Map<String, dynamic>.from(rateCalls.last.arguments as Map)['rate'] as num),
+          2.0,
+        );
+        expect(ohosPlayer.state.rate, 2.0);
+        expect(find.text('2.0×'), findsWidgets);
+        expect(find.text('3.0×'), findsNothing);
+
+        // 2) Open speed sheet on touch UI: only 0.5x..2.0x exist; 2.5x / 3.0x must NOT be offered!
+        await tester.tap(find.text('2.0×').first);
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.text('0.5× 倍速'), findsOneWidget);
+        expect(find.text('1.5× 倍速'), findsOneWidget);
+        expect(find.text('2.0× 倍速'), findsOneWidget);
+        expect(find.text('2.5× 倍速'), findsNothing);
+        expect(find.text('3.0× 倍速'), findsNothing);
+        await tester.tap(find.text('1.5× 倍速'));
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(ohosPlayer.state.rate, 1.5);
+        expect(find.text('1.5×'), findsWidgets);
+
+        // 3) Simulate playing + position progress + background/foreground lifecycle recovery
+        ohosPlayer.handleNativeEvent({
+          'type': 'position',
+          'positionMs': 45000,
+          'durationMs': 300000,
+          'bufferedMs': 90000,
+        });
+        ohosPlayer.handleNativeEvent({
+          'type': 'state',
+          'playing': true,
+          'buffering': false,
+          'completed': false,
+        });
+        await tester.pump(const Duration(milliseconds: 100));
+
+        final pauseCountBefore = calls.where((c) => c.method == 'pause').length;
+        final playCountBefore = calls.where((c) => c.method == 'play').length;
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(
+          calls.where((c) => c.method == 'pause').length,
+          greaterThan(pauseCountBefore),
+        );
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(
+          calls.where((c) => c.method == 'play').length,
+          greaterThan(playCountBefore),
+        );
+
+        // 4) Switch to episode 2 -> speed stays 1.5x and speedDone/rate readback matches UI
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyN);
+        await tester.pump(const Duration(milliseconds: 250));
+        ohosPlayer.handleNativeEvent({'type': 'rate', 'rate': 1.5});
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(ohosPlayer.state.rate, 1.5);
+        expect(find.text('1.5×'), findsWidgets);
+
+        // 5) Header-preservation open failure surfaces actionable retryable error
+        failNextOpenWithHeaderError = true;
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyP);
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.textContaining('无法保留必要请求头打开播放源'), findsOneWidget);
+        expect(find.text('重试播放'), findsOneWidget);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 200));
+      },
+    );
+
+    test(
+      'P1-6 HarmonyOS document picker preserves raw ZIP bytes & Chinese names, handles cancel/over-limit/corrupt, and round-trips backup export -> restart -> restore',
+      () async {
+        OhosRuntime.debugIsOhosOverride = true;
+        final zipArchive = Archive();
+        final subJson = jsonEncode({
+          'sites': [
+            {
+              'key': 'cn_zip_site',
+              'name': '中文压缩包片源',
+              'type': 1,
+              'api': 'http://127.0.0.1:18080/api.php/provide/vod/',
+              'searchable': 1,
+            },
+          ],
+        });
+        final subBytes = utf8.encode(subJson);
+        zipArchive.addFile(ArchiveFile('config.json', subBytes.length, subBytes));
+        final validZipBytes = Uint8List.fromList(ZipEncoder().encode(zipArchive)!);
+
+        String mockMode = 'zip';
+        String? lastSavedFileName;
+        String? lastSavedContent;
+        Map<String, dynamic>? lastPickArgs;
+
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(OhosRuntime.systemChannel, (call) async {
+          if (call.method == 'pickDocumentFile') {
+            lastPickArgs = Map<String, dynamic>.from(call.arguments as Map);
+            switch (mockMode) {
+              case 'zip':
+                return <String, Object?>{
+                  'name': '我的订阅_中文配置.zip',
+                  'path': 'file://docs/我的订阅_中文配置.zip',
+                  'bytes': validZipBytes,
+                  'size': validZipBytes.length,
+                };
+              case 'cancel':
+                return null;
+              case 'over_limit':
+                throw PlatformException(
+                  code: 'OHOS_SYSTEM_ERROR',
+                  message: 'FILE_TOO_LARGE:所选文件超过 16 MB 限制',
+                );
+              case 'corrupt_zip':
+                return <String, Object?>{
+                  'name': '损坏配置包.zip',
+                  'path': 'file://docs/损坏配置包.zip',
+                  'bytes': Uint8List.fromList([0x50, 0x4b, 0x03, 0x04, 0x00, 0xFF]),
+                  'size': 6,
+                };
+              case 'exported_backup':
+                final bytes = Uint8List.fromList(utf8.encode(lastSavedContent ?? ''));
+                return <String, Object?>{
+                  'name': '中文备份_2026.json',
+                  'path': 'file://docs/中文备份_2026.json',
+                  'bytes': bytes,
+                  'size': bytes.length,
+                };
+            }
+          }
+          if (call.method == 'saveTextFile') {
+            final args = Map<String, dynamic>.from(call.arguments as Map);
+            lastSavedFileName = args['fileName']?.toString();
+            lastSavedContent = args['content']?.toString();
+            return 'file://docs/$lastSavedFileName';
+          }
+          return null;
+        });
+
+        // 1) ZIP subscription preserves raw bytes & Chinese filename and parses via CmsClient.readSubscriptionFile
+        final pickedZip = await OhosRuntime.pickDocumentFile(
+          purpose: OhosDocumentPurpose.subscription,
+          maxBytes: CmsClient.maxResponseBytes,
+        );
+        expect(pickedZip, isNotNull);
+        expect(pickedZip!.name, '我的订阅_中文配置.zip');
+        expect(pickedZip.bytes, validZipBytes);
+        expect(lastPickArgs?['asBytes'], isTrue);
+        expect(lastPickArgs?['extensions'], contains('.zip'));
+        final extracted = CmsClient.readSubscriptionFile(pickedZip.bytes, pickedZip.name);
+        expect(extracted, contains('中文压缩包片源'));
+
+        // 2) Cancel returns null without throwing
+        mockMode = 'cancel';
+        expect(
+          await OhosRuntime.pickDocumentFile(
+            purpose: OhosDocumentPurpose.live,
+            maxBytes: CmsClient.maxResponseBytes,
+          ),
+          isNull,
+        );
+
+        // 3) Over-limit throws clean FormatException
+        mockMode = 'over_limit';
+        await expectLater(
+          OhosRuntime.pickDocumentFile(
+            purpose: OhosDocumentPurpose.subscription,
+            maxBytes: CmsClient.maxResponseBytes,
+          ),
+          throwsA(
+            isA<FormatException>().having(
+              (e) => e.message,
+              'message',
+              contains('16 MB'),
+            ),
+          ),
+        );
+
+        // 4) Corrupt file throws and preserves existing user config
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        await storage.saveConfig(extracted);
+        await storage.setTvAmbientTheme('twilight');
+        await storage.toggleFavorite(
+          const CmsSite(
+            key: 'cn_zip_site',
+            name: '中文压缩包片源',
+            type: 1,
+            api: 'http://127.0.0.1:18080/api.php/provide/vod/',
+          ),
+          const CmsVideo(
+            id: 'fav1',
+            title: '原配置保留测试剧',
+            poster: '',
+            remarks: '4K',
+          ),
+        );
+        mockMode = 'corrupt_zip';
+        final corruptPicked = await OhosRuntime.pickDocumentFile(
+          purpose: OhosDocumentPurpose.subscription,
+          maxBytes: CmsClient.maxResponseBytes,
+        );
+        expect(
+          () => CmsClient.readSubscriptionFile(corruptPicked!.bytes, corruptPicked.name),
+          throwsA(anything),
+        );
+        expect(storage.loadSavedConfig()?.sites.first.key, 'cn_zip_site');
+        expect(storage.getFavorites().first.title, '原配置保留测试剧');
+
+        // 5) Export backup -> simulated fresh restart -> restore via OhosRuntime document picker
+        final exportedJson = storage.exportBackupJson();
+        final savedUri = await OhosRuntime.saveTextFile(
+          fileName: 'marco-movie-backup.json',
+          content: exportedJson,
+        );
+        expect(savedUri, isNotNull);
+        expect(lastSavedContent, exportedJson);
+
+        SharedPreferences.setMockInitialValues({});
+        final freshStorage = await StorageService.init();
+        expect(freshStorage.getFavorites(), isEmpty);
+        mockMode = 'exported_backup';
+        final restoredPick = await OhosRuntime.pickDocumentFile(
+          purpose: OhosDocumentPurpose.backup,
+          maxBytes: StorageService.maxSyncPayloadBytes,
+        );
+        expect(restoredPick!.name, '中文备份_2026.json');
+        await freshStorage.importBackupJson(
+          restoredPick.decodeUtf8(allowMalformed: false),
+        );
+        expect(freshStorage.loadSavedConfig()?.sites.first.key, 'cn_zip_site');
+        expect(freshStorage.getFavorites().first.title, '原配置保留测试剧');
+      },
+    );
+
+    testWidgets(
+      'P2-7 Smart Screen global search covers 17th site with max concurrency 4, handles single-site timeout, all-failed, true-zero, and rapid keyword switch',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+        final sitesJson = List.generate(
+          18,
+          (i) => {
+            'key': 's_${i + 1}',
+            'name': '站点${i + 1}',
+            'type': 1,
+            'api': 'http://127.0.0.1:18080/site/${i + 1}/api.php/provide/vod/',
+            'searchable': 1,
+          },
+        );
+        await storage.saveConfig(jsonEncode({'sites': sitesJson}));
+
+        var activeInFlight = 0;
+        var maxInFlight = 0;
+        var searchMode = 'hit17';
+        final slowACompleter = Completer<void>();
+
+        final searchClient = CmsClient(
+          client: MockClient((request) async {
+            final path = request.url.path;
+            final wd = request.url.queryParameters['wd'] ?? '';
+            if (wd.isEmpty) {
+              return http.Response(
+                jsonEncode({'code': 1, 'page': 1, 'pagecount': 1, 'list': []}),
+                200,
+              );
+            }
+            activeInFlight++;
+            if (activeInFlight > maxInFlight) maxInFlight = activeInFlight;
+            try {
+              final siteMatch = RegExp(r'/site/(\d+)/').firstMatch(path);
+              final siteNum = int.parse(siteMatch!.group(1)!);
+
+              if (searchMode == 'hit17') {
+                await Future<void>.delayed(const Duration(milliseconds: 5));
+                if (siteNum == 17) {
+                  return http.Response.bytes(
+                    utf8.encode(
+                      jsonEncode({
+                        'code': 1,
+                        'list': [
+                          {
+                            'vod_id': 'hit17',
+                            'vod_name': '第17站唯一命中影片',
+                            'vod_play_from': 'm3u8',
+                            'vod_play_url': '正片\$http://127.0.0.1:18080/17.m3u8',
+                          },
+                        ],
+                      }),
+                    ),
+                    200,
+                    headers: const {'content-type': 'application/json; charset=utf-8'},
+                  );
+                }
+                return http.Response(jsonEncode({'code': 1, 'list': []}), 200);
+              }
+
+              if (searchMode == 'single_timeout') {
+                if (siteNum == 1) {
+                  await Future<void>.delayed(const Duration(milliseconds: 400));
+                }
+                if (siteNum == 2) {
+                  return http.Response.bytes(
+                    utf8.encode(
+                      jsonEncode({
+                        'code': 1,
+                        'list': [
+                          {
+                            'vod_id': 'fast2',
+                            'vod_name': '二号站先到命中',
+                            'vod_play_from': 'm3u8',
+                            'vod_play_url': '正片\$http://127.0.0.1:18080/2.m3u8',
+                          },
+                        ],
+                      }),
+                    ),
+                    200,
+                    headers: const {'content-type': 'application/json; charset=utf-8'},
+                  );
+                }
+                return http.Response(jsonEncode({'code': 1, 'list': []}), 200);
+              }
+
+              if (searchMode == 'all_fail') {
+                return http.Response('Internal Server Error', 500);
+              }
+
+              if (searchMode == 'true_zero') {
+                return http.Response(jsonEncode({'code': 1, 'list': []}), 200);
+              }
+
+              if (searchMode == 'race') {
+                if (wd == 'A') {
+                  await slowACompleter.future;
+                  return http.Response.bytes(
+                    utf8.encode(
+                      jsonEncode({
+                        'code': 1,
+                        'list': [
+                          {
+                            'vod_id': 'staleA',
+                            'vod_name': '旧关键词A迟到结果',
+                            'vod_play_from': 'm3u8',
+                            'vod_play_url': '正片\$http://127.0.0.1:18080/a.m3u8',
+                          },
+                        ],
+                      }),
+                    ),
+                    200,
+                    headers: const {'content-type': 'application/json; charset=utf-8'},
+                  );
+                }
+                if (siteNum == 1) {
+                  return http.Response.bytes(
+                    utf8.encode(
+                      jsonEncode({
+                        'code': 1,
+                        'list': [
+                          {
+                            'vod_id': 'freshB',
+                            'vod_name': '新关键词B正确结果',
+                            'vod_play_from': 'm3u8',
+                            'vod_play_url': '正片\$http://127.0.0.1:18080/b.m3u8',
+                          },
+                        ],
+                      }),
+                    ),
+                    200,
+                    headers: const {'content-type': 'application/json; charset=utf-8'},
+                  );
+                }
+                return http.Response(jsonEncode({'code': 1, 'list': []}), 200);
+              }
+
+              return http.Response(jsonEncode({'code': 1, 'list': []}), 200);
+            } finally {
+              activeInFlight--;
+            }
+          }),
+        );
+
+        tester.view.physicalSize = const Size(1920, 1080);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TvLivingRoomShell(
+              storage: storage,
+              client: searchClient,
+              searchSiteTimeout: const Duration(milliseconds: 120),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.text('搜索'));
+        await tester.pump(const Duration(milliseconds: 200));
+
+        final submitSearch = find.descendant(
+          of: find.byType(TvRemoteGridKeyboard),
+          matching: find.text('搜索'),
+        );
+
+        // 1) Site #17 is the ONLY hit + concurrency never exceeds 4
+        await tester.tap(find.text('A'));
+        await tester.pump();
+        await tester.tap(submitSearch);
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(find.text('第17站唯一命中影片'), findsOneWidget);
+        expect(maxInFlight, lessThanOrEqualTo(4));
+
+        // 2) Single-site timeout: fast hit arrives & displays + timeout notice shown
+        searchMode = 'single_timeout';
+        await tester.tap(submitSearch);
+        await tester.pump(const Duration(milliseconds: 60));
+        expect(find.text('二号站先到命中'), findsOneWidget);
+        await tester.pump(const Duration(milliseconds: 350));
+        expect(find.textContaining('含 1 站超时'), findsOneWidget);
+
+        // 3) All sites fail -> distinct failure state with retry pill
+        searchMode = 'all_fail';
+        await tester.tap(submitSearch);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.textContaining('搜索失败：全部 18 个站点'), findsOneWidget);
+        expect(find.byKey(const ValueKey('tv-search-retry-btn')), findsOneWidget);
+
+        // 4) True zero results -> clean empty message, no retry failure alert
+        searchMode = 'true_zero';
+        await tester.tap(submitSearch);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('未找到匹配的影视内容，可尝试缩短关键词'), findsOneWidget);
+        expect(find.byKey(const ValueKey('tv-search-retry-btn')), findsNothing);
+
+        // 5) Rapid keyword switch: start slow 'A', immediately switch to 'AB', release 'A' late -> only 'B' shown
+        searchMode = 'race';
+        await tester.tap(submitSearch); // searches 'A' (hangs on slowACompleter)
+        await tester.pump(const Duration(milliseconds: 40));
+        await tester.tap(find.text('B')); // query becomes 'AB'
+        await tester.pump();
+        await tester.tap(submitSearch); // searches 'AB' (fast hit)
+        await tester.pump(const Duration(milliseconds: 120));
+        slowACompleter.complete();
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.text('新关键词B正确结果'), findsOneWidget);
+        expect(find.text('旧关键词A迟到结果'), findsNothing);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 5));
+      },
+    );
+
+    testWidgets(
+      'P1-4b TvLivingRoomShell live tab opens PlayerScreen with only current channel routes + liveGroups',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+        const m3uPayload = '''
+#EXTM3U
+#EXTINF:-1 group-title="新闻组",频道A
+#EXTVLCOPT:http-referrer=https://a1.example/
+#EXTVLCOPT:http-user-agent=Agent-A1
+http://127.0.0.1:18080/a1.m3u8
+#EXTINF:-1 group-title="新闻组",频道A
+#EXTVLCOPT:http-referrer=https://a2.example/
+#EXTVLCOPT:http-user-agent=Agent-A2
+http://127.0.0.1:18080/a2.m3u8
+#EXTINF:-1 group-title="新闻组",频道B
+#EXTVLCOPT:http-referrer=https://b1.example/
+http://127.0.0.1:18080/b1.m3u8
+''';
+        await storage.saveConfig(
+          jsonEncode({
+            'sites': [],
+            'lives': [
+              {
+                'name': '测试直播源',
+                'type': 0,
+                'url': 'http://127.0.0.1:18080/live.m3u',
+              },
+            ],
+          }),
+        );
+
+        final liveClient = CmsClient(
+          client: MockClient((request) async {
+            if (request.url.path.endsWith('/live.m3u')) {
+              return http.Response.bytes(
+                utf8.encode(m3uPayload),
+                200,
+                headers: const {'content-type': 'text/plain; charset=utf-8'},
+              );
+            }
+            return http.Response('{}', 200);
+          }),
+        );
+
+        CmsVideo? openedVideo;
+        List<LiveGroup>? openedGroups;
+        LiveChannel? openedInitialChannel;
+
+        tester.view.physicalSize = const Size(1920, 1080);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TvLivingRoomShell(
+              storage: storage,
+              client: liveClient,
+              debugLiveRouteBuilder: (site, video, groups, initialChannel) {
+                openedVideo = video;
+                openedGroups = groups;
+                openedInitialChannel = initialChannel;
+                return MaterialPageRoute<void>(
+                  builder: (_) => const Scaffold(body: Text('LiveRouteOpened')),
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.text('直播'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.ensureVisible(find.text('频道A').first);
+        await tester.pump();
+        await tester.tap(find.text('频道A').first);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+
+        expect(find.text('LiveRouteOpened'), findsOneWidget);
+        expect(openedVideo, isNotNull);
+        expect(openedVideo!.lines.first.episodes.length, 2);
+        expect(
+          openedVideo!.lines.first.episodes.map((e) => e.url).toList(),
+          [
+            'http://127.0.0.1:18080/a1.m3u8',
+            'http://127.0.0.1:18080/a2.m3u8',
+          ],
+        );
+        expect(
+          openedVideo!.lines.first.episodes[0].headers['Referer'],
+          'https://a1.example/',
+        );
+        expect(
+          openedVideo!.lines.first.episodes[1].headers['Referer'],
+          'https://a2.example/',
+        );
+        expect(openedInitialChannel?.name, '频道A');
+        expect(openedGroups?.first.channels.map((c) => c.name).toList(), ['频道A', '频道B']);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 1));
+      },
+    );
+
+    testWidgets(
+      'Journey 1 (Touchscreen Phone): HarmonyOS update panel reads HAP (not windowsUrl), imports subscription, searches, plays VOD, and resumes progress after exit',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'phone';
+
+        final subConfigJson = jsonEncode({
+          'sites': [
+            {
+              'key': 'phone_vod',
+              'name': '鸿蒙手机点播站',
+              'type': 1,
+              'api': 'http://127.0.0.1:18080/api.php/provide/vod/',
+              'searchable': 1,
+            },
+          ],
+        });
+        final launchedUrls = <String>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(OhosRuntime.systemChannel, (call) async {
+          if (call.method == 'getPackageInfo') {
+            return <String, String>{
+              'appName': 'Marco Movie',
+              'packageName': 'com.pilipala.marcomovie',
+              'version': '0.1.1',
+              'buildNumber': '1000002',
+            };
+          }
+          if (call.method == 'openExternalUrl') {
+            final args = Map<String, dynamic>.from(call.arguments as Map);
+            launchedUrls.add(args['url'].toString());
+            return true;
+          }
+          if (call.method == 'pickDocumentFile') {
+            final bytes = Uint8List.fromList(utf8.encode(subConfigJson));
+            return <String, Object?>{
+              'name': '手机订阅配置.json',
+              'path': 'file://docs/手机订阅配置.json',
+              'bytes': bytes,
+              'size': bytes.length,
+            };
+          }
+          return null;
+        });
+
+        final avCalls = <MethodCall>[];
+        OhosPlatformPlayer? activeOhosPlayer;
+        const avChannel = MethodChannel('com.pilipala.marcomovie/ohos_avplayer');
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(avChannel, (call) async {
+          avCalls.add(call);
+          if (call.method == 'create') {
+            return <String, dynamic>{'playerId': 51, 'textureId': 510};
+          }
+          return true;
+        });
+
+        final validDigest = 'd' * 64;
+        AppUpdate.debugHttpClientOverride = MockClient((request) async {
+          expect(request.url.path, '/movie/updates/harmonyos.json');
+          return http.Response.bytes(
+            utf8.encode(
+              jsonEncode({
+                'schema': 1,
+                'platform': 'harmonyos',
+                'versionName': '0.1.2',
+                'prerelease': false,
+                'notes': '- 鸿蒙手机端更新说明',
+                'packages': {
+                  'MarcoMovie-0.1.2-harmonyos-universal.hap': {
+                    'size': 39500000,
+                    'sha256': validDigest,
+                    'url':
+                        'https://github.com/Pilipala9919/MarcoMovie/releases/download/harmonyos-v0.1.2/MarcoMovie-0.1.2-harmonyos-universal.hap',
+                  },
+                },
+                'release_url':
+                    'https://github.com/Pilipala9919/MarcoMovie/releases/tag/harmonyos-v0.1.2',
+              }),
+            ),
+            200,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
+          );
+        });
+
+        // 1) Import subscription via HarmonyOS document picker & verify search returns VOD
+        final picked = await OhosRuntime.pickDocumentFile(
+          purpose: OhosDocumentPurpose.subscription,
+          maxBytes: CmsClient.maxResponseBytes,
+        );
+        expect(picked?.name, '手机订阅配置.json');
+        await storage.saveConfig(
+          CmsClient.readSubscriptionFile(picked!.bytes, picked.name),
+        );
+        final savedSite = storage.loadSavedConfig()!.sites.first;
+        expect(savedSite.key, 'phone_vod');
+
+        final phoneClient = CmsClient(
+          client: MockClient((request) async {
+            final wd = request.url.queryParameters['wd'] ?? '';
+            if (wd.isNotEmpty) {
+              return http.Response.bytes(
+                utf8.encode(
+                  jsonEncode({
+                    'code': 1,
+                    'list': [
+                      {
+                        'vod_id': 'vod_101',
+                        'vod_name': '鸿蒙续播测试剧',
+                        'vod_play_from': '高清线',
+                        'vod_play_url':
+                            '第01集\$https://localhost/ep1.mp4#第02集\$https://localhost/ep2.mp4',
+                      },
+                    ],
+                  }),
+                ),
+                200,
+                headers: const {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            return http.Response.bytes(
+              utf8.encode(jsonEncode({'code': 1, 'page': 1, 'pagecount': 1, 'list': []})),
+              200,
+              headers: const {'content-type': 'application/json; charset=utf-8'},
+            );
+          }),
+        );
+
+        final foundListing = await phoneClient.fetchSearch(savedSite, '续播');
+        expect(foundListing.videos, hasLength(1));
+        final vod = foundListing.videos.first;
+        expect(vod.title, '鸿蒙续播测试剧');
+
+        // 2) Play VOD -> advance to 65s -> exit -> reopen and verify resume seek to 65s
+        activeOhosPlayer = OhosPlatformPlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: savedSite,
+              video: vod,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: Player(platformPlayer: activeOhosPlayer),
+              debugVideoSurface: const SizedBox.expand(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        activeOhosPlayer.handleNativeEvent({
+          'type': 'position',
+          'positionMs': 65000,
+          'durationMs': 600000,
+          'bufferedMs': 120000,
+        });
+        activeOhosPlayer.handleNativeEvent({
+          'type': 'state',
+          'playing': true,
+          'buffering': false,
+          'completed': false,
+        });
+        await tester.pump(const Duration(milliseconds: 200));
+        // Exit player -> saves watch progress
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 200));
+
+        final history = storage.getWatchHistory();
+        expect(history, isNotEmpty);
+        expect(history.first.position, 65000);
+
+        // Reopen same VOD -> resumes at 65s
+        avCalls.clear();
+        final resumePlayer = OhosPlatformPlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: savedSite,
+              video: vod,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              initialPositionMs: history.first.resumePosition,
+              storage: storage,
+              debugPlayer: Player(platformPlayer: resumePlayer),
+              debugVideoSurface: const SizedBox.expand(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        final openCall = avCalls.lastWhere((c) => c.method == 'open');
+        final openArgs = Map<String, dynamic>.from(openCall.arguments as Map);
+        expect(openArgs['startPositionMs'], 65000);
+
+        // 3) Touchscreen AdaptiveShell update check reads HarmonyOS HAP (never windowsUrl) & shows unsigned guide
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AdaptiveShell(
+              storage: storage,
+              client: phoneClient,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.text('设置').last);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        final updateTile = find.text('检查版本更新').evaluate().isNotEmpty
+            ? find.text('检查版本更新')
+            : find.text('软件更新与版本');
+        await tester.scrollUntilVisible(
+          updateTile,
+          250,
+          scrollable: find.byType(Scrollable).last,
+        );
+        await tester.drag(find.byType(Scrollable).last, const Offset(0, -180));
+        await tester.pump();
+        await tester.tap(updateTile);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.textContaining('0.1.2'), findsWidgets);
+        expect(find.textContaining('DevEco Studio'), findsOneWidget);
+        expect(find.textContaining('MarcoMovie-0.1.2-harmonyos-universal.hap'), findsOneWidget);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 5));
+      },
+    );
+
+    testWidgets(
+      'Journey 2 (Smart Screen Remote-Only): D-pad search -> detail -> episode -> return preserving state',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+        await storage.saveConfig(
+          jsonEncode({
+            'sites': [
+              {
+                'key': 'tv_vod',
+                'name': '智慧屏片源站',
+                'type': 1,
+                'api': 'http://127.0.0.1:18080/api.php/provide/vod/',
+                'searchable': 1,
+              },
+            ],
+          }),
+        );
+
+        final tvClient = CmsClient(
+          client: MockClient((request) async {
+            final wd = request.url.queryParameters['wd'] ?? '';
+            final ids = request.url.queryParameters['ids'] ?? '';
+            if (wd.isNotEmpty || ids.isNotEmpty) {
+              return http.Response.bytes(
+                utf8.encode(
+                  jsonEncode({
+                    'code': 1,
+                    'list': [
+                      {
+                        'vod_id': 'tv_1',
+                        'vod_name': '遥控器全流程剧',
+                        'vod_remarks': '全2集',
+                        'vod_play_from': '4K线路',
+                        'vod_play_url':
+                            '第01集\$https://localhost/tv1.mp4#第02集\$https://localhost/tv2.mp4',
+                      },
+                    ],
+                  }),
+                ),
+                200,
+                headers: const {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            return http.Response.bytes(
+              utf8.encode(jsonEncode({'code': 1, 'page': 1, 'pagecount': 1, 'list': []})),
+              200,
+              headers: const {'content-type': 'application/json; charset=utf-8'},
+            );
+          }),
+        );
+
+        tester.view.physicalSize = const Size(1920, 1080);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TvLivingRoomShell(
+              storage: storage,
+              client: tvClient,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // 1) Navigate to Search tab, enter 'A' and search
+        await tester.tap(find.text('搜索'));
+        await tester.pump(const Duration(milliseconds: 200));
+        await tester.tap(find.text('A'));
+        await tester.pump();
+        final submitSearch = find.descendant(
+          of: find.byType(TvRemoteGridKeyboard),
+          matching: find.text('搜索'),
+        );
+        await tester.tap(submitSearch);
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text('遥控器全流程剧'), findsOneWidget);
+
+        // 2) Enter TvDetailScreen -> verify episodes rendered -> navigate back with Escape (remote Back)
+        await tester.ensureVisible(find.text('遥控器全流程剧'));
+        await tester.pump();
+        await tester.tap(find.text('遥控器全流程剧'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.byType(TvDetailScreen), findsOneWidget);
+        expect(find.text('第02集'), findsWidgets);
+
+        await tester.tap(find.text('← 返回'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 450));
+
+        // 3) Returned cleanly to search results still showing the matched card
+        expect(find.byType(TvDetailScreen), findsNothing);
+        expect(find.text('遥控器全流程剧'), findsOneWidget);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 5));
+      },
+    );
   });
 }

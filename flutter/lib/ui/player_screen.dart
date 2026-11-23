@@ -265,6 +265,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   );
   final Set<int> _globalActivePointers = <int>{};
   bool _appInForeground = true;
+  bool _resumeOhosOnForeground = false;
+  int _ohosBackgroundResumeMs = 0;
   double _previousVolume = 100.0;
   final ScrollController _portraitToolsScrollController = ScrollController();
   String _playbackError = '';
@@ -420,9 +422,27 @@ class _PlayerScreenState extends State<PlayerScreen>
       ? (_iosAvPlayerController?.playOrPause() ?? Future<void>.value())
       : _player.playOrPause();
 
+  bool get _usesOhosAvPlayer =>
+      _player.platform is OhosPlatformPlayer || OhosRuntime.isOhos;
+
+  List<double> get _supportedPlaybackSpeeds => _usesOhosAvPlayer
+      ? OhosPlatformPlayer.supportedSpeeds
+      : const <double>[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+
+  double _normalizePlaybackSpeed(double rate) {
+    if (_usesOhosAvPlayer) {
+      return OhosPlatformPlayer.normalizeSupportedRate(rate);
+    }
+    return double.parse(
+      rate
+          .clamp(StorageService.minPlaySpeed, StorageService.maxPlaySpeed)
+          .toStringAsFixed(2),
+    );
+  }
+
   Future<void> _engineSetRate(double rate) => _usingAvPlayer
       ? (_iosAvPlayerController?.setRate(rate) ?? Future<void>.value())
-      : _player.setRate(rate);
+      : _player.setRate(_normalizePlaybackSpeed(rate));
 
   Future<void> _engineSetVolume100(double vol100) => _usingAvPlayer
       ? (_iosAvPlayerController?.setVolume((vol100 / 100.0).clamp(0.0, 1.0)) ??
@@ -831,7 +851,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       0,
       _currentLine.episodes.length - 1,
     );
-    _normalSpeed = _isLiveStream ? 1.0 : widget.storage.playSpeed;
+    final initUsesOhos =
+        OhosRuntime.isOhos || widget.debugPlayer?.platform is OhosPlatformPlayer;
+    _normalSpeed = _isLiveStream
+        ? 1.0
+        : (initUsesOhos
+            ? OhosPlatformPlayer.normalizeSupportedRate(widget.storage.playSpeed)
+            : widget.storage.playSpeed);
     _skipIntroSec = widget.storage.getVideoSkipIntroSec(
       widget.site.key,
       widget.video.id,
@@ -1019,6 +1045,23 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(sub.cancel());
     }
     _playerSubscriptions.clear();
+    final boundPlayer = _player;
+    if (boundPlayer.platform is OhosPlatformPlayer) {
+      _playerSubscriptions.add(boundPlayer.stream.rate.listen((rate) {
+        if (!mounted ||
+            !identical(boundPlayer, _player) ||
+            !_allowEvents ||
+            !_matchesActiveMedia ||
+            _isLiveStream ||
+            _speedBoosting) {
+          return;
+        }
+        final normalized = OhosPlatformPlayer.normalizeSupportedRate(rate);
+        if ((_normalSpeed - normalized).abs() >= 0.01) {
+          setState(() => _normalSpeed = normalized);
+        }
+      }));
+    }
     _playerSubscriptions.add(_player.stream.width.listen((w) {
       if (!mounted || w == null || w <= 0 || w == _videoWidth) return;
       setState(() {
@@ -1350,9 +1393,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       // Only treat terminal open/format failures as immediate startup errors;
       // do not abort live HLS/FLV streams on transient sliding-window segment
       // 404s or harmless initial decoder warnings (e.g. missing SPS before keyframe).
+      final isOhosAvPlayerError =
+          boundPlayer.platform is OhosPlatformPlayer ||
+          lower.contains('avplayer error') ||
+          lower.contains('ohos avplayer') ||
+          lower.contains('无法保留必要请求头');
       final isFatalStartupError = !_startup.isPastStartupWindow &&
           _position <= Duration.zero &&
-          (lower.contains('failed to open') ||
+          (isOhosAvPlayerError ||
+              lower.contains('failed to open') ||
               lower.contains('failed to recognize file format') ||
               lower.contains('could not open') ||
               lower.contains('cannot open') ||
@@ -1766,6 +1815,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       _cancelTransientInteractions(GestureInterruptReason.lifecyclePause);
       if (state == AppLifecycleState.paused ||
           state == AppLifecycleState.hidden) {
+        if (_usesOhosAvPlayer && !_usingAvPlayer) {
+          _resumeOhosOnForeground = _playing && _playbackError.isEmpty;
+          _ohosBackgroundResumeMs = _position.inMilliseconds > 0
+              ? _position.inMilliseconds
+              : _lastKnownPositionMs;
+          if (_resumeOhosOnForeground) {
+            unawaited(_enginePause());
+          }
+        }
         _saveProgress(immediate: true);
         widget.storage.flushPendingHistory();
         widget.storage.scheduleAutoWebdavSync(immediate: true);
@@ -1774,6 +1832,20 @@ class _PlayerScreenState extends State<PlayerScreen>
       _appInForeground = true;
       unawaited(IosLiquidGlassBridge.refreshReduceTransparency());
       _syncMobileSystemBars(force: true);
+      if (_usesOhosAvPlayer && !_usingAvPlayer && _resumeOhosOnForeground) {
+        _resumeOhosOnForeground = false;
+        if (_playbackError.isEmpty) {
+          if (_isLiveStream) {
+            unawaited(_openCurrentEpisode(resumeMs: 0));
+          } else if (_ohosBackgroundResumeMs > 0 &&
+              _position.inMilliseconds == 0) {
+            unawaited(_openCurrentEpisode(resumeMs: _ohosBackgroundResumeMs));
+          } else {
+            unawaited(_enginePlay());
+            unawaited(_engineSetRate(_normalSpeed));
+          }
+        }
+      }
       _maybeEvaluateSkipTriggers();
     }
   }
@@ -2031,8 +2103,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         final nextIdx = (_episodeIndex + step) % total;
         if (_failedLiveEpisodes.contains(nextIdx)) continue;
         final candidate = _currentLine.episodes[nextIdx];
-        if (candidate.url == _activeStreamUrl ||
-            candidate.url == _currentEpisode.url) {
+        final sameHeaders =
+            mapEquals(candidate.headers, _currentEpisode.headers);
+        if ((candidate.url == _activeStreamUrl ||
+                candidate.url == _currentEpisode.url) &&
+            sameHeaders) {
           continue;
         }
         setState(() {
@@ -2078,6 +2153,13 @@ class _PlayerScreenState extends State<PlayerScreen>
         return;
       }
     }
+    String? specificHeaderError;
+    if (error is PlatformException &&
+        (error.message ?? '').contains('请求头')) {
+      specificHeaderError = error.message!.trim();
+    } else if (error is String && error.contains('请求头')) {
+      specificHeaderError = error.trim();
+    }
     setState(() {
       _allowEvents = false;
       _allowHistory = false;
@@ -2089,6 +2171,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       _hudText = '';
       _playbackError = cloudError.isNotEmpty
           ? cloudError
+          : specificHeaderError != null
+          ? specificHeaderError
           : _isLiveStream
           ? PlayerScreen.formatLivePlaybackError(
               error,
@@ -2510,15 +2594,15 @@ class _PlayerScreenState extends State<PlayerScreen>
           try {
             final dyn = _player.platform as dynamic;
             await dyn.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
-            final ua = headers.entries
-                .firstWhere(
-                  (e) => e.key.toLowerCase() == 'user-agent',
-                  orElse: () => const MapEntry('User-Agent', ''),
-                )
-                .value;
-            if (ua.isNotEmpty) {
-              await dyn.setProperty('user-agent', ua);
-            }
+            final ua = pendingLocalLease != null
+                ? ''
+                : headers.entries
+                    .firstWhere(
+                      (e) => e.key.toLowerCase() == 'user-agent',
+                      orElse: () => const MapEntry('User-Agent', ''),
+                    )
+                    .value;
+            await dyn.setProperty('user-agent', ua);
             final ref = pendingLocalLease != null
                 ? ''
                 : headers.entries
@@ -3189,6 +3273,42 @@ class _PlayerScreenState extends State<PlayerScreen>
         },
       ),
     );
+  }
+
+  List<LiveChannel> get _allLiveCatalogChannels => [
+    for (final g in widget.liveGroups)
+      for (final ch in g.channels)
+        if (ch.episodes.isNotEmpty) ch,
+  ];
+
+  bool get _canStepLiveChannel =>
+      _hasLiveChannelCatalog && _allLiveCatalogChannels.length > 1;
+
+  void _stepLiveChannel(int delta) {
+    if (!mounted || !_hasLiveChannelCatalog || delta == 0) return;
+    final channels = _allLiveCatalogChannels;
+    if (channels.length <= 1) return;
+    final active = _activeLiveChannel;
+    var currentIdx = -1;
+    if (active != null) {
+      currentIdx = channels.indexWhere((ch) => identical(ch, active));
+      if (currentIdx < 0) {
+        currentIdx = channels.indexWhere(
+          (ch) => ch.name == active.name && ch.group == active.group,
+        );
+      }
+    }
+    if (currentIdx < 0) {
+      currentIdx = channels.indexWhere(
+        (ch) => ch.name == _displayTitle && ch.group == _currentLine.name,
+      );
+    }
+    if (currentIdx < 0) {
+      currentIdx = 0;
+    }
+    final nextIdx = (currentIdx + delta) % channels.length;
+    final safeNext = nextIdx < 0 ? nextIdx + channels.length : nextIdx;
+    _switchLiveChannel(channels[safeNext], lineIdx: 0);
   }
 
   void _stepEpisode(int delta) {
@@ -3969,11 +4089,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _applyManualSpeed(double newSpeed) {
-    final clamped = double.parse(
-      newSpeed
-          .clamp(StorageService.minPlaySpeed, StorageService.maxPlaySpeed)
-          .toStringAsFixed(2),
-    );
+    final clamped = _normalizePlaybackSpeed(newSpeed);
     if (_useEnhancedHud) {
       final events = _gestureFsm.onManualSpeedChanged(clamped);
       _applyGestureEvents(events);
@@ -5202,12 +5318,40 @@ class _PlayerScreenState extends State<PlayerScreen>
               return KeyEventResult.handled;
             }
             if (event is KeyDownEvent &&
+                (event.logicalKey == LogicalKeyboardKey.channelUp ||
+                    event.logicalKey == LogicalKeyboardKey.channelDown)) {
+              if (_isLiveStream) {
+                final delta =
+                    event.logicalKey == LogicalKeyboardKey.channelUp ? 1 : -1;
+                if (_hasLiveChannelCatalog) {
+                  _stepLiveChannel(delta);
+                } else {
+                  _stepEpisode(delta);
+                }
+                return KeyEventResult.handled;
+              }
+            }
+            if (event is KeyDownEvent &&
+                _isLiveStream &&
+                _hasLiveChannelCatalog &&
+                (event.logicalKey == LogicalKeyboardKey.pageUp ||
+                    event.logicalKey == LogicalKeyboardKey.pageDown)) {
+              _stepLiveChannel(
+                event.logicalKey == LogicalKeyboardKey.pageDown ? 1 : -1,
+              );
+              return KeyEventResult.handled;
+            }
+            if (event is KeyDownEvent &&
                 (event.logicalKey == LogicalKeyboardKey.arrowUp ||
                     event.logicalKey == LogicalKeyboardKey.arrowDown)) {
               if (_isLiveStream && !_controlsVisible) {
-                _stepEpisode(
-                  event.logicalKey == LogicalKeyboardKey.arrowUp ? -1 : 1,
-                );
+                final delta =
+                    event.logicalKey == LogicalKeyboardKey.arrowUp ? -1 : 1;
+                if (_hasLiveChannelCatalog) {
+                  _stepLiveChannel(delta);
+                } else {
+                  _stepEpisode(delta);
+                }
               } else if (!_isLiveStream &&
                   event.logicalKey == LogicalKeyboardKey.arrowDown) {
                 _openTvPlayerControlSheet();
@@ -5342,14 +5486,38 @@ class _PlayerScreenState extends State<PlayerScreen>
             }
             return KeyEventResult.handled;
           }
+          if (event.logicalKey == LogicalKeyboardKey.channelUp) {
+            if (_isLiveStream && _hasLiveChannelCatalog) {
+              _stepLiveChannel(1);
+            } else {
+              _stepEpisode(1);
+            }
+            return KeyEventResult.handled;
+          }
+          if (event.logicalKey == LogicalKeyboardKey.channelDown) {
+            if (_isLiveStream && _hasLiveChannelCatalog) {
+              _stepLiveChannel(-1);
+            } else {
+              _stepEpisode(-1);
+            }
+            return KeyEventResult.handled;
+          }
           if (event.logicalKey == LogicalKeyboardKey.keyN ||
               event.logicalKey == LogicalKeyboardKey.pageDown) {
-            _stepEpisode(1);
+            if (_isLiveStream && _hasLiveChannelCatalog) {
+              _stepLiveChannel(1);
+            } else {
+              _stepEpisode(1);
+            }
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.keyP ||
               event.logicalKey == LogicalKeyboardKey.pageUp) {
-            _stepEpisode(-1);
+            if (_isLiveStream && _hasLiveChannelCatalog) {
+              _stepLiveChannel(-1);
+            } else {
+              _stepEpisode(-1);
+            }
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.space ||
@@ -6553,6 +6721,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                 _openCurrentEpisode();
               },
             ),
+            if (_canStepLiveChannel)
+              AppleCapsuleButton(
+                key: const ValueKey('live-error-next-channel'),
+                label: '下一台',
+                icon: CupertinoIcons.forward_end_fill,
+                compact: true,
+                onPressed: () => _stepLiveChannel(1),
+              ),
             if (_isWindowsPlayerPlatform && widget.debugPlayer == null)
               AppleCapsuleButton(
                 label: _videoKernel.isMdk ? '切回 MPV 重试' : '切换 MDK 核显重试',
@@ -9483,10 +9659,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         currentSpeed: _normalSpeed,
         onSpeedSelected: (nextSpeed) {
           if (!mounted) return;
-          setState(() => _normalSpeed = nextSpeed);
-          widget.storage.setPlaySpeed(nextSpeed);
+          final normalized = _normalizePlaybackSpeed(nextSpeed);
+          setState(() => _normalSpeed = normalized);
+          widget.storage.setPlaySpeed(normalized);
           final speedLabel =
-              nextSpeed.toString().replaceAll(RegExp(r'\.0$'), '');
+              normalized.toString().replaceAll(RegExp(r'\.0$'), '');
           _showHud('倍速 ${speedLabel}x');
         },
         currentFit: _fit,
@@ -9503,7 +9680,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _showSpeedSheet({Rect? anchorRect}) {
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
-    const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+    final speeds = _supportedPlaybackSpeeds;
     if (_canUseNativeIosSheet) {
       final session = _playSession;
       unawaited(() async {

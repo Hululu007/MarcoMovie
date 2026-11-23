@@ -196,6 +196,23 @@ class OhosSystemBridge {
     return OhosPickedTextFile.fromMap(raw);
   }
 
+  Future<Map<Object?, Object?>?> pickDocumentFile({
+    String purpose = 'subscription',
+    List<String> extensions = const <String>[],
+    int maxBytes = 16 * 1024 * 1024,
+    bool asBytes = true,
+  }) {
+    return _channel.invokeMapMethod<Object?, Object?>(
+      'pickDocumentFile',
+      <String, Object?>{
+        'purpose': purpose,
+        'extensions': extensions,
+        'maxBytes': maxBytes,
+        'asBytes': asBytes,
+      },
+    );
+  }
+
   Future<String?> saveTextFile({
     required String fileName,
     required String content,

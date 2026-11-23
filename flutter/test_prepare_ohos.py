@@ -117,7 +117,7 @@ class PrepareOhosTests(unittest.TestCase):
                 patched_entry["buildOption"]["arkOptions"]["obfuscation"]["ruleOptions"]["enable"]
             )
 
-            # 4) Normalization of non-parenthesized targetSdkVersion ("26.0.0") from DevEco 6.1 CLI
+            # 4) Enforcement of API 12 (5.0.0(12)) even when flutter create writes 5.0.5(17) / 26.0.0
             (sandbox / "ohos" / "build-profile.json5").write_text(
                 """{
   app: {
@@ -139,8 +139,8 @@ class PrepareOhosTests(unittest.TestCase):
             prepare_ohos.sync_ohos_version(sandbox)
             patched_root = prepare_ohos.load_json5(sandbox / "ohos" / "build-profile.json5")
             prod0 = patched_root["app"]["products"][0]
-            self.assertEqual(prod0["compatibleSdkVersion"], "5.0.5(17)")
-            self.assertEqual(prod0["targetSdkVersion"], "5.0.5(17)")
+            self.assertEqual(prod0["compatibleSdkVersion"], "5.0.0(12)")
+            self.assertEqual(prod0["targetSdkVersion"], "5.0.0(12)")
 
     def test_patch_and_restore_pubspec_roundtrip_is_byte_identical(self) -> None:
         icon_master = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
@@ -215,7 +215,7 @@ class PrepareOhosTests(unittest.TestCase):
         entry_profile = prepare_ohos.load_json5(ohos_dir / "entry" / "build-profile.json5")
         native_opts = entry_profile["buildOption"]["externalNativeOptions"]
         self.assertEqual(native_opts["path"], "./src/main/cpp/CMakeLists.txt")
-        self.assertEqual(set(native_opts["abiFilters"]), {"arm64-v8a", "x86_64"})
+        self.assertEqual(set(native_opts["abiFilters"]), {"arm64-v8a"})
 
         module_cfg = prepare_ohos.load_json5(
             ohos_dir / "entry" / "src" / "main" / "module.json5"
@@ -320,6 +320,7 @@ class PrepareOhosTests(unittest.TestCase):
             "secureWrite",
             "secureDelete",
             "pickJsonFile",
+            "pickDocumentFile",
             "saveTextFile",
             "openExternalUrl",
             "setKeepScreenOn",
@@ -330,7 +331,14 @@ class PrepareOhosTests(unittest.TestCase):
             self.assertIn(f"'{method}'", dart_shim)
         self.assertIn("marco_movie_prefs", sys_plugin)
         self.assertIn("marco_movie_secure_fallback", sys_plugin)
+        self.assertNotIn("writeSecureFallback", sys_plugin)
+        self.assertIn("writeToAssetStoreVerified", sys_plugin)
         self.assertIn("DEVICE_FIRST_UNLOCKED", sys_plugin)
+        self.assertNotIn("fs.readSync", sys_plugin)
+        self.assertNotIn("fs.writeSync", sys_plugin)
+        self.assertIn("await fs.open(", sys_plugin)
+        self.assertIn("await fs.read(", sys_plugin)
+        self.assertIn("await fs.write(", sys_plugin)
 
         self.assertIn("com.pilipala.marcomovie/ohos_avplayer", av_plugin)
         self.assertIn("com.pilipala.marcomovie/ohos_avplayer/events/", av_plugin)
@@ -352,10 +360,13 @@ class PrepareOhosTests(unittest.TestCase):
             self.assertIn(f"case '{method}':", av_plugin)
             self.assertIn(f"'{method}'", dart_shim)
 
-        for event_type in ("state", "position", "videoSize", "error"):
+        for event_type in ("state", "position", "videoSize", "rate", "error"):
             self.assertIn(f"'type': '{event_type}'", av_plugin)
         self.assertIn("avPlayer.surfaceId = session.surfaceId", av_plugin)
         self.assertIn("createMediaSourceWithUrl", av_plugin)
+        self.assertIn("APPLICATION_M3U8", av_plugin)
+        self.assertIn("speedDone", av_plugin)
+        self.assertIn("hasRequiredHeaders", av_plugin)
 
         self.assertIn("extends FlutterAbility", entry_ability)
         self.assertIn("GeneratedPluginRegistrant.registerWith(flutterEngine)", entry_ability)
@@ -377,6 +388,110 @@ class PrepareOhosTests(unittest.TestCase):
                     re.search(r"https?://", text),
                     f"Unexpected external URL in {path}",
                 )
+
+
+    def test_verify_hap_package_and_ci_hardening(self) -> None:
+        import zipfile
+
+        def write_hap(
+            dst: Path,
+            *,
+            min_api: int = 50000012,
+            build_mode: str = "release",
+            debug: bool = False,
+            extra_x86_orphan: bool = False,
+            catpaw_count: int = 12,
+        ) -> None:
+            module_doc = {
+                "app": {
+                    "bundleName": "com.pilipala.marcomovie",
+                    "versionName": "0.1.2",
+                    "versionCode": 1000003,
+                    "buildMode": build_mode,
+                    "debug": debug,
+                    "minAPIVersion": min_api,
+                    "targetAPIVersion": min_api,
+                    "compileSdkVersion": "26.0.0.105",
+                },
+                "module": {
+                    "name": "entry",
+                    "deviceTypes": ["phone", "tablet", "2in1", "tv"],
+                },
+            }
+            with zipfile.ZipFile(dst, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("module.json", json.dumps(module_doc))
+                for lib in prepare_ohos.REQUIRED_ABI_LIBRARIES:
+                    zf.writestr(f"libs/arm64-v8a/{lib}", b"ELF")
+                if extra_x86_orphan:
+                    zf.writestr("libs/x86_64/libquickjs_c_bridge_plugin.so", b"ELF")
+                for req in prepare_ohos.REQUIRED_CATPAW_FILES:
+                    zf.writestr(
+                        f"resources/rawfile/flutter_assets/assets/catpaw/{req}",
+                        b"// ok",
+                    )
+                for idx in range(catpaw_count):
+                    zf.writestr(
+                        f"resources/rawfile/flutter_assets/assets/catpaw/extra_{idx}.js",
+                        b"// extra",
+                    )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            good_hap = tmp_dir / "good.hap"
+            write_hap(good_hap)
+            summary = prepare_ohos.verify_hap_package(
+                good_hap,
+                expected_version="0.1.2",
+                expected_build_number=1000003,
+            )
+            self.assertEqual(summary["minAPIVersion"], 50000012)
+            self.assertEqual(list(summary["abis"].keys()), ["arm64-v8a"])
+            self.assertGreaterEqual(summary["catpawAssetCount"], 15)
+
+            bad_api_hap = tmp_dir / "api17.hap"
+            write_hap(bad_api_hap, min_api=50005017)
+            with self.assertRaises(ValueError):
+                prepare_ohos.verify_hap_package(
+                    bad_api_hap,
+                    expected_version="0.1.2",
+                    expected_build_number=1000003,
+                )
+
+            orphan_abi_hap = tmp_dir / "orphan_x86.hap"
+            write_hap(orphan_abi_hap, extra_x86_orphan=True)
+            with self.assertRaises(ValueError):
+                prepare_ohos.verify_hap_package(
+                    orphan_abi_hap,
+                    expected_version="0.1.2",
+                    expected_build_number=1000003,
+                )
+
+            debug_hap = tmp_dir / "debug.hap"
+            write_hap(debug_hap, build_mode="debug", debug=True)
+            with self.assertRaises(ValueError):
+                prepare_ohos.verify_hap_package(
+                    debug_hap,
+                    expected_version="0.1.2",
+                    expected_build_number=1000003,
+                )
+
+            missing_catpaw_hap = tmp_dir / "no_catpaw.hap"
+            write_hap(missing_catpaw_hap, catpaw_count=0)
+            with self.assertRaises(ValueError):
+                prepare_ohos.verify_hap_package(
+                    missing_catpaw_hap,
+                    expected_version="0.1.2",
+                    expected_build_number=1000003,
+                )
+
+        workflow_text = (
+            REPO_ROOT / ".github" / "workflows" / "build-multiplatform.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("OHOS_FLUTTER_COMMIT", workflow_text)
+        self.assertIn("eb3be16003d73e42d2e45657278473c00fb91355", workflow_text)
+        self.assertIn("--no-codesign", workflow_text)
+        self.assertIn("entry-default-unsigned.hap", workflow_text)
+        self.assertIn("prepare_ohos.py --verify-hap", workflow_text)
 
 
 if __name__ == "__main__":

@@ -8025,42 +8025,56 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
           Future<void> pickLocalFile() async {
             try {
-              final result = await FilePicker.platform.pickFiles(
-                type: FileType.any,
-                withData: true,
-              );
-              if (result == null || result.files.isEmpty) return;
-              final file = result.files.first;
               String rawText = '';
-              if (file.bytes != null) {
-                if (file.bytes!.length > CmsClient.maxResponseBytes) {
-                  setSheetState(() => errorMsg = '直播源文件超过 6 MB 限制');
-                  return;
+              String fileName = '';
+              if (OhosRuntime.isOhos) {
+                final picked = await OhosRuntime.pickDocumentFile(
+                  purpose: OhosDocumentPurpose.live,
+                  maxBytes: CmsClient.maxResponseBytes,
+                );
+                if (picked == null) return;
+                fileName = picked.name;
+                rawText = CmsParser.decodeConfigDocument(picked.bytes);
+              } else {
+                final result = await FilePicker.platform.pickFiles(
+                  type: FileType.any,
+                  withData: true,
+                );
+                if (result == null || result.files.isEmpty) return;
+                final file = result.files.first;
+                fileName = file.name;
+                if (file.bytes != null) {
+                  if (file.bytes!.length > CmsClient.maxResponseBytes) {
+                    setSheetState(() => errorMsg = '直播源文件超过 6 MB 限制');
+                    return;
+                  }
+                  rawText = utf8.decode(file.bytes!, allowMalformed: true);
+                } else if (file.path != null && file.path!.isNotEmpty) {
+                  final ioFile = File(file.path!);
+                  if (await ioFile.length() > CmsClient.maxResponseBytes) {
+                    setSheetState(() => errorMsg = '直播源文件超过 6 MB 限制');
+                    return;
+                  }
+                  rawText = await ioFile.readAsString();
                 }
-                rawText = utf8.decode(file.bytes!, allowMalformed: true);
-              } else if (file.path != null && file.path!.isNotEmpty) {
-                final ioFile = File(file.path!);
-                if (await ioFile.length() > CmsClient.maxResponseBytes) {
-                  setSheetState(() => errorMsg = '直播源文件超过 6 MB 限制');
-                  return;
-                }
-                rawText = await ioFile.readAsString();
               }
               if (rawText.trim().isEmpty) {
                 setSheetState(() => errorMsg = '所选直播文件内容为空');
                 return;
               }
               setSheetState(() {
-                pickedFileName = file.name;
+                pickedFileName = fileName;
                 pickedFileContent = rawText;
                 errorMsg = null;
                 if (nameCtrl.text.trim().isEmpty) {
-                  nameCtrl.text = file.name.replaceAll(
+                  nameCtrl.text = fileName.replaceAll(
                     RegExp(r'\.(?:m3u8?|txt|json)$', caseSensitive: false),
                     '',
                   );
                 }
               });
+            } on FormatException catch (e) {
+              setSheetState(() => errorMsg = '读取文件失败：${e.message}');
             } catch (e) {
               setSheetState(() => errorMsg = '读取文件失败：$e');
             }
@@ -11902,14 +11916,34 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   String _currentAppVersion = '读取中';
   Timer? _installedVersionTimer;
 
+  Future<String> _resolveInstalledAppVersion() async {
+    if (OhosRuntime.isOhos) {
+      final ohosPkg = await OhosRuntime.getPackageInfo();
+      if (ohosPkg != null && ohosPkg.version.isNotEmpty) {
+        return ohosPkg.version;
+      }
+    }
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (info.version.trim().isNotEmpty) {
+        return info.version.trim();
+      }
+    } catch (_) {}
+    return '';
+  }
+
   Future<void> _loadInstalledVersion() async {
     _installedVersionTimer = Timer(const Duration(seconds: 3), () {
       if (mounted) setState(() => _currentAppVersion = '未知');
     });
     try {
-      final info = await PackageInfo.fromPlatform();
+      final version = await _resolveInstalledAppVersion();
       _installedVersionTimer?.cancel();
-      if (mounted) setState(() => _currentAppVersion = info.version);
+      if (mounted) {
+        setState(
+          () => _currentAppVersion = version.isNotEmpty ? version : '未知',
+        );
+      }
     } catch (_) {
       _installedVersionTimer?.cancel();
       if (mounted) setState(() => _currentAppVersion = '未知');
@@ -11988,8 +12022,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     bool checking = true;
     bool downloading = false;
+    bool checkFailed = false;
     double progress = 0.0;
-    String statusText = '正在连接镜像站检测最新版本…';
+    final isHarmony = OhosRuntime.isOhos;
+    String statusText = isHarmony
+        ? '正在检查 HarmonyOS NEXT 独立更新源…'
+        : '正在连接镜像站检测最新版本…';
     String latestVersion = _currentAppVersion;
     String releaseNotes = '';
     String downloadUrl = '';
@@ -11997,27 +12035,68 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     bool checkStarted = false;
     AppUpdate? release;
 
+    String formatMb(int bytes) => '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+
+    Future<void> openHarmonyOrCopyUrl(String targetUrl, String label) async {
+      final opened = await OhosRuntime.openExternalUrl(targetUrl);
+      if (opened) return;
+      await Clipboard.setData(ClipboardData(text: targetUrl));
+      _showAppleNotice('已复制$label', '请在系统浏览器中打开：$targetUrl');
+    }
+
     showAppleModalSheet<void>(
       context: context,
-      title: '检查版本更新',
+      title: isHarmony ? 'HarmonyOS NEXT 版本更新' : '检查版本更新',
       builder: (ctx) {
         return StatefulBuilder(
           builder: (ctx, setSheetState) {
             Future<void> checkRemote() async {
+              if (ctx.mounted) {
+                setSheetState(() {
+                  checking = true;
+                  checkFailed = false;
+                  release = null;
+                  releaseNotes = '';
+                  downloadUrl = '';
+                  hasNewer = false;
+                  statusText = isHarmony
+                      ? '正在检查 HarmonyOS NEXT 独立更新源…'
+                      : '正在连接镜像站检测最新版本…';
+                });
+              }
               try {
-                final installed = await PackageInfo.fromPlatform();
-                if (installed.version.isEmpty) throw const FormatException('无法读取已安装版本');
-                _currentAppVersion = installed.version;
-                release = await AppUpdate.check();
+                final resolvedVersion = await _resolveInstalledAppVersion();
+                if (resolvedVersion.isEmpty) {
+                  throw const FormatException('无法读取已安装版本');
+                }
+                _currentAppVersion = resolvedVersion;
+                if (mounted) setState(() {});
+                release = await AppUpdate.check(
+                  platform: isHarmony ? 'harmonyos' : null,
+                );
                 latestVersion = release!.version;
                 releaseNotes = _formatCleanReleaseNotes(release!.notes);
-                downloadUrl = release!.windowsUrl?.toString() ?? '';
+                downloadUrl = isHarmony
+                    ? (release!.harmonyosUrl?.toString() ?? '')
+                    : (release!.windowsUrl?.toString() ?? '');
+                if (isHarmony && downloadUrl.isEmpty) {
+                  throw const FormatException('未获取到有效的鸿蒙 HAP 安装包或校验信息');
+                }
                 hasNewer = _isRemoteVersionNewer(latestVersion, _currentAppVersion);
-                statusText = hasNewer ? '发现新版本 v$latestVersion（当前 v$_currentAppVersion）'
+                statusText = hasNewer
+                    ? '发现新版本 v$latestVersion（当前 v$_currentAppVersion）'
                     : '当前已是最新版本（v$_currentAppVersion）';
               } on FormatException catch (e) {
+                checkFailed = true;
+                release = null;
+                downloadUrl = '';
+                hasNewer = false;
                 statusText = '检查更新失败：${e.message}';
               } catch (_) {
+                checkFailed = true;
+                release = null;
+                downloadUrl = '';
+                hasNewer = false;
                 statusText = '暂时无法检查更新，请稍后重试或打开官方下载站';
               }
               if (ctx.mounted) setSheetState(() => checking = false);
@@ -12131,15 +12210,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         const SizedBox(width: 10),
                       ] else ...[
                         Icon(
-                          hasNewer
-                              ? CupertinoIcons.arrow_down_circle_fill
-                              : CupertinoIcons.checkmark_seal_fill,
-                          color: hasNewer
-                              ? AppleColors.systemBlue
-                              : AppleColors.systemGreen,
+                          checkFailed
+                              ? CupertinoIcons.exclamationmark_triangle_fill
+                              : hasNewer
+                                  ? CupertinoIcons.arrow_down_circle_fill
+                                  : CupertinoIcons.checkmark_seal_fill,
+                          color: checkFailed
+                              ? AppleColors.systemOrange
+                              : hasNewer
+                                  ? AppleColors.systemBlue
+                                  : AppleColors.systemGreen,
                           size: 22,
                         ),
-                        SizedBox(width: 8),
+                        const SizedBox(width: 8),
                       ],
                       Expanded(
                         child: Text(
@@ -12153,6 +12236,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       ),
                     ],
                   ),
+                  if (isHarmony) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      '当前已装版本：v$_currentAppVersion · 通道：HarmonyOS NEXT (arm64-v8a)',
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelSecondary,
+                        fontSize: 12.5,
+                      ),
+                    ),
+                  ],
                   if (downloading) ...[
                     const SizedBox(height: 12),
                     ClipRRect(
@@ -12189,56 +12282,153 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       ),
                     ),
                   ],
-                  const SizedBox(height: 18),
-                  if (!checking && !downloading)
-                    Row(
-                      children: [
-                        if (!kIsWeb &&
-                            Platform.isWindows &&
-                            downloadUrl.isNotEmpty)
-                          Expanded(
-                            child: AppleCapsuleButton(
-                              label: hasNewer
-                                  ? '一键下载安装 v$latestVersion'
-                                  : '重新下载安装 v$latestVersion',
-                              icon: CupertinoIcons.arrow_down_to_line,
-                              primary: true,
-                              onPressed: downloadAndInstallWindows,
+                  if (isHarmony && !checking && !checkFailed && release != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: ApplePalette.of(context).groupedSecondary,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: AppleColors.glassBorder,
+                          width: 0.5,
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '安装包：${release!.packageFileName ?? "MarcoMovie-$latestVersion-harmonyos-universal.hap"}'
+                            '${release!.size != null ? "（${formatMb(release!.size!)}）" : ""}',
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelPrimary,
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
-                        if (!kIsWeb &&
-                            Platform.isWindows &&
-                            downloadUrl.isNotEmpty)
-                          const SizedBox(width: 10),
-                        Expanded(
-                          child: AppleCapsuleButton(
-                            label: '打开官方下载站',
-                            icon: CupertinoIcons.globe,
-                            primary: kIsWeb || !Platform.isWindows,
-                            onPressed: () async {
-                              const mirror =
-                                  'https://marcotv.wlj9919.top/movie/';
-                              if (!kIsWeb && Platform.isWindows) {
-                                await Process.run(
-                                  'cmd',
-                                  ['/c', 'start', '', mirror],
-                                );
-                              } else if (!kIsWeb && Platform.isMacOS) {
-                                await Process.run('open', [mirror]);
-                              } else {
-                                await Clipboard.setData(
-                                  const ClipboardData(text: mirror),
-                                );
-                                _showAppleNotice(
-                                  '已复制下载站地址',
-                                  '请在浏览器中打开：$mirror',
-                                );
-                              }
-                            },
+                          if ((release!.checksum ?? '').isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            SelectableText(
+                              'SHA-256：${release!.checksum}',
+                              style: TextStyle(
+                                color: ApplePalette.of(context).labelSecondary,
+                                fontSize: 11.5,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 8),
+                          Text(
+                            AppUpdate.harmonyosUnsignedInstallGuide,
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelSecondary,
+                              fontSize: 12,
+                              height: 1.45,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
+                  ],
+                  const SizedBox(height: 18),
+                  if (!checking && !downloading)
+                    if (isHarmony)
+                      Row(
+                        children: [
+                          if (downloadUrl.isNotEmpty) ...[
+                            Expanded(
+                              child: AppleCapsuleButton(
+                                key: const ValueKey('ohos-update-download-hap'),
+                                label: hasNewer
+                                    ? '下载未签名 HAP v$latestVersion'
+                                    : '重新下载 HAP v$latestVersion',
+                                icon: CupertinoIcons.arrow_down_to_line,
+                                primary: true,
+                                onPressed: () => openHarmonyOrCopyUrl(
+                                  downloadUrl,
+                                  'HAP 下载链接',
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                          ] else if (checkFailed) ...[
+                            Expanded(
+                              child: AppleCapsuleButton(
+                                key: const ValueKey('ohos-update-retry'),
+                                label: '重新检查更新',
+                                icon: CupertinoIcons.refresh,
+                                primary: true,
+                                onPressed: checkRemote,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                          ],
+                          Expanded(
+                            child: AppleCapsuleButton(
+                              key: const ValueKey('ohos-update-open-release'),
+                              label: release?.releaseUrl != null
+                                  ? '打开鸿蒙发布页'
+                                  : '打开官方下载站',
+                              icon: CupertinoIcons.globe,
+                              primary: downloadUrl.isEmpty && !checkFailed,
+                              onPressed: () => openHarmonyOrCopyUrl(
+                                release?.releaseUrl?.toString() ??
+                                    'https://marcotv.wlj9919.top/movie/',
+                                '鸿蒙发布页地址',
+                              ),
+                            ),
+                          ),
+                        ],
+                      )
+                    else
+                      Row(
+                        children: [
+                          if (!kIsWeb &&
+                              Platform.isWindows &&
+                              downloadUrl.isNotEmpty)
+                            Expanded(
+                              child: AppleCapsuleButton(
+                                label: hasNewer
+                                    ? '一键下载安装 v$latestVersion'
+                                    : '重新下载安装 v$latestVersion',
+                                icon: CupertinoIcons.arrow_down_to_line,
+                                primary: true,
+                                onPressed: downloadAndInstallWindows,
+                              ),
+                            ),
+                          if (!kIsWeb &&
+                              Platform.isWindows &&
+                              downloadUrl.isNotEmpty)
+                            const SizedBox(width: 10),
+                          Expanded(
+                            child: AppleCapsuleButton(
+                              label: '打开官方下载站',
+                              icon: CupertinoIcons.globe,
+                              primary: kIsWeb || !Platform.isWindows,
+                              onPressed: () async {
+                                const mirror =
+                                    'https://marcotv.wlj9919.top/movie/';
+                                if (!kIsWeb && Platform.isWindows) {
+                                  await Process.run(
+                                    'cmd',
+                                    ['/c', 'start', '', mirror],
+                                  );
+                                } else if (!kIsWeb && Platform.isMacOS) {
+                                  await Process.run('open', [mirror]);
+                                } else {
+                                  await Clipboard.setData(
+                                    const ClipboardData(text: mirror),
+                                  );
+                                  _showAppleNotice(
+                                    '已复制下载站地址',
+                                    '请在浏览器中打开：$mirror',
+                                  );
+                                }
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
                 ],
               ),
             );
@@ -14844,38 +15034,62 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     }
                   }),
                 CupertinoButton(
+                  key: const ValueKey('subscription-pick-local-file'),
                   padding: EdgeInsets.zero,
                   onPressed: submitting ? null : () async {
                     try {
-                      final picked = await FilePicker.platform.pickFiles(
-                        type: FileType.any,
-                        withData: false,
-                      );
-                      final entry = picked?.files.single;
-                      if (entry == null || !ctx.mounted) return;
                       final Uint8List rawBytes;
-                      if (entry.path != null && entry.path!.isNotEmpty) {
-                        final file = File(entry.path!);
-                        if (await file.length() > CmsClient.maxResponseBytes) {
-                          throw const FormatException('文件超过 6 MB');
-                        }
-                        rawBytes = await file.readAsBytes();
-                      } else if (entry.bytes != null) {
-                        if (entry.bytes!.length > CmsClient.maxResponseBytes) {
-                          throw const FormatException('文件超过 6 MB');
-                        }
-                        rawBytes = entry.bytes!;
+                      final String pickedName;
+                      if (OhosRuntime.isOhos) {
+                        final picked = await OhosRuntime.pickDocumentFile(
+                          purpose: OhosDocumentPurpose.subscription,
+                          maxBytes: CmsClient.maxResponseBytes,
+                        );
+                        if (picked == null || !ctx.mounted) return;
+                        rawBytes = picked.bytes;
+                        pickedName = picked.name;
                       } else {
-                        return;
+                        final picked = await FilePicker.platform.pickFiles(
+                          type: FileType.any,
+                          withData: false,
+                        );
+                        final entry = picked?.files.single;
+                        if (entry == null || !ctx.mounted) return;
+                        pickedName = entry.name;
+                        if (entry.path != null && entry.path!.isNotEmpty) {
+                          final file = File(entry.path!);
+                          if (await file.length() > CmsClient.maxResponseBytes) {
+                            throw const FormatException('文件超过 6 MB');
+                          }
+                          rawBytes = await file.readAsBytes();
+                        } else if (entry.bytes != null) {
+                          if (entry.bytes!.length > CmsClient.maxResponseBytes) {
+                            throw const FormatException('文件超过 6 MB');
+                          }
+                          rawBytes = entry.bytes!;
+                        } else {
+                          return;
+                        }
                       }
-                      final body = CmsClient.readSubscriptionFile(rawBytes, entry.name);
+                      final body =
+                          CmsClient.readSubscriptionFile(rawBytes, pickedName);
                       if (!ctx.mounted) return;
-                      setModalState(() { jsonCtrl.text = body; urlCtrl.clear(); errorText = null; });
+                      setModalState(() {
+                        jsonCtrl.text = body;
+                        urlCtrl.clear();
+                        errorText = null;
+                      });
+                    } on FormatException catch (e) {
+                      if (ctx.mounted) {
+                        setModalState(() => errorText = '读取本地订阅失败：${e.message}');
+                      }
                     } catch (e) {
-                      if (ctx.mounted) setModalState(() => errorText = '读取本地订阅失败：$e');
+                      if (ctx.mounted) {
+                        setModalState(() => errorText = '读取本地订阅失败：$e');
+                      }
                     }
                   },
-                  child: Text('选择本地订阅或 ZIP 配置包'),
+                  child: const Text('选择本地订阅或 ZIP 配置包'),
                 ),
                 // 1. Group Selector
                 Text(
@@ -15246,6 +15460,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       icon: CupertinoIcons.square_arrow_down,
                       onPressed: () async {
                         try {
+                          if (OhosRuntime.isOhos) {
+                            final savedUri = await OhosRuntime.saveTextFile(
+                              fileName: 'marco-movie-backup.json',
+                              content: ctrl.text,
+                            );
+                            if (savedUri == null || !ctx.mounted) return;
+                            setModalState(() => errorText = null);
+                            _showAppleNotice('导出成功', '备份 JSON 文件已保存。');
+                            return;
+                          }
                           final bytes = Uint8List.fromList(utf8.encode(ctrl.text));
                           final outputPath = await FilePicker.platform.saveFile(
                             dialogTitle: '导出 Marco Movie 备份 JSON',
@@ -15260,6 +15484,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           }
                           setModalState(() => errorText = null);
                           _showAppleNotice('导出成功', '备份 JSON 文件已保存。');
+                        } on FormatException catch (e) {
+                          if (ctx.mounted) {
+                            setModalState(() => errorText = '保存 JSON 文件失败：${e.message}');
+                          }
                         } catch (e) {
                           if (ctx.mounted) {
                             setModalState(() => errorText = '保存 JSON 文件失败：$e');
@@ -15276,29 +15504,45 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       icon: CupertinoIcons.folder,
                       onPressed: () async {
                         try {
-                          final picked = await FilePicker.platform.pickFiles(
-                            type: FileType.any,
-                            withData: false,
-                          );
-                          final entry = picked?.files.single;
-                          if (entry == null || !ctx.mounted) return;
                           final String text;
-                          if (entry.path != null && entry.path!.isNotEmpty) {
-                            final file = File(entry.path!);
-                            if (await file.length() > StorageService.maxSyncPayloadBytes) {
-                              throw const FormatException('备份文件超过 8 MB 限制');
-                            }
-                            text = await file.readAsString();
-                          } else if (entry.bytes != null) {
-                            text = utf8.decode(entry.bytes!);
+                          if (OhosRuntime.isOhos) {
+                            final picked = await OhosRuntime.pickDocumentFile(
+                              purpose: OhosDocumentPurpose.backup,
+                              maxBytes: StorageService.maxSyncPayloadBytes,
+                            );
+                            if (picked == null || !ctx.mounted) return;
+                            text = picked.decodeUtf8(allowMalformed: false);
                           } else {
-                            return;
+                            final picked = await FilePicker.platform.pickFiles(
+                              type: FileType.any,
+                              withData: false,
+                            );
+                            final entry = picked?.files.single;
+                            if (entry == null || !ctx.mounted) return;
+                            if (entry.path != null && entry.path!.isNotEmpty) {
+                              final file = File(entry.path!);
+                              if (await file.length() > StorageService.maxSyncPayloadBytes) {
+                                throw const FormatException('备份文件超过 8 MB 限制');
+                              }
+                              text = await file.readAsString();
+                            } else if (entry.bytes != null) {
+                              if (entry.bytes!.length > StorageService.maxSyncPayloadBytes) {
+                                throw const FormatException('备份文件超过 8 MB 限制');
+                              }
+                              text = utf8.decode(entry.bytes!);
+                            } else {
+                              return;
+                            }
                           }
                           if (!ctx.mounted) return;
                           setModalState(() {
                             ctrl.text = text;
                             errorText = null;
                           });
+                        } on FormatException catch (e) {
+                          if (ctx.mounted) {
+                            setModalState(() => errorText = '读取备份文件失败：${e.message}');
+                          }
                         } catch (e) {
                           if (ctx.mounted) {
                             setModalState(() => errorText = '读取备份文件失败：$e');

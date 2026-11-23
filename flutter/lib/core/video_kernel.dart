@@ -44,6 +44,29 @@ class OhosPlatformPlayer extends PlatformPlayer {
   static const MethodChannel _channel =
       MethodChannel('com.pilipala.marcomovie/ohos_avplayer');
 
+  /// Exact playback speed tiers executable by HarmonyOS NEXT API 12 `@kit.MediaKit` `AVPlayer`.
+  static const List<double> supportedSpeeds = <double>[
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    1.75,
+    2.0,
+  ];
+
+  /// Maps any requested speed to the exact tier executed by HarmonyOS API 12 `AVPlayer`.
+  static double normalizeSupportedRate(double rate) {
+    if (!rate.isFinite || rate <= 0) return 1.0;
+    if (rate <= 0.625) return 0.5;
+    if (rate <= 0.875) return 0.75;
+    if (rate <= 1.125) return 1.0;
+    if (rate <= 1.375) return 1.25;
+    if (rate <= 1.625) return 1.5;
+    if (rate <= 1.875) return 1.75;
+    return 2.0;
+  }
+
   final MethodChannel _controlChannel;
   final ValueNotifier<int?> _textureId = ValueNotifier<int?>(null);
   int? _playerId;
@@ -181,6 +204,14 @@ class OhosPlatformPlayer extends PlatformPlayer {
           _applyNativeTracks(rawList);
         }
         break;
+      case 'rate':
+        final rawRate = (event['rate'] as num?)?.toDouble();
+        if (rawRate != null && rawRate.isFinite && rawRate > 0) {
+          final normalized = normalizeSupportedRate(rawRate);
+          state = state.copyWith(rate: normalized);
+          rateController.add(normalized);
+        }
+        break;
       case 'error':
         final msg = event['message']?.toString() ??
             'AVPlayer error (${event['code'] ?? 'unknown'})';
@@ -257,12 +288,26 @@ class OhosPlatformPlayer extends PlatformPlayer {
     }
 
     final mergedHeaders = <String, String>{};
+    final lowerKeys = <String, String>{};
+    void putHeader(String key, String value) {
+      final k = key.trim();
+      final v = value.trim();
+      if (k.isEmpty || v.isEmpty) return;
+      final lower = k.toLowerCase();
+      final prev = lowerKeys[lower];
+      if (prev != null && prev != k) {
+        mergedHeaders.remove(prev);
+      }
+      lowerKeys[lower] = k;
+      mergedHeaders[k] = v;
+    }
+
     final propUa = _properties['user-agent'] ?? '';
     final propRef = _properties['referrer'] ?? '';
-    if (propUa.isNotEmpty) mergedHeaders['User-Agent'] = propUa;
-    if (propRef.isNotEmpty) mergedHeaders['Referer'] = propRef;
+    if (propUa.isNotEmpty) putHeader('User-Agent', propUa);
+    if (propRef.isNotEmpty) putHeader('Referer', propRef);
     if (media.httpHeaders != null) {
-      mergedHeaders.addAll(media.httpHeaders!);
+      media.httpHeaders!.forEach(putHeader);
     }
 
     _activeSubtitleTrackIndex = null;
@@ -362,13 +407,13 @@ class OhosPlatformPlayer extends PlatformPlayer {
   @override
   Future<void> setRate(double rate) async {
     final pid = _playerId;
-    final clamped = rate.clamp(0.25, 3.0);
-    state = state.copyWith(rate: clamped);
-    rateController.add(clamped);
+    final normalized = normalizeSupportedRate(rate);
+    state = state.copyWith(rate: normalized);
+    rateController.add(normalized);
     if (pid == null || _disposed) return;
     await _controlChannel.invokeMethod<void>('setRate', {
       'playerId': pid,
-      'rate': clamped,
+      'rate': normalized,
     });
   }
 

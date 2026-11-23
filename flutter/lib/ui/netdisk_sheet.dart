@@ -222,10 +222,17 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
           setState(() => _qrStatusText = '账户验证未完成，请刷新二维码重试');
           return;
         }
-        await widget.storage.setNetdiskCredential(
-          session.driveKey,
-          res.credential,
-        );
+        try {
+          await widget.storage.setNetdiskCredential(
+            session.driveKey,
+            res.credential,
+          );
+        } catch (e) {
+          if (!current()) return;
+          final reason = e is FormatException ? e.message : '系统安全存储暂不可用';
+          setState(() => _qrStatusText = '登录已确认，但凭据保存失败：$reason');
+          return;
+        }
         if (!current()) return;
         widget.onChanged?.call();
         setState(_cancelQr);
@@ -418,7 +425,17 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
           rawCredential,
         );
         if (!mounted || attemptAtStart != _qrAttempt) return true;
-        await widget.storage.setNetdiskCredential(drive.key, verified);
+        try {
+          await widget.storage.setNetdiskCredential(drive.key, verified);
+        } catch (e) {
+          if (mounted && attemptAtStart == _qrAttempt) {
+            final reason = e is FormatException ? e.message : '系统安全存储暂不可用';
+            setState(() {
+              _qrStatusText = '${drive.providerName}凭据保存失败：$reason';
+            });
+          }
+          return true;
+        }
         if (!mounted || attemptAtStart != _qrAttempt) return true;
         widget.onChanged?.call();
         setState(_cancelQr);
@@ -586,10 +603,22 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                         if (!mounted ||
                             !ctx.mounted ||
                             ModalRoute.of(ctx)?.isCurrent == false) return;
-                        await widget.storage.setNetdiskCredential(
-                          driveKey,
-                          credential,
-                        );
+                        try {
+                          await widget.storage.setNetdiskCredential(
+                            driveKey,
+                            credential,
+                          );
+                        } catch (e) {
+                          if (ctx.mounted) {
+                            final reason =
+                                e is FormatException ? e.message : '系统安全存储暂不可用';
+                            update(() {
+                              saving = false;
+                              error = '凭据保存失败：$reason';
+                            });
+                          }
+                          return;
+                        }
                         widget.onChanged?.call();
                         if (ctx.mounted) Navigator.of(ctx).pop();
                         if (mounted) setState(() {});

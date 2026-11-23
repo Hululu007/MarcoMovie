@@ -12,7 +12,13 @@ REPO_ROOT = ROOT.parent
 IOS_LIQUID_GLASS_SWIFT_PATH = Path(__file__).resolve().parent / "ios_native" / "MarcoLiquidGlass.swift"
 IOS_AVPLAYER_ENGINE_SWIFT_PATH = Path(__file__).resolve().parent / "ios_native" / "MarcoAvPlayerEngine.swift"
 IOS_WEB_SNIFFER_JS_HOST_SWIFT_PATH = Path(__file__).resolve().parent / "ios_native" / "MarcoWebSnifferAndJsHost.swift"
-LOGO_MARK = REPO_ROOT / "android" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png"
+_LOGO_MARK_CANDIDATES = (
+    REPO_ROOT / "android-tv" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png",
+    REPO_ROOT / "android-mobile" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png",
+    REPO_ROOT / "android" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png",
+    ROOT / "assets" / "logo_mark.png",
+)
+LOGO_MARK = next((p for p in _LOGO_MARK_CANDIDATES if p.is_file()), _LOGO_MARK_CANDIDATES[0])
 OPAQUE_ICON = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
 MACOS_ICON_DIR = ROOT / "brand" / "macos"
 IOS_ICON = ROOT / "brand" / "ios" / "1024.png"

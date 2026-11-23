@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:marco_movie/core/app_update.dart';
+import 'package:marco_movie/core/ohos_runtime.dart';
 
 class _TestEd25519Signer {
   static final BigInt _q = (BigInt.one << 255) - BigInt.from(19);
@@ -378,5 +379,220 @@ void main() {
     final plain = summary.toPlainText();
     expect(plain, isNot(contains('SHA-256')));
     expect(plain, isNot(contains('公共内容守卫')));
+  });
+
+  group('HarmonyOS NEXT independent update channel', () {
+    tearDown(() {
+      OhosRuntime.resetForTesting();
+      AppUpdate.debugHttpClientOverride = null;
+    });
+
+    test('currentPlatform resolves harmonyos explicitly when running on OHOS', () {
+      OhosRuntime.debugIsOhosOverride = true;
+      expect(AppUpdate.currentPlatform, 'harmonyos');
+    });
+
+    test('reads /movie/updates/harmonyos.json packages and verifies HAP metadata & file digest', () async {
+      OhosRuntime.debugIsOhosOverride = true;
+      final hapBytes = utf8.encode('harmonyos-candidate-hap-fixture');
+      final digest = sha256.convert(hapBytes).toString();
+      final requestedPaths = <String>[];
+      final client = MockClient((request) async {
+        requestedPaths.add(request.url.path);
+        expect(request.url.path, '/movie/updates/harmonyos.json');
+        return http.Response.bytes(
+          utf8.encode(
+            jsonEncode({
+              'schema': 1,
+              'platform': 'harmonyos',
+              'versionName': '0.1.2',
+              'prerelease': false,
+              'notes': '# Marco Movie HarmonyOS NEXT 0.1.2\n- 修复凭据存储与独立更新',
+              'packages': {
+                'MarcoMovie-0.1.2-harmonyos-universal.hap': {
+                  'size': hapBytes.length,
+                  'sha256': digest,
+                  'url':
+                      'https://github.com/Pilipala9919/MarcoMovie/releases/download/harmonyos-v0.1.2/MarcoMovie-0.1.2-harmonyos-universal.hap',
+                },
+              },
+              'release_url':
+                  'https://github.com/Pilipala9919/MarcoMovie/releases/tag/harmonyos-v0.1.2',
+            }),
+          ),
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      });
+
+      final release = await AppUpdate.check(client: client);
+      expect(requestedPaths, ['/movie/updates/harmonyos.json']);
+      expect(release.version, '0.1.2');
+      expect(release.windowsUrl, isNull);
+      expect(release.iosUrl, isNull);
+      expect(
+        release.harmonyosUrl.toString(),
+        'https://github.com/Pilipala9919/MarcoMovie/releases/download/harmonyos-v0.1.2/MarcoMovie-0.1.2-harmonyos-universal.hap',
+      );
+      expect(release.packageFileName, 'MarcoMovie-0.1.2-harmonyos-universal.hap');
+      expect(release.size, hapBytes.length);
+      expect(release.checksum, digest);
+      expect(
+        release.releaseUrl.toString(),
+        'https://github.com/Pilipala9919/MarcoMovie/releases/tag/harmonyos-v0.1.2',
+      );
+      expect(AppUpdate.isRemoteVersionNewer('0.1.2', '0.1.1'), isTrue);
+      expect(AppUpdate.isRemoteVersionNewer('0.1.2', '0.1.2'), isFalse);
+
+      final dir = await Directory.systemTemp.createTemp('marco-ohos-verify-');
+      addTearDown(() => dir.delete(recursive: true));
+      final hapFile = File('${dir.path}/MarcoMovie-0.1.2-harmonyos-universal.hap');
+      await hapFile.writeAsBytes(hapBytes);
+      await release.verifyFile(hapFile);
+      await hapFile.writeAsBytes(utf8.encode('corrupted-candidate-hap-fixture'));
+      await expectLater(release.verifyFile(hapFile), throwsFormatException);
+    });
+
+    test('falls back to GitHub harmonyos-v release and rejects APK / bad digest / offline', () async {
+      OhosRuntime.debugIsOhosOverride = true;
+      final goodDigest = 'b' * 64;
+      // 1) Mirror returns APK -> must be rejected and fall back to GitHub harmonyos release
+      final fallbackClient = MockClient((request) async {
+        if (request.url.host != 'api.github.com') {
+          return http.Response(
+            jsonEncode({
+              'platform': 'harmonyos',
+              'versionName': '0.9.9',
+              'packages': {
+                'MarcoMovie-0.9.9-harmonyos-universal.hap': {
+                  'size': 200,
+                  'sha256': goodDigest,
+                  'url':
+                      'https://github.com/Pilipala9919/MarcoMovie/releases/download/v0.9.9/MarcoMovie-0.9.9-android-mobile.apk',
+                },
+              },
+            }),
+            200,
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(
+            jsonEncode([
+              {
+                'tag_name': 'v0.7.1',
+                'prerelease': false,
+                'assets': [
+                  {
+                    'name': 'MarcoMovie-0.7.1-mobile.apk',
+                    'size': 200,
+                    'digest': 'sha256:$goodDigest',
+                    'browser_download_url':
+                        'https://github.com/Pilipala9919/MarcoMovie/releases/download/v0.7.1/MarcoMovie-0.7.1-mobile.apk',
+                  },
+                ],
+              },
+              {
+                'tag_name': 'harmonyos-v0.1.2',
+                'prerelease': false,
+                'body': 'GitHub 鸿蒙正式包',
+                'html_url':
+                    'https://github.com/Pilipala9919/MarcoMovie/releases/tag/harmonyos-v0.1.2',
+                'assets': [
+                  {
+                    'name': 'MarcoMovie-0.1.2-harmonyos-universal.hap',
+                    'size': 39500000,
+                    'digest': 'sha256:$goodDigest',
+                    'browser_download_url':
+                        'https://github.com/Pilipala9919/MarcoMovie/releases/download/harmonyos-v0.1.2/MarcoMovie-0.1.2-harmonyos-universal.hap',
+                  },
+                ],
+              },
+            ]),
+          ),
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      });
+      final fromGithub = await AppUpdate.check(client: fallbackClient);
+      expect(fromGithub.version, '0.1.2');
+      expect(fromGithub.harmonyosUrl!.path, endsWith('-harmonyos-universal.hap'));
+
+      // 2) Both endpoints return APK -> must fail
+      final apkOnlyClient = MockClient((request) async {
+        if (request.url.host != 'api.github.com') {
+          return http.Response(
+            jsonEncode({
+              'platform': 'android',
+              'versionName': '0.7.0',
+              'packages': {
+                'MarcoMovie-0.7.0-mobile.apk': {
+                  'size': 100,
+                  'sha256': goodDigest,
+                  'url':
+                      'https://github.com/Pilipala9919/MarcoMovie/releases/download/v0.7.0/MarcoMovie-0.7.0-mobile.apk',
+                },
+              },
+            }),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode([
+            {
+              'tag_name': 'harmonyos-v0.1.2',
+              'assets': [
+                {
+                  'name': 'MarcoMovie-0.1.2-mobile.apk',
+                  'size': 100,
+                  'digest': 'sha256:$goodDigest',
+                  'browser_download_url':
+                      'https://github.com/Pilipala9919/MarcoMovie/releases/download/harmonyos-v0.1.2/MarcoMovie-0.1.2-mobile.apk',
+                },
+              ],
+            },
+          ]),
+          200,
+        );
+      });
+      await expectLater(
+        AppUpdate.check(client: apkOnlyClient),
+        throwsA(isA<HttpException>()),
+      );
+
+      // 3) Bad SHA-256 digest -> must be rejected
+      final badDigestClient = MockClient((request) async {
+        if (request.url.host != 'api.github.com') {
+          return http.Response(
+            jsonEncode({
+              'platform': 'harmonyos',
+              'versionName': '0.1.2',
+              'packages': {
+                'MarcoMovie-0.1.2-harmonyos-universal.hap': {
+                  'size': 12345,
+                  'sha256': 'not-a-valid-sha256',
+                  'url':
+                      'https://github.com/Pilipala9919/MarcoMovie/releases/download/harmonyos-v0.1.2/MarcoMovie-0.1.2-harmonyos-universal.hap',
+                },
+              },
+            }),
+            200,
+          );
+        }
+        return http.Response('[]', 200);
+      });
+      await expectLater(
+        AppUpdate.check(client: badDigestClient),
+        throwsA(isA<HttpException>()),
+      );
+
+      // 4) Offline -> throws HttpException
+      final offlineClient = MockClient((_) async {
+        throw const SocketException('Network unreachable');
+      });
+      await expectLater(
+        AppUpdate.check(client: offlineClient),
+        throwsA(isA<HttpException>()),
+      );
+    });
   });
 }

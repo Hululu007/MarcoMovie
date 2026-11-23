@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'ed25519.dart';
+import 'ohos_runtime.dart';
 
 class UpdateCancelled implements Exception {
   const UpdateCancelled();
@@ -38,6 +40,10 @@ class AppUpdate {
   /// Optional testing override for unit tests.
   @visibleForTesting
   static String? debugPublicKeyHexOverride;
+
+  /// Optional testing HTTP client override used when UI flows call `AppUpdate.check()`.
+  @visibleForTesting
+  static http.Client? debugHttpClientOverride;
 
   static String _effectivePublicKeyHex([String? publicKeyHex]) =>
       (publicKeyHex ?? debugPublicKeyHexOverride ?? defaultUpdatePublicKeyHex)
@@ -128,6 +134,9 @@ class AppUpdate {
   final String? checksum;
   final int? size;
   final Uri? iosUrl;
+  final Uri? harmonyosUrl;
+  final Uri? releaseUrl;
+  final String? packageFileName;
   const AppUpdate(
     this.version,
     this.notes,
@@ -135,7 +144,75 @@ class AppUpdate {
     this.checksum,
     this.size, [
     this.iosUrl,
+    this.harmonyosUrl,
+    this.releaseUrl,
+    this.packageFileName,
   ]);
+
+  static const String harmonyosUnsignedInstallGuide =
+      '当前 HarmonyOS NEXT 发行包为未签名 HAP（仅支持 arm64-v8a），下载后需使用个人华为开发者调试证书签名再覆盖安装（覆盖安装需保持同一签名证书以保留订阅与凭据）：\n'
+      '1. 在 DevEco Studio 登录华为账号自动签名，或使用 Command Line Tools 的 hap-sign-tool 对 HAP 重新签名；\n'
+      '2. 通过 hdc install -r <已签名.hap> 或 DevEco Studio 安装到手机、平板或智慧屏；\n'
+      '3. 安装前请核对上方包大小与 SHA-256 摘要，避免安装损坏或来源不明的安装包。';
+
+  static bool isRemoteVersionNewer(String remote, String current) {
+    List<int> parseParts(String v) => v
+        .replaceAll(RegExp(r'^[vV]'), '')
+        .split(RegExp(r'[^0-9]+'))
+        .where((s) => s.isNotEmpty)
+        .map((s) => int.tryParse(s) ?? 0)
+        .toList();
+    final r = parseParts(remote);
+    final c = parseParts(current);
+    final len = math.max(r.length, c.length);
+    for (var i = 0; i < len; i++) {
+      final rv = i < r.length ? r[i] : 0;
+      final cv = i < c.length ? c[i] : 0;
+      if (rv != cv) return rv > cv;
+    }
+    return false;
+  }
+
+  static bool isValidHarmonyosAssetName(String name, String version) {
+    final trimmed = name.trim();
+    if (!trimmed.endsWith('.hap')) return false;
+    return trimmed == 'MarcoMovie-$version-harmonyos-universal.hap' ||
+        trimmed == 'MarcoMovie-$version-harmonyos-arm64.hap' ||
+        trimmed == 'MarcoMovie-$version-harmonyos.hap';
+  }
+
+  static bool isValidHarmonyosAssetPath(String path, String version) {
+    final segments = path.split('/').where((s) => s.isNotEmpty).toList();
+    if (segments.isEmpty) return false;
+    return isValidHarmonyosAssetName(segments.last, version);
+  }
+
+  static Uri? trustedReleasePage(dynamic value) {
+    final uri = Uri.tryParse(value?.toString() ?? '');
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment ||
+        (uri.hasPort && uri.port != 443)) {
+      return null;
+    }
+    if ((uri.host == 'github.com' &&
+            uri.path.startsWith('/Pilipala9919/MarcoMovie/releases/')) ||
+        (uri.host == 'marcotv.wlj9919.top' && uri.path.startsWith('/movie/'))) {
+      return uri;
+    }
+    return null;
+  }
+
+  Uri? downloadUrlForPlatform([String? platform]) {
+    final target = platform ?? currentPlatform;
+    return switch (target) {
+      'windows' => windowsUrl,
+      'ios' => iosUrl,
+      'harmonyos' => harmonyosUrl,
+      _ => null,
+    };
+  }
 
   // Only use the advertised asset. The download site does not host large IPAs.
   Uri get iosMirrorIpaUrl =>
@@ -190,23 +267,32 @@ class AppUpdate {
     if (match == null) throw const FormatException('更新版本信息无效');
     final version = match.group(1)!;
     Map? asset;
+    String? matchedFileName;
     if (github) {
       final assets = json['assets'];
       if (assets is List) {
         for (final item in assets.whereType<Map>()) {
+          final itemName = (item['name'] ?? '').toString().trim();
           if (platform == 'windows' &&
-              item['name'] == 'MarcoMovie-$version-windows-setup.exe') {
+              itemName == 'MarcoMovie-$version-windows-setup.exe') {
             asset = item;
+            matchedFileName = itemName;
           } else if (platform == 'ios' &&
-              (item['name'] == 'MarcoMovie-$version-ios-unsigned.ipa' ||
-                  item['name'] ==
+              (itemName == 'MarcoMovie-$version-ios-unsigned.ipa' ||
+                  itemName ==
                       'MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa')) {
             asset ??= item;
+            matchedFileName ??= itemName;
+          } else if (platform == 'harmonyos' &&
+              isValidHarmonyosAssetName(itemName, version)) {
+            asset ??= item;
+            matchedFileName ??= itemName;
           }
         }
       }
     } else if (platform == 'windows' && json['windows'] is Map) {
       asset = json['windows'] as Map;
+      matchedFileName = 'MarcoMovie-$version-windows-setup.exe';
     } else if (platform == 'ios') {
       if (json['package'] is Map) {
         asset = json['package'] as Map;
@@ -217,6 +303,37 @@ class AppUpdate {
         if (cand is Map) asset = cand;
       } else if (json['ios'] is Map) {
         asset = json['ios'] as Map;
+      }
+    } else if (platform == 'harmonyos') {
+      if (json['packages'] is Map) {
+        final pkgs = json['packages'] as Map;
+        for (final candidateName in [
+          'MarcoMovie-$version-harmonyos-universal.hap',
+          'MarcoMovie-$version-harmonyos-arm64.hap',
+          'MarcoMovie-$version-harmonyos.hap',
+        ]) {
+          final cand = pkgs[candidateName];
+          if (cand is Map) {
+            asset = cand;
+            matchedFileName = candidateName;
+            break;
+          }
+        }
+        if (asset == null) {
+          for (final entry in pkgs.entries) {
+            final keyName = entry.key.toString().trim();
+            if (isValidHarmonyosAssetName(keyName, version) &&
+                entry.value is Map) {
+              asset = entry.value as Map;
+              matchedFileName = keyName;
+              break;
+            }
+          }
+        }
+      } else if (json['package'] is Map) {
+        asset = json['package'] as Map;
+      } else if (json['harmonyos'] is Map) {
+        asset = json['harmonyos'] as Map;
       }
     }
     final data = asset ?? const <String, dynamic>{};
@@ -241,7 +358,18 @@ class AppUpdate {
               '/MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa',
             )) &&
         validDigest;
-    final verified = verifiedWin || verifiedIos;
+    final verifiedHarmonyos = platform == 'harmonyos' &&
+        uri != null &&
+        isValidHarmonyosAssetPath(uri.path, version) &&
+        validDigest;
+    final verified = verifiedWin || verifiedIos || verifiedHarmonyos;
+    final releasePage = trustedReleasePage(
+      github ? json['html_url'] : (json['release_url'] ?? json['releaseUrl']),
+    );
+    final resolvedFileName = matchedFileName ??
+        (uri != null && uri.pathSegments.isNotEmpty
+            ? uri.pathSegments.last
+            : null);
     return AppUpdate(
       version,
       (json[github ? 'body' : 'notes'] ?? '').toString(),
@@ -249,20 +377,26 @@ class AppUpdate {
       verified ? digest.toLowerCase() : null,
       verified ? size : null,
       verifiedIos ? uri : null,
+      verifiedHarmonyos ? uri : null,
+      releasePage,
+      verified ? resolvedFileName : null,
     );
   }
 
-  static String get currentPlatform => Platform.isWindows
-      ? 'windows'
-      : Platform.isIOS
-          ? 'ios'
-          : Platform.isMacOS
-              ? 'macos'
-              : 'android';
+  static String get currentPlatform => OhosRuntime.isOhos
+      ? 'harmonyos'
+      : Platform.isWindows
+          ? 'windows'
+          : Platform.isIOS
+              ? 'ios'
+              : Platform.isMacOS
+                  ? 'macos'
+                  : 'android';
 
   static String _suffix(String platform) => switch (platform) {
         'windows' => 'windows-setup.exe',
         'ios' => 'ios-unsigned.ipa',
+        'harmonyos' => 'harmonyos-universal.hap',
         'macos' => 'macos.zip',
         'android' => 'mobile.apk',
         _ => throw const FormatException('不支持的更新平台'),
@@ -272,6 +406,10 @@ class AppUpdate {
     final candidates = <AppUpdate>[];
     for (final item in (body is List ? body : [body]).whereType<Map>()) {
       if (item['draft'] == true || item['prerelease'] == true) continue;
+      final tagName = (item['tag_name'] ?? '').toString().trim();
+      if (platform == 'harmonyos' && !tagName.startsWith('harmonyos-')) {
+        continue;
+      }
       try {
         final release = parse(Map<String, dynamic>.from(item),
             github: true, platform: platform);
@@ -281,15 +419,24 @@ class AppUpdate {
         final assets = item['assets'];
         if (assets is! List ||
             !assets.whereType<Map>().any(
-                  (asset) =>
-                      (asset['name'] == name ||
-                          (platform == 'ios' && asset['name'] == altIosName)) &&
-                      trustedAsset(asset['browser_download_url']) != null,
+                  (asset) {
+                    final assetName = (asset['name'] ?? '').toString().trim();
+                    final matchesName = assetName == name ||
+                        (platform == 'ios' && assetName == altIosName) ||
+                        (platform == 'harmonyos' &&
+                            isValidHarmonyosAssetName(
+                              assetName,
+                              release.version,
+                            ));
+                    return matchesName &&
+                        trustedAsset(asset['browser_download_url']) != null;
+                  },
                 )) {
           continue;
         }
         if (platform == 'windows' && release.windowsUrl == null ||
-            platform == 'ios' && release.iosUrl == null) {
+            platform == 'ios' && release.iosUrl == null ||
+            platform == 'harmonyos' && release.harmonyosUrl == null) {
           continue;
         }
         candidates.add(release);
@@ -318,7 +465,8 @@ class AppUpdate {
   }) async {
     platform ??= currentPlatform;
     _suffix(platform);
-    final transport = client ?? http.Client();
+    final effectiveClient = client ?? debugHttpClientOverride;
+    final transport = effectiveClient ?? http.Client();
     try {
       for (final url in [
         'https://marcotv.wlj9919.top/movie/updates/$platform.json',
@@ -394,7 +542,8 @@ class AppUpdate {
           }
           final release = parse(manifest, platform: platform);
           if (platform == 'windows' && release.windowsUrl == null ||
-              platform == 'ios' && release.iosUrl == null) {
+              platform == 'ios' && release.iosUrl == null ||
+              platform == 'harmonyos' && release.harmonyosUrl == null) {
             continue;
           }
           return release;
@@ -408,7 +557,7 @@ class AppUpdate {
       }
       throw const HttpException('暂时无法检查更新，请稍后重试');
     } finally {
-      if (client == null) transport.close();
+      if (effectiveClient == null) transport.close();
     }
   }
 
@@ -521,7 +670,7 @@ class AppUpdate {
   }
 
   Future<void> verifyFile(File file) async {
-    if ((windowsUrl == null && iosUrl == null) ||
+    if ((windowsUrl == null && iosUrl == null && harmonyosUrl == null) ||
         size == null ||
         checksum == null ||
         await file.length() != size) {

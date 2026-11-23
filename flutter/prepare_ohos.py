@@ -3,19 +3,37 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import sys
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 DEFAULT_ICON_SOURCE = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
 
-DEFAULT_OHOS_VERSION_NAME = "0.1.1"
-DEFAULT_OHOS_VERSION_CODE = 1000002
+DEFAULT_OHOS_VERSION_NAME = "0.1.2"
+DEFAULT_OHOS_VERSION_CODE = 1000003
+MIN_OHOS_SDK_VERSION = "5.0.0(12)"
+TARGET_OHOS_SDK_VERSION = "5.0.0(12)"
+MIN_OHOS_API_CODE = 50000012
+DEFAULT_OHOS_ABI_FILTERS = ("arm64-v8a",)
+REQUIRED_DEVICE_TYPES = frozenset({"phone", "tablet", "2in1", "tv"})
+REQUIRED_ABI_LIBRARIES = (
+    "libflutter.so",
+    "libapp.so",
+    "libquickjs_c_bridge_plugin.so",
+    "libc++_shared.so",
+)
+REQUIRED_CATPAW_FILES = (
+    "drpy-worker.cjs",
+    "drpy-core.js",
+    "drpy-assets.json",
+)
 
 NON_OHOS_PACKAGES = {
     "media_kit_libs_video",
@@ -241,16 +259,12 @@ def sync_ohos_version(project_root: Path = ROOT) -> tuple[str, int]:
         for product in products:
             if not isinstance(product, dict):
                 continue
-            compat = str(product.get("compatibleSdkVersion") or "").strip()
-            if not OHOS_SDK_VERSION_RE.match(compat):
-                compat = "5.0.0(12)"
-                product["compatibleSdkVersion"] = compat
+            if str(product.get("compatibleSdkVersion") or "").strip() != MIN_OHOS_SDK_VERSION:
+                product["compatibleSdkVersion"] = MIN_OHOS_SDK_VERSION
                 changed_root = True
-            if "targetSdkVersion" in product:
-                target_sdk = str(product.get("targetSdkVersion") or "").strip()
-                if not OHOS_SDK_VERSION_RE.match(target_sdk):
-                    product["targetSdkVersion"] = compat
-                    changed_root = True
+            if str(product.get("targetSdkVersion") or "").strip() != TARGET_OHOS_SDK_VERSION:
+                product["targetSdkVersion"] = TARGET_OHOS_SDK_VERSION
+                changed_root = True
             if "compileSdkVersion" in product:
                 compile_sdk = str(product.get("compileSdkVersion") or "").strip()
                 if not OHOS_SDK_VERSION_RE.match(compile_sdk):
@@ -267,7 +281,7 @@ def sync_ohos_version(project_root: Path = ROOT) -> tuple[str, int]:
             "path": "./src/main/cpp/CMakeLists.txt",
             "arguments": "",
             "cppFlags": "-std=c++17",
-            "abiFilters": ["arm64-v8a", "x86_64"],
+            "abiFilters": list(DEFAULT_OHOS_ABI_FILTERS),
         }
         _write_text_idempotent(entry_profile, json.dumps(entry_doc, indent=2, ensure_ascii=False))
 
@@ -483,6 +497,115 @@ def restore_pubspecs(project_root: Path = ROOT) -> bool:
     return restored_any
 
 
+def verify_hap_package(
+    hap_path: Path,
+    *,
+    expected_version: str | None = None,
+    expected_build_number: int | None = None,
+    expected_min_api: int = MIN_OHOS_API_CODE,
+    expected_abis: tuple[str, ...] = DEFAULT_OHOS_ABI_FILTERS,
+    require_release: bool = True,
+) -> dict:
+    """Unpack and validate a HarmonyOS NEXT HAP archive before candidate/release packaging."""
+    if not hap_path.is_file() or hap_path.stat().st_size == 0:
+        raise ValueError(f"HAP file missing or empty: {hap_path}")
+
+    raw_bytes = hap_path.read_bytes()
+    sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
+
+    with zipfile.ZipFile(hap_path, "r") as zf:
+        names = set(zf.namelist())
+        if "module.json" not in names:
+            raise ValueError(f"HAP archive missing module.json: {hap_path}")
+        module_doc = json.loads(zf.read("module.json").decode("utf-8"))
+        app_info = module_doc.get("app") or {}
+        mod_info = module_doc.get("module") or {}
+
+        bundle_name = str(app_info.get("bundleName") or "")
+        if bundle_name != "com.pilipala.marcomovie":
+            raise ValueError(f"Unexpected bundleName in HAP: {bundle_name!r}")
+
+        version_name = str(app_info.get("versionName") or "")
+        version_code = int(app_info.get("versionCode") or 0)
+        if expected_version is not None and version_name != expected_version:
+            raise ValueError(
+                f"HAP versionName mismatch: got {version_name!r}, expected {expected_version!r}"
+            )
+        if expected_build_number is not None and version_code != expected_build_number:
+            raise ValueError(
+                f"HAP versionCode mismatch: got {version_code}, expected {expected_build_number}"
+            )
+
+        build_mode = str(app_info.get("buildMode") or "")
+        is_debug = bool(app_info.get("debug", False))
+        if require_release and (build_mode != "release" or is_debug):
+            raise ValueError(
+                f"HAP is not a release build: buildMode={build_mode!r}, debug={is_debug}"
+            )
+
+        min_api = int(app_info.get("minAPIVersion") or 0)
+        target_api = int(app_info.get("targetAPIVersion") or 0)
+        if min_api != expected_min_api:
+            raise ValueError(
+                f"HAP minAPIVersion mismatch: got {min_api}, expected {expected_min_api} ({MIN_OHOS_SDK_VERSION})"
+            )
+
+        device_types = set(mod_info.get("deviceTypes") or [])
+        if device_types != set(REQUIRED_DEVICE_TYPES):
+            raise ValueError(
+                f"HAP deviceTypes mismatch: got {sorted(device_types)}, expected {sorted(REQUIRED_DEVICE_TYPES)}"
+            )
+
+        abi_libs: dict[str, set[str]] = {}
+        for entry in names:
+            parts = entry.split("/")
+            if len(parts) >= 3 and parts[0] == "libs" and parts[2]:
+                info = zf.getinfo(entry)
+                if info.file_size > 0:
+                    abi_libs.setdefault(parts[1], set()).add(parts[2])
+
+        expected_abi_set = set(expected_abis)
+        actual_abi_set = set(abi_libs.keys())
+        if actual_abi_set != expected_abi_set:
+            raise ValueError(
+                f"HAP ABI directories mismatch: got {sorted(actual_abi_set)}, expected {sorted(expected_abi_set)}"
+            )
+        for abi in sorted(expected_abi_set):
+            libs_for_abi = abi_libs.get(abi, set())
+            missing_libs = [lib for lib in REQUIRED_ABI_LIBRARIES if lib not in libs_for_abi]
+            if missing_libs:
+                raise ValueError(f"HAP ABI {abi} missing required libraries: {missing_libs}")
+
+        catpaw_prefix = "resources/rawfile/flutter_assets/assets/catpaw/"
+        catpaw_files = sorted(
+            n[len(catpaw_prefix):]
+            for n in names
+            if n.startswith(catpaw_prefix) and not n.endswith("/") and zf.getinfo(n).file_size > 0
+        )
+        missing_catpaw = [req for req in REQUIRED_CATPAW_FILES if req not in catpaw_files]
+        if missing_catpaw or len(catpaw_files) < 10:
+            raise ValueError(
+                f"HAP missing CatPaw assets: count={len(catpaw_files)}, missing={missing_catpaw}"
+            )
+
+    return {
+        "path": str(hap_path),
+        "size": len(raw_bytes),
+        "sha256": sha256_hex,
+        "bundleName": bundle_name,
+        "versionName": version_name,
+        "versionCode": version_code,
+        "buildMode": build_mode,
+        "debug": is_debug,
+        "minAPIVersion": min_api,
+        "targetAPIVersion": target_api,
+        "compileSdkVersion": str(app_info.get("compileSdkVersion") or ""),
+        "deviceTypes": sorted(device_types),
+        "abis": {abi: sorted(libs) for abi, libs in sorted(abi_libs.items())},
+        "catpawAssetCount": len(catpaw_files),
+    }
+
+
 def prepare_ohos(
     project_root: Path = ROOT,
     icon_source: Path | None = None,
@@ -514,6 +637,34 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional override path to the 512x512 app icon PNG.",
     )
+    parser.add_argument(
+        "--verify-hap",
+        type=Path,
+        default=None,
+        help="Unpack and validate a built HarmonyOS NEXT .hap package.",
+    )
+    parser.add_argument(
+        "--expected-version",
+        default=None,
+        help="Expected app.versionName for --verify-hap (defaults to edition-versions.json).",
+    )
+    parser.add_argument(
+        "--expected-build-number",
+        type=int,
+        default=None,
+        help="Expected app.versionCode for --verify-hap (defaults to edition-versions.json).",
+    )
+    parser.add_argument(
+        "--expected-min-api",
+        type=int,
+        default=MIN_OHOS_API_CODE,
+        help="Expected app.minAPIVersion integer for --verify-hap (default: 50000012 / API 12).",
+    )
+    parser.add_argument(
+        "--expected-abis",
+        default=",".join(DEFAULT_OHOS_ABI_FILTERS),
+        help="Comma-separated list of expected runnable ABI directories under libs/ (default: arm64-v8a).",
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--patch-pubspec",
@@ -526,8 +677,26 @@ def main(argv: list[str] | None = None) -> int:
         help="Restore backed-up pubspec files byte-for-byte.",
     )
     args = parser.parse_args(argv)
+    project_root = args.project_root.resolve()
+    if args.verify_hap is not None:
+        exp_ver = args.expected_version
+        exp_code = args.expected_build_number
+        if exp_ver is None or exp_code is None:
+            resolved_ver, resolved_code = resolve_harmonyos_version(project_root)
+            exp_ver = exp_ver or resolved_ver
+            exp_code = exp_code if exp_code is not None else resolved_code
+        exp_abis = tuple(a.strip() for a in str(args.expected_abis).split(",") if a.strip())
+        summary = verify_hap_package(
+            args.verify_hap.resolve(),
+            expected_version=exp_ver,
+            expected_build_number=exp_code,
+            expected_min_api=args.expected_min_api,
+            expected_abis=exp_abis,
+        )
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return 0
     prepare_ohos(
-        project_root=args.project_root.resolve(),
+        project_root=project_root,
         icon_source=args.icon_source.resolve() if args.icon_source else None,
         patch_pubspec=args.patch_pubspec,
         restore_pubspec=args.restore_pubspec,
