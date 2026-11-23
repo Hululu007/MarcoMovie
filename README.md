@@ -6,7 +6,7 @@
   </picture>
   <h1>Marco Movie</h1>
   <p>支持 Android 电视、手机、平板，HarmonyOS NEXT（手机 / 平板 / 智慧屏），Apple TV（tvOS）及 Windows / macOS / iOS 多端自适应的播放器。</p>
-  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.6.0 · Android 电视：0.6.2 · Android Lite：0.5.8 · Windows：0.7.1 · macOS：0.5.20 · iOS：0.7.0 · Apple TV：0.1.1 · HarmonyOS NEXT：0.1.1 · 各端独立更新</p>
+  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.7.0 · Android 电视：0.6.2 · Android Lite：0.5.8 · Windows：0.7.1 · macOS：0.5.20 · iOS：0.7.0 · Apple TV：0.1.1 · HarmonyOS NEXT：0.1.1 · 各端独立更新</p>
   <p><a href="https://marcotv.wlj9919.top/movie/">镜像下载与产品展示</a> · <a href="https://github.com/Pilipala9919/MarcoMovie/releases">GitHub 下载</a> · <a href="docs/USER_GUIDE.md">使用指南</a> · <a href="docs/BUILD.md">构建说明</a> · <a href="docs/PRIVACY.md">隐私说明</a></p>
 </div>
 
@@ -71,9 +71,10 @@ Marco Movie 希望让大屏电视、随身手机、平板电脑与桌面端上�
 ## 项目结构与开发
 
 ```text
-android/src/main/       原生 Android 应用代码（手机 / 平板与电视独立分包）、输入词典与第三方许可
-android/tests/          本地模拟数据测试，不包含真实影视配置
-android/*dependencies.json  固定版本依赖及校验摘要
+android-tv/             独立原生 Android TV / 盒子工程（armeabi-v7a）、独立测试与依赖清单
+android-mobile/         独立原生 Android 手机 / 平板工程（armeabi-v7a + arm64-v8a）、独立测试与依赖清单
+lite/                   独立 Android 4.0+（API 14+）Lite 工程与版本清单
+shared/                 跨平台共享层（CatPaw 运行时、跨平台脚本宿主、公共 Java 与一致性样本）
 tvos/                   原生 Apple TV（tvOS 16.0+）客户端工程（SwiftUI + AVKit + QuickJS-NG + 6 路网盘代理）
 flutter/                跨平台客户端工程（覆盖 Windows / macOS / iPhone / iPad / HarmonyOS NEXT，互通备份与同步）
 flutter/ohos/           HarmonyOS NEXT Stage 模型宿主、ArkTS AVPlayer 硬件纹理插件与安全凭据存储插件

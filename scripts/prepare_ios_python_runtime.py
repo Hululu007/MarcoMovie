@@ -12,7 +12,7 @@ import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "flutter/packages/python_source_runtime"
-HOST = ROOT / "android/src/main/assets/python-native"
+HOST = ROOT / "shared/script-host/python-native"
 ADAPTER = ROOT / "scripts/ios_cpython_transport/requests_adapter.py"
 SPEC = importlib.util.spec_from_file_location("ios_python_staging", ROOT / "scripts/ios_cpython/run_cpython_probe.py")
 native = importlib.util.module_from_spec(SPEC)

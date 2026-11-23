@@ -1101,11 +1101,11 @@ def main() -> None:
     assets_dir = ROOT / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT / 'shared/catpaw', assets_dir / 'catpaw', dirs_exist_ok=True)
-    python_host = REPO_ROOT / "android/src/main/assets/python-host"
+    python_host = REPO_ROOT / "shared/script-host/python-host"
     shutil.copytree(python_host, assets_dir / "python-host", dirs_exist_ok=True)
     (assets_dir / 'js-host').mkdir(parents=True, exist_ok=True)
     for name in ('module-interop.js', 'catvod.mjs', 'crypto-js.js', 'crypto.LICENSE'):
-        shutil.copyfile(REPO_ROOT / 'android/src/main/assets/js-host' / name,
+        shutil.copyfile(REPO_ROOT / 'shared/script-host/js-host' / name,
                         assets_dir / 'js-host' / name)
     if LOGO_MARK.exists():
         shutil.copy2(LOGO_MARK, assets_dir / "logo_mark.png")
