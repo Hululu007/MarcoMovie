@@ -866,12 +866,15 @@ public final class MainActivity extends Activity {
     static String attributeUncaughtCrashSite(
             Thread thread, Throwable error, SharedPreferences prefs) {
         if (prefs == null) return "";
-        String loadingSite = prefs.getString(Prefs.LOADING_SITE, "");
-        String cleanLoading = loadingSite == null ? "" : loadingSite.trim();
         String threadSite = activeSourceLoadSiteForThread(thread);
-        if (!threadSite.isEmpty() && threadSite.equals(cleanLoading)) {
+        if (!threadSite.isEmpty()) {
+            // Authoritative thread-level ownership: this crashing thread belongs strictly to
+            // threadSite and must NEVER fall through to blame a newer disk LOADING_SITE or
+            // SELECTED_SITE (e.g. healthy B) when a superseded worker A throws late.
             return threadSite;
         }
+        String loadingSite = prefs.getString(Prefs.LOADING_SITE, "");
+        String cleanLoading = loadingSite == null ? "" : loadingSite.trim();
         String selectedSite = prefs.getString(Prefs.SELECTED_SITE, "");
         String cleanSelected = selectedSite == null ? "" : selectedSite.trim();
         if (ListingRoute.hasPluginFrame(error)
@@ -1234,11 +1237,15 @@ public final class MainActivity extends Activity {
                 // Keep crash-recovery decisions intact across snapshot healing: once a confirmed
                 // faulty site has been cleared on boot, never let config-state.json re-select that
                 // same faulty site back into Prefs.SELECTED_SITE.
+                String recoveredSkip = prefs.getString(Prefs.RECOVERED_SKIP_SITE, "");
+                String cleanRecoveredSkip = recoveredSkip == null ? "" : recoveredSkip.trim();
                 boolean suppressCrashedSelectedHeal =
                         bootGuardResetSite
                                 || (priorLoadingCrash
                                         && !priorCrashSiteKey.isEmpty()
-                                        && priorCrashSiteKey.equals(recovered.selectedSite));
+                                        && priorCrashSiteKey.equals(recovered.selectedSite))
+                                || (!cleanRecoveredSkip.isEmpty()
+                                        && cleanRecoveredSkip.equals(recovered.selectedSite));
                 boolean needHealOrigin =
                         recovered.fromAtomicBundle && !Objects.equals(recovered.origin, prefOrigin);
                 boolean needHealSelected =
@@ -3336,8 +3343,9 @@ public final class MainActivity extends Activity {
                         .putString(Prefs.LOADING_SITE, "")
                         .putString(Prefs.CONFIRMED_CRASH_SITE, "");
         if (!badKey.isEmpty()) {
-            if (badKey.equals(selected)) {
+            if (selected == null || selected.isEmpty() || badKey.equals(selected)) {
                 editor.putString(Prefs.SELECTED_SITE, "");
+                editor.putString(Prefs.RECOVERED_SKIP_SITE, badKey);
             }
             if (preferred != null
                     && !preferred.isEmpty()

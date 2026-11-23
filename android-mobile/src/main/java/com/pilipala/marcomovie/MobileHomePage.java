@@ -205,10 +205,94 @@ final class MobileHomePage {
             return;
         }
         if (a.config == null || shell.activeSite == null) {
+            String skipped =
+                    a.prefs != null ? a.prefs.getString(Prefs.RECOVERED_SKIP_SITE, "") : "";
+            if (a.config != null && skipped != null && !skipped.trim().isEmpty()) {
+                renderCrashRecoveryEmpty(shell, container, skipped.trim());
+                return;
+            }
             renderEmptyWelcome(shell, container);
             return;
         }
         renderSourceHome(shell, container, shell.activeSite);
+    }
+
+    private static void renderCrashRecoveryEmpty(
+            final MobileRootShell shell, final FrameLayout container, final String skippedSiteKey) {
+        final MainActivity a = shell.a;
+        ScrollView sv = new ScrollView(a);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.setFillViewport(true);
+        LinearLayout box = a.vertical();
+        box.setGravity(Gravity.CENTER_HORIZONTAL);
+        box.setPadding(a.dp(24), a.statusBarHeight() + a.dp(48), a.dp(24), a.dp(110));
+
+        TextView badge = a.text("崩溃保护已生效", 12, 0xfffbbf24);
+        badge.setTypeface(null, Typeface.BOLD);
+        box.addView(badge);
+        a.gap(box, 10);
+
+        String skippedName = skippedSiteKey;
+        if (a.config != null) {
+            for (Cms.Site s : a.config.sites) {
+                if (s != null
+                        && skippedSiteKey.equals(s.key)
+                        && s.name != null
+                        && !s.name.isEmpty()) {
+                    skippedName = s.name;
+                    break;
+                }
+            }
+        }
+        TextView headline = a.text("已暂停自动加载异常片源", 22, Color.WHITE);
+        headline.setTypeface(null, Typeface.BOLD);
+        headline.setGravity(Gravity.CENTER);
+        box.addView(headline);
+        a.gap(box, 10);
+
+        TextView desc =
+                a.text(
+                        "上次加载「" + skippedName + "」时发生异常退出，当前配置内暂无其他可用站。请切换或导入其他片源，也可手动重试。",
+                        13.5f,
+                        MainActivity.MUTED);
+        desc.setGravity(Gravity.CENTER);
+        desc.setLineSpacing(0, 1.35f);
+        box.addView(desc);
+        a.gap(box, 24);
+
+        addPillAction(
+                a,
+                box,
+                "切换片源 / 管理线路",
+                a.mobileAccentColor(),
+                0xff08120e,
+                () -> shell.showQuickSourceAndModeSheet());
+        a.gap(box, 10);
+        addPillAction(
+                a,
+                box,
+                "手动重试该片源",
+                0xff1e2824,
+                Color.WHITE,
+                () -> {
+                    a.prefs
+                            .edit()
+                            .putString(Prefs.RECOVERED_SKIP_SITE, "")
+                            .putString(Prefs.SELECTED_SITE, skippedSiteKey)
+                            .apply();
+                    shell.switchTab(MobileRootShell.TAB_HOME);
+                });
+        a.gap(box, 10);
+        addPillAction(
+                a,
+                box,
+                "导入其他配置网址 / 本地包",
+                0xff1a222d,
+                0xff93c5fd,
+                () -> UiWidgets.showMobileImportDialog(a));
+
+        sv.addView(box, new ScrollView.LayoutParams(-1, -2));
+        container.addView(sv, new FrameLayout.LayoutParams(-1, -1));
     }
 
     private static void renderEmptyWelcome(MobileRootShell shell, FrameLayout container) {

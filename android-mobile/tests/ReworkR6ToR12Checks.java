@@ -1688,6 +1688,108 @@ public final class ReworkR6ToR12Checks {
                                             threadCrashPrefs.getString(
                                                     Prefs.CONFIRMED_CRASH_SITE, "")),
                     "R12 Round-4 positive control: fatal error on active source-loading thread attributes directly to site A");
+
+            // 8e. Round-5 Negative (superseded worker thread attribution): worker thread A is still
+            //     registered as loading A when healthy B supersedes SELECTED/PREFERRED/LOADING on
+            //     disk. A late HttpT4Engine exception on thread A MUST attribute ONLY to A (NEVER
+            //     to healthy B!), leaving B selected, preferred, and resolved by Home!
+            MapPrefs supersededPrefs = new MapPrefs();
+            supersededPrefs
+                    .edit()
+                    .putString(Prefs.LOADING_SITE, "")
+                    .putString(Prefs.CONFIRMED_CRASH_SITE, "")
+                    .putString(Prefs.SELECTED_SITE, "A")
+                    .putString(Prefs.PREFERRED_SITE, "")
+                    .apply();
+            dummyAct.prefs = supersededPrefs;
+            MobileHomePage.LoadingSiteGuard supersededGuard = new MobileHomePage.LoadingSiteGuard();
+            CountDownLatch aAcquired = new CountDownLatch(1);
+            CountDownLatch bSuperseded = new CountDownLatch(1);
+            CountDownLatch aCrashDone = new CountDownLatch(1);
+            AtomicReference<Throwable> supersededErr = new AtomicReference<>();
+            Thread staleWorkerA =
+                    new Thread(
+                            () -> {
+                                long tokA2 =
+                                        supersededGuard.acquire(
+                                                k ->
+                                                        supersededPrefs
+                                                                .edit()
+                                                                .putString(Prefs.LOADING_SITE, k)
+                                                                .commit(),
+                                                "A");
+                                aAcquired.countDown();
+                                try {
+                                    if (!bSuperseded.await(5, TimeUnit.SECONDS)) {
+                                        throw new AssertionError("timeout waiting for B supersede");
+                                    }
+                                    Throwable lateEngineErr =
+                                            new RuntimeException("late worker A 503 engine crash");
+                                    lateEngineErr.setStackTrace(
+                                            new StackTraceElement[] {
+                                                new StackTraceElement(
+                                                        "com.pilipala.marcomovie.HttpT4Engine",
+                                                        "home",
+                                                        "HttpT4Engine.java",
+                                                        42)
+                                            });
+                                    invokeFatalHandler.invoke(
+                                            null,
+                                            Thread.currentThread(),
+                                            prev,
+                                            Thread.currentThread(),
+                                            lateEngineErr);
+                                } catch (Throwable t) {
+                                    supersededErr.set(t);
+                                } finally {
+                                    supersededGuard.releaseIfOwner(null, tokA2);
+                                    aCrashDone.countDown();
+                                }
+                            },
+                            "r12-stale-worker-A");
+            staleWorkerA.start();
+            check(
+                    aAcquired.await(5, TimeUnit.SECONDS),
+                    "R12 Round-5 setup: stale worker A registered thread ownership");
+            long tokB2 =
+                    supersededGuard.acquire(
+                            k -> supersededPrefs.edit().putString(Prefs.LOADING_SITE, k).commit(),
+                            "B");
+            supersededPrefs
+                    .edit()
+                    .putString(Prefs.SELECTED_SITE, "B")
+                    .putString(Prefs.PREFERRED_SITE, "B\nhttps://b.invalid/")
+                    .apply();
+            bSuperseded.countDown();
+            check(
+                    aCrashDone.await(5, TimeUnit.SECONDS) && supersededErr.get() == null,
+                    "R12 Round-5 setup: stale worker A delivered late uncaught exception");
+            supersededGuard.releaseIfOwner(null, tokB2);
+            check(
+                    "A".equals(supersededPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""))
+                            && "B".equals(supersededPrefs.getString(Prefs.SELECTED_SITE, ""))
+                            && "B\nhttps://b.invalid/"
+                                    .equals(supersededPrefs.getString(Prefs.PREFERRED_SITE, "")),
+                    "R12 Round-5: superseded worker A exception attributes to A only and never blames healthy B");
+            MainActivity.clearRecoveredCrashSite(supersededPrefs);
+            MainActivity supersededHomeAct =
+                    (MainActivity) alloc.invoke(unsafeObj, MainActivity.class);
+            supersededHomeAct.prefs = supersededPrefs;
+            supersededHomeAct.config =
+                    Cms.parseConfig(
+                            "{\"sites\":[{\"key\":\"A\",\"name\":\"A\",\"type\":1,\"api\":\"https://a.invalid/\"},"
+                                    + "{\"key\":\"B\",\"name\":\"B\",\"type\":1,\"api\":\"https://b.invalid/\"}]}",
+                            "https://example.invalid/sub.json");
+            MobileRootShell supersededShell = new MobileRootShell(supersededHomeAct);
+            supersededShell.resolveActiveSite();
+            check(
+                    supersededShell.activeSite != null
+                            && "B".equals(supersededShell.activeSite.key)
+                            && "B".equals(supersededPrefs.getString(Prefs.SELECTED_SITE, ""))
+                            && "B\nhttps://b.invalid/"
+                                    .equals(supersededPrefs.getString(Prefs.PREFERRED_SITE, ""))
+                            && "".equals(supersededPrefs.getString(Prefs.RECOVERED_SKIP_SITE, "")),
+                    "R12 Round-5: after late worker A fault + recovery, healthy selected & preferred B remain active on Home");
         } finally {
             MainActivity.activeActivity = null;
         }
@@ -1746,6 +1848,142 @@ public final class ReworkR6ToR12Checks {
         check(
                 "A".equals(nextBootRecovered.selectedSite),
                 "R12 Round-4: next normal cold restart after recovery retains healthy site A");
+
+        // 10. Round-5 R12: Confirmed fault on FIRST site A ([A, B] config) MUST skip A on Home
+        //     and select healthy second site B on BOTH recovery boot (guards=1 & guards=2) AND
+        //     subsequent normal cold restart; manual re-selection of A later still succeeds!
+        Cms.Config abConfig = Cms.parseConfig(abRaw, abOrigin);
+        for (int guards : new int[] {1, 2}) {
+            File r5Dir = Files.createTempDirectory("r12-r5-first-site-g" + guards + "-").toFile();
+            ConfigStore r5Store = new ConfigStore(r5Dir);
+            r5Store.writeVersioned(abRaw, new ConfigStore.PointerSnapshot(abOrigin, "A"));
+            MapPrefs r5Prefs = new MapPrefs();
+            r5Prefs.edit()
+                    .putString(Prefs.ORIGIN, abOrigin)
+                    .putString(
+                            Prefs.ACTIVE_SUBSCRIPTION_ID,
+                            ConfigStore.subscriptionIdentity(abOrigin, abRaw))
+                    .putString(Prefs.LOADING_SITE, "A")
+                    .putString(Prefs.CONFIRMED_CRASH_SITE, "A")
+                    .putString(Prefs.SELECTED_SITE, "A")
+                    .putString(Prefs.PREFERRED_SITE, "A\nhttps://a.invalid/")
+                    .apply();
+            MainActivity.clearRecoveredCrashSite(r5Prefs);
+            check(
+                    "".equals(r5Prefs.getString(Prefs.SELECTED_SITE, ""))
+                            && "".equals(r5Prefs.getString(Prefs.PREFERRED_SITE, ""))
+                            && "A".equals(r5Prefs.getString(Prefs.RECOVERED_SKIP_SITE, "")),
+                    "R12 Round-5 (guards="
+                            + guards
+                            + "): clearRecoveredCrashSite clears first site A and records RECOVERED_SKIP_SITE=A");
+            // Recovery boot opens Home -> MobileRootShell.resolveActiveSite() skips A and picks B!
+            MainActivity r5HomeAct = (MainActivity) alloc.invoke(unsafeObj, MainActivity.class);
+            r5HomeAct.prefs = r5Prefs;
+            r5HomeAct.config = abConfig;
+            MobileRootShell r5Shell1 = new MobileRootShell(r5HomeAct);
+            r5Shell1.resolveActiveSite();
+            check(
+                    r5Shell1.activeSite != null
+                            && "B".equals(r5Shell1.activeSite.key)
+                            && "B".equals(r5Prefs.getString(Prefs.SELECTED_SITE, ""))
+                            && "".equals(r5Prefs.getString(Prefs.RECOVERED_SKIP_SITE, "")),
+                    "R12 Round-5 (guards="
+                            + guards
+                            + "): Home skips confirmed broken first site A and selects healthy B");
+            // Subsequent normal cold restart preserves B across snapshot recovery + Home open!
+            ConfigStore.RecoveredState r5Cold =
+                    r5Store.loadRecoveredState(
+                            r5Prefs.getString(Prefs.ORIGIN, null),
+                            r5Prefs.getString(Prefs.SELECTED_SITE, null),
+                            r5Prefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, null));
+            check(
+                    "B".equals(r5Cold.selectedSite),
+                    "R12 Round-5 (guards="
+                            + guards
+                            + "): ConfigStore preserves B on next normal cold restart");
+            MainActivity r5ColdAct = (MainActivity) alloc.invoke(unsafeObj, MainActivity.class);
+            r5ColdAct.prefs = r5Prefs;
+            r5ColdAct.config = Cms.parseConfig(r5Cold.raw, r5Cold.origin);
+            MobileRootShell r5Shell2 = new MobileRootShell(r5ColdAct);
+            r5Shell2.resolveActiveSite();
+            check(
+                    r5Shell2.activeSite != null
+                            && "B".equals(r5Shell2.activeSite.key)
+                            && "B".equals(r5Prefs.getString(Prefs.SELECTED_SITE, "")),
+                    "R12 Round-5 (guards="
+                            + guards
+                            + "): second normal cold restart still opens healthy site B");
+        }
+
+        // Empty SELECTED_SITE with confirmed fault on first site A also skips A -> B,
+        // and explicit user re-selection of A via SourcePicker clears RECOVERED_SKIP_SITE!
+        MapPrefs emptySelPrefs = new MapPrefs();
+        emptySelPrefs
+                .edit()
+                .putString(Prefs.CONFIRMED_CRASH_SITE, "A")
+                .putString(Prefs.SELECTED_SITE, "")
+                .apply();
+        MainActivity.clearRecoveredCrashSite(emptySelPrefs);
+        MainActivity emptySelAct = (MainActivity) alloc.invoke(unsafeObj, MainActivity.class);
+        emptySelAct.prefs = emptySelPrefs;
+        emptySelAct.config = abConfig;
+        MobileRootShell emptySelShell = new MobileRootShell(emptySelAct);
+        emptySelShell.resolveActiveSite();
+        check(
+                emptySelShell.activeSite != null
+                        && "B".equals(emptySelShell.activeSite.key)
+                        && "B".equals(emptySelPrefs.getString(Prefs.SELECTED_SITE, "")),
+                "R12 Round-5: empty SELECTED_SITE with confirmed fault A still skips A and opens B");
+        emptySelPrefs.edit().putString(Prefs.RECOVERED_SKIP_SITE, "A").apply();
+        Method commitPick =
+                SourcePicker.class.getDeclaredMethod(
+                        "commitSelectedSiteForCrashGuard", MainActivity.class, String.class);
+        commitPick.setAccessible(true);
+        commitPick.invoke(null, emptySelAct, "A");
+        emptySelShell.resolveActiveSite();
+        check(
+                emptySelShell.activeSite != null
+                        && "A".equals(emptySelShell.activeSite.key)
+                        && "".equals(emptySelPrefs.getString(Prefs.RECOVERED_SKIP_SITE, "")),
+                "R12 Round-5: manual selection of A via SourcePicker clears RECOVERED_SKIP_SITE and allows manual retry");
+
+        // 11. Round-5 R12: Single-site config [A] ONLY with confirmed fault A leaves
+        //     activeSite == null and preserves RECOVERED_SKIP_SITE across repeated render calls
+        //     so MobileHomePage surfaces manual switch-source & manual-retry actions!
+        Cms.Config onlyAConfig =
+                Cms.parseConfig(
+                        "{\"sites\":[{\"key\":\"A\",\"name\":\"OnlyA\",\"type\":1,\"api\":\"https://a.invalid/\"}]}",
+                        "https://example.invalid/only-a.json");
+        MapPrefs onlyAPrefs = new MapPrefs();
+        onlyAPrefs
+                .edit()
+                .putString(Prefs.LOADING_SITE, "A")
+                .putString(Prefs.CONFIRMED_CRASH_SITE, "A")
+                .putString(Prefs.SELECTED_SITE, "A")
+                .putString(Prefs.PREFERRED_SITE, "A\nhttps://a.invalid/")
+                .apply();
+        MainActivity.clearRecoveredCrashSite(onlyAPrefs);
+        MainActivity onlyAAct = (MainActivity) alloc.invoke(unsafeObj, MainActivity.class);
+        onlyAAct.prefs = onlyAPrefs;
+        onlyAAct.config = onlyAConfig;
+        MobileRootShell onlyAShell = new MobileRootShell(onlyAAct);
+        onlyAShell.resolveActiveSite();
+        Cms.Site firstPassSite = onlyAShell.activeSite;
+        onlyAShell.resolveActiveSite();
+        Cms.Site secondPassSite = onlyAShell.activeSite;
+        String homePageSrc =
+                new String(
+                        Files.readAllBytes(new File(srcRoot, "MobileHomePage.java").toPath()),
+                        StandardCharsets.UTF_8);
+        check(
+                firstPassSite == null
+                        && secondPassSite == null
+                        && "A".equals(onlyAPrefs.getString(Prefs.RECOVERED_SKIP_SITE, ""))
+                        && "".equals(onlyAPrefs.getString(Prefs.SELECTED_SITE, ""))
+                        && homePageSrc.contains("renderCrashRecoveryEmpty(")
+                        && homePageSrc.contains("切换片源 / 管理线路")
+                        && homePageSrc.contains("手动重试该片源"),
+                "R12 Round-5 single-site recovery: leaves activeSite null across repeated resolves and surfaces manual switch/retry UI");
 
         prefs.edit()
                 .putString(Prefs.LOADING_SITE, "site_bad")

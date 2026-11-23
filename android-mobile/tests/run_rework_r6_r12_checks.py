@@ -955,13 +955,14 @@ public final class R9SameNameImportCheck {
         }
 
         // -----------------------------------------------------------------
-        // 4. Round-4 R9: Upgrading from 0.6.0 flat local_spiders/source.py + PREFERRED_SITE
-        //    MUST migrate 1 -> 1 to doc-scoped key, keep PREFERRED_SITE active, and resolve
-        //    revision-two after cold restart + SourcePreferences.restoreDefault!
-        //    Meanwhile an ambiguous non-flat legacy hashed script (no SAF URI) MUST NOT be
-        //    silently merged by filename.
+        // 4. Round-5 R9 (headless fallback): Upgrading from 0.6.0 flat local_spiders/source.py
+        //    with PREFERRED_SITE when NO interactive choice dialog can be shown MUST preserve
+        //    old data (keep both sites, preserve original PREFERRED_SITE on # revision-one)
+        //    rather than silently overwriting by filename. Interactive replace vs keep-both
+        //    choices are verified separately in run_r9_legacy_choice_dialog_harness.
+        //    An ambiguous non-flat legacy hashed script (no SAF URI) also never auto-merges.
         // -----------------------------------------------------------------
-        File root4 = Files.createTempDirectory("r9-r4-legacy-upgrade-").toFile();
+        File root4 = Files.createTempDirectory("r9-r5-legacy-headless-").toFile();
         ExecutorService exec4 = Executors.newSingleThreadExecutor();
         try {
             ContentResolver cr4 = new ContentResolver();
@@ -987,7 +988,7 @@ public final class R9SameNameImportCheck {
                     .putString(Prefs.SELECTED_SITE, legacyKey)
                     .putString(Prefs.PREFERRED_SITE, SourcePreferences.identity(legacyCfg.sites.get(0)))
                     .apply();
-            // Simulate cold boot into 0.7.0 before re-importing
+            // Simulate cold boot into 0.7.0 before importing another same-named document
             ConfigStore.RecoveredState preUpgrade =
                     host4.configStore.loadRecoveredState(
                             host4.prefs.getString(Prefs.ORIGIN, null),
@@ -998,22 +999,21 @@ public final class R9SameNameImportCheck {
             host4.prefs.edit().putString(Prefs.ACTIVE_SUBSCRIPTION_ID, preUpgrade.subscriptionId).apply();
             SourcePreferences.restoreDefault(host4);
 
-            // Re-import same SAF URI with revision-two on 0.7.0!
+            // Headless import of dirB/source.py MUST preserve old 0.6.0 dirA & its PREFERRED_SITE!
             cr4.bodies.put(
-                    sameUri.toString(),
-                    "# revision-two\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
-            SourceController.importLocalUri(host4, sameUri, false);
+                    otherUri.toString(),
+                    "# other-doc-B\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+            SourceController.importLocalUri(host4, otherUri, false);
             exec4.submit(() -> {}).get(5, TimeUnit.SECONDS);
             drainUntil(
                     host4,
                     () ->
                             host4.config != null
-                                    && host4.config.sites.size() == 1
-                                    && host4.config.sites.get(0).key.startsWith("py_doc_"));
+                                    && host4.config.sites.size() == 2);
             ConfigStore.WRITE_EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
             host4.ui.drain();
 
-            // Cold restart + SourcePreferences.restoreDefault MUST keep sites=1, preferred=true, revision-two!
+            // Cold restart + SourcePreferences.restoreDefault MUST keep sites=2, original preferred!
             MainActivity coldHost4 = newHost(root4, exec4, cr4);
             for (String k :
                     new String[] {
@@ -1038,16 +1038,16 @@ public final class R9SameNameImportCheck {
             }
             SourcePreferences.restoreDefault(coldHost4);
             check(
-                    coldHost4.config.sites.size() == 1
-                            && coldHost4.config.sites.get(0).key.startsWith("py_doc_")
-                            && coldHost4.config.sites
-                                    .get(0)
-                                    .key
-                                    .equals(coldHost4.prefs.getString(Prefs.SELECTED_SITE, ""))
+                    coldHost4.config.sites.size() == 2
+                            && legacyKey.equals(coldHost4.config.sites.get(0).key)
                             && SourcePreferences.isPreferred(coldHost4, coldHost4.config.sites.get(0))
+                            && !SourcePreferences.isPreferred(coldHost4, coldHost4.config.sites.get(1))
+                            && legacyKey.equals(coldHost4.prefs.getString(Prefs.SELECTED_SITE, ""))
                             && readApiFile(coldHost4.config.sites.get(0).api)
-                                    .startsWith("# revision-two"),
-                    "R9 Round-4 0.6.0 upgrade: migrates flat local_spiders/source.py 1->1, keeps preferred=true & revision-two after cold restart");
+                                    .startsWith("# revision-one")
+                            && readApiFile(coldHost4.config.sites.get(1).api)
+                                    .startsWith("# other-doc-B"),
+                    "R9 Round-5 headless 0.6.0 guard: preserves old 0.6.0 flat site + PREFERRED_SITE and adds distinct document separately");
 
             // Ambiguous non-flat legacy hashed script (no SAF URI) MUST NOT silently merge by filename!
             File rootAmb = Files.createTempDirectory("r9-r4-ambiguous-legacy-").toFile();
@@ -1213,6 +1213,464 @@ public final class R9SameNameImportCheck {
     )
     subprocess.run(
         [JAVA, "-Dfile.encoding=UTF-8", "-cp", cp, "com.pilipala.marcomovie.R9SameNameImportCheck"],
+        cwd=ROOT,
+        check=True,
+        timeout=40,
+    )
+
+
+def run_r9_legacy_choice_dialog_harness(work_dir: Path, base_cp: list[Path]) -> None:
+    """Exercise REAL SourceController.importLocalUri interactive AppDialog choice for 0.6.0 flat & legacy hashed scripts."""
+    r9d_dir = work_dir / "r9-legacy-choice-dialog"
+    r9d_src = r9d_dir / "src"
+    r9d_classes = r9d_dir / "classes"
+    r9d_src.mkdir(parents=True, exist_ok=True)
+    r9d_classes.mkdir(parents=True, exist_ok=True)
+
+    window_java = r9d_src / "android/view/Window.java"
+    window_java.parent.mkdir(parents=True, exist_ok=True)
+    window_java.write_text("package android.view;\npublic class Window {}\n", encoding="utf-8")
+
+    handler_java = r9d_src / "android/os/Handler.java"
+    handler_java.parent.mkdir(parents=True, exist_ok=True)
+    handler_java.write_text(
+        """package android.os;
+import java.util.ArrayList;
+import java.util.List;
+public class Handler {
+    public final List<Runnable> posted = new ArrayList<>();
+    public boolean post(Runnable r) {
+        synchronized (posted) { posted.add(r); }
+        return true;
+    }
+    public void drain() {
+        List<Runnable> copy;
+        synchronized (posted) {
+            copy = new ArrayList<>(posted);
+            posted.clear();
+        }
+        for (Runnable r : copy) r.run();
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    resolver_java = r9d_src / "android/content/ContentResolver.java"
+    resolver_java.parent.mkdir(parents=True, exist_ok=True)
+    resolver_java.write_text(
+        """package android.content;
+import android.database.Cursor;
+import android.net.Uri;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
+
+public class ContentResolver {
+    public final Map<String, String> names = new HashMap<>();
+    public final Map<String, String> bodies = new HashMap<>();
+
+    public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
+        final String name = names.getOrDefault(uri.toString(), "source.py");
+        return (Cursor) Proxy.newProxyInstance(
+                Cursor.class.getClassLoader(),
+                new Class<?>[] {Cursor.class},
+                (proxy, method, args) -> {
+                    String m = method.getName();
+                    if ("moveToFirst".equals(m)) return Boolean.TRUE;
+                    if ("getString".equals(m)) return name;
+                    if ("close".equals(m)) return null;
+                    return null;
+                });
+    }
+
+    public InputStream openInputStream(Uri uri) {
+        String body = bodies.getOrDefault(uri.toString(), "");
+        return new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8));
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    activity_java = r9d_src / "android/app/Activity.java"
+    activity_java.parent.mkdir(parents=True, exist_ok=True)
+    activity_java.write_text(
+        """package android.app;
+import android.content.ContentResolver;
+import android.view.Window;
+import java.io.File;
+public class Activity extends android.content.Context {
+    public Window getWindow() { return new Window(); }
+    public boolean isFinishing() { return false; }
+    public boolean isDestroyed() { return false; }
+    public ContentResolver getContentResolver() { return null; }
+    @Override public File getFilesDir() { return null; }
+}
+""",
+        encoding="utf-8",
+    )
+
+    main_activity_java = r9d_src / "com/pilipala/marcomovie/MainActivity.java"
+    main_activity_java.parent.mkdir(parents=True, exist_ok=True)
+    main_activity_java.write_text(
+        """package com.pilipala.marcomovie;
+
+import android.content.ContentResolver;
+import android.content.SharedPreferences;
+import java.io.File;
+import java.util.ArrayDeque;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class MainActivity extends android.app.Activity {
+    static final class Screen {
+        final Runnable render;
+        Screen(Runnable render) { this.render = render; }
+    }
+
+    public boolean privateMode, switchingPrivacy;
+    public final AtomicLong configImportSeq = new AtomicLong();
+    public android.os.Handler ui = new android.os.Handler();
+    public ExecutorService worker;
+    public File publicRoot;
+    public ContentResolver resolver;
+    public Cms.Config config;
+    public String configOrigin = "";
+    public ConfigStore configStore;
+    public SharedPreferences prefs;
+    public final ArrayDeque<Screen> back = new ArrayDeque<>();
+    public Screen current;
+
+    @Override public boolean isFinishing() { return false; }
+    @Override public boolean isDestroyed() { return false; }
+    boolean isTvDevice() { return false; }
+    void toast(String msg) {}
+    void refresh() {}
+    void closeEngines() {}
+    void home() {}
+    void restore(Screen s) {}
+    boolean available(Cms.Site site) { return true; }
+    String message(Throwable e) { return e == null ? "" : String.valueOf(e.getMessage()); }
+    @Override public ContentResolver getContentResolver() { return resolver; }
+    @Override public File getFilesDir() { return publicRoot; }
+}
+""",
+        encoding="utf-8",
+    )
+
+    app_dialog_java = r9d_src / "com/pilipala/marcomovie/AppDialog.java"
+    app_dialog_java.parent.mkdir(parents=True, exist_ok=True)
+    app_dialog_java.write_text(
+        """package com.pilipala.marcomovie;
+
+import android.content.DialogInterface;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+final class AppDialog implements DialogInterface {
+    static int showCount;
+    static String lastTitle = "";
+    static final List<String> lastItems = new ArrayList<>();
+    static int nextPick = -1; // -1 = last option (keep both), 0 = first legacy replace
+
+    static void reset(int pickMode) {
+        showCount = 0;
+        lastTitle = "";
+        lastItems.clear();
+        nextPick = pickMode;
+    }
+
+    @Override public void cancel() {}
+    @Override public void dismiss() {}
+
+    static final class Builder {
+        String title = "";
+        String[] items = new String[0];
+        DialogInterface.OnClickListener listener;
+
+        Builder(MainActivity a) {}
+        Builder wrapChoices() { return this; }
+        Builder setTitle(String value) { this.title = value == null ? "" : value; return this; }
+        Builder setItems(String[] values, DialogInterface.OnClickListener action) {
+            this.items = values == null ? new String[0] : values;
+            this.listener = action;
+            return this;
+        }
+        AppDialog show() {
+            showCount++;
+            lastTitle = title;
+            lastItems.clear();
+            lastItems.addAll(Arrays.asList(items));
+            AppDialog d = new AppDialog();
+            if (listener != null && items.length > 0) {
+                int idx = nextPick < 0 ? (items.length - 1) : nextPick;
+                listener.onClick(d, idx);
+            }
+            return d;
+        }
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    test_java = r9d_src / "com/pilipala/marcomovie/R9LegacyChoiceDialogCheck.java"
+    test_java.parent.mkdir(parents=True, exist_ok=True)
+    test_java.write_text(
+        """package com.pilipala.marcomovie;
+
+import android.content.ContentResolver;
+import android.content.SharedPreferences;
+import android.net.Uri;
+import java.io.File;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+public final class R9LegacyChoiceDialogCheck {
+    private static void check(boolean cond, String label) {
+        if (!cond) throw new AssertionError("FAIL: " + label);
+        System.out.println("PASS " + label);
+    }
+
+    static final class MemPrefs implements SharedPreferences {
+        final Map<String, Object> data = new HashMap<>();
+        @Override public synchronized Map<String, ?> getAll() { return new HashMap<>(data); }
+        @Override public synchronized String getString(String k, String d) {
+            Object v = data.get(k); return v instanceof String ? (String) v : d;
+        }
+        @Override @SuppressWarnings("unchecked")
+        public synchronized Set<String> getStringSet(String k, Set<String> d) {
+            Object v = data.get(k); return v instanceof Set ? new HashSet<>((Set<String>) v) : d;
+        }
+        @Override public synchronized int getInt(String k, int d) {
+            Object v = data.get(k); return v instanceof Integer ? (Integer) v : d;
+        }
+        @Override public synchronized long getLong(String k, long d) {
+            Object v = data.get(k); return v instanceof Long ? (Long) v : d;
+        }
+        @Override public synchronized float getFloat(String k, float d) {
+            Object v = data.get(k); return v instanceof Float ? (Float) v : d;
+        }
+        @Override public synchronized boolean getBoolean(String k, boolean d) {
+            Object v = data.get(k); return v instanceof Boolean ? (Boolean) v : d;
+        }
+        @Override public synchronized boolean contains(String k) { return data.containsKey(k); }
+        @Override public Editor edit() {
+            return new Editor() {
+                final Map<String, Object> u = new HashMap<>();
+                final Set<String> rm = new HashSet<>();
+                boolean clr;
+                @Override public Editor putString(String k, String v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor putStringSet(String k, Set<String> v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor putInt(String k, int v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor putLong(String k, long v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor putFloat(String k, float v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor putBoolean(String k, boolean v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor remove(String k) { rm.add(k); u.remove(k); return this; }
+                @Override public Editor clear() { clr = true; u.clear(); rm.clear(); return this; }
+                @Override public boolean commit() { apply(); return true; }
+                @Override public void apply() {
+                    synchronized (MemPrefs.this) {
+                        if (clr) data.clear();
+                        for (String r : rm) data.remove(r);
+                        for (Map.Entry<String, Object> e : u.entrySet()) {
+                            if (e.getValue() == null) data.remove(e.getKey());
+                            else data.put(e.getKey(), e.getValue());
+                        }
+                    }
+                }
+            };
+        }
+        @Override public void registerOnSharedPreferenceChangeListener(OnSharedPreferenceChangeListener l) {}
+        @Override public void unregisterOnSharedPreferenceChangeListener(OnSharedPreferenceChangeListener l) {}
+    }
+
+    private static MainActivity newHost(File root, ExecutorService exec, ContentResolver cr) {
+        MainActivity host = new MainActivity();
+        host.publicRoot = root;
+        host.resolver = cr;
+        host.worker = exec;
+        host.prefs = new MemPrefs();
+        host.configStore = new ConfigStore(new File(root, "cfg"));
+        return host;
+    }
+
+    private static String readApiFile(String apiUri) throws Exception {
+        return new String(Files.readAllBytes(new File(new URI(apiUri)).toPath()), StandardCharsets.UTF_8);
+    }
+
+    private static void flush(MainActivity host, ExecutorService exec) throws Exception {
+        exec.submit(() -> {}).get(5, TimeUnit.SECONDS);
+        host.ui.drain();
+        ConfigStore.WRITE_EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
+        host.ui.drain();
+    }
+
+    private static MainActivity coldRestart(File root, ExecutorService exec, ContentResolver cr, MainActivity prev)
+            throws Exception {
+        MainActivity cold = newHost(root, exec, cr);
+        for (String k :
+                new String[] {
+                    Prefs.ORIGIN,
+                    Prefs.SELECTED_SITE,
+                    Prefs.PREFERRED_SITE,
+                    Prefs.ACTIVE_SUBSCRIPTION_ID
+                }) {
+            if (prev.prefs.contains(k)) {
+                cold.prefs.edit().putString(k, prev.prefs.getString(k, "")).apply();
+            }
+        }
+        ConfigStore.RecoveredState rec =
+                cold.configStore.loadRecoveredState(
+                        cold.prefs.getString(Prefs.ORIGIN, null),
+                        cold.prefs.getString(Prefs.SELECTED_SITE, null),
+                        cold.prefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, null));
+        cold.config = Cms.parseConfig(rec.raw, rec.origin);
+        cold.configOrigin = rec.origin == null ? "" : rec.origin;
+        if (rec.selectedSite != null) {
+            cold.prefs.edit().putString(Prefs.SELECTED_SITE, rec.selectedSite).apply();
+        }
+        if (rec.subscriptionId != null && !rec.subscriptionId.isEmpty()) {
+            cold.prefs.edit().putString(Prefs.ACTIVE_SUBSCRIPTION_ID, rec.subscriptionId).apply();
+        }
+        SourcePreferences.restoreDefault(cold);
+        return cold;
+    }
+
+    private static MainActivity seedLegacySite(
+            File root, ExecutorService exec, ContentResolver cr, boolean flat060) throws Exception {
+        MainActivity host = newHost(root, exec, cr);
+        File targetDir =
+                flat060
+                        ? new File(root, "local_spiders")
+                        : new File(new File(root, "local_spiders"), "deadbeef12345678");
+        targetDir.mkdirs();
+        File legacyFile = new File(targetDir, "source.py");
+        String bodyA = "# revision-one\\nclass Spider:\\n    def homeContent(self, f): return {}\\n";
+        Files.write(legacyFile.toPath(), bodyA.getBytes(StandardCharsets.UTF_8));
+        Cms.Config legacyCfg = Cms.parseConfig(bodyA, Cms.fileUri(legacyFile));
+        String legacyKey = legacyCfg.sites.get(0).key;
+        host.configStore.write(legacyCfg.raw);
+        host.prefs
+                .edit()
+                .putString(Prefs.ORIGIN, "")
+                .putString(Prefs.SELECTED_SITE, legacyKey)
+                .putString(Prefs.PREFERRED_SITE, SourcePreferences.identity(legacyCfg.sites.get(0)))
+                .apply();
+        return coldRestart(root, exec, cr, host);
+    }
+
+    public static void main(String[] args) throws Exception {
+        ExecutorService exec = Executors.newSingleThreadExecutor();
+        try {
+            ContentResolver cr = new ContentResolver();
+            Uri uriA = Uri.parse("content://docs/dirA/source.py");
+            Uri uriB = Uri.parse("content://docs/dirB/source.py");
+            cr.names.put(uriA.toString(), "source.py");
+            cr.names.put(uriB.toString(), "source.py");
+            cr.bodies.put(uriA.toString(), "# revision-two\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+            cr.bodies.put(uriB.toString(), "# other-doc-B\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+
+            for (boolean flat060 : new boolean[] {true, false}) {
+                String tag = flat060 ? "0.6.0-flat" : "legacy-hashed";
+
+                // 1. User chooses "保留旧片源并新增为独立片源" -> both sites preserved, old PREFERRED_SITE intact!
+                File keepRoot = Files.createTempDirectory("r9-r5-choice-keep-" + tag + "-").toFile();
+                MainActivity keepHost = seedLegacySite(keepRoot, exec, cr, flat060);
+                String oldKey = keepHost.config.sites.get(0).key;
+                AppDialog.reset(-1);
+                SourceController.importLocalUri(keepHost, uriB, false);
+                flush(keepHost, exec);
+                MainActivity coldKeep = coldRestart(keepRoot, exec, cr, keepHost);
+                check(
+                        AppDialog.showCount == 1
+                                && AppDialog.lastItems.size() == 2
+                                && AppDialog.lastItems.get(0).startsWith("替换旧版同名片源：")
+                                && "保留旧片源并新增为独立片源".equals(AppDialog.lastItems.get(1))
+                                && coldKeep.config.sites.size() == 2
+                                && oldKey.equals(coldKeep.config.sites.get(0).key)
+                                && SourcePreferences.isPreferred(coldKeep, coldKeep.config.sites.get(0))
+                                && !SourcePreferences.isPreferred(coldKeep, coldKeep.config.sites.get(1))
+                                && oldKey.equals(coldKeep.prefs.getString(Prefs.SELECTED_SITE, ""))
+                                && readApiFile(coldKeep.config.sites.get(0).api).startsWith("# revision-one")
+                                && readApiFile(coldKeep.config.sites.get(1).api).startsWith("# other-doc-B"),
+                        "R9 Round-5 interactive(" + tag + ", keep-both): shows choice dialog, keeps both docs, preserves original PREFERRED_SITE");
+
+                // 2. User chooses "替换旧版同名片源..." -> 1->1 replacement & migrates PREFERRED_SITE!
+                File repRoot = Files.createTempDirectory("r9-r5-choice-replace-" + tag + "-").toFile();
+                MainActivity repHost = seedLegacySite(repRoot, exec, cr, flat060);
+                AppDialog.reset(0);
+                SourceController.importLocalUri(repHost, uriA, false);
+                flush(repHost, exec);
+                MainActivity coldRep = coldRestart(repRoot, exec, cr, repHost);
+                check(
+                        AppDialog.showCount == 1
+                                && coldRep.config.sites.size() == 1
+                                && coldRep.config.sites.get(0).key.startsWith("py_doc_")
+                                && SourcePreferences.isPreferred(coldRep, coldRep.config.sites.get(0))
+                                && coldRep.config.sites.get(0).key.equals(coldRep.prefs.getString(Prefs.SELECTED_SITE, ""))
+                                && readApiFile(coldRep.config.sites.get(0).api).startsWith("# revision-two"),
+                        "R9 Round-5 interactive(" + tag + ", replace): shows choice dialog, migrates 1->1 and preserves PREFERRED_SITE");
+
+                // 3. Subsequent update of the ALREADY doc-scoped py_doc_* URI requires NO dialog (1->1)!
+                cr.bodies.put(uriA.toString(), "# revision-three\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+                AppDialog.reset(-1);
+                SourceController.importLocalUri(coldRep, uriA, false);
+                flush(coldRep, exec);
+                MainActivity coldDocUp = coldRestart(repRoot, exec, cr, coldRep);
+                check(
+                        AppDialog.showCount == 0
+                                && coldDocUp.config.sites.size() == 1
+                                && coldDocUp.config.sites.get(0).key.equals(coldRep.config.sites.get(0).key)
+                                && SourcePreferences.isPreferred(coldDocUp, coldDocUp.config.sites.get(0))
+                                && readApiFile(coldDocUp.config.sites.get(0).api).startsWith("# revision-three"),
+                        "R9 Round-5 interactive(" + tag + ", doc-scoped update): updates 1->1 silently without dialog");
+                cr.bodies.put(uriA.toString(), "# revision-two\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+            }
+        } finally {
+            exec.shutdownNow();
+        }
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    cp = os.pathsep.join(str(p) for p in [r9d_classes, *base_cp])
+    subprocess.run(
+        [
+            JAVAC,
+            "-encoding",
+            "UTF-8",
+            "-cp",
+            cp,
+            "-d",
+            str(r9d_classes),
+            str(window_java),
+            str(handler_java),
+            str(resolver_java),
+            str(activity_java),
+            str(main_activity_java),
+            str(app_dialog_java),
+            str(test_java),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [JAVA, "-Dfile.encoding=UTF-8", "-cp", cp, "com.pilipala.marcomovie.R9LegacyChoiceDialogCheck"],
         cwd=ROOT,
         check=True,
         timeout=40,
@@ -1428,6 +1886,9 @@ public class ContextWrapper extends Context {
 
         # Verify R9 real SourceController.importLocalUri same-named source.py + privacy isolation
         run_r9_same_name_import_harness(work_dir, runtime_cp)
+
+        # Verify R9 Round-5 interactive AppDialog choice for 0.6.0 flat & legacy hashed scripts
+        run_r9_legacy_choice_dialog_harness(work_dir, runtime_cp)
 
         # Verify R10 real MobileInlinePlayer.captureResumePosition() bytecode
         run_r10_inline_progress_harness(work_dir, runtime_cp)

@@ -146,16 +146,30 @@ final class MobileRootShell {
         activeSite = null;
         if (a.config == null || a.config.sites.isEmpty()) return;
         String saved = a.prefs.getString(Prefs.SELECTED_SITE, "");
+        String rawSkip = a.prefs.getString(Prefs.RECOVERED_SKIP_SITE, "");
+        String skipSite = rawSkip == null ? "" : rawSkip.trim();
         for (Cms.Site s : a.config.sites) {
             if (s.key.equals(saved) && a.available(s)) {
                 activeSite = s;
+                if (!skipSite.isEmpty()) {
+                    a.prefs.edit().putString(Prefs.RECOVERED_SKIP_SITE, "").apply();
+                }
                 return;
             }
         }
+        // After startup crash recovery clears a faulty site, skip that site on fallback selection
+        // even when it is the first entry in config.sites so Home opens the next healthy site.
+        // If no alternative site exists, leave activeSite null so MobileHomePage offers manual
+        // switch-source and manual retry controls instead of looping back into the crashed site.
         for (Cms.Site s : a.config.sites) {
-            if (a.available(s)) {
+            if (a.available(s) && (skipSite.isEmpty() || !s.key.equals(skipSite))) {
                 activeSite = s;
-                a.prefs.edit().putString(Prefs.SELECTED_SITE, s.key).apply();
+                android.content.SharedPreferences.Editor ed =
+                        a.prefs.edit().putString(Prefs.SELECTED_SITE, s.key);
+                if (!skipSite.isEmpty()) {
+                    ed.putString(Prefs.RECOVERED_SKIP_SITE, "");
+                }
+                ed.apply();
                 return;
             }
         }
@@ -512,7 +526,11 @@ final class MobileRootShell {
                 actions.add(
                         () -> {
                             a.mobilePrefs().edit().putInt(Prefs.HOME_MODE, 0).apply();
-                            a.prefs.edit().putString(Prefs.SELECTED_SITE, s.key).apply();
+                            a.prefs
+                                    .edit()
+                                    .putString(Prefs.SELECTED_SITE, s.key)
+                                    .putString(Prefs.RECOVERED_SKIP_SITE, "")
+                                    .apply();
                             activeSite = s;
                             switchTab(TAB_HOME);
                         });

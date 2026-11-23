@@ -2372,12 +2372,14 @@ final class SourceController {
     }
 
     /**
-     * Merges a newly imported local script while preserving upgrade continuity from 0.6.0 flat
-     * {@code local_spiders/<file>} entries (single unambiguous legacy flat match migrates 1 -> 1
-     * along with {@link Prefs#PREFERRED_SITE}). When non-document-scoped legacy entries are
-     * ambiguous because the original SAF URI was never recorded, interactive UI asks the user
-     * whether to replace a specific legacy site or keep both, and headless fallback preserves both
-     * rather than silently merging by filename.
+     * Merges a newly imported local script while preserving document identity isolation. When an
+     * exact document-scoped key ({@code py_doc_*} / {@code js_doc_*}) already exists, updates
+     * replace 1 -> 1 automatically. When only legacy non-document-scoped scripts exist (including
+     * 0.6.0 flat {@code local_spiders/<file>} entries or hashed entries without a recorded SAF
+     * URI), interactive UI prompts the user to explicitly choose between replacing a specific
+     * legacy site (migrating its {@link Prefs#PREFERRED_SITE}) or keeping both, and headless
+     * fallback preserves the legacy site rather than silently overwriting another document by
+     * filename.
      */
     static void mergeOrSaveLocalScriptConfig(
             final MainActivity a,
@@ -2435,11 +2437,6 @@ final class SourceController {
         if (exactDocKeyMatch) {
             mergeOrSaveConfig(a, singleCfg, "", true, null);
             a.toast("已导入扩展片源：" + incomingSite.name);
-            return;
-        }
-        if (legacyFlatMatches.size() == 1 && ambiguousLegacyMatches.isEmpty()) {
-            mergeOrSaveConfig(a, singleCfg, "", true, legacyFlatMatches.get(0).key);
-            a.toast("已更新扩展片源：" + incomingSite.name);
             return;
         }
         final java.util.List<LegacyScriptCandidate> choices = new java.util.ArrayList<>();
@@ -2967,6 +2964,7 @@ final class SourceController {
                 } else {
                     editor.remove(Prefs.SELECTED_SITE);
                 }
+                editor.remove(Prefs.RECOVERED_SKIP_SITE);
                 if (snapshot.stateTag instanceof SavedState) {
                     SavedState saved = (SavedState) snapshot.stateTag;
                     String raw = saved.config != null ? saved.config.raw : null;

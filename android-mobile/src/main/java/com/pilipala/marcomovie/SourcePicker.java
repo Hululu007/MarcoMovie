@@ -873,6 +873,7 @@ final class SourcePicker {
                 .edit()
                 .putString(Prefs.SELECTED_SITE, siteKey)
                 .putString(Prefs.LOADING_SITE, siteKey)
+                .putString(Prefs.RECOVERED_SKIP_SITE, "")
                 .commit();
     }
 
