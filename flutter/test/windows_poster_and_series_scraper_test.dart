@@ -240,7 +240,7 @@ void main() {
           '溏心风暴3：黄围家走马上任，解释他是有权拿这笔奖金',
           '走马上任',
           targetYear: 2026,
-          imageUrl: 'https://puui.qpic.cn/vpic_cover/abc123/abc123_hz.jpg',
+          imageUrl: 'https://owned.invalid/vpic_cover/abc123/abc123_hz.jpg',
         ),
         isFalse,
       );
