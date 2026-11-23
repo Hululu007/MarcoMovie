@@ -122,12 +122,16 @@ public final class Batch1MobileChecks {
                 mpvSrc.contains("lastSurfaceWidth > 0 && lastSurfaceHeight > 0")
                         && mpvSrc.contains("MPVLib.command(new String[] {\"stop\"})"),
                 "#72/#73: MpvPlayer restores surface size across rotation/reattach and stops before surface detach");
+        String normalizedCtrl = ctrlSrc.replaceAll("\\s+", " ");
         check(
-                ctrlSrc.contains(
-                                "if (ticket == a.generation\n                                                                    && a.player == ready")
-                        && ctrlSrc.contains(
-                                "if (ticket != a.generation\n                                                                    || a.player != ready) return;"),
-                "#72/#73: PlaybackController drops late onPrepared/onVideoSizeChanged/onHdrChanged callbacks from stale players");
+                normalizedCtrl.contains("if (ticket == a.generation && a.player == ready")
+                        && normalizedCtrl.contains(
+                                "if (!isFullscreenSessionActive( a, ticket, sessionId) || a.player != ready) return;")
+                        && normalizedCtrl.contains(
+                                "if (ticket != a.generation || a.player != ready || a.isFinishing()) return;")
+                        && normalizedCtrl.contains(
+                                "if (ticket != a.generation || sessionId != a.fullscreenPlaybackSession || a.player != ready) return;"),
+                "#72/#73: PlaybackController drops late onPrepared/onVideoSizeChanged/onHdrChanged/onCompletion callbacks from stale players");
 
         // 3. CrashReportStore sanitized native tombstone / trace extraction
         String textTrace =
