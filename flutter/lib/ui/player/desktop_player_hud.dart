@@ -151,6 +151,7 @@ enum _DesktopHudQuickMenu { quality, loudness }
 /// - PC-native anchored "More" & quick quality/loudness popovers (zero duplicates, zero focus steal)
 class DesktopPlayerHud extends StatefulWidget {
   final bool embedded;
+  final double topSafeInset;
   final String title;
   final bool playing;
   final bool isLive;
@@ -205,6 +206,7 @@ class DesktopPlayerHud extends StatefulWidget {
   const DesktopPlayerHud({
     super.key,
     required this.embedded,
+    this.topSafeInset = 0.0,
     required this.title,
     required this.playing,
     required this.isLive,
@@ -324,56 +326,75 @@ class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
               left: 12,
               right: 12,
               bottom: 12,
-              child: WinPanel(
-                dark: true,
-                padding: const EdgeInsets.all(6),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    IconButton(
-                      tooltip: widget.playing ? '暂停' : '播放',
-                      onPressed: widget.onPlayPause,
-                      icon: Icon(
-                        widget.playing
-                            ? CupertinoIcons.pause_fill
-                            : CupertinoIcons.play_fill,
-                        color: Colors.white,
+              child: Builder(
+                builder: (ctx) {
+                  final row = Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      IconButton(
+                        tooltip: widget.playing ? '暂停' : '播放',
+                        onPressed: widget.onPlayPause,
+                        icon: Icon(
+                          widget.playing
+                              ? CupertinoIcons.pause_fill
+                              : CupertinoIcons.play_fill,
+                          color: Colors.white,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '音量',
+                        onPressed: widget.onVolumeTap,
+                        icon: const Icon(
+                          CupertinoIcons.volume_up,
+                          color: Colors.white,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '线路',
+                        onPressed: widget.onEpisodesTap,
+                        icon: const Icon(
+                          CupertinoIcons.list_bullet,
+                          color: Colors.white,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '更多',
+                        onPressed: widget.onToggleMore,
+                        icon: const Icon(
+                          CupertinoIcons.ellipsis,
+                          color: Colors.white,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '展开播放',
+                        onPressed: widget.onToggleExpand,
+                        icon: const Icon(
+                          CupertinoIcons.arrow_up_left_arrow_down_right,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  );
+                  if (WindowsAppearanceScope.maybeOf(ctx) != null) {
+                    return WinPanel(
+                      dark: true,
+                      padding: const EdgeInsets.all(6),
+                      child: row,
+                    );
+                  }
+                  return Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xD9161820),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.14),
+                        width: 0.8,
                       ),
                     ),
-                    IconButton(
-                      tooltip: '音量',
-                      onPressed: widget.onVolumeTap,
-                      icon: const Icon(
-                        CupertinoIcons.volume_up,
-                        color: Colors.white,
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: '线路',
-                      onPressed: widget.onEpisodesTap,
-                      icon: const Icon(
-                        CupertinoIcons.list_bullet,
-                        color: Colors.white,
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: '更多',
-                      onPressed: widget.onToggleMore,
-                      icon: const Icon(
-                        CupertinoIcons.ellipsis,
-                        color: Colors.white,
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: '展开播放',
-                      onPressed: widget.onToggleExpand,
-                      icon: const Icon(
-                        CupertinoIcons.arrow_up_left_arrow_down_right,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ],
-                ),
+                    child: row,
+                  );
+                },
               ),
             ),
           ],
@@ -540,7 +561,12 @@ class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
               child: SafeArea(
                 bottom: false,
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 14, 24, 24),
+                  padding: EdgeInsets.fromLTRB(
+                    24,
+                    14 + widget.topSafeInset,
+                    24,
+                    24,
+                  ),
                   child: widget.topHeader,
                 ),
               ),

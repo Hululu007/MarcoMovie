@@ -372,6 +372,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       !kIsWeb &&
       defaultTargetPlatform == TargetPlatform.windows &&
       !OhosRuntime.isOhos;
+  bool get _isMacosPlayerPlatform =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.macOS &&
+      !OhosRuntime.isOhos;
   bool get _canUseIosAvPlayerEngine =>
       _isIosPlayerPlatform &&
       widget.debugPlayer == null &&
@@ -2700,7 +2704,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_screenLocked ||
         _isSliderDragging ||
         _hasActivePlayerOverlay ||
-        (isWindowsDesktopUi && _windowsMoreControls)) {
+        ((isWindowsDesktopUi || _isMacosPlayerPlatform) &&
+            _windowsMoreControls)) {
       return;
     }
     final hideDelay = _desktop
@@ -6909,6 +6914,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
       return _buildWindowsChrome(context);
     }
+    if (_isMacosPlayerPlatform) {
+      return _buildMacosChrome(context);
+    }
     final size = MediaQuery.sizeOf(context);
     final isLandscape = size.width > size.height;
     final showLeftLockButton = isLandscape && size.width >= 480;
@@ -7650,6 +7658,103 @@ class _PlayerScreenState extends State<PlayerScreen>
         _scheduleHide();
       },
       onToggleExpand: _toggleOrientation,
+    );
+  }
+
+  /// macOS desktop cinema player HUD:
+  /// - Reuses [DesktopPlayerHud] with easy-to-click full-width progress bar,
+  ///   inline volume + wheel volume, keyboard hold scrub preview, subtitles,
+  ///   4-tier Anime4K, compact anchored "More" popover, and native fullscreen.
+  /// - Adds windowed top clearance (`28pt`) so the Back button & title never
+  ///   collide with macOS traffic-light buttons; clears automatically in
+  ///   native fullscreen.
+  /// - Deliberately keeps Windows HDR (`videoQualityVisible`) and vocal boost
+  ///   (`audioLoudnessVisible`) hidden on macOS pending Mac output/power eval.
+  Widget _buildMacosChrome(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final scale = (width / 1280).clamp(.78, 1.0);
+    final isFullscreen = _desktopWindow?.fullscreen == true;
+    return Theme(
+      data: Theme.of(context).copyWith(brightness: Brightness.dark),
+      child: CupertinoTheme(
+        data: CupertinoTheme.of(context).copyWith(brightness: Brightness.dark),
+        child: Builder(
+          builder: (darkContext) => DesktopPlayerHud(
+            embedded: widget.embedded,
+            topSafeInset: (!widget.embedded && !isFullscreen) ? 28.0 : 0.0,
+            title: _displayTitle,
+            playing: _playing,
+            isLive: _isLiveStream,
+            isFullscreen: isFullscreen,
+            normalSpeed: _normalSpeed,
+            volume: _engineVolume100,
+            volumeStream: _usingAvPlayer ? null : _safePlayerVolumeStream(),
+            onVolumeChanged: (v) {
+              final next = v.clamp(0.0, 100.0);
+              _engineSetVolume100(next);
+              if (mounted) setState(() {});
+              _showHud('音量 ${next.round()}%');
+              _scheduleHide();
+            },
+            onMuteToggle: _toggleDesktopMute,
+            hasPrevEpisode: _episodeIndex > 0,
+            hasNextEpisode: _episodeIndex < _currentLine.episodes.length - 1,
+            onPrevEpisode: () => _stepEpisode(-1),
+            onNextEpisode: () => _stepEpisode(1),
+            moreControlsOpen: _windowsMoreControls,
+            sleepTimerActive: _sleepTimer.isActive,
+            sleepTimerLabel: _sleepTimer.shortStatusLabel,
+            danmuEnabled: widget.onToggleDanmu != null
+                ? widget.danmuEnabled
+                : (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled),
+            onDanmuToggle: OhosRuntime.isOhos ? null : _handleDanmuToggle,
+            onDanmuSettingsTap:
+                OhosRuntime.isOhos ? null : _handleDanmuSettingsTap,
+            anime4kVisible: _anime4kAvailable,
+            anime4kActive: _anime4kController.preset != Anime4kPreset.off,
+            anime4kLabel: _anime4kController.preset == Anime4kPreset.off
+                ? 'Anime4K'
+                : 'Anime4K·${_anime4kController.preset.labelZh}',
+            onAnime4kTap: _anime4kAvailable ? _showAnime4kSheet : null,
+            videoQualityVisible: false,
+            audioLoudnessVisible: false,
+            topHeader: _buildTopHeader(
+              darkContext,
+              true,
+              scale,
+              includeLockButton: false,
+              includeLiveFullscreen: false,
+            ),
+            lockButton: widget.embedded ? null : _buildDesktopLockButton(scale),
+            progressBar: _isLiveStream
+                ? null
+                : _buildDesktopFullWidthProgressBar(darkContext, scale),
+            transportButtons: _buildCenterTransportButtons(scale),
+            moreToolsDock: _buildDesktopMoreMenuPopover(darkContext, width),
+            onExit: _exitPlayer,
+            onPlayPause: _enginePlayOrPause,
+            onVolumeTap: _showWindowsVolume,
+            onEpisodesTap: _showEpisodesSheet,
+            onSpeedTap: _showSpeedSheet,
+            onSubtitlesTap: _showSubtitleTracksSheet,
+            onSleepTimerTap: _showSleepTimerSheet,
+            onToggleMore: () {
+              setState(() => _windowsMoreControls = !_windowsMoreControls);
+              if (_windowsMoreControls && !widget.embedded) {
+                _hideTimer?.cancel();
+              } else {
+                _scheduleHide();
+              }
+            },
+            onCloseMore: () {
+              if (!_windowsMoreControls) return;
+              setState(() => _windowsMoreControls = false);
+              _scheduleHide();
+            },
+            onToggleExpand: _toggleOrientation,
+          ),
+        ),
+      ),
     );
   }
 

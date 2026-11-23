@@ -461,7 +461,8 @@ jobs:
               test/subscription_format_contract_test.dart \
               test/macos_window_bounds_test.dart \
               test/macos_update_and_profile_test.dart \
-              test/live_snapshot_and_first_frame_test.dart 2>&1 | tee -a "$REPORT"
+              test/live_snapshot_and_first_frame_test.dart \
+              test/macos_desktop_ux_and_player_test.dart 2>&1 | tee -a "$REPORT"
           rm -rf "$VERIFY_DIR"
       - uses: actions/upload-artifact@v4
         with:
