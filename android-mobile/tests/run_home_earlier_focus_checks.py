@@ -4,9 +4,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HOME = 'android-mobile/src/main/java/com/pilipala/marcomovie/HomeScreen.java'
+OLD_HOME = 'android/src/main/java/com/pilipala/marcomovie/HomeScreen.java'
 JAVA = Path(os.environ['MARCOMOVIE_JDK']) / 'bin'
 SUFFIX = '.exe' if os.name == 'nt' else ''
-old = subprocess.check_output(['git','show','6a6db2aa35ce1091aa1272b03a0084a20f27068f:'+HOME], cwd=ROOT).decode('utf8')
+old = subprocess.check_output(['git','show','6a6db2aa35ce1091aa1272b03a0084a20f27068f:'+OLD_HOME], cwd=ROOT).decode('utf8')
 old_line = next(line.strip() for line in old.splitlines() if 'earlier.setVisibility(state.windowStart' in line)
 source = (ROOT/HOME).read_text(encoding='utf8')
 start = source.index('    void updateEarlier() {')

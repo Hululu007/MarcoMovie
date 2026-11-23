@@ -33,6 +33,11 @@ final class MobileHomePage {
 
     private MobileHomePage() {}
 
+    private static void commitLoadingSite(MainActivity a, String siteKey) {
+        if (a == null || a.prefs == null) return;
+        a.prefs.edit().putString(Prefs.LOADING_SITE, siteKey == null ? "" : siteKey).commit();
+    }
+
     static void render(final MobileRootShell shell, final FrameLayout container) {
         final MainActivity a = shell.a;
         int homeMode = a.mobilePrefs().getInt(Prefs.HOME_MODE, 0);
@@ -343,6 +348,7 @@ final class MobileHomePage {
                                     filterSchemaHolder[0], targetCatForDefs, currentVideos);
                     a.submitPage(
                             () -> {
+                                commitLoadingSite(a, site.key);
                                 try {
                                     SourceEngine eng = a.engine(site);
                                     final List<Cms.Category> parsedCats;
@@ -445,6 +451,8 @@ final class MobileHomePage {
                                                 statusView.setOnClickListener(
                                                         v -> fetchListing[0].run());
                                             });
+                                } finally {
+                                    a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
                                 }
                             });
                 };

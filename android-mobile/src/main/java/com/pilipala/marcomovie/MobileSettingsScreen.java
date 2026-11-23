@@ -496,7 +496,7 @@ final class MobileSettingsScreen {
                                 a.mobilePrefs()
                                         .edit()
                                         .putInt(Prefs.MOBILE_UI_SCALE_PERCENT, vals[idx])
-                                        .commit();
+                                        .apply();
                                 a.recreate();
                             });
                 });
@@ -1246,7 +1246,7 @@ final class MobileSettingsScreen {
                                 .setPositiveButton(
                                         "恢复默认",
                                         (d, w) -> {
-                                            a.mobilePrefs().edit().clear().commit();
+                                            a.mobilePrefs().edit().clear().apply();
                                             a.recreate();
                                         })
                                 .show());
