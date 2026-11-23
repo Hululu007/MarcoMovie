@@ -951,8 +951,13 @@ final class CloudSyncDialog {
                             a.closeEngines();
                             a.config = parsedConfig;
                             a.configOrigin = finalOrigin;
+                            String syncedSubId =
+                                    ConfigStore.subscriptionIdentity(finalOrigin, parsedConfig.raw);
                             SharedPreferences.Editor ed =
-                                    a.prefs.edit().putString(Prefs.ORIGIN, finalOrigin);
+                                    a.prefs
+                                            .edit()
+                                            .putString(Prefs.ORIGIN, finalOrigin)
+                                            .putString(Prefs.ACTIVE_SUBSCRIPTION_ID, syncedSubId);
                             if (!resolvedPickSite.isEmpty()) {
                                 ed.putString(Prefs.SELECTED_SITE, resolvedPickSite);
                             } else {
@@ -963,7 +968,12 @@ final class CloudSyncDialog {
                             a.closeEngines();
                             a.config = null;
                             a.configOrigin = "";
-                            a.prefs.edit().remove(Prefs.ORIGIN).remove(Prefs.SELECTED_SITE).apply();
+                            a.prefs
+                                    .edit()
+                                    .remove(Prefs.ORIGIN)
+                                    .remove(Prefs.SELECTED_SITE)
+                                    .remove(Prefs.ACTIVE_SUBSCRIPTION_ID)
+                                    .apply();
                         }
                     } catch (Throwable t) {
                         uiError.set(t);

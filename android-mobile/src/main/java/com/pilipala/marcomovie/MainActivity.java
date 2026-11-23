@@ -751,30 +751,135 @@ public final class MainActivity extends Activity {
                     MainActivity activity = activeActivity;
                     CrashReportStore.recordUncaughtCrash(activity, thread, error);
                     if (activity != null && activity.prefs != null) {
-                        // Only attribute a fatal uncaught exception to a site when a source load is
-                        // actively in flight OR the crash stack originates inside a loaded plugin
-                        // DEX. Unrelated UI exceptions (e.g. SettingsScreen) must NEVER blame the
-                        // user's healthy selected site.
-                        String loadingSite = activity.prefs.getString(Prefs.LOADING_SITE, "");
-                        boolean hasInFlightLoad =
-                                loadingSite != null && !loadingSite.trim().isEmpty();
+                        // Only attribute a fatal uncaught exception to a site when the crashing
+                        // thread itself owns an active source load, OR the crash stack originates
+                        // in a plugin DEX / source engine call chain. An unrelated UI exception
+                        // (e.g. SettingsScreen on the main thread) overlapping a healthy background
+                        // HTTP request must NEVER blame that healthy site.
                         String faultSite =
-                                hasInFlightLoad
-                                        ? loadingSite.trim()
-                                        : (hasDexClassLoaderFrame(error)
-                                                ? activity.prefs.getString(Prefs.SELECTED_SITE, "")
-                                                : "");
-                        if (faultSite != null && !faultSite.trim().isEmpty()) {
-                            String cleanFault = faultSite.trim();
-                            activity.prefs
-                                    .edit()
-                                    .putString(Prefs.LOADING_SITE, cleanFault)
-                                    .putString(Prefs.CONFIRMED_CRASH_SITE, cleanFault)
-                                    .commit();
+                                attributeUncaughtCrashSite(thread, error, activity.prefs);
+                        String staleLoading = activity.prefs.getString(Prefs.LOADING_SITE, "");
+                        boolean clearStaleLoading =
+                                faultSite.isEmpty()
+                                        && staleLoading != null
+                                        && !staleLoading.trim().isEmpty();
+                        if (!faultSite.isEmpty() || clearStaleLoading) {
+                            SharedPreferences.Editor ed =
+                                    activity.prefs
+                                            .edit()
+                                            .putString(
+                                                    Prefs.LOADING_SITE,
+                                                    clearStaleLoading ? "" : faultSite);
+                            if (!faultSite.isEmpty()) {
+                                ed.putString(Prefs.CONFIRMED_CRASH_SITE, faultSite);
+                            }
+                            ed.commit();
                         }
                     }
                     if (previous != null) previous.uncaughtException(thread, error);
                 });
+    }
+
+    private static final class ActiveSourceLoad {
+        final long token;
+        final String siteKey;
+
+        ActiveSourceLoad(long token, String siteKey) {
+            this.token = token;
+            this.siteKey = siteKey;
+        }
+    }
+
+    private static final java.util.concurrent.ConcurrentHashMap<Long, ActiveSourceLoad>
+            ACTIVE_SOURCE_LOAD_THREADS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    static void registerActiveSourceLoadThread(Thread thread, long token, String siteKey) {
+        if (thread == null) return;
+        String clean = siteKey == null ? "" : siteKey.trim();
+        if (clean.isEmpty()) {
+            ACTIVE_SOURCE_LOAD_THREADS.remove(thread.getId());
+        } else {
+            ACTIVE_SOURCE_LOAD_THREADS.put(thread.getId(), new ActiveSourceLoad(token, clean));
+        }
+    }
+
+    static void unregisterActiveSourceLoadThread(Thread thread, long token) {
+        if (thread == null) return;
+        ActiveSourceLoad cur = ACTIVE_SOURCE_LOAD_THREADS.get(thread.getId());
+        if (cur != null && (token <= 0L || cur.token == token)) {
+            ACTIVE_SOURCE_LOAD_THREADS.remove(thread.getId(), cur);
+        }
+    }
+
+    static String activeSourceLoadSiteForThread(Thread thread) {
+        if (thread == null) return "";
+        ActiveSourceLoad cur = ACTIVE_SOURCE_LOAD_THREADS.get(thread.getId());
+        return cur == null ? "" : cur.siteKey;
+    }
+
+    private static boolean isSourceEngineClassName(String cls) {
+        if (cls == null || cls.isEmpty()) return false;
+        if (cls.startsWith("com.github.catvod.")
+                || cls.startsWith("com.fongmi.")
+                || cls.startsWith("com.whl.quickjs.")
+                || cls.startsWith("app.cash.quickjs.")) {
+            return true;
+        }
+        final String pkg = "com.pilipala.marcomovie.";
+        if (!cls.startsWith(pkg)) return false;
+        String simple = cls.substring(pkg.length());
+        int dollar = simple.indexOf('$');
+        if (dollar >= 0) simple = simple.substring(0, dollar);
+        return "CspEngine".equals(simple)
+                || "JsEngine".equals(simple)
+                || "WebViewJsEngine".equals(simple)
+                || "DrpyEngine".equals(simple)
+                || "NativePythonEngine".equals(simple)
+                || "HttpT4Engine".equals(simple)
+                || "JsonCmsEngine".equals(simple)
+                || "CatPawEngine".equals(simple)
+                || "AlistEngine".equals(simple)
+                || "EmbyEngine".equals(simple)
+                || "GuardEngine".equals(simple)
+                || "QueuedSourceEngine".equals(simple)
+                || "SourceEngine".equals(simple)
+                || "QuickJsDeadline".equals(simple)
+                || "SpiderGatewayServer".equals(simple)
+                || "LocalSourcePackage".equals(simple)
+                || "Cms".equals(simple);
+    }
+
+    static boolean hasSourceEngineStackFrame(Throwable error) {
+        if (error == null) return false;
+        int depth = 0;
+        for (Throwable t = error; t != null && depth < 12; t = t.getCause(), depth++) {
+            for (StackTraceElement e : t.getStackTrace()) {
+                if (e != null && isSourceEngineClassName(e.getClassName())) {
+                    return true;
+                }
+            }
+            if (t.getCause() == t) break;
+        }
+        return false;
+    }
+
+    static String attributeUncaughtCrashSite(
+            Thread thread, Throwable error, SharedPreferences prefs) {
+        if (prefs == null) return "";
+        String loadingSite = prefs.getString(Prefs.LOADING_SITE, "");
+        String cleanLoading = loadingSite == null ? "" : loadingSite.trim();
+        String threadSite = activeSourceLoadSiteForThread(thread);
+        if (!threadSite.isEmpty() && threadSite.equals(cleanLoading)) {
+            return threadSite;
+        }
+        String selectedSite = prefs.getString(Prefs.SELECTED_SITE, "");
+        String cleanSelected = selectedSite == null ? "" : selectedSite.trim();
+        if (ListingRoute.hasPluginFrame(error)
+                || hasDexClassLoaderFrame(error)
+                || hasSourceEngineStackFrame(error)) {
+            return !cleanLoading.isEmpty() ? cleanLoading : cleanSelected;
+        }
+        return "";
     }
 
     static boolean hasDexClassLoaderFrame(Throwable error) {
@@ -1058,6 +1163,10 @@ public final class MainActivity extends Activity {
         final int priorExitStatus = priorExitInfo[1];
         final String pendingLoadingSite = prefs.getString(Prefs.LOADING_SITE, "");
         final String confirmedCrashSite = prefs.getString(Prefs.CONFIRMED_CRASH_SITE, "");
+        final String priorCrashSiteKey =
+                confirmedCrashSite != null && !confirmedCrashSite.trim().isEmpty()
+                        ? confirmedCrashSite.trim()
+                        : (pendingLoadingSite != null ? pendingLoadingSite.trim() : "");
         final boolean priorLoadingCrash =
                 shouldTreatLoadingSiteAsCrash(
                         pendingLoadingSite, confirmedCrashSite, priorExitReason, priorExitStatus);
@@ -1122,22 +1231,34 @@ public final class MainActivity extends Activity {
                     configStore.loadRecoveredState(prefOrigin, prefSelected, prefSubId);
             if (recovered != null && recovered.raw != null && !recovered.raw.isEmpty()) {
                 configOrigin = recovered.origin == null ? "" : recovered.origin;
-                boolean needHealBundlePointers =
+                // Keep crash-recovery decisions intact across snapshot healing: once a confirmed
+                // faulty site has been cleared on boot, never let config-state.json re-select that
+                // same faulty site back into Prefs.SELECTED_SITE.
+                boolean suppressCrashedSelectedHeal =
+                        bootGuardResetSite
+                                || (priorLoadingCrash
+                                        && !priorCrashSiteKey.isEmpty()
+                                        && priorCrashSiteKey.equals(recovered.selectedSite));
+                boolean needHealOrigin =
+                        recovered.fromAtomicBundle && !Objects.equals(recovered.origin, prefOrigin);
+                boolean needHealSelected =
                         recovered.fromAtomicBundle
-                                && (!Objects.equals(recovered.origin, prefOrigin)
-                                        || !Objects.equals(recovered.selectedSite, prefSelected));
+                                && !suppressCrashedSelectedHeal
+                                && !Objects.equals(recovered.selectedSite, prefSelected);
                 boolean needHealSubId =
                         recovered.subscriptionId != null
                                 && !recovered.subscriptionId.isEmpty()
                                 && !Objects.equals(recovered.subscriptionId, prefSubId);
-                if (needHealBundlePointers || needHealSubId) {
+                if (needHealOrigin || needHealSelected || needHealSubId) {
                     SharedPreferences.Editor heal = prefs.edit();
-                    if (needHealBundlePointers) {
+                    if (needHealOrigin) {
                         if (recovered.origin != null) {
                             heal.putString(Prefs.ORIGIN, recovered.origin);
                         } else {
                             heal.remove(Prefs.ORIGIN);
                         }
+                    }
+                    if (needHealSelected) {
                         if (recovered.selectedSite != null) {
                             heal.putString(Prefs.SELECTED_SITE, recovered.selectedSite);
                         } else {

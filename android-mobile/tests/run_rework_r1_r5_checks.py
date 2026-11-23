@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ MOBILE_SRC = ROOT / "android-mobile/src/main/java/com/pilipala/marcomovie"
 JDK = resolve_jdk_bin()
 JAVA = str(JDK / ("java" + SUFFIX))
 JAVAC = str(JDK / ("javac" + SUFFIX))
+JAVAP = str(JDK / ("javap" + SUFFIX))
 
 
 def run_r3_buffered_stop_harness(classes_dir: Path, work_dir: Path, base_cp: list[Path]) -> None:
@@ -849,23 +851,18 @@ public final class R4ReconnectRound3Check {
         // Actually our stubbed RequestScope.submit calls pool.execute(task), so let's capture in RequestScope!
     }
 
-    private static Method findPlayerPageLambda(Class<?> retType, Class<?>... tailParams) {
+    private static Method findRegisteredLambda(String propName) {
+        String exactName = System.getProperty(propName, "").trim();
+        if (exactName.isEmpty()) {
+            throw new AssertionError("Missing required listener system property: " + propName);
+        }
         for (Method m : PlaybackController.class.getDeclaredMethods()) {
-            Class<?>[] ts = m.getParameterTypes();
-            if (!m.isSynthetic() || !m.getName().startsWith("lambda$playerPage$") || m.getReturnType() != retType) {
-                continue;
-            }
-            if (ts.length < tailParams.length) continue;
-            boolean ok = true;
-            for (int i = 0; i < tailParams.length; i++) {
-                if (ts[ts.length - tailParams.length + i] != tailParams[i]) { ok = false; break; }
-            }
-            if (ok) {
+            if (exactName.equals(m.getName())) {
                 m.setAccessible(true);
                 return m;
             }
         }
-        throw new AssertionError("Missing expected playerPage lambda");
+        throw new AssertionError("Registered listener lambda not found: " + exactName);
     }
 
     private static Object[] buildArgs(
@@ -890,6 +887,39 @@ public final class R4ReconnectRound3Check {
         return values;
     }
 
+    private static void runActivePositiveReconnect(boolean isEof) throws Exception {
+        String kind = isEof ? "EOF-450ms" : "IO-500ms";
+        long expectedDelay = isEof ? 450L : 500L;
+        MainActivity a = new MainActivity();
+        Cms.Episode epA = new Cms.Episode(); epA.name = "A"; epA.url = "id-A";
+        Cms.Video video = new Cms.Video(); video.id = "v1"; video.title = "Film";
+        Cms.Site site = new Cms.Site(); site.type = 3; site.key = "fixture";
+        Cms.Line line = new Cms.Line(); line.name = "L1"; line.episodes.add(epA);
+        a.activeLine = line;
+        a.activeEpisode = epA;
+        MoviePlayer player = a.player = new MoviePlayer();
+        RequestScopeCapture.reset();
+
+        Method listener = findRegisteredLambda(isEof ? "r4.completion.listener" : "r4.error.listener");
+        listener.invoke(null, buildArgs(listener, a, player, site, video, epA, isEof ? 0 : 2001, 0, !isEof));
+        check(
+                a.ui.delayed.size() == 1 && a.ui.delayedMs.get(0) == expectedDelay,
+                "R4 Round-4 Positive(" + kind + "): active A queued " + expectedDelay + "ms reconnect via registered listener");
+        a.ui.delayed.get(0).run();
+        check(
+                RequestScopeCapture.tasks.size() == 1 && a.activeEpisode == epA,
+                "R4 Round-4 Positive(" + kind + "): active A executed reconnect and requested A resolver");
+        RequestScopeCapture.tasks.get(0).run();
+        check(!a.ui.immediate.isEmpty(), "R4 Round-4 Positive(" + kind + "): A resolver posted UI openPlayer");
+        a.ui.immediate.get(0).run();
+        check(
+                a.openPlayerCount.get() == 1
+                        && a.activeEpisode == epA
+                        && a.openedEpisode != null
+                        && "https://fixture.invalid/id-A.mp4".equals(a.openedEpisode.url),
+                "R4 Round-4 Positive(" + kind + "): active A reconnected and opened id-A.mp4 once");
+    }
+
     private static void runIoReconnectScenario(boolean aRunsBeforeBResolves) throws Exception {
         String tag = aRunsBeforeBResolves ? "Order1(A-retry-before-B)" : "Order2(B-opens-before-A-retry)";
         MainActivity a = new MainActivity();
@@ -902,7 +932,7 @@ public final class R4ReconnectRound3Check {
         a.activeEpisode = epA;
         MoviePlayer player = a.player = new MoviePlayer();
 
-        Method onError = findPlayerPageLambda(boolean.class, MoviePlayer.class, int.class, int.class);
+        Method onError = findRegisteredLambda("r4.error.listener");
         onError.invoke(null, buildArgs(onError, a, player, site, video, epA, 2001, 0, true));
         check(a.ui.delayed.size() == 1 && a.ui.delayedMs.get(0) == 500L, "R4 Round-3 " + tag + ": A queued 500ms IO retry");
         Runnable staleARetry = a.ui.delayed.get(0);
@@ -953,7 +983,8 @@ public final class R4ReconnectRound3Check {
                 "R4 Round-3 " + tag + ": URL, activeEpisode, and history/resume ALL point to B, and B started exactly once");
     }
 
-    private static void runEofReconnectScenario() throws Exception {
+    private static void runEofReconnectScenario(boolean aRunsBeforeBResolves) throws Exception {
+        String tag = aRunsBeforeBResolves ? "EOF-Order1(A-before-B)" : "EOF-Order2(B-before-A)";
         MainActivity a = new MainActivity();
         Cms.Episode epA = new Cms.Episode(); epA.name = "A"; epA.url = "id-A";
         Cms.Episode epB = new Cms.Episode(); epB.name = "B"; epB.url = "id-B";
@@ -964,23 +995,42 @@ public final class R4ReconnectRound3Check {
         a.activeEpisode = epA;
         MoviePlayer player = a.player = new MoviePlayer();
 
-        Method onCompletion = findPlayerPageLambda(void.class, MoviePlayer.class);
+        Method onCompletion = findRegisteredLambda("r4.completion.listener");
         onCompletion.invoke(null, buildArgs(onCompletion, a, player, site, video, epA, 0, 0, false));
-        check(a.ui.delayed.size() == 1 && a.ui.delayedMs.get(0) == 450L, "R4 Round-3 EOF: A queued 450ms EOF reconnect");
+        check(a.ui.delayed.size() == 1 && a.ui.delayedMs.get(0) == 450L, "R4 Round-4 " + tag + ": A queued 450ms EOF reconnect");
         Runnable staleEof = a.ui.delayed.get(0);
 
         RequestScopeCapture.reset();
         PlaybackController.changeEpisode(a, site, video, line, epB, 5000);
-        staleEof.run();
+        if (aRunsBeforeBResolves) {
+            staleEof.run();
+            check(
+                    a.activeEpisode == epB && RequestScopeCapture.tasks.size() == 1,
+                    "R4 Round-4 " + tag + ": expired A 450ms EOF reconnect rejected while B pending");
+            RequestScopeCapture.tasks.get(0).run();
+            a.ui.immediate.get(0).run();
+        } else {
+            RequestScopeCapture.tasks.get(0).run();
+            a.ui.immediate.get(0).run();
+            staleEof.run();
+        }
         check(
-                a.activeEpisode == epB && RequestScopeCapture.tasks.size() == 1,
-                "R4 Round-3 EOF: expired A 450ms EOF reconnect rejected after switch to B");
+                a.openPlayerCount.get() == 1
+                        && a.activeEpisode == epB
+                        && a.openedEpisode != null
+                        && "https://fixture.invalid/id-B.mp4".equals(a.openedEpisode.url)
+                        && a.recordedHistoryEpisodes.size() == 1
+                        && "B".equals(a.recordedHistoryEpisodes.get(0)),
+                "R4 Round-4 " + tag + ": URL, activeEpisode, and history/resume ALL point to B, and B started once");
     }
 
     public static void main(String[] args) throws Exception {
+        runActivePositiveReconnect(false);
+        runActivePositiveReconnect(true);
         runIoReconnectScenario(true);
         runIoReconnectScenario(false);
-        runEofReconnectScenario();
+        runEofReconnectScenario(true);
+        runEofReconnectScenario(false);
     }
 }
 """,
@@ -1009,13 +1059,101 @@ final class RequestScope {
         p.write_text(content, encoding="utf-8")
         src_files.append(str(p))
 
+    def resolve_registered_player_listener(setter_name: str, required_body_call: str | None = None) -> str:
+        """Inspect PlaybackController bytecode BootstrapMethods to bind the EXACT lambda passed to MoviePlayer.<setter_name>."""
+        listing = subprocess.check_output(
+            [
+                JAVAP,
+                "-J-Duser.language=en",
+                "-v",
+                "-p",
+                "-c",
+                "-classpath",
+                str(base_cp[0]),
+                "com.pilipala.marcomovie.PlaybackController",
+            ],
+            encoding="utf-8",
+            errors="replace",
+        )
+        lines = listing.splitlines()
+        bsm_targets: dict[int, str] = {}
+        in_bsm = False
+        cur_bsm: int | None = None
+        for line in lines:
+            if line.strip() == "BootstrapMethods:":
+                in_bsm = True
+                continue
+            if in_bsm:
+                m_idx = re.match(r"^\s+(\d+):\s+#\d+\s+REF_invokeStatic", line)
+                if m_idx:
+                    cur_bsm = int(m_idx.group(1))
+                    continue
+                if cur_bsm is not None:
+                    m_ref = re.search(
+                        r"REF_invokeStatic\s+com/pilipala/marcomovie/PlaybackController\.([^:\s]+):",
+                        line,
+                    )
+                    if m_ref:
+                        bsm_targets[cur_bsm] = m_ref.group(1)
+        matched_lambdas: list[str] = []
+        for i, line in enumerate(lines):
+            if f"Method com/pilipala/marcomovie/MoviePlayer.{setter_name}:" in line:
+                for back in range(1, 4):
+                    if i - back >= 0:
+                        m_ind = re.search(r"invokedynamic\s+#\d+,\s*0\s*//\s*InvokeDynamic\s+#(\d+):", lines[i - back])
+                        if m_ind:
+                            target = bsm_targets.get(int(m_ind.group(1)))
+                            if target:
+                                matched_lambdas.append(target)
+                            break
+        if len(matched_lambdas) != 1:
+            raise AssertionError(
+                f"Expected exactly 1 registered {setter_name} lambda in PlaybackController, got {matched_lambdas}"
+            )
+        chosen = matched_lambdas[0]
+        if required_body_call:
+            in_chosen = False
+            saw_call = False
+            for line in lines:
+                if f" {chosen}(" in line and not line.startswith("        "):
+                    in_chosen = True
+                    continue
+                if in_chosen:
+                    if line.startswith("  private static ") or line.startswith("  static ") or line.startswith("  public "):
+                        break
+                    if required_body_call in line:
+                        saw_call = True
+                        break
+            if not saw_call:
+                raise AssertionError(
+                    f"Resolved {setter_name} lambda {chosen} did not call expected {required_body_call}"
+                )
+        return chosen
+
+    completion_lambda = resolve_registered_player_listener(
+        "setOnCompletionListener", "MoviePlayer.isPrematureProgressiveEnd:"
+    )
+    error_lambda = resolve_registered_player_listener("setOnErrorListener")
+    print(
+        f"PASS R4 Round-4 bytecode binding: completion={completion_lambda}, error={error_lambda}",
+        flush=True,
+    )
+
     cp = os.pathsep.join(str(p) for p in [r4r_classes, *base_cp])
     subprocess.run(
         [JAVAC, "-encoding", "UTF-8", "-cp", cp, "-d", str(r4r_classes), *src_files],
         check=True,
     )
     subprocess.run(
-        [JAVA, "-Dfile.encoding=UTF-8", "-cp", cp, "com.pilipala.marcomovie.R4ReconnectRound3Check"],
+        [
+            JAVA,
+            "-Dfile.encoding=UTF-8",
+            f"-Dr4.completion.listener={completion_lambda}",
+            f"-Dr4.error.listener={error_lambda}",
+            "-cp",
+            cp,
+            "com.pilipala.marcomovie.R4ReconnectRound3Check",
+        ],
         cwd=ROOT,
         check=True,
         timeout=40,

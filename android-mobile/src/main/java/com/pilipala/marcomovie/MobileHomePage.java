@@ -47,6 +47,7 @@ final class MobileHomePage {
         private final Object lock = new Object();
         private long activeToken = 0L;
         private String activeSite = "";
+        private Thread activeThread = null;
 
         long acquire(LoadingMarkerStore store, String siteKey) {
             String clean = siteKey == null ? "" : siteKey;
@@ -54,6 +55,8 @@ final class MobileHomePage {
                 long token = seq.incrementAndGet();
                 activeToken = token;
                 activeSite = clean;
+                activeThread = Thread.currentThread();
+                MainActivity.registerActiveSourceLoadThread(activeThread, token, clean);
                 if (store != null) {
                     store.writeMarker(clean);
                 }
@@ -62,12 +65,15 @@ final class MobileHomePage {
         }
 
         boolean releaseIfOwner(LoadingMarkerStore store, long token) {
+            MainActivity.unregisterActiveSourceLoadThread(Thread.currentThread(), token);
             synchronized (lock) {
                 if (token <= 0L || activeToken != token) {
                     return false;
                 }
+                MainActivity.unregisterActiveSourceLoadThread(activeThread, token);
                 activeToken = 0L;
                 activeSite = "";
+                activeThread = null;
                 if (store != null) {
                     store.writeMarker("");
                 }
@@ -77,8 +83,10 @@ final class MobileHomePage {
 
         void clearOnNormalStop(LoadingMarkerStore store) {
             synchronized (lock) {
+                MainActivity.unregisterActiveSourceLoadThread(activeThread, activeToken);
                 activeToken = 0L;
                 activeSite = "";
+                activeThread = null;
                 if (store != null) {
                     store.writeMarker("");
                 }

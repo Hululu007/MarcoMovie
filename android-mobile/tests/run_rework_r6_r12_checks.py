@@ -634,6 +634,7 @@ public class MainActivity extends android.app.Activity {
     void closeEngines() {}
     void home() {}
     void restore(Screen s) {}
+    boolean available(Cms.Site site) { return true; }
     String message(Throwable e) { return e == null ? "" : String.valueOf(e.getMessage()); }
     @Override public ContentResolver getContentResolver() { return resolver; }
     @Override public File getFilesDir() {
@@ -951,6 +952,240 @@ public final class R9SameNameImportCheck {
                     "R9 Round-3 distinct URI: dirB/source.py stays isolated from dirA/source.py (2 independent sites)");
         } finally {
             exec3.shutdownNow();
+        }
+
+        // -----------------------------------------------------------------
+        // 4. Round-4 R9: Upgrading from 0.6.0 flat local_spiders/source.py + PREFERRED_SITE
+        //    MUST migrate 1 -> 1 to doc-scoped key, keep PREFERRED_SITE active, and resolve
+        //    revision-two after cold restart + SourcePreferences.restoreDefault!
+        //    Meanwhile an ambiguous non-flat legacy hashed script (no SAF URI) MUST NOT be
+        //    silently merged by filename.
+        // -----------------------------------------------------------------
+        File root4 = Files.createTempDirectory("r9-r4-legacy-upgrade-").toFile();
+        ExecutorService exec4 = Executors.newSingleThreadExecutor();
+        try {
+            ContentResolver cr4 = new ContentResolver();
+            Uri sameUri = Uri.parse("content://docs/dirA/source.py");
+            Uri otherUri = Uri.parse("content://docs/dirB/source.py");
+            cr4.names.put(sameUri.toString(), "source.py");
+            cr4.names.put(otherUri.toString(), "source.py");
+
+            MainActivity host4 = newHost(root4, exec4, cr4);
+            // Seed authentic 0.6.0 flat local_spiders/source.py + legacy config.json (no bundle)
+            File legacySpidersDir = new File(root4, "local_spiders");
+            legacySpidersDir.mkdirs();
+            File legacyFlatFile = new File(legacySpidersDir, "source.py");
+            String rev1Body = "# revision-one\\nclass Spider:\\n    def homeContent(self, f): return {}\\n";
+            Files.write(legacyFlatFile.toPath(), rev1Body.getBytes(StandardCharsets.UTF_8));
+            String legacyFlatUri = Cms.fileUri(legacyFlatFile);
+            Cms.Config legacyCfg = Cms.parseConfig(rev1Body, legacyFlatUri);
+            String legacyKey = legacyCfg.sites.get(0).key;
+            host4.configStore.write(legacyCfg.raw);
+            host4.prefs
+                    .edit()
+                    .putString(Prefs.ORIGIN, "")
+                    .putString(Prefs.SELECTED_SITE, legacyKey)
+                    .putString(Prefs.PREFERRED_SITE, SourcePreferences.identity(legacyCfg.sites.get(0)))
+                    .apply();
+            // Simulate cold boot into 0.7.0 before re-importing
+            ConfigStore.RecoveredState preUpgrade =
+                    host4.configStore.loadRecoveredState(
+                            host4.prefs.getString(Prefs.ORIGIN, null),
+                            host4.prefs.getString(Prefs.SELECTED_SITE, null),
+                            host4.prefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, null));
+            host4.config = Cms.parseConfig(preUpgrade.raw, preUpgrade.origin);
+            host4.configOrigin = preUpgrade.origin == null ? "" : preUpgrade.origin;
+            host4.prefs.edit().putString(Prefs.ACTIVE_SUBSCRIPTION_ID, preUpgrade.subscriptionId).apply();
+            SourcePreferences.restoreDefault(host4);
+
+            // Re-import same SAF URI with revision-two on 0.7.0!
+            cr4.bodies.put(
+                    sameUri.toString(),
+                    "# revision-two\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+            SourceController.importLocalUri(host4, sameUri, false);
+            exec4.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            drainUntil(
+                    host4,
+                    () ->
+                            host4.config != null
+                                    && host4.config.sites.size() == 1
+                                    && host4.config.sites.get(0).key.startsWith("py_doc_"));
+            ConfigStore.WRITE_EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            host4.ui.drain();
+
+            // Cold restart + SourcePreferences.restoreDefault MUST keep sites=1, preferred=true, revision-two!
+            MainActivity coldHost4 = newHost(root4, exec4, cr4);
+            for (String k :
+                    new String[] {
+                        Prefs.ORIGIN,
+                        Prefs.SELECTED_SITE,
+                        Prefs.PREFERRED_SITE,
+                        Prefs.ACTIVE_SUBSCRIPTION_ID
+                    }) {
+                if (host4.prefs.contains(k)) {
+                    coldHost4.prefs.edit().putString(k, host4.prefs.getString(k, "")).apply();
+                }
+            }
+            ConfigStore.RecoveredState postUpgrade =
+                    coldHost4.configStore.loadRecoveredState(
+                            coldHost4.prefs.getString(Prefs.ORIGIN, null),
+                            coldHost4.prefs.getString(Prefs.SELECTED_SITE, null),
+                            coldHost4.prefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, null));
+            coldHost4.config = Cms.parseConfig(postUpgrade.raw, postUpgrade.origin);
+            coldHost4.configOrigin = postUpgrade.origin == null ? "" : postUpgrade.origin;
+            if (postUpgrade.selectedSite != null) {
+                coldHost4.prefs.edit().putString(Prefs.SELECTED_SITE, postUpgrade.selectedSite).apply();
+            }
+            SourcePreferences.restoreDefault(coldHost4);
+            check(
+                    coldHost4.config.sites.size() == 1
+                            && coldHost4.config.sites.get(0).key.startsWith("py_doc_")
+                            && coldHost4.config.sites
+                                    .get(0)
+                                    .key
+                                    .equals(coldHost4.prefs.getString(Prefs.SELECTED_SITE, ""))
+                            && SourcePreferences.isPreferred(coldHost4, coldHost4.config.sites.get(0))
+                            && readApiFile(coldHost4.config.sites.get(0).api)
+                                    .startsWith("# revision-two"),
+                    "R9 Round-4 0.6.0 upgrade: migrates flat local_spiders/source.py 1->1, keeps preferred=true & revision-two after cold restart");
+
+            // Ambiguous non-flat legacy hashed script (no SAF URI) MUST NOT silently merge by filename!
+            File rootAmb = Files.createTempDirectory("r9-r4-ambiguous-legacy-").toFile();
+            MainActivity hostAmb = newHost(rootAmb, exec4, cr4);
+            File ambBucket = new File(new File(rootAmb, "local_spiders"), "deadbeef12345678");
+            ambBucket.mkdirs();
+            File ambFile = new File(ambBucket, "source.py");
+            String ambBody = "# ambiguous-old\\nclass Spider:\\n    def homeContent(self, f): return {}\\n";
+            Files.write(ambFile.toPath(), ambBody.getBytes(StandardCharsets.UTF_8));
+            Cms.Config ambCfg = Cms.parseConfig(ambBody, Cms.fileUri(ambFile));
+            hostAmb.configStore.write(ambCfg.raw);
+            hostAmb.config = ambCfg;
+            hostAmb.configOrigin = "";
+            cr4.bodies.put(
+                    otherUri.toString(),
+                    "# distinct-new\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+            SourceController.importLocalUri(hostAmb, otherUri, false);
+            exec4.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            drainUntil(hostAmb, () -> hostAmb.config != null && hostAmb.config.sites.size() == 2);
+            check(
+                    hostAmb.config.sites.size() == 2
+                            && readApiFile(hostAmb.config.sites.get(0).api).startsWith("# ambiguous-old")
+                            && readApiFile(hostAmb.config.sites.get(1).api).startsWith("# distinct-new"),
+                    "R9 Round-4 ambiguity guard: non-flat legacy script without SAF URI is never silently merged by filename");
+        } finally {
+            exec4.shutdownNow();
+        }
+
+        // -----------------------------------------------------------------
+        // 5. Round-4 R2: CloudSync subscription activation & removal MUST keep
+        //    Prefs.ACTIVE_SUBSCRIPTION_ID aligned so manual site switch ("second")
+        //    persists across cold restart for both tombstoned HTTP A -> HTTP B and
+        //    fresh-device empty-origin local B!
+        // -----------------------------------------------------------------
+        for (int mode = 0; mode < 2; mode++) {
+            boolean hasOld = (mode == 0);
+            File syncRoot = Files.createTempDirectory("r2-r4-cloudsync-" + mode + "-").toFile();
+            ExecutorService syncExec = Executors.newSingleThreadExecutor();
+            try {
+                MainActivity syncHost = newHost(syncRoot, syncExec, new ContentResolver());
+                syncHost.prefs.edit().putBoolean(Prefs.WEBDAV_SYNC_SUBS, false).apply();
+                String originA = "https://catalog.invalid/A/config.json";
+                String originB = "https://catalog.invalid/B/config.json";
+                String rawA =
+                        "{\\\"sites\\\":[{\\\"key\\\":\\\"first\\\",\\\"name\\\":\\\"A first\\\",\\\"type\\\":1,\\\"api\\\":\\\"./first\\\"},{\\\"key\\\":\\\"second\\\",\\\"name\\\":\\\"A second\\\",\\\"type\\\":1,\\\"api\\\":\\\"./second\\\"}]}";
+                String rawB =
+                        "{\\\"sites\\\":[{\\\"key\\\":\\\"first\\\",\\\"name\\\":\\\"B first\\\",\\\"type\\\":1,\\\"api\\\":\\\"./first\\\"},{\\\"key\\\":\\\"second\\\",\\\"name\\\":\\\"B second\\\",\\\"type\\\":1,\\\"api\\\":\\\"./second\\\"}]}";
+                String tombsJson = "{}";
+                if (hasOld) {
+                    SourceController.saveConfig(syncHost, Cms.parseConfig(rawA, originA), originA);
+                    ConfigStore.WRITE_EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
+                    syncHost.ui.drain();
+                    String oldId = syncHost.prefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, "");
+                    tombsJson =
+                            new org.json.JSONObject()
+                                    .put("sub:" + oldId, System.currentTimeMillis() + 10000L)
+                                    .toString();
+                }
+                CloudSync.SubscriptionItem itemB = new CloudSync.SubscriptionItem();
+                itemB.rawContent = rawB;
+                itemB.url = hasOld ? originB : "";
+                itemB.name = "B";
+                itemB.selectedSiteKey = "first";
+                itemB.updatedAt = System.currentTimeMillis();
+                java.lang.reflect.Method applyMerged =
+                        CloudSyncDialog.class.getDeclaredMethod(
+                                "applyMergedSubscriptions",
+                                MainActivity.class,
+                                java.util.List.class,
+                                String.class);
+                applyMerged.setAccessible(true);
+                final String finalTombs = tombsJson;
+                java.util.concurrent.Future<?> syncFuture =
+                        syncExec.submit(
+                                () ->
+                                        applyMerged.invoke(
+                                                null,
+                                                syncHost,
+                                                java.util.Collections.singletonList(itemB),
+                                                finalTombs));
+                long syncDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                while (!syncFuture.isDone() && System.nanoTime() < syncDeadline) {
+                    syncHost.ui.drain();
+                    Thread.sleep(10);
+                }
+                check(
+                        Boolean.TRUE.equals(syncFuture.get(5, TimeUnit.SECONDS)),
+                        "R2 Round-4 CloudSync(" + (hasOld ? "tombstone-HTTP" : "fresh-local") + "): activation succeeded");
+                String expectedId = ConfigStore.subscriptionIdentity(syncHost.configOrigin, syncHost.config.raw);
+                check(
+                        expectedId.equals(syncHost.prefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, "")),
+                        "R2 Round-4 CloudSync(" + (hasOld ? "tombstone-HTTP" : "fresh-local") + "): ACTIVE_SUBSCRIPTION_ID updated to active B");
+                // Manual site switch to "second" via real SourcePicker crash-guard helper
+                java.lang.reflect.Method pickSite =
+                        SourcePicker.class.getDeclaredMethod(
+                                "commitSelectedSiteForCrashGuard", MainActivity.class, String.class);
+                pickSite.setAccessible(true);
+                pickSite.invoke(null, syncHost, "second");
+                ConfigStore.RecoveredState coldSync =
+                        new ConfigStore(new File(syncRoot, "cfg"))
+                                .loadRecoveredState(
+                                        syncHost.prefs.getString(Prefs.ORIGIN, null),
+                                        syncHost.prefs.getString(Prefs.SELECTED_SITE, null),
+                                        syncHost.prefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, null));
+                check(
+                        "second".equals(coldSync.selectedSite)
+                                && expectedId.equals(coldSync.subscriptionId),
+                        "R2 Round-4 CloudSync(" + (hasOld ? "tombstone-HTTP" : "fresh-local") + "): cold restart preserves manual switch 'second'");
+
+                // Deleting active subscription clears ACTIVE_SUBSCRIPTION_ID too!
+                if (hasOld) {
+                    String clearTombs =
+                            new org.json.JSONObject()
+                                    .put("sub:" + expectedId, System.currentTimeMillis() + 20000L)
+                                    .toString();
+                    java.util.concurrent.Future<?> clearFuture =
+                            syncExec.submit(
+                                    () ->
+                                            applyMerged.invoke(
+                                                    null,
+                                                    syncHost,
+                                                    java.util.Collections.emptyList(),
+                                                    clearTombs));
+                    long clearDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (!clearFuture.isDone() && System.nanoTime() < clearDeadline) {
+                        syncHost.ui.drain();
+                        Thread.sleep(10);
+                    }
+                    clearFuture.get(5, TimeUnit.SECONDS);
+                    check(
+                            !syncHost.prefs.contains(Prefs.ACTIVE_SUBSCRIPTION_ID)
+                                    && !syncHost.prefs.contains(Prefs.ORIGIN)
+                                    && !syncHost.prefs.contains(Prefs.SELECTED_SITE),
+                            "R2 Round-4 CloudSync: deleting last active subscription clears ORIGIN, SELECTED_SITE, and ACTIVE_SUBSCRIPTION_ID");
+                }
+            } finally {
+                syncExec.shutdownNow();
+            }
         }
     }
 }

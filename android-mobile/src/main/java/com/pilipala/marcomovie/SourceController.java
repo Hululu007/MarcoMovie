@@ -2223,6 +2223,16 @@ final class SourceController {
 
     static void mergeOrSaveConfig(MainActivity a, Cms.Config incoming, String origin, boolean merge)
             throws Exception {
+        mergeOrSaveConfig(a, incoming, origin, merge, null);
+    }
+
+    static void mergeOrSaveConfig(
+            MainActivity a,
+            Cms.Config incoming,
+            String origin,
+            boolean merge,
+            String replaceLegacyKey)
+            throws Exception {
         if (!merge || a.config == null || a.config.sites.isEmpty()) {
             saveConfig(a, incoming, origin);
             return;
@@ -2241,16 +2251,23 @@ final class SourceController {
         }
         String preferredPref = a.prefs != null ? a.prefs.getString(Prefs.PREFERRED_SITE, "") : "";
         String updatedPreferredPref = null;
+        String cleanLegacyKey =
+                replaceLegacyKey == null || replaceLegacyKey.trim().isEmpty()
+                        ? null
+                        : replaceLegacyKey.trim();
         for (Cms.Site ns : incoming.sites) {
             boolean isDocScoped =
                     ns.key != null
                             && (ns.key.startsWith("py_doc_") || ns.key.startsWith("js_doc_"));
             for (int i = sitesArr.length() - 1; i >= 0; i--) {
                 org.json.JSONObject existing = sitesArr.optJSONObject(i);
-                if (existing != null
-                        && (ns.key.equals(existing.optString("key"))
-                                || (!isDocScoped && ns.api.equals(existing.optString("api"))))) {
-                    sitesArr.remove(i);
+                if (existing != null) {
+                    String existingKey = existing.optString("key");
+                    if (ns.key.equals(existingKey)
+                            || (cleanLegacyKey != null && cleanLegacyKey.equals(existingKey))
+                            || (!isDocScoped && ns.api.equals(existing.optString("api")))) {
+                        sitesArr.remove(i);
+                    }
                 }
             }
             org.json.JSONObject sObj =
@@ -2264,7 +2281,11 @@ final class SourceController {
             if (ns.ext != null) sObj.put("ext", ns.ext);
             sitesArr.put(sObj);
             if (preferredPref != null
-                    && (preferredPref.equals(ns.key) || preferredPref.startsWith(ns.key + "\n"))) {
+                    && (preferredPref.equals(ns.key)
+                            || preferredPref.startsWith(ns.key + "\n")
+                            || (cleanLegacyKey != null
+                                    && (preferredPref.equals(cleanLegacyKey)
+                                            || preferredPref.startsWith(cleanLegacyKey + "\n"))))) {
                 updatedPreferredPref = SourcePreferences.identity(ns);
             }
         }
@@ -2281,6 +2302,184 @@ final class SourceController {
                 newPreferred != null && a.prefs != null
                         ? () -> a.prefs.edit().putString(Prefs.PREFERRED_SITE, newPreferred).apply()
                         : null);
+    }
+
+    private static final class LegacyScriptCandidate {
+        final String key;
+        final String name;
+        final String api;
+
+        LegacyScriptCandidate(String key, String name, String api) {
+            this.key = key;
+            this.name = name;
+            this.api = api;
+        }
+    }
+
+    static String sanitizeLocalScriptFileName(String displayName) {
+        String safeName =
+                (displayName == null ? "imported" : displayName)
+                        .replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
+        if (safeName.isEmpty() || ".".equals(safeName) || "..".equals(safeName)) {
+            safeName = "imported";
+        }
+        return safeName;
+    }
+
+    private static boolean isLegacyNonDocScriptKey(String key, String keyPrefix) {
+        if (key == null || keyPrefix == null || keyPrefix.isEmpty()) return false;
+        return key.startsWith(keyPrefix + "_") && !key.startsWith(keyPrefix + "_doc_");
+    }
+
+    private static boolean isLegacyFlatLocalScriptUri(
+            String api, java.io.File filesDir, java.io.File spiderDir, String safeName) {
+        if (api == null || api.isEmpty() || filesDir == null || safeName == null) return false;
+        String legacyDefaultUri =
+                Cms.fileUri(
+                        new java.io.File(new java.io.File(filesDir, "local_spiders"), safeName));
+        if (api.equals(legacyDefaultUri)) return true;
+        if (spiderDir != null) {
+            String legacySpaceUri = Cms.fileUri(new java.io.File(spiderDir, safeName));
+            if (api.equals(legacySpaceUri)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isAmbiguousLegacyHashedScriptUri(
+            String api, java.io.File filesDir, java.io.File spiderDir, String safeName) {
+        if (api == null || !api.startsWith("file://") || safeName == null) return false;
+        try {
+            java.io.File apiFile = new java.io.File(java.net.URI.create(api));
+            if (!safeName.equals(apiFile.getName())) return false;
+            java.io.File parent = apiFile.getParentFile();
+            if (parent == null) return false;
+            java.io.File grandParent = parent.getParentFile();
+            if (grandParent == null) return false;
+            java.io.File defaultSpiders = new java.io.File(filesDir, "local_spiders");
+            return (spiderDir != null && grandParent.equals(spiderDir))
+                    || grandParent.equals(defaultSpiders);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean canShowInteractiveDialog(MainActivity a) {
+        try {
+            return a != null && !a.isFinishing() && !a.isDestroyed() && a.getWindow() != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Merges a newly imported local script while preserving upgrade continuity from 0.6.0 flat
+     * {@code local_spiders/<file>} entries (single unambiguous legacy flat match migrates 1 -> 1
+     * along with {@link Prefs#PREFERRED_SITE}). When non-document-scoped legacy entries are
+     * ambiguous because the original SAF URI was never recorded, interactive UI asks the user
+     * whether to replace a specific legacy site or keep both, and headless fallback preserves both
+     * rather than silently merging by filename.
+     */
+    static void mergeOrSaveLocalScriptConfig(
+            final MainActivity a,
+            final Cms.Config singleCfg,
+            java.io.File filesDir,
+            java.io.File spiderDir,
+            String safeName,
+            String keyPrefix,
+            final boolean snapshotPrivate,
+            final long importSeq)
+            throws Exception {
+        if (a.config == null || a.config.sites.isEmpty() || singleCfg.sites.isEmpty()) {
+            saveConfig(a, singleCfg, "");
+            a.toast("已导入扩展片源：" + singleCfg.sites.get(0).name);
+            return;
+        }
+        Cms.Site incomingSite = singleCfg.sites.get(0);
+        org.json.JSONArray sitesArr = null;
+        try {
+            org.json.JSONObject baseJson =
+                    new org.json.JSONObject(Cms.withoutComments(a.config.raw));
+            sitesArr = baseJson.optJSONArray("sites");
+        } catch (Exception ignored) {
+        }
+        if (sitesArr == null) {
+            mergeOrSaveConfig(a, singleCfg, "", true, null);
+            a.toast("已导入扩展片源：" + incomingSite.name);
+            return;
+        }
+        boolean exactDocKeyMatch = false;
+        final java.util.List<LegacyScriptCandidate> legacyFlatMatches = new java.util.ArrayList<>();
+        final java.util.List<LegacyScriptCandidate> ambiguousLegacyMatches =
+                new java.util.ArrayList<>();
+        for (int i = 0; i < sitesArr.length(); i++) {
+            org.json.JSONObject existing = sitesArr.optJSONObject(i);
+            if (existing == null) continue;
+            String existingKey = existing.optString("key", "");
+            String existingApi = existing.optString("api", "");
+            String existingName = existing.optString("name", existingKey);
+            if (incomingSite.key.equals(existingKey)) {
+                exactDocKeyMatch = true;
+                break;
+            }
+            if (isLegacyNonDocScriptKey(existingKey, keyPrefix)) {
+                if (isLegacyFlatLocalScriptUri(existingApi, filesDir, spiderDir, safeName)) {
+                    legacyFlatMatches.add(
+                            new LegacyScriptCandidate(existingKey, existingName, existingApi));
+                } else if (isAmbiguousLegacyHashedScriptUri(
+                        existingApi, filesDir, spiderDir, safeName)) {
+                    ambiguousLegacyMatches.add(
+                            new LegacyScriptCandidate(existingKey, existingName, existingApi));
+                }
+            }
+        }
+        if (exactDocKeyMatch) {
+            mergeOrSaveConfig(a, singleCfg, "", true, null);
+            a.toast("已导入扩展片源：" + incomingSite.name);
+            return;
+        }
+        if (legacyFlatMatches.size() == 1 && ambiguousLegacyMatches.isEmpty()) {
+            mergeOrSaveConfig(a, singleCfg, "", true, legacyFlatMatches.get(0).key);
+            a.toast("已更新扩展片源：" + incomingSite.name);
+            return;
+        }
+        final java.util.List<LegacyScriptCandidate> choices = new java.util.ArrayList<>();
+        choices.addAll(legacyFlatMatches);
+        choices.addAll(ambiguousLegacyMatches);
+        if (!choices.isEmpty() && canShowInteractiveDialog(a)) {
+            String[] labels = new String[choices.size() + 1];
+            for (int i = 0; i < choices.size(); i++) {
+                labels[i] = "替换旧版同名片源：" + choices.get(i).name + " (" + choices.get(i).key + ")";
+            }
+            labels[choices.size()] = "保留旧片源并新增为独立片源";
+            new AppDialog.Builder(a)
+                    .wrapChoices()
+                    .setTitle("发现未记录来源路径的同名旧脚本")
+                    .setItems(
+                            labels,
+                            (d, index) -> {
+                                if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                    return;
+                                }
+                                String targetLegacyKey =
+                                        index >= 0 && index < choices.size()
+                                                ? choices.get(index).key
+                                                : null;
+                                try {
+                                    mergeOrSaveConfig(a, singleCfg, "", true, targetLegacyKey);
+                                    a.toast(
+                                            (targetLegacyKey != null ? "已更新扩展片源：" : "已导入扩展片源：")
+                                                    + incomingSite.name);
+                                } catch (Exception ex) {
+                                    a.toast("保存扩展片源失败：" + a.message(ex));
+                                }
+                            })
+                    .show();
+            return;
+        }
+        // Ambiguous non-interactive fallback or distinct doc-scoped site: never silently merge by
+        // filename; preserve existing site(s) and add this document as an independent site.
+        mergeOrSaveConfig(a, singleCfg, "", true, null);
+        a.toast("已导入扩展片源：" + incomingSite.name);
     }
 
     static boolean canCommitConfigImport(
@@ -2396,12 +2595,7 @@ final class SourceController {
         if (dir == null) throw new IOException("本地存储目录不可用");
         if (!dir.exists() && !dir.mkdirs()) throw new IOException("无法创建本地存储目录");
         byte[] data = utf8Bytes == null ? new byte[0] : utf8Bytes;
-        String safeName =
-                (displayName == null ? "imported" : displayName)
-                        .replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
-        if (safeName.isEmpty() || ".".equals(safeName) || "..".equals(safeName)) {
-            safeName = "imported";
-        }
+        String safeName = sanitizeLocalScriptFileName(displayName);
         String digest = sha256HexPrefix(data, 16);
         java.io.File bucket = new java.io.File(dir, digest);
         if (!bucket.exists() && !bucket.mkdirs() && !bucket.isDirectory()) {
@@ -2617,12 +2811,15 @@ final class SourceController {
                                             snapshotPrivate
                                                     ? "local_spiders_private"
                                                     : "local_spiders");
+                            final java.io.File finalFilesDir = filesDir;
+                            final java.io.File finalSpiderDir = spiderDir;
+                            final String safeScriptName = sanitizeLocalScriptFileName(displayName);
                             java.io.File savedFile =
                                     writeContentAddressedLocalFile(
                                             spiderDir, displayName, text.getBytes("UTF-8"));
                             String fileOrigin = Cms.fileUri(savedFile);
                             Cms.Config parsedSingle = Cms.parseConfig(text, fileOrigin);
-                            String keyPrefix =
+                            final String keyPrefix =
                                     (lowerName.endsWith(".py")
                                                     || Cms.looksLikePySpider(text, displayName))
                                             ? "py"
@@ -2638,8 +2835,15 @@ final class SourceController {
                                             return;
                                         }
                                         try {
-                                            mergeOrSaveConfig(a, singleCfg, "", true);
-                                            a.toast("已导入扩展片源：" + singleCfg.sites.get(0).name);
+                                            mergeOrSaveLocalScriptConfig(
+                                                    a,
+                                                    singleCfg,
+                                                    finalFilesDir,
+                                                    finalSpiderDir,
+                                                    safeScriptName,
+                                                    keyPrefix,
+                                                    snapshotPrivate,
+                                                    importSeq);
                                         } catch (Exception ex) {
                                             a.toast("保存扩展片源失败：" + a.message(ex));
                                         }

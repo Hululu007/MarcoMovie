@@ -1542,7 +1542,78 @@ public final class ReworkR6ToR12Checks {
                                     .equals(uiCrashPrefs.getString(Prefs.PREFERRED_SITE, "")),
                     "R12 Round-3: unrelated SettingsScreen exception with no in-flight load never blames healthy site B");
 
-            // 8b. Uncaught fatal crash WHILE loading site A -> confirms A and recovers A!
+            // 8b. Round-4 Negative: SettingsScreen UI exception on main thread OVERLAPPING an
+            //     in-flight background HTTP load of healthy site B MUST NOT blame B or mark
+            //     CONFIRMED_CRASH_SITE, and preserves B across API 23-29 and API 30+ REASON_CRASH!
+            MapPrefs overlapPrefs = new MapPrefs();
+            overlapPrefs
+                    .edit()
+                    .putString(Prefs.LOADING_SITE, "")
+                    .putString(Prefs.CONFIRMED_CRASH_SITE, "")
+                    .putString(Prefs.SELECTED_SITE, "B")
+                    .putString(Prefs.PREFERRED_SITE, "B\nhttps://b.invalid/")
+                    .apply();
+            dummyAct.prefs = overlapPrefs;
+            MobileHomePage.LoadingSiteGuard bgGuard = new MobileHomePage.LoadingSiteGuard();
+            CountDownLatch bgAcquired = new CountDownLatch(1);
+            CountDownLatch bgRelease = new CountDownLatch(1);
+            Thread bgLoader =
+                    new Thread(
+                            () -> {
+                                long tok =
+                                        bgGuard.acquire(
+                                                k ->
+                                                        overlapPrefs
+                                                                .edit()
+                                                                .putString(Prefs.LOADING_SITE, k)
+                                                                .commit(),
+                                                "B");
+                                bgAcquired.countDown();
+                                try {
+                                    bgRelease.await(5, TimeUnit.SECONDS);
+                                } catch (InterruptedException ignored) {
+                                } finally {
+                                    bgGuard.releaseIfOwner(
+                                            k ->
+                                                    overlapPrefs
+                                                            .edit()
+                                                            .putString(Prefs.LOADING_SITE, k)
+                                                            .apply(),
+                                            tok);
+                                }
+                            },
+                            "r12-bg-http-loader");
+            bgLoader.start();
+            check(
+                    bgAcquired.await(5, TimeUnit.SECONDS),
+                    "R12 Round-4 setup: background loader B acquired guard");
+            try {
+                fatalHandler.invoke(
+                        null, Thread.currentThread(), prev, Thread.currentThread(), settingsErr);
+                check(
+                        "".equals(overlapPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""))
+                                && "".equals(overlapPrefs.getString(Prefs.LOADING_SITE, ""))
+                                && !MainActivity.shouldTreatLoadingSiteAsCrash(
+                                        overlapPrefs.getString(Prefs.LOADING_SITE, ""),
+                                        overlapPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""),
+                                        MainActivity.EXIT_REASON_UNKNOWN,
+                                        MainActivity.EXIT_STATUS_UNKNOWN)
+                                && !MainActivity.shouldTreatLoadingSiteAsCrash(
+                                        overlapPrefs.getString(Prefs.LOADING_SITE, ""),
+                                        overlapPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""),
+                                        4,
+                                        0)
+                                && "B".equals(overlapPrefs.getString(Prefs.SELECTED_SITE, ""))
+                                && "B\nhttps://b.invalid/"
+                                        .equals(overlapPrefs.getString(Prefs.PREFERRED_SITE, "")),
+                        "R12 Round-4: overlapping SettingsScreen exception during healthy B load never blames B (API 23-29 & API 30+)");
+            } finally {
+                bgRelease.countDown();
+                bgLoader.join(5000);
+            }
+
+            // 8c. Round-4 Positive (call-chain attribution): uncaught crash originating in a real
+            //     source engine frame (HttpT4Engine.home) while loading A confirms A on API 23-29!
             MapPrefs loadCrashPrefs = new MapPrefs();
             loadCrashPrefs
                     .edit()
@@ -1552,18 +1623,129 @@ public final class ReworkR6ToR12Checks {
                     .putString(Prefs.PREFERRED_SITE, "A\nbad")
                     .apply();
             dummyAct.prefs = loadCrashPrefs;
+            Throwable engineErr = new RuntimeException("fixture T4 engine fatal crash");
+            engineErr.setStackTrace(
+                    new StackTraceElement[] {
+                        new StackTraceElement(
+                                "com.pilipala.marcomovie.HttpT4Engine",
+                                "home",
+                                "HttpT4Engine.java",
+                                42)
+                    });
             fatalHandler.invoke(
-                    null, Thread.currentThread(), prev, Thread.currentThread(), settingsErr);
+                    null, Thread.currentThread(), prev, Thread.currentThread(), engineErr);
             check(
                     "A".equals(loadCrashPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""))
                             && MainActivity.shouldTreatLoadingSiteAsCrash(
                                     loadCrashPrefs.getString(Prefs.LOADING_SITE, ""),
                                     loadCrashPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""),
                                     MainActivity.EXIT_REASON_UNKNOWN),
-                    "R12 Round-3 positive control: uncaught crash during active load of A confirms A even on API 23-29");
+                    "R12 Round-4 positive control: source-engine stack crash during active load of A confirms A on API 23-29");
+
+            // 8d. Round-4 Positive (thread attribution): fatal error on the active loading worker
+            //     thread itself attributes directly to the site owned by that thread!
+            MapPrefs threadCrashPrefs = new MapPrefs();
+            threadCrashPrefs
+                    .edit()
+                    .putString(Prefs.LOADING_SITE, "A")
+                    .putString(Prefs.CONFIRMED_CRASH_SITE, "")
+                    .putString(Prefs.SELECTED_SITE, "A")
+                    .putString(Prefs.PREFERRED_SITE, "A\nbad")
+                    .apply();
+            dummyAct.prefs = threadCrashPrefs;
+            CountDownLatch workerDone = new CountDownLatch(1);
+            AtomicReference<Throwable> workerCheckErr = new AtomicReference<>();
+            final Method invokeFatalHandler = fatalHandler;
+            Thread crashingLoader =
+                    new Thread(
+                            () -> {
+                                MobileHomePage.LoadingSiteGuard g =
+                                        new MobileHomePage.LoadingSiteGuard();
+                                long tok = g.acquire(null, "A");
+                                try {
+                                    Throwable genericOom = new OutOfMemoryError("fixture OOM");
+                                    genericOom.setStackTrace(new StackTraceElement[0]);
+                                    invokeFatalHandler.invoke(
+                                            null,
+                                            Thread.currentThread(),
+                                            prev,
+                                            Thread.currentThread(),
+                                            genericOom);
+                                } catch (Throwable t) {
+                                    workerCheckErr.set(t);
+                                } finally {
+                                    g.releaseIfOwner(null, tok);
+                                    workerDone.countDown();
+                                }
+                            },
+                            "r12-crashing-loader");
+            crashingLoader.start();
+            check(
+                    workerDone.await(5, TimeUnit.SECONDS)
+                            && workerCheckErr.get() == null
+                            && "A"
+                                    .equals(
+                                            threadCrashPrefs.getString(
+                                                    Prefs.CONFIRMED_CRASH_SITE, "")),
+                    "R12 Round-4 positive control: fatal error on active source-loading thread attributes directly to site A");
         } finally {
             MainActivity.activeActivity = null;
         }
+
+        // 9. Round-4 R12: two interrupted boots + true fault B + disk snapshot selecting B MUST
+        //    keep the boot-guard reset intact across snapshot healing (never re-write B into prefs)
+        File snapDir = Files.createTempDirectory("r12-r4-snapshot-recovery-").toFile();
+        String abOrigin = "https://example.invalid/sub.json";
+        String abRaw =
+                "{\"sites\":[{\"key\":\"A\",\"name\":\"A\",\"type\":1,\"api\":\"https://a.invalid/\"},"
+                        + "{\"key\":\"B\",\"name\":\"B\",\"type\":1,\"api\":\"https://b.invalid/\"}]}";
+        ConfigStore snapStore = new ConfigStore(snapDir);
+        snapStore.writeVersioned(abRaw, new ConfigStore.PointerSnapshot(abOrigin, "B"));
+        MapPrefs snapPrefs = new MapPrefs();
+        snapPrefs
+                .edit()
+                .putString(Prefs.ORIGIN, abOrigin)
+                .putString(
+                        Prefs.ACTIVE_SUBSCRIPTION_ID,
+                        ConfigStore.subscriptionIdentity(abOrigin, abRaw))
+                .putString(Prefs.LOADING_SITE, "B")
+                .putString(Prefs.CONFIRMED_CRASH_SITE, "B")
+                .putString(Prefs.SELECTED_SITE, "B")
+                .putString(Prefs.PREFERRED_SITE, "B\nbad")
+                .apply();
+        // Verify MainActivity.onCreate suppresses re-healing faulty B from snapshot after boot
+        // reset
+        String mainOnCreateSrc =
+                new String(
+                        Files.readAllBytes(new File(srcRoot, "MainActivity.java").toPath()),
+                        StandardCharsets.UTF_8);
+        check(
+                mainOnCreateSrc.contains("boolean suppressCrashedSelectedHeal")
+                        && mainOnCreateSrc.contains("!suppressCrashedSelectedHeal"),
+                "R12 Round-4 wiring: MainActivity.onCreate suppresses re-healing crashed site from config-state snapshot");
+        MainActivity.clearRecoveredCrashSite(snapPrefs);
+        ConfigStore.RecoveredState snapRecovered =
+                snapStore.loadRecoveredState(
+                        snapPrefs.getString(Prefs.ORIGIN, null),
+                        snapPrefs.getString(Prefs.SELECTED_SITE, null),
+                        snapPrefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, null));
+        // Snapshot still reports B, so suppressed heal MUST leave SELECTED_SITE="" so Home picks A!
+        check(
+                "".equals(snapPrefs.getString(Prefs.SELECTED_SITE, ""))
+                        && "".equals(snapPrefs.getString(Prefs.PREFERRED_SITE, ""))
+                        && "B".equals(snapRecovered.selectedSite),
+                "R12 Round-4: boot reset clears B while stale snapshot still carries B (suppressed from re-healing)");
+        // Home picks first healthy site A and persists SELECTED_SITE="A"; next normal boot retains
+        // A!
+        snapPrefs.edit().putString(Prefs.SELECTED_SITE, "A").apply();
+        ConfigStore.RecoveredState nextBootRecovered =
+                snapStore.loadRecoveredState(
+                        snapPrefs.getString(Prefs.ORIGIN, null),
+                        snapPrefs.getString(Prefs.SELECTED_SITE, null),
+                        snapPrefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, null));
+        check(
+                "A".equals(nextBootRecovered.selectedSite),
+                "R12 Round-4: next normal cold restart after recovery retains healthy site A");
 
         prefs.edit()
                 .putString(Prefs.LOADING_SITE, "site_bad")
