@@ -77,12 +77,18 @@ public final class CmsClient: @unchecked Sendable {
     private var scriptHosts: [String: ScriptHostBackend] = [:]
     private var jarCache: [String: Data] = [:]
 
-    public init(timeoutSeconds: TimeInterval = 15, netdiskResolver: NetdiskShareResolver? = nil) {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = timeoutSeconds
-        config.timeoutIntervalForResource = timeoutSeconds * 2
-        config.httpShouldSetCookies = false
-        let builtSession = URLSession(configuration: config)
+    public init(
+        timeoutSeconds: TimeInterval = 15,
+        netdiskResolver: NetdiskShareResolver? = nil,
+        session: URLSession? = nil
+    ) {
+        let builtSession: URLSession = session ?? {
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = timeoutSeconds
+            config.timeoutIntervalForResource = timeoutSeconds * 2
+            config.httpShouldSetCookies = false
+            return URLSession(configuration: config)
+        }()
         self.session = builtSession
         self.netdiskResolver = netdiskResolver ?? NetdiskShareResolver(session: builtSession)
     }

@@ -190,7 +190,7 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
     }
 
     private func makeTestVodSiteAndVideo() -> (CmsSite, CmsVideo) {
-        let site = CmsSite(key: "site_vod", name: "测试点播站", api: "https://vod.example/api.php/provide/vod")
+        let site = CmsSite(key: "site_vod", name: "测试点播站", type: 1, api: "https://vod.example/api.php/provide/vod")
         let line0 = CmsLine(
             name: "主线",
             episodes: [
@@ -240,23 +240,29 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
                     try await gate.waitUntilReleased(key: "B")
                 }
                 return ResolvedPlayback(
-                    playableUrl: URL(string: ep.url)!,
                     originalUrl: ep.url,
+                    playableUrl: URL(string: ep.url)!,
                     isProxied: false,
-                    resolutionBadge: "1080P",
-                    kernelLabel: "AVKit 硬解"
+                    kernelLabel: "AVKit 硬解",
+                    resolutionBadge: "1080P"
                 )
             },
             progressRecorder: { desc, posMs, durMs in
                 guard let line = desc.currentLine, let ep = desc.currentEpisode else { return }
                 recordedHistoryEvents.append((ep.name, posMs))
-                storage.recordWatchHistory(
-                    site: desc.site.key,
-                    video: desc.video,
-                    episodeName: ep.name,
-                    lineName: line.name,
-                    resumePosition: posMs,
-                    duration: durMs
+                storage.upsertWatchHistory(
+                    WatchHistoryItem(
+                        site: desc.site.key,
+                        id: desc.video.id,
+                        title: desc.video.title,
+                        poster: desc.video.poster,
+                        line: line.name,
+                        episode: ep.name,
+                        index: desc.episodeIndex,
+                        position: posMs,
+                        duration: durMs,
+                        updated: Int64(Date().timeIntervalSince1970 * 1000)
+                    )
                 )
             }
         )
@@ -296,7 +302,7 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
         let bWasCancelled = await gate.wasCancelled(key: "B")
         XCTAssertTrue(bWasCancelled, "Slow B resolution task must be cancelled when switching to C")
 
-        // Stale callbacks from token A or bogus token B must be ignored while C plays
+        // Stale callbacks from token A must be ignored while C plays
         engine.emitPlaybackEventsCheck(tokenA: tokenA, coordinator: coordinator)
 
         // Verify A's exact breakpoint (120_000 ms) was preserved and B has ZERO false progress
@@ -330,11 +336,11 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
                 try await gate.waitUntilReleased(key: "exit_case")
                 let ep = descriptor.currentEpisode!
                 return ResolvedPlayback(
-                    playableUrl: URL(string: ep.url)!,
                     originalUrl: ep.url,
+                    playableUrl: URL(string: ep.url)!,
                     isProxied: false,
-                    resolutionBadge: "1080P",
-                    kernelLabel: "AVKit 硬解"
+                    kernelLabel: "AVKit 硬解",
+                    resolutionBadge: "1080P"
                 )
             },
             progressRecorder: { _, _, _ in
@@ -369,11 +375,11 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
             resolver: { descriptor in
                 let ep = descriptor.currentEpisode!
                 return ResolvedPlayback(
-                    playableUrl: URL(string: ep.url)!,
                     originalUrl: ep.url,
+                    playableUrl: URL(string: ep.url)!,
                     isProxied: false,
-                    resolutionBadge: "1080P",
-                    kernelLabel: "AVKit 硬解"
+                    kernelLabel: "AVKit 硬解",
+                    resolutionBadge: "1080P"
                 )
             },
             progressRecorder: { _, _, _ in },
@@ -414,11 +420,11 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
             resolver: { descriptor in
                 let ep = descriptor.currentEpisode!
                 return ResolvedPlayback(
-                    playableUrl: URL(string: ep.url)!,
                     originalUrl: ep.url,
+                    playableUrl: URL(string: ep.url)!,
                     isProxied: false,
-                    resolutionBadge: "1080P",
-                    kernelLabel: "AVKit 硬解"
+                    kernelLabel: "AVKit 硬解",
+                    resolutionBadge: "1080P"
                 )
             },
             progressRecorder: { _, _, _ in }
@@ -465,23 +471,26 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
     @MainActor
     func testLiveSameChannelLineSwitchFirstFailsSecondSucceeds() async throws {
         let ch1 = LiveChannel(
-            id: "cctv1",
             name: "CCTV-1 综合",
             group: "央视",
+            urls: [
+                "https://cdn.example/live/cctv1_line1.m3u8",
+                "https://cdn.example/live/cctv1_line2.m3u8",
+            ],
             streams: [
-                LiveStream(url: "https://cdn.example/live/cctv1_line1.m3u8"),
-                LiveStream(url: "https://cdn.example/live/cctv1_line2.m3u8"),
+                CmsEpisode(name: "线路 1", url: "https://cdn.example/live/cctv1_line1.m3u8"),
+                CmsEpisode(name: "线路 2", url: "https://cdn.example/live/cctv1_line2.m3u8"),
             ]
         )
         let ch2 = LiveChannel(
-            id: "cctv5",
             name: "CCTV-5 体育",
             group: "央视",
+            urls: ["https://cdn.example/live/cctv5_line1.m3u8"],
             streams: [
-                LiveStream(url: "https://cdn.example/live/cctv5_line1.m3u8"),
+                CmsEpisode(name: "线路 1", url: "https://cdn.example/live/cctv5_line1.m3u8"),
             ]
         )
-        let liveSite = CmsSite(key: "__live__", name: "电视直播", api: "")
+        let liveSite = CmsSite(key: "__live__", name: "电视直播", type: 1, api: "")
         let liveVideo = CmsVideo(
             id: ch1.id,
             title: ch1.name,
@@ -507,11 +516,11 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
                     throw MarcoError.networkFailure("直播线路 1 连接超时")
                 }
                 return ResolvedPlayback(
-                    playableUrl: URL(string: ep.url)!,
                     originalUrl: ep.url,
+                    playableUrl: URL(string: ep.url)!,
                     isProxied: false,
-                    resolutionBadge: "直播",
-                    kernelLabel: "AVKit 硬解"
+                    kernelLabel: "AVKit 硬解",
+                    resolutionBadge: "直播"
                 )
             },
             progressRecorder: { _, _, _ in }
@@ -533,7 +542,7 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
         XCTAssertEqual(engine.loadCalls[0].url.absoluteString, "https://cdn.example/live/cctv1_line2.m3u8")
         XCTAssertNil(coordinator.errorMessage)
 
-        // Also test playback failure on Line 2 -> direct switchLiveLine(to:) works cleanly
+        // Also test playback failure on Line 2 -> error surfaces cleanly keeping channel fixed
         let tokLive = try XCTUnwrap(engine.activeItemToken)
         engine.emitFailed(token: tokLive, message: "直播解码中断")
         XCTAssertTrue(coordinator.errorIsPlaybackFailure)
@@ -548,19 +557,20 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let storage = TvStorageManager(cachesDirectory: tempDir, keychain: InMemoryKeychainStore())
 
-        let subA = SubscriptionRecord(
+        let rawA = #"{"sites":[{"key":"site_a","name":"站点A","type":1,"api":"https://site-a.example/api.php/provide/vod"}]}"#
+        let rawB = #"{"sites":[{"key":"site_b","name":"站点B","type":1,"api":"https://site-b.example/api.php/provide/vod"}]}"#
+        _ = try storage.upsertSubscription(
             id: "sub_a",
             name: "来源A",
             url: "https://site-a.example/config.json",
-            configJson: #"{"sites":[{"key":"site_a","name":"站点A","type":1,"api":"https://site-a.example/api.php/provide/vod"}]}"#
+            rawContent: rawA
         )
-        let subB = SubscriptionRecord(
+        _ = try storage.upsertSubscription(
             id: "sub_b",
             name: "来源B",
             url: "https://site-b.example/config.json",
-            configJson: #"{"sites":[{"key":"site_b","name":"站点B","type":1,"api":"https://site-b.example/api.php/provide/vod"}]}"#
+            rawContent: rawB
         )
-        storage.saveSubscriptions([subA, subB])
         storage.updatePreferences { $0.selectedSiteKey = "site_b" }
 
         let requestedHostsBox = StubCmsLockedBox<[String]>([])
@@ -586,8 +596,34 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
         let vidA = CmsVideo(id: "42", title: "星际穿越·A站", poster: "https://cdn.example/a42.jpg", remarks: "4K")
         let vidB = CmsVideo(id: "42", title: "盗梦空间·B站", poster: "https://cdn.example/b42.jpg", remarks: "蓝光")
 
-        storage.recordWatchHistory(site: "site_a", video: vidA, episodeName: "正片", lineName: "A线", resumePosition: 90_000, duration: 6_000_000)
-        storage.recordWatchHistory(site: "site_b", video: vidB, episodeName: "正片", lineName: "B线", resumePosition: 30_000, duration: 5_000_000)
+        storage.upsertWatchHistory(
+            WatchHistoryItem(
+                site: "site_a",
+                id: vidA.id,
+                title: vidA.title,
+                poster: vidA.poster,
+                line: "A线",
+                episode: "正片",
+                index: 0,
+                position: 90_000,
+                duration: 6_000_000,
+                updated: 1_710_000_001_000
+            )
+        )
+        storage.upsertWatchHistory(
+            WatchHistoryItem(
+                site: "site_b",
+                id: vidB.id,
+                title: vidB.title,
+                poster: vidB.poster,
+                line: "B线",
+                episode: "正片",
+                index: 0,
+                position: 30_000,
+                duration: 5_000_000,
+                updated: 1_710_000_002_000
+            )
+        )
         storage.toggleFavorite(site: "site_a", video: vidA)
         storage.toggleFavorite(site: "site_b", video: vidB)
 
@@ -622,7 +658,13 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
         XCTAssertEqual(resumeB?.resumePosition, 30_000)
 
         // Now disable subA -> A's history and favorite MUST stay intact and refuse falling back to site_b!
-        storage.setSubscriptionEnabled(id: "sub_a", enabled: false)
+        _ = try storage.upsertSubscription(
+            id: "sub_a",
+            name: "来源A",
+            url: "https://site-a.example/config.json",
+            rawContent: rawA,
+            enabled: false
+        )
         requestedHostsBox.withLock { $0.removeAll() }
         let disabledConfig = storage.mergedConfig()
 
@@ -672,10 +714,10 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
 
         // Session 1: Import M3U VOD subscription directly (matching production flow), open from Discover, watch 60s, favorite
         let storage1 = TvStorageManager(cachesDirectory: tempDir, keychain: sharedKeychain)
-        _ = storage1.upsertSubscription(
+        _ = try storage1.upsertSubscription(
             name: "M3U精选电影",
             url: "https://m3u.example/movies.m3u",
-            configJson: m3uVodText
+            rawContent: m3uVodText
         )
 
         let config1 = storage1.mergedConfig()
@@ -686,13 +728,19 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
         XCTAssertEqual(duneMovie.lines.first?.episodes.first?.url, "https://cdn.example/vod/dune2_4k.m3u8")
         XCTAssertEqual(duneMovie.lines.first?.episodes.first?.headers["User-Agent"], "MarcoM3uAgent/1.0")
 
-        storage1.recordWatchHistory(
-            site: m3uSite.key,
-            video: duneMovie,
-            episodeName: duneMovie.lines[0].episodes[0].name,
-            lineName: duneMovie.lines[0].name,
-            resumePosition: 60_000,
-            duration: 5_400_000
+        storage1.upsertWatchHistory(
+            WatchHistoryItem(
+                site: m3uSite.key,
+                id: duneMovie.id,
+                title: duneMovie.title,
+                poster: duneMovie.poster,
+                line: duneMovie.lines[0].name,
+                episode: duneMovie.lines[0].episodes[0].name,
+                index: 0,
+                position: 60_000,
+                duration: 5_400_000,
+                updated: 1_710_000_003_000
+            )
         )
         XCTAssertTrue(storage1.toggleFavorite(site: m3uSite.key, video: duneMovie))
 

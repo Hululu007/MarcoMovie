@@ -1239,22 +1239,27 @@ private final class LoopbackLargeNonRangeUpstreamServer: @unchecked Sendable {
         }
 
         let boundPort: UInt16 = try await withCheckedThrowingContinuation { continuation in
-            let rLock = NSLock()
-            var done = false
+            let doneBox = LockedTestBox(false)
             nwListener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    rLock.lock()
-                    defer { rLock.unlock() }
-                    guard !done else { return }
-                    done = true
-                    continuation.resume(returning: nwListener.port?.rawValue ?? 0)
+                    let shouldResume = doneBox.withLock { done -> Bool in
+                        guard !done else { return false }
+                        done = true
+                        return true
+                    }
+                    if shouldResume {
+                        continuation.resume(returning: nwListener.port?.rawValue ?? 0)
+                    }
                 case .failed(let err):
-                    rLock.lock()
-                    defer { rLock.unlock() }
-                    guard !done else { return }
-                    done = true
-                    continuation.resume(throwing: err)
+                    let shouldResume = doneBox.withLock { done -> Bool in
+                        guard !done else { return false }
+                        done = true
+                        return true
+                    }
+                    if shouldResume {
+                        continuation.resume(throwing: err)
+                    }
                 default:
                     break
                 }
