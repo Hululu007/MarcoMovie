@@ -346,6 +346,17 @@ class DeploymentChecks(unittest.TestCase):
         self.assertIn('"supportsHdrDisplay":', av_src)
         self.assertNotIn('UIScreen.main', av_src)
 
+        # 6. Root Dock / Logo overlay mounts directly above rootView in UIWindow
+        #    so scrolling Flutter UiKitViews (e.g. Filter button) never occlude it.
+        self.assertIn('targetParent.insertSubview(overlayView, aboveSubview: rootView)', liquid_src)
+
+        # 7. Native Apple SF Symbols monochrome tab icons (no cartoonish multi-layer shapes)
+        self.assertIn('return selected ? "house.fill" : "house"', liquid_src)
+        self.assertIn('return selected ? "play.tv.fill" : "play.tv"', liquid_src)
+        self.assertIn('return selected ? "rectangle.stack.fill" : "rectangle.stack"', liquid_src)
+        self.assertIn('return selected ? "gearshape.fill" : "gearshape"', liquid_src)
+        self.assertNotIn('liveBeaconRed', liquid_src)
+
 
 if __name__ == '__main__':
     unittest.main()

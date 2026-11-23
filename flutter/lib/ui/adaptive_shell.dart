@@ -290,19 +290,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   static const List<IosNativeDockItem> _iosNativeDockItems = <IosNativeDockItem>[
     IosNativeDockItem(
       label: '主页',
-      symbol: 'play.rectangle',
-      selectedSymbol: 'play.rectangle.fill',
+      symbol: 'house',
+      selectedSymbol: 'house.fill',
       kind: 'home',
     ),
     IosNativeDockItem(
       label: '直播',
-      symbol: 'dot.radiowaves.left.and.right',
+      symbol: 'play.tv',
+      selectedSymbol: 'play.tv.fill',
       kind: 'live',
     ),
     IosNativeDockItem(
       label: '片库',
-      symbol: 'square.stack.3d.up',
-      selectedSymbol: 'square.stack.3d.up.fill',
+      symbol: 'rectangle.stack',
+      selectedSymbol: 'rectangle.stack.fill',
       kind: 'library',
     ),
     IosNativeDockItem(
@@ -2452,15 +2453,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final useSidebar =
         _isDesktop ? (size.width >= 700) : (size.width > size.height);
     const dockItems = <(IconData, IconData, String)>[
-      (CupertinoIcons.play_rectangle, CupertinoIcons.play_rectangle_fill, '主页'),
+      (CupertinoIcons.house, CupertinoIcons.house_fill, '主页'),
+      (CupertinoIcons.tv, CupertinoIcons.tv_fill, '直播'),
       (
-        CupertinoIcons.dot_radiowaves_left_right,
-        CupertinoIcons.dot_radiowaves_left_right,
-        '直播',
-      ),
-      (
-        CupertinoIcons.square_stack_3d_up,
-        CupertinoIcons.square_stack_3d_up_fill,
+        CupertinoIcons.rectangle_stack,
+        CupertinoIcons.rectangle_stack_fill,
         '片库',
       ),
       (CupertinoIcons.gear_alt, CupertinoIcons.gear_alt_fill, '设置'),
@@ -2468,19 +2465,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     const nativeDockItems = <IosNativeDockItem>[
       IosNativeDockItem(
         label: '主页',
-        symbol: 'play.rectangle',
-        selectedSymbol: 'play.rectangle.fill',
+        symbol: 'house',
+        selectedSymbol: 'house.fill',
         kind: 'home',
       ),
       IosNativeDockItem(
         label: '直播',
-        symbol: 'dot.radiowaves.left.and.right',
+        symbol: 'play.tv',
+        selectedSymbol: 'play.tv.fill',
         kind: 'live',
       ),
       IosNativeDockItem(
         label: '片库',
-        symbol: 'square.stack.3d.up',
-        selectedSymbol: 'square.stack.3d.up.fill',
+        symbol: 'rectangle.stack',
+        selectedSymbol: 'rectangle.stack.fill',
         kind: 'library',
       ),
       IosNativeDockItem(

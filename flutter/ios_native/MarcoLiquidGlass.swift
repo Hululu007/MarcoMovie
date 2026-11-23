@@ -2850,11 +2850,12 @@ private final class MarcoTraitAwareHostView: UIView {
   }
 }
 
-/// Bespoke 24x24pt CoreAnimation layered vector tab icon for the 4 bottom Dock
-/// tabs (`主页` / `直播` / `片库` / `设置`) with rich dual-tone selected styling
-/// and distinctive per-tab spring micro-animations (cinema screen pop + sparkle,
-/// live crimson broadcast wave ripple, 3-layer library card fan, and 60°
-/// mechanical precision gear turn). Adapts natively to Light & Dark Mode.
+/// Apple HIG native SF Symbols tab icon view for the floating Liquid Glass Dock.
+///
+/// Uses genuine Apple SF Symbols (`house`, `play.tv`, `rectangle.stack`,
+/// `gearshape`, all available natively on iOS 14.0 through iOS 26+) at Apple's
+/// exact tab-bar optical weight with monochrome tinting and native iOS 17+
+/// `.bounce` SF Symbol effects.
 private final class MarcoAnimatedTabIconView: UIView {
   enum Kind: String {
     case home
@@ -2874,7 +2875,7 @@ private final class MarcoAnimatedTabIconView: UIView {
       if sym.contains("radiowaves") || sym.contains("antenna") || sym.contains("tv") || label.contains("直播") {
         return .live
       }
-      if sym.contains("square.stack") || sym.contains("film") || sym.contains("bookmark") || label.contains("片库") {
+      if sym.contains("square.stack") || sym.contains("rectangle.stack") || sym.contains("film") || sym.contains("bookmark") || label.contains("片库") {
         return .library
       }
       if sym.contains("gear") || sym.contains("slider") || label.contains("设置") {
@@ -2882,30 +2883,24 @@ private final class MarcoAnimatedTabIconView: UIView {
       }
       return .fallback
     }
+
+    func appleSymbolName(selected: Bool, fallback: String) -> String {
+      switch self {
+      case .home:
+        return selected ? "house.fill" : "house"
+      case .live:
+        return selected ? "play.tv.fill" : "play.tv"
+      case .library:
+        return selected ? "rectangle.stack.fill" : "rectangle.stack"
+      case .settings:
+        return selected ? "gearshape.fill" : "gearshape"
+      case .fallback:
+        return fallback
+      }
+    }
   }
 
-  private let canvasLayer = CALayer()
-  // Home layers (Sculpted Cinema House + Centered Play Aperture + Peak Accent)
-  private let homeHouseLayer = CAShapeLayer()
-  private let homePlayLayer = CAShapeLayer()
-  private let homeAccentLayer = CAShapeLayer()
-  // Live layers (Rounded Broadcast Frame + Symmetric Interior Signal Arcs + Crimson Beacon)
-  private let liveFrameLayer = CAShapeLayer()
-  private let liveWaveLayer = CAShapeLayer()
-  private let liveHaloLayer = CAShapeLayer()
-  private let liveBeaconLayer = CAShapeLayer()
-  // Library layers (Overlapping Cinema Poster Deck + Film Reel Bars)
-  private let libBackCardLayer = CAShapeLayer()
-  private let libFrontCardLayer = CAShapeLayer()
-  private let libDetailLayer = CAShapeLayer()
-  // Settings layers (Apple Control-Center Precision Sliders)
-  private let settingsTrackTopLayer = CAShapeLayer()
-  private let settingsTrackBotLayer = CAShapeLayer()
-  private let settingsKnobTopLayer = CAShapeLayer()
-  private let settingsKnobBotLayer = CAShapeLayer()
-  // Fallback SF Symbol
-  private let fallbackImageView = UIImageView()
-
+  private let symbolImageView = UIImageView()
   private var currentKind: Kind = .home
   private var isSelectedState: Bool = false
   private var isDarkState: Bool = true
@@ -2922,46 +2917,10 @@ private final class MarcoAnimatedTabIconView: UIView {
     isUserInteractionEnabled = false
     clipsToBounds = false
 
-    canvasLayer.frame = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
-    canvasLayer.masksToBounds = false
-    layer.addSublayer(canvasLayer)
-
-    let scale = max(MarcoLiquidGlassSupport.activeWindow()?.windowScene?.screen.scale ?? 3.0, 2.0)
-    func setup(_ sl: CAShapeLayer, pivot: CGPoint) {
-      sl.bounds = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
-      sl.anchorPoint = CGPoint(x: pivot.x / 24.0, y: pivot.y / 24.0)
-      sl.position = pivot
-      sl.contentsScale = scale
-      sl.lineCap = .round
-      sl.lineJoin = .round
-      sl.isHidden = true
-      canvasLayer.addSublayer(sl)
-    }
-
-    setup(homeHouseLayer, pivot: CGPoint(x: 12.0, y: 12.2))
-    setup(homePlayLayer, pivot: CGPoint(x: 12.2, y: 13.8))
-    setup(homeAccentLayer, pivot: CGPoint(x: 12.0, y: 4.5))
-
-    setup(liveFrameLayer, pivot: CGPoint(x: 12.0, y: 12.0))
-    setup(liveWaveLayer, pivot: CGPoint(x: 12.0, y: 12.0))
-    setup(liveHaloLayer, pivot: CGPoint(x: 12.0, y: 12.0))
-    setup(liveBeaconLayer, pivot: CGPoint(x: 12.0, y: 12.0))
-
-    setup(libBackCardLayer, pivot: CGPoint(x: 13.6, y: 9.6))
-    setup(libFrontCardLayer, pivot: CGPoint(x: 10.6, y: 13.6))
-    setup(libDetailLayer, pivot: CGPoint(x: 10.6, y: 13.6))
-
-    setup(settingsTrackTopLayer, pivot: CGPoint(x: 12.0, y: 8.2))
-    setup(settingsTrackBotLayer, pivot: CGPoint(x: 12.0, y: 15.8))
-    setup(settingsKnobTopLayer, pivot: CGPoint(x: 15.2, y: 8.2))
-    setup(settingsKnobBotLayer, pivot: CGPoint(x: 8.8, y: 15.8))
-
-    fallbackImageView.contentMode = .scaleAspectFit
-    fallbackImageView.isHidden = true
-    fallbackImageView.frame = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
-    addSubview(fallbackImageView)
-
-    buildStaticPaths()
+    symbolImageView.contentMode = .center
+    symbolImageView.isUserInteractionEnabled = false
+    symbolImageView.frame = CGRect(x: 0.0, y: 0.0, width: 24.0, height: 24.0)
+    addSubview(symbolImageView)
   }
 
   @available(*, unavailable)
@@ -2969,104 +2928,9 @@ private final class MarcoAnimatedTabIconView: UIView {
     fatalError("init(coder:) has not been implemented")
   }
 
-  override func didMoveToWindow() {
-    super.didMoveToWindow()
-    let displayScale = window?.windowScene?.screen.scale ?? traitCollection.displayScale
-    guard displayScale >= 1.0 else { return }
-    for sub in canvasLayer.sublayers ?? [] {
-      sub.contentsScale = displayScale
-    }
-  }
-
   override func layoutSubviews() {
     super.layoutSubviews()
-    let sx = bounds.width > 0 ? bounds.width / 24.0 : 1.0
-    let sy = bounds.height > 0 ? bounds.height / 24.0 : 1.0
-    let s = min(sx, sy)
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    canvasLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
-    canvasLayer.transform = CATransform3DMakeScale(s, s, 1.0)
-    fallbackImageView.frame = bounds
-    CATransaction.commit()
-  }
-
-  private func buildStaticPaths() {
-    // 1. Home: Sculpted Rounded Cinema House + Centered Play Aperture
-    let house = UIBezierPath()
-    house.move(to: CGPoint(x: 4.0, y: 11.1))
-    house.addQuadCurve(to: CGPoint(x: 5.3, y: 8.5), controlPoint: CGPoint(x: 4.0, y: 9.5))
-    house.addLine(to: CGPoint(x: 10.6, y: 4.2))
-    house.addQuadCurve(to: CGPoint(x: 13.4, y: 4.2), controlPoint: CGPoint(x: 12.0, y: 3.1))
-    house.addLine(to: CGPoint(x: 18.7, y: 8.5))
-    house.addQuadCurve(to: CGPoint(x: 20.0, y: 11.1), controlPoint: CGPoint(x: 20.0, y: 9.5))
-    house.addLine(to: CGPoint(x: 20.0, y: 17.3))
-    house.addQuadCurve(to: CGPoint(x: 16.9, y: 20.4), controlPoint: CGPoint(x: 20.0, y: 20.4))
-    house.addLine(to: CGPoint(x: 7.1, y: 20.4))
-    house.addQuadCurve(to: CGPoint(x: 4.0, y: 17.3), controlPoint: CGPoint(x: 4.0, y: 20.4))
-    house.close()
-    homeHouseLayer.path = house.cgPath
-
-    let playPath = UIBezierPath()
-    playPath.move(to: CGPoint(x: 10.2, y: 11.3))
-    playPath.addLine(to: CGPoint(x: 15.1, y: 13.8))
-    playPath.addLine(to: CGPoint(x: 10.2, y: 16.3))
-    playPath.close()
-    homePlayLayer.path = playPath.cgPath
-
-    let accent = UIBezierPath()
-    accent.move(to: CGPoint(x: 10.0, y: 7.4))
-    accent.addQuadCurve(to: CGPoint(x: 14.0, y: 7.4), controlPoint: CGPoint(x: 12.0, y: 6.1))
-    homeAccentLayer.path = accent.cgPath
-
-    // 2. Live: Rounded Cinema Broadcast Frame + Symmetric Interior Wave Arcs + Live Dot
-    liveFrameLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 2.6, y: 4.8, width: 18.8, height: 14.4),
-      cornerRadius: 4.8
-    ).cgPath
-
-    let bc = CGPoint(x: 12.0, y: 12.0)
-    let wave = UIBezierPath()
-    let deg44 = 44.0 * Double.pi / 180.0
-    let deg136 = 136.0 * Double.pi / 180.0
-    let deg224 = 224.0 * Double.pi / 180.0
-    wave.addArc(withCenter: bc, radius: 4.7, startAngle: CGFloat(deg136), endAngle: CGFloat(deg224), clockwise: true)
-    wave.move(to: CGPoint(x: bc.x + CGFloat(Foundation.cos(-deg44) * 4.7), y: bc.y + CGFloat(Foundation.sin(-deg44) * 4.7)))
-    wave.addArc(withCenter: bc, radius: 4.7, startAngle: CGFloat(-deg44), endAngle: CGFloat(deg44), clockwise: true)
-    liveWaveLayer.path = wave.cgPath
-
-    liveHaloLayer.path = UIBezierPath(ovalIn: CGRect(x: bc.x - 3.6, y: bc.y - 3.6, width: 7.2, height: 7.2)).cgPath
-    liveBeaconLayer.path = UIBezierPath(ovalIn: CGRect(x: bc.x - 2.0, y: bc.y - 2.0, width: 4.0, height: 4.0)).cgPath
-
-    // 3. Library: Sculpted Dual-Layer Poster Deck + Curated Film Bars
-    libBackCardLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 7.2, y: 3.4, width: 13.0, height: 13.6),
-      cornerRadius: 3.4
-    ).cgPath
-    libFrontCardLayer.path = UIBezierPath(
-      roundedRect: CGRect(x: 3.8, y: 6.8, width: 13.6, height: 13.8),
-      cornerRadius: 3.6
-    ).cgPath
-    let detail = UIBezierPath()
-    detail.move(to: CGPoint(x: 7.3, y: 11.7))
-    detail.addLine(to: CGPoint(x: 13.9, y: 11.7))
-    detail.move(to: CGPoint(x: 7.3, y: 15.5))
-    detail.addLine(to: CGPoint(x: 11.8, y: 15.5))
-    libDetailLayer.path = detail.cgPath
-
-    // 4. Settings: Modern Apple Precision Control Sliders
-    let topTrack = UIBezierPath()
-    topTrack.move(to: CGPoint(x: 3.6, y: 8.2))
-    topTrack.addLine(to: CGPoint(x: 20.4, y: 8.2))
-    settingsTrackTopLayer.path = topTrack.cgPath
-
-    let botTrack = UIBezierPath()
-    botTrack.move(to: CGPoint(x: 3.6, y: 15.8))
-    botTrack.addLine(to: CGPoint(x: 20.4, y: 15.8))
-    settingsTrackBotLayer.path = botTrack.cgPath
-
-    settingsKnobTopLayer.path = UIBezierPath(ovalIn: CGRect(x: 12.45, y: 5.45, width: 5.5, height: 5.5)).cgPath
-    settingsKnobBotLayer.path = UIBezierPath(ovalIn: CGRect(x: 6.05, y: 13.05, width: 5.5, height: 5.5)).cgPath
+    symbolImageView.frame = bounds
   }
 
   func configure(kind: Kind, selected: Bool, dark: Bool, fallbackSymbol: String) {
@@ -3075,277 +2939,40 @@ private final class MarcoAnimatedTabIconView: UIView {
     self.isDarkState = dark
     self.fallbackSymbol = fallbackSymbol
 
-    let activePrimary: UIColor = dark
-      ? UIColor(red: 0.25, green: 0.65, blue: 1.0, alpha: 1.0)
+    let activeTint: UIColor = dark
+      ? UIColor(red: 0.039, green: 0.518, blue: 1.0, alpha: 1.0)
       : UIColor.systemBlue
-    let activeSecondary: UIColor = dark
-      ? UIColor(red: 0.46, green: 0.84, blue: 1.0, alpha: 1.0)
-      : UIColor(red: 0.22, green: 0.71, blue: 1.0, alpha: 1.0)
-    let liveBeaconRed: UIColor = dark
-      ? UIColor(red: 1.0, green: 0.27, blue: 0.23, alpha: 1.0)
-      : UIColor(red: 1.0, green: 0.23, blue: 0.19, alpha: 1.0)
-    let inactiveColor: UIColor = dark
-      ? UIColor.white.withAlphaComponent(0.74)
-      : UIColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 0.78)
-    let surfaceCutout: UIColor = dark
-      ? UIColor(red: 0.10, green: 0.11, blue: 0.14, alpha: 1.0)
-      : UIColor.white
+    let inactiveTint: UIColor = dark
+      ? UIColor.white.withAlphaComponent(0.76)
+      : UIColor(white: 0.10, alpha: 0.82)
 
-    let allShapeLayers: [CAShapeLayer] = [
-      homeHouseLayer, homePlayLayer, homeAccentLayer,
-      liveFrameLayer, liveWaveLayer, liveHaloLayer, liveBeaconLayer,
-      libBackCardLayer, libFrontCardLayer, libDetailLayer,
-      settingsTrackTopLayer, settingsTrackBotLayer, settingsKnobTopLayer, settingsKnobBotLayer,
-    ]
-
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    for sl in allShapeLayers {
-      sl.isHidden = true
-    }
-    fallbackImageView.isHidden = true
-
-    switch kind {
-    case .home:
-      homeHouseLayer.isHidden = false
-      homePlayLayer.isHidden = false
-      homeAccentLayer.isHidden = !selected
-
-      if selected {
-        homeHouseLayer.fillColor = activePrimary.cgColor
-        homeHouseLayer.strokeColor = nil
-        homeHouseLayer.lineWidth = 0.0
-
-        homePlayLayer.fillColor = UIColor.white.cgColor
-        homePlayLayer.strokeColor = UIColor.white.cgColor
-        homePlayLayer.lineWidth = 0.9
-
-        homeAccentLayer.fillColor = nil
-        homeAccentLayer.strokeColor = UIColor.white.withAlphaComponent(0.45).cgColor
-        homeAccentLayer.lineWidth = 1.4
-      } else {
-        homeHouseLayer.fillColor = nil
-        homeHouseLayer.strokeColor = inactiveColor.cgColor
-        homeHouseLayer.lineWidth = 1.85
-
-        homePlayLayer.fillColor = inactiveColor.cgColor
-        homePlayLayer.strokeColor = inactiveColor.cgColor
-        homePlayLayer.lineWidth = 0.7
-      }
-
-    case .live:
-      liveFrameLayer.isHidden = false
-      liveWaveLayer.isHidden = false
-      liveBeaconLayer.isHidden = false
-      liveHaloLayer.isHidden = !selected
-
-      liveWaveLayer.fillColor = nil
-      if selected {
-        liveFrameLayer.fillColor = activePrimary.cgColor
-        liveFrameLayer.strokeColor = nil
-        liveFrameLayer.lineWidth = 0.0
-
-        liveWaveLayer.strokeColor = UIColor.white.withAlphaComponent(0.92).cgColor
-        liveWaveLayer.lineWidth = 1.75
-
-        liveHaloLayer.fillColor = liveBeaconRed.withAlphaComponent(0.32).cgColor
-        liveHaloLayer.strokeColor = nil
-
-        liveBeaconLayer.fillColor = liveBeaconRed.cgColor
-        liveBeaconLayer.strokeColor = UIColor.white.cgColor
-        liveBeaconLayer.lineWidth = 0.85
-      } else {
-        liveFrameLayer.fillColor = nil
-        liveFrameLayer.strokeColor = inactiveColor.cgColor
-        liveFrameLayer.lineWidth = 1.85
-
-        liveWaveLayer.strokeColor = inactiveColor.withAlphaComponent(0.82).cgColor
-        liveWaveLayer.lineWidth = 1.7
-
-        liveBeaconLayer.fillColor = inactiveColor.cgColor
-        liveBeaconLayer.strokeColor = nil
-        liveBeaconLayer.lineWidth = 0.0
-      }
-
-    case .library:
-      libBackCardLayer.isHidden = false
-      libFrontCardLayer.isHidden = false
-      libDetailLayer.isHidden = false
-
-      if selected {
-        libBackCardLayer.fillColor = activeSecondary.withAlphaComponent(0.62).cgColor
-        libBackCardLayer.strokeColor = nil
-        libBackCardLayer.lineWidth = 0.0
-
-        libFrontCardLayer.fillColor = activePrimary.cgColor
-        libFrontCardLayer.strokeColor = nil
-        libFrontCardLayer.lineWidth = 0.0
-
-        libDetailLayer.fillColor = nil
-        libDetailLayer.strokeColor = UIColor.white.cgColor
-        libDetailLayer.lineWidth = 1.85
-      } else {
-        libBackCardLayer.fillColor = nil
-        libBackCardLayer.strokeColor = inactiveColor.withAlphaComponent(0.55).cgColor
-        libBackCardLayer.lineWidth = 1.65
-
-        libFrontCardLayer.fillColor = surfaceCutout.withAlphaComponent(0.01).cgColor
-        libFrontCardLayer.strokeColor = inactiveColor.cgColor
-        libFrontCardLayer.lineWidth = 1.85
-
-        libDetailLayer.fillColor = nil
-        libDetailLayer.strokeColor = inactiveColor.cgColor
-        libDetailLayer.lineWidth = 1.65
-      }
-
-    case .settings:
-      settingsTrackTopLayer.isHidden = false
-      settingsTrackBotLayer.isHidden = false
-      settingsKnobTopLayer.isHidden = false
-      settingsKnobBotLayer.isHidden = false
-
-      settingsTrackTopLayer.fillColor = nil
-      settingsTrackBotLayer.fillColor = nil
-
-      if selected {
-        settingsTrackTopLayer.strokeColor = activePrimary.withAlphaComponent(0.45).cgColor
-        settingsTrackTopLayer.lineWidth = 2.1
-        settingsTrackBotLayer.strokeColor = activePrimary.withAlphaComponent(0.45).cgColor
-        settingsTrackBotLayer.lineWidth = 2.1
-
-        settingsKnobTopLayer.fillColor = activePrimary.cgColor
-        settingsKnobTopLayer.strokeColor = nil
-        settingsKnobTopLayer.lineWidth = 0.0
-
-        settingsKnobBotLayer.fillColor = activeSecondary.cgColor
-        settingsKnobBotLayer.strokeColor = nil
-        settingsKnobBotLayer.lineWidth = 0.0
-      } else {
-        settingsTrackTopLayer.strokeColor = inactiveColor.cgColor
-        settingsTrackTopLayer.lineWidth = 1.85
-        settingsTrackBotLayer.strokeColor = inactiveColor.cgColor
-        settingsTrackBotLayer.lineWidth = 1.85
-
-        settingsKnobTopLayer.fillColor = surfaceCutout.cgColor
-        settingsKnobTopLayer.strokeColor = inactiveColor.cgColor
-        settingsKnobTopLayer.lineWidth = 1.85
-
-        settingsKnobBotLayer.fillColor = surfaceCutout.cgColor
-        settingsKnobBotLayer.strokeColor = inactiveColor.cgColor
-        settingsKnobBotLayer.lineWidth = 1.85
-      }
-
-    case .fallback:
-      fallbackImageView.isHidden = false
-      let cfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: selected ? .semibold : .medium)
-      fallbackImageView.image = UIImage(systemName: fallbackSymbol, withConfiguration: cfg)
-      fallbackImageView.tintColor = selected ? activePrimary : inactiveColor
-    }
-    CATransaction.commit()
+    let symbolName = kind.appleSymbolName(selected: selected, fallback: fallbackSymbol)
+    let pointSize: CGFloat = kind == .live ? 19.0 : 20.0
+    let cfg = UIImage.SymbolConfiguration(
+      pointSize: pointSize,
+      weight: selected ? .semibold : .medium,
+      scale: .medium
+    )
+    let img = UIImage(systemName: symbolName, withConfiguration: cfg)
+      ?? UIImage(systemName: fallbackSymbol, withConfiguration: cfg)
+    symbolImageView.image = img?.withRenderingMode(.alwaysTemplate)
+    symbolImageView.tintColor = selected ? activeTint : inactiveTint
   }
 
-  /// Plays this tab's signature tactile spring micro-animation on selection.
+  /// Plays Apple's native SF Symbol effect (iOS 17+) or crisp spring bounce (iOS 14–16).
   func playSelectAnimation() {
     guard !UIAccessibility.isReduceMotionEnabled else { return }
-    let now = canvasLayer.convertTime(CACurrentMediaTime(), from: nil)
-
-    func keyframe(
-      _ keyPath: String,
-      values: [Any],
-      times: [NSNumber],
-      duration: CFTimeInterval,
-      delay: CFTimeInterval = 0.0
-    ) -> CAKeyframeAnimation {
-      let anim = CAKeyframeAnimation(keyPath: keyPath)
-      anim.values = values
-      anim.keyTimes = times
-      anim.duration = duration
-      anim.beginTime = delay > 0 ? now + delay : 0
-      anim.fillMode = .backwards
-      anim.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
-      return anim
+    if #available(iOS 17.0, *) {
+      symbolImageView.addSymbolEffect(.bounce.up.byLayer, options: .nonRepeating, animated: true)
+      return
     }
-
-    switch currentKind {
-    case .home:
-      homeHouseLayer.removeAllAnimations()
-      homePlayLayer.removeAllAnimations()
-      homeAccentLayer.removeAllAnimations()
-
-      homeHouseLayer.add(
-        keyframe("transform.scale", values: [0.84, 1.11, 0.97, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.50),
-        forKey: "marcoHomePop"
-      )
-      homePlayLayer.add(
-        keyframe("transform.translation.x", values: [-2.0, 0.8, -0.2, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.50),
-        forKey: "marcoHomePlaySlide"
-      )
-      homePlayLayer.add(
-        keyframe("transform.scale", values: [0.58, 1.18, 0.96, 1.0], times: [0, 0.46, 0.78, 1.0], duration: 0.50),
-        forKey: "marcoHomePlayScale"
-      )
-
-    case .live:
-      liveFrameLayer.removeAllAnimations()
-      liveBeaconLayer.removeAllAnimations()
-      liveHaloLayer.removeAllAnimations()
-      liveWaveLayer.removeAllAnimations()
-
-      liveFrameLayer.add(
-        keyframe("transform.scale", values: [0.86, 1.09, 0.98, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.48),
-        forKey: "marcoLiveFrame"
-      )
-      liveBeaconLayer.add(
-        keyframe("transform.scale", values: [0.58, 1.38, 0.94, 1.0], times: [0, 0.38, 0.72, 1.0], duration: 0.54),
-        forKey: "marcoLiveBeacon"
-      )
-      liveHaloLayer.add(
-        keyframe("transform.scale", values: [0.55, 1.62, 1.06, 1.0], times: [0, 0.45, 0.78, 1.0], duration: 0.62),
-        forKey: "marcoLiveHaloScale"
-      )
-      liveWaveLayer.add(
-        keyframe("transform.scale", values: [0.72, 1.16, 0.98, 1.0], times: [0, 0.48, 0.78, 1.0], duration: 0.50, delay: 0.05),
-        forKey: "marcoLiveWaveScale"
-      )
-
-    case .library:
-      libFrontCardLayer.removeAllAnimations()
-      libBackCardLayer.removeAllAnimations()
-      libDetailLayer.removeAllAnimations()
-
-      libFrontCardLayer.add(
-        keyframe("transform.scale", values: [0.86, 1.09, 0.98, 1.0], times: [0, 0.42, 0.76, 1.0], duration: 0.48),
-        forKey: "marcoLibFront"
-      )
-      libBackCardLayer.add(
-        keyframe("transform.translation.x", values: [-2.6, 1.0, -0.2, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52, delay: 0.04),
-        forKey: "marcoLibBackX"
-      )
-      libBackCardLayer.add(
-        keyframe("transform.translation.y", values: [2.6, -1.0, 0.2, 0.0], times: [0, 0.46, 0.78, 1.0], duration: 0.52, delay: 0.04),
-        forKey: "marcoLibBackY"
-      )
-
-    case .settings:
-      settingsKnobTopLayer.removeAllAnimations()
-      settingsKnobBotLayer.removeAllAnimations()
-
-      settingsKnobTopLayer.add(
-        keyframe("transform.translation.x", values: [-4.0, 1.1, -0.25, 0.0], times: [0, 0.48, 0.78, 1.0], duration: 0.52),
-        forKey: "marcoSettingsTopSlide"
-      )
-      settingsKnobBotLayer.add(
-        keyframe("transform.translation.x", values: [4.0, -1.1, 0.25, 0.0], times: [0, 0.48, 0.78, 1.0], duration: 0.52, delay: 0.04),
-        forKey: "marcoSettingsBotSlide"
-      )
-
-    case .fallback:
-      fallbackImageView.layer.removeAllAnimations()
-      fallbackImageView.layer.add(
-        keyframe("transform.scale", values: [0.84, 1.14, 0.97, 1.0], times: [0, 0.44, 0.76, 1.0], duration: 0.48),
-        forKey: "marcoFallbackBounce"
-      )
-    }
+    symbolImageView.layer.removeAllAnimations()
+    let anim = CAKeyframeAnimation(keyPath: "transform.scale")
+    anim.values = [0.88, 1.08, 0.98, 1.0]
+    anim.keyTimes = [0, 0.42, 0.76, 1.0]
+    anim.duration = 0.42
+    anim.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+    symbolImageView.layer.add(anim, forKey: "marcoAppleSymbolBounce")
   }
 }
 
@@ -3593,14 +3220,14 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   private func applySlotAppearances(activeIndex: Int) {
     let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
     let activeLabelColor: UIColor = dark
-      ? UIColor(red: 0.36, green: 0.72, blue: 1.0, alpha: 1.0)
+      ? UIColor(red: 0.039, green: 0.518, blue: 1.0, alpha: 1.0)
       : UIColor.systemBlue
     let inactiveLabelColor: UIColor = dark
-      ? UIColor.white.withAlphaComponent(0.70)
-      : UIColor(red: 0.17, green: 0.19, blue: 0.23, alpha: 0.76)
+      ? UIColor.white.withAlphaComponent(0.76)
+      : UIColor(white: 0.10, alpha: 0.82)
     selectionLensView.layer.borderColor = (dark
-      ? UIColor(red: 0.55, green: 0.80, blue: 1.0, alpha: 0.28)
-      : UIColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 0.16)).cgColor
+      ? UIColor.white.withAlphaComponent(0.14)
+      : UIColor.black.withAlphaComponent(0.05)).cgColor
     scrubbingLensShadowView.layer.shadowOpacity = dark ? 0.34 : 0.16
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
@@ -3671,8 +3298,8 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       self.selectionLensView.transform = .identity
       let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
       self.selectionLensView.backgroundColor = dark
-        ? UIColor(red: 0.22, green: 0.58, blue: 1.0, alpha: 0.22)
-        : UIColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 0.12)
+        ? UIColor.white.withAlphaComponent(0.14)
+        : UIColor.black.withAlphaComponent(0.065)
       self.selectionLensView.alpha = lifted ? 0.0 : 1.0
 
       self.scrubbingLensShadowView.bounds = liftedBounds
@@ -4430,28 +4057,50 @@ private final class MarcoIos27RootTabChromeController: NSObject {
   }
 
   private func attachToRootIfNeeded() {
-    guard let rootVC = MarcoLiquidGlassSupport.activeWindow()?.rootViewController,
+    guard let window = MarcoLiquidGlassSupport.activeWindow(),
+          let rootVC = window.rootViewController,
           let rootView = rootVC.view else {
       return
     }
-    if attachedHostView !== rootView || overlayView.superview !== rootView {
+    // Mount on rootView's superview (UIWindow) directly ABOVE rootView so
+    // Flutter's dynamic UiKitView platform views (such as the scrolling Filter
+    // pill or segmented controls mounted inside rootView) can NEVER cover or
+    // intercept hits on the floating Dock / Logo orb, while native UIKit modal
+    // sheets & alerts (UITransitionView added later to UIWindow) still stay
+    // cleanly above the Dock.
+    let targetParent = rootView.superview ?? window
+    let targetFrame = targetParent === rootView ? rootView.bounds : rootView.frame
+    if attachedHostView !== rootView || overlayView.superview !== targetParent {
       overlayView.removeFromSuperview()
-      overlayView.frame = rootView.bounds
+      overlayView.frame = targetFrame
       chromeView.frame = overlayView.bounds
-      rootView.addSubview(overlayView)
+      if rootView.superview === targetParent {
+        targetParent.insertSubview(overlayView, aboveSubview: rootView)
+      } else {
+        targetParent.addSubview(overlayView)
+      }
       attachedHostView = rootView
+    } else if rootView.superview === targetParent {
+      if let rootIdx = targetParent.subviews.firstIndex(of: rootView),
+         let overlayIdx = targetParent.subviews.firstIndex(of: overlayView),
+         overlayIdx < rootIdx {
+        targetParent.insertSubview(overlayView, aboveSubview: rootView)
+      }
+    } else if targetParent === rootView {
+      targetParent.bringSubviewToFront(overlayView)
     }
-    rootView.bringSubviewToFront(overlayView)
   }
 
   private func syncOverlayFrame() {
-    guard let rootView = attachedHostView ?? MarcoLiquidGlassSupport.activeWindow()?.rootViewController?.view else {
+    guard let window = MarcoLiquidGlassSupport.activeWindow(),
+          let rootView = attachedHostView ?? window.rootViewController?.view else {
       return
     }
-    overlayView.frame = rootView.bounds
+    attachToRootIfNeeded()
+    let targetParent = overlayView.superview ?? rootView
+    overlayView.frame = targetParent === rootView ? rootView.bounds : rootView.frame
     chromeView.frame = overlayView.bounds
     chromeView.setNeedsLayout()
-    rootView.bringSubviewToFront(overlayView)
   }
 
   func configure(args: [String: Any]) {
