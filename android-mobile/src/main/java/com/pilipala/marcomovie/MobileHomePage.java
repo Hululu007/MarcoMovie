@@ -12,11 +12,13 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Redesigned Mobile Discovery Home:
@@ -31,11 +33,82 @@ final class MobileHomePage {
     private static String lastSiteKey = "";
     private static final Map<String, String> selectedFilters = new LinkedHashMap<>();
 
+    interface LoadingMarkerStore {
+        void writeMarker(String siteKey);
+    }
+
+    /**
+     * Request-owned loading-site crash guard: ensures an older slow request finishing after a newer
+     * request started can never clear the newer request's marker, and normal backgrounding clears
+     * the marker cleanly so OS process reclaim is never misclassified as a crash.
+     */
+    static final class LoadingSiteGuard {
+        private final AtomicLong seq = new AtomicLong(0L);
+        private final Object lock = new Object();
+        private long activeToken = 0L;
+        private String activeSite = "";
+
+        long acquire(LoadingMarkerStore store, String siteKey) {
+            String clean = siteKey == null ? "" : siteKey;
+            long token;
+            synchronized (lock) {
+                token = seq.incrementAndGet();
+                activeToken = token;
+                activeSite = clean;
+            }
+            if (store != null) {
+                store.writeMarker(clean);
+            }
+            return token;
+        }
+
+        boolean releaseIfOwner(LoadingMarkerStore store, long token) {
+            synchronized (lock) {
+                if (token <= 0L || activeToken != token) {
+                    return false;
+                }
+                activeToken = 0L;
+                activeSite = "";
+            }
+            if (store != null) {
+                store.writeMarker("");
+            }
+            return true;
+        }
+
+        void clearOnNormalStop(LoadingMarkerStore store) {
+            synchronized (lock) {
+                activeToken = 0L;
+                activeSite = "";
+            }
+            if (store != null) {
+                store.writeMarker("");
+            }
+        }
+
+        synchronized String activeSiteForTest() {
+            synchronized (lock) {
+                return activeSite;
+            }
+        }
+    }
+
+    private static final LoadingSiteGuard LOADING_GUARD = new LoadingSiteGuard();
+
     private MobileHomePage() {}
 
     private static void commitLoadingSite(MainActivity a, String siteKey) {
         if (a == null || a.prefs == null) return;
         a.prefs.edit().putString(Prefs.LOADING_SITE, siteKey == null ? "" : siteKey).commit();
+    }
+
+    private static void applyClearLoadingSite(MainActivity a) {
+        if (a == null || a.prefs == null) return;
+        a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+    }
+
+    static void clearLoadingSiteOnNormalStop(MainActivity a) {
+        LOADING_GUARD.clearOnNormalStop(key -> applyClearLoadingSite(a));
     }
 
     static boolean hasAnyPoster(List<Cms.Video> videos) {
@@ -52,32 +125,48 @@ final class MobileHomePage {
      * Resolves initial home listings for both XML/JSON CMS and script sources. Standard Apple CMS
      * v10 {@code ?ac=list} omits {@code vod_pic}; when the home response contains videos without
      * any poster URL, enriches via {@link SourceEngine#homeVideos()} ({@code ?ac=detail&pg=1}) or
-     * the first category before falling back to the posterless list.
+     * the first category before falling back to the posterless list. When no initial videos exist
+     * and every fallback path fails with an exception, rethrows the error instead of masking a
+     * broken source as an empty library.
      */
     static Cms.Listing resolveHomeListing(
             SourceEngine eng, String homeRaw, List<Cms.Category> parsedCats) throws Exception {
         Cms.Listing cand = HomeScreen.parseHomeListing(homeRaw);
         boolean hasPosters = hasAnyPoster(cand.videos);
+        Throwable fallbackError = null;
+        boolean fallbackSucceeded = false;
         if (cand.videos.isEmpty() || !hasPosters) {
             try {
                 Cms.Listing enriched = Cms.listing(eng.homeVideos());
+                fallbackSucceeded = true;
                 if (!enriched.videos.isEmpty()
                         && (cand.videos.isEmpty() || hasAnyPoster(enriched.videos))) {
                     cand = enriched;
                     hasPosters = hasAnyPoster(cand.videos);
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable err) {
+                fallbackError = err;
             }
         }
         if ((cand.videos.isEmpty() || !hasPosters) && parsedCats != null && !parsedCats.isEmpty()) {
             try {
                 Cms.Listing byCat = Cms.listing(eng.category(parsedCats.get(0).id, 1));
+                fallbackSucceeded = true;
                 if (!byCat.videos.isEmpty()
                         && (cand.videos.isEmpty() || hasAnyPoster(byCat.videos))) {
                     cand = byCat;
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable err) {
+                fallbackError = err;
             }
+        }
+        if (cand.videos.isEmpty() && !fallbackSucceeded && fallbackError != null) {
+            if (fallbackError instanceof Exception) {
+                throw (Exception) fallbackError;
+            }
+            throw new IOException(
+                    fallbackError.getMessage() != null ? fallbackError.getMessage() : "列表读取失败",
+                    fallbackError);
         }
         return cand;
     }
@@ -418,7 +507,9 @@ final class MobileHomePage {
                                     filterSchemaHolder[0], targetCatForDefs, currentVideos);
                     a.submitPage(
                             () -> {
-                                commitLoadingSite(a, site.key);
+                                final long loadingGuardToken =
+                                        LOADING_GUARD.acquire(
+                                                key -> commitLoadingSite(a, key), site.key);
                                 try {
                                     SourceEngine eng = a.engine(site);
                                     final List<Cms.Category> parsedCats;
@@ -511,7 +602,8 @@ final class MobileHomePage {
                                                 recoverSwitchBtn.setVisibility(View.VISIBLE);
                                             });
                                 } finally {
-                                    a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+                                    LOADING_GUARD.releaseIfOwner(
+                                            key -> applyClearLoadingSite(a), loadingGuardToken);
                                 }
                             });
                 };

@@ -1038,7 +1038,16 @@ public final class MainActivity extends Activity {
         prefs = getSharedPreferences(privateMode ? "movie-private" : Prefs.FILE, MODE_PRIVATE);
         cleanupLegacyPrivateHistory(getSharedPreferences("movie-private", MODE_PRIVATE));
         final int priorBootCrashes = recordStartupBootGuard(getCacheDir());
-        final boolean priorLoadingCrash = !prefs.getString(Prefs.LOADING_SITE, "").isEmpty();
+        final int priorExitReason = queryLastProcessExitReason();
+        final String pendingLoadingSite = prefs.getString(Prefs.LOADING_SITE, "");
+        final boolean priorLoadingCrash =
+                shouldTreatLoadingSiteAsCrash(pendingLoadingSite, priorExitReason);
+        if (!pendingLoadingSite.isEmpty() && !priorLoadingCrash) {
+            // Previous process exited cleanly or via OS memory/freezer reclaim while a slow home
+            // request was still in flight; clear only the transient loading marker and keep user's
+            // selected/preferred site intact.
+            prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+        }
         if (priorBootCrashes >= 1 || priorLoadingCrash) {
             purgeVolatileCrashCaches(getCacheDir());
             if (priorBootCrashes >= 2) {
@@ -1153,9 +1162,12 @@ public final class MainActivity extends Activity {
                         ui.post(
                                 () -> {
                                     if (isFinishing() || isDestroyed()) return;
-                                    String crashedSite = prefs.getString(Prefs.LOADING_SITE, "");
+                                    final String crashedSite =
+                                            prefs.getString(Prefs.LOADING_SITE, "");
                                     boolean recoveredFromCrash =
-                                            crashedSite != null && !crashedSite.isEmpty();
+                                            priorLoadingCrash
+                                                    && crashedSite != null
+                                                    && !crashedSite.isEmpty();
                                     if (recoveredFromCrash) {
                                         clearRecoveredCrashSite(prefs);
                                     }
@@ -3023,6 +3035,59 @@ public final class MainActivity extends Activity {
         }
     }
 
+    static final int EXIT_REASON_UNKNOWN = 0;
+
+    static boolean isAttributableCrashExitReason(int reason) {
+        // ApplicationExitInfo: REASON_SIGNALED(2), REASON_CRASH(4), REASON_CRASH_NATIVE(5),
+        // REASON_ANR(6)
+        return reason == 2 || reason == 4 || reason == 5 || reason == 6;
+    }
+
+    static boolean isKnownBenignExitReason(int reason) {
+        // ApplicationExitInfo: REASON_EXIT_SELF(1), REASON_LOW_MEMORY(3),
+        // REASON_PERMISSION_CHANGE(8), REASON_USER_REQUESTED(10), REASON_USER_STOPPED(11),
+        // REASON_FREEZER(14), REASON_PACKAGE_STATE_CHANGE(15), REASON_PACKAGE_UPDATED(16)
+        return reason == 1
+                || reason == 3
+                || reason == 8
+                || reason == 10
+                || reason == 11
+                || reason == 14
+                || reason == 15
+                || reason == 16;
+    }
+
+    /**
+     * Determines whether a leftover {@link Prefs#LOADING_SITE} marker represents an attributable
+     * crash rather than normal backgrounding or OS process reclaim.
+     */
+    static boolean shouldTreatLoadingSiteAsCrash(String loadingSite, int lastExitReason) {
+        if (loadingSite == null || loadingSite.trim().isEmpty()) {
+            return false;
+        }
+        if (isKnownBenignExitReason(lastExitReason)) {
+            return false;
+        }
+        return true;
+    }
+
+    private int queryLastProcessExitReason() {
+        if (android.os.Build.VERSION.SDK_INT < 30) {
+            return EXIT_REASON_UNKNOWN;
+        }
+        try {
+            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) return EXIT_REASON_UNKNOWN;
+            List<android.app.ApplicationExitInfo> reasons =
+                    am.getHistoricalProcessExitReasons(getPackageName(), 0, 1);
+            if (reasons != null && !reasons.isEmpty() && reasons.get(0) != null) {
+                return reasons.get(0).getReason();
+            }
+        } catch (Throwable ignored) {
+        }
+        return EXIT_REASON_UNKNOWN;
+    }
+
     static void clearRecoveredCrashSite(SharedPreferences prefs) {
         if (prefs == null) return;
         String crashed = prefs.getString(Prefs.LOADING_SITE, "");
@@ -3406,6 +3471,9 @@ public final class MainActivity extends Activity {
             CloudSyncDialog.pushOnExit(this);
         }
         foreground = false;
+        if (!isTvDevice()) {
+            MobileHomePage.clearLoadingSiteOnNormalStop(this);
+        }
         super.onStop();
         boolean keepBgPlay =
                 (android.os.Build.VERSION.SDK_INT >= 24 && isInPictureInPictureMode())

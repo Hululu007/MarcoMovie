@@ -297,6 +297,79 @@ final class CloudSyncDialog {
         return nowFavorited;
     }
 
+    /**
+     * Idempotently removes a favorite and records its {@code fav:} delete tombstone in one
+     * {@link WatchHistory#STORAGE_EXECUTOR} step. Repeated clicks or duplicate invocations after a
+     * remote deletion always keep the entry absent and never flip it back to favorited.
+     *
+     * @return always {@code false} (item is absent after removal)
+     */
+    static boolean removeFavoriteWithTombstoneSync(
+            SharedPreferences prefs,
+            boolean privateMode,
+            String siteKey,
+            String videoId,
+            long now) {
+        if (prefs == null
+                || siteKey == null
+                || siteKey.isEmpty()
+                || videoId == null
+                || videoId.isEmpty()) {
+            return false;
+        }
+        String currentFavs = prefs.getString(Prefs.FAVORITES, "[]");
+        String nextFavs = Favorites.remove(currentFavs, siteKey, videoId);
+        SharedPreferences.Editor ed = prefs.edit().putString(Prefs.FAVORITES, nextFavs);
+        if (!privateMode) {
+            String itemKey = siteKey + "\n" + videoId;
+            String nextTombs =
+                    CloudSync.Tombstones.recordFavoriteToggle(
+                            prefs.getString(Prefs.SYNC_TOMBSTONES, ""), itemKey, false, now);
+            ed.putString(Prefs.SYNC_TOMBSTONES, nextTombs);
+        }
+        ed.apply();
+        return false;
+    }
+
+    static void removeFavoriteWithTombstone(
+            final MainActivity a,
+            final String siteKey,
+            final String videoId,
+            final Runnable onUiComplete) {
+        if (a == null
+                || a.prefs == null
+                || siteKey == null
+                || siteKey.isEmpty()
+                || videoId == null
+                || videoId.isEmpty()) {
+            if (onUiComplete != null) mainHandler().post(onUiComplete);
+            return;
+        }
+        final SharedPreferences prefs = a.prefs;
+        final boolean isPrivate = a.privateMode;
+        final long now = System.currentTimeMillis();
+        WatchHistory.STORAGE_EXECUTOR.execute(
+                () -> {
+                    try {
+                        removeFavoriteWithTombstoneSync(prefs, isPrivate, siteKey, videoId, now);
+                    } catch (Exception e) {
+                        AppLog.w("CloudSync", "Atomic favorite remove with tombstone failed", e);
+                    }
+                    mainHandler()
+                            .post(
+                                    () -> {
+                                        if (onUiComplete != null
+                                                && !a.isFinishing()
+                                                && !a.isDestroyed()) {
+                                            onUiComplete.run();
+                                        }
+                                        if (!isPrivate) {
+                                            scheduleAutoPush(a, true);
+                                        }
+                                    });
+                });
+    }
+
     static void toggleFavoriteWithTombstone(
             final MainActivity a,
             final String siteKey,

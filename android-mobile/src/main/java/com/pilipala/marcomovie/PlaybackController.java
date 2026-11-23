@@ -1695,52 +1695,41 @@ final class PlaybackController {
                                                                     return true;
                                                                 }
                                                             }
-                                                            if (mp instanceof MpvPlayer
-                                                                    && !ep.media.optBoolean(
-                                                                            "_mpvFallback")) {
-                                                                try {
-                                                                    ep.media.put(
-                                                                            "_mpvFallback", true);
-                                                                } catch (Exception ignored) {
-                                                                }
-                                                                a.resumeAt =
-                                                                        mp.getCurrentPosition();
-                                                                a.playStatus.setText(
-                                                                        "MPV 播放异常，正在切换 Media3 内核…");
-                                                                a.ui.post(
-                                                                        () -> {
-                                                                            if (ticket
-                                                                                    == a.generation)
-                                                                                playerPage(
-                                                                                        a, s, v,
-                                                                                        ep);
-                                                                        });
-                                                                return true;
-                                                            }
-                                                            if (PlaybackFailure.decoderFallback(
-                                                                            what)
-                                                                    && a.prefs.getInt(
+                                                            boolean autoSwitchKernel =
+                                                                    shouldAutoSwitchKernel(a);
+                                                            int bookmarkPos =
+                                                                    a.playingBookmark != null
+                                                                            ? a.playingBookmark
+                                                                                    .position
+                                                                            : 0;
+                                                            FullscreenFallbackAction kernelAction =
+                                                                    decideFullscreenKernelFallback(
+                                                                            mp instanceof MpvPlayer,
+                                                                            what,
+                                                                            a.prefs.getInt(
                                                                                     Prefs
                                                                                             .DECODER_MODE,
-                                                                                    0)
-                                                                            == 0) {
-                                                                if (currentPos >= 5000
-                                                                        && !ep.media.optBoolean(
-                                                                                "_hwRetry")
-                                                                        && !ep.media.optBoolean(
-                                                                                "_softwareFallback")
-                                                                        && !ep.media.optBoolean(
-                                                                                "_systemFallback")
-                                                                        && !mp
-                                                                                .isUnsupportedDolbyVisionProfile5()) {
-                                                                    try {
-                                                                        ep.media.put(
-                                                                                "_hwRetry", true);
-                                                                    } catch (Exception ignored) {
-                                                                    }
-                                                                    a.resumeAt = currentPos;
-                                                                    a.playStatus.setText(
-                                                                            "解码器波动，正在重新初始化硬件解码…");
+                                                                                    0),
+                                                                            a.prefs.getInt(
+                                                                                    Prefs
+                                                                                            .PLAYER_ENGINE,
+                                                                                    0),
+                                                                            ep.media,
+                                                                            mp
+                                                                                    .isUnsupportedDolbyVisionProfile5(),
+                                                                            mp.softFallbackMode(),
+                                                                            currentPos,
+                                                                            bookmarkPos,
+                                                                            a.resumeAt,
+                                                                            autoSwitchKernel);
+                                                            if (kernelAction.action
+                                                                    != FullscreenFallbackAction
+                                                                            .ACTION_NONE) {
+                                                                a.resumeAt =
+                                                                        kernelAction.resumeAtMs;
+                                                                a.playStatus.setText(
+                                                                        kernelAction.statusText);
+                                                                if (kernelAction.delayMs > 0L) {
                                                                     a.ui.postDelayed(
                                                                             () -> {
                                                                                 if (ticket
@@ -1752,27 +1741,8 @@ final class PlaybackController {
                                                                                             ep);
                                                                                 }
                                                                             },
-                                                                            250L);
-                                                                    return true;
-                                                                }
-                                                                if (!ep.media.optBoolean(
-                                                                                "_softwareFallback")
-                                                                        && !mp
-                                                                                .isUnsupportedDolbyVisionProfile5()) {
-                                                                    try {
-                                                                        ep.media.put(
-                                                                                "_softwareFallback",
-                                                                                true);
-                                                                        ep.media.put(
-                                                                                "_fallbackMode",
-                                                                                mp
-                                                                                        .softFallbackMode());
-                                                                    } catch (Exception ignored) {
-                                                                    }
-                                                                    a.resumeAt =
-                                                                            mp.getCurrentPosition();
-                                                                    a.playStatus.setText(
-                                                                            "正在尝试内置软解码…");
+                                                                            kernelAction.delayMs);
+                                                                } else {
                                                                     a.ui.post(
                                                                             () -> {
                                                                                 if (ticket
@@ -1781,35 +1751,8 @@ final class PlaybackController {
                                                                                             a, s, v,
                                                                                             ep);
                                                                             });
-                                                                    return true;
                                                                 }
-                                                                if (!ep.media.optBoolean(
-                                                                                "_systemFallback")
-                                                                        && a.prefs.getInt(
-                                                                                        Prefs
-                                                                                                .PLAYER_ENGINE,
-                                                                                        0)
-                                                                                != 1) {
-                                                                    try {
-                                                                        ep.media.put(
-                                                                                "_systemFallback",
-                                                                                true);
-                                                                    } catch (Exception ignored) {
-                                                                    }
-                                                                    a.resumeAt =
-                                                                            mp.getCurrentPosition();
-                                                                    a.playStatus.setText(
-                                                                            "正在切换至系统硬件播放器…");
-                                                                    a.ui.post(
-                                                                            () -> {
-                                                                                if (ticket
-                                                                                        == a.generation)
-                                                                                    playerPage(
-                                                                                            a, s, v,
-                                                                                            ep);
-                                                                            });
-                                                                    return true;
-                                                                }
+                                                                return true;
                                                             }
                                                             if (tryAdvanceQualityOrLiveStream(
                                                                     a, ticket, s, v, ep)) {
@@ -1900,6 +1843,9 @@ final class PlaybackController {
                                                                 a.playerChrome.setLoading(false);
                                                             a.playStatus.setText(
                                                                     mp.getFailureMessage(what)
+                                                                            + (autoSwitchKernel
+                                                                                    ? ""
+                                                                                    : "（自动切核已关闭）")
                                                                             + "（"
                                                                             + what
                                                                             + "）");
@@ -2604,6 +2550,121 @@ final class PlaybackController {
         }
         outPlayer[0] = candidate;
         return actual;
+    }
+
+    static boolean shouldAutoSwitchKernel(MainActivity a) {
+        return a == null
+                || a.isTvDevice()
+                || a.mobilePrefs().getBoolean(Prefs.AUTO_SWITCH_KERNEL, true);
+    }
+
+    static int resolveFallbackResumePosition(
+            int currentPosMs, int fallbackSavedPosMs, int existingResumeAtMs) {
+        if (currentPosMs > 0) return currentPosMs;
+        if (fallbackSavedPosMs > 0) return fallbackSavedPosMs;
+        return Math.max(0, existingResumeAtMs);
+    }
+
+    static final class FullscreenFallbackAction {
+        static final int ACTION_NONE = 0;
+        static final int ACTION_MPV_TO_MEDIA3 = 1;
+        static final int ACTION_HW_RETRY = 2;
+        static final int ACTION_SOFTWARE_FALLBACK = 3;
+        static final int ACTION_SYSTEM_FALLBACK = 4;
+
+        final int action;
+        final int resumeAtMs;
+        final long delayMs;
+        final String statusText;
+
+        FullscreenFallbackAction(int action, int resumeAtMs, long delayMs, String statusText) {
+            this.action = action;
+            this.resumeAtMs = Math.max(0, resumeAtMs);
+            this.delayMs = Math.max(0L, delayMs);
+            this.statusText = statusText == null ? "" : statusText;
+        }
+
+        static final FullscreenFallbackAction NONE =
+                new FullscreenFallbackAction(ACTION_NONE, 0, 0L, "");
+    }
+
+    /**
+     * Unified fullscreen kernel-fallback decision enforcing {@link Prefs#AUTO_SWITCH_KERNEL} and
+     * preserving the playback position across kernel switches.
+     */
+    static FullscreenFallbackAction decideFullscreenKernelFallback(
+            boolean isMpv,
+            int errorWhat,
+            int decoderMode,
+            int enginePref,
+            JSONObject media,
+            boolean unsupportedDv5,
+            int softFallbackMode,
+            int currentPosMs,
+            int bookmarkPosMs,
+            int existingResumeAtMs,
+            boolean autoSwitchKernel) {
+        if (media == null) return FullscreenFallbackAction.NONE;
+        int resumePos =
+                resolveFallbackResumePosition(currentPosMs, bookmarkPosMs, existingResumeAtMs);
+        if (isMpv && !media.optBoolean("_mpvFallback")) {
+            if (!autoSwitchKernel) {
+                return FullscreenFallbackAction.NONE;
+            }
+            try {
+                media.put("_mpvFallback", true);
+            } catch (Exception ignored) {
+            }
+            return new FullscreenFallbackAction(
+                    FullscreenFallbackAction.ACTION_MPV_TO_MEDIA3,
+                    resumePos,
+                    0L,
+                    "MPV 播放异常，正在切换 Media3 内核…");
+        }
+        if (PlaybackFailure.decoderFallback(errorWhat) && decoderMode == 0) {
+            if (!autoSwitchKernel) {
+                return FullscreenFallbackAction.NONE;
+            }
+            if (currentPosMs >= 5000
+                    && !media.optBoolean("_hwRetry")
+                    && !media.optBoolean("_softwareFallback")
+                    && !media.optBoolean("_systemFallback")
+                    && !unsupportedDv5) {
+                try {
+                    media.put("_hwRetry", true);
+                } catch (Exception ignored) {
+                }
+                return new FullscreenFallbackAction(
+                        FullscreenFallbackAction.ACTION_HW_RETRY,
+                        resumePos,
+                        250L,
+                        "解码器波动，正在重新初始化硬件解码…");
+            }
+            if (!media.optBoolean("_softwareFallback") && !unsupportedDv5) {
+                try {
+                    media.put("_softwareFallback", true);
+                    media.put("_fallbackMode", softFallbackMode);
+                } catch (Exception ignored) {
+                }
+                return new FullscreenFallbackAction(
+                        FullscreenFallbackAction.ACTION_SOFTWARE_FALLBACK,
+                        resumePos,
+                        0L,
+                        "正在尝试内置软解码…");
+            }
+            if (!media.optBoolean("_systemFallback") && enginePref != ENGINE_SYSTEM) {
+                try {
+                    media.put("_systemFallback", true);
+                } catch (Exception ignored) {
+                }
+                return new FullscreenFallbackAction(
+                        FullscreenFallbackAction.ACTION_SYSTEM_FALLBACK,
+                        resumePos,
+                        0L,
+                        "正在切换至系统硬件播放器…");
+            }
+        }
+        return FullscreenFallbackAction.NONE;
     }
 
     /**

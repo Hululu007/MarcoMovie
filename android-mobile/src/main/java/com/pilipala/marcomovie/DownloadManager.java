@@ -235,6 +235,7 @@ final class DownloadManager {
         long length = -1;
         double durationSec = 4.0;
         boolean discontinuity;
+        Segment init;
 
         String range() {
             if (length < 0) return null;
@@ -300,6 +301,7 @@ final class DownloadManager {
 
     private static final class Media {
         final List<Segment> segments = new ArrayList<>();
+        final List<Segment> initSegments = new ArrayList<>();
         Segment init;
         double targetDurationSec = 6.0;
         Media audioMedia;
@@ -799,6 +801,10 @@ final class DownloadManager {
             downloadSeparatedHlsBundle(run, t, media, parts);
             return;
         }
+        if (distinctInits(media).size() > 1) {
+            downloadMultiInitSingleTrackHlsBundle(run, t, media, parts);
+            return;
+        }
         int count = media.segments.size();
         int ready = 0;
         for (int i = 0; i < count; i++) {
@@ -852,10 +858,125 @@ final class DownloadManager {
         }
     }
 
+    private static List<Segment> distinctInits(Media media) {
+        if (media == null) return java.util.Collections.emptyList();
+        if (!media.initSegments.isEmpty()) return media.initSegments;
+        if (media.init != null) return java.util.Collections.singletonList(media.init);
+        return java.util.Collections.emptyList();
+    }
+
+    private static String localInitFileName(String prefix, int index, int totalCount) {
+        if (totalCount <= 1) return prefix + "_init.mp4";
+        return prefix + "_init_" + index + ".mp4";
+    }
+
+    private static String initDedupKey(Segment init) {
+        if (init == null) return "";
+        return text(init.uri)
+                + "|"
+                + init.offset
+                + "|"
+                + init.length
+                + "|"
+                + text(init.key)
+                + "|"
+                + (init.iv == null ? "" : java.util.Arrays.toString(init.iv));
+    }
+
+    /**
+     * Downloads single-track fMP4 HLS streams that contain multiple distinct {@code #EXT-X-MAP}
+     * initialization segments into an offline {@code .hls/master.m3u8} bundle preserving every
+     * per-segment MAP and discontinuity boundary.
+     */
+    private void downloadMultiInitSingleTrackHlsBundle(
+            Run run, Task t, Media videoMedia, File parts) throws Exception {
+        List<Segment> vInits = distinctInits(videoMedia);
+        int vCount = videoMedia.segments.size();
+        int ready = 0;
+        for (int i = 0; i < vCount; i++) {
+            if (trackSegmentFile(parts, "v", i, true).isFile()) ready++;
+        }
+        synchronized (t) {
+            t.segmentCount = vCount;
+            t.segments = ready;
+            t.bytes = 0;
+            t.total = -1;
+        }
+        ExecutorService workers = Executors.newFixedThreadPool(SEGMENT_THREADS, THREADS);
+        List<Future<Void>> jobs = new ArrayList<>();
+        try {
+            for (int idx = 0; idx < vInits.size(); idx++) {
+                final Segment initSeg = vInits.get(idx);
+                final File target = new File(parts, localInitFileName("v", idx, vInits.size()));
+                if (!target.isFile()) {
+                    jobs.add(
+                            workers.submit(
+                                    () -> {
+                                        download(run, initSeg, target, false);
+                                        return null;
+                                    }));
+                }
+            }
+            for (int i = 0; i < vCount; i++) {
+                File target = trackSegmentFile(parts, "v", i, true);
+                if (target.isFile()) continue;
+                Segment seg = videoMedia.segments.get(i);
+                jobs.add(
+                        workers.submit(
+                                () -> {
+                                    download(run, seg, target, true);
+                                    return null;
+                                }));
+            }
+            for (Future<Void> pending : jobs) await(pending);
+        } finally {
+            workers.shutdownNow();
+        }
+        check(run);
+        long bundleBytes = 0;
+        for (int idx = 0; idx < vInits.size(); idx++) {
+            File vInit = new File(parts, localInitFileName("v", idx, vInits.size()));
+            if (!vInit.isFile() || vInit.length() <= 0) {
+                throw new DownloadException("视频初始化分片 #" + idx + " 缺失，无法完成离线合成");
+            }
+            bundleBytes += vInit.length();
+        }
+        for (int i = 0; i < vCount; i++) {
+            File f = trackSegmentFile(parts, "v", i, true);
+            if (!f.isFile() || f.length() <= 0) {
+                throw new DownloadException("视频分片 #" + i + " 缺失或损坏");
+            }
+            bundleBytes += f.length();
+        }
+        File videoPlaylist = new File(parts, "video.m3u8");
+        File masterPlaylist = new File(parts, "master.m3u8");
+        writeUtf8Atomic(
+                videoPlaylist,
+                buildLocalMediaPlaylist(videoMedia, "v", localInitFileName("v", 0, vInits.size())));
+        writeUtf8Atomic(masterPlaylist, buildLocalSingleTrackMasterPlaylist(videoMedia));
+        bundleBytes += videoPlaylist.length() + masterPlaylist.length();
+
+        File bundleDir = workFile(t, ".hls");
+        if (bundleDir.exists()) deleteTree(bundleDir);
+        if (!parts.renameTo(bundleDir)) {
+            throw new DownloadException("无法保存离线 HLS 目录");
+        }
+        File finalMaster = new File(bundleDir, "master.m3u8");
+        if (!finalMaster.isFile()) {
+            throw new DownloadException("离线播放列表校验失败");
+        }
+        synchronized (t) {
+            t.path = finalMaster.getAbsolutePath();
+            t.bytes = bundleBytes;
+            t.total = bundleBytes;
+        }
+    }
+
     /**
      * Downloads both video and separated audio HLS renditions with full segment-level resume,
-     * decrypts any AES-128 segments, verifies every required track file, and atomically publishes a
-     * self-contained offline {@code .hls/master.m3u8} bundle playable with zero network.
+     * decrypts any AES-128 segments, preserves every distinct {@code #EXT-X-MAP} per segment,
+     * verifies every required track file, and atomically publishes a self-contained offline
+     * {@code .hls/master.m3u8} bundle playable with zero network.
      */
     private void downloadSeparatedHlsBundle(Run run, Task t, Media videoMedia, File parts)
             throws Exception {
@@ -863,15 +984,19 @@ final class DownloadManager {
         if (audioMedia == null || audioMedia.segments.isEmpty()) {
             throw new DownloadException("独立音轨缺少有效分片，拒绝生成无声离线文件");
         }
+        List<Segment> vInits = distinctInits(videoMedia);
+        List<Segment> aInits = distinctInits(audioMedia);
+        boolean vFmp4 = !vInits.isEmpty();
+        boolean aFmp4 = !aInits.isEmpty();
         int vCount = videoMedia.segments.size();
         int aCount = audioMedia.segments.size();
         int totalCount = vCount + aCount;
         int ready = 0;
         for (int i = 0; i < vCount; i++) {
-            if (trackSegmentFile(parts, "v", i, videoMedia.init != null).isFile()) ready++;
+            if (trackSegmentFile(parts, "v", i, vFmp4).isFile()) ready++;
         }
         for (int i = 0; i < aCount; i++) {
-            if (trackSegmentFile(parts, "a", i, audioMedia.init != null).isFile()) ready++;
+            if (trackSegmentFile(parts, "a", i, aFmp4).isFile()) ready++;
         }
         synchronized (t) {
             t.segmentCount = totalCount;
@@ -883,30 +1008,32 @@ final class DownloadManager {
         ExecutorService workers = Executors.newFixedThreadPool(SEGMENT_THREADS, THREADS);
         List<Future<Void>> jobs = new ArrayList<>();
         try {
-            if (videoMedia.init != null) {
-                File vInit = new File(parts, "v_init.mp4");
+            for (int idx = 0; idx < vInits.size(); idx++) {
+                final Segment initSeg = vInits.get(idx);
+                final File vInit = new File(parts, localInitFileName("v", idx, vInits.size()));
                 if (!vInit.isFile()) {
                     jobs.add(
                             workers.submit(
                                     () -> {
-                                        download(run, videoMedia.init, vInit, false);
+                                        download(run, initSeg, vInit, false);
                                         return null;
                                     }));
                 }
             }
-            if (audioMedia.init != null) {
-                File aInit = new File(parts, "a_init.mp4");
+            for (int idx = 0; idx < aInits.size(); idx++) {
+                final Segment initSeg = aInits.get(idx);
+                final File aInit = new File(parts, localInitFileName("a", idx, aInits.size()));
                 if (!aInit.isFile()) {
                     jobs.add(
                             workers.submit(
                                     () -> {
-                                        download(run, audioMedia.init, aInit, false);
+                                        download(run, initSeg, aInit, false);
                                         return null;
                                     }));
                 }
             }
             for (int i = 0; i < vCount; i++) {
-                File target = trackSegmentFile(parts, "v", i, videoMedia.init != null);
+                File target = trackSegmentFile(parts, "v", i, vFmp4);
                 if (target.isFile()) continue;
                 Segment seg = videoMedia.segments.get(i);
                 jobs.add(
@@ -917,7 +1044,7 @@ final class DownloadManager {
                                 }));
             }
             for (int i = 0; i < aCount; i++) {
-                File target = trackSegmentFile(parts, "a", i, audioMedia.init != null);
+                File target = trackSegmentFile(parts, "a", i, aFmp4);
                 if (target.isFile()) continue;
                 Segment seg = audioMedia.segments.get(i);
                 jobs.add(
@@ -933,31 +1060,31 @@ final class DownloadManager {
         }
 
         check(run);
-        // Verify every required video & audio segment and init file exists and is non-empty.
+        // Verify every required video & audio segment and every init file exists and is non-empty.
         long bundleBytes = 0;
-        if (videoMedia.init != null) {
-            File vInit = new File(parts, "v_init.mp4");
+        for (int idx = 0; idx < vInits.size(); idx++) {
+            File vInit = new File(parts, localInitFileName("v", idx, vInits.size()));
             if (!vInit.isFile() || vInit.length() <= 0) {
-                throw new DownloadException("视频初始化分片缺失，无法完成离线合成");
+                throw new DownloadException("视频初始化分片 #" + idx + " 缺失，无法完成离线合成");
             }
             bundleBytes += vInit.length();
         }
-        if (audioMedia.init != null) {
-            File aInit = new File(parts, "a_init.mp4");
+        for (int idx = 0; idx < aInits.size(); idx++) {
+            File aInit = new File(parts, localInitFileName("a", idx, aInits.size()));
             if (!aInit.isFile() || aInit.length() <= 0) {
-                throw new DownloadException("音频初始化分片缺失，拒绝生成无声离线文件");
+                throw new DownloadException("音频初始化分片 #" + idx + " 缺失，拒绝生成无声离线文件");
             }
             bundleBytes += aInit.length();
         }
         for (int i = 0; i < vCount; i++) {
-            File f = trackSegmentFile(parts, "v", i, videoMedia.init != null);
+            File f = trackSegmentFile(parts, "v", i, vFmp4);
             if (!f.isFile() || f.length() <= 0) {
                 throw new DownloadException("视频分片 #" + i + " 缺失或损坏");
             }
             bundleBytes += f.length();
         }
         for (int i = 0; i < aCount; i++) {
-            File f = trackSegmentFile(parts, "a", i, audioMedia.init != null);
+            File f = trackSegmentFile(parts, "a", i, aFmp4);
             if (!f.isFile() || f.length() <= 0) {
                 throw new DownloadException("音轨分片 #" + i + " 缺失或损坏，拒绝生成无声离线文件");
             }
@@ -970,11 +1097,11 @@ final class DownloadManager {
         writeUtf8Atomic(
                 videoPlaylist,
                 buildLocalMediaPlaylist(
-                        videoMedia, "v", videoMedia.init != null ? "v_init.mp4" : null));
+                        videoMedia, "v", vFmp4 ? localInitFileName("v", 0, vInits.size()) : null));
         writeUtf8Atomic(
                 audioPlaylist,
                 buildLocalMediaPlaylist(
-                        audioMedia, "a", audioMedia.init != null ? "a_init.mp4" : null));
+                        audioMedia, "a", aFmp4 ? localInitFileName("a", 0, aInits.size()) : null));
         writeUtf8Atomic(masterPlaylist, buildLocalMasterPlaylist(videoMedia));
         bundleBytes += videoPlaylist.length() + audioPlaylist.length() + masterPlaylist.length();
 
@@ -1000,7 +1127,16 @@ final class DownloadManager {
     }
 
     private static String buildLocalMediaPlaylist(Media media, String prefix, String initFile) {
-        boolean fmp4 = initFile != null;
+        List<Segment> inits = distinctInits(media);
+        boolean fmp4 = !inits.isEmpty() || initFile != null;
+        java.util.IdentityHashMap<Segment, String> initNames = new java.util.IdentityHashMap<>();
+        if (inits.size() == 1 && initFile != null) {
+            initNames.put(inits.get(0), initFile);
+        } else {
+            for (int idx = 0; idx < inits.size(); idx++) {
+                initNames.put(inits.get(idx), localInitFileName(prefix, idx, inits.size()));
+            }
+        }
         int targetDur = Math.max(1, (int) Math.ceil(media.targetDurationSec));
         for (Segment seg : media.segments) {
             int d = Math.max(1, (int) Math.ceil(seg.durationSec));
@@ -1012,19 +1148,46 @@ final class DownloadManager {
         sb.append("#EXT-X-TARGETDURATION:").append(targetDur).append('\n');
         sb.append("#EXT-X-MEDIA-SEQUENCE:0\n");
         sb.append("#EXT-X-PLAYLIST-TYPE:VOD\n");
-        if (initFile != null) {
-            sb.append("#EXT-X-MAP:URI=\"").append(initFile).append("\"\n");
-        }
+        String lastEmittedInit = null;
         for (int i = 0; i < media.segments.size(); i++) {
             Segment seg = media.segments.get(i);
             if (seg.discontinuity) {
                 sb.append("#EXT-X-DISCONTINUITY\n");
+            }
+            String segInit =
+                    seg.init != null
+                            ? initNames.get(seg.init)
+                            : (inits.isEmpty() ? initFile : null);
+            if (segInit != null && (seg.discontinuity || !segInit.equals(lastEmittedInit))) {
+                sb.append("#EXT-X-MAP:URI=\"").append(segInit).append("\"\n");
+                lastEmittedInit = segInit;
             }
             double dur = seg.durationSec > 0 ? seg.durationSec : 4.0;
             sb.append(String.format(Locale.ROOT, "#EXTINF:%.3f,\n", dur));
             sb.append(String.format(Locale.ROOT, "%s_%06d%s\n", prefix, i, fmp4 ? ".m4s" : ".ts"));
         }
         sb.append("#EXT-X-ENDLIST\n");
+        return sb.toString();
+    }
+
+    private static String buildLocalSingleTrackMasterPlaylist(Media videoMedia) {
+        long bw =
+                (videoMedia.variant != null && videoMedia.variant.bandwidth > 0)
+                        ? videoMedia.variant.bandwidth
+                        : 2_000_000L;
+        StringBuilder sb = new StringBuilder();
+        sb.append("#EXTM3U\n");
+        sb.append("#EXT-X-VERSION:7\n");
+        sb.append("#EXT-X-INDEPENDENT-SEGMENTS\n");
+        sb.append("#EXT-X-STREAM-INF:BANDWIDTH=").append(bw);
+        if (videoMedia.variant != null && !videoMedia.variant.resolution.isEmpty()) {
+            sb.append(",RESOLUTION=").append(videoMedia.variant.resolution);
+        }
+        if (videoMedia.variant != null && !videoMedia.variant.codecs.isEmpty()) {
+            sb.append(",CODECS=\"").append(videoMedia.variant.codecs.replace("\"", "")).append('"');
+        }
+        sb.append('\n');
+        sb.append("video.m3u8\n");
         return sb.toString();
     }
 
@@ -1265,6 +1428,8 @@ final class DownloadManager {
         double pendingDuration = 4.0;
         boolean pendingDiscontinuity = false;
         String lastUri = null;
+        Segment activeInit = null;
+        Map<String, Segment> initByKey = new LinkedHashMap<>();
         int index = 0;
         for (String raw : text.split("\n")) {
             String line = raw.trim();
@@ -1311,7 +1476,16 @@ final class DownloadManager {
                     init.key = keyUri;
                     init.iv = keyIv;
                 }
-                out.init = init;
+                String dedupKey = initDedupKey(init);
+                Segment existing = initByKey.get(dedupKey);
+                if (existing == null) {
+                    initByKey.put(dedupKey, init);
+                    existing = init;
+                }
+                activeInit = existing;
+                if (out.init == null) {
+                    out.init = existing;
+                }
             } else if (line.startsWith("#EXT-X-BYTERANGE:")) {
                 long[] range = byteRange(line.substring(line.indexOf(':') + 1));
                 if (range != null) {
@@ -1323,6 +1497,10 @@ final class DownloadManager {
                 segment.uri = absolute(base, line);
                 segment.durationSec = pendingDuration > 0 ? pendingDuration : 4.0;
                 segment.discontinuity = pendingDiscontinuity;
+                segment.init = activeInit;
+                if (activeInit != null && !out.initSegments.contains(activeInit)) {
+                    out.initSegments.add(activeInit);
+                }
                 pendingDuration = 4.0;
                 pendingDiscontinuity = false;
                 if (pendingLength >= 0) {

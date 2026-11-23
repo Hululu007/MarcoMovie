@@ -2266,7 +2266,109 @@ final class SourceController {
         saveConfig(a, merged, a.configOrigin);
     }
 
+    static boolean canCommitConfigImport(
+            boolean finishing,
+            boolean destroyed,
+            boolean switchingPrivacy,
+            boolean currentPrivateMode,
+            boolean snapshotPrivateMode,
+            long currentImportSeq,
+            long expectedImportSeq) {
+        return !finishing
+                && !destroyed
+                && !switchingPrivacy
+                && currentPrivateMode == snapshotPrivateMode
+                && currentImportSeq == expectedImportSeq;
+    }
+
+    static boolean canCommitConfigImport(
+            MainActivity a, boolean snapshotPrivateMode, long expectedImportSeq) {
+        return a != null
+                && canCommitConfigImport(
+                        a.isFinishing(),
+                        a.isDestroyed(),
+                        a.switchingPrivacy,
+                        a.privateMode,
+                        snapshotPrivateMode,
+                        a.configImportSeq.get(),
+                        expectedImportSeq);
+    }
+
+    interface LocalImportProvider {
+        String displayName();
+
+        byte[] readBytes() throws Exception;
+
+        String scheme();
+
+        String uriString();
+    }
+
+    interface LocalImportGuardState {
+        long beginImport();
+
+        boolean isPrivateMode();
+
+        boolean canCommit(boolean snapshotPrivateMode, long importSeq);
+    }
+
+    interface LocalImportResultHandler {
+        void onConfigReady(Cms.Config config, String origin) throws Exception;
+
+        void onError(Exception error);
+    }
+
+    /**
+     * Pure guarded async file-import coordinator shared with regression tests to guarantee a slow
+     * file provider A can never overwrite a newer selection B, nor commit after Activity destroy or
+     * private-space transition.
+     */
+    static void executeGuardedConfigFileImport(
+            java.util.concurrent.ExecutorService worker,
+            PlaybackController.MainThreadDispatcher ui,
+            final LocalImportGuardState guard,
+            final LocalImportProvider provider,
+            final LocalImportResultHandler handler) {
+        final long importSeq = guard.beginImport();
+        final boolean snapshotPrivate = guard.isPrivateMode();
+        worker.execute(
+                () -> {
+                    try {
+                        byte[] rawBytes = provider.readBytes();
+                        if (!guard.canCommit(snapshotPrivate, importSeq)) {
+                            return;
+                        }
+                        String text = Cms.document(rawBytes);
+                        final String finalOrigin =
+                                Cms.localImportOrigin(provider.scheme(), provider.uriString());
+                        final Cms.Config parsed =
+                                Cms.parseConfig(text, finalOrigin.isEmpty() ? null : finalOrigin);
+                        ui.post(
+                                () -> {
+                                    if (!guard.canCommit(snapshotPrivate, importSeq)) {
+                                        return;
+                                    }
+                                    try {
+                                        handler.onConfigReady(parsed, finalOrigin);
+                                    } catch (Exception ex) {
+                                        handler.onError(ex);
+                                    }
+                                });
+                    } catch (Exception e) {
+                        ui.post(
+                                () -> {
+                                    if (!guard.canCommit(snapshotPrivate, importSeq)) {
+                                        return;
+                                    }
+                                    handler.onError(e);
+                                });
+                    }
+                });
+    }
+
     static void importLocalUri(MainActivity a, Uri uri, boolean preferLive) {
+        final long importSeq = beginConfigImport(a);
+        final boolean snapshotPrivate = a.privateMode;
         a.toast("正在读取本地文件…");
         a.worker.execute(
                 () -> {
@@ -2301,6 +2403,9 @@ final class SourceController {
                             }
                             rawBytes = bos.toByteArray();
                         }
+                        if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                            return;
+                        }
                         String lowerName = displayName.toLowerCase(java.util.Locale.ROOT);
                         boolean isZip =
                                 lowerName.endsWith(".zip")
@@ -2314,6 +2419,9 @@ final class SourceController {
                                     LocalSourcePackage.open(a.getFilesDir(), rawBytes);
                             a.ui.post(
                                     () -> {
+                                        if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                            return;
+                                        }
                                         try {
                                             applyLocalPackage(a, pkg);
                                         } catch (Exception ex) {
@@ -2329,6 +2437,9 @@ final class SourceController {
                                 || lowerName.endsWith(".txt")) {
                             try {
                                 LiveCatalog.Catalog cat = LiveCatalog.parse(text, "", null);
+                                if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                    return;
+                                }
                                 String suffix = LiveQualityPolicy.metricKey(text);
                                 if (suffix.length() > 8) suffix = suffix.substring(0, 8);
                                 java.io.File liveFile =
@@ -2343,6 +2454,10 @@ final class SourceController {
                                 final String liveName = displayName + " (" + count + "台)";
                                 a.ui.post(
                                         () -> {
+                                            if (!canCommitConfigImport(
+                                                    a, snapshotPrivate, importSeq)) {
+                                                return;
+                                            }
                                             upsertCustomLiveSource(a, liveName, liveUrl);
                                             a.toast("直播源添加成功（共 " + count + " 个频道）");
                                             if (!a.isTvDevice()) MobileShell.show(a);
@@ -2358,6 +2473,9 @@ final class SourceController {
                                 || lowerName.endsWith(".py")
                                 || Cms.looksLikeJsSpider(text, displayName)
                                 || Cms.looksLikePySpider(text, displayName)) {
+                            if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                return;
+                            }
                             java.io.File spiderDir =
                                     new java.io.File(a.getFilesDir(), "local_spiders");
                             if (!spiderDir.exists()) spiderDir.mkdirs();
@@ -2372,6 +2490,9 @@ final class SourceController {
                             Cms.Config singleCfg = Cms.parseConfig(text, fileOrigin);
                             a.ui.post(
                                     () -> {
+                                        if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                            return;
+                                        }
                                         try {
                                             mergeOrSaveConfig(a, singleCfg, "", true);
                                             a.toast("已导入扩展片源：" + singleCfg.sites.get(0).name);
@@ -2391,6 +2512,9 @@ final class SourceController {
                                             text, finalOrigin.isEmpty() ? null : finalOrigin);
                             a.ui.post(
                                     () -> {
+                                        if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                            return;
+                                        }
                                         try {
                                             saveConfig(a, parsed, finalOrigin);
                                         } catch (Exception ex) {
@@ -2401,6 +2525,9 @@ final class SourceController {
                             // Fallback: check if the JSON/text file is actually a live channel list
                             try {
                                 LiveCatalog.Catalog cat = LiveCatalog.parse(text, "", null);
+                                if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                    return;
+                                }
                                 java.io.File liveFile =
                                         new java.io.File(a.getFilesDir(), "custom_live.txt");
                                 try (java.io.OutputStream out =
@@ -2411,6 +2538,10 @@ final class SourceController {
                                 final int count = cat.channelCount();
                                 a.ui.post(
                                         () -> {
+                                            if (!canCommitConfigImport(
+                                                    a, snapshotPrivate, importSeq)) {
+                                                return;
+                                            }
                                             upsertCustomLiveSource(
                                                     a, "本地直播 (" + count + "台)", liveUrl);
                                             a.toast("已识别并添加直播源（共 " + count + " 个频道）");
@@ -2422,7 +2553,13 @@ final class SourceController {
                             }
                         }
                     } catch (Exception e) {
-                        a.ui.post(() -> a.toast("文件读取失败：" + a.message(e)));
+                        a.ui.post(
+                                () -> {
+                                    if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                        return;
+                                    }
+                                    a.toast("文件读取失败：" + a.message(e));
+                                });
                     }
                 });
     }

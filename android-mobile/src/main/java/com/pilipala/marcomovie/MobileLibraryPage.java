@@ -275,9 +275,7 @@ final class MobileLibraryPage {
             del.setPadding(a.dp(8), a.dp(6), a.dp(6), a.dp(6));
             UiWidgets.bindTouchFeedback(del);
             del.setOnClickListener(
-                    v ->
-                            CloudSyncDialog.toggleFavoriteWithTombstone(
-                                    a, f.site, f.video(), nowFaved -> reload.run()));
+                    v -> CloudSyncDialog.removeFavoriteWithTombstone(a, f.site, f.id, reload));
             row.addView(del);
 
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);

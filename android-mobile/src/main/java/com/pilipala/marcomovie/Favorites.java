@@ -85,4 +85,25 @@ final class Favorites {
             }
         return out.toString();
     }
+
+    /** Idempotently removes {@code (site, id)}; never re-adds when the entry is already absent. */
+    static String remove(String raw, String site, String id) {
+        if (site == null || site.isEmpty() || id == null || id.isEmpty()) {
+            return raw == null ? "[]" : raw;
+        }
+        List<Entry> list = read(raw);
+        for (Iterator<Entry> it = list.iterator(); it.hasNext(); ) {
+            Entry cur = it.next();
+            if (cur.site.equals(site) && cur.id.equals(id)) {
+                it.remove();
+            }
+        }
+        JSONArray out = new JSONArray();
+        for (int i = 0; i < Math.min(LIMIT, list.size()); i++)
+            try {
+                out.put(list.get(i).json());
+            } catch (Exception ignored) {
+            }
+        return out.toString();
+    }
 }

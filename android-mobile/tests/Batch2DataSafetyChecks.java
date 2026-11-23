@@ -883,8 +883,9 @@ public final class Batch2DataSafetyChecks {
         check(
                 libPage.contains("CloudSyncDialog.clearHistoryWithTombstone(")
                         && libPage.contains("CloudSyncDialog.removeHistoryWithTombstone(")
-                        && libPage.contains("CloudSyncDialog.toggleFavoriteWithTombstone("),
-                "D3 wiring: MobileLibraryPage routes clear, delete, unfavorite through atomic CloudSyncDialog");
+                        && libPage.contains("CloudSyncDialog.removeFavoriteWithTombstone(")
+                        && !libPage.contains("CloudSyncDialog.toggleFavoriteWithTombstone("),
+                "D3/R6 wiring: MobileLibraryPage routes clear, delete, and idempotent unfavorite through atomic CloudSyncDialog");
         check(
                 !libPage.contains("putString(Prefs.WATCH_HISTORY")
                         && !libPage.contains("putString(Prefs.FAVORITES"),

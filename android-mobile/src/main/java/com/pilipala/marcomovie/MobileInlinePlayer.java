@@ -93,6 +93,8 @@ final class MobileInlinePlayer {
     private boolean userSeeking;
     private boolean closed;
     private boolean pausedForBackground;
+    private int lastKnownPosMs;
+    private int lastKnownDurMs;
     private int loadSerial;
     private long episodeToken;
     private final IntroSkipEvaluator skipEvaluator = new IntroSkipEvaluator();
@@ -106,6 +108,8 @@ final class MobileInlinePlayer {
                     try {
                         int pos = player.getCurrentPosition();
                         int dur = player.getDuration();
+                        if (pos > 0) lastKnownPosMs = pos;
+                        if (dur > 0) lastKnownDurMs = dur;
                         if (!userSeeking && dur > 0) {
                             seekBar.setMax(dur);
                             seekBar.setProgress(pos);
@@ -336,12 +340,16 @@ final class MobileInlinePlayer {
             boolean isTv,
             int seasonNum,
             int epNum) {
+        // Persist the outgoing episode's latest position before tearing down its player.
+        flushHistoryProgress();
         // Ensure strict single active playback session before mounting inline player.
         if (a.player != null) {
             a.inlinePlayer = null;
             a.releasePlayer();
         }
         releaseInternalPlayer();
+        this.lastKnownPosMs = 0;
+        this.lastKnownDurMs = 0;
         this.site = s;
         this.video = v;
         this.activeLine = line;
@@ -531,15 +539,24 @@ final class MobileInlinePlayer {
                                                                 actualPlan.softwareFallback,
                                                                 autoSwitch);
                                                 if (reason != null) {
+                                                    int resumePos = captureResumePosition();
+                                                    if (resumePos > 0) {
+                                                        a.resumeAt = resumePos;
+                                                    }
                                                     a.toast(reason);
                                                     startResolvedStream();
                                                     return true;
                                                 }
+                                                flushHistoryProgress();
                                                 statusLabel.setVisibility(View.VISIBLE);
                                                 statusLabel.setText(
-                                                        "播放失败（"
-                                                                + actualPlan.engineLabel
-                                                                + "），点击右上角「横屏全屏」切核重试");
+                                                        autoSwitch
+                                                                ? ("播放失败（"
+                                                                        + actualPlan.engineLabel
+                                                                        + "），点击右上角「横屏全屏」切核重试")
+                                                                : ("播放失败（"
+                                                                        + actualPlan.engineLabel
+                                                                        + "，已关闭自动切核），请手动切换内核或线路"));
                                                 return true;
                                             });
                                     mp.prepareAsync();
@@ -605,13 +622,32 @@ final class MobileInlinePlayer {
         }
     }
 
+    int captureResumePosition() {
+        int pos = 0;
+        if (player != null && prepared) {
+            try {
+                pos = Math.max(0, player.getCurrentPosition());
+            } catch (Exception ignored) {
+            }
+        }
+        return PlaybackController.resolveFallbackResumePosition(
+                pos, lastKnownPosMs, a != null ? a.resumeAt : 0);
+    }
+
     void flushHistoryProgress() {
-        if (player == null || !prepared) return;
+        if (player == null && lastKnownPosMs <= 0) return;
         try {
-            saveHistoryProgress(
-                    Math.max(0, player.getCurrentPosition()),
-                    Math.max(0, player.getDuration()),
-                    true);
+            int pos = 0;
+            int dur = 0;
+            if (player != null && prepared) {
+                pos = Math.max(0, player.getCurrentPosition());
+                dur = Math.max(0, player.getDuration());
+            }
+            if (pos <= 0) pos = lastKnownPosMs;
+            if (dur <= 0) dur = lastKnownDurMs;
+            if (dur > 0) {
+                saveHistoryProgress(pos, dur, true);
+            }
         } catch (Exception ignored) {
         }
     }
