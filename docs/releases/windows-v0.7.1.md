@@ -19,7 +19,14 @@
   - 强化 `PosterLoader`、`CastAvatarService` 与 `WindowsDetail` 的剧集/电影封面及演职员头像匹配策略，结合年份、介质形态与片名做严格过滤，减少同名不同剧与人物词条错误配图；
   - 在 `CmsParser`、`CuratedDiscovery` 与详情/检索链路中明确识别并隔离「动态漫画 / 漫剧」与正式 3D/2D 动漫，避免两者混排与封面串片。
 
+## 包信息与构建记录
+
+- **Windows 64 位安装版（Inno Setup）**：`MarcoMovie-0.7.1-windows-x64-setup.exe`（`71616917` B，兼容别名 `MarcoMovie-0.7.1-windows-setup.exe`），SHA-256：`ae13048dc0d67152235b4a28e03f7301119f5d11b04c9d52d509319a97e05b06`。
+- **Windows 64 位绿色便携版**：`MarcoMovie-0.7.1-windows-x64-portable.zip`（`102641882` B，兼容别名 `MarcoMovie-0.7.1-windows-x64.zip`），SHA-256：`1a992fc9f917c375177a36a3afc16ebec95aabdb64f47535c60c28a55333407a`。
+- **对应源码包**：`MarcoMovie-windows-v0.7.1-source.zip`（`11510458` B），SHA-256：`bfee0bb3f4ef67de243aa512e8f1c8bfa471c4c1c8882a18945096b93d849678`。
+- **构建提交与 CI 记录**：`a919dfd9c8605628c8a5bb59f330ede104e225f4`。[Windows x64 原生构建与全量校验（Job 137487699037 · Run 45112032102）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45112032102/job/137487699037) / [公开守卫与离线校验（Job 137486329825）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45112032102/job/137486329825) / [Public content checks（45112032114）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/45112032114)。
+
 ## 验证范围与已知限制
 
-- **本地自动化校验**：已在本地 Windows x64 环境完成全量 Flutter 单元测试、新增 `windows_danmu_and_mdk_test.dart` 与 `windows_poster_and_series_scraper_test.dart` 专项回归、`flutter analyze --no-fatal-infos` 零错误零告警、`scripts/check_public_content.py`、`scripts/sync_readme_versions.py --check`、`flutter/test_*.py`、`scripts/test_platform_packages.py` 以及 Release 编译打包（验证 `fvp.dll`、`mdk.dll`、`ffmpeg-9.dll`、`libass.dll` 与 `libmpv-2.dll` 无冲突共存）。
+- **本地与云端自动化校验**：已在本地 Windows x64 环境与提交 `a919dfd9c8605628c8a5bb59f330ede104e225f4` 的 GitHub Actions 7 平台全绿构建（Run `45112032102`）完成 Release 编译打包（Inno Setup 安装包与绿色便携包，已验证包内同时包含 `fvp.dll`、`mdk.dll`、`ffmpeg-9.dll`、`libass.dll`、`libmpv-2.dll`、内置 Python `3.11.9` 与 Node/CatPaw 运行时）、`scripts/check_public_content.py`（`1601` 追踪文件）、`scripts/sync_readme_versions.py --check`、`flutter analyze --no-fatal-infos` 零错误零告警、全量 `1336` 项 Flutter 单元测试（零失败，含新增 `windows_danmu_and_mdk_test.dart` 与 `windows_poster_and_series_scraper_test.dart`）及 `libmpv-2.dll` 原生解码回放校验。尚未在全部型号 Intel / AMD 核显实机与所有第三方片源上完成穷尽验证。
 - **已知限制**：安装包与便携程序未购买商业代码签名证书，Windows SmartScreen 首次运行如提示未知发布者需手动确认运行；MDK 引擎模式下不适用 MPV 专属的 Anime4K 着色器与 `dynaudnorm` 人声响度滤波，可随时一键切回 MPV 旗舰画质模式；动态网页嗅探与 WebView2 异步 JS 需系统已安装 Microsoft Edge WebView2 Runtime。
