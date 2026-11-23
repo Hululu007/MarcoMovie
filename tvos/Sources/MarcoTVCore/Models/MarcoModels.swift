@@ -36,11 +36,28 @@ public struct CmsDepot: Codable, Hashable, Identifiable, Sendable {
     public var name: String
     public var url: String
     public var subscriptionId: String
+    public var isPrivate: Bool
 
-    public init(name: String, url: String, subscriptionId: String = "") {
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case url
+        case subscriptionId
+        case isPrivate
+    }
+
+    public init(name: String, url: String, subscriptionId: String = "", isPrivate: Bool = false) {
         self.name = name
         self.url = url
         self.subscriptionId = subscriptionId
+        self.isPrivate = isPrivate
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        self.url = try container.decodeIfPresent(String.self, forKey: .url) ?? ""
+        self.subscriptionId = try container.decodeIfPresent(String.self, forKey: .subscriptionId) ?? ""
+        self.isPrivate = try container.decodeIfPresent(Bool.self, forKey: .isPrivate) ?? false
     }
 }
 
@@ -912,8 +929,21 @@ public struct CmsConfig: Codable, Hashable, Sendable {
         sites.filter { !$0.supported }
     }
 
-    public var supportedLives: [LiveSource] {
+    public var allSupportedLives: [LiveSource] {
         lives.filter { $0.supported }
+    }
+
+    public var publicSupportedLives: [LiveSource] {
+        lives.filter { $0.supported && !$0.isEffectivelyPrivate }
+    }
+
+    /// Default live source list follows the public-visible scope.
+    public var supportedLives: [LiveSource] {
+        publicSupportedLives
+    }
+
+    public var publicDepots: [CmsDepot] {
+        depots.filter { !$0.isPrivate }
     }
 
     public var isMultiDepotOnly: Bool {

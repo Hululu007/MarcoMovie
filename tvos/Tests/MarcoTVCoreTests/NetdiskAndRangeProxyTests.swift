@@ -722,13 +722,43 @@ final class NetdiskAndRangeProxyTests: XCTestCase {
         XCTAssertEqual(decodedLegacy.netdiskQuality, "auto")
         XCTAssertEqual(decodedLegacy.playerKernel, "range_proxy")
 
-        // Verify LAN POST /api/netdisk push updates Keychain
+        // Verify LAN pairing-session bound POST /configure/<token>/netdisk push updates Keychain
+        // and rejects unauthenticated /api/netdisk, invalid tokens, and expired sessions.
         let lanServer = LanConfigServer(storage: storage)
         let lanPort = try await lanServer.start(loopbackOnly: true)
         defer { lanServer.stop() }
 
-        let apiNetdiskUrl = URL(string: "http://127.0.0.1:\(lanPort)/api/netdisk")!
-        var pushReq = URLRequest(url: apiNetdiskUrl)
+        let consoleHtmlUrl = URL(string: lanServer.configureUrl(forHost: "127.0.0.1"))!
+        let (consoleHtmlData, consoleHtmlResp) = try await URLSession.shared.data(from: consoleHtmlUrl)
+        XCTAssertEqual((consoleHtmlResp as? HTTPURLResponse)?.statusCode, 200)
+        let consoleHtml = String(decoding: consoleHtmlData, as: UTF8.self)
+        XCTAssertTrue(consoleHtml.contains("'/netdisk'"))
+        XCTAssertFalse(consoleHtml.contains("'/api/netdisk'"))
+
+        // 1) Legacy unauthenticated /api/netdisk must be rejected with 404
+        var unauthReq = URLRequest(url: URL(string: "http://127.0.0.1:\(lanPort)/api/netdisk")!)
+        unauthReq.httpMethod = "POST"
+        unauthReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        unauthReq.httpBody = try JSONSerialization.data(withJSONObject: [
+            "drive": "quark",
+            "credential": "__pus=SHOULD_NEVER_WRITE_UNAUTH; __puus=NOPE",
+        ])
+        let (_, unauthResp) = try await URLSession.shared.data(for: unauthReq)
+        XCTAssertEqual((unauthResp as? HTTPURLResponse)?.statusCode, 404)
+        XCTAssertEqual(storage.netdiskCredential(for: "quark"), qkSecret)
+
+        // 2) Wrong session token must be rejected with 404
+        var wrongTokenReq = URLRequest(url: URL(string: "http://127.0.0.1:\(lanPort)/configure/0000000000000000/netdisk")!)
+        wrongTokenReq.httpMethod = "POST"
+        wrongTokenReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        wrongTokenReq.httpBody = unauthReq.httpBody
+        let (_, wrongTokenResp) = try await URLSession.shared.data(for: wrongTokenReq)
+        XCTAssertEqual((wrongTokenResp as? HTTPURLResponse)?.statusCode, 404)
+        XCTAssertEqual(storage.netdiskCredential(for: "quark"), qkSecret)
+
+        // 3) Valid active pairing session succeeds and persists synthetic credential
+        let sessionNetdiskUrl = URL(string: lanServer.netdiskUrl(forHost: "127.0.0.1"))!
+        var pushReq = URLRequest(url: sessionNetdiskUrl)
         pushReq.httpMethod = "POST"
         pushReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let pushedCookie = "__pus=LAN_PUSHED_QUARK_TOKEN_7788; __puus=LAN_PUSHED_PUUS_7799"
@@ -742,10 +772,191 @@ final class NetdiskAndRangeProxyTests: XCTestCase {
         XCTAssertEqual(pushObj?["ok"] as? Bool, true)
         XCTAssertEqual(storage.netdiskCredential(for: "quark"), pushedCookie)
 
+        // 4) Expired pairing session rejects credential push with 410 Gone
+        let expiredServer = LanConfigServer(storage: storage, ttlSeconds: -1)
+        _ = try await expiredServer.start(loopbackOnly: true)
+        defer { expiredServer.stop() }
+        var expiredReq = URLRequest(url: URL(string: expiredServer.netdiskUrl(forHost: "127.0.0.1"))!)
+        expiredReq.httpMethod = "POST"
+        expiredReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        expiredReq.httpBody = try JSONSerialization.data(withJSONObject: [
+            "drive": "quark",
+            "credential": "__pus=EXPIRED_SESSION_REJECTED; __puus=NOPE",
+        ])
+        let (_, expiredResp) = try await URLSession.shared.data(for: expiredReq)
+        XCTAssertEqual((expiredResp as? HTTPURLResponse)?.statusCode, 410)
+        XCTAssertEqual(storage.netdiskCredential(for: "quark"), pushedCookie)
+
         // Verify resetAllData wipes all Netdisk Keychain credentials
         try storage.resetAllData()
         XCTAssertTrue(storage.loggedInNetdiskDrives().isEmpty)
         XCTAssertFalse(storage.isNetdiskLoggedIn("quark"))
         XCTAssertFalse(storage.isNetdiskLoggedIn("ali"))
+    }
+
+    // MARK: - 5. Ali Refresh Credential Isolation & HLS Sub-Playlist / Segment / Redirect Isolation
+
+    func testAliRefreshTokenIsolationAndHlsProxyPerTargetMinimalHeaders() async throws {
+        let syntheticRefresh = "SYNTH_ALI_REFRESH_998877665544332211"
+        let syntheticAccess = "SYNTH_ALI_ACCESS_TOKEN_SHORT_LIVED"
+
+        // 1) buildPolicy must never embed Ali refresh token into media headers
+        let directPolicy = try XCTUnwrap(
+            NetdiskShareResolver.buildPolicy(driveKey: "ali", credential: "ali_token=\(syntheticRefresh)")
+        )
+        let sameDomainDirectHeaders = directPolicy.headers(for: URL(string: "https://www.alipan.com/media/movie.mp4")!)
+        let crossDomainDirectHeaders = directPolicy.headers(for: URL(string: "https://cdn.example/media/movie.mp4")!)
+        for hdrMap in [sameDomainDirectHeaders, crossDomainDirectHeaders] {
+            XCTAssertNil(hdrMap["X-Ali-Refresh-Token"])
+            XCTAssertFalse(hdrMap.values.contains(where: { $0.contains(syntheticRefresh) }))
+        }
+        XCTAssertNil(crossDomainDirectHeaders["Origin"])
+        XCTAssertNil(crossDomainDirectHeaders["Referer"])
+        XCTAssertNil(crossDomainDirectHeaders["Authorization"])
+        XCTAssertNil(crossDomainDirectHeaders["Cookie"])
+
+        // 2) End-to-end Ali share resolution -> HLS proxy -> same-domain vs cross-domain sub-playlist, segment, key & redirect
+        struct CapturedUpstreamCall {
+            let url: String
+            let headers: [String: String]
+        }
+        let apiCallsBox = LockedTestBox<[String]>([])
+        let proxyCallsBox = LockedTestBox<[CapturedUpstreamCall]>([])
+
+        StubNetdiskURLProtocol.install { req in
+            let url = req.url!
+            let path = url.path
+            apiCallsBox.withLock { $0.append(url.absoluteString) }
+            if path == "/v2/account/token" {
+                let json = #"{"access_token":"\#(syntheticAccess)"}"#
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+            }
+            if path == "/v2/share_link/get_share_token" {
+                let json = #"{"share_token":"share_tok_demo"}"#
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+            }
+            if path == "/adrive/v3/file/list_by_share" {
+                let json = #"{"items":[{"file_id":"f_ali_1","name":"Demo.2160p.4K.mkv","category":"video"}]}"#
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+            }
+            if path == "/v2/file/get_share_link_video_preview_play_info" {
+                let json = #"{"video_preview_play_info":{"live_transcoding_task_list":[{"template_id":"UHD","url":"https://www.alipan.com/hls/master.m3u8"}]}}"#
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+            }
+            return (HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+        }
+
+        let headerProxy = LocalHeaderProxyServer { url, _, headers in
+            proxyCallsBox.withLock { $0.append(CapturedUpstreamCall(url: url.absoluteString, headers: headers)) }
+            switch url.absoluteString {
+            case "https://www.alipan.com/hls/master.m3u8":
+                let manifest = """
+                #EXTM3U
+                #EXT-X-STREAM-INF:BANDWIDTH=8000000
+                https://www.alipan.com/hls/same_variant.m3u8
+                #EXT-X-STREAM-INF:BANDWIDTH=4000000
+                https://cdn.example/hls/cross_variant.m3u8
+                """
+                return ProxyUpstreamResponse(statusCode: 200, headers: ["Content-Type": "application/vnd.apple.mpegurl"], body: Data(manifest.utf8))
+            case "https://www.alipan.com/hls/same_variant.m3u8":
+                let sub = """
+                #EXTM3U
+                #EXT-X-KEY:METHOD=AES-128,URI="https://www.alipan.com/hls/same.key"
+                https://www.alipan.com/hls/redirect_seg.ts
+                """
+                return ProxyUpstreamResponse(statusCode: 200, headers: ["Content-Type": "application/vnd.apple.mpegurl"], body: Data(sub.utf8))
+            case "https://cdn.example/hls/cross_variant.m3u8":
+                let sub = """
+                #EXTM3U
+                #EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/hls/cross.key"
+                https://cdn.example/hls/cross_seg.ts
+                """
+                return ProxyUpstreamResponse(statusCode: 200, headers: ["Content-Type": "application/vnd.apple.mpegurl"], body: Data(sub.utf8))
+            case "https://www.alipan.com/hls/redirect_seg.ts":
+                return ProxyUpstreamResponse(statusCode: 302, headers: ["Location": "https://cdn.example/hls/redirected_final.ts"], body: Data())
+            default:
+                return ProxyUpstreamResponse(statusCode: 200, headers: ["Content-Type": "application/octet-stream"], body: Data([0x47, 0x40]))
+            }
+        }
+        defer { headerProxy.stop() }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MarcoAliIsolation_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let storage = TvStorageManager(cachesDirectory: tempDir, keychain: InMemoryKeychainStore())
+        try storage.setNetdiskCredential(syntheticRefresh, for: "ali")
+
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [StubNetdiskURLProtocol.self]
+        let resolver = NetdiskShareResolver(session: URLSession(configuration: cfg))
+
+        let resolved = try await resolver.resolvePlayback(
+            rawUrl: "https://www.alipan.com/s/shareDemo123",
+            lineName: "阿狸4K",
+            qualityPreference: "4k_hdr",
+            playerKernel: "range_proxy",
+            storage: storage,
+            rangeProxy: nil,
+            headerProxy: headerProxy
+        )
+        XCTAssertTrue(resolved.isProxied)
+
+        // Fetch rewritten master playlist and follow every rewritten sub-playlist, key, segment & redirect
+        let (masterData, _) = try await URLSession.shared.data(from: resolved.playableUrl)
+        let masterText = String(decoding: masterData, as: UTF8.self)
+        let variantUrls = masterText
+            .components(separatedBy: .newlines)
+            .filter { $0.hasPrefix("http://127.0.0.1:") }
+            .compactMap(URL.init(string:))
+        XCTAssertEqual(variantUrls.count, 2)
+
+        for vUrl in variantUrls {
+            let (subData, _) = try await URLSession.shared.data(from: vUrl)
+            let subText = String(decoding: subData, as: UTF8.self)
+            for line in subText.components(separatedBy: .newlines) {
+                if let range = line.range(of: #"URI="([^"]+)""#, options: .regularExpression) {
+                    let quoted = String(line[range])
+                    let inner = quoted.replacingOccurrences(of: "URI=\"", with: "").replacingOccurrences(of: "\"", with: "")
+                    if let keyUrl = URL(string: inner) {
+                        _ = try await URLSession.shared.data(from: keyUrl)
+                    }
+                } else if line.hasPrefix("http://127.0.0.1:"), let segUrl = URL(string: line) {
+                    _ = try await URLSession.shared.data(from: segUrl)
+                }
+            }
+        }
+
+        let captured = proxyCallsBox.withLock { $0 }
+        func callFor(_ urlStr: String) throws -> CapturedUpstreamCall {
+            try XCTUnwrap(captured.first(where: { $0.url == urlStr }), "Expected request to \(urlStr)")
+        }
+
+        // Refresh token NEVER appears on ANY media/HLS/redirect request
+        for call in captured {
+            XCTAssertNil(call.headers["X-Ali-Refresh-Token"], "Refresh token header leaked to \(call.url)")
+            XCTAssertFalse(call.headers.values.contains(where: { $0.contains(syntheticRefresh) }), "Refresh token value leaked to \(call.url)")
+        }
+
+        // Same-domain trusted requests carry short-lived Bearer access token
+        XCTAssertEqual(try callFor("https://www.alipan.com/hls/master.m3u8").headers["Authorization"], "Bearer \(syntheticAccess)")
+        XCTAssertEqual(try callFor("https://www.alipan.com/hls/same_variant.m3u8").headers["Authorization"], "Bearer \(syntheticAccess)")
+        XCTAssertEqual(try callFor("https://www.alipan.com/hls/same.key").headers["Authorization"], "Bearer \(syntheticAccess)")
+        XCTAssertEqual(try callFor("https://www.alipan.com/hls/redirect_seg.ts").headers["Authorization"], "Bearer \(syntheticAccess)")
+
+        // Cross-domain sub-playlist, key, segment, and 302 redirect destination strip ALL credentials & Origin/Referer
+        for crossUrl in [
+            "https://cdn.example/hls/cross_variant.m3u8",
+            "https://cdn.example/hls/cross.key",
+            "https://cdn.example/hls/cross_seg.ts",
+            "https://cdn.example/hls/redirected_final.ts",
+        ] {
+            let hdrs = try callFor(crossUrl).headers
+            XCTAssertNil(hdrs["Authorization"], "Authorization leaked cross-domain to \(crossUrl)")
+            XCTAssertNil(hdrs["Cookie"], "Cookie leaked cross-domain to \(crossUrl)")
+            XCTAssertNil(hdrs["Origin"], "Origin leaked cross-domain to \(crossUrl)")
+            XCTAssertNil(hdrs["Referer"], "Referer leaked cross-domain to \(crossUrl)")
+            XCTAssertEqual(hdrs["Accept-Encoding"], "identity")
+            XCTAssertNotNil(hdrs["User-Agent"])
+        }
     }
 }

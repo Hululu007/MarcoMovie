@@ -197,7 +197,7 @@ public struct SiteDepotSwitcherSheet: View {
                     Text("切换片源与多仓线路")
                         .font(TvFont.pageTitle)
                         .foregroundColor(.white)
-                    Text("可用 \(appModel.config.availableSites.count) / 共 \(appModel.config.sites.count) 个片源")
+                    Text("可用 \(appModel.config.publicAvailableSites.count) / 共 \(appModel.config.sites.filter { !$0.isEffectivelyPrivate }.count) 个片源")
                         .font(TvFont.caption)
                         .foregroundColor(TvTheme.secondaryText)
                 }
@@ -208,13 +208,13 @@ public struct SiteDepotSwitcherSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    if !appModel.config.depots.isEmpty {
+                    if !appModel.config.publicDepots.isEmpty {
                         Text("多仓仓库列表")
                             .font(TvFont.sectionTitle)
                             .foregroundColor(.white)
 
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 14)], spacing: 14) {
-                            ForEach(appModel.config.depots) { depot in
+                            ForEach(appModel.config.publicDepots) { depot in
                                 Button {
                                     dismiss()
                                     Task { await appModel.switchDepot(depot) }

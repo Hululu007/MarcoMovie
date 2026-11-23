@@ -11,20 +11,34 @@ public struct NetdiskHeaderPolicy: Hashable, Sendable {
     public let baseHeaders: [String: String]
     public let cookieDomains: [String]
     public let allowInsecureLoopbackCredentials: Bool
+    public let defaultUserAgent: String
 
-    private static let sensitiveHeaderNames: Set<String> = [
-        "cookie",
-        "cookie2",
-        "authorization",
-        "proxy-authorization",
-        "x-auth-token",
+    /// Refresh credentials and hop-by-hop transport headers must NEVER be forwarded on media requests.
+    private static let alwaysBlockedHeaderNames: Set<String> = [
+        "accept-encoding",
+        "range",
+        "host",
+        "content-length",
+        "connection",
+        "transfer-encoding",
+        "x-ali-refresh-token",
+        "refresh-token",
+        "x-refresh-token",
+    ]
+
+    /// Minimal playback headers allowed when targeting cross-domain CDNs or redirected third-party hosts.
+    private static let crossDomainAllowedHeaderNames: Set<String> = [
+        "user-agent",
+        "accept",
+        "accept-language",
     ]
 
     public init(
         originUrl: URL,
         baseHeaders: [String: String] = [:],
         cookieDomains: [String] = [],
-        allowInsecureLoopbackCredentials: Bool = false
+        allowInsecureLoopbackCredentials: Bool = false,
+        defaultUserAgent: String = NetdiskService.desktopChromeUA
     ) {
         self.originUrl = originUrl
         self.baseHeaders = baseHeaders
@@ -32,6 +46,7 @@ public struct NetdiskHeaderPolicy: Hashable, Sendable {
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n")).lowercased() }
             .filter { $0.contains(".") && !$0.isEmpty }
         self.allowInsecureLoopbackCredentials = allowInsecureLoopbackCredentials
+        self.defaultUserAgent = defaultUserAgent
     }
 
     public func shouldSendCredentials(to targetUrl: URL) -> Bool {
@@ -45,7 +60,7 @@ public struct NetdiskHeaderPolicy: Hashable, Sendable {
             return false
         }
 
-        let isLoopback = (targetHost == "127.0.0.1" || targetHost == "localhost")
+        let isLoopback = (targetHost == "127.0.0.1" || targetHost == "localhost" || targetHost == "::1")
         if targetScheme != "https" {
             guard allowInsecureLoopbackCredentials && targetScheme == "http" && isLoopback else {
                 return false
@@ -83,17 +98,17 @@ public struct NetdiskHeaderPolicy: Hashable, Sendable {
             let cleanVal = Self.sanitizeHeaderToken(rawVal)
             guard !cleanKey.isEmpty, !cleanVal.isEmpty else { continue }
             let lowerKey = cleanKey.lowercased()
-            if lowerKey == "accept-encoding" || lowerKey == "range" || lowerKey == "host" {
+            if Self.alwaysBlockedHeaderNames.contains(lowerKey) {
                 continue
             }
-            if Self.sensitiveHeaderNames.contains(lowerKey) && !includeSecrets {
+            if !includeSecrets && !Self.crossDomainAllowedHeaderNames.contains(lowerKey) {
                 continue
             }
             out[cleanKey] = cleanVal
         }
 
         if out.keys.allSatisfy({ $0.lowercased() != "user-agent" }) {
-            out["User-Agent"] = NetdiskService.desktopChromeUA
+            out["User-Agent"] = defaultUserAgent
         }
         out["Accept-Encoding"] = "identity"
         if let range = range {

@@ -125,7 +125,7 @@ public final class AppViewModel: ObservableObject {
     }
 
     public var hasConfiguredSources: Bool {
-        !config.sites.isEmpty || !config.lives.isEmpty || !config.depots.isEmpty
+        !config.publicAvailableSites.isEmpty || !config.publicSupportedLives.isEmpty || !config.publicDepots.isEmpty
     }
 
     public func reloadLocalState() {
@@ -155,14 +155,21 @@ public final class AppViewModel: ObservableObject {
 
     private func performSelfHealingStartupIfNeeded() async {
         if storage.needsSubscriptionContentRefresh {
-            for sub in storage.subscriptions() where !sub.url.isEmpty && sub.rawContent.isEmpty {
+            for sub in storage.subscriptions()
+                where sub.enabled && !sub.isEffectivelyPrivate && !sub.url.isEmpty && sub.rawContent.isEmpty
+            {
                 if let (raw, _) = try? await cmsClient.fetchConfig(from: sub.url, defaultName: sub.name) {
                     _ = try? storage.upsertSubscription(
+                        id: sub.id,
                         name: sub.name,
                         url: sub.url,
                         rawContent: raw,
+                        group: sub.group,
+                        isPrivate: sub.isEffectivelyPrivate,
+                        enabled: sub.enabled,
                         warehouseUrl: sub.warehouseUrl,
-                        activeDepotName: sub.activeDepotName
+                        activeDepotName: sub.activeDepotName,
+                        depots: sub.depots
                     )
                 }
             }
@@ -175,7 +182,7 @@ public final class AppViewModel: ObservableObject {
         if activeSite != nil && discoverVideos.isEmpty {
             await loadHomeForActiveSite()
         }
-        if !config.supportedLives.isEmpty && liveGroups.isEmpty {
+        if !config.publicSupportedLives.isEmpty && liveGroups.isEmpty {
             await loadLiveCatalog(sourceIndex: 0)
         }
     }
@@ -201,22 +208,22 @@ public final class AppViewModel: ObservableObject {
         discoverError = nil
         do {
             let (rawText, _) = try await cmsClient.fetchDepotConfig(depot)
-            let parentSub = subscriptions.first { $0.id == depot.subscriptionId } ?? subscriptions.first
+            let parentSub = !depot.subscriptionId.isEmpty
+                ? subscriptions.first { $0.id == depot.subscriptionId }
+                : subscriptions.first { $0.depots.contains(where: { $0.url == depot.url }) } ?? subscriptions.first
             let warehouse = parentSub?.warehouseUrl.isEmpty == false ? (parentSub?.warehouseUrl ?? "") : (parentSub?.url ?? "")
             _ = try storage.upsertSubscription(
+                id: parentSub?.id,
                 name: depot.name,
                 url: depot.url,
                 rawContent: rawText,
+                group: parentSub?.group,
+                isPrivate: parentSub?.isEffectivelyPrivate,
+                enabled: parentSub?.enabled,
                 warehouseUrl: warehouse,
-                activeDepotName: depot.name
+                activeDepotName: depot.name,
+                depots: parentSub?.depots
             )
-            if !depot.subscriptionId.isEmpty, let oldParent = parentSub {
-                var all = storage.subscriptions()
-                if let idx = all.firstIndex(where: { $0.activeDepotName == depot.name }) {
-                    all[idx].depots = oldParent.depots
-                    storage.saveSubscriptions(all)
-                }
-            }
             reloadLocalState()
             statusBannerMessage = "已切换至仓库：\(depot.name)"
             await loadHomeForActiveSite()
@@ -239,19 +246,15 @@ public final class AppViewModel: ObservableObject {
                 url: firstDepot.url,
                 rawContent: depotRaw,
                 warehouseUrl: normalized,
-                activeDepotName: firstDepot.name
+                activeDepotName: firstDepot.name,
+                depots: firstCfg.depots
             )
-            var subs = storage.subscriptions()
-            if !subs.isEmpty {
-                subs[0].depots = firstCfg.depots
-                storage.saveSubscriptions(subs)
-            }
         } else {
             _ = try storage.upsertSubscription(name: name, url: normalized, rawContent: fetchedRaw)
         }
         reloadLocalState()
         await loadHomeForActiveSite()
-        if !config.supportedLives.isEmpty {
+        if !config.publicSupportedLives.isEmpty {
             await loadLiveCatalog(sourceIndex: 0)
         }
     }
@@ -329,7 +332,7 @@ public final class AppViewModel: ObservableObject {
     // MARK: - Live TV
 
     public func loadLiveCatalog(sourceIndex: Int) async {
-        let lives = config.supportedLives
+        let lives = config.publicSupportedLives
         guard lives.indices.contains(sourceIndex) else {
             liveGroups = []
             return

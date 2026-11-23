@@ -20,11 +20,22 @@ QUICKJS_SRC_DIR = REPO_ROOT / "flutter" / "packages" / "quickjs_engine" / "nativ
 CQUICKJS_DST_DIR = TVOS_DIR / "Sources" / "CQuickJS"
 CQUICKJS_INCLUDE_DIR = CQUICKJS_DST_DIR / "include"
 
-ANDROID_JS_HOST_DIR = REPO_ROOT / "android" / "src" / "main" / "assets" / "js-host"
-FLUTTER_JS_HOST_DIR = REPO_ROOT / "flutter" / "assets" / "js-host"
+SHARED_JS_HOST_DIR = REPO_ROOT / "shared" / "script-host" / "js-host"
 SHARED_CATPAW_DIR = REPO_ROOT / "shared" / "catpaw"
 TVOS_JS_HOST_DST_DIR = TVOS_DIR / "Sources" / "MarcoTVCore" / "Resources" / "js-host"
 TVOS_CATPAW_DST_DIR = TVOS_DIR / "Sources" / "MarcoTVCore" / "Resources" / "catpaw"
+
+REQUIRED_SHARED_JS_HOST_FILES = (
+    "crypto-js.js",
+    "catvod.mjs",
+    "module-interop.js",
+    "bootstrap.js",
+    "crypto.LICENSE",
+)
+
+REQUIRED_CATPAW_JS_HOST_FILES = (
+    "drpy-core.js",
+)
 
 # Node-only worker scripts are not needed on tvOS (QuickJS-NG executes DRPY2 & Guard adapters in-process,
 # and Apple Foundation handles GBK/GB18030/Big5 natively via CFStringConvertEncodingToNSStringEncoding).
@@ -36,7 +47,10 @@ CATPAW_TVOS_SKIP_FILES = {
 }
 
 APP_ICON_512 = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
-LOGO_MARK_PNG = REPO_ROOT / "android" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png"
+LOGO_MARK_CANDIDATES = (
+    REPO_ROOT / "android-tv" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png",
+    REPO_ROOT / "android-mobile" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png",
+)
 
 RUNNER_DIR = TVOS_DIR / "RunnerProject"
 XCODEPROJ_DIR = RUNNER_DIR / "MarcoMovieTV.xcodeproj"
@@ -323,43 +337,91 @@ def sync_quickjs_sources() -> list[Path]:
     return copied
 
 
-def sync_js_host_assets() -> list[Path]:
-    TVOS_JS_HOST_DST_DIR.mkdir(parents=True, exist_ok=True)
-    js_src_base = FLUTTER_JS_HOST_DIR if (FLUTTER_JS_HOST_DIR / "crypto-js.js").exists() else ANDROID_JS_HOST_DIR
-
-    copied: list[Path] = []
-    for name in ("crypto-js.js", "catvod.mjs", "module-interop.js", "bootstrap.js", "crypto.LICENSE"):
-        src = js_src_base / name
-        if not src.exists():
-            src = ANDROID_JS_HOST_DIR / name
-        if src.exists():
-            dst = TVOS_JS_HOST_DST_DIR / name
-            shutil.copy2(src, dst)
-            copied.append(dst)
-
-    drpy_core = SHARED_CATPAW_DIR / "drpy-core.js"
-    if drpy_core.exists():
-        dst = TVOS_JS_HOST_DST_DIR / "drpy-core.js"
-        shutil.copy2(drpy_core, dst)
-        copied.append(dst)
-
-    return copied
-
-
-def sync_catpaw_assets() -> list[Path]:
-    """Sync SHA-256 verified DRPY2 & Guard extractor/adapter assets from shared/catpaw/."""
-    manifest_path = SHARED_CATPAW_DIR / "drpy-assets.json"
-    if not manifest_path.exists():
+def _load_catpaw_manifest(shared_catpaw_dir: Path = SHARED_CATPAW_DIR) -> tuple[Path, list[dict]]:
+    manifest_path = shared_catpaw_dir / "drpy-assets.json"
+    if not manifest_path.is_file():
         raise FileNotFoundError(f"CatPaw DRPY asset manifest missing: {manifest_path}")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     files = manifest.get("files")
     if not isinstance(files, list) or not files:
-        raise ValueError("Invalid drpy-assets.json manifest")
+        raise ValueError(f"Invalid drpy-assets.json manifest: {manifest_path}")
+    return manifest_path, files
 
-    TVOS_CATPAW_DST_DIR.mkdir(parents=True, exist_ok=True)
+
+def _read_verified_catpaw_asset(entry: dict, shared_catpaw_dir: Path = SHARED_CATPAW_DIR) -> bytes:
+    name = entry["name"]
+    src = shared_catpaw_dir / name
+    if not src.is_file():
+        raise FileNotFoundError(f"Missing CatPaw asset '{name}': {src}")
+    raw = src.read_bytes()
+    if len(raw) != entry["bytes"] or hashlib.sha256(raw).hexdigest() != entry["sha256"]:
+        raise ValueError(f"SHA-256 verification failed for CatPaw asset: {name}")
+    return raw
+
+
+def _clear_directory(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def sync_js_host_assets(
+    shared_js_host_dir: Path = SHARED_JS_HOST_DIR,
+    shared_catpaw_dir: Path = SHARED_CATPAW_DIR,
+    dst_dir: Path = TVOS_JS_HOST_DST_DIR,
+) -> list[Path]:
+    """Sync required JS host runtime assets from tracked shared/script-host/js-host/ and shared/catpaw/."""
+    if not shared_js_host_dir.is_dir():
+        raise FileNotFoundError(f"Shared js-host source directory missing: {shared_js_host_dir}")
+
+    _, catpaw_entries = _load_catpaw_manifest(shared_catpaw_dir)
+    catpaw_by_name = {entry["name"]: entry for entry in catpaw_entries}
+
+    missing: list[str] = []
+    for name in REQUIRED_SHARED_JS_HOST_FILES:
+        src = shared_js_host_dir / name
+        if not src.is_file():
+            missing.append(f"{name} ({src})")
+    for name in REQUIRED_CATPAW_JS_HOST_FILES:
+        src = shared_catpaw_dir / name
+        if not src.is_file():
+            missing.append(f"{name} ({src})")
+        elif name not in catpaw_by_name:
+            missing.append(f"{name} (missing entry in drpy-assets.json)")
+
+    if missing:
+        raise FileNotFoundError(
+            "Missing required tvOS js-host asset(s): " + ", ".join(missing)
+        )
+
+    _clear_directory(dst_dir)
     copied: list[Path] = []
-    dst_manifest = TVOS_CATPAW_DST_DIR / "drpy-assets.json"
+    for name in REQUIRED_SHARED_JS_HOST_FILES:
+        src = shared_js_host_dir / name
+        dst = dst_dir / name
+        shutil.copy2(src, dst)
+        copied.append(dst)
+
+    for name in REQUIRED_CATPAW_JS_HOST_FILES:
+        raw = _read_verified_catpaw_asset(catpaw_by_name[name], shared_catpaw_dir)
+        dst = dst_dir / name
+        dst.write_bytes(raw)
+        copied.append(dst)
+
+    return copied
+
+
+def sync_catpaw_assets(
+    shared_catpaw_dir: Path = SHARED_CATPAW_DIR,
+    dst_dir: Path = TVOS_CATPAW_DST_DIR,
+) -> list[Path]:
+    """Sync SHA-256 verified DRPY2 & Guard extractor/adapter assets from shared/catpaw/."""
+    manifest_path, files = _load_catpaw_manifest(shared_catpaw_dir)
+
+    _clear_directory(dst_dir)
+    copied: list[Path] = []
+    dst_manifest = dst_dir / "drpy-assets.json"
     shutil.copy2(manifest_path, dst_manifest)
     copied.append(dst_manifest)
 
@@ -367,17 +429,21 @@ def sync_catpaw_assets() -> list[Path]:
         name = entry["name"]
         if name in CATPAW_TVOS_SKIP_FILES:
             continue
-        src = SHARED_CATPAW_DIR / name
-        if not src.exists():
-            raise FileNotFoundError(f"Missing CatPaw asset: {src}")
-        raw = src.read_bytes()
-        if len(raw) != entry["bytes"] or hashlib.sha256(raw).hexdigest() != entry["sha256"]:
-            raise ValueError(f"SHA-256 verification failed for CatPaw asset: {name}")
-        dst = TVOS_CATPAW_DST_DIR / name
+        raw = _read_verified_catpaw_asset(entry, shared_catpaw_dir)
+        dst = dst_dir / name
         dst.write_bytes(raw)
         copied.append(dst)
 
     return copied
+
+
+def resolve_logo_mark_png(candidates: tuple[Path, ...] = LOGO_MARK_CANDIDATES) -> Path:
+    """Resolve the tracked transparent brand mark asset without referencing deleted directories."""
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(p) for p in candidates)
+    raise FileNotFoundError(f"Missing confirmed transparent brand mark asset (logo_mark.png); searched: {searched}")
 
 
 # ==============================================================================
@@ -391,11 +457,12 @@ def _write_json(path: Path, obj: dict) -> None:
 
 
 def generate_tvos_xcassets() -> None:
+    if not APP_ICON_512.is_file():
+        raise FileNotFoundError(f"Missing confirmed opaque app icon asset: {APP_ICON_512}")
+    logo_mark_path = resolve_logo_mark_png()
+
     _, _, opaque_rows = decode_png_rgba(APP_ICON_512)
-    if LOGO_MARK_PNG.exists():
-        _, _, front_rows = decode_png_rgba(LOGO_MARK_PNG)
-    else:
-        front_rows = opaque_rows
+    _, _, front_rows = decode_png_rgba(logo_mark_path)
 
     _write_json(ASSETS_DIR / "Contents.json", {"info": {"author": "xcode", "version": 1}})
 

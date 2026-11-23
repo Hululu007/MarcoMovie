@@ -433,7 +433,7 @@ public enum CmsParser {
                 guard seenDepotUrls.insert(resolved).inserted else { continue }
                 let rawName = firstNonEmpty(item["name"], item["sourceName"])
                 let depotName = rawName.isEmpty ? "仓库 \(depots.count + 1)" : rawName
-                depots.append(CmsDepot(name: depotName, url: resolved, subscriptionId: subscriptionId))
+                depots.append(CmsDepot(name: depotName, url: resolved, subscriptionId: subscriptionId, isPrivate: isPrivate))
             }
         }
 

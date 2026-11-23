@@ -21,13 +21,28 @@ public typealias ProxyUpstreamFetcher = @Sendable (
     _ headers: [String: String]
 ) async throws -> ProxyUpstreamResponse
 
-/// Loopback-only (`127.0.0.1`) HTTP proxy for tvOS `AVPlayer` that injects custom
-/// `Referer` / `User-Agent` / `Cookie` headers and rewrites HLS `.m3u8` variant & segment URLs.
+private final class LocalHeaderNoRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        // Intercept every redirect so LocalHeaderProxyServer recomputes minimal per-target headers.
+        completionHandler(nil)
+    }
+}
+
+/// Loopback-only (`127.0.0.1`) HTTP proxy for tvOS `AVPlayer` that evaluates per-target
+/// `NetdiskHeaderPolicy` isolation across HLS manifests, sub-playlists, segments, and redirects.
 public final class LocalHeaderProxyServer: @unchecked Sendable {
+    private static let maxRedirects = 8
+
     private struct StreamSession: Sendable {
         let id: String
         let rootUrl: URL
-        let headers: [String: String]
+        let policy: NetdiskHeaderPolicy
         let createdAt: Date
     }
 
@@ -36,9 +51,12 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
     private var sessions: [String: StreamSession] = [:]
     private var listener: NWListener?
     private(set) public var port: UInt16 = 0
+    private let redirectDelegate: LocalHeaderNoRedirectDelegate
     private let upstreamFetcher: ProxyUpstreamFetcher
 
     public init(upstreamFetcher: ProxyUpstreamFetcher? = nil) {
+        let delegate = LocalHeaderNoRedirectDelegate()
+        self.redirectDelegate = delegate
         if let custom = upstreamFetcher {
             self.upstreamFetcher = custom
         } else {
@@ -46,10 +64,12 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
             config.timeoutIntervalForRequest = 20
             config.timeoutIntervalForResource = 60
             config.httpShouldSetCookies = false
-            let session = URLSession(configuration: config)
+            config.httpCookieAcceptPolicy = .never
+            let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
             self.upstreamFetcher = { url, method, headers in
-                var request = URLRequest(url: url)
+                var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
                 request.httpMethod = method
+                request.httpShouldHandleCookies = false
                 for (k, v) in headers {
                     request.setValue(v, forHTTPHeaderField: k)
                 }
@@ -146,15 +166,15 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
         current?.cancel()
     }
 
-    /// Registers an upstream media URL + custom headers and returns a loopback URL playable by `AVPlayer`.
-    public func registerStream(url: URL, headers: [String: String]) async throws -> URL {
+    /// Registers an upstream media URL + origin-bound `NetdiskHeaderPolicy` and returns a loopback URL playable by `AVPlayer`.
+    public func registerStream(url: URL, policy: NetdiskHeaderPolicy) async throws -> URL {
         let activePort = try await startIfNeeded()
         var tokenBytes = [UInt8](repeating: 0, count: 12)
         for i in 0..<tokenBytes.count {
             tokenBytes[i] = UInt8.random(in: 0...255)
         }
         let sessionId = tokenBytes.map { String(format: "%02x", $0) }.joined()
-        let session = StreamSession(id: sessionId, rootUrl: url, headers: headers, createdAt: Date())
+        let session = StreamSession(id: sessionId, rootUrl: url, policy: policy, createdAt: Date())
 
         withLock {
             if sessions.count >= 64,
@@ -171,6 +191,20 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
             throw MarcoError.networkFailure("无法构造本地代理播放地址")
         }
         return proxyUrl
+    }
+
+    /// Registers an upstream media URL + custom headers under an origin-bound isolation policy.
+    public func registerStream(url: URL, headers: [String: String]) async throws -> URL {
+        let host = (url.host ?? "").lowercased()
+        let isLoopback = (host == "127.0.0.1" || host == "localhost" || host == "::1")
+        let policy = NetdiskHeaderPolicy(
+            originUrl: url,
+            baseHeaders: headers,
+            cookieDomains: [],
+            allowInsecureLoopbackCredentials: isLoopback,
+            defaultUserAgent: CmsClient.defaultSafariUserAgent
+        )
+        return try await registerStream(url: url, policy: policy)
     }
 
     /// Rewrites an HLS `.m3u8` manifest so all variant playlists, media segments, and `#EXT-X-KEY` / `#EXT-X-MAP` URIs route through loopback.
@@ -334,22 +368,46 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
             targetUrl = streamSession.rootUrl
         }
 
-        var outboundHeaders = streamSession.headers
-        if outboundHeaders.keys.allSatisfy({ $0.lowercased() != "user-agent" }) {
-            outboundHeaders["User-Agent"] = CmsClient.defaultSafariUserAgent
-        }
-        if let rangeVal = clientHeaders["range"], !rangeVal.isEmpty {
-            outboundHeaders["Range"] = rangeVal
-        }
-
+        let requestedRange = clientHeaders["range"]
         let fetcher = self.upstreamFetcher
         Task {
             do {
-                let upstream = try await fetcher(targetUrl, method, outboundHeaders)
+                var currentUrl = targetUrl
+                var currentMethod = method
+                var resolvedUpstream: ProxyUpstreamResponse?
+
+                for _ in 0...Self.maxRedirects {
+                    guard let scheme = currentUrl.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+                        self.sendError(connection: connection, status: 502, message: "Unsupported redirect scheme")
+                        return
+                    }
+                    let hopHeaders = streamSession.policy.headers(for: currentUrl, range: requestedRange)
+                    let hopResponse = try await fetcher(currentUrl, currentMethod, hopHeaders)
+                    if [301, 302, 303, 307, 308].contains(hopResponse.statusCode),
+                       let rawLoc = hopResponse.headers.first(where: { $0.key.lowercased() == "location" })?.value
+                           .trimmingCharacters(in: .whitespacesAndNewlines),
+                       !rawLoc.isEmpty,
+                       let nextUrl = URL(string: rawLoc, relativeTo: currentUrl)?.absoluteURL
+                    {
+                        if hopResponse.statusCode == 303 && currentMethod != "HEAD" {
+                            currentMethod = "GET"
+                        }
+                        currentUrl = nextUrl
+                        continue
+                    }
+                    resolvedUpstream = hopResponse
+                    break
+                }
+
+                guard let upstream = resolvedUpstream else {
+                    self.sendError(connection: connection, status: 502, message: "Too many upstream redirects")
+                    return
+                }
+
                 let contentType = upstream.headers.first(where: { $0.key.lowercased() == "content-type" })?.value ?? ""
                 let bodyPrefix = String(decoding: upstream.body.prefix(32), as: UTF8.self)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                let isHls = targetUrl.path.lowercased().hasSuffix(".m3u8")
+                let isHls = currentUrl.path.lowercased().hasSuffix(".m3u8")
                     || contentType.lowercased().contains("mpegurl")
                     || bodyPrefix.hasPrefix("#EXTM3U")
 
@@ -357,7 +415,7 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
                     let manifestText = String(decoding: upstream.body, as: UTF8.self)
                     let rewritten = Self.rewriteM3u8Playlist(
                         manifestText,
-                        baseUrl: targetUrl,
+                        baseUrl: currentUrl,
                         proxyPort: activePort,
                         sessionId: sessionId
                     )

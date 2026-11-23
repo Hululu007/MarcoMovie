@@ -404,6 +404,7 @@ public final class TvStorageManager: @unchecked Sendable {
         var url: String
         var group: String
         var format: String
+        var isPrivate: Bool?
         var enabled: Bool
         var updatedAt: Int64
         var warehouseUrl: String
@@ -412,7 +413,7 @@ public final class TvStorageManager: @unchecked Sendable {
     }
 
     private struct KeychainAnchorSnapshot: Codable {
-        var version: Int = 1
+        var version: Int = 2
         var subscriptions: [KeychainSubscriptionStub]
         var favorites: [FavoriteItem]
         var watchHistory: [WatchHistoryItem]
@@ -482,7 +483,9 @@ public final class TvStorageManager: @unchecked Sendable {
             tombstonesCache = readCodable(from: tombsFile) ?? [:]
             searchHistoryCache = readCodable(from: searchFile) ?? []
             recoveredFromKeychainAnchor = false
-            needsSubscriptionContentRefresh = subscriptionsCache.contains { !$0.url.isEmpty && $0.rawContent.isEmpty }
+            needsSubscriptionContentRefresh = subscriptionsCache.contains {
+                $0.enabled && !$0.isEffectivelyPrivate && !$0.url.isEmpty && $0.rawContent.isEmpty
+            }
         } else if let anchor = readKeychainAnchor() {
             // Caches directory was purged by tvOS! Reconstruct working state from Keychain Anchor.
             favoritesCache = Array(anchor.favorites.prefix(CmsParser.maxFavoriteEntries))
@@ -490,22 +493,37 @@ public final class TvStorageManager: @unchecked Sendable {
             preferencesCache = anchor.preferences
             tombstonesCache = anchor.tombstones
             subscriptionsCache = anchor.subscriptions.map { stub in
-                SubscriptionEntry(
+                // Legacy v1 Keychain stubs omitted `isPrivate`; when privacy cannot be determined,
+                // conservatively treat the recovered subscription as private to avoid exposing hidden sources.
+                let inferredPrivate = stub.isPrivate ?? true
+                let effectivePrivate = inferredPrivate || stub.group.contains("隐私") || stub.group.contains("私密")
+                let restoredDepots = stub.depots.map { d in
+                    CmsDepot(
+                        name: d.name,
+                        url: d.url,
+                        subscriptionId: d.subscriptionId.isEmpty ? stub.id : d.subscriptionId,
+                        isPrivate: effectivePrivate || d.isPrivate
+                    )
+                }
+                return SubscriptionEntry(
                     id: stub.id,
                     name: stub.name,
                     url: stub.url,
                     group: stub.group,
                     format: stub.format,
+                    isPrivate: effectivePrivate,
                     enabled: stub.enabled,
                     rawContent: "",
                     updatedAt: stub.updatedAt,
                     warehouseUrl: stub.warehouseUrl,
                     activeDepotName: stub.activeDepotName,
-                    depots: stub.depots
+                    depots: restoredDepots
                 )
             }
             recoveredFromKeychainAnchor = true
-            needsSubscriptionContentRefresh = subscriptionsCache.contains { !$0.url.isEmpty }
+            needsSubscriptionContentRefresh = subscriptionsCache.contains {
+                $0.enabled && !$0.isEffectivelyPrivate && !$0.url.isEmpty
+            }
             persistCachesFilesOnly()
         } else {
             subscriptionsCache = []
@@ -531,55 +549,166 @@ public final class TvStorageManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         subscriptionsCache = entries
-        needsSubscriptionContentRefresh = entries.contains { !$0.url.isEmpty && $0.rawContent.isEmpty }
+        needsSubscriptionContentRefresh = entries.contains {
+            $0.enabled && !$0.isEffectivelyPrivate && !$0.url.isEmpty && $0.rawContent.isEmpty
+        }
         writeCodableAtomically(subscriptionsCache, to: cachesDirectory.appendingPathComponent("subscriptions.json"))
         persistKeychainAnchor()
     }
 
     @discardableResult
     public func upsertSubscription(
+        id existingTargetId: String? = nil,
         name: String,
         url: String,
         rawContent: String,
+        group: String? = nil,
+        isPrivate: Bool? = nil,
+        enabled: Bool? = nil,
         warehouseUrl: String = "",
         activeDepotName: String = "",
+        depots: [CmsDepot]? = nil,
         nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
     ) throws -> (entry: SubscriptionEntry, config: CmsConfig) {
-        let parsed = try CmsParser.parseConfig(rawContent, origin: url, defaultName: name)
         let cleanUrl = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanWarehouse = warehouseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanDepotName = activeDepotName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanTargetId = existingTargetId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        // Snapshot existing subscription metadata first so refresh & depot switch preserve
+        // original id, group, privacy, enabled state, and owning warehouse.
+        lock.lock()
+        let existingSnapshot: SubscriptionEntry? = {
+            if !cleanTargetId.isEmpty,
+               let byId = subscriptionsCache.first(where: { $0.id == cleanTargetId })
+            {
+                return byId
+            }
+            if !cleanWarehouse.isEmpty,
+               let byWarehouse = subscriptionsCache.first(where: { $0.warehouseUrl == cleanWarehouse || $0.url == cleanWarehouse })
+            {
+                return byWarehouse
+            }
+            if !cleanUrl.isEmpty,
+               let byUrl = subscriptionsCache.first(where: { $0.url == cleanUrl })
+            {
+                return byUrl
+            }
+            return nil
+        }()
+        lock.unlock()
+
+        let subId = existingSnapshot?.id
+            ?? (!cleanTargetId.isEmpty ? cleanTargetId : "sub_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(10).lowercased())")
+        let effectiveGroup: String = {
+            if let explicit = group?.trimmingCharacters(in: .whitespacesAndNewlines), !explicit.isEmpty {
+                return explicit
+            }
+            if let prev = existingSnapshot?.group.trimmingCharacters(in: .whitespacesAndNewlines), !prev.isEmpty {
+                return prev
+            }
+            return "默认分组"
+        }()
+        let effectivePrivate = (isPrivate ?? existingSnapshot?.isEffectivelyPrivate ?? false)
+            || effectiveGroup.contains("隐私")
+            || effectiveGroup.contains("私密")
+        let effectiveEnabled = enabled ?? existingSnapshot?.enabled ?? true
+        let effectiveWarehouse = !cleanWarehouse.isEmpty ? cleanWarehouse : (existingSnapshot?.warehouseUrl ?? "")
+        let effectiveActiveDepot = !cleanDepotName.isEmpty ? cleanDepotName : (existingSnapshot?.activeDepotName ?? "")
+
+        let displayName: String = {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+            if let prevName = existingSnapshot?.name.trimmingCharacters(in: .whitespacesAndNewlines), !prevName.isEmpty {
+                return prevName
+            }
+            if !effectiveActiveDepot.isEmpty { return effectiveActiveDepot }
+            if let host = URL(string: cleanUrl)?.host, !host.isEmpty { return host }
+            return "Apple TV 订阅源"
+        }()
+
+        let parsed = try CmsParser.parseConfig(
+            rawContent,
+            origin: cleanUrl,
+            defaultGroup: effectiveGroup,
+            isPrivate: effectivePrivate,
+            subscriptionId: subId,
+            defaultName: displayName
+        )
 
         lock.lock()
         defer { lock.unlock() }
 
-        let existingIdx = subscriptionsCache.firstIndex { sub in
-            (!cleanUrl.isEmpty && sub.url == cleanUrl)
-                || (!warehouseUrl.isEmpty && sub.warehouseUrl == warehouseUrl)
+        let existingIdx: Int? = {
+            if !cleanTargetId.isEmpty,
+               let idx = subscriptionsCache.firstIndex(where: { $0.id == cleanTargetId })
+            {
+                return idx
+            }
+            if let snap = existingSnapshot,
+               let idx = subscriptionsCache.firstIndex(where: { $0.id == snap.id })
+            {
+                return idx
+            }
+            if !cleanWarehouse.isEmpty,
+               let idx = subscriptionsCache.firstIndex(where: { $0.warehouseUrl == cleanWarehouse || $0.url == cleanWarehouse })
+            {
+                return idx
+            }
+            if !cleanUrl.isEmpty,
+               let idx = subscriptionsCache.firstIndex(where: { $0.url == cleanUrl })
+            {
+                return idx
+            }
+            return nil
+        }()
+
+        let rawDepots: [CmsDepot] = {
+            if let explicitDepots = depots, !explicitDepots.isEmpty {
+                return explicitDepots
+            }
+            if !parsed.depots.isEmpty {
+                return parsed.depots
+            }
+            if let idx = existingIdx {
+                return subscriptionsCache[idx].depots
+            }
+            return []
+        }()
+        let normalizedDepots = rawDepots.map { d in
+            CmsDepot(
+                name: d.name,
+                url: d.url,
+                subscriptionId: subId,
+                isPrivate: effectivePrivate || d.isPrivate
+            )
         }
-        let subId = existingIdx.map { subscriptionsCache[$0].id }
-            ?? "sub_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(10).lowercased())"
-        let displayName: String = {
-            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-            if !activeDepotName.isEmpty { return activeDepotName }
-            if let host = URL(string: cleanUrl)?.host, !host.isEmpty { return host }
-            return "Apple TV 订阅源"
+
+        let effectiveFormat: String = {
+            if !normalizedDepots.isEmpty || !effectiveWarehouse.isEmpty {
+                return "多仓"
+            }
+            if let idx = existingIdx, !subscriptionsCache[idx].format.isEmpty {
+                return subscriptionsCache[idx].format
+            }
+            return "JSON"
         }()
 
         let entry = SubscriptionEntry(
             id: subId,
             name: displayName,
             url: cleanUrl,
-            format: parsed.depots.isEmpty ? "JSON" : "多仓",
-            enabled: true,
+            group: effectiveGroup,
+            format: effectiveFormat,
+            isPrivate: effectivePrivate,
+            enabled: effectiveEnabled,
             rawContent: rawContent,
             siteCount: parsed.sites.count,
             liveCount: parsed.lives.count,
             updatedAt: nowMs,
-            warehouseUrl: warehouseUrl,
-            activeDepotName: activeDepotName,
-            depots: parsed.depots.isEmpty
-                ? (existingIdx.map { subscriptionsCache[$0].depots } ?? [])
-                : parsed.depots
+            warehouseUrl: effectiveWarehouse,
+            activeDepotName: effectiveActiveDepot,
+            depots: normalizedDepots
         )
 
         if let idx = existingIdx {
@@ -588,7 +717,9 @@ public final class TvStorageManager: @unchecked Sendable {
             subscriptionsCache.insert(entry, at: 0)
         }
 
-        if preferencesCache.selectedSiteKey.isEmpty,
+        if effectiveEnabled,
+           !effectivePrivate,
+           preferencesCache.selectedSiteKey.isEmpty,
            let firstAvail = parsed.publicAvailableSites.first(where: { !$0.isBannerNoticeSite })
                ?? parsed.publicAvailableSites.first
         {
@@ -596,15 +727,19 @@ public final class TvStorageManager: @unchecked Sendable {
             writeCodableAtomically(preferencesCache, to: cachesDirectory.appendingPathComponent("preferences.json"))
         }
 
-        let syncKey = WebDavSyncService.canonicalSubscriptionSyncKey(
-            url: entry.url,
-            rawContent: entry.rawContent,
-            warehouseUrl: entry.warehouseUrl
-        )
-        tombstonesCache.removeValue(forKey: "sub:\(syncKey)")
-        writeCodableAtomically(tombstonesCache, to: cachesDirectory.appendingPathComponent("tombstones.json"))
+        if !effectivePrivate {
+            let syncKey = WebDavSyncService.canonicalSubscriptionSyncKey(
+                url: entry.url,
+                rawContent: entry.rawContent,
+                warehouseUrl: entry.warehouseUrl
+            )
+            tombstonesCache.removeValue(forKey: "sub:\(syncKey)")
+            writeCodableAtomically(tombstonesCache, to: cachesDirectory.appendingPathComponent("tombstones.json"))
+        }
         writeCodableAtomically(subscriptionsCache, to: cachesDirectory.appendingPathComponent("subscriptions.json"))
-        needsSubscriptionContentRefresh = subscriptionsCache.contains { !$0.url.isEmpty && $0.rawContent.isEmpty }
+        needsSubscriptionContentRefresh = subscriptionsCache.contains {
+            $0.enabled && !$0.isEffectivelyPrivate && !$0.url.isEmpty && $0.rawContent.isEmpty
+        }
         persistKeychainAnchor()
         return (entry, parsed)
     }
@@ -640,14 +775,15 @@ public final class TvStorageManager: @unchecked Sendable {
         var seenDepotUrls = Set<String>()
 
         for sub in activeSubs {
+            let subPriv = sub.isEffectivelyPrivate
             for d in sub.depots where seenDepotUrls.insert(d.url).inserted {
-                allDepots.append(CmsDepot(name: d.name, url: d.url, subscriptionId: sub.id))
+                allDepots.append(CmsDepot(name: d.name, url: d.url, subscriptionId: sub.id, isPrivate: subPriv || d.isPrivate))
             }
             guard let cfg = try? CmsParser.parseConfig(
                 sub.rawContent,
                 origin: sub.url,
                 defaultGroup: sub.group,
-                isPrivate: sub.isEffectivelyPrivate,
+                isPrivate: subPriv,
                 subscriptionId: sub.id,
                 defaultName: sub.name
             ) else {
@@ -657,7 +793,7 @@ public final class TvStorageManager: @unchecked Sendable {
                 primarySpider = cfg.spider
             }
             for d in cfg.depots where seenDepotUrls.insert(d.url).inserted {
-                allDepots.append(d)
+                allDepots.append(CmsDepot(name: d.name, url: d.url, subscriptionId: sub.id, isPrivate: subPriv || d.isPrivate))
             }
             for p in cfg.parses where !allParses.contains(where: { $0.url == p.url }) {
                 allParses.append(p)
@@ -1039,6 +1175,7 @@ public final class TvStorageManager: @unchecked Sendable {
                 url: sub.url,
                 group: sub.group,
                 format: sub.format,
+                isPrivate: sub.isEffectivelyPrivate,
                 enabled: sub.enabled,
                 updatedAt: sub.updatedAt,
                 warehouseUrl: sub.warehouseUrl,
@@ -1047,6 +1184,7 @@ public final class TvStorageManager: @unchecked Sendable {
             )
         }
         let snapshot = KeychainAnchorSnapshot(
+            version: 2,
             subscriptions: stubs,
             favorites: Array(favoritesCache.prefix(CmsParser.maxFavoriteEntries)),
             watchHistory: Array(historyCache.prefix(CmsParser.maxHistoryEntries)),

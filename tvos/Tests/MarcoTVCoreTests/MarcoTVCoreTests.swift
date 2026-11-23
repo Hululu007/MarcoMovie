@@ -344,6 +344,491 @@ final class MarcoTVCoreTests: XCTestCase {
         XCTAssertEqual(play.headers["Referer"], "http://127.0.0.1/spider")
     }
 
+    // MARK: - 7. Batch 1 Regressions: Bundled JS Host, WebDAV Switch & 412 Safety, Privacy Boundaries
+
+    func testLocalScriptSourceExecutesBundledCryptoJsAssets() async throws {
+        let jsHostDir = try resolveBundledJsHostDirectory()
+        for required in ["crypto-js.js", "catvod.mjs", "module-interop.js", "bootstrap.js", "crypto.LICENSE", "drpy-core.js"] {
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: jsHostDir.appendingPathComponent(required).path),
+                "Missing bundled js-host resource: \(required)"
+            )
+        }
+
+        let localSpider = """
+        export default {
+            async init(ext) {
+                this.salt = String(ext || 'tvos');
+            },
+            async homeContent() {
+                const digest = CryptoJS.MD5('marco-' + this.salt).toString();
+                return {
+                    class: [{ type_id: 'local', type_name: '本地脚本' }],
+                    list: [{ vod_id: 'local_1', vod_name: '加密测试-' + digest.slice(0, 8), vod_remarks: digest }]
+                };
+            },
+            async detailContent(ids) {
+                return {
+                    list: [{
+                        vod_id: ids[0],
+                        vod_name: '本地脚本样例',
+                        vod_play_from: '本地线路',
+                        vod_play_url: '第1集$http://127.0.0.1/local/ep1.m3u8'
+                    }]
+                };
+            },
+            async playerContent(flag, id) {
+                const token = CryptoJS.MD5(flag + '|' + id).toString().slice(0, 12);
+                return { url: id + '?sig=' + token, parse: 0 };
+            }
+        };
+        """
+        let site = CmsSite(key: "local_js_sample", name: "本地脚本样例", type: 3, api: "csp_LocalScript.js", ext: "clean")
+        let host = try JsSourceHost(site: site, scriptSource: localSpider)
+        let home = try await host.homeContent()
+        XCTAssertEqual(home.categories.first?.name, "本地脚本")
+        let firstVideo = try XCTUnwrap(home.listing.videos.first)
+        XCTAssertEqual(firstVideo.remarks.count, 32, "CryptoJS.MD5 from bundled crypto-js.js must produce a 32-char hex digest")
+        XCTAssertTrue(firstVideo.title.hasPrefix("加密测试-"))
+
+        let resolved = try await host.playerContent(flag: "本地线路", id: "http://127.0.0.1/local/ep1.m3u8")
+        XCTAssertTrue(resolved.url.contains("?sig="))
+        XCTAssertEqual(resolved.url.components(separatedBy: "?sig=").last?.count, 12)
+    }
+
+    func testWebDavSyncToggleCombinationsPreserveDisabledRemoteAndLocalData() async throws {
+        let localSubCfg = #"{"sites":[{"key":"s_local","name":"本机站","type":1,"api":"http://127.0.0.1:9101/vod"}]}"#
+        let remoteSubCfg = #"{"sites":[{"key":"s_remote","name":"远端站","type":1,"api":"http://127.0.0.1:9102/vod"}]}"#
+        let localDeletedKey = WebDavSyncService.canonicalSubscriptionSyncKey(
+            url: "https://local-del.invalid/sub.json",
+            rawContent: localSubCfg
+        )
+        let remoteDeletedKey = WebDavSyncService.canonicalSubscriptionSyncKey(
+            url: "https://remote-del.invalid/sub.json",
+            rawContent: remoteSubCfg
+        )
+        let remoteSubKey = WebDavSyncService.canonicalSubscriptionSyncKey(
+            url: "https://remote.invalid/sub.json",
+            rawContent: remoteSubCfg
+        )
+
+        func makeRemotePayload() throws -> String {
+            let remoteSub = SubscriptionEntry(
+                id: "sub_remote_1",
+                name: "远端订阅",
+                url: "https://remote.invalid/sub.json",
+                rawContent: remoteSubCfg,
+                siteCount: 1,
+                updatedAt: 400
+            )
+            var subDict = remoteSub.toDictionary()
+            subDict["syncKey"] = remoteSubKey
+            subDict["isPrivate"] = false
+            let obj: [String: Any] = [
+                "schema": WebDavSyncService.syncSchema,
+                "version": WebDavSyncService.syncVersion,
+                "updated": 450,
+                "watch_history": [
+                    WatchHistoryItem(site: "s_remote", id: "r1", title: "远端历史片", position: 42_000, duration: 120_000, updated: 410).toDictionary(),
+                ],
+                "favorites": [
+                    FavoriteItem(site: "s_remote", id: "rf1", title: "远端收藏片", updated: 420).toDictionary(),
+                ],
+                "subscriptions": [subDict],
+                "tombstones": [
+                    "hist:s_remote\nr_del": 430,
+                    "fav:s_remote\nrf_del": 435,
+                    "sub:\(remoteDeletedKey)": 440,
+                ],
+            ]
+            let data = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
+            return String(decoding: data, as: UTF8.self)
+        }
+
+        func makeLocalStorage(
+            syncHistory: Bool,
+            syncSubscriptions: Bool
+        ) throws -> (URL, TvStorageManager) {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MarcoWebDavToggle_\(UUID().uuidString)", isDirectory: true)
+            let storage = TvStorageManager(cachesDirectory: dir, keychain: InMemoryKeychainStore())
+            _ = try storage.upsertSubscription(
+                id: "sub_local_1",
+                name: "本机订阅",
+                url: "https://local.invalid/sub.json",
+                rawContent: localSubCfg,
+                nowMs: 300
+            )
+            storage.upsertWatchHistory(
+                WatchHistoryItem(site: "s_local", id: "l1", title: "本机历史片", position: 15_000, duration: 120_000, updated: 310)
+            )
+            _ = storage.toggleFavorite(
+                site: "s_local",
+                video: CmsVideo(id: "lf1", title: "本机收藏片"),
+                nowMs: 320
+            )
+            // Seed local tombstones across both categories
+            storage.removeWatchHistory(site: "s_local", id: "l_del", nowMs: 330)
+            storage.removeFavorite(site: "s_local", id: "lf_del", nowMs: 335)
+            _ = try storage.upsertSubscription(
+                id: "sub_local_del",
+                name: "待删本机订阅",
+                url: "https://local-del.invalid/sub.json",
+                rawContent: localSubCfg,
+                nowMs: 200
+            )
+            storage.removeSubscription(id: "sub_local_del", nowMs: 340)
+            try storage.saveWebDavConfig(
+                WebDavConfig(
+                    url: "https://dav.jianguoyun.com/dav",
+                    username: "u",
+                    password: "p",
+                    syncSubscriptions: syncSubscriptions,
+                    syncHistory: syncHistory
+                )
+            )
+            return (dir, storage)
+        }
+
+        func decodeJson(_ text: String) throws -> [String: Any] {
+            let obj = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
+            return try XCTUnwrap(obj)
+        }
+
+        // Case 1: (syncHistory: false, syncSubscriptions: false) -> neither local nor remote modified, zero PUT
+        do {
+            let (dir, storage) = try makeLocalStorage(syncHistory: false, syncSubscriptions: false)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let transport = StatefulMockWebDavTransport(initialPayload: try makeRemotePayload(), initialEtag: "\"v1\"")
+            let service = WebDavSyncService(storage: storage, transport: transport)
+            let summary = try await service.syncNow()
+
+            XCTAssertFalse(summary.changed)
+            XCTAssertEqual(transport.putCount, 0)
+            XCTAssertEqual(storage.watchHistory().map(\.id), ["l1"])
+            XCTAssertEqual(storage.favorites().map(\.id), ["lf1"])
+            XCTAssertEqual(storage.subscriptions().map(\.url), ["https://local.invalid/sub.json"])
+            XCTAssertEqual(storage.tombstones()["hist:s_local\nl_del"], 330)
+            XCTAssertEqual(storage.tombstones()["sub:\(localDeletedKey)"], 340)
+
+            let remoteObj = try decodeJson(transport.currentPayload)
+            XCTAssertEqual((remoteObj["watch_history"] as? [[String: Any]])?.count, 1)
+            XCTAssertEqual((remoteObj["favorites"] as? [[String: Any]])?.count, 1)
+            XCTAssertEqual((remoteObj["subscriptions"] as? [[String: Any]])?.count, 1)
+        }
+
+        // Case 2: (syncHistory: false, syncSubscriptions: true) -> only subscriptions merge; remote & local history/favs/tombstones preserved
+        do {
+            let (dir, storage) = try makeLocalStorage(syncHistory: false, syncSubscriptions: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let transport = StatefulMockWebDavTransport(initialPayload: try makeRemotePayload(), initialEtag: "\"v1\"")
+            let service = WebDavSyncService(storage: storage, transport: transport)
+            _ = try await service.syncNow()
+
+            XCTAssertEqual(transport.putCount, 1)
+            // Local: subscriptions merged, history/favorites/history-tombstones untouched
+            XCTAssertEqual(Set(storage.subscriptions().map(\.url)), ["https://local.invalid/sub.json", "https://remote.invalid/sub.json"])
+            XCTAssertEqual(storage.watchHistory().map(\.id), ["l1"])
+            XCTAssertEqual(storage.favorites().map(\.id), ["lf1"])
+            XCTAssertEqual(storage.tombstones()["hist:s_local\nl_del"], 330)
+            XCTAssertEqual(storage.tombstones()["fav:s_local\nlf_del"], 335)
+            XCTAssertNil(storage.tombstones()["hist:s_remote\nr_del"])
+            XCTAssertEqual(storage.tombstones()["sub:\(remoteDeletedKey)"], 440)
+            XCTAssertEqual(storage.tombstones()["sub:\(localDeletedKey)"], 340)
+
+            // Remote: subscriptions merged, remote history/favorites/history-tombstones preserved intact
+            let remoteObj = try decodeJson(transport.currentPayload)
+            let remoteHist = (remoteObj["watch_history"] as? [[String: Any]]) ?? []
+            let remoteFavs = (remoteObj["favorites"] as? [[String: Any]]) ?? []
+            let remoteSubs = (remoteObj["subscriptions"] as? [[String: Any]]) ?? []
+            let remoteTombs = (remoteObj["tombstones"] as? [String: NSNumber]) ?? [:]
+            XCTAssertEqual(remoteHist.map { $0["id"] as? String }, ["r1"])
+            XCTAssertEqual(remoteFavs.map { $0["id"] as? String }, ["rf1"])
+            XCTAssertEqual(Set(remoteSubs.compactMap { $0["url"] as? String }), ["https://local.invalid/sub.json", "https://remote.invalid/sub.json"])
+            XCTAssertEqual(remoteTombs["hist:s_remote\nr_del"]?.int64Value, 430)
+            XCTAssertEqual(remoteTombs["fav:s_remote\nrf_del"]?.int64Value, 435)
+            XCTAssertNil(remoteTombs["hist:s_local\nl_del"])
+            XCTAssertEqual(remoteTombs["sub:\(remoteDeletedKey)"]?.int64Value, 440)
+            XCTAssertEqual(remoteTombs["sub:\(localDeletedKey)"]?.int64Value, 340)
+        }
+
+        // Case 3: (syncHistory: true, syncSubscriptions: false) -> only history/favs merge; remote & local subs/sub-tombstones preserved
+        do {
+            let (dir, storage) = try makeLocalStorage(syncHistory: true, syncSubscriptions: false)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let transport = StatefulMockWebDavTransport(initialPayload: try makeRemotePayload(), initialEtag: "\"v1\"")
+            let service = WebDavSyncService(storage: storage, transport: transport)
+            _ = try await service.syncNow()
+
+            XCTAssertEqual(transport.putCount, 1)
+            // Local: history & favorites merged, subscriptions & sub tombstones untouched
+            XCTAssertEqual(Set(storage.watchHistory().map(\.id)), ["l1", "r1"])
+            XCTAssertEqual(Set(storage.favorites().map(\.id)), ["lf1", "rf1"])
+            XCTAssertEqual(storage.subscriptions().map(\.url), ["https://local.invalid/sub.json"])
+            XCTAssertEqual(storage.tombstones()["sub:\(localDeletedKey)"], 340)
+            XCTAssertNil(storage.tombstones()["sub:\(remoteDeletedKey)"])
+            XCTAssertEqual(storage.tombstones()["hist:s_remote\nr_del"], 430)
+
+            // Remote: history & favorites merged, remote subscriptions & sub tombstones preserved verbatim
+            let remoteObj = try decodeJson(transport.currentPayload)
+            let remoteHist = (remoteObj["watch_history"] as? [[String: Any]]) ?? []
+            let remoteFavs = (remoteObj["favorites"] as? [[String: Any]]) ?? []
+            let remoteSubs = (remoteObj["subscriptions"] as? [[String: Any]]) ?? []
+            let remoteTombs = (remoteObj["tombstones"] as? [String: NSNumber]) ?? [:]
+            XCTAssertEqual(Set(remoteHist.compactMap { $0["id"] as? String }), ["l1", "r1"])
+            XCTAssertEqual(Set(remoteFavs.compactMap { $0["id"] as? String }), ["lf1", "rf1"])
+            XCTAssertEqual(remoteSubs.compactMap { $0["url"] as? String }, ["https://remote.invalid/sub.json"])
+            XCTAssertEqual(remoteTombs["sub:\(remoteDeletedKey)"]?.int64Value, 440)
+            XCTAssertNil(remoteTombs["sub:\(localDeletedKey)"])
+            XCTAssertEqual(remoteTombs["hist:s_local\nl_del"]?.int64Value, 330)
+            XCTAssertEqual(remoteTombs["hist:s_remote\nr_del"]?.int64Value, 430)
+        }
+
+        // Case 4: (syncHistory: true, syncSubscriptions: true) -> all categories & tombstones merge
+        do {
+            let (dir, storage) = try makeLocalStorage(syncHistory: true, syncSubscriptions: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let transport = StatefulMockWebDavTransport(initialPayload: try makeRemotePayload(), initialEtag: "\"v1\"")
+            let service = WebDavSyncService(storage: storage, transport: transport)
+            _ = try await service.syncNow()
+
+            XCTAssertEqual(Set(storage.watchHistory().map(\.id)), ["l1", "r1"])
+            XCTAssertEqual(Set(storage.favorites().map(\.id)), ["lf1", "rf1"])
+            XCTAssertEqual(Set(storage.subscriptions().map(\.url)), ["https://local.invalid/sub.json", "https://remote.invalid/sub.json"])
+            XCTAssertEqual(storage.tombstones()["hist:s_local\nl_del"], 330)
+            XCTAssertEqual(storage.tombstones()["hist:s_remote\nr_del"], 430)
+            XCTAssertEqual(storage.tombstones()["sub:\(localDeletedKey)"], 340)
+            XCTAssertEqual(storage.tombstones()["sub:\(remoteDeletedKey)"], 440)
+        }
+    }
+
+    func testWebDavSyncConflictRetriesBoundedAndNeverForceOverwrites() async throws {
+        // Part A: 1 concurrent 412 conflict -> re-GET updated remote, merge both devices, succeed on retry
+        do {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MarcoWebDav412Recover_\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let storage = TvStorageManager(cachesDirectory: dir, keychain: InMemoryKeychainStore())
+            storage.upsertWatchHistory(
+                WatchHistoryItem(site: "s1", id: "dev_a", title: "设备A记录", position: 10_000, duration: 90_000, updated: 500)
+            )
+            try storage.saveWebDavConfig(WebDavConfig(url: "https://dav.jianguoyun.com/dav", username: "u", password: "p"))
+
+            let initialRemote = """
+            {"schema":"marco-movie-sync","version":2,"updated":400,"watch_history":[{"site":"s1","id":"dev_b1","title":"设备B1","position":20000,"duration":90000,"updated":400}],"favorites":[],"tombstones":{}}
+            """
+            let concurrentRemote = """
+            {"schema":"marco-movie-sync","version":2,"updated":550,"watch_history":[{"site":"s1","id":"dev_b1","title":"设备B1","position":20000,"duration":90000,"updated":400},{"site":"s1","id":"dev_b2","title":"设备B2并发写入","position":35000,"duration":90000,"updated":550}],"favorites":[],"tombstones":{}}
+            """
+            let transport = StatefulMockWebDavTransport(initialPayload: initialRemote, initialEtag: "\"v1\"")
+            transport.conflictPayloads = [(payload: concurrentRemote, etag: "\"v2\"")]
+
+            let service = WebDavSyncService(storage: storage, transport: transport)
+            let summary = try await service.syncNow(maxConflictRetries: 2)
+
+            XCTAssertEqual(summary.historyCount, 3)
+            XCTAssertEqual(transport.putCount, 2)
+            XCTAssertEqual(transport.unconditionalPutCount, 0)
+            XCTAssertEqual(Set(storage.watchHistory().map(\.id)), ["dev_a", "dev_b1", "dev_b2"])
+            XCTAssertTrue(transport.currentPayload.contains("dev_a"))
+            XCTAssertTrue(transport.currentPayload.contains("dev_b2"))
+        }
+
+        // Part B: Continuous 412 conflicts exhaust retries -> NEVER force-overwrite, preserve both local & remote
+        do {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MarcoWebDav412Exhaust_\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let storage = TvStorageManager(cachesDirectory: dir, keychain: InMemoryKeychainStore())
+            storage.upsertWatchHistory(
+                WatchHistoryItem(site: "s1", id: "local_only", title: "本机未上传", position: 12_000, duration: 90_000, updated: 600)
+            )
+            try storage.saveWebDavConfig(WebDavConfig(url: "https://dav.jianguoyun.com/dav", username: "u", password: "p"))
+
+            let remoteB = """
+            {"schema":"marco-movie-sync","version":2,"updated":610,"watch_history":[{"site":"s1","id":"remote_only","title":"远端最新","position":44000,"duration":90000,"updated":610}],"favorites":[],"tombstones":{}}
+            """
+            let transport = StatefulMockWebDavTransport(initialPayload: remoteB, initialEtag: "\"v1\"")
+            transport.alwaysConflict412 = true
+
+            let service = WebDavSyncService(storage: storage, transport: transport)
+            do {
+                _ = try await service.syncNow(maxConflictRetries: 2)
+                XCTFail("Expected conflict error after bounded 412 retries exhausted")
+            } catch let err as MarcoError {
+                if case .webdavError(let msg) = err {
+                    XCTAssertTrue(msg.contains("冲突") || msg.contains("412"))
+                } else {
+                    XCTFail("Unexpected MarcoError: \(err)")
+                }
+            }
+
+            XCTAssertEqual(transport.putCount, 3, "Expected initial attempt + 2 bounded retries")
+            XCTAssertEqual(transport.unconditionalPutCount, 0, "Must NEVER drop If-Match/If-None-Match on 412")
+            // Remote was NOT overwritten
+            XCTAssertTrue(transport.currentPayload.contains("remote_only"))
+            XCTAssertFalse(transport.currentPayload.contains("local_only"))
+            // Local was preserved untouched
+            XCTAssertEqual(storage.watchHistory().map(\.id), ["local_only"])
+            XCTAssertTrue(storage.loadWebDavConfig().lastSyncStatus.contains("冲突") || storage.loadWebDavConfig().lastSyncStatus.contains("412"))
+        }
+    }
+
+    func testPrivateSubscriptionPreservationKeychainRecoveryAndPublicScope() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MarcoPrivacyTests_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let keychain = InMemoryKeychainStore()
+        let storage = TvStorageManager(cachesDirectory: dir, keychain: keychain)
+
+        let privateCfg = """
+        {
+          "sites": [{"key": "priv_site", "name": "私密站", "type": 1, "api": "http://127.0.0.1:9201/vod"}],
+          "lives": [{"name": "私密直播", "url": "http://127.0.0.1:9201/live.m3u"}]
+        }
+        """
+        let publicCfg = """
+        {
+          "sites": [{"key": "pub_site", "name": "公开站", "type": 1, "api": "http://127.0.0.1:9202/vod"}],
+          "lives": [{"name": "公开直播", "url": "http://127.0.0.1:9202/live.m3u"}]
+        }
+        """
+        let depots = [
+            CmsDepot(name: "私密一仓", url: "https://priv-warehouse.invalid/depot1.json", subscriptionId: "sub_priv_keep"),
+            CmsDepot(name: "私密二仓", url: "https://priv-warehouse.invalid/depot2.json", subscriptionId: "sub_priv_keep"),
+        ]
+
+        let (privInitial, _) = try storage.upsertSubscription(
+            id: "sub_priv_keep",
+            name: "我的私密多仓",
+            url: "https://priv-warehouse.invalid/depot1.json",
+            rawContent: privateCfg,
+            group: "个人专享",
+            isPrivate: true,
+            enabled: false,
+            warehouseUrl: "https://priv-warehouse.invalid/index.json",
+            activeDepotName: "私密一仓",
+            depots: depots,
+            nowMs: 1_000
+        )
+        XCTAssertEqual(privInitial.id, "sub_priv_keep")
+        XCTAssertTrue(privInitial.isEffectivelyPrivate)
+        XCTAssertFalse(privInitial.enabled)
+        XCTAssertEqual(privInitial.group, "个人专享")
+
+        // Switch depot / refresh on the private subscription -> MUST preserve id, group, isPrivate, enabled, warehouseUrl, depots
+        let (privSwitched, _) = try storage.upsertSubscription(
+            id: "sub_priv_keep",
+            name: "私密二仓",
+            url: "https://priv-warehouse.invalid/depot2.json",
+            rawContent: privateCfg,
+            warehouseUrl: "https://priv-warehouse.invalid/index.json",
+            activeDepotName: "私密二仓",
+            nowMs: 2_000
+        )
+        XCTAssertEqual(privSwitched.id, "sub_priv_keep")
+        XCTAssertEqual(privSwitched.group, "个人专享")
+        XCTAssertTrue(privSwitched.isPrivate)
+        XCTAssertTrue(privSwitched.isEffectivelyPrivate)
+        XCTAssertFalse(privSwitched.enabled)
+        XCTAssertEqual(privSwitched.warehouseUrl, "https://priv-warehouse.invalid/index.json")
+        XCTAssertEqual(privSwitched.activeDepotName, "私密二仓")
+        XCTAssertEqual(privSwitched.depots.count, 2)
+
+        // Enable private subscription and add a public subscription; verify default public scope excludes private sites, lives & depots
+        var allSubs = storage.subscriptions()
+        allSubs[0].enabled = true
+        storage.saveSubscriptions(allSubs)
+        _ = try storage.upsertSubscription(
+            id: "sub_pub_1",
+            name: "公开订阅",
+            url: "https://pub.invalid/sub.json",
+            rawContent: publicCfg,
+            isPrivate: false,
+            enabled: true,
+            nowMs: 3_000
+        )
+
+        let merged = storage.mergedConfig()
+        XCTAssertEqual(merged.publicAvailableSites.map(\.key), ["pub_site"])
+        XCTAssertEqual(merged.publicSupportedLives.map(\.name), ["公开直播"])
+        XCTAssertEqual(merged.supportedLives.map(\.name), ["公开直播"])
+        XCTAssertEqual(merged.allSupportedLives.count, 2)
+        XCTAssertTrue(merged.publicDepots.isEmpty)
+
+        // Simulate tvOS purging Caches -> Keychain Anchor recovery preserves privacy, group, enabled, warehouseUrl, depots
+        try FileManager.default.removeItem(at: dir)
+        let recovered = TvStorageManager(cachesDirectory: dir, keychain: keychain)
+        XCTAssertTrue(recovered.recoveredFromKeychainAnchor)
+        let recPriv = try XCTUnwrap(recovered.subscriptions().first(where: { $0.id == "sub_priv_keep" }))
+        let recPub = try XCTUnwrap(recovered.subscriptions().first(where: { $0.id == "sub_pub_1" }))
+        XCTAssertTrue(recPriv.isPrivate)
+        XCTAssertTrue(recPriv.isEffectivelyPrivate)
+        XCTAssertEqual(recPriv.group, "个人专享")
+        XCTAssertEqual(recPriv.warehouseUrl, "https://priv-warehouse.invalid/index.json")
+        XCTAssertEqual(recPriv.activeDepotName, "私密二仓")
+        XCTAssertEqual(recPriv.depots.count, 2)
+        XCTAssertFalse(recPub.isPrivate)
+        XCTAssertTrue(recovered.needsSubscriptionContentRefresh)
+
+        // Legacy v1 Keychain Anchor without `isPrivate` field -> conservatively treated as private
+        let legacyDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MarcoLegacyAnchor_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: legacyDir) }
+        let legacyKeychain = InMemoryKeychainStore()
+        let legacyJson = """
+        {
+          "version": 1,
+          "subscriptions": [{
+            "id": "sub_legacy_unknown",
+            "name": "旧版记录",
+            "url": "https://legacy.invalid/sub.json",
+            "group": "默认分组",
+            "format": "JSON",
+            "enabled": true,
+            "updatedAt": 1000,
+            "warehouseUrl": "",
+            "activeDepotName": "",
+            "depots": []
+          }],
+          "favorites": [],
+          "watchHistory": [],
+          "preferences": {},
+          "tombstones": {}
+        }
+        """
+        let compressedLegacy = try XCTUnwrap(ConfigDecoder.compressDeflate(Data(legacyJson.utf8)))
+        try legacyKeychain.setData(compressedLegacy, forAccount: "anchor_snapshot_zlib_v1")
+
+        let legacyRecovered = TvStorageManager(cachesDirectory: legacyDir, keychain: legacyKeychain)
+        XCTAssertTrue(legacyRecovered.recoveredFromKeychainAnchor)
+        let legacySub = try XCTUnwrap(legacyRecovered.subscriptions().first)
+        XCTAssertEqual(legacySub.id, "sub_legacy_unknown")
+        XCTAssertTrue(legacySub.isPrivate, "Legacy anchor stubs without explicit privacy must default conservatively to private")
+        XCTAssertTrue(legacySub.isEffectivelyPrivate)
+        XCTAssertFalse(legacyRecovered.needsSubscriptionContentRefresh, "Private subscriptions must not trigger public startup preload")
+    }
+
+    private func resolveBundledJsHostDirectory() throws -> URL {
+        #if SWIFT_PACKAGE
+        if let resURL = Bundle.module.resourceURL {
+            let candidate = resURL.appendingPathComponent("js-host")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        #endif
+        let testFileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let fallback = testFileDir
+            .appendingPathComponent("../../Sources/MarcoTVCore/Resources/js-host")
+            .standardizedFileURL
+        if FileManager.default.fileExists(atPath: fallback.path) {
+            return fallback
+        }
+        throw NSError(domain: "MarcoTVCoreTests", code: 2, userInfo: [NSLocalizedDescriptionKey: "Cannot locate bundled js-host directory"])
+    }
+
     // MARK: - Conformance Helpers
 
     private func resolveConformanceDirectory() throws -> URL {
@@ -515,6 +1000,63 @@ private final class MockWebDavTransport: WebDavTransportProtocol, @unchecked Sen
                 remotePayload = String(decoding: body, as: UTF8.self)
             }
             return WebDavHttpResponse(statusCode: 204)
+        default:
+            return WebDavHttpResponse(statusCode: 405)
+        }
+    }
+}
+
+private final class StatefulMockWebDavTransport: WebDavTransportProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    var currentPayload: String
+    var currentEtag: String
+    var putCount: Int = 0
+    var unconditionalPutCount: Int = 0
+    var alwaysConflict412: Bool = false
+    var conflictPayloads: [(payload: String, etag: String)] = []
+
+    init(initialPayload: String, initialEtag: String = "\"v1\"") {
+        self.currentPayload = initialPayload
+        self.currentEtag = initialEtag
+    }
+
+    func send(method: String, url: URL, headers: [String: String], body: Data?) async throws -> WebDavHttpResponse {
+        lock.lock()
+        defer { lock.unlock() }
+        switch method {
+        case "GET":
+            return WebDavHttpResponse(
+                statusCode: 200,
+                headers: ["ETag": currentEtag],
+                body: Data(currentPayload.utf8)
+            )
+        case "MKCOL":
+            return WebDavHttpResponse(statusCode: 201)
+        case "PUT":
+            putCount += 1
+            let ifMatch = headers["If-Match"]
+            let ifNoneMatch = headers["If-None-Match"]
+            if ifMatch == nil && ifNoneMatch == nil {
+                unconditionalPutCount += 1
+            }
+            if alwaysConflict412 {
+                currentEtag = "\"v\(putCount + 1)\""
+                return WebDavHttpResponse(statusCode: 412)
+            }
+            if !conflictPayloads.isEmpty {
+                let next = conflictPayloads.removeFirst()
+                currentPayload = next.payload
+                currentEtag = next.etag
+                return WebDavHttpResponse(statusCode: 412)
+            }
+            if let expected = ifMatch, expected != currentEtag {
+                return WebDavHttpResponse(statusCode: 412)
+            }
+            if let body = body {
+                currentPayload = String(decoding: body, as: UTF8.self)
+            }
+            currentEtag = "\"v\(putCount + 10)\""
+            return WebDavHttpResponse(statusCode: 204, headers: ["ETag": currentEtag])
         default:
             return WebDavHttpResponse(statusCode: 405)
         }
