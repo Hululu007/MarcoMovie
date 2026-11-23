@@ -16,6 +16,7 @@ import '../core/download_service.dart';
 import '../core/media_badges.dart';
 import '../core/models.dart';
 import '../core/ohos_runtime.dart';
+import '../core/series_scraper.dart';
 import '../core/storage_service.dart';
 import '../core/web_media_resolver.dart';
 import '../core/wogg_source.dart';
@@ -30,6 +31,7 @@ import 'motion/player_enter_transition.dart';
 import 'netdisk_sheet.dart';
 import 'player_screen.dart';
 import 'poster_image.dart';
+import 'series_scrape_sheet.dart';
 import 'source_verification_dialog.dart';
 import 'windows_appearance.dart';
 import 'windows_title_bar.dart';
@@ -189,6 +191,138 @@ class _DetailScreenState extends State<DetailScreen> {
   final GlobalKey _transitionPosterKey = GlobalKey();
   Uint8List? _loadedPosterBytes;
   String _loadedPosterIdentity = '';
+  SeriesScrapeOverride? _scrapeOverride;
+  final TextEditingController _windowsEpisodeQueryCtrl = TextEditingController();
+  String _windowsEpisodeQuery = '';
+  CmsLine? _cachedScrapeLine;
+  String _cachedScrapeSig = '';
+  LineEpisodeScrapeResult? _cachedScrapeResult;
+
+  void _loadScrapeOverride() {
+    _scrapeOverride = widget.storage.getSeriesScrapeOverride(
+      _activeSite.key,
+      _video.id,
+      isPrivate: _activeSite.isEffectivelyPrivate,
+    );
+    _cachedScrapeLine = null;
+    _cachedScrapeSig = '';
+    _cachedScrapeResult = null;
+  }
+
+  bool get _effectiveWantMotionComic {
+    final ov = _scrapeOverride;
+    if (ov != null && ov.hasWorkBinding) return ov.isMotionComic;
+    return SeriesScraper.isMotionComicText(
+      _video.title,
+      extraContext: '${_video.tag} ${_video.remarks}',
+    );
+  }
+
+  String get _effectiveLookupTitle {
+    if (_activeSite.isEffectivelyPrivate) return '';
+    final ov = _scrapeOverride;
+    if (ov != null && ov.matchedTitle.trim().isNotEmpty) {
+      return ov.matchedTitle.trim();
+    }
+    return _video.title;
+  }
+
+  String get _effectiveLookupYear {
+    final ov = _scrapeOverride;
+    if (!_activeSite.isEffectivelyPrivate &&
+        ov != null &&
+        ov.matchedYear.trim().isNotEmpty) {
+      return ov.matchedYear.trim();
+    }
+    return _video.year;
+  }
+
+  String get _effectiveDoubanId {
+    if (_activeSite.isEffectivelyPrivate) return '';
+    return _scrapeOverride?.doubanId.trim() ?? '';
+  }
+
+  bool get _effectiveDoubanIsTv => _scrapeOverride?.isTv ?? true;
+
+  String get _effectiveBackdropUrl {
+    if (_activeSite.isEffectivelyPrivate) return '';
+    return _scrapeOverride?.backdropUrl.trim() ?? '';
+  }
+
+  String get _effectivePosterUrl {
+    final ov = _scrapeOverride;
+    if (!_activeSite.isEffectivelyPrivate &&
+        ov != null &&
+        ov.posterUrl.trim().isNotEmpty) {
+      return ov.posterUrl.trim();
+    }
+    return _video.poster;
+  }
+
+  LineEpisodeScrapeResult _scrapeResultForLine(CmsLine line) {
+    final ov = _scrapeOverride;
+    final title = _effectiveLookupTitle.isNotEmpty
+        ? _effectiveLookupTitle
+        : _video.title;
+    final offset = ov?.episodeOffset ?? 0;
+    final overrides = ov?.episodeNumberOverrides ?? const <String, int>{};
+    final sig =
+        '${line.name}|${line.episodes.length}|$title|$offset|${overrides.entries.map((e) => "${e.key}:${e.value}").join(",")}';
+    if (identical(_cachedScrapeLine, line) &&
+        _cachedScrapeSig == sig &&
+        _cachedScrapeResult != null) {
+      return _cachedScrapeResult!;
+    }
+    final result = SeriesScraper.scrapeLineEpisodes(
+      line.episodes,
+      seriesTitle: title,
+      episodeOffset: offset,
+      manualOverrides: overrides,
+    );
+    _cachedScrapeLine = line;
+    _cachedScrapeSig = sig;
+    _cachedScrapeResult = result;
+    return result;
+  }
+
+  Future<void> _openSeriesScrapeSheet({int initialTab = 0}) async {
+    if (_activeSite.isEffectivelyPrivate) return;
+    final activeLine = _video.lines.isNotEmpty
+        ? _video.lines[_selectedLine.clamp(0, _video.lines.length - 1)]
+        : null;
+    await showSeriesScrapeSheet(
+      context,
+      site: _activeSite,
+      video: _video,
+      storage: widget.storage,
+      activeLine: activeLine,
+      initialOverride: _scrapeOverride,
+      initialTab: initialTab,
+    );
+  }
+
+  void _onSeriesScrapeRevision() {
+    if (!mounted) return;
+    _loadScrapeOverride();
+    _externalSynopsis = '';
+    _resolvedDoubanScore = null;
+    _resolvedRtScore = null;
+    _seedCachedExternalFields();
+    _windowsHeroHasLandscape = !_activeSite.isEffectivelyPrivate &&
+        PosterLoader.peekLandscapeMemory(
+              _effectiveLookupTitle,
+              year: _effectiveLookupYear,
+              wantMotionComic: _effectiveWantMotionComic,
+              preferredBackdropUrl: _effectiveBackdropUrl,
+              preferredDoubanId: _effectiveDoubanId,
+            ) !=
+            null;
+    setState(() {
+      _selectedPage = 0;
+    });
+    _warmRatings(_effectiveLookupTitle, year: _effectiveLookupYear);
+    _warmExternalMetadata(_effectiveLookupTitle);
+  }
 
   static bool _canShowInitialLinesImmediately(CmsSite site, CmsVideo video) {
     if (!video.lines.any((l) => l.episodes.isNotEmpty)) return false;
@@ -213,15 +347,23 @@ class _DetailScreenState extends State<DetailScreen> {
       _resolvedRtScore = null;
       return;
     }
-    final syn = PosterLoader.peekSeriesSynopsis(_video.title);
+    final lookupTitle = _effectiveLookupTitle;
+    final lookupYear = _effectiveLookupYear;
+    final wantMc = _effectiveWantMotionComic;
+    final syn = PosterLoader.peekSeriesSynopsis(
+      lookupTitle,
+      year: lookupYear,
+      wantMotionComic: wantMc,
+    );
     if (syn.isNotEmpty) {
       _externalSynopsis = syn;
     }
     final cachedRatings = PosterLoader.peekRatings(
-      _video.title,
-      year: _video.year,
+      lookupTitle,
+      year: lookupYear,
+      wantMotionComic: wantMc,
     );
-    _resolvedDoubanScore = cachedRatings?.douban;
+    _resolvedDoubanScore = _scrapeOverride?.doubanScore ?? cachedRatings?.douban;
     _resolvedRtScore = cachedRatings?.rt;
   }
 
@@ -263,19 +405,24 @@ class _DetailScreenState extends State<DetailScreen> {
       _video.id,
       forPrivate: _activeSite.isEffectivelyPrivate,
     );
+    _loadScrapeOverride();
     _seedCachedExternalFields();
     _windowsHeroHasLandscape = !_activeSite.isEffectivelyPrivate &&
         PosterLoader.peekLandscapeMemory(
-              _publicLookupTitle,
-              year: _video.year,
+              _effectiveLookupTitle,
+              year: _effectiveLookupYear,
+              wantMotionComic: _effectiveWantMotionComic,
+              preferredBackdropUrl: _effectiveBackdropUrl,
+              preferredDoubanId: _effectiveDoubanId,
             ) !=
             null;
     PosterLoader.metadataRevision.addListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.addListener(_onWatchHistoryChanged);
+    widget.storage.seriesScrapeRevision.addListener(_onSeriesScrapeRevision);
     final immediateBytes = PosterLoader.peekMemory(
-      _video.poster,
-      title: _publicLookupTitle,
-      year: _video.year,
+      _effectivePosterUrl,
+      title: _effectiveLookupTitle,
+      year: _effectiveLookupYear,
       preferHd: true,
     );
     if (immediateBytes != null) {
@@ -287,17 +434,16 @@ class _DetailScreenState extends State<DetailScreen> {
       }
     }
     _loadDetail();
-    _warmRatings(_video.title, year: _video.year);
+    _warmRatings(_effectiveLookupTitle, year: _effectiveLookupYear);
     if (!_loading) {
-      _warmExternalMetadata(_video.title);
+      _warmExternalMetadata(_effectiveLookupTitle);
     }
   }
 
-  String get _publicLookupTitle =>
-      _activeSite.isEffectivelyPrivate ? '' : _video.title;
+  String get _publicLookupTitle => _effectiveLookupTitle;
 
   String get _currentPosterIdentity =>
-      '${_activeSite.key}|${_video.id}|${_video.poster}|$_publicLookupTitle|${_video.year}';
+      '${_activeSite.key}|${_video.id}|$_effectivePosterUrl|$_effectiveLookupTitle|$_effectiveLookupYear|$_effectiveDoubanId';
 
   void _onPosterCardBytesLoaded(Uint8List bytes) {
     _loadedPosterBytes = bytes;
@@ -340,6 +486,8 @@ class _DetailScreenState extends State<DetailScreen> {
     _cancelDetailWork();
     PosterLoader.metadataRevision.removeListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryChanged);
+    widget.storage.seriesScrapeRevision.removeListener(_onSeriesScrapeRevision);
+    _windowsEpisodeQueryCtrl.dispose();
     _scrollOffset.dispose();
     _seasonsScrollController.dispose();
     _quickEpisodesScrollController.dispose();
@@ -359,10 +507,27 @@ class _DetailScreenState extends State<DetailScreen> {
 
   void _onExternalMetadataRevision() {
     if (!mounted || _activeSite.isEffectivelyPrivate) return;
-    final syn = PosterLoader.peekSeriesSynopsis(_video.title);
-    final epMetaLen = PosterLoader.peekAllEpisodeMeta(_video.title).length;
-    final capLen = PosterLoader.peekSeriesEpisodeCaptions(_video.title).length;
-    final ratings = PosterLoader.peekRatings(_video.title, year: _video.year);
+    final lookupTitle = _effectiveLookupTitle;
+    final lookupYear = _effectiveLookupYear;
+    final wantMc = _effectiveWantMotionComic;
+    final syn = PosterLoader.peekSeriesSynopsis(
+      lookupTitle,
+      year: lookupYear,
+      wantMotionComic: wantMc,
+    );
+    final epMetaLen = PosterLoader.peekAllEpisodeMeta(
+      lookupTitle,
+      wantMotionComic: wantMc,
+    ).length;
+    final capLen = PosterLoader.peekSeriesEpisodeCaptions(
+      lookupTitle,
+      wantMotionComic: wantMc,
+    ).length;
+    final ratings = PosterLoader.peekRatings(
+      lookupTitle,
+      year: lookupYear,
+      wantMotionComic: wantMc,
+    );
     final sig = Object.hash(
       syn,
       epMetaLen,
@@ -376,7 +541,8 @@ class _DetailScreenState extends State<DetailScreen> {
       _externalSynopsis = syn;
     }
     if (ratings != null) {
-      _resolvedDoubanScore = ratings.douban ?? _resolvedDoubanScore;
+      _resolvedDoubanScore =
+          _scrapeOverride?.doubanScore ?? ratings.douban ?? _resolvedDoubanScore;
       _resolvedRtScore = ratings.rt ?? _resolvedRtScore;
     }
     setState(() {});
@@ -426,15 +592,26 @@ class _DetailScreenState extends State<DetailScreen> {
 
   Future<void> _warmRatings(String title, {String year = ''}) async {
     if (_activeSite.isEmby || _activeSite.isEffectivelyPrivate) return;
-    final trimmed = title.trim();
+    final trimmed = _effectiveLookupTitle.trim().isNotEmpty
+        ? _effectiveLookupTitle.trim()
+        : title.trim();
     if (trimmed.isEmpty) return;
+    final effectiveYear =
+        _effectiveLookupYear.isNotEmpty ? _effectiveLookupYear : year;
     final epoch = _detailEpoch;
-    final ratings = await PosterLoader.fetchRatings(trimmed, year: year);
+    final ratings = await PosterLoader.fetchRatings(
+      trimmed,
+      year: effectiveYear,
+      wantMotionComic: _effectiveWantMotionComic,
+      preferredDoubanId: _effectiveDoubanId,
+      preferredDoubanIsTv: _effectiveDoubanIsTv,
+    );
     if (!mounted || epoch != _detailEpoch) return;
     if ((ratings.douban != null && ratings.douban != _resolvedDoubanScore) ||
         (ratings.rt != null && ratings.rt != _resolvedRtScore)) {
       setState(() {
-        _resolvedDoubanScore = ratings.douban ?? _resolvedDoubanScore;
+        _resolvedDoubanScore =
+            _scrapeOverride?.doubanScore ?? ratings.douban ?? _resolvedDoubanScore;
         _resolvedRtScore = ratings.rt ?? _resolvedRtScore;
       });
     }
@@ -442,9 +619,18 @@ class _DetailScreenState extends State<DetailScreen> {
 
   Future<void> _warmExternalMetadata(String title) async {
     if (_activeSite.isEmby || _activeSite.isEffectivelyPrivate) return;
-    if (title.trim().isEmpty) return;
+    final lookupTitle = _effectiveLookupTitle.trim().isNotEmpty
+        ? _effectiveLookupTitle.trim()
+        : title.trim();
+    if (lookupTitle.isEmpty) return;
+    final lookupYear = _effectiveLookupYear;
+    final wantMc = _effectiveWantMotionComic;
     unawaited(
-      PosterLoader.fetchSeriesSynopsis(title, year: _video.year).then((syn) {
+      PosterLoader.fetchSeriesSynopsis(
+        lookupTitle,
+        year: lookupYear,
+        wantMotionComic: wantMc,
+      ).then((syn) {
         if (!mounted || syn.isEmpty) return;
         if (_externalSynopsis != syn) {
           setState(() {
@@ -454,9 +640,21 @@ class _DetailScreenState extends State<DetailScreen> {
       }),
     );
     if (!_isVarietyShow) {
-      unawaited(PosterLoader.fetchSeriesEpisodeMetadata(title));
+      unawaited(
+        PosterLoader.fetchSeriesEpisodeMetadata(
+          lookupTitle,
+          year: lookupYear,
+          wantMotionComic: wantMc,
+        ),
+      );
     }
-    unawaited(PosterLoader.fetchSeriesEpisodeStills(title, year: _video.year));
+    unawaited(
+      PosterLoader.fetchSeriesEpisodeStills(
+        lookupTitle,
+        year: lookupYear,
+        wantMotionComic: wantMc,
+      ),
+    );
   }
 
   final Map<(CmsLine, String, List<CmsParse>), String?> _lineUnavailableCache =
@@ -930,7 +1128,10 @@ class _DetailScreenState extends State<DetailScreen> {
       _selectedLine = 0;
       _selectedPage = 0;
       _selectedInLineSeason = null;
+      _windowsEpisodeQuery = '';
+      _windowsEpisodeQueryCtrl.clear();
       _externalSynopsis = '';
+      _loadScrapeOverride();
       _seedCachedExternalFields();
       _isFavorite = widget.storage.isFavorite(
         _activeSite.key,
@@ -1012,9 +1213,15 @@ class _DetailScreenState extends State<DetailScreen> {
   String _effectiveSeriesSynopsis() {
     final raw = _video.description.trim();
     if (_activeSite.isEffectivelyPrivate) return raw;
+    final boundSyn = _scrapeOverride?.synopsis.trim() ?? '';
+    if (boundSyn.isNotEmpty) return boundSyn;
     final ext = _externalSynopsis.trim().isNotEmpty
         ? _externalSynopsis.trim()
-        : PosterLoader.peekSeriesSynopsis(_video.title).trim();
+        : PosterLoader.peekSeriesSynopsis(
+            _effectiveLookupTitle,
+            year: _effectiveLookupYear,
+            wantMotionComic: _effectiveWantMotionComic,
+          ).trim();
     // Always preserve the CMS's own authentic description unless it is empty
     // or a generic placeholder slogan (e.g. "正式启动！", "敬请期待", "暂无简介").
     final isPlaceholderSlogan = raw.length < 14 ||
@@ -1262,17 +1469,41 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   List<int> _activeEpisodeIndicesFor(CmsLine line) {
+    final scrape = _scrapeResultForLine(line);
+    final sortByScraped =
+        _scrapeOverride?.sortByScrapedEpisode ?? scrape.sourceOrderScrambled;
+    final hideSpecials = _scrapeOverride?.hideSpecials ?? false;
     final inLine = CmsParser.extractInLineSeasons(line.episodes);
     if (inLine.length >= 2) {
       final activeNum = _selectedInLineSeason ?? inLine.first.seasonNumber;
+      List<int> base = inLine.first.episodeIndexes;
       for (final s in inLine) {
         if (s.seasonNumber == activeNum) {
-          return s.episodeIndexes;
+          base = s.episodeIndexes;
+          break;
         }
       }
-      return inLine.first.episodeIndexes;
+      var list = hideSpecials
+          ? base.where((i) => !scrape.byOriginalIndex[i].isSpecial).toList()
+          : List<int>.from(base);
+      if (list.isEmpty) list = List<int>.from(base);
+      if (sortByScraped) {
+        list.sort((a, b) {
+          final ea = scrape.byOriginalIndex[a];
+          final eb = scrape.byOriginalIndex[b];
+          if (ea.isSpecial != eb.isSpecial) return ea.isSpecial ? 1 : -1;
+          final na = ea.resolvedEpisodeNumber;
+          final nb = eb.resolvedEpisodeNumber;
+          if (na != null && nb != null && na != nb) return na.compareTo(nb);
+          return a.compareTo(b);
+        });
+      }
+      return list;
     }
-    return List<int>.generate(line.episodes.length, (i) => i, growable: false);
+    return scrape.orderedIndices(
+      sortByScraped: sortByScraped,
+      hideSpecials: hideSpecials,
+    );
   }
 
   void _playPrimaryAction(WatchHistoryEntry? bookmark) {
@@ -1701,90 +1932,184 @@ class _DetailScreenState extends State<DetailScreen> {
     if (_video.lines.isEmpty) return;
     final safeLineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
     final line = _video.lines[safeLineIdx];
+    final scrape = _scrapeResultForLine(line);
     final activeIndices = _activeEpisodeIndicesFor(line);
-    final total = activeIndices.length;
+    final ordered =
+        _descending ? activeIndices.reversed.toList() : activeIndices;
+    final total = ordered.length;
+    String filterQuery = '';
     showIos27LiquidSheet<void>(
       context: context,
       title: '全部剧集 · ${_currentSeasonLabel(line)} · ${line.name} ($total)',
-      builder: (ctx) => GridView.builder(
-        shrinkWrap: true,
-        padding: const EdgeInsets.all(16),
-        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: 140,
-          mainAxisSpacing: 10,
-          crossAxisSpacing: 10,
-          childAspectRatio: 2.5,
-        ),
-        itemCount: total,
-        itemBuilder: (ctx, idx) {
-          final posIdx = _descending ? (total - 1 - idx) : idx;
-          final originalIdx = activeIndices[posIdx];
-          final ep = line.episodes[originalIdx];
-          final unavailReason = _episodeUnavailableReason(ep);
-          final isUnavailable = unavailReason != null;
-          final isBookmarked = !isUnavailable &&
-              bookmark != null &&
-              bookmark.line == line.name &&
-              bookmark.index == originalIdx;
-          final cell = GestureDetector(
-            onTap: () {
-              if (unavailReason != null) {
-                unawaited(
-                  showAppleNativeAlert(
-                    ctx,
-                    title: ep.name,
-                    message: unavailReason,
-                    actions: const [
-                      AppleNativeAlertAction(
-                        id: 'ok',
-                        title: '我知道了',
-                        isDefault: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (sheetCtx, setSheetState) {
+          final q = filterQuery.trim().toLowerCase();
+          final filtered = q.isEmpty
+              ? ordered
+              : ordered.where((origIdx) {
+                  final ep = line.episodes[origIdx];
+                  final info = scrape.byOriginalIndex[origIdx];
+                  final epNumStr = info.resolvedEpisodeNumber?.toString() ?? '';
+                  return ep.name.toLowerCase().contains(q) ||
+                      info.displayLabel.toLowerCase().contains(q) ||
+                      epNumStr == q;
+                }).toList();
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (total >= 12)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                  child: TextField(
+                    decoration: InputDecoration(
+                      hintText: '输入集数或关键词快速定位（如 180）',
+                      prefixIcon: const Icon(CupertinoIcons.search, size: 16),
+                      isDense: true,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                    ],
-                  ),
-                );
-                return;
-              }
-              Navigator.of(ctx).pop();
-              _openPlayer(safeLineIdx, originalIdx);
-            },
-            child: Builder(
-              builder: (cellCtx) {
-                final palette = ApplePalette.of(cellCtx);
-                final isDark = palette.isDark;
-                return Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  decoration: BoxDecoration(
-                    color: isBookmarked
-                        ? AppleColors.systemBlue
-                        : (isDark ? const Color(0xFF28282E) : Colors.white),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: isBookmarked
-                          ? AppleColors.systemBlue
-                          : (isDark
-                              ? const Color(0x26FFFFFF)
-                              : Colors.black.withValues(alpha: 0.09)),
-                      width: isBookmarked ? 1.2 : 0.65,
                     ),
+                    onChanged: (v) => setSheetState(() => filterQuery = v),
                   ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    isUnavailable ? '${ep.name} (不可解析)' : ep.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: isBookmarked ? Colors.white : palette.labelPrimary,
-                      fontSize: 13.5,
-                      fontWeight:
-                          isBookmarked ? FontWeight.w700 : FontWeight.w500,
-                    ),
+                ),
+              Flexible(
+                child: GridView.builder(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.all(16),
+                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 152,
+                    mainAxisSpacing: 10,
+                    crossAxisSpacing: 10,
+                    childAspectRatio: 2.35,
                   ),
-                );
-              },
-            ),
+                  itemCount: filtered.length,
+                  itemBuilder: (ctx, idx) {
+                    final originalIdx = filtered[idx];
+                    final ep = line.episodes[originalIdx];
+                    final info = scrape.byOriginalIndex[originalIdx];
+                    final unavailReason = _episodeUnavailableReason(ep);
+                    final isUnavailable = unavailReason != null;
+                    final isBookmarked = !isUnavailable &&
+                        bookmark != null &&
+                        bookmark.line == line.name &&
+                        bookmark.index == originalIdx;
+                    final showScrapedSub = info.resolvedEpisodeNumber != null &&
+                        !info.isSpecial &&
+                        ep.name.trim() != info.displayLabel &&
+                        !ep.name.contains('第${info.resolvedEpisodeNumber}集');
+                    final cell = GestureDetector(
+                      onTap: () {
+                        if (unavailReason != null) {
+                          unawaited(
+                            showAppleNativeAlert(
+                              ctx,
+                              title: ep.name,
+                              message: unavailReason,
+                              actions: const [
+                                AppleNativeAlertAction(
+                                  id: 'ok',
+                                  title: '我知道了',
+                                  isDefault: true,
+                                ),
+                              ],
+                            ),
+                          );
+                          return;
+                        }
+                        Navigator.of(ctx).pop();
+                        _openPlayer(safeLineIdx, originalIdx);
+                      },
+                      child: Builder(
+                        builder: (cellCtx) {
+                          final palette = ApplePalette.of(cellCtx);
+                          final isDark = palette.isDark;
+                          return Tooltip(
+                            message: showScrapedSub
+                                ? '${info.displayLabel} · ${ep.name}'
+                                : ep.name,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: isBookmarked
+                                    ? AppleColors.systemBlue
+                                    : (isDark
+                                        ? const Color(0xFF28282E)
+                                        : Colors.white),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isBookmarked
+                                      ? AppleColors.systemBlue
+                                      : (isDark
+                                          ? const Color(0x26FFFFFF)
+                                          : Colors.black.withValues(alpha: 0.09)),
+                                  width: isBookmarked ? 1.2 : 0.65,
+                                ),
+                              ),
+                              alignment: Alignment.center,
+                              child: showScrapedSub
+                                  ? Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          isUnavailable
+                                              ? '${info.displayLabel} (不可解析)'
+                                              : info.displayLabel,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: isBookmarked
+                                                ? Colors.white
+                                                : palette.labelPrimary,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        Text(
+                                          ep.name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: isBookmarked
+                                                ? Colors.white70
+                                                : palette.labelSecondary,
+                                            fontSize: 10.5,
+                                          ),
+                                        ),
+                                      ],
+                                    )
+                                  : Text(
+                                      isUnavailable
+                                          ? '${ep.name} (不可解析)'
+                                          : ep.name,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: isBookmarked
+                                            ? Colors.white
+                                            : palette.labelPrimary,
+                                        fontSize: 13.5,
+                                        fontWeight: isBookmarked
+                                            ? FontWeight.w700
+                                            : FontWeight.w500,
+                                      ),
+                                    ),
+                            ),
+                          );
+                        },
+                      ),
+                    );
+                    return isUnavailable
+                        ? Opacity(opacity: 0.48, child: cell)
+                        : cell;
+                  },
+                ),
+              ),
+            ],
           );
-          return isUnavailable ? Opacity(opacity: 0.48, child: cell) : cell;
         },
       ),
     );
@@ -2288,9 +2613,15 @@ class _DetailScreenState extends State<DetailScreen> {
                                   ],
                                   const SizedBox(height: 18),
                                   CastAvatarSection(
-                                    title: _video.title,
+                                    title: _effectiveLookupTitle.isNotEmpty
+                                        ? _effectiveLookupTitle
+                                        : _video.title,
                                     actorRaw: _video.actor,
-                                    year: _video.year,
+                                    year: _effectiveLookupYear,
+                                    doubanId: _effectiveDoubanId,
+                                    wantMotionComic: _effectiveWantMotionComic,
+                                    allowExternalLookup:
+                                        !_activeSite.isEffectivelyPrivate,
                                     forceDark: true,
                                     padding: EdgeInsets.zero,
                                   ),
@@ -2899,6 +3230,12 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   double? _effectiveDoubanScore() {
+    if (!_activeSite.isEffectivelyPrivate) {
+      final boundRating = _scrapeOverride?.doubanScore;
+      if (boundRating != null && boundRating >= 2.0 && boundRating <= 10.0) {
+        return boundRating;
+      }
+    }
     final direct = _video.doubanScore;
     if (direct != null && direct >= 2.0 && direct <= 10.0) return direct;
     if (!_activeSite.isEffectivelyPrivate) {
@@ -3631,25 +3968,30 @@ class _DetailScreenState extends State<DetailScreen> {
               final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
               final originalIdx = activeIndices[posIdx];
               final ep = line.episodes[originalIdx];
+              final epScrape =
+                  _scrapeResultForLine(line).byOriginalIndex[originalIdx];
+              final realEpNum = epScrape.resolvedEpisodeNumber ?? (posIdx + 1);
               final unavailReason = _episodeUnavailableReason(ep);
               final isUnavailable = unavailReason != null;
               final isCurrent = !isUnavailable && originalIdx == currentActiveEpIdx;
               final (cleanTitle, parsedBadge) =
-                  _parseEpisodeDisplay(ep.name, posIdx + 1);
+                  _parseEpisodeDisplay(ep.name, realEpNum);
               final specBadge = isUnavailable ? '不可解析' : parsedBadge;
-              final unitLabel =
-                  _isVarietyShow ? '第${posIdx + 1}期' : '第${posIdx + 1}集';
+              final unitLabel = epScrape.isSpecial
+                  ? epScrape.displayLabel
+                  : (_isVarietyShow ? '第$realEpNum期' : '第$realEpNum集');
               final subMeta = isUnavailable
                   ? unavailReason
                   : [
-                      if (_video.year.trim().isNotEmpty) _video.year.trim(),
+                      if (_effectiveLookupYear.trim().isNotEmpty)
+                        _effectiveLookupYear.trim(),
                       unitLabel,
                       if (specBadge != null) specBadge,
                     ].join(' · ');
               final headline =
-                  _formatEpisodeCardHeadline(cleanTitle, posIdx + 1);
+                  _formatEpisodeCardHeadline(cleanTitle, realEpNum);
               final epDesc = _resolveAuthenticEpisodeSummary(
-                posIdx + 1,
+                realEpNum,
                 cleanTitle,
               );
 
@@ -3681,10 +4023,12 @@ class _DetailScreenState extends State<DetailScreen> {
                               fit: StackFit.expand,
                               children: [
                                 EpisodeStillImage(
-                                  seriesTitle: _publicLookupTitle,
-                                  year: _video.year,
+                                  seriesTitle: _effectiveLookupTitle,
+                                  year: _effectiveLookupYear,
                                   episodeIndex: posIdx,
-                                  fallbackPosterUrl: _video.poster,
+                                  realEpisodeNumber: realEpNum,
+                                  wantMotionComic: _effectiveWantMotionComic,
+                                  fallbackPosterUrl: _effectivePosterUrl,
                                   placeholder: _posterPlaceholder(
                                     _resolveBaseAmbientColor(),
                                   ),
@@ -4150,9 +4494,15 @@ class _DetailScreenState extends State<DetailScreen> {
                             children: [
                               const SizedBox(height: 8),
                               CastAvatarSection(
-                                title: _video.title,
+                                title: _effectiveLookupTitle.isNotEmpty
+                                    ? _effectiveLookupTitle
+                                    : _video.title,
                                 actorRaw: _video.actor,
-                                year: _video.year,
+                                year: _effectiveLookupYear,
+                                doubanId: _effectiveDoubanId,
+                                wantMotionComic: _effectiveWantMotionComic,
+                                allowExternalLookup:
+                                    !_activeSite.isEffectivelyPrivate,
                                 forceDark: true,
                                 padding: EdgeInsets.zero,
                               ),

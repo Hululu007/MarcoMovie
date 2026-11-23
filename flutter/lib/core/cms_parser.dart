@@ -5,6 +5,7 @@ import 'package:meta/meta.dart';
 import 'js_source_syntax.dart';
 import 'models.dart';
 import 'live_catalog_parser.dart';
+import 'series_scraper.dart';
 /// Pure Dart parser for Marco Movie / TVBox JSON & XML CMS, multi-depot configs,
 /// obfuscated/encrypted config payloads (**Base64, Base64, $#...#$ AES-128-CBC),
 /// Punycode IDN URLs, M3U/TXT live playlists, and cross-platform backups.
@@ -2668,6 +2669,10 @@ class CmsParser {
     String currentTitle,
     String candidateTitle,
   ) {
+    if (SeriesScraper.isMotionComicText(currentTitle) !=
+        SeriesScraper.isMotionComicText(candidateTitle)) {
+      return false;
+    }
     final cur = parseSeriesSeasonInfo(currentTitle);
     final cand = parseSeriesSeasonInfo(candidateTitle);
     final curNorm = _normalizeFranchiseKey(cur.baseTitle);

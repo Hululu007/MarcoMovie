@@ -9,6 +9,7 @@ import 'package:media_kit/media_kit.dart';
 import 'core/app_log.dart';
 import 'core/cms_client.dart';
 import 'core/download_service.dart';
+import 'core/mdk_platform_player.dart';
 import 'core/ohos_runtime.dart';
 import 'core/storage_service.dart';
 import 'ui/adaptive_shell.dart';
@@ -38,6 +39,9 @@ Future<void> main() async {
       MediaKit.ensureInitialized();
     } catch (e) {
       debugPrint('MediaKit init warning: $e');
+    }
+    if (Platform.isWindows) {
+      MdkPlatformPlayer.ensureInitialized();
     }
   }
   try {

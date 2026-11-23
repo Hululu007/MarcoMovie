@@ -16,11 +16,13 @@ import 'csp_bridge.dart';
 import 'ios_avplayer_controller.dart';
 import 'ios_mpv_profile.dart';
 import 'local_media_proxy.dart';
+import 'mdk_platform_player.dart';
 import 'models.dart';
 import 'quark_account.dart';
 import 'netdisk_session.dart';
 import 'ohos_runtime.dart';
 import 'secure_credential_store.dart';
+import 'series_scraper.dart';
 import 'spider_plugin_registry.dart';
 import 'storage_file_store.dart';
 
@@ -120,6 +122,8 @@ class StorageService {
   static const String keySyncLastTime = 'sync_last_time';
   static const String keySyncLastStatus = 'sync_last_status';
   static const String keyVideoSkipRecords = 'video_skip_records';
+  static const String keySeriesScrapeOverrides = 'series_scrape_overrides_v1';
+  static const int maxSeriesScrapeOverrides = 300;
   static const String keyPlayerAlwaysShowClock = 'player_always_show_clock';
   static const String keyTvUiMode = 'tv_ui_mode';
   static const String keyTvAmbientTheme = 'tv_ambient_theme';
@@ -821,6 +825,10 @@ class StorageService {
       _prefs.getString(keyDefaultAspectMode) ?? 'contain';
   String get playerKernel =>
       _prefs.getString(keyPlayerKernel) ?? 'exo';
+  String get windowsPlaybackEngine =>
+      WindowsPlaybackEngine.fromId(
+        _prefs.getString(WindowsPlaybackEngine.prefKey),
+      ).id;
   String get iosPlaybackEngineMode =>
       IosPlaybackEngineMode.fromId(
         _prefs.getString(IosMpvProfile.prefKeyEngineMode),
@@ -2698,6 +2706,10 @@ class StorageService {
   }
   Future<void> setPlayerKernel(String kernel) async {
     await _prefs.setString(keyPlayerKernel, kernel.trim());
+  }
+  Future<void> setWindowsPlaybackEngine(String engine) async {
+    final normalized = WindowsPlaybackEngine.fromId(engine).id;
+    await _prefs.setString(WindowsPlaybackEngine.prefKey, normalized);
   }
   Future<void> setIosPlaybackEngineMode(String mode) async {
     final normalized = IosPlaybackEngineMode.fromId(mode).id;
@@ -5432,5 +5444,92 @@ class StorageService {
     await _writeSecret(keySpiderGatewayToken, clean.token);
     SpiderPluginRegistry.instance.setGatewayConfig(clean);
     _invalidateConfigCache();
+  }
+
+  /// Revision counter incremented whenever a series scrape binding or episode
+  /// calibration override is saved or cleared.
+  final ValueNotifier<int> seriesScrapeRevision = ValueNotifier<int>(0);
+
+  Map<String, SeriesScrapeOverride> _readSeriesScrapeOverrides() {
+    final raw = _prefs.getString(keySeriesScrapeOverrides) ?? '{}';
+    final out = <String, SeriesScrapeOverride>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        for (final entry in decoded.entries) {
+          final k = entry.key.toString();
+          final v = entry.value;
+          if (k.isEmpty || v is! Map) continue;
+          final parsed = SeriesScrapeOverride.fromJson(
+            Map<String, dynamic>.from(v),
+          );
+          if (!parsed.isEmpty) {
+            out[k] = parsed;
+          }
+        }
+      }
+    } on Object catch (e) {
+      debugPrint('StorageService: _readSeriesScrapeOverrides parse failed: $e');
+    }
+    return out;
+  }
+
+  Future<void> _writeSeriesScrapeOverrides(
+    Map<String, SeriesScrapeOverride> records,
+  ) async {
+    final entries = records.entries.where((e) => !e.value.isEmpty).toList()
+      ..sort((a, b) => b.value.updatedAtMs.compareTo(a.value.updatedAtMs));
+    final bounded = entries.take(maxSeriesScrapeOverrides);
+    final payload = <String, Map<String, dynamic>>{
+      for (final e in bounded) e.key: e.value.toJson(),
+    };
+    await _prefs.setString(keySeriesScrapeOverrides, jsonEncode(payload));
+  }
+
+  SeriesScrapeOverride? getSeriesScrapeOverride(
+    String siteKey,
+    String videoId, {
+    bool isPrivate = false,
+  }) {
+    if (_isPrivateVideoSkip(siteKey, isPrivate)) return null;
+    final key = _videoSkipKey(siteKey, videoId);
+    if (key.isEmpty) return null;
+    return _readSeriesScrapeOverrides()[key];
+  }
+
+  Future<void> saveSeriesScrapeOverride(
+    String siteKey,
+    String videoId,
+    SeriesScrapeOverride override, {
+    bool isPrivate = false,
+  }) async {
+    if (_isPrivateVideoSkip(siteKey, isPrivate)) return;
+    final key = _videoSkipKey(siteKey, videoId);
+    if (key.isEmpty) return;
+    final records = _readSeriesScrapeOverrides();
+    if (override.isEmpty) {
+      records.remove(key);
+    } else {
+      records[key] = override.copyWith(
+        updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+      );
+    }
+    await _writeSeriesScrapeOverrides(records);
+    seriesScrapeRevision.value++;
+  }
+
+  Future<void> clearSeriesScrapeOverride(
+    String siteKey,
+    String videoId, {
+    bool isPrivate = false,
+  }) async {
+    if (_isPrivateVideoSkip(siteKey, isPrivate)) return;
+    final key = _videoSkipKey(siteKey, videoId);
+    if (key.isEmpty) return;
+    final records = _readSeriesScrapeOverrides();
+    if (records.remove(key) != null) {
+      await _writeSeriesScrapeOverrides(records);
+      seriesScrapeRevision.value++;
+    }
   }
 }

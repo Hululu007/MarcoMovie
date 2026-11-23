@@ -2369,12 +2369,16 @@ class _WindowsPlaybackEnhancementGroupState
     extends State<_WindowsPlaybackEnhancementGroup> {
   final WindowsVideoQualityController _qualityController =
       WindowsVideoQualityController();
+  late WindowsPlaybackEngine _windowsEngine;
   WindowsQualityPreset _qualityPreset = WindowsQualityPreset.balancedHq;
   AudioLoudnessPreset _loudnessPreset = AudioLoudnessPreset.off;
 
   @override
   void initState() {
     super.initState();
+    _windowsEngine = WindowsPlaybackEngine.fromId(
+      widget.storage.windowsPlaybackEngine,
+    );
     unawaited(_loadPresets());
   }
 
@@ -2397,10 +2401,75 @@ class _WindowsPlaybackEnhancementGroupState
 
   @override
   Widget build(BuildContext context) {
+    final isMdk = _windowsEngine == WindowsPlaybackEngine.mdk;
     return WinSettingsGroup(
-      header: 'Windows 画质、人声响度与流媒体净化',
-      footer: '高画质 HDR 映射档采用 spline36 缩放与动态色调映射解决 4K HDR 发灰与色带；切换后下次起播自动生效（播放中亦可在右下角实时热切）。',
+      header: 'Windows 播放引擎、画质与流媒体净化',
+      footer: isMdk
+          ? '当前已选用 MDK 核显兼容引擎：采用原生 D3D11 / MFT / DXVA 零拷贝硬解，显著降低 Intel / AMD 核显占用并提升 4K/HDR 流畅度；播放页右下角「更多」可随时热切引擎。'
+          : '高画质 HDR 映射档与人声响度增强适用于 MPV 引擎（核显轻薄本推荐切换为 MDK 核显兼容引擎）；切换后下次起播生效，播放中亦可在右下角实时热切。',
       children: [
+        Padding(
+          key: const ValueKey('windows-settings-playback-engine'),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(CupertinoIcons.desktopcomputer,
+                      size: 20, color: winMuted(context)),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Windows 播放引擎',
+                          style: TextStyle(
+                            color: winInk(context),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _windowsEngine.descriptionZh,
+                          style: TextStyle(
+                            color: winMuted(context),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final engine in const <WindowsPlaybackEngine>[
+                    WindowsPlaybackEngine.mdk,
+                    WindowsPlaybackEngine.mpv,
+                  ])
+                    WinButton(
+                      engine.labelZh,
+                      key: ValueKey('win-setting-engine-${engine.id}'),
+                      selected: _windowsEngine == engine,
+                      onPressed: () async {
+                        setState(() => _windowsEngine = engine);
+                        await widget.storage.setWindowsPlaybackEngine(
+                          engine.id,
+                        );
+                        widget.onChanged();
+                      },
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
         Padding(
           key: const ValueKey('windows-settings-video-quality'),
           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),

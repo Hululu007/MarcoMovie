@@ -1,3 +1,17 @@
+## 2026-11-23 Windows x64 0.7.1 专项体验与解码升级：新增 MDK 核显兼容播放引擎、修复全屏隐藏进度条弹幕静止、剧集内刮削与弹幕集号校准、海报精准匹配及动态漫画/动漫区分（Windows 0.7.1）
+
+- [Windows 0.7.1](docs/releases/windows-v0.7.1.md)
+- **新增 Windows MDK（`libmdk` / `fvp`）核显兼容播放引擎（`MdkPlatformPlayer`）**：
+  - 引入 `fvp`（底层 `libmdk` + FFmpeg + `libass`）作为与 `libmpv` 并行的可选 Windows 播放引擎，专为 Intel / AMD 核显与轻薄本电脑优化：默认解码链 `MFT:d3d=11 → D3D11 → DXVA → CUDA → FFmpeg → dav1d`（「兼容缓冲」策略自动置顶 `DXVA` 适配老核显），强制启用 `video.decoder=shader_resource=0` 规避核显驱动格式不兼容，自动配置 Windows 中文字体供原生 `libass` 渲染特效字幕；
+  - 支持在「设置 → 播放」持久化选择引擎、播放页右下角「更多」与播放失败卡片保留进度实时热切，并在 MDK 遇到不兼容流启动失败时自动无缝回退至 MPV 续播。
+- **修复全屏隐藏进度条时弹幕静止不动问题（`DanmuLayer` / `PlayerScreen`）**：
+  - 为 `DanmuLayer` 新增 `positionListenable`（`ValueListenable<int>`）零重建时钟通道，在全屏自动隐藏控制条且关闭底部细进度条时持续向 `DanmuClockInterpolator` 推送精准播放进度并将插值防跑飞保护窗口放宽至 `1000ms`，既保留隐藏 HUD 零整树重建性能优化，又彻底消除弹幕 500ms 后静止的现象。
+- **支持剧集内刮削、快速集数定位与弹幕集数校准（`SeriesScraper` / `SeriesScrapeSheet`）**：
+  - 详情页与播放页新增剧集内刮削与校准能力：自动解析多季、SP/OVA/番外与错位文件名并支持按剧集名/年份/季号重新刮削与手动集号偏移，支持快速定位目标集数，同时将校准后的实际集号同步联动至弹幕匹配，避免找不到想看的集数或弹幕集数错位。
+- **海报与实际剧集精准匹配优化 & 动态漫画与正式动漫区分**：
+  - 强化 `PosterLoader` / `CastAvatarService` / `WindowsDetail` 海报与剧照匹配规则，结合年份、剧种、演员与标题严格校验，过滤人物百科/错误同名影视海报污染；
+  - 升级 `CmsParser` / `CuratedDiscovery` / 分类与元数据识别规则，将「动态漫画 / 漫剧」与正式 3D/2D 动漫清晰区分隔离，避免动态漫画错配正式动漫海报或混入动漫列表。
+
 ## 2026-11-23 Windows x64 0.7.0 专项大版本升级：MPV 三档高画质/HDR 动态色调映射、人声响度增强、内置免安装 Python 3.11 运行时、Edge WebView2 动态嗅探与异步 JS、512 MB 落盘块缓存及蓝光原盘 ISO 流式直播（Windows 0.7.0）
 
 - [Windows 0.7.0](docs/releases/windows-v0.7.0.md)

@@ -26,6 +26,7 @@ import '../core/download_service.dart';
 import '../core/ios_avplayer_controller.dart';
 import '../core/live_channel_organizer.dart';
 import '../core/local_media_proxy.dart';
+import '../core/mdk_platform_player.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
 import '../core/python_source_host.dart';

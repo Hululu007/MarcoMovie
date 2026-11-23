@@ -30,6 +30,7 @@ import '../core/playback_recovery_policy.dart';
 import '../core/playback_startup.dart';
 import '../core/playback_wakelock.dart';
 import '../core/ohos_runtime.dart';
+import '../core/series_scraper.dart';
 import '../core/video_kernel.dart';
 import '../core/web_media_resolver.dart';
 import '../core/windows_tray_service.dart';
@@ -217,9 +218,13 @@ class PlayerCloudMediaSession {
 
 class _PlayerScreenState extends State<PlayerScreen>
     with WidgetsBindingObserver {
-  late final VideoKernel _videoKernel;
-  late final Player _player;
+  late VideoKernel _videoKernel;
+  late Player _player;
+  bool _playerDisposed = false;
   late Future<void> _playerConfiguration;
+  WindowsPlaybackEngine _windowsEngine = WindowsPlaybackEngine.mpv;
+  bool _mdkAutoFallbackTriggered = false;
+  bool _switchingWindowsEngine = false;
   final CmsClient _client = CmsClient();
   final List<StreamSubscription<dynamic>> _playerSubscriptions = [];
 
@@ -280,7 +285,16 @@ class _PlayerScreenState extends State<PlayerScreen>
   Timer? _hideTimer;
   Timer? _historyTimer;
   EmbyPlaybackSession? _embySession;
-  Duration _position = Duration.zero;
+  Duration _positionValue = Duration.zero;
+  final ValueNotifier<int> _danmuPositionMs = ValueNotifier<int>(0);
+  Duration get _position => _positionValue;
+  set _position(Duration value) {
+    _positionValue = value;
+    final ms = value.inMilliseconds;
+    if (_danmuPositionMs.value != ms) {
+      _danmuPositionMs.value = ms;
+    }
+  }
   Duration _duration = Duration.zero;
   bool _playing = false;
   bool _loading = true;
@@ -337,6 +351,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   DanmuCancelToken? _danmuMatchToken;
   int _danmuSessionGen = 0;
   bool _danmuBoundForEpisode = false;
+  DanmuCandidate? _matchedDanmuCandidate;
+  int? _scrapedDanmuEpisodeNumber;
+  int _activeDanmuEpisodeOffset = 0;
   OnboardingPrefs? _onboardingPrefs;
   bool _hasStartedVodPlayback = false;
   bool _firstPlayHintDismissedThisSession = false;
@@ -899,6 +916,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _autoNext = widget.storage.autoNext;
     _repeatMode = widget.storage.repeatMode;
     _playerKernel = widget.storage.playerKernel;
+    _windowsEngine = WindowsPlaybackEngine.fromId(
+      widget.storage.windowsPlaybackEngine,
+    );
     _iosEngineMode = IosPlaybackEngineMode.fromId(
       widget.storage.iosPlaybackEngineMode,
     );
@@ -970,8 +990,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       debugPlayer: widget.debugPlayer,
       debugVideoSurface: widget.debugVideoSurface,
       hwdec: _hardwareDecoder(_playerKernel),
+      windowsEngine: _windowsEngine,
+      kernelStrategy: _playerKernel,
     );
     _player = _videoKernel.player;
+    _playerDisposed = false;
     // Keep one source lease for this page, including pause and overlapping
     // episode/quality transitions. Release only after the decoder is disposed.
     _releaseSourceSession = _client.pinPlaybackSource(widget.site);
@@ -982,6 +1005,20 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(_initAnime4kAfterKernel());
     }
 
+    _attachPlayerStreams();
+
+    _openCurrentEpisode(resumeMs: widget.initialPositionMs);
+    _historyTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => _saveProgress(immediate: false),
+    );
+  }
+
+  void _attachPlayerStreams() {
+    for (final sub in _playerSubscriptions) {
+      unawaited(sub.cancel());
+    }
+    _playerSubscriptions.clear();
     _playerSubscriptions.add(_player.stream.width.listen((w) {
       if (!mounted || w == null || w <= 0 || w == _videoWidth) return;
       setState(() {
@@ -1332,21 +1369,34 @@ class _PlayerScreenState extends State<PlayerScreen>
               lower.contains('server returned 403') ||
               lower.contains('server returned 404') ||
               lower.contains('server returned 410') ||
-              lower.contains('server returned 5'));
-      if (isFatalStartupError ||
+              lower.contains('server returned 5') ||
+              lower.contains('mdk reader.open') ||
+              lower.contains('mdk decoder.video') ||
+              lower.contains('mdk failed'));
+      final shouldHandleError = isFatalStartupError ||
           (!_isLiveStream &&
               !_playing &&
               _duration <= Duration.zero &&
-              _position <= Duration.zero)) {
+              _position <= Duration.zero);
+      if (shouldHandleError) {
+        if (_isWindowsPlayerPlatform &&
+            _videoKernel.isMdk &&
+            widget.debugPlayer == null &&
+            !_mdkAutoFallbackTriggered &&
+            !_switchingWindowsEngine) {
+          _mdkAutoFallbackTriggered = true;
+          unawaited(
+            _switchWindowsPlaybackEngine(
+              WindowsPlaybackEngine.mpv,
+              persist: false,
+              customToast: 'MDK 引擎不支持当前流，已自动切回 MPV 播放',
+            ),
+          );
+          return;
+        }
         _failPlayback(message);
       }
     }));
-
-    _openCurrentEpisode(resumeMs: widget.initialPositionMs);
-    _historyTimer = Timer.periodic(
-      const Duration(seconds: 15),
-      (_) => _saveProgress(immediate: false),
-    );
   }
 
   @override
@@ -3233,7 +3283,13 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _applyPlayerKernel(String kernel) async {
     try {
-      final dyn = _player.platform as dynamic;
+      final platform = _player.platform;
+      if (platform is MdkPlatformPlayer) {
+        platform.applyKernelStrategy(kernel, isLive: _isLiveStream);
+        await platform.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
+        return;
+      }
+      final dyn = platform as dynamic;
       await dyn.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
       await dyn.setProperty('hwdec', _hardwareDecoder(kernel));
       await dyn.setProperty('cache-on-disk', 'no');
@@ -3529,6 +3585,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _sleepTimer.removeListener(_onHudSubstateChanged);
     _sleepTimer.dispose();
+    _danmuPositionMs.dispose();
     _skipCountdown.removeListener(_onHudSubstateChanged);
     _skipCountdown.dispose();
     _startSpecController.removeListener(_onHudSubstateChanged);
@@ -3623,7 +3680,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           }
         }
         iosAvPlayerController?.dispose();
-        await _player.dispose();
+        if (!_playerDisposed) {
+          _playerDisposed = true;
+          await _player.dispose();
+        }
       } finally {
         try {
           await cloudLease?.close();
@@ -4081,6 +4141,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     _danmuMatchToken = null;
     _danmuSessionGen++;
     _danmuBoundForEpisode = false;
+    _matchedDanmuCandidate = null;
+    _scrapedDanmuEpisodeNumber = null;
     final cache = _danmuCache;
     if (cache != null) {
       unawaited(cache.bindSession(''));
@@ -4088,6 +4150,191 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!_isLiveStream && _danmuSettings.effectiveEnabled) {
       _bindDanmuForCurrentEpisode();
     }
+  }
+
+  ({
+    DanmuMatchQuery query,
+    int? scrapedEpisodeNumber,
+    int episodeOffset,
+    String effectiveTitle,
+    bool isMotionComic,
+    SeriesScrapeOverride? override,
+  }) _resolveDanmuMatchContext() {
+    final override = widget.storage.getSeriesScrapeOverride(
+      widget.site.key,
+      widget.video.id,
+      isPrivate: widget.site.isEffectivelyPrivate,
+    );
+    final effectiveTitle =
+        (override != null && override.effectiveDanmuTitle.isNotEmpty)
+            ? override.effectiveDanmuTitle
+            : widget.video.title;
+    final isMotionComic = (override != null && override.hasWorkBinding)
+        ? override.isMotionComic
+        : SeriesScraper.isMotionComicText(
+            widget.video.title,
+            extraContext: '${widget.video.tag} ${widget.video.remarks}',
+          );
+    final episodeOffset = override?.episodeOffset ?? 0;
+    final lineEps = _currentLine.episodes;
+    final scrape = SeriesScraper.scrapeLineEpisodes(
+      lineEps,
+      seriesTitle: effectiveTitle,
+      episodeOffset: episodeOffset,
+      manualOverrides: override?.episodeNumberOverrides ?? const {},
+    );
+    final epInfo =
+        (_episodeIndex >= 0 && _episodeIndex < scrape.byOriginalIndex.length)
+            ? scrape.byOriginalIndex[_episodeIndex]
+            : null;
+    final int? scrapedEpNum = epInfo?.resolvedEpisodeNumber;
+    final int effectiveEpNum;
+    if (scrapedEpNum != null && scrapedEpNum > 0) {
+      effectiveEpNum = scrapedEpNum;
+    } else if (epInfo != null &&
+        epInfo.isSpecial &&
+        !epInfo.hasManualOverride) {
+      // Do not falsely treat a leading trailer/SP as Episode 1 for danmu.
+      effectiveEpNum = 0;
+    } else {
+      effectiveEpNum = math.max(1, _episodeIndex + 1 + episodeOffset);
+    }
+    final effectiveDurMs = _duration.inMilliseconds > 0
+        ? _duration.inMilliseconds
+        : _lastKnownDurationMs;
+    final year = (override != null && override.matchedYear.isNotEmpty)
+        ? override.matchedYear
+        : widget.video.year;
+    final query = DanmuMatchQuery(
+      title: effectiveTitle,
+      episodeTitle: _currentEpisode.name,
+      episodeIndex: effectiveEpNum,
+      durationSec: effectiveDurMs > 0 ? effectiveDurMs ~/ 1000 : 0,
+      seasonNumber: epInfo?.seasonNumber,
+      isMotionComic: isMotionComic,
+      year: year,
+      animeIdOverride: override?.danmuAnimeId ?? '',
+      originOverride: override?.danmuOrigin ?? '',
+    );
+    return (
+      query: query,
+      scrapedEpisodeNumber: effectiveEpNum > 0 ? effectiveEpNum : null,
+      episodeOffset: episodeOffset,
+      effectiveTitle: effectiveTitle,
+      isMotionComic: isMotionComic,
+      override: override,
+    );
+  }
+
+  String _currentDanmuMatchSummary() {
+    final matched = _matchedDanmuCandidate;
+    if (matched != null) {
+      final parts = <String>[
+        if (matched.animeTitle.isNotEmpty) matched.animeTitle,
+        if (matched.episodeTitle.isNotEmpty) matched.episodeTitle,
+      ];
+      return parts.isNotEmpty
+          ? '当前匹配：${parts.join(" · ")}'
+          : '已绑定弹幕（ID ${matched.animeId}）';
+    }
+    final epNum = _scrapedDanmuEpisodeNumber;
+    if (epNum != null && epNum > 0) {
+      return '当前识别：第 $epNum 集（${_danmuBoundForEpisode ? "已加载" : "待匹配"}）';
+    }
+    return '当前集：${_currentEpisode.name}';
+  }
+
+  Future<List<DanmuCandidate>> _searchDanmuCandidatesManually(
+    String keyword,
+    int? episodeNumber,
+  ) async {
+    if (_danmuProvider == null || _danmuCache == null) {
+      _rebuildDanmuPipeline();
+    }
+    final provider = _danmuProvider;
+    if (provider == null) return const <DanmuCandidate>[];
+    final ctx = _resolveDanmuMatchContext();
+    final query = DanmuMatchQuery(
+      title: keyword.trim().isNotEmpty ? keyword.trim() : ctx.effectiveTitle,
+      episodeTitle: _currentEpisode.name,
+      episodeIndex: episodeNumber ?? ctx.query.episodeIndex,
+      durationSec: ctx.query.durationSec,
+      seasonNumber: ctx.query.seasonNumber,
+      isMotionComic: SeriesScraper.isMotionComicText(keyword)
+          ? true
+          : ctx.isMotionComic,
+      year: ctx.query.year,
+    );
+    return provider.matchOrSearch(query);
+  }
+
+  void _manualBindDanmuCandidate(DanmuCandidate candidate) {
+    if (candidate.boundEpisodeId.trim().isEmpty) return;
+    if (_danmuProvider == null || _danmuCache == null) {
+      _rebuildDanmuPipeline();
+    }
+    final cache = _danmuCache;
+    if (cache == null) return;
+    _danmuMatchToken?.cancel();
+    final gen = ++_danmuSessionGen;
+    _matchedDanmuCandidate = candidate;
+    unawaited(() async {
+      try {
+        await cache.bindSession(candidate.boundEpisodeId);
+        if (!mounted || gen != _danmuSessionGen) return;
+        _danmuBoundForEpisode = true;
+        cache.onPlaybackTick(_position.inMilliseconds, playing: _playing);
+        _showHud(
+          '已切换弹幕：${candidate.animeTitle} ${candidate.episodeTitle}'.trim(),
+        );
+      } catch (_) {}
+    }());
+    // Persist the chosen Dandanplay bangumi binding for future episodes in this series.
+    if (!widget.site.isEffectivelyPrivate &&
+        candidate.animeId.isNotEmpty &&
+        candidate.sourceOrigin.isNotEmpty) {
+      final existing = widget.storage.getSeriesScrapeOverride(
+        widget.site.key,
+        widget.video.id,
+        isPrivate: false,
+      );
+      final updated = (existing ?? const SeriesScrapeOverride()).copyWith(
+        danmuAnimeId: candidate.animeId,
+        danmuOrigin: candidate.sourceOrigin,
+        danmuTitleOverride: candidate.animeTitle,
+      );
+      unawaited(
+        widget.storage.saveSeriesScrapeOverride(
+          widget.site.key,
+          widget.video.id,
+          updated,
+        ),
+      );
+    }
+  }
+
+  void _updateDanmuEpisodeOffset(int nextOffset) {
+    final clamped = nextOffset.clamp(-500, 500);
+    _activeDanmuEpisodeOffset = clamped;
+    if (!widget.site.isEffectivelyPrivate) {
+      final existing = widget.storage.getSeriesScrapeOverride(
+        widget.site.key,
+        widget.video.id,
+        isPrivate: false,
+      );
+      final updated = (existing ?? const SeriesScrapeOverride())
+          .copyWith(episodeOffset: clamped);
+      unawaited(
+        widget.storage.saveSeriesScrapeOverride(
+          widget.site.key,
+          widget.video.id,
+          updated,
+        ),
+      );
+    }
+    _matchedDanmuCandidate = null;
+    _danmuBoundForEpisode = false;
+    _bindDanmuForCurrentEpisode();
   }
 
   void _bindDanmuForCurrentEpisode() {
@@ -4112,15 +4359,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     final token = DanmuCancelToken();
     _danmuMatchToken = token;
     final gen = ++_danmuSessionGen;
-    final effectiveDurMs = _duration.inMilliseconds > 0
-        ? _duration.inMilliseconds
-        : _lastKnownDurationMs;
-    final query = DanmuMatchQuery(
-      title: widget.video.title,
-      episodeTitle: _currentEpisode.name,
-      episodeIndex: _episodeIndex + 1,
-      durationSec: effectiveDurMs > 0 ? effectiveDurMs ~/ 1000 : 0,
-    );
+    final ctx = _resolveDanmuMatchContext();
+    _scrapedDanmuEpisodeNumber = ctx.scrapedEpisodeNumber;
+    _activeDanmuEpisodeOffset = ctx.episodeOffset;
+    final query = ctx.query;
 
     unawaited(() async {
       try {
@@ -4134,9 +4376,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         for (final c in candidates.skip(1)) {
           if (c.confidence > best.confidence) best = c;
         }
-        if (best.boundEpisodeId.trim().isEmpty) return;
+        if (best.boundEpisodeId.trim().isEmpty || best.confidence < 0.35) {
+          return;
+        }
         await cache.bindSession(best.boundEpisodeId);
         if (!mounted || gen != _danmuSessionGen || token.isCancelled) return;
+        _matchedDanmuCandidate = best;
         _danmuBoundForEpisode = true;
         cache.onPlaybackTick(_position.inMilliseconds, playing: _playing);
       } catch (_) {
@@ -4195,6 +4440,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final session = _playSession;
+    final matchCtx = _isLiveStream ? null : _resolveDanmuMatchContext();
+    final matchSummary = _isLiveStream ? '' : _currentDanmuMatchSummary();
     if (_useIos26PlayerChrome) {
       unawaited(
         showIosGlassPopover<void>(
@@ -4207,6 +4454,25 @@ class _PlayerScreenState extends State<PlayerScreen>
           contentPadding: const EdgeInsets.fromLTRB(4, 2, 4, 8),
           builder: (ctx) => DanmuSettingsSheet(
             initialSettings: _danmuSettings,
+            currentMatchSummary: matchSummary,
+            episodeOffset: matchCtx?.episodeOffset ?? _activeDanmuEpisodeOffset,
+            initialSearchKeyword: matchCtx?.effectiveTitle ?? widget.video.title,
+            initialEpisodeNumber: matchCtx?.scrapedEpisodeNumber,
+            onEpisodeOffsetChanged: _isLiveStream
+                ? null
+                : (offset) {
+                    if (!mounted || session != _playSession) return;
+                    _updateDanmuEpisodeOffset(offset);
+                  },
+            onSearchCandidates: _isLiveStream
+                ? null
+                : _searchDanmuCandidatesManually,
+            onSelectCandidate: _isLiveStream
+                ? null
+                : (cand) {
+                    if (!mounted || session != _playSession) return;
+                    _manualBindDanmuCandidate(cand);
+                  },
             onChanged: (updated) {
               if (!mounted || session != _playSession) return;
               _applyDanmuSettings(updated, persist: false);
@@ -4220,6 +4486,24 @@ class _PlayerScreenState extends State<PlayerScreen>
       DanmuSettingsSheet.show(
         context,
         initialSettings: _danmuSettings,
+        currentMatchSummary: matchSummary,
+        episodeOffset: matchCtx?.episodeOffset ?? _activeDanmuEpisodeOffset,
+        initialSearchKeyword: matchCtx?.effectiveTitle ?? widget.video.title,
+        initialEpisodeNumber: matchCtx?.scrapedEpisodeNumber,
+        onEpisodeOffsetChanged: _isLiveStream
+            ? null
+            : (offset) {
+                if (!mounted || session != _playSession) return;
+                _updateDanmuEpisodeOffset(offset);
+              },
+        onSearchCandidates:
+            _isLiveStream ? null : _searchDanmuCandidatesManually,
+        onSelectCandidate: _isLiveStream
+            ? null
+            : (cand) {
+                if (!mounted || session != _playSession) return;
+                _manualBindDanmuCandidate(cand);
+              },
         onChanged: (updated) {
           if (!mounted || session != _playSession) return;
           _applyDanmuSettings(updated, persist: false);
@@ -4392,6 +4676,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ? DanmuLayer(
                     settings: _danmuSettings,
                     positionMs: _position.inMilliseconds,
+                    positionListenable: _danmuPositionMs,
                     playing: _playing,
                     playSpeed: effectiveDanmuSpeed,
                     segmentCache: _danmuCache,
@@ -6268,6 +6553,25 @@ class _PlayerScreenState extends State<PlayerScreen>
                 _openCurrentEpisode();
               },
             ),
+            if (_isWindowsPlayerPlatform && widget.debugPlayer == null)
+              AppleCapsuleButton(
+                label: _videoKernel.isMdk ? '切回 MPV 重试' : '切换 MDK 核显重试',
+                icon: CupertinoIcons.desktopcomputer,
+                compact: true,
+                onPressed: () {
+                  _failedLinesForEpisode.clear();
+                  _failedLiveEpisodes.clear();
+                  _failedQualityUrls.clear();
+                  unawaited(
+                    _switchWindowsPlaybackEngine(
+                      _videoKernel.isMdk
+                          ? WindowsPlaybackEngine.mpv
+                          : WindowsPlaybackEngine.mdk,
+                      persist: false,
+                    ),
+                  );
+                },
+              ),
             if (_qualityChoices.length > 1)
               AppleCapsuleButton(
                 label: '切换画质 (${_qualityChoices.length})',
@@ -7067,6 +7371,17 @@ class _PlayerScreenState extends State<PlayerScreen>
           label: '音轨选择',
           onTap: () => closeAndRun(_showAudioTracksSheet),
         ),
+        if (_isWindowsPlayerPlatform)
+          DesktopMoreMenuRow(
+            key: const ValueKey('windows-more-engine-switch'),
+            icon: CupertinoIcons.desktopcomputer,
+            label: '播放引擎',
+            valueText: _windowsEngine == WindowsPlaybackEngine.mdk
+                ? 'MDK 核显'
+                : 'MPV 旗舰',
+            active: _windowsEngine == WindowsPlaybackEngine.mdk,
+            onTap: () => closeAndRun(_showWindowsEngineSheet),
+          ),
         DesktopMoreMenuRow(
           icon: CupertinoIcons.slider_horizontal_3,
           label: '播放策略',
@@ -9009,6 +9324,148 @@ class _PlayerScreenState extends State<PlayerScreen>
                 onTap: () async {
                   Navigator.of(ctx).pop();
                   await _selectKernel(k.key, k.title);
+                },
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _switchWindowsPlaybackEngine(
+    WindowsPlaybackEngine next, {
+    bool persist = true,
+    String? customToast,
+  }) async {
+    if (!_isWindowsPlayerPlatform) return;
+    if (widget.debugPlayer != null) {
+      if (persist) {
+        await widget.storage.setWindowsPlaybackEngine(next.id);
+      }
+      if (!mounted) return;
+      setState(() => _windowsEngine = next);
+      _showHud(customToast ?? '已切换至 ${next.labelZh}');
+      return;
+    }
+    if (_switchingWindowsEngine) return;
+    final alreadyTarget =
+        _windowsEngine == next &&
+        _videoKernel.isMdk == (next == WindowsPlaybackEngine.mdk);
+    if (alreadyTarget) return;
+    _switchingWindowsEngine = true;
+    final keepPos = _position.inMilliseconds >= 1000
+        ? _position.inMilliseconds
+        : _lastKnownPositionMs;
+    final keepVolume = _engineVolume100;
+    final session = ++_playSession;
+    _allowEvents = false;
+    if (next == WindowsPlaybackEngine.mdk) {
+      _mdkAutoFallbackTriggered = false;
+    }
+    try {
+      if (persist) {
+        await widget.storage.setWindowsPlaybackEngine(next.id);
+      }
+      for (final sub in _playerSubscriptions) {
+        unawaited(sub.cancel());
+      }
+      _playerSubscriptions.clear();
+      final oldPlayer = _player;
+      await _changeMedia(session, () async {
+        try {
+          if (!OhosRuntime.isOhos &&
+              _anime4kController.isAvailableForPlayer(oldPlayer)) {
+            await _anime4kController.resetSession(oldPlayer);
+          }
+        } catch (_) {}
+        try {
+          await oldPlayer.stop();
+        } catch (_) {}
+        if (!_playerDisposed) {
+          _playerDisposed = true;
+          try {
+            await oldPlayer.dispose();
+          } catch (_) {}
+        }
+      });
+      if (!mounted || session != _playSession) return;
+      final nextKernel = VideoKernel.create(
+        debugVideoSurface: widget.debugVideoSurface,
+        hwdec: _hardwareDecoder(_playerKernel),
+        windowsEngine: next,
+        kernelStrategy: _playerKernel,
+      );
+      _videoKernel = nextKernel;
+      _player = nextKernel.player;
+      _playerDisposed = false;
+      _attachPlayerStreams();
+      setState(() {
+        _windowsEngine = next;
+        _loading = true;
+        _playing = false;
+        _buffering = false;
+        _playbackError = '';
+        _playbackErrorCause = null;
+        _videoWidth = 0;
+        _videoHeight = 0;
+        _videoCodec = '';
+        _audioCodec = '';
+      });
+      _playerConfiguration = _applyPlayerKernel(_playerKernel);
+      await _playerConfiguration;
+      if (!mounted || session != _playSession) return;
+      await _player.setVolume(keepVolume);
+      if (!OhosRuntime.isOhos &&
+          !_videoKernel.isMdk &&
+          _anime4kController.isAvailableForPlayer(_player)) {
+        unawaited(_initAnime4kAfterKernel());
+      }
+      _showHud(customToast ?? '已切换至 ${next.labelZh}，正在续播…');
+      unawaited(_openCurrentEpisode(resumeMs: keepPos));
+    } finally {
+      _switchingWindowsEngine = false;
+    }
+  }
+
+  void _showWindowsEngineSheet() {
+    if (!_isWindowsPlayerPlatform) return;
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    const engines = <WindowsPlaybackEngine>[
+      WindowsPlaybackEngine.mdk,
+      WindowsPlaybackEngine.mpv,
+    ];
+    showAppleModalSheet<void>(
+      context: context,
+      title: '切换 Windows 播放引擎',
+      maxWidth: 500,
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: engines.map((engine) {
+              final selected = _windowsEngine == engine;
+              return AppleGroupedTile(
+                key: ValueKey('player-engine-option-${engine.id}'),
+                icon: engine == WindowsPlaybackEngine.mdk
+                    ? CupertinoIcons.bolt_fill
+                    : CupertinoIcons.sparkles,
+                iconBgColor: selected
+                    ? AppleColors.systemBlue
+                    : AppleColors.groupedTertiary,
+                title: engine.labelZh,
+                subtitle: engine.descriptionZh,
+                trailing: selected
+                    ? const Icon(
+                        CupertinoIcons.checkmark_alt,
+                        color: AppleColors.systemBlue,
+                        size: 18,
+                      )
+                    : null,
+                onTap: () async {
+                  Navigator.of(ctx).pop();
+                  await _switchWindowsPlaybackEngine(engine);
                 },
               );
             }).toList(),

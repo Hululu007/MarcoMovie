@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+import 'series_scraper.dart';
 
 /// A single cast or crew member displayed in the avatar carousel on the Detail
 /// and Portrait Player screens.
@@ -130,16 +131,24 @@ class CastAvatarService {
     String actorRaw = '',
     String year = '',
     String doubanId = '',
+    bool? wantMotionComic,
     void Function(List<CastMember> members)? onProgress,
   }) async {
     final fallback = parseRawActors(actorRaw);
     final key = _normalizeTitle(title);
-    if (key.isEmpty && fallback.isEmpty) return const [];
-    final cacheKey = key.isNotEmpty
-        ? '$key|${year.trim()}|${fallback.map((e) => e.name).take(4).join(",")}'
-        : fallback.map((e) => e.name).join(',');
+    if (key.isEmpty && fallback.isEmpty && doubanId.trim().isEmpty) {
+      return const [];
+    }
+    final wantMc = wantMotionComic ?? SeriesScraper.isMotionComicText(title);
+    final cleanDouban = doubanId.trim();
+    final cacheKey = cleanDouban.isNotEmpty
+        ? 'douban:$cleanDouban|${fallback.map((e) => e.name).take(4).join(",")}'
+        : (key.isNotEmpty
+            ? '$key|${year.trim()}|${wantMc ? "mc" : "std"}|${fallback.map((e) => e.name).take(4).join(",")}'
+            : fallback.map((e) => e.name).join(','));
 
-    final cached = _cache[cacheKey] ?? (key.isNotEmpty ? _cache[key] : null);
+    final cached = _cache[cacheKey] ??
+        (cleanDouban.isEmpty && key.isNotEmpty && !wantMc ? _cache[key] : null);
     if (cached != null &&
         cached.isNotEmpty &&
         (cached.any((m) => m.avatarUrl.isNotEmpty) ||
@@ -153,7 +162,8 @@ class CastAvatarService {
     final future = _fetchCastForTitle(
       cleanTitle: key,
       year: year.trim(),
-      doubanId: doubanId.trim(),
+      doubanId: cleanDouban,
+      wantMotionComic: wantMc,
       fallback: fallback,
     );
     _inflight[cacheKey] = future;
@@ -161,7 +171,7 @@ class CastAvatarService {
       final result = await future;
       if (result.isNotEmpty) {
         _putCache(cacheKey, result);
-        if (key.isNotEmpty) {
+        if (cleanDouban.isEmpty && key.isNotEmpty && !wantMc) {
           _putCache(key, result);
         }
         onProgress?.call(result);
@@ -333,16 +343,9 @@ class CastAvatarService {
   }
 
   static String _normalizeTitle(String raw) {
-    var s = raw.trim();
-    s = s.replaceAll(
-      RegExp(
-        r'[\(\[（【].*?(?:4K|HDR|臻彩|杜比|蓝光|国语|粤语|中字|未删减|完整版|高清|HD|1080P|2160P).*?[\)\]）】]',
-        caseSensitive: false,
-      ),
-      '',
-    );
-    s = s.replaceAll(RegExp(r'\s+'), ' ').trim();
-    return s;
+    final cleaned = SeriesScraper.cleanSearchTitle(raw);
+    if (cleaned.isNotEmpty) return cleaned;
+    return raw.trim().replaceAll(RegExp(r'\s+'), ' ');
   }
 
   static String _normalizePortraitUrl(String raw) {
@@ -377,6 +380,7 @@ class CastAvatarService {
     required String cleanTitle,
     required String year,
     required String doubanId,
+    required bool wantMotionComic,
     required List<CastMember> fallback,
   }) async {
     if (Platform.environment.containsKey('FLUTTER_TEST')) {
@@ -387,7 +391,11 @@ class CastAvatarService {
       String id = doubanId;
       String kind = 'tv';
       if (id.isEmpty && cleanTitle.isNotEmpty) {
-        final match = await _lookupDoubanSubject(cleanTitle, year);
+        final match = await _lookupDoubanSubject(
+          cleanTitle,
+          year,
+          wantMotionComic: wantMotionComic,
+        );
         if (match != null) {
           id = match.id;
           kind = match.kind;
@@ -486,13 +494,15 @@ class CastAvatarService {
   /// then `search/subjects`, then `movie.douban.com/j/subject_suggest`.
   static Future<({String id, String kind})?> _lookupDoubanSubject(
     String title,
-    String year,
-  ) async {
+    String year, {
+    bool wantMotionComic = false,
+  }) async {
+    final searchQ = wantMotionComic ? '$title 动态漫画' : title;
     // 1. Mobile Rexxar weixin subject search (high hit rate & low rate-limit)
     final weixinUri = Uri.https(
       'm.douban.com',
       '/rexxar/api/v2/search/weixin',
-      {'q': title, 'count': '6'},
+      {'q': searchQ, 'count': '6'},
     );
     final weixinText = await _getJsonText(
       weixinUri,
@@ -502,7 +512,12 @@ class CastAvatarService {
       try {
         final decoded = jsonDecode(weixinText);
         final items = _extractRexxarSearchItems(decoded);
-        final match = _pickBestRexxarSubject(items, title, year);
+        final match = _pickBestRexxarSubject(
+          items,
+          title,
+          year,
+          wantMotionComic: wantMotionComic,
+        );
         if (match != null) return match;
       } catch (_) {}
     }
@@ -511,7 +526,7 @@ class CastAvatarService {
     final rexxarUri = Uri.https(
       'm.douban.com',
       '/rexxar/api/v2/search/subjects',
-      {'type': 'movie', 'q': title},
+      {'type': 'movie', 'q': searchQ},
     );
     final rexxarText = await _getJsonText(
       rexxarUri,
@@ -521,14 +536,19 @@ class CastAvatarService {
       try {
         final decoded = jsonDecode(rexxarText);
         final items = _extractRexxarSearchItems(decoded);
-        final match = _pickBestRexxarSubject(items, title, year);
+        final match = _pickBestRexxarSubject(
+          items,
+          title,
+          year,
+          wantMotionComic: wantMotionComic,
+        );
         if (match != null) return match;
       } catch (_) {}
     }
 
-    // 2. Fallback: classic movie.douban.com/j/subject_suggest
+    // 3. Fallback: classic movie.douban.com/j/subject_suggest
     final suggestUri = Uri.https('movie.douban.com', '/j/subject_suggest', {
-      'q': title,
+      'q': searchQ,
     });
     final jsonText = await _getJsonText(
       suggestUri,
@@ -539,17 +559,47 @@ class CastAvatarService {
       final decoded = jsonDecode(jsonText);
       if (decoded is! List || decoded.isEmpty) return null;
       Map<String, dynamic>? best;
+      int bestScore = -1;
+      final normTarget = SeriesScraper.normalizeWorkCoreTitle(title);
       for (final item in decoded.whereType<Map>()) {
         final map = Map<String, dynamic>.from(item);
         final type = (map['type'] ?? '').toString().toLowerCase();
         if (type != 'movie' && type != 'tv') continue;
         final itemTitle = (map['title'] ?? '').toString().trim();
+        final subTitle = (map['sub_title'] ?? '').toString().trim();
         final itemYear = (map['year'] ?? '').toString().trim();
-        if (itemTitle == title && (year.isEmpty || itemYear == year)) {
-          best = map;
-          break;
+        if (!SeriesScraper.isCompatibleWorkForm(
+          targetIsMotionComic: wantMotionComic,
+          candidateTitle: itemTitle,
+          candidateContext: subTitle,
+        )) {
+          continue;
         }
-        best ??= map;
+        final normItem = SeriesScraper.normalizeWorkCoreTitle(itemTitle);
+        int score = 0;
+        if (normItem == normTarget) {
+          score = 100;
+        } else if (normItem.contains(normTarget) ||
+            normTarget.contains(normItem)) {
+          score = 70;
+        } else {
+          continue;
+        }
+        if (year.isNotEmpty && itemYear.isNotEmpty) {
+          if (itemYear == year) {
+            score += 40;
+          } else {
+            final yA = int.tryParse(year);
+            final yB = int.tryParse(itemYear);
+            if (yA != null && yB != null && (yA - yB).abs() >= 2) {
+              score -= 35;
+            }
+          }
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          best = map;
+        }
       }
       if (best == null) return null;
       final id = (best['id'] ?? '').toString().trim();
@@ -578,10 +628,14 @@ class CastAvatarService {
   static ({String id, String kind})? _pickBestRexxarSubject(
     List<Map<String, dynamic>> items,
     String title,
-    String year,
-  ) {
-    ({String id, String kind})? fallbackMatch;
-    final cleanTarget = title.replaceAll(RegExp(r'\s+'), '').toLowerCase();
+    String year, {
+    bool wantMotionComic = false,
+  }) {
+    ({String id, String kind})? best;
+    int bestScore = -1;
+    final normTarget = SeriesScraper.normalizeWorkCoreTitle(title);
+    if (normTarget.isEmpty) return null;
+    final targetYearNum = int.tryParse(year);
     for (final entry in items) {
       final targetRaw = entry['target'];
       final target = targetRaw is Map
@@ -593,20 +647,53 @@ class CastAvatarService {
       final id = (target['id'] ?? '').toString().trim();
       final itemTitle = (target['title'] ?? '').toString().trim();
       final itemYear = (target['year'] ?? '').toString().trim();
+      final cardSub = (target['card_subtitle'] ?? '').toString().trim();
       if (id.isEmpty || itemTitle.isEmpty) continue;
+      if (!SeriesScraper.isCompatibleWorkForm(
+        targetIsMotionComic: wantMotionComic,
+        candidateTitle: itemTitle,
+        candidateContext: cardSub,
+      )) {
+        continue;
+      }
       final kind = type == 'tv' ? 'tv' : 'movie';
-      final cleanItem = itemTitle.replaceAll(RegExp(r'\s+'), '').toLowerCase();
-      if (cleanItem == cleanTarget) {
-        if (year.isEmpty || itemYear == year) {
-          return (id: id, kind: kind);
+      final normItem = SeriesScraper.normalizeWorkCoreTitle(itemTitle);
+      if (normItem.isEmpty) continue;
+      int score = 0;
+      if (normItem == normTarget) {
+        score = 120;
+      } else if (normItem.contains(normTarget) ||
+          normTarget.contains(normItem)) {
+        // Avoid bare root title (`斗罗大陆`) hijacking numbered sequel (`斗罗大陆2绝世唐门`)
+        if (normTarget.length >= 6 &&
+            normItem.length <= 4 &&
+            RegExp(r'\d').hasMatch(normTarget) &&
+            !RegExp(r'\d').hasMatch(normItem)) {
+          continue;
         }
-        fallbackMatch ??= (id: id, kind: kind);
-      } else if (cleanItem.contains(cleanTarget) ||
-          cleanTarget.contains(cleanItem)) {
-        fallbackMatch ??= (id: id, kind: kind);
+        score = 80;
+      } else {
+        continue;
+      }
+      if (targetYearNum != null && itemYear.isNotEmpty) {
+        final iy = int.tryParse(itemYear);
+        if (iy != null) {
+          final diff = (iy - targetYearNum).abs();
+          if (diff == 0) {
+            score += 45;
+          } else if (diff == 1) {
+            score += 20;
+          } else {
+            score -= 40;
+          }
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = (id: id, kind: kind);
       }
     }
-    return fallbackMatch;
+    return best;
   }
 
   /// Parses BOTH current Douban Rexxar `items` format AND legacy `credits`

@@ -76,11 +76,13 @@ extension _WindowsDetail on _DetailScreenState {
                           _windowsCollapsibleControlsPanel(bookmark),
                           if (hasCastSection)
                             CastAvatarSection(
-                              title: _publicLookupTitle.isNotEmpty
-                                  ? _publicLookupTitle
+                              title: _effectiveLookupTitle.isNotEmpty
+                                  ? _effectiveLookupTitle
                                   : _video.title,
                               actorRaw: _video.actor,
-                              year: _video.year,
+                              year: _effectiveLookupYear,
+                              doubanId: _effectiveDoubanId,
+                              wantMotionComic: _effectiveWantMotionComic,
                               forceDark: true,
                               allowExternalLookup:
                                   !_activeSite.isEffectivelyPrivate,
@@ -173,11 +175,11 @@ extension _WindowsDetail on _DetailScreenState {
     final specBadges =
         OhosRuntime.isOhos ? const <MediaBadge>[] : _specBadgesForHero(activeLine);
     final synopsis = _cleanWindowsSynopsis(_effectiveSeriesSynopsis());
-    final metaLine = [_video.year, _video.area, _video.remarks]
+    final metaLine = [_effectiveLookupYear, _video.area, _video.remarks]
         .where((s) => s.isNotEmpty)
         .join(' · ');
     final bool hasAnyPosterArt =
-        _video.poster.trim().isNotEmpty || _loadedPosterBytes != null;
+        _effectivePosterUrl.trim().isNotEmpty || _loadedPosterBytes != null;
     final bool showFramedPortraitCard =
         !_windowsHeroHasLandscape && hasAnyPosterArt && box.maxWidth >= 660;
     final double framedPosterHeight = showFramedPortraitCard
@@ -280,6 +282,10 @@ extension _WindowsDetail on _DetailScreenState {
         ],
         if ((douban != null && douban >= 2 && douban <= 10) ||
             (rt != null && rt >= 1 && rt <= 100) ||
+            _effectiveWantMotionComic ||
+            (_scrapeOverride != null &&
+                (_scrapeOverride!.hasWorkBinding ||
+                    _scrapeOverride!.hasEpisodeCalibration)) ||
             specBadges.isNotEmpty) ...[
           const SizedBox(height: 10),
           Wrap(
@@ -287,6 +293,27 @@ extension _WindowsDetail on _DetailScreenState {
             runSpacing: 6,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
+              if (_effectiveWantMotionComic)
+                Container(
+                  key: const ValueKey('detail-motion-comic-badge'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 3.5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0x3DFF9F0A),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: const Color(0x80FF9F0A)),
+                  ),
+                  child: const Text(
+                    '动态漫画',
+                    style: TextStyle(
+                      color: Color(0xFFFFE0A8),
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
               if (douban != null && douban >= 2 && douban <= 10)
                 Container(
                   key: const ValueKey('detail-douban-badge'),
@@ -394,9 +421,13 @@ extension _WindowsDetail on _DetailScreenState {
             key: _transitionPosterKey,
             child: LandscapePosterImage(
               key: const ValueKey('windows-detail-poster'),
-              url: _video.poster,
-              title: _publicLookupTitle,
-              year: _video.year,
+              url: _effectivePosterUrl,
+              title: _effectiveLookupTitle,
+              year: _effectiveLookupYear,
+              preferredBackdropUrl: _effectiveBackdropUrl,
+              preferredDoubanId: _effectiveDoubanId,
+              preferredDoubanIsTv: _effectiveDoubanIsTv,
+              wantMotionComic: _effectiveWantMotionComic,
               allowExternalLookup: !_activeSite.isEffectivelyPrivate,
               fit: BoxFit.cover,
               alignment: Alignment.topCenter,
@@ -506,9 +537,9 @@ extension _WindowsDetail on _DetailScreenState {
                     fit: StackFit.expand,
                     children: [
                       PosterImage(
-                        url: _video.poster,
-                        title: _publicLookupTitle,
-                        year: _video.year,
+                        url: _effectivePosterUrl,
+                        title: _effectiveLookupTitle,
+                        year: _effectiveLookupYear,
                         fit: BoxFit.cover,
                         highRes: true,
                         placeholder: const ColoredBox(
@@ -595,11 +626,13 @@ extension _WindowsDetail on _DetailScreenState {
 
   Widget _windowsCinemaActionPill(
     String label, {
+    Key? key,
     IconData? icon,
     bool selected = false,
     VoidCallback? onPressed,
   }) {
     return TextButton(
+      key: key,
       onPressed: onPressed,
       style: TextButton.styleFrom(
         foregroundColor: Colors.white,
@@ -710,6 +743,20 @@ extension _WindowsDetail on _DetailScreenState {
                 icon: CupertinoIcons.arrow_2_squarepath,
                 onPressed: _showSourcePickerSheet,
               ),
+              if (!_activeSite.isEffectivelyPrivate)
+                _windowsCinemaActionPill(
+                  (_scrapeOverride != null &&
+                          (_scrapeOverride!.hasWorkBinding ||
+                              _scrapeOverride!.hasEpisodeCalibration))
+                      ? '刮削匹配 · 已校准'
+                      : '刮削匹配',
+                  key: const ValueKey('windows-detail-scrape-btn'),
+                  icon: CupertinoIcons.sparkles,
+                  selected: _scrapeOverride != null &&
+                      (_scrapeOverride!.hasWorkBinding ||
+                          _scrapeOverride!.hasEpisodeCalibration),
+                  onPressed: () => _openSeriesScrapeSheet(initialTab: 0),
+                ),
               if (cleanSynopsis.isNotEmpty)
                 _windowsDrawerToggleButton(
                   key: const ValueKey('windows-detail-synopsis-toggle'),
@@ -822,14 +869,97 @@ extension _WindowsDetail on _DetailScreenState {
                         children: [
                           const Divider(height: 1, color: _cinemaBorder),
                           const SizedBox(height: 14),
-                          Row(
+                          Wrap(
+                            spacing: 10,
+                            runSpacing: 8,
+                            crossAxisAlignment: WrapCrossAlignment.center,
                             children: [
                               _windowsCinemaActionPill(
                                 '季数 · ${_currentSeasonLabel(activeLine!)}',
                                 icon: CupertinoIcons.chevron_down,
                                 onPressed: _showSeasonPickerSheet,
                               ),
-                              const Spacer(),
+                              if (!_activeSite.isEffectivelyPrivate)
+                                _windowsCinemaActionPill(
+                                  '集数校准',
+                                  key: const ValueKey(
+                                    'windows-detail-episode-scrape-btn',
+                                  ),
+                                  icon: CupertinoIcons.slider_horizontal_3,
+                                  selected: _scrapeOverride
+                                          ?.hasEpisodeCalibration ??
+                                      false,
+                                  onPressed: () =>
+                                      _openSeriesScrapeSheet(initialTab: 1),
+                                ),
+                              if (activeIndices.length >= 10)
+                                SizedBox(
+                                  width: 210,
+                                  height: 36,
+                                  child: TextField(
+                                    key: const ValueKey(
+                                      'windows-episode-locator-field',
+                                    ),
+                                    controller: _windowsEpisodeQueryCtrl,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12.5,
+                                    ),
+                                    decoration: InputDecoration(
+                                      hintText: '输入集数定位，如 180',
+                                      hintStyle: const TextStyle(
+                                        color: Color(0x70FFFFFF),
+                                        fontSize: 12,
+                                      ),
+                                      prefixIcon: const Icon(
+                                        CupertinoIcons.search,
+                                        color: Color(0x88FFFFFF),
+                                        size: 14,
+                                      ),
+                                      suffixIcon: _windowsEpisodeQuery.isNotEmpty
+                                          ? IconButton(
+                                              padding: EdgeInsets.zero,
+                                              iconSize: 14,
+                                              onPressed: () =>
+                                                  _updateWindowsState(() {
+                                                _windowsEpisodeQueryCtrl.clear();
+                                                _windowsEpisodeQuery = '';
+                                                _selectedPage = 0;
+                                              }),
+                                              icon: const Icon(
+                                                CupertinoIcons.xmark_circle_fill,
+                                                color: Color(0x88FFFFFF),
+                                              ),
+                                            )
+                                          : null,
+                                      filled: true,
+                                      fillColor:
+                                          Colors.white.withValues(alpha: 0.07),
+                                      isDense: true,
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 8,
+                                      ),
+                                      border: OutlineInputBorder(
+                                        borderRadius: BorderRadius.circular(18),
+                                        borderSide: const BorderSide(
+                                          color: _cinemaBorder,
+                                        ),
+                                      ),
+                                      enabledBorder: OutlineInputBorder(
+                                        borderRadius: BorderRadius.circular(18),
+                                        borderSide: const BorderSide(
+                                          color: _cinemaBorder,
+                                        ),
+                                      ),
+                                    ),
+                                    onChanged: (v) => _updateWindowsState(() {
+                                      _windowsEpisodeQuery = v;
+                                      _selectedPage = 0;
+                                    }),
+                                  ),
+                                ),
                               Text(
                                 '共 ${activeIndices.length} 集',
                                 style: const TextStyle(
@@ -940,8 +1070,20 @@ extension _WindowsDetail on _DetailScreenState {
   Widget _windowsEpisodes(WatchHistoryEntry? bookmark) {
     final lineIndex = _selectedLine.clamp(0, _video.lines.length - 1);
     final line = _video.lines[lineIndex];
+    final scrape = _scrapeResultForLine(line);
     final active = _activeEpisodeIndicesFor(line);
-    final indices = _descending ? active.reversed.toList() : active;
+    final ordered = _descending ? active.reversed.toList() : active;
+    final filterKw = _windowsEpisodeQuery.trim().toLowerCase();
+    final indices = filterKw.isEmpty
+        ? ordered
+        : ordered.where((idx) {
+            final ep = line.episodes[idx];
+            final info = scrape.byOriginalIndex[idx];
+            final numStr = info.resolvedEpisodeNumber?.toString() ?? '';
+            return ep.name.toLowerCase().contains(filterKw) ||
+                info.displayLabel.toLowerCase().contains(filterKw) ||
+                numStr == filterKw;
+          }).toList();
     final pageCount = (indices.length / CmsParser.episodePageSize).ceil();
     final page = _selectedPage.clamp(0, pageCount == 0 ? 0 : pageCount - 1);
     final visible = indices
@@ -953,60 +1095,160 @@ extension _WindowsDetail on _DetailScreenState {
           padding: const EdgeInsets.only(bottom: 14),
           child: Text(reason, style: const TextStyle(color: _cinemaMuted)),
         ),
+      if (indices.isEmpty && filterKw.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          child: Row(
+            children: [
+              Text(
+                '未找到匹配「$_windowsEpisodeQuery」的剧集',
+                style: const TextStyle(color: _cinemaMuted, fontSize: 13),
+              ),
+              const SizedBox(width: 10),
+              _windowsCinemaActionPill(
+                '清除筛选',
+                onPressed: () => _updateWindowsState(() {
+                  _windowsEpisodeQueryCtrl.clear();
+                  _windowsEpisodeQuery = '';
+                  _selectedPage = 0;
+                }),
+              ),
+            ],
+          ),
+        ),
       LayoutBuilder(builder: (context, box) {
-        final columns = (box.maxWidth / 124).floor().clamp(2, 10);
+        final columns = (box.maxWidth / 136).floor().clamp(2, 10);
         return Wrap(spacing: 10, runSpacing: 10, children: [
           for (final index in visible)
-            SizedBox(
-              width: (box.maxWidth - (columns - 1) * 10) / columns,
-              child: Tooltip(
-                message: [
-                  line.episodes[index].name,
-                  if (_episodeUnavailableReason(line.episodes[index])
-                      case final reason?)
-                    reason
-                ].join(' · '),
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    key: ValueKey('ep_card_${lineIndex}_$index'),
-                    onTap: () => _openPlayer(lineIndex, index),
-                    borderRadius: BorderRadius.circular(12),
-                    child: Container(
-                      constraints: const BoxConstraints(minHeight: 46),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 11,
-                      ),
-                      alignment: Alignment.centerLeft,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(12),
-                        color: bookmark?.line == line.name &&
-                                bookmark?.index == index
-                            ? const Color(0x334C9AFF)
-                            : Colors.white.withValues(alpha: .06),
-                        border: Border.all(
-                          color: bookmark?.line == line.name &&
-                                  bookmark?.index == index
-                              ? const Color(0xFF4C9AFF)
-                              : _cinemaBorder,
+            Builder(builder: (_) {
+              final ep = line.episodes[index];
+              final info = scrape.byOriginalIndex[index];
+              final showDualLine = info.resolvedEpisodeNumber != null &&
+                  !info.isSpecial &&
+                  ep.name.trim() != info.displayLabel &&
+                  !ep.name.contains('第${info.resolvedEpisodeNumber}集') &&
+                  !ep.name.contains('第 ${info.resolvedEpisodeNumber} 集');
+              final isBookmarked =
+                  bookmark?.line == line.name && bookmark?.index == index;
+              return SizedBox(
+                width: (box.maxWidth - (columns - 1) * 10) / columns,
+                child: Tooltip(
+                  message: [
+                    if (showDualLine) info.displayLabel,
+                    ep.name,
+                    if (info.isSpecial) '特别篇/预告',
+                    if (_episodeUnavailableReason(ep) case final reason?)
+                      reason,
+                  ].join(' · '),
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      key: ValueKey('ep_card_${lineIndex}_$index'),
+                      onTap: () => _openPlayer(lineIndex, index),
+                      borderRadius: BorderRadius.circular(12),
+                      child: Container(
+                        constraints: const BoxConstraints(minHeight: 48),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 9,
                         ),
-                      ),
-                      child: Text(
-                        line.episodes[index].name,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
+                        alignment: Alignment.centerLeft,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          color: isBookmarked
+                              ? const Color(0x334C9AFF)
+                              : Colors.white.withValues(alpha: .06),
+                          border: Border.all(
+                            color: isBookmarked
+                                ? const Color(0xFF4C9AFF)
+                                : _cinemaBorder,
+                          ),
                         ),
+                        child: showDualLine
+                            ? Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          info.displayLabel,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ),
+                                      if (info.qualityTag.isNotEmpty)
+                                        Text(
+                                          info.qualityTag,
+                                          style: const TextStyle(
+                                            color: Color(0xFF8AB8FF),
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    ep.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Color(0x99FFFFFF),
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              )
+                            : Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      ep.name,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                  if (info.isSpecial) ...[
+                                    const SizedBox(width: 4),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 5,
+                                        vertical: 1.5,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0x33FF9F0A),
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: const Text(
+                                        '特',
+                                        style: TextStyle(
+                                          color: Color(0xFFFFD080),
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            ),
+              );
+            }),
         ]);
       }),
       if (pageCount > 1)

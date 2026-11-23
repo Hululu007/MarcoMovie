@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/cupertino.dart';
 import 'models.dart';
+import 'series_scraper.dart';
 
 /// Descriptor for a Rex-style self-built curated discovery shelf on the Home
 /// screen (近期国内热门、豆瓣高分、烂番茄、迪士尼、漫威、DC).
@@ -449,7 +450,7 @@ class CuratedDiscoveryService {
   /// Normalizes a title for fuzzy matching against a user's CMS source search
   /// results.
   static String normalizeMatchKey(String title) {
-    var s = title.trim().toLowerCase();
+    var s = SeriesScraper.normalizeSequelNumerals(title.trim()).toLowerCase();
     s = s.replaceAll(
       RegExp(
         r'[\(\[（【].*?(?:4k|hdr|臻彩|杜比|蓝光|国语|粤语|中字|未删减|完整版|高清|hd|1080p|2160p|抢先|tc|ts).*?[\)\]）】]',
@@ -464,6 +465,10 @@ class CuratedDiscoveryService {
   /// Scores how closely [candidateTitle] matches [targetTitle] so user-source
   /// resolution picks the exact movie/series first.
   static int titleMatchScore(String targetTitle, String candidateTitle) {
+    if (SeriesScraper.isMotionComicText(targetTitle) !=
+        SeriesScraper.isMotionComicText(candidateTitle)) {
+      return 0;
+    }
     final a = normalizeMatchKey(targetTitle);
     final b = normalizeMatchKey(candidateTitle);
     if (a.isEmpty || b.isEmpty) return 0;
