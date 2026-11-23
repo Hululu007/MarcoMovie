@@ -873,6 +873,85 @@ public final class R9SameNameImportCheck {
         } finally {
             exec2.shutdownNow();
         }
+
+        // -----------------------------------------------------------------
+        // 3. Round-3 R9: Updating the SAME SAF script URI twice (# revision-one -> # revision-two)
+        //    MUST leave only 1 site (latest revision) with the SAME stable document key so
+        //    SELECTED_SITE continues working; importing a DIFFERENT SAF URI with the same filename
+        //    (dirB/source.py) produces 2 independent sites!
+        // -----------------------------------------------------------------
+        File root3 = Files.createTempDirectory("r9-same-doc-update-").toFile();
+        ExecutorService exec3 = Executors.newSingleThreadExecutor();
+        try {
+            ContentResolver cr3 = new ContentResolver();
+            Uri sameUri = Uri.parse("content://docs/dirA/source.py");
+            Uri otherUri = Uri.parse("content://docs/dirB/source.py");
+            cr3.names.put(sameUri.toString(), "source.py");
+            cr3.names.put(otherUri.toString(), "source.py");
+
+            MainActivity host3 = newHost(root3, exec3, cr3);
+
+            // Revision 1 on dirA/source.py
+            cr3.bodies.put(
+                    sameUri.toString(),
+                    "# revision-one\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+            SourceController.importLocalUri(host3, sameUri, false);
+            exec3.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            drainUntil(host3, () -> host3.config != null && host3.config.sites.size() == 1);
+            String rev1Key = host3.config.sites.get(0).key;
+            String rev1Api = host3.config.sites.get(0).api;
+            check(
+                    rev1Key.equals(host3.prefs.getString(Prefs.SELECTED_SITE, ""))
+                            && readApiFile(rev1Api).startsWith("# revision-one"),
+                    "R9 Round-3: revision-one imported with stable key and selected");
+
+            // Revision 2 on SAME URI dirA/source.py (only file body changed!)
+            cr3.bodies.put(
+                    sameUri.toString(),
+                    "# revision-two\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+            SourceController.importLocalUri(host3, sameUri, false);
+            exec3.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            drainUntil(
+                    host3,
+                    () ->
+                            host3.config != null
+                                    && !host3.config.sites.isEmpty()
+                                    && !rev1Api.equals(host3.config.sites.get(0).api));
+            check(
+                    host3.config.sites.size() == 1
+                            && rev1Key.equals(host3.config.sites.get(0).key)
+                            && rev1Key.equals(host3.prefs.getString(Prefs.SELECTED_SITE, "")),
+                    "R9 Round-3: re-importing same SAF URI keeps site count=1 with unchanged selected key");
+
+            ConfigStore.RecoveredState coldSameDoc =
+                    new ConfigStore(new File(root3, "cfg"))
+                            .loadRecoveredState(
+                                    host3.prefs.getString(Prefs.ORIGIN, null),
+                                    host3.prefs.getString(Prefs.SELECTED_SITE, null),
+                                    host3.prefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, null));
+            Cms.Config coldSameCfg = Cms.parseConfig(coldSameDoc.raw, coldSameDoc.origin);
+            check(
+                    coldSameCfg.sites.size() == 1
+                            && rev1Key.equals(coldSameCfg.sites.get(0).key)
+                            && rev1Key.equals(coldSameDoc.selectedSite)
+                            && readApiFile(coldSameCfg.sites.get(0).api).startsWith("# revision-two"),
+                    "R9 Round-3 cold restart: same SAF URI update leaves only revision-two and preserves selected site");
+
+            // Importing a DIFFERENT SAF URI with the same filename dirB/source.py creates a 2nd independent site!
+            cr3.bodies.put(
+                    otherUri.toString(),
+                    "# other-doc-B\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+            SourceController.importLocalUri(host3, otherUri, false);
+            exec3.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            drainUntil(host3, () -> host3.config != null && host3.config.sites.size() == 2);
+            check(
+                    host3.config.sites.size() == 2
+                            && readApiFile(host3.config.sites.get(0).api).startsWith("# revision-two")
+                            && readApiFile(host3.config.sites.get(1).api).startsWith("# other-doc-B"),
+                    "R9 Round-3 distinct URI: dirB/source.py stays isolated from dirA/source.py (2 independent sites)");
+        } finally {
+            exec3.shutdownNow();
+        }
     }
 }
 """,

@@ -884,6 +884,119 @@ public final class ReworkR1ToR5Checks {
                 "R5: open-ended credits does not advance when hasNextEpisode=false");
     }
 
+    private static String twoSiteLocalJson(String label) {
+        return "{\"sites\":["
+                + "{\"key\":\"first\",\"name\":\""
+                + label
+                + " first\",\"type\":1,\"api\":\"https://catalog.invalid/"
+                + label
+                + "/first\"},"
+                + "{\"key\":\"second\",\"name\":\""
+                + label
+                + " second\",\"type\":1,\"api\":\"https://catalog.invalid/"
+                + label
+                + "/second\"}"
+                + "]}";
+    }
+
+    private static String largeQuoteHeavyJsConfig() throws Exception {
+        StringBuilder js = new StringBuilder(140_000);
+        for (int r = 0; r < 2100; r++) {
+            js.append("function category(){return {\"key\":\"value\",\"path\":\"a\\\\b\"};}\n");
+        }
+        String script = js.toString();
+        org.json.JSONArray sites = new org.json.JSONArray();
+        for (int i = 0; i < 109; i++) {
+            sites.put(
+                    new org.json.JSONObject()
+                            .put("key", "b" + i)
+                            .put("name", "Js source " + i)
+                            .put("type", 3)
+                            .put("api", "./site" + i + ".js")
+                            .put("ext", new org.json.JSONObject().put("_mm_entrySource", script)));
+        }
+        return new org.json.JSONObject().put("sites", sites).toString();
+    }
+
+    private static void runR2Round3HaltChild(Path dir, String mode) throws Exception {
+        ConfigStore cs = new ConfigStore(dir.toFile());
+        String raw = "local".equals(mode) ? twoSiteLocalJson("B") : largeQuoteHeavyJsConfig();
+        String origin = "local".equals(mode) ? "" : "https://beta.invalid/two/config.json";
+        String selected = "local".equals(mode) ? "first" : "b0";
+        cs.saveAsync(
+                        raw,
+                        new ConfigStore.PointerSnapshot(origin, selected),
+                        new ConfigStore.PointerStore() {
+                            @Override
+                            public ConfigStore.PointerSnapshot readCurrentPointers() {
+                                return new ConfigStore.PointerSnapshot("", "second");
+                            }
+
+                            @Override
+                            public void applyPointers(ConfigStore.PointerSnapshot p) {
+                                // Simulate abrupt process death AFTER config-state.json &
+                                // config.json are durable on disk, BEFORE preferences are updated!
+                                Runtime.getRuntime().halt(35);
+                            }
+                        },
+                        null)
+                .get(30, TimeUnit.SECONDS);
+    }
+
+    private static void runR2Round3ColdChild(Path dir, String mode) throws Exception {
+        if ("local".equals(mode)) {
+            String bodyA = twoSiteLocalJson("A");
+            String subIdA = ConfigStore.subscriptionIdentity("", bodyA);
+            // 1. 2-arg recovery (empty origin without subId) MUST NOT attribute A's "second" to B!
+            ConfigStore.RecoveredState rec2 =
+                    new ConfigStore(dir.toFile()).loadRecoveredState("", "second");
+            Cms.Config parsed2 = Cms.parseConfig(rec2.raw, rec2.origin);
+            check(
+                    rec2.fromAtomicBundle
+                            && "".equals(rec2.origin)
+                            && "first".equals(rec2.selectedSite)
+                            && "B first".equals(parsed2.sites.get(0).name),
+                    "R2 Round-3 local halt (2-arg): different SAF JSON B recovers B/first (not stale A/second)");
+
+            // 2. 3-arg recovery with stale A subscriptionId MUST also recover B/first!
+            ConfigStore.RecoveredState rec3 =
+                    new ConfigStore(dir.toFile()).loadRecoveredState("", "second", subIdA);
+            Cms.Config parsed3 = Cms.parseConfig(rec3.raw, rec3.origin);
+            check(
+                    rec3.fromAtomicBundle
+                            && "first".equals(rec3.selectedSite)
+                            && "B first".equals(parsed3.sites.get(0).name),
+                    "R2 Round-3 local halt (3-arg stale subId A): recovers B/first");
+
+            // 3. Positive control: manual switch first->second within SAME local SAF JSON B
+            //    (matching subId B) preserves B/second across cold restart!
+            ConfigStore.RecoveredState recSameLocal =
+                    new ConfigStore(dir.toFile())
+                            .loadRecoveredState("", "second", rec3.subscriptionId);
+            check(
+                    recSameLocal.fromAtomicBundle && "second".equals(recSameLocal.selectedSite),
+                    "R2 Round-3 local control: manual site switch within SAME local SAF JSON preserves 'second'");
+            return;
+        }
+        // Large quote-/backslash-/newline-heavy near-16-MiB config
+        long stateFileBytes = Files.size(dir.resolve(ConfigStore.STATE_FILE_NAME));
+        ConfigStore.RecoveredState recLarge =
+                new ConfigStore(dir.toFile())
+                        .loadRecoveredState("https://alpha.invalid/one/config.json", "second");
+        Cms.Config parsedLarge = Cms.parseConfig(recLarge.raw, recLarge.origin);
+        check(
+                recLarge.fromAtomicBundle
+                        && stateFileBytes < Cms.MAX_JSON
+                        && "https://beta.invalid/two/config.json".equals(recLarge.origin)
+                        && "b0".equals(recLarge.selectedSite)
+                        && parsedLarge.sites.size() == 109
+                        && "b0".equals(parsedLarge.sites.get(0).key)
+                        && "https://beta.invalid/two/site0.js".equals(parsedLarge.sites.get(0).api),
+                "R2 Round-3 large config halt: 109-site near-16-MiB v2 bundle ("
+                        + stateFileBytes
+                        + " B) recovers B origin, B/b0, and resolves ./site0.js to beta.invalid");
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length >= 2 && "--r2-halt".equals(args[0])) {
             runR2HaltChild(Paths.get(args[1]));
@@ -891,6 +1004,14 @@ public final class ReworkR1ToR5Checks {
         }
         if (args.length >= 2 && "--r2-cold".equals(args[0])) {
             runR2ColdChild(Paths.get(args[1]));
+            return;
+        }
+        if (args.length >= 3 && "--r2-r3-halt".equals(args[0])) {
+            runR2Round3HaltChild(Paths.get(args[1]), args[2]);
+            return;
+        }
+        if (args.length >= 3 && "--r2-r3-cold".equals(args[0])) {
+            runR2Round3ColdChild(Paths.get(args[1]), args[2]);
             return;
         }
         File workDir = new File(args[0]);

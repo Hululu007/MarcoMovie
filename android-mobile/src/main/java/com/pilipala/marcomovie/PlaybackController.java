@@ -281,6 +281,7 @@ final class PlaybackController {
 
     static void resolvePlayer(
             MainActivity a, Cms.Site s, Cms.Video v, Cms.Line line, Cms.Episode ep) {
+        if (!s.supported() && a.playbackLoading != null) return;
         if (a.miniMode) {
             a.changingMiniEpisode = true;
             showEpisodeDetails(a, s, v);
@@ -1535,6 +1536,8 @@ final class PlaybackController {
                                                 ready.setOnCompletionListener(
                                                         mp -> {
                                                             if (ticket != a.generation
+                                                                    || sessionId
+                                                                            != a.fullscreenPlaybackSession
                                                                     || a.player != ready) return;
                                                             if (a.markerHost != null)
                                                                 a.markerHost.abort();
@@ -1594,10 +1597,11 @@ final class PlaybackController {
                                                                         a.activeEpisode;
                                                                 a.ui.postDelayed(
                                                                         () -> {
-                                                                            if (ticket
-                                                                                            == a.generation
-                                                                                    && !a
-                                                                                            .isFinishing()) {
+                                                                            if (isFullscreenRetrySessionActive(
+                                                                                    a, ticket,
+                                                                                    sessionId,
+                                                                                    retryLine,
+                                                                                    retryEp)) {
                                                                                 resolvePlayer(
                                                                                         a, s, v,
                                                                                         retryLine,
@@ -1632,6 +1636,8 @@ final class PlaybackController {
                                                 ready.setOnErrorListener(
                                                         (mp, what, extra) -> {
                                                             if (ticket != a.generation
+                                                                    || sessionId
+                                                                            != a.fullscreenPlaybackSession
                                                                     || a.player != ready)
                                                                 return true;
                                                             if (a.markerHost != null)
@@ -1684,10 +1690,11 @@ final class PlaybackController {
                                                                             a.activeEpisode;
                                                                     a.ui.postDelayed(
                                                                             () -> {
-                                                                                if (ticket
-                                                                                                == a.generation
-                                                                                        && !a
-                                                                                                .isFinishing()) {
+                                                                                if (isFullscreenRetrySessionActive(
+                                                                                        a, ticket,
+                                                                                        sessionId,
+                                                                                        retryLine,
+                                                                                        retryEp)) {
                                                                                     resolvePlayer(
                                                                                             a, s, v,
                                                                                             retryLine,
@@ -1732,13 +1739,18 @@ final class PlaybackController {
                                                                         kernelAction.resumeAtMs;
                                                                 a.playStatus.setText(
                                                                         kernelAction.statusText);
+                                                                final Cms.Line retryLine =
+                                                                        a.activeLine;
+                                                                final Cms.Episode retryEp =
+                                                                        a.activeEpisode;
                                                                 if (kernelAction.delayMs > 0L) {
                                                                     a.ui.postDelayed(
                                                                             () -> {
-                                                                                if (ticket
-                                                                                                == a.generation
-                                                                                        && !a
-                                                                                                .isFinishing()) {
+                                                                                if (isFullscreenRetrySessionActive(
+                                                                                        a, ticket,
+                                                                                        sessionId,
+                                                                                        retryLine,
+                                                                                        retryEp)) {
                                                                                     playerPage(
                                                                                             a, s, v,
                                                                                             ep);
@@ -1748,17 +1760,22 @@ final class PlaybackController {
                                                                 } else {
                                                                     a.ui.post(
                                                                             () -> {
-                                                                                if (ticket
-                                                                                        == a.generation)
+                                                                                if (isFullscreenRetrySessionActive(
+                                                                                        a, ticket,
+                                                                                        sessionId,
+                                                                                        retryLine,
+                                                                                        retryEp)) {
                                                                                     playerPage(
                                                                                             a, s, v,
                                                                                             ep);
+                                                                                }
                                                                             });
                                                                 }
                                                                 return true;
                                                             }
                                                             if (tryAdvanceQualityOrLiveStream(
-                                                                    a, ticket, s, v, ep)) {
+                                                                    a, ticket, sessionId, s, v,
+                                                                    ep)) {
                                                                 return true;
                                                             }
                                                             if (v != null
@@ -1809,10 +1826,18 @@ final class PlaybackController {
                                                                                 "当前线路异常，正在切换至 "
                                                                                         + nextLine.name
                                                                                         + "…");
+                                                                        final Cms.Line origLine =
+                                                                                a.activeLine;
+                                                                        final Cms.Episode origEp =
+                                                                                a.activeEpisode;
                                                                         a.ui.post(
                                                                                 () -> {
-                                                                                    if (ticket
-                                                                                            == a.generation) {
+                                                                                    if (isFullscreenRetrySessionActive(
+                                                                                            a,
+                                                                                            ticket,
+                                                                                            sessionId,
+                                                                                            origLine,
+                                                                                            origEp)) {
                                                                                         rememberEpisodeOnBackStack(
                                                                                                 a,
                                                                                                 nextLine,
@@ -1865,12 +1890,13 @@ final class PlaybackController {
                                                             && curQIdx + 1 < liveQs.length()) {
                                                         a.ui.postDelayed(
                                                                 () -> {
-                                                                    if (ticket == a.generation
-                                                                            && !a.prepared
-                                                                            && a.current != null
-                                                                            && a.current.player) {
+                                                                    if (isFullscreenSessionActive(
+                                                                                    a, ticket,
+                                                                                    sessionId)
+                                                                            && !a.prepared) {
                                                                         tryAdvanceQualityOrLiveStream(
-                                                                                a, ticket, s, v,
+                                                                                a, ticket,
+                                                                                sessionId, s, v,
                                                                                 ep);
                                                                     }
                                                                 },
@@ -2271,6 +2297,12 @@ final class PlaybackController {
 
     static boolean tryAdvanceQualityOrLiveStream(
             MainActivity a, int ticket, Cms.Site s, Cms.Video v, Cms.Episode ep) {
+        return tryAdvanceQualityOrLiveStream(
+                a, ticket, a != null ? a.fullscreenPlaybackSession : 0, s, v, ep);
+    }
+
+    static boolean tryAdvanceQualityOrLiveStream(
+            MainActivity a, int ticket, int sessionId, Cms.Site s, Cms.Video v, Cms.Episode ep) {
         if ("live".equals(s.key) && a.prefs != null && ep.url != null && !ep.url.isEmpty()) {
             String failedMetrics =
                     LiveQualityPolicy.recordStreamFailure(
@@ -2293,10 +2325,13 @@ final class PlaybackController {
         } catch (Exception ignored) {
         }
         applyCandidateHeaders(s, ep, nextQ);
+        final Cms.Line retryLine = a.activeLine;
+        final Cms.Episode retryEp = a.activeEpisode;
         if (LiveQualityPolicy.isEmbyLiveUrl(nextUrl)) {
             a.ui.post(
                     () -> {
-                        if (ticket == a.generation) {
+                        if (isFullscreenRetrySessionActive(
+                                a, ticket, sessionId, retryLine, retryEp)) {
                             LiveController.playEmbyLiveAsync(a, s, v, ep, nextUrl);
                         }
                     });
@@ -2312,7 +2347,9 @@ final class PlaybackController {
         }
         a.ui.post(
                 () -> {
-                    if (ticket == a.generation) playerPage(a, s, v, ep);
+                    if (isFullscreenRetrySessionActive(a, ticket, sessionId, retryLine, retryEp)) {
+                        playerPage(a, s, v, ep);
+                    }
                 });
         return true;
     }
@@ -2516,6 +2553,37 @@ final class PlaybackController {
                 && a.fullscreenPlaybackSession == sessionId
                 && a.current != null
                 && a.current.player;
+    }
+
+    /**
+     * Authoritative guard for delayed/posted fullscreen retry callbacks (network reconnect, EOF
+     * reconnect, kernel fallback, line hop, and live quality failover). Requires both the playback
+     * session ID and the target line/episode to remain unchanged so an expired retry from episode A
+     * can never overwrite {@code a.activeEpisode} or hijack playback after switching to episode B.
+     */
+    static boolean isFullscreenRetrySessionActive(
+            MainActivity a,
+            int ticket,
+            int sessionId,
+            Cms.Line expectedLine,
+            Cms.Episode expectedEpisode) {
+        if (a == null
+                || a.isFinishing()
+                || a.isDestroyed()
+                || a.generation != ticket
+                || a.fullscreenPlaybackSession != sessionId) {
+            return false;
+        }
+        if (a.current != null && !a.current.player) {
+            return false;
+        }
+        if (expectedLine != null && a.activeLine != expectedLine) {
+            return false;
+        }
+        if (expectedEpisode != null && a.activeEpisode != expectedEpisode) {
+            return false;
+        }
+        return true;
     }
 
     /**

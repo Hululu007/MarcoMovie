@@ -629,6 +629,399 @@ public final class R2AndR4Round2Check {
     )
 
 
+def run_r4_reconnect_episode_switch_harness(work_dir: Path, base_cp: list[Path]) -> None:
+    """Exercise REAL PlaybackController.playerPage onError(500ms IO retry) + onCompletion(450ms EOF retry) + changeEpisode(B) in BOTH return orders."""
+    r4r_dir = work_dir / "r4-reconnect-r3"
+    r4r_src = r4r_dir / "src"
+    r4r_classes = r4r_dir / "classes"
+    r4r_src.mkdir(parents=True, exist_ok=True)
+    r4r_classes.mkdir(parents=True, exist_ok=True)
+
+    stubs = {
+        "android/content/Context.java": """package android.content;
+public class Context {}
+""",
+        "android/content/ContextWrapper.java": """package android.content;
+public class ContextWrapper extends Context {
+    public ContextWrapper(Context base) {}
+}
+""",
+        "android/app/Activity.java": """package android.app;
+public class Activity extends android.content.Context {
+    public boolean isFinishing() { return false; }
+    public boolean isDestroyed() { return false; }
+    public void setRequestedOrientation(int requestedOrientation) {}
+    public android.view.Window getWindow() { return null; }
+    public android.view.View getCurrentFocus() { return null; }
+}
+""",
+        "android/view/View.java": """package android.view;
+public class View {
+    public static final int VISIBLE = 0;
+    public static final int GONE = 8;
+    public void setVisibility(int v) {}
+    public ViewParent getParent() { return null; }
+    public boolean requestFocus() { return true; }
+    public void setFocusable(boolean b) {}
+}
+""",
+        "android/view/ViewGroup.java": """package android.view;
+public class ViewGroup extends View {
+    public static class LayoutParams {
+        public LayoutParams(int w, int h) {}
+    }
+    public void addView(View v, LayoutParams lp) {}
+    public void removeView(View v) {}
+}
+""",
+        "android/widget/FrameLayout.java": """package android.widget;
+import android.view.*;
+public class FrameLayout extends ViewGroup {
+    public static class LayoutParams extends ViewGroup.LayoutParams {
+        public LayoutParams(int w, int h) { super(w, h); }
+    }
+}
+""",
+        "android/widget/TextView.java": """package android.widget;
+public class TextView extends android.view.View {
+    public CharSequence lastText = "";
+    public void setText(CharSequence s) { lastText = s; }
+}
+""",
+        "android/os/Handler.java": """package android.os;
+import java.util.*;
+public class Handler {
+    public final List<Runnable> delayed = new ArrayList<>();
+    public final List<Long> delayedMs = new ArrayList<>();
+    public final List<Runnable> immediate = new ArrayList<>();
+    public void removeCallbacks(Runnable r) {}
+    public boolean post(Runnable r) { immediate.add(r); return true; }
+    public boolean postDelayed(Runnable r, long ms) {
+        delayed.add(r);
+        delayedMs.add(ms);
+        return true;
+    }
+}
+""",
+        "com/pilipala/marcomovie/PluginDialogStyler.java": """package com.pilipala.marcomovie;
+final class PluginDialogStyler {
+    static void watch(MainActivity a) {}
+}
+""",
+        "com/pilipala/marcomovie/PlaybackLoading.java": """package com.pilipala.marcomovie;
+final class PlaybackLoading extends android.widget.FrameLayout {
+    PlaybackLoading(MainActivity a) {}
+    void start() {}
+    void stop() {}
+}
+""",
+        "com/pilipala/marcomovie/RequestScope.java": """package com.pilipala.marcomovie;
+import java.util.concurrent.*;
+final class RequestScope {
+    static Future<?> submit(ExecutorService pool, Runnable task) {
+        pool.execute(task);
+        return new FutureTask<>(task, null);
+    }
+}
+""",
+        "com/pilipala/marcomovie/MoviePlayer.java": """package com.pilipala.marcomovie;
+public class MoviePlayer {
+    public int pos = 12_000;
+    public int dur = 2_400_000;
+    public int getCurrentPosition() { return pos; }
+    public int getDuration() { return dur; }
+    public void release() {}
+    public static boolean isPrematureProgressiveEnd(boolean live, int pos, int dur) {
+        return !live && dur > 60_000 && pos > 5_000 && pos < dur - 30_000;
+    }
+}
+""",
+        "com/pilipala/marcomovie/MainActivity.java": """package com.pilipala.marcomovie;
+import android.content.SharedPreferences;
+import android.widget.FrameLayout;
+import android.widget.TextView;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class MainActivity extends android.app.Activity {
+    static final class Screen {
+        final Runnable render;
+        boolean player;
+        Screen(Runnable render) { this.render = render; }
+    }
+    public final android.os.Handler ui = new android.os.Handler();
+    public final List<Future<?>> pageRequests = new ArrayList<>();
+    public final ArrayDeque<Screen> back = new ArrayDeque<>();
+    public Screen current = new Screen(() -> {});
+    public int generation = 37;
+    public int fullscreenPlaybackSession = 100;
+    public int playbackResolveSerial = 1;
+    public boolean miniMode, changingMiniEpisode, prepared, playing, privateMode = true;
+    public int resumeAt;
+    public Cms.Line activeLine;
+    public Cms.Episode activeEpisode;
+    public MoviePlayer player;
+    public WebResolver webResolver;
+    public MagnetStream magnetStream;
+    public PlaybackLoading playbackLoading;
+    public android.view.View playbackLoadingFocus;
+    public final FrameLayout root = new FrameLayout();
+    public final TextView playStatus = new TextView();
+    public final SeekGesture seekGesture = new SeekGesture();
+    public Runnable seekPulse;
+    public TvMarkerHost markerHost;
+    public PlayerChrome playerChrome;
+    public PlaybackControls playbackControls;
+    public MobileInlinePlayer inlinePlayer;
+    public TouchPlayerGesture touchPlayerGesture;
+    public MobilePlayerOverlay mobilePlayerOverlay;
+    public WatchHistory.Entry playingBookmark;
+    public com.pilipala.emby.EmbyLibrary.Reporter embyReporter;
+    public Cms.Config config;
+    public SharedPreferences prefs;
+    public Cms.Episode openedEpisode;
+    public final AtomicInteger openPlayerCount = new AtomicInteger();
+    public final List<String> recordedHistoryEpisodes = new ArrayList<>();
+
+    MainActivity() { current.player = true; }
+    void toast(String s) {}
+    void notice(String s) {}
+    void clearLiveNumber() {}
+    boolean isTvDevice() { return false; }
+    void stopWeb() {}
+    void stopMagnet() {}
+    List<WatchHistory.Entry> watchHistory() { return Collections.emptyList(); }
+    Future<?> trackPageRequest(Future<?> f) { return f; }
+    void untrackPageRequest(Future<?> f) {}
+    SourceEngine engine(Cms.Site s) {
+        return new SourceEngine() {
+            public boolean requiresExternalRuntime() { return false; }
+            public String home() { return "{}"; }
+            public String category(String id, int pg) { return "{}"; }
+            public String detail(String id) { return "{}"; }
+            public String search(String kw, int pg) { return "{}"; }
+            public String player(String flag, String id) {
+                return "{\\"url\\":\\"https://fixture.invalid/" + id + ".mp4\\"}";
+            }
+        };
+    }
+    void open(Screen s, boolean push) {
+        if (s != null && s.render != null) {
+            for (java.lang.reflect.Field f : s.render.getClass().getDeclaredFields()) {
+                if (f.getType() == Cms.Episode.class) {
+                    try {
+                        f.setAccessible(true);
+                        openedEpisode = (Cms.Episode) f.get(s.render);
+                    } catch (ReflectiveOperationException e) {
+                        throw new AssertionError(e);
+                    }
+                }
+            }
+        }
+        // Simulate playerPage opening: increment generation + session and capture bookmark from activeEpisode!
+        generation++;
+        fullscreenPlaybackSession++;
+        openPlayerCount.incrementAndGet();
+        if (activeEpisode != null) {
+            recordedHistoryEpisodes.add(activeEpisode.name);
+        }
+    }
+}
+""",
+        "com/pilipala/marcomovie/R4ReconnectRound3Check.java": """package com.pilipala.marcomovie;
+
+import java.lang.reflect.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+public final class R4ReconnectRound3Check {
+    private static void check(boolean cond, String label) {
+        if (!cond) throw new AssertionError("FAIL: " + label);
+        System.out.println("PASS " + label);
+    }
+
+    private static void wireExecutor(final MainActivity a) throws Exception {
+        Field f = PlaybackController.class.getDeclaredField("PLAYER_RESOLVE");
+        f.setAccessible(true);
+        // Replace only via custom pageRequests? Wait: PLAYER_RESOLVE is final; use direct invoke of
+        // resolvePlayer with our stubbed RequestScope.submit capturing onto a.pageRequests?
+        // Actually our stubbed RequestScope.submit calls pool.execute(task), so let's capture in RequestScope!
+    }
+
+    private static Method findPlayerPageLambda(Class<?> retType, Class<?>... tailParams) {
+        for (Method m : PlaybackController.class.getDeclaredMethods()) {
+            Class<?>[] ts = m.getParameterTypes();
+            if (!m.isSynthetic() || !m.getName().startsWith("lambda$playerPage$") || m.getReturnType() != retType) {
+                continue;
+            }
+            if (ts.length < tailParams.length) continue;
+            boolean ok = true;
+            for (int i = 0; i < tailParams.length; i++) {
+                if (ts[ts.length - tailParams.length + i] != tailParams[i]) { ok = false; break; }
+            }
+            if (ok) {
+                m.setAccessible(true);
+                return m;
+            }
+        }
+        throw new AssertionError("Missing expected playerPage lambda");
+    }
+
+    private static Object[] buildArgs(
+            Method m, MainActivity a, MoviePlayer player, Cms.Site site, Cms.Video video, Cms.Episode ep, int what, int extra, boolean isError) {
+        int g = a.generation;
+        int s = a.fullscreenPlaybackSession;
+        Class<?>[] params = m.getParameterTypes();
+        Object[] values = new Object[params.length];
+        int intCaptures = 0;
+        for (int i = 0; i < params.length; i++) {
+            Class<?> t = params[i];
+            if (isError && i == params.length - 2) values[i] = what;
+            else if (isError && i == params.length - 1) values[i] = extra;
+            else if (t == int.class) values[i] = (intCaptures++ == 0 ? g : s);
+            else if (t == MainActivity.class) values[i] = a;
+            else if (t == MoviePlayer.class) values[i] = player;
+            else if (t == Cms.Site.class) values[i] = site;
+            else if (t == Cms.Video.class) values[i] = video;
+            else if (t == Cms.Episode.class) values[i] = ep;
+            else values[i] = null;
+        }
+        return values;
+    }
+
+    private static void runIoReconnectScenario(boolean aRunsBeforeBResolves) throws Exception {
+        String tag = aRunsBeforeBResolves ? "Order1(A-retry-before-B)" : "Order2(B-opens-before-A-retry)";
+        MainActivity a = new MainActivity();
+        Cms.Episode epA = new Cms.Episode(); epA.name = "A"; epA.url = "id-A";
+        Cms.Episode epB = new Cms.Episode(); epB.name = "B"; epB.url = "id-B";
+        Cms.Video video = new Cms.Video(); video.id = "v1"; video.title = "Film";
+        Cms.Site site = new Cms.Site(); site.type = 3; site.key = "fixture";
+        Cms.Line line = new Cms.Line(); line.name = "L1"; line.episodes.add(epA); line.episodes.add(epB);
+        a.activeLine = line;
+        a.activeEpisode = epA;
+        MoviePlayer player = a.player = new MoviePlayer();
+
+        Method onError = findPlayerPageLambda(boolean.class, MoviePlayer.class, int.class, int.class);
+        onError.invoke(null, buildArgs(onError, a, player, site, video, epA, 2001, 0, true));
+        check(a.ui.delayed.size() == 1 && a.ui.delayedMs.get(0) == 500L, "R4 Round-3 " + tag + ": A queued 500ms IO retry");
+        Runnable staleARetry = a.ui.delayed.get(0);
+
+        // User switches in-place to async-resolved episode B!
+        RequestScopeCapture.reset();
+        PlaybackController.changeEpisode(a, site, video, line, epB, 5000);
+        check(
+                a.activeEpisode == epB
+                        && a.fullscreenPlaybackSession == 101
+                        && RequestScopeCapture.tasks.size() == 1,
+                "R4 Round-3 " + tag + ": changeEpisode(B) bumped session and queued B resolver");
+
+        if (aRunsBeforeBResolves) {
+            // Order 1: A's 500ms retry fires WHILE B is still resolving!
+            staleARetry.run();
+            check(
+                    a.activeEpisode == epB
+                            && a.openPlayerCount.get() == 0
+                            && RequestScopeCapture.tasks.size() == 1,
+                    "R4 Round-3 " + tag + ": expired A retry rejected while B pending (activeEpisode stays B)");
+            // Now let B's resolver finish and deliver on main thread
+            RequestScopeCapture.tasks.get(0).run();
+            check(!a.ui.immediate.isEmpty(), "R4 Round-3 " + tag + ": B resolver posted UI openPlayer");
+            a.ui.immediate.get(0).run();
+        } else {
+            // Order 2: B resolves and opens FIRST, then expired A retry fires!
+            RequestScopeCapture.tasks.get(0).run();
+            check(!a.ui.immediate.isEmpty(), "R4 Round-3 " + tag + ": B resolver posted UI openPlayer");
+            a.ui.immediate.get(0).run();
+            check(
+                    a.openPlayerCount.get() == 1
+                            && a.activeEpisode == epB
+                            && a.openedEpisode != null
+                            && "https://fixture.invalid/id-B.mp4".equals(a.openedEpisode.url),
+                    "R4 Round-3 " + tag + ": B opened cleanly before expired A retry");
+            // Now expired A retry fires!
+            staleARetry.run();
+        }
+
+        check(
+                a.openPlayerCount.get() == 1
+                        && a.activeEpisode == epB
+                        && a.openedEpisode != null
+                        && "https://fixture.invalid/id-B.mp4".equals(a.openedEpisode.url)
+                        && a.recordedHistoryEpisodes.size() == 1
+                        && "B".equals(a.recordedHistoryEpisodes.get(0)),
+                "R4 Round-3 " + tag + ": URL, activeEpisode, and history/resume ALL point to B, and B started exactly once");
+    }
+
+    private static void runEofReconnectScenario() throws Exception {
+        MainActivity a = new MainActivity();
+        Cms.Episode epA = new Cms.Episode(); epA.name = "A"; epA.url = "id-A";
+        Cms.Episode epB = new Cms.Episode(); epB.name = "B"; epB.url = "id-B";
+        Cms.Video video = new Cms.Video(); video.id = "v1"; video.title = "Film";
+        Cms.Site site = new Cms.Site(); site.type = 3; site.key = "fixture";
+        Cms.Line line = new Cms.Line(); line.name = "L1"; line.episodes.add(epA); line.episodes.add(epB);
+        a.activeLine = line;
+        a.activeEpisode = epA;
+        MoviePlayer player = a.player = new MoviePlayer();
+
+        Method onCompletion = findPlayerPageLambda(void.class, MoviePlayer.class);
+        onCompletion.invoke(null, buildArgs(onCompletion, a, player, site, video, epA, 0, 0, false));
+        check(a.ui.delayed.size() == 1 && a.ui.delayedMs.get(0) == 450L, "R4 Round-3 EOF: A queued 450ms EOF reconnect");
+        Runnable staleEof = a.ui.delayed.get(0);
+
+        RequestScopeCapture.reset();
+        PlaybackController.changeEpisode(a, site, video, line, epB, 5000);
+        staleEof.run();
+        check(
+                a.activeEpisode == epB && RequestScopeCapture.tasks.size() == 1,
+                "R4 Round-3 EOF: expired A 450ms EOF reconnect rejected after switch to B");
+    }
+
+    public static void main(String[] args) throws Exception {
+        runIoReconnectScenario(true);
+        runIoReconnectScenario(false);
+        runEofReconnectScenario();
+    }
+}
+""",
+        "com/pilipala/marcomovie/RequestScopeCapture.java": """package com.pilipala.marcomovie;
+import java.util.*;
+final class RequestScopeCapture {
+    static final List<Runnable> tasks = new ArrayList<>();
+    static void reset() { tasks.clear(); }
+}
+""",
+    }
+    stubs["com/pilipala/marcomovie/RequestScope.java"] = """package com.pilipala.marcomovie;
+import java.util.concurrent.*;
+final class RequestScope {
+    static Future<?> submit(ExecutorService pool, Runnable task) {
+        RequestScopeCapture.tasks.add(task);
+        return new FutureTask<>(task, null);
+    }
+}
+"""
+
+    src_files = []
+    for rel, content in stubs.items():
+        p = r4r_src / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        src_files.append(str(p))
+
+    cp = os.pathsep.join(str(p) for p in [r4r_classes, *base_cp])
+    subprocess.run(
+        [JAVAC, "-encoding", "UTF-8", "-cp", cp, "-d", str(r4r_classes), *src_files],
+        check=True,
+    )
+    subprocess.run(
+        [JAVA, "-Dfile.encoding=UTF-8", "-cp", cp, "com.pilipala.marcomovie.R4ReconnectRound3Check"],
+        cwd=ROOT,
+        check=True,
+        timeout=40,
+    )
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="rework-r1-r5-") as tmp:
         work_dir = Path(tmp)
@@ -691,11 +1084,61 @@ def main() -> None:
             timeout=40,
         )
 
+        # 2b. Run Round-3 real Runtime.getRuntime().halt(35) child JVMs for R2 local SAF JSON
+        #     shared-keys AND ~15.57 MiB quote-/backslash-/newline-heavy JS config!
+        for mode in ("local", "large"):
+            r3_halt_dir = work_dir / f"r2-r3-halt-{mode}"
+            r3_halt_dir.mkdir(parents=True, exist_ok=True)
+            # Pre-seed legacy config.json on disk for subscription A
+            (r3_halt_dir / "config.json").write_text(
+                '{"sites":[{"key":"first","name":"A first","type":1,"api":"https://catalog.invalid/A/first"},'
+                '{"key":"second","name":"A second","type":1,"api":"https://catalog.invalid/A/second"}]}',
+                encoding="utf-8",
+            )
+            halt_proc = subprocess.run(
+                [
+                    JAVA,
+                    "-Xmx1g",
+                    "-Dfile.encoding=UTF-8",
+                    "-cp",
+                    cp_str,
+                    "com.pilipala.marcomovie.ReworkR1ToR5Checks",
+                    "--r2-r3-halt",
+                    str(r3_halt_dir),
+                    mode,
+                ],
+                cwd=ROOT,
+                timeout=60,
+            )
+            if halt_proc.returncode != 35:
+                raise AssertionError(
+                    f"R2 Round-3 child ({mode}) expected halt exit 35, got {halt_proc.returncode}"
+                )
+            subprocess.run(
+                [
+                    JAVA,
+                    "-Xmx1g",
+                    "-Dfile.encoding=UTF-8",
+                    "-cp",
+                    cp_str,
+                    "com.pilipala.marcomovie.ReworkR1ToR5Checks",
+                    "--r2-r3-cold",
+                    str(r3_halt_dir),
+                    mode,
+                ],
+                cwd=ROOT,
+                check=True,
+                timeout=60,
+            )
+
         # 3. Run R3 real MobileInlinePlayer.onActivityStop buffering harness
         run_r3_buffered_stop_harness(classes_dir, work_dir, runtime_cp)
 
         # 4. Run R2 explicit-default & R4 fullscreen-return + rapid-play-B harness
         run_r2_explicit_default_and_r4_fullscreen_return_harness(work_dir, runtime_cp)
+
+        # 5. Run R4 Round-3 weak-network reconnect vs episode switch B harness (both return orders + EOF)
+        run_r4_reconnect_episode_switch_harness(work_dir, runtime_cp)
 
         print("ALL R1-R5 REGRESSION CHECKS PASSED")
 

@@ -2239,12 +2239,17 @@ final class SourceController {
             sitesArr = new org.json.JSONArray();
             baseJson.put("sites", sitesArr);
         }
+        String preferredPref = a.prefs != null ? a.prefs.getString(Prefs.PREFERRED_SITE, "") : "";
+        String updatedPreferredPref = null;
         for (Cms.Site ns : incoming.sites) {
+            boolean isDocScoped =
+                    ns.key != null
+                            && (ns.key.startsWith("py_doc_") || ns.key.startsWith("js_doc_"));
             for (int i = sitesArr.length() - 1; i >= 0; i--) {
                 org.json.JSONObject existing = sitesArr.optJSONObject(i);
                 if (existing != null
                         && (ns.key.equals(existing.optString("key"))
-                                || ns.api.equals(existing.optString("api")))) {
+                                || (!isDocScoped && ns.api.equals(existing.optString("api"))))) {
                     sitesArr.remove(i);
                 }
             }
@@ -2258,13 +2263,24 @@ final class SourceController {
             if (ns.jar != null && !ns.jar.isEmpty()) sObj.put("jar", ns.jar);
             if (ns.ext != null) sObj.put("ext", ns.ext);
             sitesArr.put(sObj);
+            if (preferredPref != null
+                    && (preferredPref.equals(ns.key) || preferredPref.startsWith(ns.key + "\n"))) {
+                updatedPreferredPref = SourcePreferences.identity(ns);
+            }
         }
         String mergedRaw = baseJson.toString(2);
         Cms.Config merged = Cms.parseConfig(mergedRaw, a.configOrigin);
-        if (!incoming.sites.isEmpty()) {
-            a.prefs.edit().putString(Prefs.SELECTED_SITE, incoming.sites.get(0).key).apply();
-        }
-        saveConfig(a, merged, a.configOrigin);
+        final String explicitSelected =
+                !incoming.sites.isEmpty() ? incoming.sites.get(0).key : null;
+        final String newPreferred = updatedPreferredPref;
+        saveConfig(
+                a,
+                merged,
+                a.configOrigin,
+                explicitSelected,
+                newPreferred != null && a.prefs != null
+                        ? () -> a.prefs.edit().putString(Prefs.PREFERRED_SITE, newPreferred).apply()
+                        : null);
     }
 
     static boolean canCommitConfigImport(
@@ -2429,6 +2445,54 @@ final class SourceController {
         }
     }
 
+    /**
+     * Derives a stable document-level site key from the imported script's SAF/file URI and space so
+     * updating the same local script document replaces the existing entry cleanly (1 -> 1) while
+     * distinct documents sharing the same filename (e.g. {@code dirA/source.py} vs {@code
+     * dirB/source.py}) or different spaces retain independent identities and immutable backing
+     * files.
+     */
+    static String stableLocalScriptSiteKey(
+            String prefix, Uri uri, boolean privateSpace, String fallbackOrigin) {
+        String cleanPrefix = prefix == null || prefix.isEmpty() ? "script" : prefix;
+        String uriStr = uri == null ? "" : uri.toString().trim();
+        if (!uriStr.isEmpty()) {
+            String docScope = (privateSpace ? "priv:" : "pub:") + uriStr;
+            try {
+                return cleanPrefix + "_doc_" + sha256HexPrefix(docScope.getBytes("UTF-8"), 16);
+            } catch (Exception ignored) {
+                return cleanPrefix + "_doc_" + Math.abs(docScope.hashCode());
+            }
+        }
+        String fb = fallbackOrigin == null ? "" : fallbackOrigin;
+        return cleanPrefix + "_" + Math.abs(fb.hashCode());
+    }
+
+    /**
+     * Rewrites the single synthesized script site's {@code key} inside both the parsed {@link
+     * Cms.Config} and its backing {@code raw} JSON so first-time saves and subsequent {@link
+     * #mergeOrSaveConfig} merges use the exact same document-scoped site identity.
+     */
+    static Cms.Config withStableScriptKey(Cms.Config singleCfg, String stableKey, String fileOrigin)
+            throws Exception {
+        if (singleCfg == null
+                || singleCfg.sites.isEmpty()
+                || stableKey == null
+                || stableKey.trim().isEmpty()) {
+            return singleCfg;
+        }
+        org.json.JSONObject root = new org.json.JSONObject(Cms.withoutComments(singleCfg.raw));
+        org.json.JSONArray sites = root.optJSONArray("sites");
+        if (sites != null && sites.length() > 0) {
+            org.json.JSONObject first = sites.optJSONObject(0);
+            if (first != null) {
+                first.put("key", stableKey);
+                return Cms.parseConfig(root.toString(), fileOrigin);
+            }
+        }
+        return singleCfg;
+    }
+
     static void importLocalUri(MainActivity a, Uri uri, boolean preferLive) {
         final long importSeq = beginConfigImport(a);
         final boolean snapshotPrivate = a.privateMode;
@@ -2557,7 +2621,17 @@ final class SourceController {
                                     writeContentAddressedLocalFile(
                                             spiderDir, displayName, text.getBytes("UTF-8"));
                             String fileOrigin = Cms.fileUri(savedFile);
-                            Cms.Config singleCfg = Cms.parseConfig(text, fileOrigin);
+                            Cms.Config parsedSingle = Cms.parseConfig(text, fileOrigin);
+                            String keyPrefix =
+                                    (lowerName.endsWith(".py")
+                                                    || Cms.looksLikePySpider(text, displayName))
+                                            ? "py"
+                                            : "js";
+                            String stableKey =
+                                    stableLocalScriptSiteKey(
+                                            keyPrefix, uri, snapshotPrivate, fileOrigin);
+                            final Cms.Config singleCfg =
+                                    withStableScriptKey(parsedSingle, stableKey, fileOrigin);
                             a.ui.post(
                                     () -> {
                                         if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
@@ -2689,17 +2763,38 @@ final class SourceController {
                 } else {
                     editor.remove(Prefs.SELECTED_SITE);
                 }
+                if (snapshot.stateTag instanceof SavedState) {
+                    SavedState saved = (SavedState) snapshot.stateTag;
+                    String raw = saved.config != null ? saved.config.raw : null;
+                    if (raw != null && !raw.isEmpty()) {
+                        editor.putString(
+                                Prefs.ACTIVE_SUBSCRIPTION_ID,
+                                ConfigStore.subscriptionIdentity(snapshot.origin, raw));
+                    } else {
+                        editor.remove(Prefs.ACTIVE_SUBSCRIPTION_ID);
+                    }
+                }
                 editor.apply();
             }
         };
     }
 
     static void saveConfig(MainActivity a, Cms.Config c, String origin) throws Exception {
-        saveConfig(a, c, origin, null);
+        saveConfig(a, c, origin, null, null);
     }
 
     static void saveConfig(
             final MainActivity a, Cms.Config c, String origin, final Runnable onCommitted)
+            throws Exception {
+        saveConfig(a, c, origin, null, onCommitted);
+    }
+
+    static void saveConfig(
+            final MainActivity a,
+            Cms.Config c,
+            String origin,
+            String explicitSelectedSite,
+            final Runnable onCommitted)
             throws Exception {
         a.configImportSeq.incrementAndGet();
         if (!c.warehouse.isEmpty()) origin = c.warehouse;
@@ -2714,7 +2809,9 @@ final class SourceController {
         final String previousOrigin = a.configOrigin;
         final String previousSelected = selected;
         final boolean snapshotPrivate = a.privateMode;
-        if (recordInLibrary) {
+        if (explicitSelectedSite != null && !explicitSelectedSite.isEmpty()) {
+            selected = explicitSelectedSite;
+        } else if (recordInLibrary) {
             try {
                 String id = ConfigLibrary.identity(origin, c.raw);
                 String previousId =

@@ -751,12 +751,25 @@ public final class MainActivity extends Activity {
                     MainActivity activity = activeActivity;
                     CrashReportStore.recordUncaughtCrash(activity, thread, error);
                     if (activity != null && activity.prefs != null) {
-                        String currentSite = activity.prefs.getString(Prefs.SELECTED_SITE, "");
-                        if (currentSite != null && !currentSite.isEmpty()) {
+                        // Only attribute a fatal uncaught exception to a site when a source load is
+                        // actively in flight OR the crash stack originates inside a loaded plugin
+                        // DEX. Unrelated UI exceptions (e.g. SettingsScreen) must NEVER blame the
+                        // user's healthy selected site.
+                        String loadingSite = activity.prefs.getString(Prefs.LOADING_SITE, "");
+                        boolean hasInFlightLoad =
+                                loadingSite != null && !loadingSite.trim().isEmpty();
+                        String faultSite =
+                                hasInFlightLoad
+                                        ? loadingSite.trim()
+                                        : (hasDexClassLoaderFrame(error)
+                                                ? activity.prefs.getString(Prefs.SELECTED_SITE, "")
+                                                : "");
+                        if (faultSite != null && !faultSite.trim().isEmpty()) {
+                            String cleanFault = faultSite.trim();
                             activity.prefs
                                     .edit()
-                                    .putString(Prefs.LOADING_SITE, currentSite)
-                                    .putString(Prefs.CONFIRMED_CRASH_SITE, currentSite)
+                                    .putString(Prefs.LOADING_SITE, cleanFault)
+                                    .putString(Prefs.CONFIRMED_CRASH_SITE, cleanFault)
                                     .commit();
                         }
                     }
@@ -1040,24 +1053,34 @@ public final class MainActivity extends Activity {
         prefs = getSharedPreferences(privateMode ? "movie-private" : Prefs.FILE, MODE_PRIVATE);
         cleanupLegacyPrivateHistory(getSharedPreferences("movie-private", MODE_PRIVATE));
         final int priorBootCrashes = recordStartupBootGuard(getCacheDir());
-        final int priorExitReason = queryLastProcessExitReason();
+        final int[] priorExitInfo = queryLastProcessExitInfo();
+        final int priorExitReason = priorExitInfo[0];
+        final int priorExitStatus = priorExitInfo[1];
         final String pendingLoadingSite = prefs.getString(Prefs.LOADING_SITE, "");
         final String confirmedCrashSite = prefs.getString(Prefs.CONFIRMED_CRASH_SITE, "");
         final boolean priorLoadingCrash =
                 shouldTreatLoadingSiteAsCrash(
-                        pendingLoadingSite, confirmedCrashSite, priorExitReason);
+                        pendingLoadingSite, confirmedCrashSite, priorExitReason, priorExitStatus);
         if (!pendingLoadingSite.isEmpty() && !priorLoadingCrash) {
-            // Previous process exited cleanly, via OS memory/freezer reclaim, or on API 23-29
-            // without crash evidence while a slow home request was in flight; clear only the
-            // transient loading marker and keep user's selected/preferred site intact.
+            // Previous process exited cleanly, via OS memory/freezer/SIGKILL reclaim, or on
+            // API 23-29 without crash evidence while a slow home request was in flight; clear only
+            // the transient loading marker and keep user's selected/preferred site intact.
             prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
         }
+        boolean bootResetSelected = false;
         if (priorBootCrashes >= 1 || priorLoadingCrash) {
             purgeVolatileCrashCaches(getCacheDir());
-            if (priorBootCrashes >= 2) {
+            if (priorBootCrashes >= 2 && priorLoadingCrash) {
+                String beforeBootSel = prefs.getString(Prefs.SELECTED_SITE, "");
                 clearRecoveredCrashSite(prefs);
+                String afterBootSel = prefs.getString(Prefs.SELECTED_SITE, "");
+                bootResetSelected =
+                        beforeBootSel != null
+                                && !beforeBootSel.isEmpty()
+                                && (afterBootSel == null || afterBootSel.isEmpty());
             }
         }
+        final boolean bootGuardResetSite = bootResetSelected;
         if (isTvDevice() && !prefs.getBoolean("tv_top_nav_default_v1", false)) {
             prefs.edit()
                     .putInt(Prefs.TV_NAVIGATION_MODE, 0)
@@ -1091,20 +1114,38 @@ public final class MainActivity extends Activity {
                     prefs.contains(Prefs.SELECTED_SITE)
                             ? prefs.getString(Prefs.SELECTED_SITE, null)
                             : null;
+            String prefSubId =
+                    prefs.contains(Prefs.ACTIVE_SUBSCRIPTION_ID)
+                            ? prefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, null)
+                            : null;
             ConfigStore.RecoveredState recovered =
-                    configStore.loadRecoveredState(prefOrigin, prefSelected);
+                    configStore.loadRecoveredState(prefOrigin, prefSelected, prefSubId);
             if (recovered != null && recovered.raw != null && !recovered.raw.isEmpty()) {
                 configOrigin = recovered.origin == null ? "" : recovered.origin;
-                if (recovered.fromAtomicBundle
-                        && (!Objects.equals(recovered.origin, prefOrigin)
-                                || !Objects.equals(recovered.selectedSite, prefSelected))) {
+                boolean needHealBundlePointers =
+                        recovered.fromAtomicBundle
+                                && (!Objects.equals(recovered.origin, prefOrigin)
+                                        || !Objects.equals(recovered.selectedSite, prefSelected));
+                boolean needHealSubId =
+                        recovered.subscriptionId != null
+                                && !recovered.subscriptionId.isEmpty()
+                                && !Objects.equals(recovered.subscriptionId, prefSubId);
+                if (needHealBundlePointers || needHealSubId) {
                     SharedPreferences.Editor heal = prefs.edit();
-                    if (recovered.origin != null) heal.putString(Prefs.ORIGIN, recovered.origin);
-                    else heal.remove(Prefs.ORIGIN);
-                    if (recovered.selectedSite != null) {
-                        heal.putString(Prefs.SELECTED_SITE, recovered.selectedSite);
-                    } else {
-                        heal.remove(Prefs.SELECTED_SITE);
+                    if (needHealBundlePointers) {
+                        if (recovered.origin != null) {
+                            heal.putString(Prefs.ORIGIN, recovered.origin);
+                        } else {
+                            heal.remove(Prefs.ORIGIN);
+                        }
+                        if (recovered.selectedSite != null) {
+                            heal.putString(Prefs.SELECTED_SITE, recovered.selectedSite);
+                        } else {
+                            heal.remove(Prefs.SELECTED_SITE);
+                        }
+                    }
+                    if (needHealSubId) {
+                        heal.putString(Prefs.ACTIVE_SUBSCRIPTION_ID, recovered.subscriptionId);
                     }
                     heal.apply();
                 }
@@ -1176,8 +1217,18 @@ public final class MainActivity extends Activity {
                                             priorLoadingCrash
                                                     && crashedSite != null
                                                     && !crashedSite.isEmpty();
+                                    boolean resetSelectedOnCrash = false;
                                     if (recoveredFromCrash) {
+                                        String beforeSelected =
+                                                prefs.getString(Prefs.SELECTED_SITE, "");
                                         clearRecoveredCrashSite(prefs);
+                                        String afterSelected =
+                                                prefs.getString(Prefs.SELECTED_SITE, "");
+                                        resetSelectedOnCrash =
+                                                beforeSelected != null
+                                                        && !beforeSelected.isEmpty()
+                                                        && (afterSelected == null
+                                                                || afterSelected.isEmpty());
                                     }
                                     worker.execute(
                                             () ->
@@ -1224,10 +1275,11 @@ public final class MainActivity extends Activity {
                                                     3800);
                                         }
                                     }
-                                    if (recoveredFromCrash) {
+                                    if ((recoveredFromCrash && resetSelectedOnCrash)
+                                            || bootGuardResetSite) {
                                         toast("上次加载该片源时异常退出，已自动重置片源选择");
                                     } else if (priorBootCrashes >= 2) {
-                                        toast("检测到连续异常退出，已清理临时缓存并重置片源");
+                                        toast("检测到连续异常退出，已自动清理临时缓存");
                                     } else if (priorBootCrashes == 1) {
                                         toast("检测到上次异常退出，已自动清理临时缓存");
                                     } else if (!privateMode
@@ -3044,11 +3096,36 @@ public final class MainActivity extends Activity {
     }
 
     static final int EXIT_REASON_UNKNOWN = 0;
+    static final int EXIT_REASON_SIGNALED = 2;
+    static final int EXIT_STATUS_UNKNOWN = 0;
+
+    /**
+     * Fatal POSIX crash signals (SIGILL=4, SIGTRAP=5, SIGABRT=6, SIGBUS=7, SIGFPE=8, SIGSEGV=11,
+     * SIGSYS=31). Explicitly excludes SIGKILL(9) and SIGTERM(15), because Android 11+ devices often
+     * report low-memory kills as {@code REASON_SIGNALED(2)} with {@code status=SIGKILL(9)}.
+     */
+    static boolean isFatalCrashSignal(int signalStatus) {
+        return signalStatus == 4
+                || signalStatus == 5
+                || signalStatus == 6
+                || signalStatus == 7
+                || signalStatus == 8
+                || signalStatus == 11
+                || signalStatus == 31;
+    }
 
     static boolean isAttributableCrashExitReason(int reason) {
-        // ApplicationExitInfo: REASON_SIGNALED(2), REASON_CRASH(4), REASON_CRASH_NATIVE(5),
-        // REASON_ANR(6)
-        return reason == 2 || reason == 4 || reason == 5 || reason == 6;
+        return isAttributableCrashExitReason(reason, EXIT_STATUS_UNKNOWN);
+    }
+
+    static boolean isAttributableCrashExitReason(int reason, int status) {
+        // ApplicationExitInfo: REASON_CRASH(4), REASON_CRASH_NATIVE(5), REASON_ANR(6) are always
+        // attributable. REASON_SIGNALED(2) is ONLY attributable when accompanied by a fatal crash
+        // signal (never bare REASON_SIGNALED or SIGKILL=9, which Android reports for LMK kills).
+        if (reason == 4 || reason == 5 || reason == 6) {
+            return true;
+        }
+        return reason == EXIT_REASON_SIGNALED && isFatalCrashSignal(status);
     }
 
     static boolean isKnownBenignExitReason(int reason) {
@@ -3067,17 +3144,14 @@ public final class MainActivity extends Activity {
 
     /**
      * Determines whether a leftover {@link Prefs#LOADING_SITE} marker has explicit crash evidence
-     * from {@code ApplicationExitInfo} (API 30+ {@code REASON_SIGNALED / CRASH / CRASH_NATIVE /
-     * ANR}). On API 23–29 where {@code ApplicationExitInfo} is unavailable ({@link
-     * #EXIT_REASON_UNKNOWN}), returns {@code false} so normal OS background kills preserve the
-     * user's selected/preferred site unless explicit uncaught-crash evidence was recorded via
+     * from {@code ApplicationExitInfo} (API 30+ {@code REASON_CRASH / CRASH_NATIVE / ANR}, or
+     * {@code REASON_SIGNALED} with a fatal crash signal). Bare {@code REASON_SIGNALED(2)},
+     * {@code SIGKILL(9)}, benign OS reclaims, and API 23–29 {@link #EXIT_REASON_UNKNOWN} return
+     * {@code false} so healthy sites are preserved unless explicit crash evidence was recorded via
      * {@link Prefs#CONFIRMED_CRASH_SITE}.
      */
     static boolean shouldTreatLoadingSiteAsCrash(String loadingSite, int lastExitReason) {
-        if (loadingSite == null || loadingSite.trim().isEmpty()) {
-            return false;
-        }
-        return isAttributableCrashExitReason(lastExitReason);
+        return shouldTreatLoadingSiteAsCrash(loadingSite, "", lastExitReason, EXIT_STATUS_UNKNOWN);
     }
 
     /**
@@ -3087,47 +3161,65 @@ public final class MainActivity extends Activity {
      */
     static boolean shouldTreatLoadingSiteAsCrash(
             String loadingSite, String confirmedCrashSite, int lastExitReason) {
+        return shouldTreatLoadingSiteAsCrash(
+                loadingSite, confirmedCrashSite, lastExitReason, EXIT_STATUS_UNKNOWN);
+    }
+
+    static boolean shouldTreatLoadingSiteAsCrash(
+            String loadingSite, String confirmedCrashSite, int lastExitReason, int lastExitStatus) {
         if (confirmedCrashSite != null && !confirmedCrashSite.trim().isEmpty()) {
             return true;
         }
-        return shouldTreatLoadingSiteAsCrash(loadingSite, lastExitReason);
+        if (loadingSite == null || loadingSite.trim().isEmpty()) {
+            return false;
+        }
+        return isAttributableCrashExitReason(lastExitReason, lastExitStatus);
     }
 
-    private int queryLastProcessExitReason() {
+    private int[] queryLastProcessExitInfo() {
         if (android.os.Build.VERSION.SDK_INT < 30) {
-            return EXIT_REASON_UNKNOWN;
+            return new int[] {EXIT_REASON_UNKNOWN, EXIT_STATUS_UNKNOWN};
         }
         try {
             ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-            if (am == null) return EXIT_REASON_UNKNOWN;
+            if (am == null) return new int[] {EXIT_REASON_UNKNOWN, EXIT_STATUS_UNKNOWN};
             List<android.app.ApplicationExitInfo> reasons =
                     am.getHistoricalProcessExitReasons(getPackageName(), 0, 1);
             if (reasons != null && !reasons.isEmpty() && reasons.get(0) != null) {
-                return reasons.get(0).getReason();
+                android.app.ApplicationExitInfo info = reasons.get(0);
+                return new int[] {info.getReason(), info.getStatus()};
             }
         } catch (Throwable ignored) {
         }
-        return EXIT_REASON_UNKNOWN;
+        return new int[] {EXIT_REASON_UNKNOWN, EXIT_STATUS_UNKNOWN};
     }
 
+    /**
+     * Clears crash markers and removes ONLY the specific site that matches the attributed fault
+     * evidence ({@link Prefs#CONFIRMED_CRASH_SITE} or {@link Prefs#LOADING_SITE}). Separately
+     * checks {@link Prefs#SELECTED_SITE} and {@link Prefs#PREFERRED_SITE} so a fault on site A (or
+     * an unattributed boot interruption with empty fault markers) NEVER wipes a healthy site B.
+     */
     static void clearRecoveredCrashSite(SharedPreferences prefs) {
         if (prefs == null) return;
         String confirmed = prefs.getString(Prefs.CONFIRMED_CRASH_SITE, "");
-        String crashed =
-                confirmed != null && !confirmed.isEmpty()
-                        ? confirmed
-                        : prefs.getString(Prefs.LOADING_SITE, "");
+        String loading = prefs.getString(Prefs.LOADING_SITE, "");
+        String badKey =
+                confirmed != null && !confirmed.trim().isEmpty()
+                        ? confirmed.trim()
+                        : (loading != null ? loading.trim() : "");
         String selected = prefs.getString(Prefs.SELECTED_SITE, "");
         String preferred = prefs.getString(Prefs.PREFERRED_SITE, "");
         SharedPreferences.Editor editor =
                 prefs.edit()
                         .putString(Prefs.LOADING_SITE, "")
-                        .putString(Prefs.CONFIRMED_CRASH_SITE, "")
-                        .putString(Prefs.SELECTED_SITE, "");
-        if (preferred != null && !preferred.isEmpty()) {
-            String badKey = crashed != null && !crashed.isEmpty() ? crashed : selected;
-            if (badKey != null
-                    && !badKey.isEmpty()
+                        .putString(Prefs.CONFIRMED_CRASH_SITE, "");
+        if (!badKey.isEmpty()) {
+            if (badKey.equals(selected)) {
+                editor.putString(Prefs.SELECTED_SITE, "");
+            }
+            if (preferred != null
+                    && !preferred.isEmpty()
                     && (preferred.equals(badKey) || preferred.startsWith(badKey + "\n"))) {
                 editor.putString(Prefs.PREFERRED_SITE, "");
             }

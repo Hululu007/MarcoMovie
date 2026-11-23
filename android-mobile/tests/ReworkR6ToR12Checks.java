@@ -1400,11 +1400,20 @@ public final class ReworkR6ToR12Checks {
                             + " does not misclassify slow load as crash");
         }
 
-        // 6. Attributable crash evidence:
-        //    (a) API 30+ crash exit reasons (REASON_SIGNALED=2, CRASH=4, CRASH_NATIVE=5, ANR=6)
-        //    (b) Explicit uncaught crash evidence (CONFIRMED_CRASH_SITE) on ANY API including API
-        // 23-29!
-        for (int crashReason : new int[] {2, 4, 5, 6}) {
+        // 6. Round-3 R12: Bare REASON_SIGNALED(2) and REASON_SIGNALED(2)+SIGKILL(9) (used by
+        //    Android 11+ OEMs for low-memory kills!) MUST NOT misclassify as a site crash;
+        //    only explicit crash reasons (CRASH=4, CRASH_NATIVE=5, ANR=6) or SIGNALED + fatal
+        //    POSIX crash signal (e.g. SIGABRT=6, SIGSEGV=11) or CONFIRMED_CRASH_SITE trigger!
+        check(
+                !MainActivity.shouldTreatLoadingSiteAsCrash("B", "", 2)
+                        && !MainActivity.shouldTreatLoadingSiteAsCrash("B", "", 2, 9)
+                        && !MainActivity.shouldTreatLoadingSiteAsCrash("B", "", 2, 15),
+                "R12 Round-3: bare REASON_SIGNALED(2), SIGNALED+SIGKILL(9), and SIGNALED+SIGTERM(15) preserve healthy site B");
+        check(
+                MainActivity.shouldTreatLoadingSiteAsCrash("A", "", 2, 6)
+                        && MainActivity.shouldTreatLoadingSiteAsCrash("A", "", 2, 11),
+                "R12 Round-3: REASON_SIGNALED(2) with fatal SIGABRT(6)/SIGSEGV(11) triggers recovery");
+        for (int crashReason : new int[] {4, 5, 6}) {
             check(
                     MainActivity.shouldTreatLoadingSiteAsCrash("site_bad", crashReason),
                     "R12: attributable crash exit reason=" + crashReason + " triggers recovery");
@@ -1413,6 +1422,148 @@ public final class ReworkR6ToR12Checks {
                 MainActivity.shouldTreatLoadingSiteAsCrash(
                         "site_bad", "site_bad", MainActivity.EXIT_REASON_UNKNOWN),
                 "R12 Round-2: explicit CONFIRMED_CRASH_SITE triggers recovery even on Android 6-10 (EXIT_REASON_UNKNOWN)");
+
+        // 7. Round-3 R12: Confirmed fault on A MUST NOT clear healthy current or preferred site B;
+        //    and two interrupted boot guards with zero site evidence MUST preserve healthy site B!
+        MapPrefs mismatchPrefs = new MapPrefs();
+        mismatchPrefs
+                .edit()
+                .putString(Prefs.LOADING_SITE, "A")
+                .putString(Prefs.CONFIRMED_CRASH_SITE, "A")
+                .putString(Prefs.SELECTED_SITE, "B")
+                .putString(Prefs.PREFERRED_SITE, "B\nhealthy")
+                .apply();
+        MainActivity.clearRecoveredCrashSite(mismatchPrefs);
+        check(
+                "".equals(mismatchPrefs.getString(Prefs.LOADING_SITE, ""))
+                        && "".equals(mismatchPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""))
+                        && "B".equals(mismatchPrefs.getString(Prefs.SELECTED_SITE, ""))
+                        && "B\nhealthy".equals(mismatchPrefs.getString(Prefs.PREFERRED_SITE, "")),
+                "R12 Round-3: confirmed fault A clears only A markers and preserves healthy selected & preferred B");
+
+        MapPrefs partialMatchPrefs = new MapPrefs();
+        partialMatchPrefs
+                .edit()
+                .putString(Prefs.LOADING_SITE, "A")
+                .putString(Prefs.CONFIRMED_CRASH_SITE, "A")
+                .putString(Prefs.SELECTED_SITE, "A")
+                .putString(Prefs.PREFERRED_SITE, "B\nhealthy")
+                .apply();
+        MainActivity.clearRecoveredCrashSite(partialMatchPrefs);
+        check(
+                "".equals(partialMatchPrefs.getString(Prefs.SELECTED_SITE, ""))
+                        && "B\nhealthy"
+                                .equals(partialMatchPrefs.getString(Prefs.PREFERRED_SITE, "")),
+                "R12 Round-3: fault A clears selected A while preserving healthy preferred B");
+
+        MapPrefs zeroEvidencePrefs = new MapPrefs();
+        zeroEvidencePrefs
+                .edit()
+                .putString(Prefs.LOADING_SITE, "")
+                .putString(Prefs.CONFIRMED_CRASH_SITE, "")
+                .putString(Prefs.SELECTED_SITE, "B")
+                .putString(Prefs.PREFERRED_SITE, "B\nhealthy")
+                .apply();
+        File bootGuardDir = Files.createTempDirectory("r12-boot-guard-").toFile();
+        int b0 = MainActivity.recordStartupBootGuard(bootGuardDir);
+        int b1 = MainActivity.recordStartupBootGuard(bootGuardDir);
+        int b2 = MainActivity.recordStartupBootGuard(bootGuardDir);
+        MainActivity.clearRecoveredCrashSite(zeroEvidencePrefs);
+        check(
+                b0 == 0
+                        && b1 == 1
+                        && b2 == 2
+                        && "B".equals(zeroEvidencePrefs.getString(Prefs.SELECTED_SITE, ""))
+                        && "B\nhealthy"
+                                .equals(zeroEvidencePrefs.getString(Prefs.PREFERRED_SITE, "")),
+                "R12 Round-3: two interrupted boot guards with zero site evidence never clear healthy site B");
+
+        // 8. Round-3 R12: Unrelated UI exception (SettingsScreen) with NO in-flight load MUST NOT
+        //    write LOADING_SITE or CONFIRMED_CRASH_SITE for healthy site B; whereas an uncaught
+        //    exception DURING an active load of A DOES confirm A!
+        Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+        Field theUnsafeField = unsafeClass.getDeclaredField("theUnsafe");
+        theUnsafeField.setAccessible(true);
+        Object unsafeObj = theUnsafeField.get(null);
+        Method alloc = unsafeClass.getMethod("allocateInstance", Class.class);
+        MainActivity dummyAct = (MainActivity) alloc.invoke(unsafeObj, MainActivity.class);
+        Method fatalHandler = null;
+        for (Method m : MainActivity.class.getDeclaredMethods()) {
+            Class<?>[] ps = m.getParameterTypes();
+            if (m.getName().startsWith("lambda$installPluginCrashGuard$")
+                    && ps.length == 4
+                    && ps[0] == Thread.class
+                    && ps[1] == Thread.UncaughtExceptionHandler.class
+                    && ps[2] == Thread.class
+                    && ps[3] == Throwable.class) {
+                fatalHandler = m;
+                break;
+            }
+        }
+        check(
+                fatalHandler != null,
+                "R12 Round-3 setup: located real installPluginCrashGuard lambda");
+        fatalHandler.setAccessible(true);
+        try {
+            // 8a. No in-flight load + SettingsScreen exception -> B untouched!
+            MapPrefs uiCrashPrefs = new MapPrefs();
+            uiCrashPrefs
+                    .edit()
+                    .putString(Prefs.LOADING_SITE, "")
+                    .putString(Prefs.CONFIRMED_CRASH_SITE, "")
+                    .putString(Prefs.SELECTED_SITE, "B")
+                    .putString(Prefs.PREFERRED_SITE, "B\nhealthy")
+                    .apply();
+            dummyAct.prefs = uiCrashPrefs;
+            MainActivity.activeActivity = dummyAct;
+            Throwable settingsErr = new IllegalStateException("fixture unrelated UI crash");
+            settingsErr.setStackTrace(
+                    new StackTraceElement[] {
+                        new StackTraceElement(
+                                "com.pilipala.marcomovie.SettingsScreen",
+                                "draw",
+                                "SettingsScreen.java",
+                                10)
+                    });
+            AtomicBoolean delegated = new AtomicBoolean(false);
+            Thread.UncaughtExceptionHandler prev = (t, e) -> delegated.set(true);
+            fatalHandler.invoke(
+                    null, Thread.currentThread(), prev, Thread.currentThread(), settingsErr);
+            check(
+                    delegated.get()
+                            && "".equals(uiCrashPrefs.getString(Prefs.LOADING_SITE, ""))
+                            && "".equals(uiCrashPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""))
+                            && !MainActivity.shouldTreatLoadingSiteAsCrash(
+                                    uiCrashPrefs.getString(Prefs.LOADING_SITE, ""),
+                                    uiCrashPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""),
+                                    MainActivity.EXIT_REASON_UNKNOWN)
+                            && "B".equals(uiCrashPrefs.getString(Prefs.SELECTED_SITE, ""))
+                            && "B\nhealthy"
+                                    .equals(uiCrashPrefs.getString(Prefs.PREFERRED_SITE, "")),
+                    "R12 Round-3: unrelated SettingsScreen exception with no in-flight load never blames healthy site B");
+
+            // 8b. Uncaught fatal crash WHILE loading site A -> confirms A and recovers A!
+            MapPrefs loadCrashPrefs = new MapPrefs();
+            loadCrashPrefs
+                    .edit()
+                    .putString(Prefs.LOADING_SITE, "A")
+                    .putString(Prefs.CONFIRMED_CRASH_SITE, "")
+                    .putString(Prefs.SELECTED_SITE, "A")
+                    .putString(Prefs.PREFERRED_SITE, "A\nbad")
+                    .apply();
+            dummyAct.prefs = loadCrashPrefs;
+            fatalHandler.invoke(
+                    null, Thread.currentThread(), prev, Thread.currentThread(), settingsErr);
+            check(
+                    "A".equals(loadCrashPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""))
+                            && MainActivity.shouldTreatLoadingSiteAsCrash(
+                                    loadCrashPrefs.getString(Prefs.LOADING_SITE, ""),
+                                    loadCrashPrefs.getString(Prefs.CONFIRMED_CRASH_SITE, ""),
+                                    MainActivity.EXIT_REASON_UNKNOWN),
+                    "R12 Round-3 positive control: uncaught crash during active load of A confirms A even on API 23-29");
+        } finally {
+            MainActivity.activeActivity = null;
+        }
 
         prefs.edit()
                 .putString(Prefs.LOADING_SITE, "site_bad")
