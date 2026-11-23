@@ -126,15 +126,64 @@ final class TmdbService {
         }
     }
 
+    /** One millisecond interval from TheIntroDB ({@code endMs < 0} means open-ended to EOF). */
+    static final class TimeRange {
+        final long startMs;
+        final long endMs;
+
+        TimeRange(long startMs, long endMs) {
+            this.startMs = startMs;
+            this.endMs = endMs;
+        }
+    }
+
     static final class IntroTimestamps {
+        final List<TimeRange> intros;
+        final List<TimeRange> credits;
         final int introStartSec;
         final int introEndSec;
         final int outroStartSec;
 
         IntroTimestamps(int introStartSec, int introEndSec, int outroStartSec) {
+            List<TimeRange> iList = new ArrayList<>();
+            if (introEndSec > Math.max(0, introStartSec)) {
+                iList.add(new TimeRange(Math.max(0, introStartSec) * 1000L, introEndSec * 1000L));
+            }
+            List<TimeRange> cList = new ArrayList<>();
+            if (outroStartSec > 0) {
+                cList.add(new TimeRange(outroStartSec * 1000L, -1L));
+            }
+            this.intros = Collections.unmodifiableList(iList);
+            this.credits = Collections.unmodifiableList(cList);
             this.introStartSec = introStartSec;
             this.introEndSec = introEndSec;
             this.outroStartSec = outroStartSec;
+        }
+
+        IntroTimestamps(List<TimeRange> intros, List<TimeRange> credits) {
+            List<TimeRange> cleanIntros =
+                    intros == null ? new ArrayList<TimeRange>() : new ArrayList<>(intros);
+            List<TimeRange> cleanCredits =
+                    credits == null ? new ArrayList<TimeRange>() : new ArrayList<>(credits);
+            this.intros = Collections.unmodifiableList(cleanIntros);
+            this.credits = Collections.unmodifiableList(cleanCredits);
+            if (!this.intros.isEmpty()) {
+                TimeRange first = this.intros.get(0);
+                this.introStartSec = (int) Math.max(0L, first.startMs / 1000L);
+                this.introEndSec = (int) Math.max(0L, first.endMs / 1000L);
+            } else {
+                this.introStartSec = -1;
+                this.introEndSec = -1;
+            }
+            if (!this.credits.isEmpty()) {
+                this.outroStartSec = (int) Math.max(0L, this.credits.get(0).startMs / 1000L);
+            } else {
+                this.outroStartSec = -1;
+            }
+        }
+
+        boolean isEmpty() {
+            return intros.isEmpty() && credits.isEmpty();
         }
     }
 
@@ -365,7 +414,97 @@ final class TmdbService {
                 });
     }
 
-    /** Queries TheIntroDB for community intro/outro timestamps using a matched TMDB ID. */
+    /**
+     * Parses TheIntroDB v4 (array-based {@code intro[]}/{@code credits[]} in milliseconds) and
+     * legacy v1/v2 single-object responses into normalized millisecond {@link TimeRange} lists.
+     *
+     * <ul>
+     *   <li>{@code intro[]}: {@code start_ms == null} defaults to {@code 0}; {@code end_ms == null}
+     *       or {@code end_ms <= start_ms} is skipped (unskippable).
+     *   <li>{@code credits[]}: {@code start_ms == null} or {@code <= 0} is skipped; {@code end_ms
+     *       == null} means until EOF ({@code -1L}).
+     * </ul>
+     */
+    static IntroTimestamps parseIntroDbResponse(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return null;
+        try {
+            JSONObject obj = new JSONObject(raw);
+            String kind = obj.optString("kind", "").trim();
+            if (!kind.isEmpty() && !"media".equalsIgnoreCase(kind)) {
+                return null;
+            }
+            List<TimeRange> intros = new ArrayList<>();
+            List<TimeRange> credits = new ArrayList<>();
+
+            // Official v4 arrays: intro[], credits[]
+            parseRanges(obj.optJSONArray("intro"), true, intros);
+            if (intros.isEmpty()) {
+                parseSingleRange(obj.optJSONObject("intro"), true, intros);
+            }
+            parseRanges(obj.optJSONArray("credits"), false, credits);
+            if (credits.isEmpty()) {
+                parseRanges(obj.optJSONArray("outro"), false, credits);
+            }
+            if (credits.isEmpty()) {
+                parseSingleRange(obj.optJSONObject("credits"), false, credits);
+            }
+            if (credits.isEmpty()) {
+                parseSingleRange(obj.optJSONObject("outro"), false, credits);
+            }
+
+            if (intros.isEmpty() && credits.isEmpty()) {
+                return null;
+            }
+            return new IntroTimestamps(intros, credits);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static void parseRanges(JSONArray arr, boolean isIntro, List<TimeRange> dest) {
+        if (arr == null) return;
+        for (int i = 0; i < arr.length(); i++) {
+            parseSingleRange(arr.optJSONObject(i), isIntro, dest);
+        }
+    }
+
+    private static void parseSingleRange(JSONObject item, boolean isIntro, List<TimeRange> dest) {
+        if (item == null) return;
+        long startMs = readTimestampMs(item, "start_ms", "start");
+        long endMs = readTimestampMs(item, "end_ms", "end");
+        if (isIntro) {
+            long effStart = startMs < 0L ? 0L : startMs;
+            if (endMs <= effStart) {
+                return;
+            }
+            dest.add(new TimeRange(effStart, endMs));
+        } else {
+            if (startMs <= 0L) {
+                return;
+            }
+            long effEnd = endMs < 0L ? -1L : endMs;
+            if (effEnd >= 0L && effEnd <= startMs) {
+                return;
+            }
+            dest.add(new TimeRange(startMs, effEnd));
+        }
+    }
+
+    private static long readTimestampMs(JSONObject obj, String msKey, String secKey) {
+        if (obj.has(msKey) && !obj.isNull(msKey)) {
+            long v = obj.optLong(msKey, -1L);
+            return v >= 0L ? v : -1L;
+        }
+        if (obj.has(secKey) && !obj.isNull(secKey)) {
+            double sec = obj.optDouble(secKey, -1.0);
+            if (!Double.isNaN(sec) && !Double.isInfinite(sec) && sec >= 0.0) {
+                return Math.round(sec * 1000.0);
+            }
+        }
+        return -1L;
+    }
+
+    /** Queries TheIntroDB v4 for community intro/credits timestamps using a matched TMDB ID. */
     static void lookupIntroDbAsync(
             final MainActivity a,
             final int tmdbId,
@@ -380,11 +519,12 @@ final class TmdbService {
                 || !a.mobilePrefs().getBoolean(Prefs.THEINTRODB_AUTO_SKIP, true)) {
             return;
         }
+        final int ticket = a.generation;
         a.worker.execute(
                 () -> {
                     try {
-                        String url =
-                                "https://api.theintrodb.org/v1/media?tmdb_id="
+                        String query =
+                                "?tmdb_id="
                                         + tmdbId
                                         + (isTv
                                                 ? ("&season="
@@ -392,40 +532,39 @@ final class TmdbService {
                                                         + "&episode="
                                                         + Math.max(1, episode))
                                                 : "");
-                        String cacheKey = "introdb_" + sha256(url);
+                        String v4Url = "https://api.theintrodb.org/v4/media" + query;
+                        String cacheKey = "introdb_v4_" + sha256(v4Url);
                         String raw = readCache(a, cacheKey, 7L * 86400_000L);
                         if (raw == null) {
-                            raw = httpGet(url, Collections.emptyMap());
-                            if (raw != null) writeCache(a, cacheKey, raw);
+                            try {
+                                raw = httpGet(v4Url, Collections.emptyMap());
+                            } catch (Exception v4Err) {
+                                // Fallback to frozen legacy v2 wrapper if v4 endpoint rejects query
+                                try {
+                                    raw =
+                                            httpGet(
+                                                    "https://api.theintrodb.org/v2/media" + query,
+                                                    Collections.emptyMap());
+                                } catch (Exception ignored) {
+                                    raw = null;
+                                }
+                            }
+                            if (raw != null && !raw.isEmpty()) writeCache(a, cacheKey, raw);
                         }
-                        if (raw == null || raw.isEmpty()) return;
-                        JSONObject obj = new JSONObject(raw);
-                        JSONObject intro = obj.optJSONObject("intro");
-                        JSONObject outro = obj.optJSONObject("outro");
-                        int iStart = intro == null ? -1 : msOrSecToSec(intro, "start_ms", "start");
-                        int iEnd = intro == null ? -1 : msOrSecToSec(intro, "end_ms", "end");
-                        int oStart = outro == null ? -1 : msOrSecToSec(outro, "start_ms", "start");
-                        if (iEnd > 0 || oStart > 0) {
-                            final IntroTimestamps ts =
-                                    new IntroTimestamps(Math.max(0, iStart), iEnd, oStart);
+                        final IntroTimestamps ts = parseIntroDbResponse(raw);
+                        if (ts != null && !ts.isEmpty()) {
                             a.ui.post(
                                     () -> {
-                                        if (!a.isFinishing()) callback.onResult(ts);
+                                        if (!a.isFinishing()
+                                                && !a.isDestroyed()
+                                                && ticket == a.generation) {
+                                            callback.onResult(ts);
+                                        }
                                     });
                         }
                     } catch (Exception ignored) {
                     }
                 });
-    }
-
-    private static int msOrSecToSec(JSONObject obj, String msKey, String secKey) {
-        if (obj.has(msKey) && !obj.isNull(msKey)) {
-            return Math.max(0, (int) (obj.optLong(msKey, 0L) / 1000L));
-        }
-        if (obj.has(secKey) && !obj.isNull(secKey)) {
-            return Math.max(0, obj.optInt(secKey, 0));
-        }
-        return -1;
     }
 
     private static void parseCardList(

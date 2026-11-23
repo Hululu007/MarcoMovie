@@ -109,6 +109,10 @@ final class MobileRootShell {
                 || a.isFinishing()) {
             return false;
         }
+        if (a.inlinePlayer != null) {
+            a.inlinePlayer.detach();
+            a.inlinePlayer = null;
+        }
         a.applyMobileSystemBars(false);
         a.root = shellRoot;
         a.setContentView(shellRoot);

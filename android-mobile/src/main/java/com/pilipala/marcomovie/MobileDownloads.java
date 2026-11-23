@@ -304,6 +304,12 @@ final class MobileDownloads {
         Cms.Episode episode = new Cms.Episode();
         episode.name = t.episode;
         episode.url = Uri.fromFile(file).toString();
+        if (file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".m3u8")) {
+            try {
+                episode.media.put("mimeType", DownloadManager.HLS_MIME);
+            } catch (Exception ignored) {
+            }
+        }
         Runnable render = () -> a.playerPage(site, video, episode);
         MainActivity.Screen screen = new MainActivity.Screen(render);
         screen.player = true;

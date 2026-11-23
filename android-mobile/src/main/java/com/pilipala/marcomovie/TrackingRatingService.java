@@ -56,6 +56,44 @@ final class TrackingRatingService {
 
     private TrackingRatingService() {}
 
+    static String buildMdblistUrl(String baseUrl, String apiKey, int tmdbId, boolean isTv)
+            throws Exception {
+        String base =
+                baseUrl == null || baseUrl.trim().isEmpty()
+                        ? "https://api.mdblist.com/"
+                        : baseUrl.trim();
+        if (!base.endsWith("/") && !base.contains("?")) base = base + "/";
+        return base
+                + "?apikey="
+                + URLEncoder.encode(apiKey == null ? "" : apiKey.trim(), "UTF-8")
+                + "&tm="
+                + tmdbId
+                + "&m="
+                + (isTv ? "show" : "movie");
+    }
+
+    static void parseMdblistResponse(String raw, MultiRating r) {
+        if (raw == null || !raw.trim().startsWith("{") || r == null) return;
+        try {
+            JSONObject obj = new JSONObject(raw);
+            JSONArray ratings = obj.optJSONArray("ratings");
+            if (ratings == null) return;
+            for (int i = 0; i < ratings.length(); i++) {
+                JSONObject item = ratings.optJSONObject(i);
+                if (item == null) continue;
+                String src = item.optString("source", "").toLowerCase(Locale.ROOT);
+                double val = item.optDouble("value", 0.0);
+                if ("imdb".equals(src) && val > 0) r.imdb = val;
+                else if ("tomatoes".equals(src) && val > 0)
+                    r.rottenTomatoes = (int) Math.round(val);
+                else if ("trakt".equals(src) && val > 0) r.trakt = val > 10 ? val / 10.0 : val;
+                else if ("tmdb".equals(src) && val > 0 && r.tmdb <= 0)
+                    r.tmdb = val > 10 ? val / 10.0 : val;
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     static void lookupRatingsAsync(
             final MainActivity a,
             final String rawTitle,
@@ -107,35 +145,12 @@ final class TrackingRatingService {
                     if (!mdbKey.isEmpty() && tmdbId > 0) {
                         try {
                             String url =
-                                    "https://api.mdblist.com/?apikey="
-                                            + URLEncoder.encode(mdbKey, "UTF-8")
-                                            + "&tm="
-                                            + tmdbId
-                                            + "&m="
-                                            + (isTv ? "show" : "movie");
+                                    buildMdblistUrl(
+                                            "https://api.mdblist.com/", mdbKey, tmdbId, isTv);
                             String raw = TmdbService.httpGet(url, Collections.emptyMap());
-                            if (raw != null && raw.startsWith("{")) {
-                                JSONObject obj = new JSONObject(raw);
-                                JSONArray ratings = obj.optJSONArray("ratings");
-                                if (ratings != null) {
-                                    for (int i = 0; i < ratings.length(); i++) {
-                                        JSONObject item = ratings.optJSONObject(i);
-                                        if (item == null) continue;
-                                        String src =
-                                                item.optString("source", "")
-                                                        .toLowerCase(Locale.ROOT);
-                                        double val = item.optDouble("value", 0.0);
-                                        if ("imdb".equals(src) && val > 0) r.imdb = val;
-                                        else if ("tomatoes".equals(src) && val > 0)
-                                            r.rottenTomatoes = (int) Math.round(val);
-                                        else if ("trakt".equals(src) && val > 0)
-                                            r.trakt = val > 10 ? val / 10.0 : val;
-                                        else if ("tmdb".equals(src) && val > 0 && r.tmdb <= 0)
-                                            r.tmdb = val > 10 ? val / 10.0 : val;
-                                    }
-                                }
-                            }
+                            parseMdblistResponse(raw, r);
                         } catch (Exception ignored) {
+                            // Never log URL or exception message that might carry apikey.
                         }
                     }
 

@@ -233,6 +233,8 @@ final class DownloadManager {
         byte[] iv;
         long offset = -1;
         long length = -1;
+        double durationSec = 4.0;
+        boolean discontinuity;
 
         String range() {
             if (length < 0) return null;
@@ -241,9 +243,68 @@ final class DownloadManager {
         }
     }
 
+    static final class AudioRendition {
+        final String groupId;
+        final String name;
+        final String language;
+        final String uri; // Empty when audio is embedded/muxed inside the video variant
+        final boolean isDefault;
+        final boolean autoSelect;
+        final String channels;
+
+        AudioRendition(
+                String groupId,
+                String name,
+                String language,
+                String uri,
+                boolean isDefault,
+                boolean autoSelect,
+                String channels) {
+            this.groupId = groupId == null ? "" : groupId;
+            this.name = name == null ? "" : name;
+            this.language = language == null ? "" : language;
+            this.uri = uri == null ? "" : uri;
+            this.isDefault = isDefault;
+            this.autoSelect = autoSelect;
+            this.channels = channels == null ? "" : channels;
+        }
+
+        boolean hasSeparateUri() {
+            return !uri.isEmpty();
+        }
+    }
+
+    static final class VariantSelection {
+        final String videoUri;
+        final String audioGroupId;
+        final AudioRendition audio; // Non-null only for separated external audio tracks
+        final long bandwidth;
+        final String codecs;
+        final String resolution;
+
+        VariantSelection(
+                String videoUri,
+                String audioGroupId,
+                AudioRendition audio,
+                long bandwidth,
+                String codecs,
+                String resolution) {
+            this.videoUri = videoUri;
+            this.audioGroupId = audioGroupId == null ? "" : audioGroupId;
+            this.audio = audio;
+            this.bandwidth = bandwidth;
+            this.codecs = codecs == null ? "" : codecs;
+            this.resolution = resolution == null ? "" : resolution;
+        }
+    }
+
     private static final class Media {
         final List<Segment> segments = new ArrayList<>();
         Segment init;
+        double targetDurationSec = 6.0;
+        Media audioMedia;
+        AudioRendition audioRendition;
+        VariantSelection variant;
     }
 
     private static final class Fetched {
@@ -734,6 +795,10 @@ final class DownloadManager {
         if (!parts.isDirectory() && !parts.mkdirs()) {
             throw new DownloadException("无法创建下载缓存目录");
         }
+        if (media.audioMedia != null) {
+            downloadSeparatedHlsBundle(run, t, media, parts);
+            return;
+        }
         int count = media.segments.size();
         int ready = 0;
         for (int i = 0; i < count; i++) {
@@ -787,6 +852,236 @@ final class DownloadManager {
         }
     }
 
+    /**
+     * Downloads both video and separated audio HLS renditions with full segment-level resume,
+     * decrypts any AES-128 segments, verifies every required track file, and atomically publishes a
+     * self-contained offline {@code .hls/master.m3u8} bundle playable with zero network.
+     */
+    private void downloadSeparatedHlsBundle(Run run, Task t, Media videoMedia, File parts)
+            throws Exception {
+        Media audioMedia = videoMedia.audioMedia;
+        if (audioMedia == null || audioMedia.segments.isEmpty()) {
+            throw new DownloadException("独立音轨缺少有效分片，拒绝生成无声离线文件");
+        }
+        int vCount = videoMedia.segments.size();
+        int aCount = audioMedia.segments.size();
+        int totalCount = vCount + aCount;
+        int ready = 0;
+        for (int i = 0; i < vCount; i++) {
+            if (trackSegmentFile(parts, "v", i, videoMedia.init != null).isFile()) ready++;
+        }
+        for (int i = 0; i < aCount; i++) {
+            if (trackSegmentFile(parts, "a", i, audioMedia.init != null).isFile()) ready++;
+        }
+        synchronized (t) {
+            t.segmentCount = totalCount;
+            t.segments = ready;
+            t.bytes = 0;
+            t.total = -1;
+        }
+
+        ExecutorService workers = Executors.newFixedThreadPool(SEGMENT_THREADS, THREADS);
+        List<Future<Void>> jobs = new ArrayList<>();
+        try {
+            if (videoMedia.init != null) {
+                File vInit = new File(parts, "v_init.mp4");
+                if (!vInit.isFile()) {
+                    jobs.add(
+                            workers.submit(
+                                    () -> {
+                                        download(run, videoMedia.init, vInit, false);
+                                        return null;
+                                    }));
+                }
+            }
+            if (audioMedia.init != null) {
+                File aInit = new File(parts, "a_init.mp4");
+                if (!aInit.isFile()) {
+                    jobs.add(
+                            workers.submit(
+                                    () -> {
+                                        download(run, audioMedia.init, aInit, false);
+                                        return null;
+                                    }));
+                }
+            }
+            for (int i = 0; i < vCount; i++) {
+                File target = trackSegmentFile(parts, "v", i, videoMedia.init != null);
+                if (target.isFile()) continue;
+                Segment seg = videoMedia.segments.get(i);
+                jobs.add(
+                        workers.submit(
+                                () -> {
+                                    download(run, seg, target, true);
+                                    return null;
+                                }));
+            }
+            for (int i = 0; i < aCount; i++) {
+                File target = trackSegmentFile(parts, "a", i, audioMedia.init != null);
+                if (target.isFile()) continue;
+                Segment seg = audioMedia.segments.get(i);
+                jobs.add(
+                        workers.submit(
+                                () -> {
+                                    download(run, seg, target, true);
+                                    return null;
+                                }));
+            }
+            for (Future<Void> pending : jobs) await(pending);
+        } finally {
+            workers.shutdownNow();
+        }
+
+        check(run);
+        // Verify every required video & audio segment and init file exists and is non-empty.
+        long bundleBytes = 0;
+        if (videoMedia.init != null) {
+            File vInit = new File(parts, "v_init.mp4");
+            if (!vInit.isFile() || vInit.length() <= 0) {
+                throw new DownloadException("视频初始化分片缺失，无法完成离线合成");
+            }
+            bundleBytes += vInit.length();
+        }
+        if (audioMedia.init != null) {
+            File aInit = new File(parts, "a_init.mp4");
+            if (!aInit.isFile() || aInit.length() <= 0) {
+                throw new DownloadException("音频初始化分片缺失，拒绝生成无声离线文件");
+            }
+            bundleBytes += aInit.length();
+        }
+        for (int i = 0; i < vCount; i++) {
+            File f = trackSegmentFile(parts, "v", i, videoMedia.init != null);
+            if (!f.isFile() || f.length() <= 0) {
+                throw new DownloadException("视频分片 #" + i + " 缺失或损坏");
+            }
+            bundleBytes += f.length();
+        }
+        for (int i = 0; i < aCount; i++) {
+            File f = trackSegmentFile(parts, "a", i, audioMedia.init != null);
+            if (!f.isFile() || f.length() <= 0) {
+                throw new DownloadException("音轨分片 #" + i + " 缺失或损坏，拒绝生成无声离线文件");
+            }
+            bundleBytes += f.length();
+        }
+
+        File videoPlaylist = new File(parts, "video.m3u8");
+        File audioPlaylist = new File(parts, "audio.m3u8");
+        File masterPlaylist = new File(parts, "master.m3u8");
+        writeUtf8Atomic(
+                videoPlaylist,
+                buildLocalMediaPlaylist(
+                        videoMedia, "v", videoMedia.init != null ? "v_init.mp4" : null));
+        writeUtf8Atomic(
+                audioPlaylist,
+                buildLocalMediaPlaylist(
+                        audioMedia, "a", audioMedia.init != null ? "a_init.mp4" : null));
+        writeUtf8Atomic(masterPlaylist, buildLocalMasterPlaylist(videoMedia));
+        bundleBytes += videoPlaylist.length() + audioPlaylist.length() + masterPlaylist.length();
+
+        File bundleDir = workFile(t, ".hls");
+        if (bundleDir.exists()) deleteTree(bundleDir);
+        if (!parts.renameTo(bundleDir)) {
+            throw new DownloadException("无法保存离线多轨 HLS 目录");
+        }
+        File finalMaster = new File(bundleDir, "master.m3u8");
+        if (!finalMaster.isFile()) {
+            throw new DownloadException("离线播放列表校验失败");
+        }
+        synchronized (t) {
+            t.path = finalMaster.getAbsolutePath();
+            t.bytes = bundleBytes;
+            t.total = bundleBytes;
+        }
+    }
+
+    private static File trackSegmentFile(File parts, String prefix, int index, boolean fmp4) {
+        String ext = fmp4 ? ".m4s" : ".ts";
+        return new File(parts, String.format(Locale.ROOT, "%s_%06d%s", prefix, index, ext));
+    }
+
+    private static String buildLocalMediaPlaylist(Media media, String prefix, String initFile) {
+        boolean fmp4 = initFile != null;
+        int targetDur = Math.max(1, (int) Math.ceil(media.targetDurationSec));
+        for (Segment seg : media.segments) {
+            int d = Math.max(1, (int) Math.ceil(seg.durationSec));
+            if (d > targetDur) targetDur = d;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("#EXTM3U\n");
+        sb.append("#EXT-X-VERSION:").append(fmp4 ? 7 : 3).append('\n');
+        sb.append("#EXT-X-TARGETDURATION:").append(targetDur).append('\n');
+        sb.append("#EXT-X-MEDIA-SEQUENCE:0\n");
+        sb.append("#EXT-X-PLAYLIST-TYPE:VOD\n");
+        if (initFile != null) {
+            sb.append("#EXT-X-MAP:URI=\"").append(initFile).append("\"\n");
+        }
+        for (int i = 0; i < media.segments.size(); i++) {
+            Segment seg = media.segments.get(i);
+            if (seg.discontinuity) {
+                sb.append("#EXT-X-DISCONTINUITY\n");
+            }
+            double dur = seg.durationSec > 0 ? seg.durationSec : 4.0;
+            sb.append(String.format(Locale.ROOT, "#EXTINF:%.3f,\n", dur));
+            sb.append(String.format(Locale.ROOT, "%s_%06d%s\n", prefix, i, fmp4 ? ".m4s" : ".ts"));
+        }
+        sb.append("#EXT-X-ENDLIST\n");
+        return sb.toString();
+    }
+
+    private static String buildLocalMasterPlaylist(Media videoMedia) {
+        AudioRendition aud = videoMedia.audioRendition;
+        String audName =
+                (aud != null && !aud.name.isEmpty()) ? aud.name.replace("\"", "") : "Audio";
+        String audLang =
+                (aud != null && !aud.language.isEmpty()) ? aud.language.replace("\"", "") : "";
+        long bw =
+                (videoMedia.variant != null && videoMedia.variant.bandwidth > 0)
+                        ? videoMedia.variant.bandwidth
+                        : 2_000_000L;
+        StringBuilder sb = new StringBuilder();
+        sb.append("#EXTM3U\n");
+        sb.append("#EXT-X-VERSION:")
+                .append(
+                        (videoMedia.init != null
+                                        || (videoMedia.audioMedia != null
+                                                && videoMedia.audioMedia.init != null))
+                                ? 7
+                                : 3)
+                .append('\n');
+        sb.append("#EXT-X-INDEPENDENT-SEGMENTS\n");
+        sb.append("#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"").append(audName).append('"');
+        if (!audLang.isEmpty()) {
+            sb.append(",LANGUAGE=\"").append(audLang).append('"');
+        }
+        if (aud != null && !aud.channels.isEmpty()) {
+            sb.append(",CHANNELS=\"").append(aud.channels.replace("\"", "")).append('"');
+        }
+        sb.append(",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio.m3u8\"\n");
+        sb.append("#EXT-X-STREAM-INF:BANDWIDTH=").append(bw);
+        if (videoMedia.variant != null && !videoMedia.variant.resolution.isEmpty()) {
+            sb.append(",RESOLUTION=").append(videoMedia.variant.resolution);
+        }
+        if (videoMedia.variant != null && !videoMedia.variant.codecs.isEmpty()) {
+            sb.append(",CODECS=\"").append(videoMedia.variant.codecs.replace("\"", "")).append('"');
+        }
+        sb.append(",AUDIO=\"aud\"\n");
+        sb.append("video.m3u8\n");
+        return sb.toString();
+    }
+
+    private static void writeUtf8Atomic(File target, String content) throws IOException {
+        File tmp = new File(target.getPath() + ".tmp");
+        try (OutputStream out = new FileOutputStream(tmp)) {
+            out.write(content.getBytes("UTF-8"));
+        }
+        if (target.exists() && !target.delete()) {
+            throw new DownloadException("无法更新离线播放列表");
+        }
+        if (!tmp.renameTo(target)) {
+            throw new DownloadException("无法写入离线播放列表");
+        }
+    }
+
     private static void await(Future<Void> job) throws Exception {
         try {
             job.get();
@@ -810,24 +1105,99 @@ final class DownloadManager {
         }
     }
 
-    /** Follows master playlists to the highest-bandwidth variant and parses its segments. */
+    /**
+     * Follows master playlists to the highest-bandwidth variant and its matching separated audio
+     * rendition (if declared with a non-empty URI), then parses video and audio media playlists.
+     */
     private Media loadMedia(Run run, String address) throws Exception {
         String url = address;
+        VariantSelection selected = null;
         for (int depth = 0; depth < 5; depth++) {
             Fetched body = fetch(run, url, null, MAX_PLAYLIST);
             String text = new String(body.data, "UTF-8");
             if (!text.contains("#EXTM3U")) throw new DownloadException("播放列表格式无法识别");
-            String variant = bestVariant(text, body.url);
-            if (variant == null) return parseMedia(text, body.url);
-            url = variant;
+            VariantSelection variant = selectBestVariant(text, body.url);
+            if (variant == null) {
+                Media videoMedia = parseMedia(text, body.url);
+                videoMedia.variant = selected;
+                if (selected != null && selected.audio != null && selected.audio.hasSeparateUri()) {
+                    Fetched audioBody;
+                    try {
+                        audioBody = fetch(run, selected.audio.uri, null, MAX_PLAYLIST);
+                    } catch (Exception e) {
+                        throw new DownloadException("独立音轨列表下载失败：" + reason(e));
+                    }
+                    String audioText = new String(audioBody.data, "UTF-8");
+                    if (!audioText.contains("#EXTM3U")) {
+                        throw new DownloadException("独立音轨播放列表格式无法识别");
+                    }
+                    Media audioMedia;
+                    try {
+                        audioMedia = parseMedia(audioText, audioBody.url);
+                    } catch (DownloadException de) {
+                        throw new DownloadException("独立音轨不受支持：" + de.getMessage());
+                    }
+                    videoMedia.audioMedia = audioMedia;
+                    videoMedia.audioRendition = selected.audio;
+                }
+                return videoMedia;
+            }
+            selected = variant;
+            url = variant.videoUri;
         }
         throw new DownloadException("播放列表嵌套层级过多");
     }
 
-    private static String bestVariant(String text, String base) throws IOException {
+    static String bestVariant(String text, String base) throws IOException {
+        VariantSelection sel = selectBestVariant(text, base);
+        return sel == null ? null : sel.videoUri;
+    }
+
+    /**
+     * Parses an HLS master playlist, selects the highest-bandwidth video variant, and resolves its
+     * {@code AUDIO} group against {@code #EXT-X-MEDIA:TYPE=AUDIO} tags:
+     * <ul>
+     *   <li>If the selected audio rendition has NO {@code URI}, audio is muxed inside the video
+     *       variant ({@code audio == null}).
+     *   <li>If the selected audio rendition has a {@code URI}, returns it for separated download.
+     *   <li>If the variant references an {@code AUDIO} group with no matching audio rendition,
+     *       throws {@link DownloadException} rather than silently producing a muted file.
+     * </ul>
+     */
+    static VariantSelection selectBestVariant(String text, String base) throws IOException {
         String[] lines = text.split("\n");
+        Map<String, List<AudioRendition>> audioGroups = new LinkedHashMap<>();
+        for (String raw : lines) {
+            String line = raw.trim();
+            if (!line.startsWith("#EXT-X-MEDIA:")) continue;
+            String type = text(attribute(line, "TYPE")).toUpperCase(Locale.ROOT);
+            if (!"AUDIO".equals(type)) continue;
+            String groupId = text(attribute(line, "GROUP-ID"));
+            if (groupId.isEmpty()) continue;
+            String rawUri = text(attribute(line, "URI"));
+            String resolvedUri = rawUri.isEmpty() ? "" : absolute(base, rawUri);
+            AudioRendition rendition =
+                    new AudioRendition(
+                            groupId,
+                            text(attribute(line, "NAME")),
+                            text(attribute(line, "LANGUAGE")),
+                            resolvedUri,
+                            "YES".equalsIgnoreCase(text(attribute(line, "DEFAULT"))),
+                            "YES".equalsIgnoreCase(text(attribute(line, "AUTOSELECT"))),
+                            text(attribute(line, "CHANNELS")));
+            List<AudioRendition> group = audioGroups.get(groupId);
+            if (group == null) {
+                group = new ArrayList<>();
+                audioGroups.put(groupId, group);
+            }
+            group.add(rendition);
+        }
+
         long best = -1;
-        String chosen = null;
+        String chosenUri = null;
+        String chosenAudioGroup = "";
+        String chosenCodecs = "";
+        String chosenResolution = "";
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i].trim();
             if (!line.startsWith("#EXT-X-STREAM-INF")) continue;
@@ -839,12 +1209,49 @@ final class DownloadManager {
                 uri = next;
                 break;
             }
-            if (uri != null && (chosen == null || bandwidth > best)) {
+            if (uri != null && (chosenUri == null || bandwidth > best)) {
                 best = bandwidth;
-                chosen = absolute(base, uri);
+                chosenUri = absolute(base, uri);
+                chosenAudioGroup = text(attribute(line, "AUDIO"));
+                chosenCodecs = text(attribute(line, "CODECS"));
+                chosenResolution = text(attribute(line, "RESOLUTION"));
             }
         }
-        return chosen;
+        if (chosenUri == null) return null;
+
+        AudioRendition chosenAudio = null;
+        if (!chosenAudioGroup.isEmpty()) {
+            List<AudioRendition> group = audioGroups.get(chosenAudioGroup);
+            if (group == null || group.isEmpty()) {
+                throw new DownloadException("播放列表声明了音轨组 " + chosenAudioGroup + "，但缺少对应音轨定义，无法离线下载");
+            }
+            AudioRendition picked = pickBestAudioRendition(group);
+            // RFC 8216: missing URI means audio is embedded/muxed inside the video variant.
+            if (picked != null && picked.hasSeparateUri()) {
+                chosenAudio = picked;
+            }
+        }
+        return new VariantSelection(
+                chosenUri, chosenAudioGroup, chosenAudio, best, chosenCodecs, chosenResolution);
+    }
+
+    static AudioRendition pickBestAudioRendition(List<AudioRendition> renditions) {
+        if (renditions == null || renditions.isEmpty()) return null;
+        AudioRendition best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (AudioRendition r : renditions) {
+            int score = 0;
+            if (r.isDefault) score += 100;
+            if (r.autoSelect) score += 40;
+            String lang = r.language.toLowerCase(Locale.ROOT);
+            if (lang.startsWith("zh") || lang.startsWith("cmn")) score += 10;
+            else if (lang.startsWith("en")) score += 5;
+            if (best == null || score > bestScore) {
+                best = r;
+                bestScore = score;
+            }
+        }
+        return best;
     }
 
     private static Media parseMedia(String text, String base) throws IOException {
@@ -855,13 +1262,25 @@ final class DownloadManager {
         long pendingLength = -1;
         long pendingOffset = -1;
         long nextOffset = 0;
+        double pendingDuration = 4.0;
+        boolean pendingDiscontinuity = false;
         String lastUri = null;
         int index = 0;
         for (String raw : text.split("\n")) {
             String line = raw.trim();
             if (line.isEmpty()) continue;
-            if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
+            if (line.startsWith("#EXT-X-TARGETDURATION:")) {
+                double td = parseDoubleSafe(line.substring(line.indexOf(':') + 1), 6.0);
+                if (td > 0) out.targetDurationSec = td;
+            } else if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
                 sequence = Math.max(0, number(line.substring(line.indexOf(':') + 1)));
+            } else if (line.startsWith("#EXTINF:")) {
+                String val = line.substring(line.indexOf(':') + 1);
+                int comma = val.indexOf(',');
+                if (comma >= 0) val = val.substring(0, comma);
+                pendingDuration = parseDoubleSafe(val, 4.0);
+            } else if (line.equals("#EXT-X-DISCONTINUITY")) {
+                pendingDiscontinuity = true;
             } else if (line.startsWith("#EXT-X-KEY:")) {
                 String method = text(attribute(line, "METHOD")).toUpperCase(Locale.ROOT);
                 if (method.isEmpty() || method.equals("NONE")) {
@@ -902,6 +1321,10 @@ final class DownloadManager {
             } else if (!line.startsWith("#")) {
                 Segment segment = new Segment();
                 segment.uri = absolute(base, line);
+                segment.durationSec = pendingDuration > 0 ? pendingDuration : 4.0;
+                segment.discontinuity = pendingDiscontinuity;
+                pendingDuration = 4.0;
+                pendingDiscontinuity = false;
                 if (pendingLength >= 0) {
                     boolean same = segment.uri.equals(lastUri);
                     long start = pendingOffset >= 0 ? pendingOffset : (same ? nextOffset : 0);
@@ -922,6 +1345,16 @@ final class DownloadManager {
         }
         if (out.segments.isEmpty()) throw new DownloadException("播放列表中没有可下载的分片");
         return out;
+    }
+
+    private static double parseDoubleSafe(String raw, double fallback) {
+        if (raw == null) return fallback;
+        try {
+            double v = Double.parseDouble(raw.trim());
+            return (!Double.isNaN(v) && !Double.isInfinite(v) && v > 0) ? v : fallback;
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
     }
 
     /** Reads one attribute from an HLS tag such as {@code #EXT-X-KEY:METHOD=AES-128,URI="k"}. */
@@ -1209,8 +1642,20 @@ final class DownloadManager {
             new File(base + ".ts.tmp").delete();
             new File(base + ".mp4.tmp").delete();
             deleteTree(new File(base + ".parts"));
+            deleteTree(new File(base + ".hls"));
+            deleteTree(new File(base + ".hls.tmp"));
         }
-        if (!t.path.isEmpty()) new File(t.path).delete();
+        if (!t.path.isEmpty()) {
+            File target = new File(t.path);
+            File parent = target.getParentFile();
+            if ("master.m3u8".equals(target.getName())
+                    && parent != null
+                    && parent.getName().endsWith(".hls")) {
+                deleteTree(parent);
+            } else {
+                target.delete();
+            }
+        }
     }
 
     static void deleteTree(File file) {

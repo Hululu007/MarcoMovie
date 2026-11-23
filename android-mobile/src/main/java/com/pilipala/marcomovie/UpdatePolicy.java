@@ -7,6 +7,7 @@ import java.net.URI;
 /** Public update metadata policy, also tested without Android. */
 final class UpdatePolicy {
     static final long MAX_APK = 128L * 1024 * 1024;
+    static final long SPACE_RESERVE_BYTES = 16L * 1024 * 1024;
     static final String FEED =
             "https://raw.githubusercontent.com/Pilipala9919/mtv/main/movie/updates/";
     static final String MIRROR = "https://marcotv.wlj9919.top/movie/";
@@ -181,11 +182,22 @@ final class UpdatePolicy {
         return offered > installed;
     }
 
+    static long requiredFreeBytes(long totalSize, long existingValidBytes) {
+        long clampedExisting = Math.max(0L, Math.min(Math.max(0L, totalSize), existingValidBytes));
+        long remaining = Math.max(0L, totalSize - clampedExisting);
+        return remaining + SPACE_RESERVE_BYTES;
+    }
+
+    static boolean hasEnoughSpace(long usableBytes, long totalSize, long existingValidBytes) {
+        return usableBytes >= requiredFreeBytes(totalSize, existingValidBytes);
+    }
+
     static long resumeOffset(long requested, int status, String range, long size)
             throws java.io.IOException {
         if (requested < 0 || requested >= size) throw new java.io.IOException("invalid offset");
         if (status == 200) return 0;
         if (status == 404) throw new java.io.IOException("http 404");
+        if (status == 416) throw new java.io.IOException("http 416");
         if (status != 206 || requested == 0 || range == null)
             throw new java.io.IOException("invalid range response");
         java.util.regex.Matcher m =

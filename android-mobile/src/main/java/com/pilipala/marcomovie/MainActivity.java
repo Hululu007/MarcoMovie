@@ -3295,6 +3295,7 @@ public final class MainActivity extends Activity {
         super.onStart();
         activeActivity = this;
         foreground = true;
+        if (inlinePlayer != null) inlinePlayer.onActivityStart();
         CspEngine.syncAllPluginActivities(this);
         syncCastService();
         syncSpiderGateway();
@@ -3318,6 +3319,7 @@ public final class MainActivity extends Activity {
         super.onResume();
         activeActivity = this;
         foreground = true;
+        if (inlinePlayer != null) inlinePlayer.onActivityStart();
         CspEngine.syncAllPluginActivities(this);
         syncCastService();
         syncSpiderGateway();
@@ -3332,7 +3334,7 @@ public final class MainActivity extends Activity {
         if (playing
                 && current != null
                 && current.player
-                && mobilePrefs().getBoolean(Prefs.AUTO_PIP, false)) {
+                && mobilePrefs().getBoolean(Prefs.AUTO_PIP, true)) {
             enterAppPip();
         }
     }
@@ -3344,6 +3346,7 @@ public final class MainActivity extends Activity {
         if (markerHost != null) markerHost.abort();
         if (playerChrome != null) playerChrome.cancelEpisodeHoldSwitch();
         savePlaybackHistory(true);
+        if (inlinePlayer != null) inlinePlayer.flushHistoryProgress();
         super.onPause();
     }
 
@@ -3387,6 +3390,9 @@ public final class MainActivity extends Activity {
         boolean keepBgPlay =
                 (android.os.Build.VERSION.SDK_INT >= 24 && isInPictureInPictureMode())
                         || mobilePrefs().getBoolean(Prefs.BACKGROUND_PLAY, false);
+        if (inlinePlayer != null) {
+            inlinePlayer.onActivityStop(keepBgPlay);
+        }
         if (player != null && !keepBgPlay)
             try {
                 player.pause();

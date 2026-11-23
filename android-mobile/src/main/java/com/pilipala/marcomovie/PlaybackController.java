@@ -1256,91 +1256,21 @@ final class PlaybackController {
                                             Cms.inheritedHeaders(s.api, ep.url, s.headers);
                                     Cms.mergeHeaders(mediaHeaders, ep.headers);
                                     int engPref = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
-                                    JSONObject drmObj = ep.media.optJSONObject("drm");
-                                    String drmScheme =
-                                            drmObj == null
-                                                    ? ep.media.optString("drmScheme", "")
-                                                    : drmObj.optString(
-                                                            "scheme", drmObj.optString("type", ""));
-                                    boolean useMpv =
-                                            !ep.media.optBoolean("_systemFallback")
-                                                    && !ep.media.optBoolean("_softwareFallback")
-                                                    && !ep.media.optBoolean("_mpvFallback")
-                                                    && drmScheme.isEmpty()
-                                                    && engPref == 3
-                                                    && MpvPlayer.isAvailable();
-                                    boolean preferIjk =
-                                            engPref == 2
-                                                    || (engPref == 0
-                                                            && (ep.media.optBoolean("live")
-                                                                    || ep.media.optInt(
-                                                                                    "playerType", 0)
-                                                                            == 2));
-                                    if (ep.media.optBoolean("_systemFallback") || engPref == 1) {
-                                        candidate = new SystemPlayer(a);
-                                    } else if (useMpv) {
-                                        try {
-                                            candidate = new MpvPlayer(a);
-                                        } catch (Throwable mpvInitErr) {
-                                            AppLog.w(
-                                                    "PlaybackController",
-                                                    "MPV init failed, falling back to Media3",
-                                                    mpvInitErr);
-                                            candidate = new MoviePlayer(a);
-                                        }
-                                    } else if (ep.media.optBoolean("_softwareFallback")) {
-                                        candidate =
-                                                new MoviePlayer(
-                                                        a,
-                                                        ep.media.optInt("_fallbackMode", 2),
-                                                        preferIjk);
-                                    } else if (preferIjk) {
-                                        candidate = MoviePlayer.createIjk(a);
-                                    } else {
-                                        candidate = new MoviePlayer(a);
+                                    EnginePlan plan =
+                                            planEngine(engPref, ep.media, MpvPlayer.isAvailable());
+                                    MoviePlayer[] created = new MoviePlayer[1];
+                                    EnginePlan actualPlan =
+                                            createPlayerWithPlan(a, ep, plan, created);
+                                    candidate = created[0];
+                                    if (!actualPlan.fallbackReason.isEmpty()) {
+                                        AppLog.i(
+                                                "PlaybackController",
+                                                "Engine fallback ("
+                                                        + actualPlan.engineLabel
+                                                        + "): "
+                                                        + actualPlan.fallbackReason);
                                     }
-                                    String rawPlayUrl =
-                                            Cms.isHttp(ep.url) ? Cms.normalizeHttp(ep.url) : ep.url;
-                                    String playUrl = rawPlayUrl;
-                                    boolean isLiveStream = ep.media.optBoolean("live");
-                                    String declaredMime = MediaOptions.mime(ep.media);
-                                    if (!isLiveStream
-                                            && a.prefs.getBoolean(Prefs.HLS_PROXY_ENABLED, true)
-                                            && HlsStreamProxy.looksLikeHls(
-                                                    rawPlayUrl, declaredMime)) {
-                                        try {
-                                            SourceController.ensureProxy(a, a.config);
-                                            playUrl =
-                                                    HlsStreamProxy.register(
-                                                            rawPlayUrl,
-                                                            mediaHeaders,
-                                                            a.prefs.getBoolean(
-                                                                    Prefs.HLS_AD_STRIP, false));
-                                        } catch (Exception proxyErr) {
-                                            AppLog.w(
-                                                    "PlaybackController",
-                                                    "HLS proxy fallback to direct URL",
-                                                    proxyErr);
-                                        }
-                                    } else if (!isLiveStream) {
-                                        int cacheMb = a.prefs.getInt(Prefs.MEDIA_CACHE_MB, 256);
-                                        if (cacheMb > 0
-                                                && MediaDiskCache.isCacheableDirectUrl(
-                                                        rawPlayUrl, declaredMime)) {
-                                            try {
-                                                SourceController.ensureProxy(a, a.config);
-                                                playUrl =
-                                                        MediaDiskCache.getInstance(
-                                                                        a.getCacheDir(), cacheMb)
-                                                                .register(rawPlayUrl, mediaHeaders);
-                                            } catch (Exception cacheErr) {
-                                                AppLog.w(
-                                                        "PlaybackController",
-                                                        "Disk cache proxy fallback to direct URL",
-                                                        cacheErr);
-                                            }
-                                        }
-                                    }
+                                    String playUrl = preparePlayUrl(a, s, ep, mediaHeaders);
                                     candidate.configureDefaultAudio();
                                     candidate.setDataSource(a, Uri.parse(playUrl), mediaHeaders);
                                     try {
@@ -2488,7 +2418,209 @@ final class PlaybackController {
         a.embyReporter = null;
     }
 
+    static final int ENGINE_MEDIA3 = 0;
+    static final int ENGINE_SYSTEM = 1;
+    static final int ENGINE_IJK = 2;
+    static final int ENGINE_MPV = 3;
+
+    /** Deterministic engine selection plan shared by both fullscreen and mobile inline players. */
+    static final class EnginePlan {
+        final int engine;
+        final boolean softwareFallback;
+        final int fallbackMode;
+        final boolean preferIjk;
+        final String engineLabel;
+        final String fallbackReason;
+
+        EnginePlan(
+                int engine,
+                boolean softwareFallback,
+                int fallbackMode,
+                boolean preferIjk,
+                String engineLabel,
+                String fallbackReason) {
+            this.engine = engine;
+            this.softwareFallback = softwareFallback;
+            this.fallbackMode = fallbackMode;
+            this.preferIjk = preferIjk;
+            this.engineLabel = engineLabel;
+            this.fallbackReason = fallbackReason == null ? "" : fallbackReason;
+        }
+    }
+
+    static EnginePlan planEngine(int engPref, JSONObject media, boolean mpvAvailable) {
+        JSONObject m = media == null ? new JSONObject() : media;
+        JSONObject drmObj = m.optJSONObject("drm");
+        String drmScheme =
+                drmObj == null
+                        ? m.optString("drmScheme", "")
+                        : drmObj.optString("scheme", drmObj.optString("type", ""));
+        boolean sysFallback = m.optBoolean("_systemFallback");
+        boolean swFallback = m.optBoolean("_softwareFallback");
+        boolean mpvFallback = m.optBoolean("_mpvFallback");
+
+        if (sysFallback) {
+            return new EnginePlan(
+                    ENGINE_SYSTEM, false, 0, false, "Android 系统播放器", "已回退至 Android 系统播放器");
+        }
+        if (engPref == ENGINE_SYSTEM) {
+            return new EnginePlan(ENGINE_SYSTEM, false, 0, false, "Android 系统播放器", "");
+        }
+        if (engPref == ENGINE_MPV) {
+            if (!drmScheme.isEmpty()) {
+                return new EnginePlan(
+                        ENGINE_MEDIA3,
+                        swFallback,
+                        swFallback ? m.optInt("_fallbackMode", 2) : 0,
+                        false,
+                        swFallback ? "Media3 (软解)" : "Media3",
+                        "DRM 内容不支持 MPV，已回退 Media3");
+            }
+            if (!mpvAvailable) {
+                return new EnginePlan(
+                        ENGINE_MEDIA3,
+                        swFallback,
+                        swFallback ? m.optInt("_fallbackMode", 2) : 0,
+                        false,
+                        swFallback ? "Media3 (软解)" : "Media3",
+                        "当前设备不支持 MPV，已回退 Media3");
+            }
+            if (!mpvFallback && !swFallback) {
+                return new EnginePlan(ENGINE_MPV, false, 0, false, "MPV", "");
+            }
+            return new EnginePlan(
+                    ENGINE_MEDIA3,
+                    swFallback,
+                    swFallback ? m.optInt("_fallbackMode", 2) : 0,
+                    false,
+                    swFallback ? "Media3 (软解)" : "Media3",
+                    swFallback ? "MPV 与硬解失败，已回退 Media3 软解" : "MPV 播放失败，已回退 Media3");
+        }
+        boolean preferIjk =
+                engPref == ENGINE_IJK
+                        || (engPref == ENGINE_MEDIA3
+                                && (m.optBoolean("live") || m.optInt("playerType", 0) == 2));
+        if (swFallback) {
+            return new EnginePlan(
+                    preferIjk ? ENGINE_IJK : ENGINE_MEDIA3,
+                    true,
+                    m.optInt("_fallbackMode", 2),
+                    preferIjk,
+                    preferIjk ? "IJK (软解)" : "Media3 (软解)",
+                    "硬件解码异常，已回退软件解码");
+        }
+        if (preferIjk) {
+            return new EnginePlan(ENGINE_IJK, false, 0, true, "IJK 兼容模式", "");
+        }
+        return new EnginePlan(ENGINE_MEDIA3, false, 0, false, "Media3", "");
+    }
+
+    static EnginePlan createPlayerWithPlan(
+            MainActivity a, Cms.Episode ep, EnginePlan plan, MoviePlayer[] outPlayer) {
+        MoviePlayer candidate;
+        EnginePlan actual = plan;
+        if (plan.engine == ENGINE_SYSTEM) {
+            candidate = new SystemPlayer(a);
+        } else if (plan.engine == ENGINE_MPV) {
+            try {
+                candidate = new MpvPlayer(a);
+            } catch (Throwable mpvInitErr) {
+                AppLog.w(
+                        "PlaybackController",
+                        "MPV init failed, falling back to Media3",
+                        mpvInitErr);
+                candidate = new MoviePlayer(a);
+                actual =
+                        new EnginePlan(
+                                ENGINE_MEDIA3, false, 0, false, "Media3", "MPV 初始化失败，已回退 Media3");
+            }
+        } else if (plan.softwareFallback) {
+            candidate = new MoviePlayer(a, plan.fallbackMode, plan.preferIjk);
+        } else if (plan.preferIjk) {
+            candidate = MoviePlayer.createIjk(a);
+        } else {
+            candidate = new MoviePlayer(a);
+        }
+        outPlayer[0] = candidate;
+        return actual;
+    }
+
+    /**
+     * Advances the shared engine fallback ladder ({@code MPV -> Media3 -> Media3 SW -> System})
+     * when {@code autoSwitchKernel} is enabled. Returns the fallback description, or {@code null}
+     * when no fallback step remains.
+     */
+    static String advanceFallbackPlan(
+            JSONObject media, int activeEngine, boolean softwareActive, boolean autoSwitchKernel) {
+        if (!autoSwitchKernel || media == null) return null;
+        try {
+            if (activeEngine == ENGINE_MPV && !media.optBoolean("_mpvFallback")) {
+                media.put("_mpvFallback", true);
+                return "MPV 播放异常，已自动回退 Media3";
+            }
+            if ((activeEngine == ENGINE_MEDIA3 || activeEngine == ENGINE_IJK)
+                    && !softwareActive
+                    && !media.optBoolean("_softwareFallback")) {
+                media.put("_softwareFallback", true);
+                media.put("_fallbackMode", 2);
+                return "硬解异常，已自动切换软件解码";
+            }
+            if (activeEngine != ENGINE_SYSTEM && !media.optBoolean("_systemFallback")) {
+                media.put("_systemFallback", true);
+                return "已自动切换 Android 系统播放器";
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    static String preparePlayUrl(
+            MainActivity a, Cms.Site s, Cms.Episode ep, Map<String, String> mediaHeaders)
+            throws Exception {
+        String rawPlayUrl = Cms.isHttp(ep.url) ? Cms.normalizeHttp(ep.url) : ep.url;
+        if (!Cms.isHttp(rawPlayUrl)) {
+            return rawPlayUrl;
+        }
+        String playUrl = rawPlayUrl;
+        boolean isLiveStream = ep.media != null && ep.media.optBoolean("live");
+        String declaredMime = MediaOptions.mime(ep.media);
+        if (!isLiveStream
+                && a.prefs.getBoolean(Prefs.HLS_PROXY_ENABLED, true)
+                && HlsStreamProxy.looksLikeHls(rawPlayUrl, declaredMime)) {
+            try {
+                SourceController.ensureProxy(a, a.config != null ? a.config : new Cms.Config());
+                playUrl =
+                        HlsStreamProxy.register(
+                                rawPlayUrl,
+                                mediaHeaders,
+                                a.prefs.getBoolean(Prefs.HLS_AD_STRIP, false));
+            } catch (Exception proxyErr) {
+                AppLog.w("PlaybackController", "HLS proxy fallback to direct URL", proxyErr);
+            }
+        } else if (!isLiveStream) {
+            int cacheMb = a.prefs.getInt(Prefs.MEDIA_CACHE_MB, 256);
+            if (cacheMb > 0 && MediaDiskCache.isCacheableDirectUrl(rawPlayUrl, declaredMime)) {
+                try {
+                    SourceController.ensureProxy(a, a.config != null ? a.config : new Cms.Config());
+                    playUrl =
+                            MediaDiskCache.getInstance(a.getCacheDir(), cacheMb)
+                                    .register(rawPlayUrl, mediaHeaders);
+                } catch (Exception cacheErr) {
+                    AppLog.w(
+                            "PlaybackController",
+                            "Disk cache proxy fallback to direct URL",
+                            cacheErr);
+                }
+            }
+        }
+        return playUrl;
+    }
+
     static void releasePlayer(MainActivity a) {
+        if (a.inlinePlayer != null) {
+            a.inlinePlayer.detach();
+            a.inlinePlayer = null;
+        }
         if (a.markerHost != null) a.markerHost.abort();
         if (a.playerChrome != null) a.playerChrome.cancelEpisodeHoldSwitch();
         finishSeek(a, false);

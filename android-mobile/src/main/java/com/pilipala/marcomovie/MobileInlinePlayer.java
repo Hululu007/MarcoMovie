@@ -15,36 +15,16 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 import java.util.Map;
 import java.util.Objects;
+import org.json.JSONObject;
 
 /**
  * Portrait inline {@code 16:9} mini-player mounted at the top of {@link MobileDetailScreen} when
- * {@link Prefs#DETAIL_TAP_MODE} is {@code 0} ("详情页内嵌小窗起播"). Intercepts resolved episodes from
- * {@link PlaybackController#openPlayer}, plays directly inside the detail page, supports automatic
- * TheIntroDB / manual intro skip, and seamlessly expands to landscape fullscreen without
- * re-resolving the stream URL.
+ * {@link Prefs#DETAIL_TAP_MODE} is {@code 0} ("详情页内嵌小窗起播"). Shares the unified engine
+ * selection, fallback ladder, proxy/cache, IntroDB v4 skip evaluator, and 15s history checkpointing
+ * with {@link PlaybackController}, enforces single active playback lifecycle across backgrounding /
+ * lock-screen / Home return, and seamlessly hands off to landscape fullscreen.
  */
 final class MobileInlinePlayer {
-    private final MainActivity a;
-    private final FrameLayout hostSlot;
-    private final Runnable onClosed;
-    private final FrameLayout container;
-    private final VideoOutput surfaceView;
-    private final TextView titleLabel;
-    private final TextView statusLabel;
-    private final TextView playPauseBtn;
-    private final TextView clockLabel;
-    private final SeekBar seekBar;
-
-    private Cms.Site site;
-    private Cms.Video video;
-    private Cms.Line activeLine;
-    private Cms.Episode rawEpisode;
-    private Cms.Episode resolvedEpisode;
-    private MoviePlayer player;
-    private Surface renderSurface;
-    private boolean prepared;
-    private boolean userSeeking;
-    private boolean closed;
     static final long CHECKPOINT_INTERVAL_MS = 15_000L;
 
     static final class ProgressCheckpointPolicy {
@@ -86,9 +66,36 @@ final class MobileInlinePlayer {
         }
     }
 
-    private int introEndSec = -1;
-    private int outroStartSec = -1;
-    private boolean introSkipped;
+    private final MainActivity a;
+    private final FrameLayout hostSlot;
+    private final Runnable onClosed;
+    private final FrameLayout container;
+    private final VideoOutput surfaceView;
+    private final TextView titleLabel;
+    private final TextView statusLabel;
+    private final TextView playPauseBtn;
+    private final TextView clockLabel;
+    private final SeekBar seekBar;
+
+    private Cms.Site site;
+    private Cms.Video video;
+    private Cms.Line activeLine;
+    private Cms.Episode rawEpisode;
+    private Cms.Episode resolvedEpisode;
+    private int tmdbId;
+    private boolean isTv = true;
+    private int seasonNum = 1;
+    private int epNum = 1;
+    private MoviePlayer player;
+    private PlaybackController.EnginePlan activeEnginePlan;
+    private Surface renderSurface;
+    private boolean prepared;
+    private boolean userSeeking;
+    private boolean closed;
+    private boolean pausedForBackground;
+    private int loadSerial;
+    private long episodeToken;
+    private final IntroSkipEvaluator skipEvaluator = new IntroSkipEvaluator();
     private final ProgressCheckpointPolicy checkpointPolicy = new ProgressCheckpointPolicy();
 
     private final Runnable ticker =
@@ -107,17 +114,22 @@ final class MobileInlinePlayer {
                                             + " / "
                                             + PlaybackController.formatTime(dur));
                         }
-                        if (!introSkipped && introEndSec > 0 && pos < introEndSec * 1000) {
-                            introSkipped = true;
-                            player.seekTo(introEndSec * 1000);
-                            a.toast("已自动跳过片头 (" + introEndSec + "s)");
-                        }
-                        if (outroStartSec > 0
-                                && dur > (outroStartSec + 5) * 1000
-                                && pos >= dur - outroStartSec * 1000) {
-                            outroStartSec = -1;
-                            stepNextEpisode();
-                            return;
+                        boolean autoNext = a.prefs.getBoolean(Prefs.AUTO_NEXT, true);
+                        IntroSkipEvaluator.Decision decision =
+                                skipEvaluator.evaluate(pos, dur, hasNextEpisode(), autoNext);
+                        if (decision.action == IntroSkipEvaluator.ACTION_SEEK
+                                && decision.targetMs >= 0L) {
+                            player.seekTo((int) decision.targetMs);
+                            if (!decision.toastMessage.isEmpty()) {
+                                a.toast(decision.toastMessage);
+                            }
+                        } else if (decision.action == IntroSkipEvaluator.ACTION_NEXT_EPISODE) {
+                            if (!decision.toastMessage.isEmpty()) {
+                                a.toast(decision.toastMessage);
+                            }
+                            if (stepNextEpisode()) {
+                                return;
+                            }
                         }
                         saveHistoryProgress(pos, dur, false);
                     } catch (Exception ignored) {
@@ -234,7 +246,7 @@ final class MobileInlinePlayer {
 
         videoArea.addView(bottomBar, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
 
-        // Tap video center to toggle play/pause; double tap to expand fullscreen
+        // Tap video center to toggle play/pause
         videoArea.setOnClickListener(v -> togglePlayPause());
 
         surfaceView.listen(
@@ -257,9 +269,55 @@ final class MobileInlinePlayer {
                     @Override
                     public void destroyed() {
                         renderSurface = null;
-                        if (player != null) player.setSurface(null);
+                        if (player != null) {
+                            player.setSurface(null);
+                            if (!allowBackgroundAudio()) {
+                                pause();
+                            }
+                        }
                     }
                 });
+    }
+
+    /** Pure policy check used across background/lock-screen/surface-destroy transitions. */
+    static boolean shouldContinuePlaybackInBackground(
+            boolean foreground, boolean inPip, boolean backgroundPlayPref) {
+        return foreground || inPip || backgroundPlayPref;
+    }
+
+    private boolean allowBackgroundAudio() {
+        boolean inPip = android.os.Build.VERSION.SDK_INT >= 24 && a.isInPictureInPictureMode();
+        boolean bgPref = a.mobilePrefs().getBoolean(Prefs.BACKGROUND_PLAY, false);
+        return shouldContinuePlaybackInBackground(a.foreground, inPip, bgPref);
+    }
+
+    private boolean hasNextEpisode() {
+        if (activeLine == null || rawEpisode == null || activeLine.episodes == null) return false;
+        int idx = activeLine.episodes.indexOf(rawEpisode);
+        return idx >= 0 && idx + 1 < activeLine.episodes.size();
+    }
+
+    void onActivityStop(boolean keepBgPlay) {
+        flushHistoryProgress();
+        if (!keepBgPlay) {
+            pausedForBackground = true;
+            if (player != null && prepared && player.isPlaying()) {
+                try {
+                    player.pause();
+                } catch (Exception ignored) {
+                }
+                playPauseBtn.setText("▶");
+            }
+            a.ui.removeCallbacks(ticker);
+        }
+    }
+
+    void onActivityStart() {
+        pausedForBackground = false;
+        if (!closed && player != null && prepared && player.isPlaying()) {
+            a.ui.removeCallbacks(ticker);
+            a.ui.post(ticker);
+        }
     }
 
     void startEpisode(
@@ -271,15 +329,26 @@ final class MobileInlinePlayer {
             boolean isTv,
             int seasonNum,
             int epNum) {
+        // Ensure strict single active playback session before mounting inline player.
+        if (a.player != null) {
+            a.inlinePlayer = null;
+            a.releasePlayer();
+        }
         releaseInternalPlayer();
         this.site = s;
         this.video = v;
         this.activeLine = line;
         this.rawEpisode = ep;
         this.resolvedEpisode = null;
-        this.introSkipped = false;
-        this.introEndSec = Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_INTRO, 0));
-        this.outroStartSec = Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_OUTRO, 0));
+        this.tmdbId = tmdbId;
+        this.isTv = isTv;
+        this.seasonNum = Math.max(1, seasonNum);
+        this.epNum = Math.max(1, epNum);
+        this.pausedForBackground = false;
+        final long epTok = ++episodeToken;
+        int manualIntro = Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_INTRO, 0));
+        int manualOutro = Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_OUTRO, 0));
+        skipEvaluator.resetForEpisode(epTok, manualIntro, manualOutro);
 
         a.activeLine = line;
         a.activeEpisode = ep;
@@ -287,26 +356,25 @@ final class MobileInlinePlayer {
         a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         EpisodeNameCleaner.CleanedEpisode cleaned =
-                EpisodeNameCleaner.clean(ep.name, v.title, epNum);
+                EpisodeNameCleaner.clean(ep.name, v.title, this.epNum);
         titleLabel.setText(v.title + " · " + cleaned.shortLabel);
         statusLabel.setText("正在解析 " + cleaned.shortLabel + " …");
         statusLabel.setVisibility(View.VISIBLE);
 
-        if (tmdbId > 0) {
+        boolean offlineOrLive = s == null || "live".equals(s.key) || "download".equals(s.key);
+        if (!offlineOrLive
+                && tmdbId > 0
+                && (manualIntro <= 0 || manualOutro <= 0)
+                && a.mobilePrefs().getBoolean(Prefs.THEINTRODB_AUTO_SKIP, true)) {
             TmdbService.lookupIntroDbAsync(
                     a,
                     tmdbId,
                     isTv,
-                    seasonNum,
-                    epNum,
+                    this.seasonNum,
+                    this.epNum,
                     ts -> {
-                        if (ts != null && !closed) {
-                            if (introEndSec <= 0 && ts.introEndSec > 0) {
-                                introEndSec = ts.introEndSec;
-                            }
-                            if (outroStartSec <= 0 && ts.outroStartSec > 0) {
-                                outroStartSec = ts.outroStartSec;
-                            }
+                        if (!closed && ts != null) {
+                            skipEvaluator.applyCommunityTimestamps(epTok, ts);
                         }
                     });
         }
@@ -342,35 +410,30 @@ final class MobileInlinePlayer {
         releaseInternalPlayer();
         final Cms.Episode ep = resolvedEpisode;
         if (ep == null || closed) return;
-        statusLabel.setText("正在缓冲画面…");
-        statusLabel.setVisibility(View.VISIBLE);
+        if (ep.media == null) {
+            ep.media = new JSONObject();
+        }
+        final int serial = ++loadSerial;
         final int ticket = a.generation;
+        final int engPref = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+        final PlaybackController.EnginePlan planned =
+                PlaybackController.planEngine(engPref, ep.media, MpvPlayer.isAvailable());
+        statusLabel.setText("正在缓冲画面（" + planned.engineLabel + "）…");
+        statusLabel.setVisibility(View.VISIBLE);
+
         a.worker.execute(
                 () -> {
+                    MoviePlayer createdPlayer = null;
                     try {
                         Map<String, String> headers =
                                 Cms.inheritedHeaders(site.api, ep.url, site.headers);
                         Cms.mergeHeaders(headers, ep.headers);
-                        String normUrl =
-                                Cms.isHttp(ep.url)
-                                        ? Cms.normalizeHttp(LocalProxy.rewrite(ep.url))
-                                        : LocalProxy.rewrite(ep.url);
-                        String effective = normUrl;
-                        String mime = ep.media != null ? ep.media.optString("mimeType", "") : "";
-                        if (a.prefs.getBoolean(Prefs.HLS_PROXY_ENABLED, true)
-                                && HlsStreamProxy.looksLikeHls(normUrl, mime)) {
-                            try {
-                                SourceController.ensureProxy(
-                                        a, a.config != null ? a.config : new Cms.Config());
-                                effective =
-                                        HlsStreamProxy.register(
-                                                normUrl,
-                                                headers,
-                                                a.prefs.getBoolean(Prefs.HLS_AD_STRIP, false));
-                            } catch (Exception ignored) {
-                            }
-                        }
-                        final MoviePlayer mp = new MoviePlayer(a);
+                        String effective = PlaybackController.preparePlayUrl(a, site, ep, headers);
+                        MoviePlayer[] out = new MoviePlayer[1];
+                        final PlaybackController.EnginePlan actualPlan =
+                                PlaybackController.createPlayerWithPlan(a, ep, planned, out);
+                        createdPlayer = out[0];
+                        final MoviePlayer mp = createdPlayer;
                         mp.configureDefaultAudio();
                         mp.setDataSource(a, Uri.parse(effective), headers);
                         mp.setOptions(ep.media);
@@ -378,16 +441,33 @@ final class MobileInlinePlayer {
                                 () -> {
                                     if (closed
                                             || a.isFinishing()
+                                            || a.isDestroyed()
                                             || ticket != a.generation
+                                            || serial != loadSerial
                                             || renderSurface == null
                                             || !renderSurface.isValid()) {
                                         mp.release();
                                         return;
                                     }
                                     player = mp;
+                                    activeEnginePlan = actualPlan;
+                                    if (!actualPlan.fallbackReason.isEmpty()) {
+                                        AppLog.i(
+                                                "MobileInlinePlayer",
+                                                "Engine fallback ("
+                                                        + actualPlan.engineLabel
+                                                        + "): "
+                                                        + actualPlan.fallbackReason);
+                                    }
                                     mp.setSurface(renderSurface);
                                     mp.setOnPreparedListener(
                                             p -> {
+                                                if (closed
+                                                        || a.isFinishing()
+                                                        || serial != loadSerial
+                                                        || player != mp) {
+                                                    return;
+                                                }
                                                 prepared = true;
                                                 statusLabel.setVisibility(View.GONE);
                                                 float spd = a.prefs.getFloat(Prefs.PLAY_SPEED, 1f);
@@ -396,23 +476,68 @@ final class MobileInlinePlayer {
                                                     p.seekTo(a.resumeAt);
                                                     a.resumeAt = 0;
                                                 }
-                                                p.start();
-                                                playPauseBtn.setText("❚❚");
-                                                a.ui.removeCallbacks(ticker);
-                                                a.ui.post(ticker);
+                                                if (allowBackgroundAudio()
+                                                        && !pausedForBackground) {
+                                                    p.start();
+                                                    playPauseBtn.setText("❚❚");
+                                                    a.ui.removeCallbacks(ticker);
+                                                    a.ui.post(ticker);
+                                                } else {
+                                                    p.pause();
+                                                    playPauseBtn.setText("▶");
+                                                }
                                             });
-                                    mp.setOnCompletionListener(p -> stepNextEpisode());
+                                    mp.setOnCompletionListener(
+                                            p -> {
+                                                if (closed
+                                                        || serial != loadSerial
+                                                        || player != mp) {
+                                                    return;
+                                                }
+                                                stepNextEpisode();
+                                            });
                                     mp.setOnErrorListener(
                                             (p, what, extra) -> {
+                                                if (closed
+                                                        || serial != loadSerial
+                                                        || player != mp) {
+                                                    return true;
+                                                }
+                                                boolean autoSwitch =
+                                                        a.mobilePrefs()
+                                                                .getBoolean(
+                                                                        Prefs.AUTO_SWITCH_KERNEL,
+                                                                        true);
+                                                String reason =
+                                                        PlaybackController.advanceFallbackPlan(
+                                                                ep.media,
+                                                                actualPlan.engine,
+                                                                actualPlan.softwareFallback,
+                                                                autoSwitch);
+                                                if (reason != null) {
+                                                    a.toast(reason);
+                                                    startResolvedStream();
+                                                    return true;
+                                                }
                                                 statusLabel.setVisibility(View.VISIBLE);
-                                                statusLabel.setText("小窗解码异常，点击右上角「横屏全屏」切核重试");
+                                                statusLabel.setText(
+                                                        "播放失败（"
+                                                                + actualPlan.engineLabel
+                                                                + "），点击右上角「横屏全屏」切核重试");
                                                 return true;
                                             });
                                     mp.prepareAsync();
                                 });
-                    } catch (Exception e) {
+                    } catch (Throwable e) {
+                        if (createdPlayer != null) {
+                            try {
+                                createdPlayer.release();
+                            } catch (Exception ignored) {
+                            }
+                        }
                         a.ui.post(
                                 () -> {
+                                    if (closed || serial != loadSerial) return;
                                     statusLabel.setVisibility(View.VISIBLE);
                                     statusLabel.setText("播放失败：" + a.message(e));
                                 });
@@ -420,19 +545,21 @@ final class MobileInlinePlayer {
                 });
     }
 
-    private void stepNextEpisode() {
+    private boolean stepNextEpisode() {
         if (!a.prefs.getBoolean(Prefs.AUTO_NEXT, true)
                 || activeLine == null
                 || rawEpisode == null) {
-            return;
+            return false;
         }
         int idx = activeLine.episodes.indexOf(rawEpisode);
         if (idx >= 0 && idx + 1 < activeLine.episodes.size()) {
             flushHistoryProgress();
             Cms.Episode next = activeLine.episodes.get(idx + 1);
             a.resumeAt = 0;
-            startEpisode(site, video, activeLine, next, 0, true, 1, idx + 2);
+            startEpisode(site, video, activeLine, next, tmdbId, isTv, seasonNum, epNum + 1);
+            return true;
         }
+        return false;
     }
 
     private void togglePlayPause() {
@@ -442,8 +569,11 @@ final class MobileInlinePlayer {
             playPauseBtn.setText("▶");
             flushHistoryProgress();
         } else {
+            pausedForBackground = false;
             player.start();
             playPauseBtn.setText("❚❚");
+            a.ui.removeCallbacks(ticker);
+            a.ui.post(ticker);
         }
     }
 
@@ -473,6 +603,18 @@ final class MobileInlinePlayer {
         Cms.Episode raw = rawEpisode;
         Cms.Episode res = resolvedEpisode;
         int pos = (player != null && prepared) ? Math.max(0, player.getCurrentPosition()) : 0;
+        if (res != null) {
+            if (res.media == null) res.media = new JSONObject();
+            try {
+                if (tmdbId > 0) {
+                    res.media.put("_tmdbId", tmdbId);
+                    res.media.put("_isTv", isTv);
+                    res.media.put("_seasonNum", seasonNum);
+                    res.media.put("_epNum", epNum);
+                }
+            } catch (Exception ignored) {
+            }
+        }
         flushHistoryProgress();
         detach();
         if (onClosed != null) onClosed.run();
@@ -492,6 +634,7 @@ final class MobileInlinePlayer {
         }
         if (site == null
                 || "live".equals(site.key)
+                || "download".equals(site.key)
                 || video == null
                 || activeLine == null
                 || rawEpisode == null
@@ -519,8 +662,10 @@ final class MobileInlinePlayer {
     }
 
     private void releaseInternalPlayer() {
+        loadSerial++;
         a.ui.removeCallbacks(ticker);
         prepared = false;
+        activeEnginePlan = null;
         checkpointPolicy.reset();
         if (player != null) {
             try {
@@ -534,9 +679,13 @@ final class MobileInlinePlayer {
     void detach() {
         flushHistoryProgress();
         closed = true;
+        episodeToken++;
         releaseInternalPlayer();
         if (a.inlinePlayer == this) {
             a.inlinePlayer = null;
+        }
+        if (a.player == null) {
+            a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
         if (container.getParent() instanceof ViewGroup) {
             ((ViewGroup) container.getParent()).removeView(container);
