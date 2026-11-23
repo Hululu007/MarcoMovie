@@ -6,7 +6,7 @@
   </picture>
   <h1>Marco Movie</h1>
   <p>支持 Android 电视、手机、平板，HarmonyOS NEXT（手机 / 平板 / 智慧屏），Apple TV（tvOS）及 Windows / macOS / iOS 多端自适应的播放器。</p>
-  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.7.0 · Android 电视：0.6.2 · Android Lite：0.5.8 · Windows：0.7.1 · macOS：0.5.20 · iOS：0.7.0 · Apple TV：0.1.1 · HarmonyOS NEXT：0.1.1 · 各端独立更新</p>
+  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.7.0 · Android 电视：0.6.2 · Android Lite：0.5.8 · Windows：0.7.1 · macOS：0.5.20 · iOS：0.7.0 · Apple TV：0.1.2 · HarmonyOS NEXT：0.1.1 · 各端独立更新</p>
   <p><a href="https://marcotv.wlj9919.top/movie/">镜像下载与产品展示</a> · <a href="https://github.com/Pilipala9919/MarcoMovie/releases">GitHub 下载</a> · <a href="docs/USER_GUIDE.md">使用指南</a> · <a href="docs/BUILD.md">构建说明</a> · <a href="docs/PRIVACY.md">隐私说明</a></p>
 </div>
 
@@ -60,7 +60,7 @@ Marco Movie 希望让大屏电视、随身手机、平板电脑与桌面端上�
 
 - **Android**：标准版最低 Android 6.0（API 23），Lite 版最低 Android 4.0（API 14）；当前主要实机验证环境为 Android 9、ARM 32 位电视。
 - **Windows / macOS / iOS / iPadOS**：iOS / iPadOS 最低 15.0（Xcode 27.2 / iOS 27.2 SDK 编译下支持真系统级 `UITabBar` + `UIGlassContainerEffect` 液态玻璃宿主、二阶物理弹簧与 `AVPlayer` + `libmpv` 双引擎，iOS 15–18 / iOS 16.4 巨魔自动平滑回退）；Windows x64 内置免安装 Python 3.11.9 运行时、三档 MPV HDR 色调映射与蓝光 `.iso` 流式代理；Windows / macOS 可选热切换 MIT 许可 `Anime4K v4.0.1` 实时超分着色器。
-- **Apple TV（tvOS）**：最低 tvOS 16.0（当前版本保持 `0.1.1`）；已通过 Swift 自动化回归与 Xcode Release 云端构建验证，支持 `AVPlayer` 原生播放、QuickJS-NG 脚本源、`marco-movie-sync` v2 及四盘扫码 + 6 路并发 Range 代理，尚未宣称完成全型号物理 Apple TV 真机验收。
+- **Apple TV（tvOS）**：最低 tvOS 16.0（当前候选版本 `0.1.2`）；已通过干净检出脚本资源同步、Swift 自动化回归与 Xcode Release 云端构建验证，支持 `AVPlayer` 原生播放控件常驻选集、QuickJS-NG 脚本源、`marco-movie-sync` v2 安全开关同步、四盘扫码 + 有界流式 6 路并发 Range 代理及逐层返回焦点恢复，尚未宣称完成全型号物理 Apple TV 真机验收。
 - **HarmonyOS NEXT（纯血鸿蒙）**：最低 API 12（HarmonyOS 5.0+，当前版本保持 `0.1.1`），单 HAP 同时适配手机、平板/2in1 与鸿蒙智慧屏（大屏自动切换 10 英尺遥控焦点界面）；已通过 OpenHarmony Flutter 与 DevEco SDK 云端构建打包验证，尚未宣称完成全型号物理鸿蒙真机验收。
 - 兼容标准 JSON/XML 内容接口及各端已实现的脚本/网盘扩展形式。没有承诺所有配置、网盘、直播列表、编码或第三方服务都可使用。
 - 磁力组件属于 Android 实验能力，要求 Android 8.0+；已完成本地协议测试，尚不作为所有设备上的稳定视频播放能力宣传。
