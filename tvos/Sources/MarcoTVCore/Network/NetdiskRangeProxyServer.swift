@@ -1096,6 +1096,8 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
     private let stateLock = NSLock()
     private var serverToken: String
     private var resources: [String: ResourceStreamCoordinator] = [:]
+    private var retiredPreemptedWindows: Int = 0
+    private var retiredChunkRequests: Int = 0
     private var listener: NWListener?
     private(set) public var port: UInt16 = 0
 
@@ -1239,6 +1241,8 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
             return all
         }
         for coord in oldResources {
+            let snap = await coord.metricsSnapshot()
+            recordRetiredMetrics(preempted: snap.preempted, chunkRequests: snap.chunkRequests)
             await coord.cancelAndPurgeAll()
         }
         await memoryBudget.resetAll()
@@ -1246,7 +1250,18 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
 
     public func revokeResource(_ resourceId: String) async {
         let removed = withStateLock { resources.removeValue(forKey: resourceId) }
-        await removed?.cancelAndPurgeAll()
+        if let coord = removed {
+            let snap = await coord.metricsSnapshot()
+            recordRetiredMetrics(preempted: snap.preempted, chunkRequests: snap.chunkRequests)
+            await coord.cancelAndPurgeAll()
+        }
+    }
+
+    private func recordRetiredMetrics(preempted: Int, chunkRequests: Int) {
+        withStateLock {
+            retiredPreemptedWindows += preempted
+            retiredChunkRequests += chunkRequests
+        }
     }
 
     /// Registers an upstream media URL with a `NetdiskHeaderPolicy` and returns `http://127.0.0.1:<port>/<token>/<resourceId>/media`.
@@ -1283,9 +1298,11 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
     }
 
     public func metrics() async -> NetdiskProxyMetrics {
-        let coords = withStateLock { Array(resources.values) }
-        var totalPreempted = 0
-        var totalChunkReqs = 0
+        let (coords, basePreempted, baseChunkReqs) = withStateLock {
+            (Array(resources.values), retiredPreemptedWindows, retiredChunkRequests)
+        }
+        var totalPreempted = basePreempted
+        var totalChunkReqs = baseChunkReqs
         for c in coords {
             let snap = await c.metricsSnapshot()
             totalPreempted += snap.preempted

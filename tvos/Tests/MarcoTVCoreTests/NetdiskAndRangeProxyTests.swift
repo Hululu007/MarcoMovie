@@ -1030,7 +1030,7 @@ final class NetdiskAndRangeProxyTests: XCTestCase {
         }
 
         // Overlapping slow stream preempted by a new seek request
-        upstream.setChunkDelayMs(6)
+        upstream.setChunkDelayMs(15)
         let slowSession = URLSession(configuration: .ephemeral)
         defer { slowSession.invalidateAndCancel() }
         let slowStreamTask = Task<Int, Never> {
@@ -1046,7 +1046,7 @@ final class NetdiskAndRangeProxyTests: XCTestCase {
                 return 0
             }
         }
-        try await Task.sleep(nanoseconds: 90_000_000)
+        try await Task.sleep(nanoseconds: 150_000_000)
 
         upstream.setChunkDelayMs(0)
         var preemptSeekReq = URLRequest(url: proxyUrl)
@@ -1057,6 +1057,8 @@ final class NetdiskAndRangeProxyTests: XCTestCase {
         XCTAssertEqual(preemptData, LoopbackLargeNonRangeUpstreamServer.expectedBytes(offset: 524_288, length: 65_536))
         slowStreamTask.cancel()
         _ = await slowStreamTask.value
+        let metricsAfterPreempt = await proxy.metrics()
+        XCTAssertGreaterThanOrEqual(metricsAfterPreempt.preemptedWindowCount, 1)
         rssPeak = max(rssPeak, Self.currentResidentMemoryBytes())
 
         // 3) Exit / revoke mid-stream on unbounded 64 MiB HTTP 200 GET
