@@ -166,7 +166,8 @@ public struct DetailView: View {
                 .environmentObject(appModel)
         }
         #endif
-        .task {
+        .task(id: "\(site.key)\n\(summaryVideo.id)") {
+            detailVideo = summaryVideo
             descending = appModel.preferences.episodesDescending
             heroFocus = .play
             await loadFullDetail()

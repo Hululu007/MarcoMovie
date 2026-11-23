@@ -1021,6 +1021,10 @@ private final class StatefulMockWebDavTransport: WebDavTransportProtocol, @unche
     }
 
     func send(method: String, url: URL, headers: [String: String], body: Data?) async throws -> WebDavHttpResponse {
+        sendSync(method: method, url: url, headers: headers, body: body)
+    }
+
+    private func sendSync(method: String, url: URL, headers: [String: String], body: Data?) -> WebDavHttpResponse {
         lock.lock()
         defer { lock.unlock() }
         switch method {

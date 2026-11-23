@@ -84,16 +84,9 @@ public struct LivingRoomShellView: View {
             NetdiskAccountSheetView()
                 .environmentObject(appModel)
         }
-        .fullScreenCover(
-            isPresented: Binding(
-                get: { appModel.selectedDetailContext != nil },
-                set: { if !$0 { appModel.selectedDetailContext = nil } }
-            )
-        ) {
-            if let ctx = appModel.selectedDetailContext {
-                DetailView(site: ctx.site, summaryVideo: ctx.video)
-                    .environmentObject(appModel)
-            }
+        .fullScreenCover(item: $appModel.selectedDetailContext) { ctx in
+            DetailView(site: ctx.site, summaryVideo: ctx.video)
+                .environmentObject(appModel)
         }
         .fullScreenCover(item: $appModel.activePlayback) { session in
             TvPlayerView(session: session)
@@ -113,16 +106,9 @@ public struct LivingRoomShellView: View {
             NetdiskAccountSheetView()
                 .environmentObject(appModel)
         }
-        .sheet(
-            isPresented: Binding(
-                get: { appModel.selectedDetailContext != nil },
-                set: { if !$0 { appModel.selectedDetailContext = nil } }
-            )
-        ) {
-            if let ctx = appModel.selectedDetailContext {
-                DetailView(site: ctx.site, summaryVideo: ctx.video)
-                    .environmentObject(appModel)
-            }
+        .sheet(item: $appModel.selectedDetailContext) { ctx in
+            DetailView(site: ctx.site, summaryVideo: ctx.video)
+                .environmentObject(appModel)
         }
         .sheet(item: $appModel.activePlayback) { session in
             TvPlayerView(session: session)

@@ -859,8 +859,19 @@ public enum CmsParser {
         var videos: [CmsVideo] = []
         for g in groups {
             for ch in g.channels {
-                let eps = ch.urls.enumerated().map { idx, u in
-                    CmsEpisode(name: ch.urls.count == 1 ? "正片" : "线路 \(idx + 1)", url: u)
+                let eps: [CmsEpisode]
+                if !ch.streams.isEmpty {
+                    eps = ch.streams.enumerated().map { idx, stream in
+                        CmsEpisode(
+                            name: ch.streams.count == 1 ? "正片" : "线路 \(idx + 1)",
+                            url: stream.url,
+                            headers: stream.headers
+                        )
+                    }
+                } else {
+                    eps = ch.urls.enumerated().map { idx, u in
+                        CmsEpisode(name: ch.urls.count == 1 ? "正片" : "线路 \(idx + 1)", url: u)
+                    }
                 }
                 videos.append(
                     CmsVideo(

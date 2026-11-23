@@ -229,7 +229,7 @@ public struct SearchView: View {
                             LazyVGrid(columns: resultColumns, spacing: 28) {
                                 ForEach(filteredItems) { item in
                                     Button {
-                                        appModel.selectedDetailContext = (item.site, item.video)
+                                        appModel.openDetail(site: item.site, video: item.video)
                                     } label: {
                                         PosterCardCell(
                                             video: item.video,

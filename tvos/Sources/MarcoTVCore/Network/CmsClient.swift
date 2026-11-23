@@ -242,7 +242,14 @@ public final class CmsClient: @unchecked Sendable {
             throw MarcoError.unsupportedSite(site.unsupportedReason)
         }
         if site.isM3uVodApi {
-            return video
+            if !video.lines.isEmpty {
+                return video
+            }
+            let (_, listing) = try CmsParser.parseM3uVodHome(site.ext, origin: site.api)
+            if let matched = listing.videos.first(where: { $0.id == video.id }) {
+                return mergeVideoDetail(summary: video, detail: matched)
+            }
+            throw MarcoError.unsupportedSite("在原片源「\(site.name)」中未找到该 M3U 点播影片，请检查或刷新订阅")
         }
         if site.hasQuickJsAdapter {
             let host = try await resolveJsHost(for: site)
@@ -258,7 +265,9 @@ public final class CmsClient: @unchecked Sendable {
         let bytes = try await fetchRawBytes(url: url, headers: site.headers)
         let text = try ConfigDecoder.decodeTextDocument(bytes)
         let listing = try CmsParser.parseListing(text)
-        guard let detail = listing.videos.first else { return video }
+        guard let detail = listing.videos.first(where: { $0.id == video.id }) ?? listing.videos.first else {
+            return video
+        }
         return mergeVideoDetail(summary: video, detail: detail)
     }
 

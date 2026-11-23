@@ -80,13 +80,10 @@ public struct LibraryView: View {
             emptyPlaceholder(icon: "clock.arrow.circlepath", text: "暂无观看记录")
         } else {
             LazyVGrid(columns: columns, spacing: 28) {
-                ForEach(appModel.watchHistory) { item in
+                ForEach(appModel.watchHistory, id: \.key) { item in
                     VStack(alignment: .leading, spacing: 10) {
                         Button {
-                            if let site = appModel.config.sites.first(where: { $0.key == item.site }) ?? appModel.activeSite {
-                                let stub = CmsVideo(id: item.id, title: item.title, poster: item.poster, remarks: item.episode)
-                                appModel.selectedDetailContext = (site, stub)
-                            }
+                            appModel.openWatchHistoryItem(item)
                         } label: {
                             PosterCardCell(
                                 video: CmsVideo(
@@ -94,7 +91,8 @@ public struct LibraryView: View {
                                     title: item.title,
                                     poster: item.poster,
                                     remarks: item.episode.isEmpty ? "\(Int(item.progressFraction * 100))%" : "\(item.episode) · \(Int(item.progressFraction * 100))%"
-                                )
+                                ),
+                                sourceBadge: appModel.originSourceDisplayName(for: item.site)
                             )
                         }
                         .tvCardButtonStyle()
@@ -121,13 +119,10 @@ public struct LibraryView: View {
             emptyPlaceholder(icon: "heart.slash", text: "暂无收藏影片")
         } else {
             LazyVGrid(columns: columns, spacing: 28) {
-                ForEach(appModel.favorites) { fav in
+                ForEach(appModel.favorites, id: \.key) { fav in
                     VStack(alignment: .leading, spacing: 10) {
                         Button {
-                            if let site = appModel.config.sites.first(where: { $0.key == fav.site }) ?? appModel.activeSite {
-                                let stub = CmsVideo(id: fav.id, title: fav.title, poster: fav.poster, remarks: fav.remarks)
-                                appModel.selectedDetailContext = (site, stub)
-                            }
+                            appModel.openFavoriteItem(fav)
                         } label: {
                             PosterCardCell(
                                 video: CmsVideo(
@@ -135,7 +130,8 @@ public struct LibraryView: View {
                                     title: fav.title,
                                     poster: fav.poster,
                                     remarks: fav.remarks
-                                )
+                                ),
+                                sourceBadge: appModel.originSourceDisplayName(for: fav.site)
                             )
                         }
                         .tvCardButtonStyle()

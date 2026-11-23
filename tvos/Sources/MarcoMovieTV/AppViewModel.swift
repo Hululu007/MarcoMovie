@@ -14,6 +14,17 @@ public enum LivingRoomTab: String, CaseIterable, Identifiable {
     public var id: String { rawValue }
 }
 
+public struct DetailRouteContext: Identifiable, Hashable {
+    public var id: String { "\(site.key)\n\(video.id)" }
+    public let site: CmsSite
+    public let video: CmsVideo
+
+    public init(site: CmsSite, video: CmsVideo) {
+        self.site = site
+        self.video = video
+    }
+}
+
 public struct ActivePlaybackSession: Identifiable, Hashable {
     public let id = UUID()
     public var site: CmsSite
@@ -77,7 +88,7 @@ public final class AppViewModel: ObservableObject {
     @Published public var backdropPosterUrl: String = ""
 
     // Detail navigation & playback
-    @Published public var selectedDetailContext: (site: CmsSite, video: CmsVideo)?
+    @Published public var selectedDetailContext: DetailRouteContext?
     @Published public var activePlayback: ActivePlaybackSession?
 
     // Live TV state
@@ -352,11 +363,15 @@ public final class AppViewModel: ObservableObject {
     public func startLivePlayback(channel: LiveChannel) {
         let allChannels = liveGroups.flatMap(\.channels)
         let flatIdx = allChannels.firstIndex(of: channel) ?? 0
+        let activeLiveSource = config.publicSupportedLives.indices.contains(selectedLiveSourceIndex)
+            ? config.publicSupportedLives[selectedLiveSourceIndex]
+            : nil
         let liveSite = CmsSite(
             key: "live_tv",
-            name: "电视直播",
+            name: activeLiveSource?.name ?? "电视直播",
             type: 1,
-            api: "http://127.0.0.1/live"
+            api: "http://127.0.0.1/live",
+            headers: activeLiveSource?.headers ?? [:]
         )
         let video = CmsVideo(
             id: channel.id,
@@ -375,6 +390,49 @@ public final class AppViewModel: ObservableObject {
             liveFlatChannels: allChannels,
             liveChannelIndex: flatIdx
         )
+    }
+
+    // MARK: - Source-Bound Detail Opening (Continue Watching / History / Favorites)
+
+    public func openDetail(site: CmsSite, video: CmsVideo) {
+        if !video.poster.isEmpty {
+            backdropPosterUrl = video.poster
+        }
+        selectedDetailContext = DetailRouteContext(site: site, video: video)
+    }
+
+    public func openWatchHistoryItem(_ item: WatchHistoryItem) {
+        switch MediaEntryResolver.lookupOriginSite(siteKey: item.site, in: config) {
+        case .available(let originSite):
+            let stub = CmsVideo(
+                id: item.id,
+                title: item.title,
+                poster: item.poster,
+                remarks: item.episode
+            )
+            openDetail(site: originSite, video: stub)
+        case .unavailable(_, let reason):
+            statusBannerMessage = reason
+        }
+    }
+
+    public func openFavoriteItem(_ fav: FavoriteItem) {
+        switch MediaEntryResolver.lookupOriginSite(siteKey: fav.site, in: config) {
+        case .available(let originSite):
+            let stub = CmsVideo(
+                id: fav.id,
+                title: fav.title,
+                poster: fav.poster,
+                remarks: fav.remarks
+            )
+            openDetail(site: originSite, video: stub)
+        case .unavailable(_, let reason):
+            statusBannerMessage = reason
+        }
+    }
+
+    public func originSourceDisplayName(for siteKey: String) -> String {
+        MediaEntryResolver.sourceDisplayName(siteKey: siteKey, in: config)
     }
 
     // MARK: - Concurrent Multi-Site Search

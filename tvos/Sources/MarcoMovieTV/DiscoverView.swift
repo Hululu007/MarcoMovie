@@ -124,21 +124,14 @@ public struct DiscoverView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 24) {
-                    ForEach(appModel.watchHistory.prefix(12)) { item in
+                    ForEach(appModel.watchHistory.prefix(12), id: \.key) { item in
                         Button {
-                            let site = appModel.config.sites.first { $0.key == item.site }
-                                ?? appModel.activeSite
-                            if let targetSite = site {
-                                let stubVideo = CmsVideo(
-                                    id: item.id,
-                                    title: item.title,
-                                    poster: item.poster,
-                                    remarks: item.episode
-                                )
-                                appModel.selectedDetailContext = (targetSite, stubVideo)
-                            }
+                            appModel.openWatchHistoryItem(item)
                         } label: {
-                            ContinueWatchingCard(item: item)
+                            ContinueWatchingCard(
+                                item: item,
+                                sourceLabel: appModel.originSourceDisplayName(for: item.site)
+                            )
                         }
                         .tvCardButtonStyle()
                     }
@@ -161,8 +154,7 @@ public struct DiscoverView: View {
                 ForEach(appModel.discoverVideos) { video in
                     Button {
                         if let site = appModel.activeSite {
-                            appModel.backdropPosterUrl = video.poster
-                            appModel.selectedDetailContext = (site, video)
+                            appModel.openDetail(site: site, video: video)
                         }
                     } label: {
                         PosterCardCell(
@@ -192,6 +184,7 @@ public struct DiscoverView: View {
 private struct ContinueWatchingCard: View {
     @Environment(\.tvCardFocused) private var isFocused
     let item: WatchHistoryItem
+    let sourceLabel: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -228,10 +221,15 @@ private struct ContinueWatchingCard: View {
                 .lineLimit(1)
                 .frame(width: 268, alignment: .leading)
 
-            Text(item.episode.isEmpty ? "继续播放" : "\(item.episode) · 已看 \(Int(item.progressFraction * 100))%")
+            Text(
+                item.episode.isEmpty
+                    ? "\(sourceLabel) · 继续播放"
+                    : "\(sourceLabel) · \(item.episode) · \(Int(item.progressFraction * 100))%"
+            )
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(TvTheme.secondaryText)
                 .lineLimit(1)
+                .frame(width: 268, alignment: .leading)
         }
     }
 }

@@ -36,7 +36,7 @@ public protocol PlayerEngineProtocol: AnyObject {
 }
 
 @MainActor
-public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol {
+public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol, PlaybackEngineAdapterProtocol {
     public let avPlayer = AVPlayer()
 
     @Published public private(set) var audioTracks: [PlayerMediaTrackOption] = []
@@ -45,50 +45,161 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol {
     @Published public private(set) var selectedSubtitleId: String = "off"
     @Published public private(set) var detectedVideoBadge: String = ""
 
+    public private(set) var activeItemToken: UInt64?
+
+    private weak var activeItem: AVPlayerItem?
     private var audibleGroup: AVMediaSelectionGroup?
     private var legibleGroup: AVMediaSelectionGroup?
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var failedToEndObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
     private var trackLoadTask: Task<Void, Never>?
     private var pendingRate: Float = 1.0
+    private var fallbackTokenCounter: UInt64 = 0
 
-    public var onProgressTick: ((_ positionMs: Int, _ durationMs: Int) -> Void)?
-    public var onPlaybackEnded: (() -> Void)?
+    public var onProgressTick: ((_ token: UInt64, _ positionMs: Int, _ durationMs: Int) -> Void)?
+    public var onPlaybackEnded: ((_ token: UInt64) -> Void)?
+    public var onPlaybackFailed: ((_ token: UInt64, _ message: String) -> Void)?
 
     public init() {
         let interval = CMTime(seconds: 5.0, preferredTimescale: 600)
         timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let strongSelf = self else { return }
-                strongSelf.onProgressTick?(strongSelf.currentTimeMs, strongSelf.durationMs)
+                guard let strongSelf = self,
+                      let token = strongSelf.activeItemToken,
+                      let item = strongSelf.activeItem,
+                      strongSelf.avPlayer.currentItem === item,
+                      item.status == .readyToPlay
+                else {
+                    return
+                }
+                strongSelf.onProgressTick?(token, strongSelf.currentTimeMs, strongSelf.durationMs)
             }
         }
     }
 
     public var currentTimeMs: Int {
+        guard let item = activeItem, avPlayer.currentItem === item else { return 0 }
         let sec = CMTimeGetSeconds(avPlayer.currentTime())
         guard sec.isFinite && sec > 0 else { return 0 }
         return Int(sec * 1000.0)
     }
 
     public var durationMs: Int {
-        guard let item = avPlayer.currentItem else { return 0 }
+        guard let item = activeItem, avPlayer.currentItem === item else { return 0 }
         let sec = CMTimeGetSeconds(item.duration)
         guard sec.isFinite && sec > 0 else { return 0 }
         return Int(sec * 1000.0)
     }
 
     public func load(url: URL, initialSeekMs: Int, rate: Float) {
+        fallbackTokenCounter &+= 1
+        load(token: fallbackTokenCounter, url: url, initialSeekMs: initialSeekMs, rate: rate)
+    }
+
+    public func load(token: UInt64, url: URL, initialSeekMs: Int, rate: Float) {
+        stopCurrentItem()
+
+        pendingRate = rate
+        let item = AVPlayerItem(url: url)
+        activeItemToken = token
+        activeItem = item
+
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let strongSelf = self,
+                      strongSelf.activeItemToken == token,
+                      strongSelf.activeItem === item
+                else {
+                    return
+                }
+                strongSelf.onPlaybackEnded?(token)
+            }
+        }
+
+        failedToEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] notification in
+            let err = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            let message = err?.localizedDescription ?? "视频播放中断，请重试或切换线路"
+            Task { @MainActor [weak self] in
+                guard let strongSelf = self,
+                      strongSelf.activeItemToken == token,
+                      strongSelf.activeItem === item
+                else {
+                    return
+                }
+                strongSelf.onPlaybackFailed?(token, message)
+            }
+        }
+
+        statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] observedItem, _ in
+            let status = observedItem.status
+            let errorMessage = observedItem.error?.localizedDescription ?? "视频资源加载失败，请重试或切换线路"
+            Task { @MainActor [weak self] in
+                guard let strongSelf = self,
+                      strongSelf.activeItemToken == token,
+                      strongSelf.activeItem === observedItem,
+                      strongSelf.avPlayer.currentItem === observedItem
+                else {
+                    return
+                }
+                switch status {
+                case .readyToPlay:
+                    strongSelf.updateNaturalSizeBadge(from: observedItem)
+                    strongSelf.discoverMediaSelectionTracks(for: observedItem, token: token)
+                case .failed:
+                    strongSelf.onPlaybackFailed?(token, errorMessage)
+                default:
+                    break
+                }
+            }
+        }
+
+        avPlayer.replaceCurrentItem(with: item)
+        discoverMediaSelectionTracks(for: item, token: token)
+
+        if initialSeekMs > 0 {
+            let target = CMTime(value: CMTimeValue(initialSeekMs), timescale: 1000)
+            avPlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let strongSelf = self,
+                          strongSelf.activeItemToken == token,
+                          strongSelf.activeItem === item
+                    else {
+                        return
+                    }
+                    strongSelf.play()
+                }
+            }
+        } else {
+            play()
+        }
+    }
+
+    public func stopCurrentItem() {
+        avPlayer.pause()
         trackLoadTask?.cancel()
         trackLoadTask = nil
         statusObservation?.invalidate()
         statusObservation = nil
-        if let endObserver = endObserver {
-            NotificationCenter.default.removeObserver(endObserver)
-            self.endObserver = nil
+        if let endObs = endObserver {
+            NotificationCenter.default.removeObserver(endObs)
+            endObserver = nil
         }
-
+        if let failObs = failedToEndObserver {
+            NotificationCenter.default.removeObserver(failObs)
+            failedToEndObserver = nil
+        }
+        activeItemToken = nil
+        activeItem = nil
         audibleGroup = nil
         legibleGroup = nil
         audioTracks = []
@@ -96,41 +207,7 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol {
         subtitleTracks = []
         selectedSubtitleId = "off"
         detectedVideoBadge = ""
-        pendingRate = rate
-
-        let item = AVPlayerItem(url: url)
-        endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: item,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.onPlaybackEnded?()
-            }
-        }
-
-        statusObservation = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
-            guard observedItem.status == .readyToPlay else { return }
-            Task { @MainActor [weak self] in
-                guard let strongSelf = self, let readyItem = strongSelf.avPlayer.currentItem else { return }
-                strongSelf.updateNaturalSizeBadge(from: readyItem)
-                strongSelf.discoverMediaSelectionTracks()
-            }
-        }
-
-        avPlayer.replaceCurrentItem(with: item)
-        discoverMediaSelectionTracks()
-
-        if initialSeekMs > 0 {
-            let target = CMTime(value: CMTimeValue(initialSeekMs), timescale: 1000)
-            avPlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.play()
-                }
-            }
-        } else {
-            play()
-        }
+        avPlayer.replaceCurrentItem(with: nil)
     }
 
     public func selectAudioTrack(_ track: PlayerMediaTrackOption) {
@@ -177,20 +254,14 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol {
     }
 
     public func teardown() {
-        avPlayer.pause()
-        trackLoadTask?.cancel()
-        trackLoadTask = nil
-        statusObservation?.invalidate()
-        statusObservation = nil
+        stopCurrentItem()
         if let obs = timeObserver {
             avPlayer.removeTimeObserver(obs)
             timeObserver = nil
         }
-        if let endObs = endObserver {
-            NotificationCenter.default.removeObserver(endObs)
-            endObserver = nil
-        }
-        avPlayer.replaceCurrentItem(with: nil)
+        onProgressTick = nil
+        onPlaybackEnded = nil
+        onPlaybackFailed = nil
     }
 
     private func updateNaturalSizeBadge(from item: AVPlayerItem) {
@@ -208,17 +279,17 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol {
         }
     }
 
-    private func discoverMediaSelectionTracks() {
+    private func discoverMediaSelectionTracks(for initialItem: AVPlayerItem, token: UInt64) {
         trackLoadTask?.cancel()
         trackLoadTask = Task { [weak self] in
-            guard let initialItem = self?.avPlayer.currentItem else { return }
             let asset = initialItem.asset
             let loadedAudible = try? await asset.loadMediaSelectionGroup(for: .audible)
             let loadedLegible = try? await asset.loadMediaSelectionGroup(for: .legible)
             guard !Task.isCancelled,
                   let strongSelf = self,
-                  let currentItem = strongSelf.avPlayer.currentItem,
-                  currentItem === initialItem
+                  strongSelf.activeItemToken == token,
+                  strongSelf.activeItem === initialItem,
+                  strongSelf.avPlayer.currentItem === initialItem
             else {
                 return
             }
@@ -234,7 +305,7 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol {
                     )
                 }
                 strongSelf.audioTracks = builtAudio
-                if let currentOpt = currentItem.currentMediaSelection.selectedMediaOption(in: audGroup),
+                if let currentOpt = initialItem.currentMediaSelection.selectedMediaOption(in: audGroup),
                    let currentIdx = audGroup.options.firstIndex(of: currentOpt)
                 {
                     strongSelf.selectedAudioId = "aud_\(currentIdx)"
@@ -259,7 +330,7 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol {
                     )
                 }
                 strongSelf.subtitleTracks = builtSubs
-                if let currentOpt = currentItem.currentMediaSelection.selectedMediaOption(in: legGroup),
+                if let currentOpt = initialItem.currentMediaSelection.selectedMediaOption(in: legGroup),
                    let currentIdx = legGroup.options.firstIndex(of: currentOpt)
                 {
                     strongSelf.selectedSubtitleId = "sub_\(currentIdx)"
@@ -302,14 +373,114 @@ public struct TvPlayerView: View {
     @EnvironmentObject private var appModel: AppViewModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var currentSession: ActivePlaybackSession
+    private let initialSession: ActivePlaybackSession
     @StateObject private var engine = AVKitPlayerEngine()
-    @State private var isResolvingStream = true
-    @State private var playbackError: String?
+    @State private var coordinator: PlaybackSessionCoordinator?
+
+    public init(session: ActivePlaybackSession) {
+        self.initialSession = session
+    }
+
+    public var body: some View {
+        Group {
+            if let coord = coordinator {
+                TvPlayerContentView(
+                    coordinator: coord,
+                    engine: engine,
+                    onDismissRequest: {
+                        coord.teardownAndPersist()
+                        dismiss()
+                    }
+                )
+                .environmentObject(appModel)
+            } else {
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    ProgressView("正在初始化播放器…")
+                        .foregroundColor(.white)
+                }
+            }
+        }
+        .task {
+            setIdleTimerDisabled(true)
+            if coordinator == nil {
+                let descriptor = PlaybackTargetDescriptor(
+                    site: initialSession.site,
+                    video: initialSession.video,
+                    lineIndex: initialSession.lineIndex,
+                    episodeIndex: initialSession.episodeIndex,
+                    initialSeekMs: initialSession.initialSeekMs,
+                    isLiveStream: initialSession.isLiveStream,
+                    liveFlatChannels: initialSession.liveFlatChannels,
+                    liveChannelIndex: initialSession.liveChannelIndex
+                )
+                let cmsClient = appModel.cmsClient
+                let parses = appModel.config.parses
+                let proxyServer = appModel.proxyServer
+                let storage = appModel.storage
+                let rangeProxyServer = appModel.rangeProxyServer
+                let model = appModel
+                let created = PlaybackSessionCoordinator(
+                    initialTarget: descriptor,
+                    engine: engine,
+                    resolver: { target in
+                        guard let line = target.currentLine, let episode = target.currentEpisode else {
+                            throw MarcoError.invalidFormat("未找到有效的剧集线路")
+                        }
+                        return try await cmsClient.resolvePlayback(
+                            site: target.site,
+                            lineName: line.name,
+                            episode: episode,
+                            parses: parses,
+                            proxyServer: proxyServer,
+                            storage: storage,
+                            rangeProxyServer: rangeProxyServer,
+                            isLiveStream: target.isLiveStream
+                        )
+                    },
+                    progressRecorder: { activeDesc, posMs, durMs in
+                        guard let line = activeDesc.currentLine, let episode = activeDesc.currentEpisode else { return }
+                        model.recordPlaybackProgress(
+                            site: activeDesc.site,
+                            video: activeDesc.video,
+                            lineName: line.name,
+                            episodeName: episode.name,
+                            episodeIndex: activeDesc.episodeIndex,
+                            positionMs: posMs,
+                            durationMs: durMs
+                        )
+                    },
+                    playbackSpeed: appModel.preferences.playSpeed,
+                    skipIntroSec: appModel.preferences.skipIntroSec,
+                    skipOutroSec: appModel.preferences.skipOutroSec,
+                    autoNext: appModel.preferences.autoNext
+                )
+                coordinator = created
+                created.startInitialLoad()
+            }
+        }
+        .onDisappear {
+            coordinator?.teardownAndPersist()
+            setIdleTimerDisabled(false)
+        }
+    }
+
+    private func setIdleTimerDisabled(_ disabled: Bool) {
+        #if os(tvOS)
+        UIApplication.shared.isIdleTimerDisabled = disabled
+        #endif
+    }
+}
+
+private struct TvPlayerContentView: View {
+    @EnvironmentObject private var appModel: AppViewModel
+    @ObservedObject var coordinator: PlaybackSessionCoordinator
+    @ObservedObject var engine: AVKitPlayerEngine
+    let onDismissRequest: () -> Void
+
     @State private var selectedSpeed: Double = 1.0
     @State private var showHudBanner = false
-    @State private var activeKernelLabel: String = "AVKit 硬解"
-    @State private var activeResolutionBadge: String = ""
+    @State private var hudHideTask: Task<Void, Never>?
     @State private var showNetdiskAuthSheet = false
     @State private var showEpisodeSelectionSheet = false
     @State private var pickerLineIndex: Int = 0
@@ -317,22 +488,20 @@ public struct TvPlayerView: View {
 
     private let speedChoices: [Double] = [0.75, 1.0, 1.25, 1.5, 2.0]
 
-    public init(session: ActivePlaybackSession) {
-        self._currentSession = State(initialValue: session)
+    private var currentSession: PlaybackTargetDescriptor {
+        coordinator.target
     }
 
     private var currentLine: CmsLine? {
-        guard currentSession.video.lines.indices.contains(currentSession.lineIndex) else { return nil }
-        return currentSession.video.lines[currentSession.lineIndex]
+        currentSession.currentLine
     }
 
     private var currentEpisode: CmsEpisode? {
-        guard let line = currentLine, line.episodes.indices.contains(currentSession.episodeIndex) else { return nil }
-        return line.episodes[currentSession.episodeIndex]
+        currentSession.currentEpisode
     }
 
     private var displayResolutionBadge: String {
-        !activeResolutionBadge.isEmpty ? activeResolutionBadge : engine.detectedVideoBadge
+        !coordinator.activeResolutionBadge.isEmpty ? coordinator.activeResolutionBadge : engine.detectedVideoBadge
     }
 
     private var currentAudioLabel: String {
@@ -343,7 +512,7 @@ public struct TvPlayerView: View {
         engine.subtitleTracks.first(where: { $0.id == engine.selectedSubtitleId })?.label ?? "字幕"
     }
 
-    public var body: some View {
+    var body: some View {
         ZStack(alignment: .topLeading) {
             Color.black.ignoresSafeArea()
 
@@ -359,7 +528,7 @@ public struct TvPlayerView: View {
                 .ignoresSafeArea()
             #endif
 
-            if isResolvingStream {
+            if coordinator.isResolving {
                 VStack(spacing: 16) {
                     ProgressView()
                     Text("正在准备「\(currentSession.video.title)」\(currentEpisode.map { " · \($0.name)" } ?? "")…")
@@ -370,46 +539,8 @@ public struct TvPlayerView: View {
                 .background(.ultraThinMaterial)
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let err = playbackError {
-                VStack(spacing: 16) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 42))
-                        .foregroundColor(.yellow)
-                    Text("播放地址解析失败：\(err)")
-                        .font(TvFont.body)
-                        .foregroundColor(.white)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 720)
-                    HStack(spacing: 14) {
-                        if err.contains("扫码") || (currentLine?.isNetdiskLine == true) {
-                            Button("扫码授权 4K 网盘") {
-                                if let key = currentLine?.netdiskDriveKey {
-                                    appModel.selectedNetdiskDriveKey = key
-                                }
-                                showNetdiskAuthSheet = true
-                            }
-                            .buttonStyle(TvPillButtonStyle(prominent: true))
-                        }
-
-                        Button("重试") {
-                            Task { await loadCurrentEpisodeStream() }
-                        }
-                        .buttonStyle(TvPillButtonStyle(prominent: true))
-
-                        Button("关闭播放器") {
-                            persistProgressAndDismiss()
-                        }
-                        .buttonStyle(TvPillButtonStyle())
-                    }
-                }
-                .padding(36)
-                .background(TvTheme.surface.opacity(0.92))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .strokeBorder(TvTheme.glassStroke, lineWidth: 1)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let err = coordinator.errorMessage {
+                errorOverlayView(errorText: err)
             }
 
             if showHudBanner {
@@ -430,7 +561,7 @@ public struct TvPlayerView: View {
                 activePlayingLineIndex: currentSession.lineIndex,
                 activePlayingEpisodeIndex: currentSession.episodeIndex
             ) { lineIdx, epIdx, resumeMs in
-                switchToEpisode(lineIndex: lineIdx, episodeIndex: epIdx, seekMs: resumeMs)
+                coordinator.switchToEpisode(lineIndex: lineIdx, episodeIndex: epIdx, seekMs: resumeMs)
             }
             .environmentObject(appModel)
         }
@@ -448,7 +579,7 @@ public struct TvPlayerView: View {
                 activePlayingLineIndex: currentSession.lineIndex,
                 activePlayingEpisodeIndex: currentSession.episodeIndex
             ) { lineIdx, epIdx, resumeMs in
-                switchToEpisode(lineIndex: lineIdx, episodeIndex: epIdx, seekMs: resumeMs)
+                coordinator.switchToEpisode(lineIndex: lineIdx, episodeIndex: epIdx, seekMs: resumeMs)
             }
             .environmentObject(appModel)
             .frame(minWidth: 1120, minHeight: 680)
@@ -459,30 +590,105 @@ public struct TvPlayerView: View {
             guard currentSession.isLiveStream, !currentSession.liveFlatChannels.isEmpty else { return }
             switch direction {
             case .up:
-                switchLiveChannel(delta: -1)
+                coordinator.switchLiveChannel(delta: -1)
             case .down:
-                switchLiveChannel(delta: 1)
+                coordinator.switchLiveChannel(delta: 1)
             default:
                 break
             }
         }
         #endif
         .tvExitHandler {
-            persistProgressAndDismiss()
+            onDismissRequest()
         }
-        .task {
+        .onAppear {
             selectedSpeed = appModel.preferences.playSpeed
             pickerLineIndex = currentSession.lineIndex
             pickerDescending = appModel.preferences.episodesDescending
-            setIdleTimerDisabled(true)
-            configureEngineCallbacks()
-            await loadCurrentEpisodeStream()
+            coordinator.onTargetTransition = {
+                showTransientHud()
+            }
+            showTransientHud()
         }
         .onDisappear {
-            persistCurrentProgress()
-            engine.teardown()
-            setIdleTimerDisabled(false)
+            hudHideTask?.cancel()
+            hudHideTask = nil
         }
+    }
+
+    private func errorOverlayView(errorText: String) -> some View {
+        let prefix = coordinator.errorIsPlaybackFailure ? "播放失败" : "播放地址解析失败"
+        let liveLines = currentSession.liveLineCount
+        let nextLiveIndex = liveLines > 1 ? ((currentSession.episodeIndex + 1) % liveLines) : 0
+
+        return VStack(spacing: 18) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 42))
+                .foregroundColor(.yellow)
+            Text("\(prefix)：\(errorText)")
+                .font(TvFont.body)
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 740)
+
+            HStack(spacing: 14) {
+                if errorText.contains("扫码") || (currentLine?.isNetdiskLine == true) {
+                    Button("扫码授权 4K 网盘") {
+                        if let key = currentLine?.netdiskDriveKey {
+                            appModel.selectedNetdiskDriveKey = key
+                        }
+                        showNetdiskAuthSheet = true
+                    }
+                    .buttonStyle(TvPillButtonStyle(prominent: true))
+                }
+
+                Button("重试") {
+                    coordinator.retryCurrent()
+                }
+                .buttonStyle(TvPillButtonStyle(prominent: true))
+
+                if currentSession.isLiveStream {
+                    if liveLines > 1 {
+                        Button("切换线路（线路 \(nextLiveIndex + 1)/\(liveLines)）") {
+                            _ = coordinator.switchToNextLiveLine()
+                        }
+                        .buttonStyle(TvPillButtonStyle(prominent: true))
+                    }
+                    if currentSession.liveFlatChannels.count > 1 {
+                        Button("下一频道") {
+                            coordinator.switchLiveChannel(delta: 1)
+                        }
+                        .buttonStyle(TvPillButtonStyle())
+                    }
+                } else {
+                    if currentSession.video.lines.count > 1 {
+                        Button("切换下一线路") {
+                            _ = coordinator.switchToNextVodLine()
+                        }
+                        .buttonStyle(TvPillButtonStyle())
+                    }
+                    if (currentLine?.episodes.count ?? 0) > 1 || currentSession.video.lines.count > 1 {
+                        Button("选集 / 换线") {
+                            openEpisodeSelection()
+                        }
+                        .buttonStyle(TvPillButtonStyle())
+                    }
+                }
+
+                Button("关闭播放器") {
+                    onDismissRequest()
+                }
+                .buttonStyle(TvPillButtonStyle())
+            }
+        }
+        .padding(36)
+        .background(TvTheme.surface.opacity(0.92))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(TvTheme.glassStroke, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var hudBannerView: some View {
@@ -499,7 +705,7 @@ public struct TvPlayerView: View {
                     .lineLimit(1)
             }
 
-            Text(activeKernelLabel)
+            Text(coordinator.activeKernelLabel)
                 .font(TvFont.badge)
                 .foregroundColor(.white)
                 .padding(.horizontal, 10)
@@ -555,12 +761,23 @@ public struct TvPlayerView: View {
                 }
             }
 
-            if !currentSession.isLiveStream {
+            if currentSession.isLiveStream {
+                if currentSession.liveLineCount > 1 {
+                    Button {
+                        _ = coordinator.switchToNextLiveLine()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("切换线路 (\(currentSession.episodeIndex + 1)/\(currentSession.liveLineCount))")
+                        }
+                    }
+                    .buttonStyle(TvPillButtonStyle(compact: true))
+                }
+            } else {
                 if (currentLine?.episodes.count ?? 0) > 1 || currentSession.video.lines.count > 1 {
                     Button {
-                        pickerLineIndex = currentSession.lineIndex
-                        pickerDescending = appModel.preferences.episodesDescending
-                        showEpisodeSelectionSheet = true
+                        openEpisodeSelection()
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "square.grid.2x2.fill")
@@ -596,110 +813,10 @@ public struct TvPlayerView: View {
         .padding(32)
     }
 
-    private func configureEngineCallbacks() {
-        engine.onProgressTick = { posMs, durMs in
-            persistCurrentProgress(explicitPosMs: posMs, explicitDurMs: durMs)
-            // Auto skip outro if configured
-            let outroMs = appModel.preferences.skipOutroSec * 1000
-            if !currentSession.isLiveStream,
-               outroMs > 0,
-               durMs > outroMs + 30_000,
-               posMs >= durMs - outroMs
-            {
-                advanceToNextEpisodeOrFinish()
-            }
-        }
-        engine.onPlaybackEnded = {
-            advanceToNextEpisodeOrFinish()
-        }
-    }
-
-    private func loadCurrentEpisodeStream() async {
-        guard let episode = currentEpisode, let line = currentLine else {
-            playbackError = "未找到有效的剧集线路"
-            isResolvingStream = false
-            return
-        }
-        isResolvingStream = true
-        playbackError = nil
-        showTransientHud()
-
-        do {
-            let resolved = try await appModel.cmsClient.resolvePlayback(
-                site: currentSession.site,
-                lineName: line.name,
-                episode: episode,
-                parses: appModel.config.parses,
-                proxyServer: appModel.proxyServer,
-                storage: appModel.storage,
-                rangeProxyServer: appModel.rangeProxyServer,
-                isLiveStream: currentSession.isLiveStream
-            )
-            activeKernelLabel = resolved.kernelLabel
-            activeResolutionBadge = resolved.resolutionBadge
-            let rate = currentSession.isLiveStream ? Float(1.0) : Float(selectedSpeed)
-            engine.load(url: resolved.playableUrl, initialSeekMs: currentSession.initialSeekMs, rate: rate)
-            isResolvingStream = false
-        } catch {
-            playbackError = error.localizedDescription
-            isResolvingStream = false
-        }
-    }
-
-    private func advanceToNextEpisodeOrFinish() {
-        guard !currentSession.isLiveStream else { return }
-        guard appModel.preferences.autoNext,
-              let line = currentLine,
-              currentSession.episodeIndex + 1 < line.episodes.count
-        else {
-            persistCurrentProgress()
-            return
-        }
-        persistCurrentProgress()
-        currentSession.episodeIndex += 1
-        currentSession.initialSeekMs = appModel.preferences.skipIntroSec * 1000
-        Task {
-            await loadCurrentEpisodeStream()
-        }
-    }
-
-    private func switchToEpisode(lineIndex: Int, episodeIndex: Int, seekMs: Int) {
-        guard !currentSession.isLiveStream,
-              currentSession.video.lines.indices.contains(lineIndex),
-              currentSession.video.lines[lineIndex].episodes.indices.contains(episodeIndex)
-        else {
-            return
-        }
-        if lineIndex == currentSession.lineIndex && episodeIndex == currentSession.episodeIndex {
-            return
-        }
-        persistCurrentProgress()
-        currentSession.lineIndex = lineIndex
-        currentSession.episodeIndex = episodeIndex
-        currentSession.initialSeekMs = seekMs > 0 ? seekMs : (appModel.preferences.skipIntroSec * 1000)
-        Task {
-            await loadCurrentEpisodeStream()
-        }
-    }
-
-    private func switchLiveChannel(delta: Int) {
-        let count = currentSession.liveFlatChannels.count
-        guard count > 0 else { return }
-        let nextIdx = (currentSession.liveChannelIndex + delta + count) % count
-        let nextChannel = currentSession.liveFlatChannels[nextIdx]
-        currentSession.liveChannelIndex = nextIdx
-        currentSession.video = CmsVideo(
-            id: nextChannel.id,
-            title: nextChannel.name,
-            poster: nextChannel.logo,
-            remarks: nextChannel.group,
-            lines: [CmsLine(name: nextChannel.group, episodes: nextChannel.episodes)]
-        )
-        currentSession.lineIndex = 0
-        currentSession.episodeIndex = 0
-        Task {
-            await loadCurrentEpisodeStream()
-        }
+    private func openEpisodeSelection() {
+        pickerLineIndex = currentSession.lineIndex
+        pickerDescending = appModel.preferences.episodesDescending
+        showEpisodeSelectionSheet = true
     }
 
     private func cycleAudioTrack() {
@@ -720,7 +837,7 @@ public struct TvPlayerView: View {
 
     private func applyPlaybackSpeed(_ sp: Double) {
         selectedSpeed = sp
-        engine.setPlaybackRate(Float(sp))
+        coordinator.applyPlaybackSpeed(sp)
         appModel.updatePlaybackPreferences { $0.playSpeed = sp }
     }
 
@@ -731,40 +848,12 @@ public struct TvPlayerView: View {
     }
 
     private func showTransientHud() {
+        hudHideTask?.cancel()
         showHudBanner = true
-        Task {
+        hudHideTask = Task {
             try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
             showHudBanner = false
         }
-    }
-
-    private func persistCurrentProgress(explicitPosMs: Int? = nil, explicitDurMs: Int? = nil) {
-        guard !currentSession.isLiveStream,
-              let line = currentLine,
-              let episode = currentEpisode
-        else { return }
-        let pos = explicitPosMs ?? engine.currentTimeMs
-        let dur = explicitDurMs ?? engine.durationMs
-        guard pos > 0 else { return }
-        appModel.recordPlaybackProgress(
-            site: currentSession.site,
-            video: currentSession.video,
-            lineName: line.name,
-            episodeName: episode.name,
-            episodeIndex: currentSession.episodeIndex,
-            positionMs: pos,
-            durationMs: dur
-        )
-    }
-
-    private func persistProgressAndDismiss() {
-        persistCurrentProgress()
-        dismiss()
-    }
-
-    private func setIdleTimerDisabled(_ disabled: Bool) {
-        #if os(tvOS)
-        UIApplication.shared.isIdleTimerDisabled = disabled
-        #endif
     }
 }
