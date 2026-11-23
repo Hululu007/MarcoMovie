@@ -13,6 +13,8 @@ public struct SearchView: View {
 
     @State private var keyMode: KeyPadMode = .abc
     @State private var selectedSourceKey: String = "__all__"
+    @State private var lastOpenedResultId: String?
+    @FocusState private var focusedResultId: String?
 
     private let alphaKeys: [String] = [
         "A", "B", "C", "D", "E", "F",
@@ -229,6 +231,7 @@ public struct SearchView: View {
                             LazyVGrid(columns: resultColumns, spacing: 28) {
                                 ForEach(filteredItems) { item in
                                     Button {
+                                        lastOpenedResultId = item.id
                                         appModel.openDetail(site: item.site, video: item.video)
                                     } label: {
                                         PosterCardCell(
@@ -238,6 +241,7 @@ public struct SearchView: View {
                                         )
                                     }
                                     .tvCardButtonStyle()
+                                    .focused($focusedResultId, equals: item.id)
                                 }
                             }
                             .padding(.horizontal, 4)
@@ -254,5 +258,18 @@ public struct SearchView: View {
         .padding(.top, 12)
         .padding(.bottom, 28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onChange(of: appModel.selectedDetailContext == nil) { isClosed in
+            guard isClosed else { return }
+            guard let targetId = FocusRestorationPlanner.resolvePosterCardReturn(
+                lastOpenedKey: lastOpenedResultId,
+                availableKeys: filteredItems.map(\.id)
+            ) else {
+                return
+            }
+            focusedResultId = targetId
+            DispatchQueue.main.async {
+                self.focusedResultId = targetId
+            }
+        }
     }
 }

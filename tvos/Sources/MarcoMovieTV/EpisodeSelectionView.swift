@@ -145,9 +145,11 @@ public struct EpisodeSelectionView: View {
     public let activePlayingEpisodeIndex: Int?
     public let onSelectEpisode: (_ lineIndex: Int, _ episodeIndex: Int, _ resumeMs: Int) -> Void
 
-    private static let episodesPerPage = 20
+    private static let episodesPerPage = EpisodePaginationPlanner.episodesPerPage
 
     @State private var selectedPageIndex: Int = 0
+    @State private var pendingJumpTarget: TargetEpisodeLocation?
+    @State private var lastFocusedEpisodeOffset: Int?
     @State private var showNetdiskSheet = false
     @FocusState private var focusedEpisodeOffset: Int?
 
@@ -173,9 +175,12 @@ public struct EpisodeSelectionView: View {
         appModel.watchHistory.first { $0.site == site.key && $0.id == video.id }
     }
 
+    private var lineEpisodeCounts: [Int] {
+        video.lines.map { $0.episodes.count }
+    }
+
     private var safeLineIndex: Int {
-        guard !video.lines.isEmpty else { return 0 }
-        return min(max(selectedLineIndex, 0), video.lines.count - 1)
+        EpisodePaginationPlanner.clampedLineIndex(selectedLineIndex, lineCount: video.lines.count)
     }
 
     private var currentLine: CmsLine? {
@@ -185,25 +190,25 @@ public struct EpisodeSelectionView: View {
 
     private var orderedEpisodes: [(offset: Int, element: CmsEpisode)] {
         guard let eps = currentLine?.episodes else { return [] }
-        let indexed = Array(eps.enumerated())
-        return descending ? indexed.reversed() : indexed
+        return EpisodePaginationPlanner.orderedOffsets(episodeCount: eps.count, descending: descending)
+            .map { (offset: $0, element: eps[$0]) }
     }
 
     private var pageCount: Int {
-        let total = orderedEpisodes.count
-        guard total > 0 else { return 1 }
-        return max(1, (total + Self.episodesPerPage - 1) / Self.episodesPerPage)
+        EpisodePaginationPlanner.pageCount(episodeCount: currentLine?.episodes.count ?? 0)
     }
 
     private var safePageIndex: Int {
-        min(max(selectedPageIndex, 0), max(0, pageCount - 1))
+        EpisodePaginationPlanner.clampedPageIndex(selectedPageIndex, episodeCount: currentLine?.episodes.count ?? 0)
     }
 
     private var visibleSlice: [(offset: Int, element: CmsEpisode)] {
-        let all = orderedEpisodes
-        let start = min(safePageIndex * Self.episodesPerPage, all.count)
-        let end = min(start + Self.episodesPerPage, all.count)
-        return Array(all[start..<end])
+        guard let eps = currentLine?.episodes else { return [] }
+        return EpisodePaginationPlanner.sliceOffsets(
+            episodeCount: eps.count,
+            descending: descending,
+            pageIndex: safePageIndex
+        ).map { (offset: $0, element: eps[$0]) }
     }
 
     private var targetJumpLocation: (lineIndex: Int, episodeIndex: Int, label: String)? {
@@ -221,6 +226,11 @@ public struct EpisodeSelectionView: View {
             return (hLine, hist.index, "定位上次观看")
         }
         return nil
+    }
+
+    private var targetLocationModel: TargetEpisodeLocation? {
+        guard let target = targetJumpLocation else { return nil }
+        return TargetEpisodeLocation(lineIndex: target.lineIndex, episodeIndex: target.episodeIndex)
     }
 
     private var isTargetVisibleOnCurrentPage: Bool {
@@ -307,9 +317,24 @@ public struct EpisodeSelectionView: View {
         .onAppear {
             syncPageAndFocusToTarget()
         }
-        .onChange(of: selectedLineIndex) { _ in
-            selectedPageIndex = 0
-            focusFirstOrTargetInSlice()
+        .onChange(of: focusedEpisodeOffset) { newOffset in
+            if let newOffset = newOffset {
+                lastFocusedEpisodeOffset = newOffset
+            }
+        }
+        .onChange(of: selectedLineIndex) { newLine in
+            let reconciled = EpisodePaginationPlanner.reconcileLineChange(
+                newLineIndex: newLine,
+                pendingJumpTarget: pendingJumpTarget,
+                target: targetLocationModel,
+                lineEpisodeCounts: lineEpisodeCounts,
+                descending: descending
+            )
+            if reconciled.consumedPendingJump {
+                pendingJumpTarget = nil
+            }
+            selectedPageIndex = reconciled.state.pageIndex
+            applyFocusTarget(reconciled.state.focusedEpisodeOffset)
         }
         .tvExitHandler {
             dismiss()
@@ -371,10 +396,22 @@ public struct EpisodeSelectionView: View {
             }
 
             Button {
-                descending.toggle()
-                appModel.updatePlaybackPreferences { $0.episodesDescending = descending }
-                selectedPageIndex = 0
-                focusFirstOrTargetInSlice()
+                let currentState = EpisodePageState(
+                    lineIndex: safeLineIndex,
+                    pageIndex: safePageIndex,
+                    descending: descending,
+                    focusedEpisodeOffset: focusedEpisodeOffset ?? lastFocusedEpisodeOffset
+                )
+                let nextState = EpisodePaginationPlanner.toggleOrder(
+                    currentState: currentState,
+                    anchorEpisodeOffset: focusedEpisodeOffset ?? lastFocusedEpisodeOffset,
+                    target: targetLocationModel,
+                    lineEpisodeCounts: lineEpisodeCounts
+                )
+                descending = nextState.descending
+                appModel.updatePlaybackPreferences { $0.episodesDescending = nextState.descending }
+                selectedPageIndex = nextState.pageIndex
+                applyFocusTarget(nextState.focusedEpisodeOffset)
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.up.arrow.down")
@@ -415,8 +452,7 @@ public struct EpisodeSelectionView: View {
                     ForEach(Array(video.lines.enumerated()), id: \.offset) { idx, line in
                         let isActive = safeLineIndex == idx
                         Button {
-                            selectedLineIndex = idx
-                            selectedPageIndex = 0
+                            selectLine(idx)
                         } label: {
                             HStack(spacing: 8) {
                                 Text("\(line.name) (\(line.episodes.count))")
@@ -489,8 +525,15 @@ public struct EpisodeSelectionView: View {
                         ForEach(0..<pageCount, id: \.self) { pIdx in
                             let label = pageRangeLabel(for: pIdx, total: total)
                             Button(label) {
-                                selectedPageIndex = pIdx
-                                focusFirstOrTargetInSlice()
+                                let nextState = EpisodePaginationPlanner.selectPage(
+                                    pageIndex: pIdx,
+                                    lineIndex: safeLineIndex,
+                                    descending: descending,
+                                    target: targetLocationModel,
+                                    lineEpisodeCounts: lineEpisodeCounts
+                                )
+                                selectedPageIndex = nextState.pageIndex
+                                applyFocusTarget(nextState.focusedEpisodeOffset)
                             }
                             .buttonStyle(TvPillButtonStyle(active: safePageIndex == pIdx, compact: true))
                         }
@@ -570,50 +613,68 @@ public struct EpisodeSelectionView: View {
     }
 
     private func pageRangeLabel(for pageIndex: Int, total: Int) -> String {
-        let startIdx = pageIndex * Self.episodesPerPage
-        let endIdx = min(total - 1, startIdx + Self.episodesPerPage - 1)
-        guard orderedEpisodes.indices.contains(startIdx),
-              orderedEpisodes.indices.contains(endIdx)
-        else {
-            return "\(startIdx + 1)-\(min(total, startIdx + Self.episodesPerPage))"
-        }
-        let firstNum = orderedEpisodes[startIdx].offset + 1
-        let lastNum = orderedEpisodes[endIdx].offset + 1
-        return "\(firstNum)-\(lastNum)"
+        EpisodePaginationPlanner.pageRangeLabel(
+            pageIndex: pageIndex,
+            episodeCount: total,
+            descending: descending
+        )
     }
 
     private func syncPageAndFocusToTarget() {
-        if let target = targetJumpLocation, target.lineIndex == safeLineIndex {
-            if let pos = orderedEpisodes.firstIndex(where: { $0.offset == target.episodeIndex }) {
-                selectedPageIndex = pos / Self.episodesPerPage
-                focusedEpisodeOffset = target.episodeIndex
-                return
-            }
+        let initial = EpisodePaginationPlanner.initialState(
+            selectedLineIndex: safeLineIndex,
+            descending: descending,
+            target: targetLocationModel,
+            lineEpisodeCounts: lineEpisodeCounts
+        )
+        selectedPageIndex = initial.pageIndex
+        applyFocusTarget(initial.focusedEpisodeOffset)
+    }
+
+    private func selectLine(_ newLineIndex: Int) {
+        pendingJumpTarget = nil
+        if newLineIndex == selectedLineIndex {
+            let state = EpisodePaginationPlanner.initialState(
+                selectedLineIndex: newLineIndex,
+                descending: descending,
+                target: targetLocationModel,
+                lineEpisodeCounts: lineEpisodeCounts
+            )
+            selectedPageIndex = state.pageIndex
+            applyFocusTarget(state.focusedEpisodeOffset)
+        } else {
+            selectedLineIndex = newLineIndex
         }
-        focusFirstOrTargetInSlice()
     }
 
     private func jumpToTarget(lineIndex: Int, episodeIndex: Int) {
-        selectedLineIndex = lineIndex
-        if let eps = video.lines[safe: lineIndex]?.episodes {
-            let ordered = descending ? Array(eps.enumerated().reversed()) : Array(eps.enumerated())
-            if let pos = ordered.firstIndex(where: { $0.offset == episodeIndex }) {
-                selectedPageIndex = pos / Self.episodesPerPage
-            } else {
-                selectedPageIndex = 0
-            }
+        let target = TargetEpisodeLocation(lineIndex: lineIndex, episodeIndex: episodeIndex)
+        let jumped = EpisodePaginationPlanner.jumpToTarget(
+            target: target,
+            lineEpisodeCounts: lineEpisodeCounts,
+            descending: descending
+        )
+        if selectedLineIndex != jumped.lineIndex {
+            // Preserve the jumped page and focus target when SwiftUI fires `.onChange(of: selectedLineIndex)`.
+            pendingJumpTarget = target
+            selectedLineIndex = jumped.lineIndex
+        } else {
+            pendingJumpTarget = nil
         }
-        focusedEpisodeOffset = episodeIndex
+        selectedPageIndex = jumped.pageIndex
+        applyFocusTarget(jumped.focusedEpisodeOffset)
     }
 
-    private func focusFirstOrTargetInSlice() {
-        if let target = targetJumpLocation,
-           target.lineIndex == safeLineIndex,
-           visibleSlice.contains(where: { $0.offset == target.episodeIndex })
-        {
-            focusedEpisodeOffset = target.episodeIndex
-        } else {
-            focusedEpisodeOffset = visibleSlice.first?.offset
+    private func applyFocusTarget(_ offset: Int?) {
+        if let offset = offset {
+            lastFocusedEpisodeOffset = offset
+        }
+        focusedEpisodeOffset = offset
+        guard let targetOffset = offset else { return }
+        DispatchQueue.main.async {
+            if self.visibleSlice.contains(where: { $0.offset == targetOffset }) {
+                self.focusedEpisodeOffset = targetOffset
+            }
         }
     }
 }

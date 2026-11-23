@@ -291,9 +291,12 @@ class TvOSWorkspaceTests(unittest.TestCase):
             "../Sources/MarcoTVCore/Network/NetdiskService.swift",
             "../Sources/MarcoTVCore/Network/NetdiskRangeProxyServer.swift",
             "../Sources/MarcoTVCore/Network/NetdiskShareResolver.swift",
+            "../Sources/MarcoTVCore/Network/MediaEntryResolver.swift",
+            "../Sources/MarcoTVCore/Playback/PlaybackSessionCoordinator.swift",
+            "../Sources/MarcoTVCore/Playback/EpisodePaginationPlanner.swift",
             "../Sources/MarcoMovieTV/NetdiskAccountSheetView.swift",
         ):
-            self.assertIn(required_rel, referenced_paths, f"Phase 2 file missing from project.pbxproj: {required_rel}")
+            self.assertIn(required_rel, referenced_paths, f"Required file missing from project.pbxproj: {required_rel}")
 
         for swift_file in core_swift + app_swift:
             rel_path = f"../{swift_file.relative_to(TVOS_DIR).as_posix()}"
@@ -351,8 +354,41 @@ class TvOSWorkspaceTests(unittest.TestCase):
             "testRangeProxyHeadMultiChunkStreaming416AndSeekPreemption",
             "testNetdiskQrStateMachineAndShareResolver",
             "testKeychainNetdiskCrudBackupIsolationAndLanPush",
+            "testAliRefreshTokenIsolationAndHlsProxyPerTargetMinimalHeaders",
+            "testLargeFileRangeIgnoring200BoundedStreamingSeekExitAndPeakMemory",
         ):
             self.assertIn(token, test_text)
+
+        player_src = (TVOS_DIR / "Sources" / "MarcoMovieTV" / "TvPlayerView.swift").read_text(encoding="utf-8")
+        self.assertIn("transportBarCustomMenuItems", player_src)
+        self.assertIn('title: "选集"', player_src)
+
+        for extra_test, required_fns in (
+            (
+                "PlaybackAndMediaEntryTests.swift",
+                (
+                    "testRapidEpisodeSwitchAPlayingBSlowCFast",
+                    "testExitDuringStreamResolutionCancelsAndNeverLoads",
+                    "testDuplicateOutroAndEndCallbacksTriggerAutoAdvanceOnce",
+                    "testPlaybackItemLoadAndMidPlaybackFailureSurfacesRetryAndLineSwitch",
+                    "testLiveSameChannelLineSwitchFirstFailsSecondSucceeds",
+                    "testCrossSiteSameIdIsolationAndDisabledOriginRetention",
+                    "testM3uVodWatched60SecondsResumesAfterRestartFromAllThreeEntries",
+                ),
+            ),
+            (
+                "EpisodePaginationAndFocusTests.swift",
+                (
+                    "testCrossLineJumpFromLineBToLineAEpisode45AscendingAndDescending",
+                    "testMultiLayerBackFocusRestorationPlayerToDetailToPosterWall",
+                ),
+            ),
+        ):
+            p = TVOS_DIR / "Tests" / "MarcoTVCoreTests" / extra_test
+            self.assertTrue(p.is_file(), f"Missing {extra_test}")
+            txt = p.read_text(encoding="utf-8")
+            for fn in required_fns:
+                self.assertIn(fn, txt)
 
     def test_patch_tvos_ipa_macho_and_plist_and_packaging(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

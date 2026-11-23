@@ -16,10 +16,6 @@ public struct DetailView: View {
     public let site: CmsSite
     public let summaryVideo: CmsVideo
 
-    private enum HeroFocusTarget: Hashable {
-        case play
-    }
-
     @State private var detailVideo: CmsVideo
     @State private var isLoading = false
     @State private var errorMessage: String?
@@ -29,7 +25,9 @@ public struct DetailView: View {
     @State private var showInlineNetdiskSheet = false
     @State private var synopsisExpanded = false
     @State private var pendingEpisodePlayback: (lineIndex: Int, episodeIndex: Int, resumeMs: Int)?
-    @FocusState private var heroFocus: HeroFocusTarget?
+    @State private var lastFocusBeforeModal: FocusRestorationPlanner.DetailReturnFocus = .play
+    @State private var lastPlayedTarget: TargetEpisodeLocation?
+    @FocusState private var activeFocus: FocusRestorationPlanner.DetailReturnFocus?
 
     private static let quickRailLimit = 12
 
@@ -169,8 +167,19 @@ public struct DetailView: View {
         .task(id: "\(site.key)\n\(summaryVideo.id)") {
             detailVideo = summaryVideo
             descending = appModel.preferences.episodesDescending
-            heroFocus = .play
+            lastFocusBeforeModal = .play
+            lastPlayedTarget = nil
+            activeFocus = .play
             await loadFullDetail()
+        }
+        .onChange(of: activeFocus) { newFocus in
+            if let focused = newFocus {
+                lastFocusBeforeModal = focused
+            }
+        }
+        .onChange(of: appModel.activePlayback == nil) { isPlayerDismissed in
+            guard isPlayerDismissed else { return }
+            restoreFocusAfterPlayerDismiss()
         }
         .tvExitHandler {
             dismiss()
@@ -284,6 +293,7 @@ public struct DetailView: View {
             // Hero Horizontal Action Pill Bar
             HStack(spacing: 16) {
                 Button {
+                    lastFocusBeforeModal = .play
                     playPrimaryAction()
                 } label: {
                     HStack(spacing: 9) {
@@ -293,11 +303,12 @@ public struct DetailView: View {
                     }
                 }
                 .buttonStyle(TvPillButtonStyle(prominent: true))
-                .focused($heroFocus, equals: .play)
+                .focused($activeFocus, equals: .play)
                 .disabled(detailVideo.lines.isEmpty)
 
                 if !detailVideo.lines.isEmpty {
                     Button {
+                        lastFocusBeforeModal = .allEpisodes
                         showEpisodeSelection = true
                     } label: {
                         HStack(spacing: 8) {
@@ -307,6 +318,7 @@ public struct DetailView: View {
                         }
                     }
                     .buttonStyle(TvPillButtonStyle())
+                    .focused($activeFocus, equals: .allEpisodes)
                 }
 
                 Button {
@@ -505,6 +517,7 @@ public struct DetailView: View {
                 .buttonStyle(TvPillButtonStyle(compact: true))
 
                 Button {
+                    lastFocusBeforeModal = .quickAllEpisodes
                     showEpisodeSelection = true
                 } label: {
                     HStack(spacing: 5) {
@@ -514,6 +527,7 @@ public struct DetailView: View {
                     }
                 }
                 .buttonStyle(TvPillButtonStyle(compact: true))
+                .focused($activeFocus, equals: .quickAllEpisodes)
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -527,6 +541,8 @@ public struct DetailView: View {
                             : nil
                         Button {
                             let seek = isLastPlayed ? (savedHistory?.resumePosition ?? 0) : 0
+                            lastFocusBeforeModal = .episode(lineIndex: safeLineIndex, episodeIndex: item.offset)
+                            lastPlayedTarget = TargetEpisodeLocation(lineIndex: safeLineIndex, episodeIndex: item.offset)
                             appModel.startVodPlayback(
                                 site: site,
                                 video: detailVideo,
@@ -548,10 +564,12 @@ public struct DetailView: View {
                             .frame(width: 284)
                         }
                         .buttonStyle(TvEpisodeTileButtonStyle(active: isLastPlayed, cornerRadius: 18))
+                        .focused($activeFocus, equals: .episode(lineIndex: safeLineIndex, episodeIndex: item.offset))
                     }
 
                     if total > railItems.count {
                         Button {
+                            lastFocusBeforeModal = .quickAllEpisodes
                             showEpisodeSelection = true
                         } label: {
                             VStack(spacing: 8) {
@@ -588,15 +606,53 @@ public struct DetailView: View {
     }
 
     private func flushPendingEpisodePlayback() {
-        guard let req = pendingEpisodePlayback else { return }
-        pendingEpisodePlayback = nil
-        appModel.startVodPlayback(
-            site: site,
-            video: detailVideo,
-            lineIndex: req.lineIndex,
-            episodeIndex: req.episodeIndex,
-            resumeMs: req.resumeMs
+        if let req = pendingEpisodePlayback {
+            pendingEpisodePlayback = nil
+            selectedLineIndex = req.lineIndex
+            lastPlayedTarget = TargetEpisodeLocation(lineIndex: req.lineIndex, episodeIndex: req.episodeIndex)
+            appModel.startVodPlayback(
+                site: site,
+                video: detailVideo,
+                lineIndex: req.lineIndex,
+                episodeIndex: req.episodeIndex,
+                resumeMs: req.resumeMs
+            )
+            return
+        }
+        let targetFocus = FocusRestorationPlanner.resolveAfterEpisodeSelectionDismiss(
+            lastFocusBeforeModal: lastFocusBeforeModal,
+            currentLineIndex: safeLineIndex,
+            visibleRailEpisodeOffsets: quickRailEpisodes.map(\.offset)
         )
+        scheduleFocusRestore(targetFocus)
+    }
+
+    private func restoreFocusAfterPlayerDismiss() {
+        let histLineIdx: Int? = savedHistory.flatMap { hist in
+            detailVideo.lines.firstIndex(where: { $0.name == hist.line })
+        }
+        if let hLine = histLineIdx, detailVideo.lines.indices.contains(hLine) {
+            selectedLineIndex = hLine
+        } else if let pLine = lastPlayedTarget?.lineIndex, detailVideo.lines.indices.contains(pLine) {
+            selectedLineIndex = pLine
+        }
+        let targetFocus = FocusRestorationPlanner.resolveAfterPlayerDismiss(
+            lastFocusBeforeModal: lastFocusBeforeModal,
+            lastPlayedLineIndex: lastPlayedTarget?.lineIndex,
+            lastPlayedEpisodeIndex: lastPlayedTarget?.episodeIndex,
+            savedHistoryLineIndex: histLineIdx,
+            savedHistoryEpisodeIndex: savedHistory?.index,
+            currentLineIndex: safeLineIndex,
+            visibleRailEpisodeOffsets: quickRailEpisodes.map(\.offset)
+        )
+        scheduleFocusRestore(targetFocus)
+    }
+
+    private func scheduleFocusRestore(_ target: FocusRestorationPlanner.DetailReturnFocus) {
+        activeFocus = target
+        DispatchQueue.main.async {
+            self.activeFocus = target
+        }
     }
 
     private func playPrimaryAction() {
@@ -605,6 +661,7 @@ public struct DetailView: View {
            let matchedLine = detailVideo.lines.firstIndex(where: { $0.name == hist.line }),
            detailVideo.lines[matchedLine].episodes.indices.contains(hist.index)
         {
+            lastPlayedTarget = TargetEpisodeLocation(lineIndex: matchedLine, episodeIndex: hist.index)
             appModel.startVodPlayback(
                 site: site,
                 video: detailVideo,
@@ -614,6 +671,7 @@ public struct DetailView: View {
             )
             return
         }
+        lastPlayedTarget = TargetEpisodeLocation(lineIndex: safeLineIndex, episodeIndex: 0)
         appModel.startVodPlayback(site: site, video: detailVideo, lineIndex: safeLineIndex, episodeIndex: 0)
     }
 

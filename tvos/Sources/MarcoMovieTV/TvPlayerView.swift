@@ -347,10 +347,47 @@ private struct NativeTvOSPlayerRepresentable: UIViewControllerRepresentable {
     let player: AVPlayer
     let title: String
     let subtitle: String
+    let isLiveStream: Bool
+    let hasEpisodePicker: Bool
+    let vodLineNames: [String]
+    let activeVodLineIndex: Int
+    let liveLineCount: Int
+    let activeLiveLineIndex: Int
+    let onOpenEpisodeSelection: () -> Void
+    let onSelectVodLine: (Int) -> Void
+    let onSelectLiveLine: (Int) -> Void
+
+    final class Coordinator: NSObject {
+        var onOpenEpisodeSelection: () -> Void
+        var onSelectVodLine: (Int) -> Void
+        var onSelectLiveLine: (Int) -> Void
+        var lastMenuSignature: String = ""
+        weak var lastMetadataItem: AVPlayerItem?
+        var lastMetadataSignature: String = ""
+
+        init(
+            onOpenEpisodeSelection: @escaping () -> Void,
+            onSelectVodLine: @escaping (Int) -> Void,
+            onSelectLiveLine: @escaping (Int) -> Void
+        ) {
+            self.onOpenEpisodeSelection = onOpenEpisodeSelection
+            self.onSelectVodLine = onSelectVodLine
+            self.onSelectLiveLine = onSelectLiveLine
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onOpenEpisodeSelection: onOpenEpisodeSelection,
+            onSelectVodLine: onSelectVodLine,
+            onSelectLiveLine: onSelectLiveLine
+        )
+    }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
         controller.player = player
+        controller.showsPlaybackControls = true
         controller.speeds = [
             AVPlaybackSpeed(rate: 0.75, localizedName: "0.75x"),
             AVPlaybackSpeed(rate: 1.0, localizedName: "1.0x"),
@@ -358,13 +395,108 @@ private struct NativeTvOSPlayerRepresentable: UIViewControllerRepresentable {
             AVPlaybackSpeed(rate: 1.5, localizedName: "1.5x"),
             AVPlaybackSpeed(rate: 2.0, localizedName: "2.0x"),
         ]
+        applyTransportMenuItems(to: controller, coordinator: context.coordinator)
+        applyExternalMetadataIfNeeded(to: player.currentItem, coordinator: context.coordinator)
         return controller
     }
 
     func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
+        context.coordinator.onOpenEpisodeSelection = onOpenEpisodeSelection
+        context.coordinator.onSelectVodLine = onSelectVodLine
+        context.coordinator.onSelectLiveLine = onSelectLiveLine
+
         if uiViewController.player !== player {
             uiViewController.player = player
         }
+        applyTransportMenuItems(to: uiViewController, coordinator: context.coordinator)
+        applyExternalMetadataIfNeeded(to: player.currentItem, coordinator: context.coordinator)
+    }
+
+    private func applyTransportMenuItems(to controller: AVPlayerViewController, coordinator: Coordinator) {
+        let signature = [
+            isLiveStream ? "live" : "vod",
+            hasEpisodePicker ? "ep" : "noep",
+            "\(activeVodLineIndex)",
+            vodLineNames.joined(separator: "|"),
+            "\(liveLineCount)",
+            "\(activeLiveLineIndex)",
+        ].joined(separator: "#")
+        guard coordinator.lastMenuSignature != signature else { return }
+        coordinator.lastMenuSignature = signature
+
+        var items: [UIMenuElement] = []
+        if isLiveStream {
+            if liveLineCount > 1 {
+                let actions = (0..<liveLineCount).map { idx in
+                    UIAction(
+                        title: "线路 \(idx + 1)",
+                        state: idx == activeLiveLineIndex ? .on : .off
+                    ) { _ in
+                        coordinator.onSelectLiveLine(idx)
+                    }
+                }
+                let liveMenu = UIMenu(
+                    title: "切换线路",
+                    image: UIImage(systemName: "arrow.triangle.branch"),
+                    children: actions
+                )
+                items.append(liveMenu)
+            }
+        } else {
+            if hasEpisodePicker {
+                let episodeAction = UIAction(
+                    title: "选集",
+                    image: UIImage(systemName: "square.grid.2x2.fill")
+                ) { _ in
+                    coordinator.onOpenEpisodeSelection()
+                }
+                items.append(episodeAction)
+            }
+            if vodLineNames.count > 1 {
+                let lineActions = vodLineNames.enumerated().map { idx, name in
+                    UIAction(
+                        title: name,
+                        state: idx == activeVodLineIndex ? .on : .off
+                    ) { _ in
+                        coordinator.onSelectVodLine(idx)
+                    }
+                }
+                let lineMenu = UIMenu(
+                    title: "切换线路",
+                    image: UIImage(systemName: "arrow.triangle.branch"),
+                    children: lineActions
+                )
+                items.append(lineMenu)
+            }
+        }
+        controller.transportBarCustomMenuItems = items
+    }
+
+    private func applyExternalMetadataIfNeeded(to item: AVPlayerItem?, coordinator: Coordinator) {
+        guard let item = item else { return }
+        let metaSig = "\(title)\n\(subtitle)"
+        if coordinator.lastMetadataItem === item && coordinator.lastMetadataSignature == metaSig {
+            return
+        }
+        coordinator.lastMetadataItem = item
+        coordinator.lastMetadataSignature = metaSig
+
+        var metadata: [AVMetadataItem] = []
+        if !title.isEmpty {
+            let titleItem = AVMutableMetadataItem()
+            titleItem.identifier = .commonIdentifierTitle
+            titleItem.value = title as NSString
+            titleItem.extendedLanguageTag = "und"
+            metadata.append(titleItem)
+        }
+        if !subtitle.isEmpty {
+            let subItem = AVMutableMetadataItem()
+            subItem.identifier = .commonIdentifierDescription
+            subItem.value = subtitle as NSString
+            subItem.extendedLanguageTag = "und"
+            metadata.append(subItem)
+        }
+        item.externalMetadata = metadata
     }
 }
 #endif
@@ -520,7 +652,27 @@ private struct TvPlayerContentView: View {
             NativeTvOSPlayerRepresentable(
                 player: engine.avPlayer,
                 title: currentSession.video.title,
-                subtitle: currentEpisode?.name ?? ""
+                subtitle: currentEpisode?.name ?? "",
+                isLiveStream: currentSession.isLiveStream,
+                hasEpisodePicker: !currentSession.isLiveStream && !currentSession.video.lines.isEmpty,
+                vodLineNames: currentSession.video.lines.map(\.name),
+                activeVodLineIndex: currentSession.lineIndex,
+                liveLineCount: currentSession.liveLineCount,
+                activeLiveLineIndex: currentSession.episodeIndex,
+                onOpenEpisodeSelection: {
+                    openEpisodeSelection()
+                },
+                onSelectVodLine: { lineIdx in
+                    guard currentSession.video.lines.indices.contains(lineIdx) else { return }
+                    let targetEps = currentSession.video.lines[lineIdx].episodes
+                    guard !targetEps.isEmpty else { return }
+                    let clampedEp = min(max(0, currentSession.episodeIndex), targetEps.count - 1)
+                    let carrySeek = max(engine.currentTimeMs, currentSession.initialSeekMs)
+                    coordinator.switchToEpisode(lineIndex: lineIdx, episodeIndex: clampedEp, seekMs: carrySeek)
+                },
+                onSelectLiveLine: { lineIdx in
+                    _ = coordinator.switchLiveLine(to: lineIdx)
+                }
             )
             .ignoresSafeArea()
             #else
@@ -546,6 +698,24 @@ private struct TvPlayerContentView: View {
             if showHudBanner {
                 hudBannerView
             }
+            #if !os(tvOS)
+            else if !currentSession.isLiveStream && !currentSession.video.lines.isEmpty && coordinator.errorMessage == nil {
+                HStack {
+                    Spacer()
+                    Button {
+                        openEpisodeSelection()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "square.grid.2x2.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("选集")
+                        }
+                    }
+                    .buttonStyle(TvPillButtonStyle(compact: true))
+                }
+                .padding(24)
+            }
+            #endif
         }
         #if os(tvOS)
         .fullScreenCover(isPresented: $showNetdiskAuthSheet) {

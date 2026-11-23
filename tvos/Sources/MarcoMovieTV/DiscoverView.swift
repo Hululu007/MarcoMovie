@@ -6,6 +6,14 @@ import SwiftUI
 public struct DiscoverView: View {
     @EnvironmentObject private var appModel: AppViewModel
 
+    private enum DiscoverFocusTarget: Hashable {
+        case continueWatching(String)
+        case poster(String)
+    }
+
+    @State private var lastOpenedFocus: DiscoverFocusTarget?
+    @FocusState private var focusedCard: DiscoverFocusTarget?
+
     private let posterColumns: [GridItem] = Array(
         repeating: GridItem(.flexible(), spacing: 26),
         count: 6
@@ -61,6 +69,25 @@ public struct DiscoverView: View {
             if appModel.discoverVideos.isEmpty && appModel.activeSite != nil {
                 await appModel.loadHomeForActiveSite()
             }
+        }
+        .onChange(of: appModel.selectedDetailContext == nil) { isClosed in
+            guard isClosed else { return }
+            restoreLastOpenedCardFocus()
+        }
+    }
+
+    private func restoreLastOpenedCardFocus() {
+        var available: [DiscoverFocusTarget] = appModel.watchHistory.prefix(12).map { .continueWatching($0.key) }
+        available.append(contentsOf: appModel.discoverVideos.map { .poster($0.id) })
+        guard let target = FocusRestorationPlanner.resolvePosterCardReturn(
+            lastOpenedKey: lastOpenedFocus,
+            availableKeys: available
+        ) else {
+            return
+        }
+        focusedCard = target
+        DispatchQueue.main.async {
+            self.focusedCard = target
         }
     }
 
@@ -126,6 +153,7 @@ public struct DiscoverView: View {
                 HStack(spacing: 24) {
                     ForEach(appModel.watchHistory.prefix(12), id: \.key) { item in
                         Button {
+                            lastOpenedFocus = .continueWatching(item.key)
                             appModel.openWatchHistoryItem(item)
                         } label: {
                             ContinueWatchingCard(
@@ -134,6 +162,7 @@ public struct DiscoverView: View {
                             )
                         }
                         .tvCardButtonStyle()
+                        .focused($focusedCard, equals: .continueWatching(item.key))
                     }
                 }
                 .padding(.horizontal, 6)
@@ -154,6 +183,7 @@ public struct DiscoverView: View {
                 ForEach(appModel.discoverVideos) { video in
                     Button {
                         if let site = appModel.activeSite {
+                            lastOpenedFocus = .poster(video.id)
                             appModel.openDetail(site: site, video: video)
                         }
                     } label: {
@@ -163,6 +193,7 @@ public struct DiscoverView: View {
                         )
                     }
                     .tvCardButtonStyle()
+                    .focused($focusedCard, equals: .poster(video.id))
                     .task {
                         await appModel.loadMoreDiscoverIfNeeded(currentVideo: video)
                     }

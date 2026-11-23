@@ -11,8 +11,15 @@ public struct LibraryView: View {
         case favorites = "我的收藏"
     }
 
+    private enum LibraryFocusTarget: Hashable {
+        case history(String)
+        case favorite(String)
+    }
+
     @State private var section: LibrarySection = .history
     @State private var showClearConfirmation = false
+    @State private var lastOpenedFocus: LibraryFocusTarget?
+    @FocusState private var focusedCard: LibraryFocusTarget?
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 26), count: 6)
 
@@ -72,6 +79,26 @@ public struct LibraryView: View {
             }
             Button("取消", role: .cancel) {}
         }
+        .onChange(of: appModel.selectedDetailContext == nil) { isClosed in
+            guard isClosed else { return }
+            restoreLastOpenedCardFocus()
+        }
+    }
+
+    private func restoreLastOpenedCardFocus() {
+        let available: [LibraryFocusTarget] = section == .history
+            ? appModel.watchHistory.map { .history($0.key) }
+            : appModel.favorites.map { .favorite($0.key) }
+        guard let target = FocusRestorationPlanner.resolvePosterCardReturn(
+            lastOpenedKey: lastOpenedFocus,
+            availableKeys: available
+        ) else {
+            return
+        }
+        focusedCard = target
+        DispatchQueue.main.async {
+            self.focusedCard = target
+        }
     }
 
     @ViewBuilder
@@ -83,6 +110,7 @@ public struct LibraryView: View {
                 ForEach(appModel.watchHistory, id: \.key) { item in
                     VStack(alignment: .leading, spacing: 10) {
                         Button {
+                            lastOpenedFocus = .history(item.key)
                             appModel.openWatchHistoryItem(item)
                         } label: {
                             PosterCardCell(
@@ -96,6 +124,7 @@ public struct LibraryView: View {
                             )
                         }
                         .tvCardButtonStyle()
+                        .focused($focusedCard, equals: .history(item.key))
 
                         Button {
                             appModel.removeHistoryItem(item)
@@ -122,6 +151,7 @@ public struct LibraryView: View {
                 ForEach(appModel.favorites, id: \.key) { fav in
                     VStack(alignment: .leading, spacing: 10) {
                         Button {
+                            lastOpenedFocus = .favorite(fav.key)
                             appModel.openFavoriteItem(fav)
                         } label: {
                             PosterCardCell(
@@ -135,6 +165,7 @@ public struct LibraryView: View {
                             )
                         }
                         .tvCardButtonStyle()
+                        .focused($focusedCard, equals: .favorite(fav.key))
 
                         Button {
                             appModel.removeFavoriteItem(fav)
