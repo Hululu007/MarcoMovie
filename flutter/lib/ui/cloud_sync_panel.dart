@@ -397,6 +397,23 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
     Widget? suffix,
     TextInputType? keyboardType,
   }) {
+    final palette = ApplePalette.of(context);
+    final isWin = usesWindowsAppearance(context);
+    final isDark = palette.isDark;
+    final textColor = isWin ? winInk(context) : palette.labelPrimary;
+    final hintColor = isWin
+        ? winMuted(context)
+        : (isDark
+            ? const Color(0xFF9E9EA8)
+            : const Color(0xFF6B7280));
+    final fillColor = isWin
+        ? winMuted(context).withValues(alpha: .08)
+        : (isDark ? const Color(0xFF2C2C2E) : const Color(0xFFF3F5F8));
+    final borderColor = isWin
+        ? winMuted(context).withValues(alpha: .22)
+        : (isDark
+            ? Colors.white.withValues(alpha: 0.16)
+            : const Color(0xFFCBD5E1));
     return TextSelectionMouseGuard(
       child: CupertinoTextField(
         key: fieldKey,
@@ -408,29 +425,26 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         enableSuggestions: false,
         smartQuotesType: SmartQuotesType.disabled,
         smartDashesType: SmartDashesType.disabled,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        cursorColor: AppleColors.systemBlue,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
         placeholderStyle: TextStyle(
-          color: settingsMuted(context),
+          color: hintColor,
           fontSize: 14,
+          fontWeight: FontWeight.w400,
         ),
         style: TextStyle(
-          color: settingsInk(context),
-          fontSize: 14.5,
+          color: textColor,
+          fontSize: 15,
+          fontWeight: FontWeight.w500,
         ),
         suffix: suffix,
         decoration: BoxDecoration(
-          color: usesWindowsAppearance(context)
-              ? winMuted(context).withValues(alpha: .08)
-              : (ApplePalette.isDarkOf(context)
-                  ? const Color(0xFF2C2C2E)
-                  : ApplePalette.of(context).groupedSecondary),
+          color: fillColor,
           borderRadius: BorderRadius.circular(10),
-          border: ApplePalette.isDarkOf(context)
-              ? null
-              : Border.all(
-                  color: Colors.black.withValues(alpha: 0.08),
-                  width: 0.6,
-                ),
+          border: Border.all(
+            color: borderColor,
+            width: 0.9,
+          ),
         ),
       ),
     );
@@ -503,7 +517,6 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
               icon: CupertinoIcons.arrow_2_circlepath,
               iconColor: AppleColors.systemGreen,
               title: '自动云同步',
-              subtitle: '启动时静默拉取最新进度，播放进度、收藏与订阅变更自动同步',
               value: _autoSync,
               onChanged: (v) async {
                 final prev = _autoSync;
@@ -532,7 +545,6 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
               icon: CupertinoIcons.layers_alt_fill,
               iconColor: AppleColors.systemPurple,
               title: '同时同步我的订阅源配置',
-              subtitle: '同步公开点播/直播订阅源（自动排除隐私分组与本机文件包）',
               value: _syncSubs,
               onChanged: (v) async {
                 setState(() => _syncSubs = v);
@@ -549,7 +561,6 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
               icon: CupertinoIcons.clock_fill,
               iconColor: AppleColors.systemBlue,
               title: '同时同步观看历史与收藏',
-              subtitle: '关闭后仅同步订阅源配置，方便与家人共享片源但隔离各自观看记录',
               value: _syncHistory,
               onChanged: (v) async {
                 setState(() => _syncHistory = v);
@@ -648,9 +659,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                   ? AppleColors.systemOrange
                   : AppleColors.systemTeal,
               title: activeServer != null ? '关闭本机局域网接收码' : '开启本机局域网接收码（5 分钟有效）',
-              subtitle: activeServer != null
-                  ? '接收服务运行中：$receiverUrl'
-                  : '生成本机局域网二维码与同步地址供其他设备连接',
+              subtitle: activeServer != null ? '接收服务运行中：$receiverUrl' : null,
               trailing: _startingLanServer
                   ? const CupertinoActivityIndicator(radius: 9)
                   : null,

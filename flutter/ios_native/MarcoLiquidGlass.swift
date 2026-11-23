@@ -3735,8 +3735,26 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     return (discrete, continuous)
   }
 
+  func setScrollCollapseProgress(_ rawProgress: CGFloat) {
+    let p = max(0.0, min(rawProgress, 1.0))
+    let count = max(slotViews.count, 1)
+    let spanW = max(bounds.width, 1.0)
+    for (idx, slot) in slotViews.enumerated() {
+      // Stagger left-to-right so leftmost tabs roll rightward into the Search
+      // circle first while rightmost tabs follow cleanly in linear lockstep.
+      let frac = CGFloat(idx) / CGFloat(max(count - 1, 1))
+      let slotP = max(0.0, min((p - frac * 0.18) / 0.82, 1.0))
+      let pullX = (1.0 - frac * 0.45) * spanW * 0.24 * slotP
+      let scale = max(0.32, 1.0 - 0.62 * slotP)
+      slot.transform = CGAffineTransform(translationX: pullX, y: 0.0).scaledBy(x: scale, y: scale)
+      slot.alpha = max(0.0, 1.0 - slotP * 1.15)
+    }
+    selectionLensView.alpha = isScrubbing ? 0.0 : max(0.0, 1.0 - p * 1.35)
+  }
+
   override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-    super.touchesBegan(touches, with: event)
+    // Intentionally do NOT call super.touchesBegan: forwarding up the responder
+    // chain leaks Dock taps directly into FlutterView behind the overlay.
     guard let touch = touches.first, !specs.isEmpty else { return }
     selectionFeedback.prepare()
     let pt = touch.location(in: self)
@@ -3756,7 +3774,8 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   }
 
   override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-    super.touchesMoved(touches, with: event)
+    // Intentionally absorb scrubbing touches so underlying Flutter scrollables
+    // and carousels never drag simultaneously with the Dock.
     guard isScrubbing, let touch = touches.first, !specs.isEmpty else { return }
     let pt = touch.location(in: self)
     if let prevX = lastScrubX {
@@ -3780,7 +3799,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   }
 
   override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-    super.touchesEnded(touches, with: event)
+    // Intentionally absorb touch release so underlying Flutter items never fire.
     guard isScrubbing else { return }
     let target = highlightedIndex
     isScrubbing = false
@@ -3801,7 +3820,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   }
 
   override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-    super.touchesCancelled(touches, with: event)
+    // Intentionally absorb cancellation without forwarding to FlutterView.
     guard isScrubbing else { return }
     isScrubbing = false
     scrubContinuousSlot = nil
@@ -3925,6 +3944,7 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       accessibilityLabel: "搜索"
     )
     searchButton.addTarget(self, action: #selector(handleSearchTap), for: .touchUpInside)
+    searchButton.isExclusiveTouch = true
     contentParent.addSubview(searchButton)
 
     configureGlassCircleButton(
@@ -3933,9 +3953,10 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       accessibilityLabel: "快捷导航"
     )
     logoButton.showsMenuAsPrimaryAction = true
+    logoButton.isExclusiveTouch = true
     logoButton.alpha = 0.0
     logoButton.isUserInteractionEnabled = false
-    logoButton.transform = CGAffineTransform(scaleX: 0.55, y: 0.55)
+    logoButton.transform = CGAffineTransform(rotationAngle: -.pi)
     contentParent.addSubview(logoButton)
 
     NotificationCenter.default.addObserver(
@@ -3973,6 +3994,14 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     }
     return hit
   }
+
+  // Secondary responder-chain firewall: once a touch hit-tests onto an active
+  // Dock control (capsule or circular button), never let it propagate further
+  // up to MarcoIos27PassthroughChromeView / FlutterView.
+  override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {}
+  override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {}
+  override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {}
+  override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {}
 
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
     super.traitCollectionDidChange(previousTraitCollection)
@@ -4127,17 +4156,20 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     return legacyTabCapsule
   }
 
-  func updateScrollMinimizeProgress(_ rawProgress: CGFloat) {
+  private func applyScrollMorph(progress rawProgress: CGFloat) {
     let p = max(0.0, min(rawProgress, 1.0))
-    minimizeProgress = p
-    let minimizedTarget = p >= 0.5
-    isMinimized = minimizedTarget
+    guard bounds.width > 1.0, logoButton.bounds.width > 1.0 else { return }
     let tabView = activeTabView()
     let targetCenterX = logoButton.center.x
-    let tabShift = (targetCenterX - tabView.center.x) * 0.42 * p
-    let tabScale = 1.0 - 0.55 * p
-    let searchScale = 1.0 - 0.55 * p
-    let logoScale = 0.55 + 0.45 * p
+    let dx = targetCenterX - tabView.center.x
+    let tabTx = dx * p
+    let tabScaleX = max(0.08, 1.0 - 0.90 * p)
+    let tabScaleY = max(0.28, 1.0 - 0.62 * p)
+    let spinScale = 1.0 - 0.08 * sin(p * .pi)
+    let searchAngle = p * .pi
+    let logoAngle = (p - 1.0) * .pi
+    let searchAlpha: CGFloat = showSearchButton ? max(0.0, min(1.0, (0.62 - p) / 0.28)) : 0.0
+    let logoAlpha: CGFloat = max(0.0, min(1.0, (p - 0.34) / 0.28))
 
     #if compiler(>=6.2)
     if #available(iOS 26.0, *), let glassEffect = glassContainerView?.effect as? UIGlassContainerEffect {
@@ -4145,59 +4177,62 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     }
     #endif
 
+    legacyTabCapsule.setScrollCollapseProgress(p)
     tabView.alpha = max(0.0, 1.0 - p * 1.15)
-    tabView.transform = CGAffineTransform(translationX: tabShift, y: 0).scaledBy(x: tabScale, y: tabScale)
-    searchButton.alpha = showSearchButton ? max(0.0, 1.0 - p * 1.15) : 0.0
-    searchButton.transform = CGAffineTransform(scaleX: searchScale, y: searchScale)
-    logoButton.alpha = max(0.0, (p - 0.2) / 0.8)
-    logoButton.transform = CGAffineTransform(scaleX: logoScale, y: logoScale)
+    tabView.transform = p <= 0.001
+      ? .identity
+      : CGAffineTransform(translationX: tabTx, y: 0.0).scaledBy(x: tabScaleX, y: tabScaleY)
 
-    tabView.isUserInteractionEnabled = !minimizedTarget
-    searchButton.isUserInteractionEnabled = !minimizedTarget && showSearchButton
-    logoButton.isUserInteractionEnabled = minimizedTarget
+    searchButton.alpha = searchAlpha
+    searchButton.transform = p <= 0.001
+      ? .identity
+      : CGAffineTransform(rotationAngle: searchAngle).scaledBy(x: spinScale, y: spinScale)
+
+    logoButton.alpha = logoAlpha
+    logoButton.transform = p >= 0.999
+      ? .identity
+      : CGAffineTransform(rotationAngle: logoAngle).scaledBy(x: spinScale, y: spinScale)
+
+    tabView.isUserInteractionEnabled = p < 0.35
+    searchButton.isUserInteractionEnabled = p < 0.5 && showSearchButton
+    logoButton.isUserInteractionEnabled = p >= 0.5
+  }
+
+  func updateScrollMinimizeProgress(_ rawProgress: CGFloat) {
+    let p = max(0.0, min(rawProgress, 1.0))
+    minimizeProgress = p
+    isMinimized = p >= 0.5
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    applyScrollMorph(progress: p)
+    CATransaction.commit()
   }
 
   func setMinimized(_ minimized: Bool, animated: Bool) {
-    guard minimized != isMinimized || (minimized ? minimizeProgress < 0.99 : minimizeProgress > 0.01) else {
+    let targetProgress: CGFloat = minimized ? 1.0 : 0.0
+    guard minimized != isMinimized || abs(minimizeProgress - targetProgress) > 0.01 else {
       return
     }
     isMinimized = minimized
-    minimizeProgress = minimized ? 1.0 : 0.0
-    let tabView = activeTabView()
-    let targetCenterX = logoButton.center.x
-    let tabShift = targetCenterX - tabView.center.x
+    minimizeProgress = targetProgress
 
     let apply = {
-      #if compiler(>=6.2)
-      if #available(iOS 26.0, *), let glassEffect = self.glassContainerView?.effect as? UIGlassContainerEffect {
-        glassEffect.spacing = minimized ? 0.0 : 10.0
-      }
-      #endif
-      if minimized {
-        tabView.alpha = 0.0
-        tabView.transform = CGAffineTransform(translationX: tabShift * 0.42, y: 0).scaledBy(x: 0.45, y: 0.45)
-        self.searchButton.alpha = 0.0
-        self.searchButton.transform = CGAffineTransform(scaleX: 0.45, y: 0.45)
-        self.logoButton.alpha = 1.0
-        self.logoButton.transform = .identity
-      } else {
-        tabView.alpha = 1.0
-        tabView.transform = .identity
-        self.searchButton.alpha = self.showSearchButton ? 1.0 : 0.0
-        self.searchButton.transform = .identity
-        self.logoButton.alpha = 0.0
-        self.logoButton.transform = CGAffineTransform(scaleX: 0.55, y: 0.55)
-      }
+      self.applyScrollMorph(progress: targetProgress)
     }
 
-    tabView.isUserInteractionEnabled = !minimized
-    searchButton.isUserInteractionEnabled = !minimized && showSearchButton
-    logoButton.isUserInteractionEnabled = minimized
-
     if animated {
-      MarcoLiquidGlassSupport.animateSpring(duration: 0.38, bounce: 0.16, animations: apply)
+      UIView.animate(
+        withDuration: 0.28,
+        delay: 0.0,
+        options: [.beginFromCurrentState, .allowUserInteraction, .curveLinear],
+        animations: apply,
+        completion: nil
+      )
     } else {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
       apply()
+      CATransaction.commit()
     }
   }
 
@@ -4340,6 +4375,10 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     let contentParent = glassContainerView?.contentView ?? fallbackContainerView
     contentParent.bringSubviewToFront(searchButton)
     contentParent.bringSubviewToFront(logoButton)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    applyScrollMorph(progress: minimizeProgress)
+    CATransaction.commit()
   }
 }
 
@@ -4722,11 +4761,15 @@ private final class MarcoNativeGlassButtonControl: UIView {
       }
 
       let useProminent = prominent || tintColor != nil
+      let singleLineLabel = label
+        .replacingOccurrences(of: "\r", with: " ")
+        .replacingOccurrences(of: "\n", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
 
       if #available(iOS 15.0, *) {
         var titleAttr: AttributedString?
-        if isCapsule && !label.isEmpty {
-          var attr = AttributedString(label)
+        if isCapsule && !singleLineLabel.isEmpty {
+          var attr = AttributedString(singleLineLabel)
           attr.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
           titleAttr = attr
         }
@@ -4736,16 +4779,17 @@ private final class MarcoNativeGlassButtonControl: UIView {
           var cfg = useProminent ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
           cfg.image = leadingImg
           cfg.attributedTitle = titleAttr
+          cfg.titleLineBreakMode = .byTruncatingTail
           cfg.baseForegroundColor = foregroundColor
           if let tint = tintColor {
             cfg.baseBackgroundColor = tint
           } else if forceDark {
             cfg.baseBackgroundColor = UIColor(white: 0.10, alpha: 0.35)
           }
-          cfg.imagePadding = isCapsule ? 5.0 : 0.0
+          cfg.imagePadding = isCapsule ? 4.5 : 0.0
           cfg.cornerStyle = .capsule
           cfg.contentInsets = isCapsule
-            ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
+            ? NSDirectionalEdgeInsets(top: 0.0, leading: 11.0, bottom: 0.0, trailing: hasTrailing ? 24.0 : 11.0)
             : .zero
           self.button.configuration = cfg
           self.button.cornerConfiguration = .capsule()
@@ -4753,14 +4797,15 @@ private final class MarcoNativeGlassButtonControl: UIView {
           var cfg = useProminent ? UIButton.Configuration.filled() : UIButton.Configuration.plain()
           cfg.image = leadingImg
           cfg.attributedTitle = titleAttr
+          cfg.titleLineBreakMode = .byTruncatingTail
           cfg.baseForegroundColor = foregroundColor
           if let tint = tintColor {
             cfg.baseBackgroundColor = tint
           }
-          cfg.imagePadding = isCapsule ? 5.0 : 0.0
+          cfg.imagePadding = isCapsule ? 4.5 : 0.0
           cfg.cornerStyle = .capsule
           cfg.contentInsets = isCapsule
-            ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
+            ? NSDirectionalEdgeInsets(top: 0.0, leading: 11.0, bottom: 0.0, trailing: hasTrailing ? 24.0 : 11.0)
             : .zero
           self.button.configuration = cfg
         }
@@ -4768,26 +4813,33 @@ private final class MarcoNativeGlassButtonControl: UIView {
         var cfg = useProminent ? UIButton.Configuration.filled() : UIButton.Configuration.plain()
         cfg.image = leadingImg
         cfg.attributedTitle = titleAttr
+        cfg.titleLineBreakMode = .byTruncatingTail
         cfg.baseForegroundColor = foregroundColor
         if let tint = tintColor {
           cfg.baseBackgroundColor = tint
         }
-        cfg.imagePadding = isCapsule ? 5.0 : 0.0
+        cfg.imagePadding = isCapsule ? 4.5 : 0.0
         cfg.cornerStyle = .capsule
         cfg.contentInsets = isCapsule
-          ? NSDirectionalEdgeInsets(top: 0.0, leading: 12.0, bottom: 0.0, trailing: hasTrailing ? 26.0 : 12.0)
+          ? NSDirectionalEdgeInsets(top: 0.0, leading: 11.0, bottom: 0.0, trailing: hasTrailing ? 24.0 : 11.0)
           : .zero
         self.button.configuration = cfg
         #endif
+        self.button.titleLabel?.numberOfLines = 1
+        self.button.titleLabel?.lineBreakMode = .byTruncatingTail
+        self.button.titleLabel?.allowsDefaultTighteningForTruncation = true
       } else {
         self.button.setImage(leadingImg, for: .normal)
-        self.button.setTitle(isCapsule ? label : nil, for: .normal)
+        self.button.setTitle(isCapsule ? singleLineLabel : nil, for: .normal)
         self.button.titleLabel?.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+        self.button.titleLabel?.numberOfLines = 1
+        self.button.titleLabel?.lineBreakMode = .byTruncatingTail
+        self.button.titleLabel?.allowsDefaultTighteningForTruncation = true
         self.button.tintColor = foregroundColor
         self.button.setTitleColor(foregroundColor, for: .normal)
         self.button.backgroundColor = useProminent ? (tintColor ?? UIColor.systemBlue) : .clear
         self.button.contentEdgeInsets = isCapsule
-          ? UIEdgeInsets(top: 0.0, left: 12.0, bottom: 0.0, right: hasTrailing ? 26.0 : 12.0)
+          ? UIEdgeInsets(top: 0.0, left: 11.0, bottom: 0.0, right: hasTrailing ? 24.0 : 11.0)
           : .zero
       }
 
@@ -5004,6 +5056,8 @@ private final class MarcoGlassPillHostView: UIView {
     isOpaque = false
     clipsToBounds = false
     overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    isExclusiveTouch = true
+    isMultipleTouchEnabled = false
 
     effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     effectView.backgroundColor = .clear

@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart' show Colors, Material;
 import '../core/danmu/danmu_prefs.dart';
+import '../core/device_quality_profiler.dart';
 import '../core/ios_avplayer_controller.dart';
 import '../core/ios_mpv_profile.dart';
 import '../core/local_media_proxy.dart';
@@ -113,22 +114,26 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
     String parentTitle = '设置',
   }) {
     widget.onSecondaryRouteActive?.call(true);
-    Navigator.of(context)
-        .push<void>(
-          buildApplePageRoute<void>(
-            builder: (_) => IosSettingsSubPage(
-              pages: widget.pages,
-              pathIds: pathIds,
-              parentTitle: parentTitle,
-              revision: _revision,
-              onChanged: _notifyChanged,
-            ),
-          ),
-        )
-        .then((_) {
-          widget.onSecondaryRouteActive?.call(false);
-          if (mounted) setState(() {});
-        });
+    final route = buildApplePageRoute<void>(
+      builder: (_) => IosSettingsSubPage(
+        pages: widget.pages,
+        pathIds: pathIds,
+        parentTitle: parentTitle,
+        revision: _revision,
+        onChanged: _notifyChanged,
+      ),
+    );
+    unawaited(
+      Navigator.of(context).push<void>(route).then((_) {
+        if (mounted) setState(() {});
+      }),
+    );
+    unawaited(
+      route.completed.then((_) {
+        widget.onSecondaryRouteActive?.call(false);
+        if (mounted) setState(() {});
+      }),
+    );
   }
 
   void _openRootPane(BuildContext context, SettingsPane entry) {
@@ -542,9 +547,9 @@ class IosSettingsScaffold extends StatelessWidget {
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: p.labelPrimary,
-                            fontSize: 17,
-                            fontWeight: FontWeight.w600,
-                            letterSpacing: -0.2,
+                            fontSize: 20,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.4,
                           ),
                         ),
                       ),
@@ -658,7 +663,6 @@ class _IosSettingsSubPageState extends State<IosSettingsSubPage> {
                     children: [
                       if (pane.children.isNotEmpty) ...[
                         IosSettingsGroup(
-                          footer: pane.subtitle.isNotEmpty ? pane.subtitle : null,
                           children: [
                             for (final child in pane.children)
                               IosSettingsRow(
@@ -666,9 +670,6 @@ class _IosSettingsSubPageState extends State<IosSettingsSubPage> {
                                 icon: child.icon,
                                 iconColor: child.color,
                                 title: child.title,
-                                subtitle: child.subtitle.isNotEmpty
-                                    ? child.subtitle
-                                    : null,
                                 trailingText: child.trailingText,
                                 showChevron: true,
                                 onTap: () => _openChild(context, pane, child),
@@ -1183,7 +1184,6 @@ class _IosDanmuSettingsSectionState extends State<IosDanmuSettingsSection> {
           icon: CupertinoIcons.chat_bubble_text_fill,
           iconColor: AppleColors.systemTeal,
           title: '默认开启弹幕',
-          subtitle: '进入点播播放页时自动开启弹幕叠加层',
           value: _settings.enabled,
           onChanged: (v) => unawaited(_update(_settings.copyWith(enabled: v))),
         ),
@@ -1218,7 +1218,6 @@ class _IosDanmuSettingsSectionState extends State<IosDanmuSettingsSection> {
           icon: CupertinoIcons.slider_horizontal_3,
           iconColor: AppleColors.systemOrange,
           title: '弹幕样式、服务地址与屏蔽词',
-          subtitle: '调节透明度、字号、显示区域、兼容服务源与正则屏蔽词',
           trailingText: serverCount > 0 ? '$serverCount 个服务源' : '未配置',
           showChevron: true,
           onTap: () {
@@ -1307,7 +1306,6 @@ class _IosPlayerHudSettingsSectionState
               icon: CupertinoIcons.sparkles,
               iconColor: AppleColors.systemBlue,
               title: '起播规格提示',
-              subtitle: '首帧就绪后展示 4K / HDR / 杜比等媒体规格徽章',
               value: data.startSpecHud,
               onChanged: (v) => unawaited(_hudPrefs.setStartSpecHud(v)),
             ),
@@ -1316,7 +1314,6 @@ class _IosPlayerHudSettingsSectionState
               icon: CupertinoIcons.minus_rectangle_fill,
               iconColor: AppleColors.systemTeal,
               title: '隐藏控制栏时显示细进度条',
-              subtitle: '点播播放隐藏主控栏后在底部常驻细进度指示条',
               value: data.slimProgress,
               onChanged: (v) => unawaited(_hudPrefs.setSlimProgress(v)),
             ),
@@ -1325,7 +1322,6 @@ class _IosPlayerHudSettingsSectionState
               icon: CupertinoIcons.forward_end_alt_fill,
               iconColor: AppleColors.systemIndigo,
               title: '跳过片头/片尾 3 秒倒计时',
-              subtitle: '关闭后达到跳过点将静默立即跳转',
               value: data.skipCountdown,
               onChanged: (v) => unawaited(_hudPrefs.setSkipCountdown(v)),
             ),
@@ -1357,9 +1353,10 @@ class _IosPlayerHudSettingsSectionState
   }
 }
 
-/// iOS 27 dual-engine (`AVPlayer` / `MPV`), HDR tone-mapping, 4-tier vocal
-/// loudness gain, and Apple Silicon thermal-guarded single-pass Anime4K settings.
-class IosPlaybackEngineSettingsSection extends StatelessWidget {
+/// iOS 27 dual-engine (`AVPlayer` / `MPV`), hardware-aware automatic quality
+/// profiling, HDR tone-mapping, 4-tier vocal loudness gain, and Apple Silicon
+/// thermal-guarded single-pass Anime4K settings.
+class IosPlaybackEngineSettingsSection extends StatefulWidget {
   final StorageService storage;
   final VoidCallback? onChanged;
 
@@ -1370,15 +1367,116 @@ class IosPlaybackEngineSettingsSection extends StatelessWidget {
   });
 
   @override
+  State<IosPlaybackEngineSettingsSection> createState() =>
+      _IosPlaybackEngineSettingsSectionState();
+}
+
+class _IosPlaybackEngineSettingsSectionState
+    extends State<IosPlaybackEngineSettingsSection> {
+  DeviceQualityRecommendation? _recommendation;
+  bool _detecting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!OhosRuntime.isOhos) {
+      unawaited(_runProfileDetection(applyIfAuto: true));
+    }
+  }
+
+  Future<void> _runProfileDetection({
+    required bool applyIfAuto,
+    bool forceApply = false,
+  }) async {
+    if (_detecting) return;
+    if (mounted) setState(() => _detecting = true);
+    try {
+      final rec = (forceApply || (applyIfAuto && widget.storage.autoHardwareQualityEnabled))
+          ? await DeviceQualityProfiler.detectAndApply(
+              widget.storage,
+              force: forceApply,
+            )
+          : DeviceQualityProfiler.recommend(
+              await DeviceQualityProfiler.detect(),
+            );
+      if (!mounted) return;
+      setState(() {
+        _recommendation = rec;
+        _detecting = false;
+      });
+      if (forceApply || (applyIfAuto && widget.storage.autoHardwareQualityEnabled)) {
+        widget.onChanged?.call();
+      }
+    } catch (_) {
+      if (mounted) setState(() => _detecting = false);
+    }
+  }
+
+  Future<void> _markManualOverride() async {
+    if (widget.storage.autoHardwareQualityEnabled) {
+      await widget.storage.setAutoHardwareQualityEnabled(false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     if (OhosRuntime.isOhos) return const SizedBox.shrink();
+    final storage = widget.storage;
+    final autoEnabled = storage.autoHardwareQualityEnabled;
     final engineMode = IosPlaybackEngineMode.fromId(storage.iosPlaybackEngineMode);
     final hdrMode = IosHdrToneMappingMode.fromId(storage.iosHdrToneMappingMode);
     final loudness = VocalLoudnessPreset.fromId(storage.vocalLoudnessPreset);
+    final profileLabel = _recommendation != null
+        ? _recommendation!.hardwareSummaryZh
+        : (storage.lastHardwareProfileSummary.isNotEmpty
+            ? storage.lastHardwareProfileSummary
+            : '正在识别本机硬件配置…');
+    final tierBadge = _recommendation?.tier.labelZh ?? (autoEnabled ? '自动适配' : '自定义');
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        IosSettingsGroup(
+          header: '本机硬件智能适配',
+          footer: _recommendation != null
+              ? _recommendation!.detailSummaryZh
+              : '自动识别本机芯片代数、内存容量、XDR 屏幕与能耗状态，自动匹配最佳内核、HDR、缓冲与超分方案。',
+          children: [
+            IosSettingsSwitchRow(
+              key: const ValueKey('ios-switch-auto-hardware-quality'),
+              icon: CupertinoIcons.sparkles,
+              iconColor: AppleColors.systemBlue,
+              title: '自动识别本机最佳配置',
+              value: autoEnabled,
+              onChanged: (v) async {
+                await storage.setAutoHardwareQualityEnabled(v);
+                if (v) {
+                  await _runProfileDetection(applyIfAuto: true, forceApply: true);
+                } else {
+                  if (mounted) setState(() {});
+                  widget.onChanged?.call();
+                }
+              },
+            ),
+            IosSettingsRow(
+              key: const ValueKey('ios-hardware-profile-summary'),
+              icon: CupertinoIcons.device_phone_portrait,
+              iconColor: AppleColors.systemTeal,
+              title: profileLabel,
+              trailingText: _detecting ? '识别中…' : tierBadge,
+              onTap: _detecting
+                  ? null
+                  : () async {
+                      await storage.setAutoHardwareQualityEnabled(true);
+                      await _runProfileDetection(
+                        applyIfAuto: true,
+                        forceApply: true,
+                      );
+                    },
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
         SettingsChoices<String>(
           title: '播放内核偏好',
           footer:
@@ -1389,8 +1487,10 @@ class IosPlaybackEngineSettingsSection extends StatelessWidget {
               (mode.id, mode.labelZh),
           ],
           onSelected: (val) async {
+            await _markManualOverride();
             await storage.setIosPlaybackEngineMode(val);
-            onChanged?.call();
+            if (mounted) setState(() {});
+            widget.onChanged?.call();
           },
         ),
         SettingsChoices<String>(
@@ -1402,8 +1502,10 @@ class IosPlaybackEngineSettingsSection extends StatelessWidget {
               (mode.id, mode.labelZh),
           ],
           onSelected: (val) async {
+            await _markManualOverride();
             await storage.setIosHdrToneMappingMode(val);
-            onChanged?.call();
+            if (mounted) setState(() {});
+            widget.onChanged?.call();
           },
         ),
         SettingsChoices<String>(
@@ -1416,7 +1518,8 @@ class IosPlaybackEngineSettingsSection extends StatelessWidget {
           ],
           onSelected: (val) async {
             await storage.setVocalLoudnessPreset(val);
-            onChanged?.call();
+            if (mounted) setState(() {});
+            widget.onChanged?.call();
           },
         ),
         IosSettingsGroup(
@@ -1429,11 +1532,12 @@ class IosPlaybackEngineSettingsSection extends StatelessWidget {
               icon: CupertinoIcons.wand_stars,
               iconColor: AppleColors.systemPurple,
               title: 'Apple Silicon 轻量 Anime4K 超分',
-              subtitle: '高温自动降级保护（仅 MPV 路径生效）',
               value: storage.iosAnime4kLightweightEnabled,
               onChanged: (v) async {
+                await _markManualOverride();
                 await storage.setIosAnime4kLightweightEnabled(v);
-                onChanged?.call();
+                if (mounted) setState(() {});
+                widget.onChanged?.call();
               },
             ),
             IosSettingsSwitchRow(
@@ -1441,11 +1545,12 @@ class IosPlaybackEngineSettingsSection extends StatelessWidget {
               icon: CupertinoIcons.gauge,
               iconColor: AppleColors.systemTeal,
               title: '6 GB+ 设备大容量预读缓冲',
-              subtitle: '将 MPV 前向缓冲从 128 MB 提升至 256 MB，减少 4K 高码率卡顿',
               value: storage.iosLargeBufferEnabled,
               onChanged: (v) async {
+                await _markManualOverride();
                 await storage.setIosLargeBufferEnabled(v);
-                onChanged?.call();
+                if (mounted) setState(() {});
+                widget.onChanged?.call();
               },
             ),
           ],
@@ -1528,7 +1633,6 @@ class _IosMediaCacheAndAdSectionState
               icon: CupertinoIcons.scissors,
               iconColor: AppleColors.systemOrange,
               title: 'HLS 点播自动去广告',
-              subtitle: '启发式剔除 #EXT-X-DISCONTINUITY 插播广告切片',
               value: widget.storage.hlsAdRemovalEnabled,
               onChanged: (v) async {
                 await widget.storage.setHlsAdRemovalEnabled(v);

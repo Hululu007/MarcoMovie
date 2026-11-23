@@ -11,6 +11,8 @@ import 'package:qr/qr.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../core/config_center_bridge.dart';
+import '../core/models.dart';
 import '../core/netdisk_service.dart';
 import '../core/netdisk_session.dart';
 import '../core/storage_service.dart';
@@ -27,8 +29,9 @@ const MethodChannel netdiskAuthChannel = MethodChannel(
   'marco_movie/netdisk_auth',
 );
 
-/// Opens the Apple-styled Netdisk QR Code Login & Account Management sheet
-/// matching Android TV's `🗂我的云盘┃配置` (`我的夸父 / 我的优汐 / 我的嘟嘟 / 我的阿狸`).
+/// Opens the unified Multi-Source Config Center (`配置中心`) supporting direct
+/// reading & single-scan cross-source sync across WEX / OK / FTY / MyDrive /
+/// CatPaw / PanConfig cloud drive sources.
 Future<void> showNetdiskAccountSheet(
   BuildContext context,
   StorageService storage, {
@@ -36,17 +39,23 @@ Future<void> showNetdiskAccountSheet(
   VoidCallback? onChanged,
   NetdiskService? service,
   String iosBackLabel = '返回',
+  List<CmsSite> sites = const <CmsSite>[],
+  String activeGroup = '',
+  VoidCallback? onOpenCatPawSettings,
 }) async {
   if (usesWindowsAppearance(context)) {
     await Navigator.of(context).push<void>(buildApplePageRoute<void>(
         builder: (_) => WinSettingsScaffold(
-            title: '网盘账号',
-            subtitle: '管理影视线路使用的账号与解析顺序。',
+            title: '配置中心',
+            subtitle: '多源网盘配置互通，一次扫码即可在所有兼容片源中通用。',
             child: _NetdiskAccountSheet(
                 storage: storage,
                 initialDriveKey: initialDriveKey,
                 onChanged: onChanged,
-                service: service))));
+                service: service,
+                sites: sites,
+                activeGroup: activeGroup,
+                onOpenCatPawSettings: onOpenCatPawSettings))));
     return;
   }
   if (defaultTargetPlatform == TargetPlatform.iOS) {
@@ -59,6 +68,9 @@ Future<void> showNetdiskAccountSheet(
           service: service,
           embedInIosScaffold: true,
           iosBackLabel: iosBackLabel,
+          sites: sites,
+          activeGroup: activeGroup,
+          onOpenCatPawSettings: onOpenCatPawSettings,
         ),
       ),
     );
@@ -66,12 +78,15 @@ Future<void> showNetdiskAccountSheet(
   }
   await showIos27LiquidSheet<void>(
     context: context,
-    title: '我的云盘 · 扫码与账号配置',
+    title: '配置中心 · 多源扫码与账号',
     builder: (ctx) => _NetdiskAccountSheet(
       storage: storage,
       initialDriveKey: initialDriveKey,
       onChanged: onChanged,
       service: service,
+      sites: sites,
+      activeGroup: activeGroup,
+      onOpenCatPawSettings: onOpenCatPawSettings,
     ),
   );
 }
@@ -83,6 +98,9 @@ class _NetdiskAccountSheet extends StatefulWidget {
   final NetdiskService? service;
   final bool embedInIosScaffold;
   final String iosBackLabel;
+  final List<CmsSite> sites;
+  final String activeGroup;
+  final VoidCallback? onOpenCatPawSettings;
 
   const _NetdiskAccountSheet({
     required this.storage,
@@ -91,6 +109,9 @@ class _NetdiskAccountSheet extends StatefulWidget {
     this.service,
     this.embedInIosScaffold = false,
     this.iosBackLabel = '返回',
+    this.sites = const <CmsSite>[],
+    this.activeGroup = '',
+    this.onOpenCatPawSettings,
   });
 
   @override
@@ -111,6 +132,8 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
   bool _foreground = true;
   bool _resumedImmediateRetry = false;
   int _selectedDriveFilter = 0;
+  bool _syncingCenters = false;
+  ConfigCenterSyncReport? _syncReport;
 
   @override
   void initState() {
@@ -118,12 +141,42 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
     WidgetsBinding.instance.addObserver(this);
     _foreground = WidgetsBinding.instance.lifecycleState == null ||
         WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    unawaited(_syncAllConfigCenters(pullFromExternal: true, pushToExternal: true));
     if (widget.initialDriveKey != null && widget.initialDriveKey!.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           _startQrLogin(widget.initialDriveKey!);
         }
       });
+    }
+  }
+
+  Future<void> _syncAllConfigCenters({
+    bool pullFromExternal = true,
+    bool pushToExternal = true,
+    bool overwriteExisting = false,
+  }) async {
+    if (_syncingCenters) return;
+    if (mounted) setState(() => _syncingCenters = true);
+    try {
+      final report = await ConfigCenterBridge.syncAll(
+        storage: widget.storage,
+        sites: widget.sites,
+        activeGroup: widget.activeGroup,
+        pullFromExternal: pullFromExternal,
+        pushToExternal: pushToExternal,
+        overwriteExisting: overwriteExisting,
+      );
+      if (!mounted) return;
+      setState(() {
+        _syncReport = report;
+        _syncingCenters = false;
+      });
+      if (report.importedDrives.isNotEmpty || report.updatedDriveOrder) {
+        widget.onChanged?.call();
+      }
+    } catch (_) {
+      if (mounted) setState(() => _syncingCenters = false);
     }
   }
 
@@ -225,6 +278,9 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
         await widget.storage.setNetdiskCredential(
           session.driveKey,
           res.credential,
+        );
+        unawaited(
+          _syncAllConfigCenters(pullFromExternal: false, pushToExternal: true),
         );
         if (!current()) return;
         widget.onChanged?.call();
@@ -590,6 +646,12 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                           driveKey,
                           credential,
                         );
+                        unawaited(
+                          _syncAllConfigCenters(
+                            pullFromExternal: false,
+                            pushToExternal: true,
+                          ),
+                        );
                         widget.onChanged?.call();
                         if (ctx.mounted) Navigator.of(ctx).pop();
                         if (mounted) setState(() {});
@@ -645,6 +707,9 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
       final first = current.removeAt(0);
       current.add(first);
       await widget.storage.setDriveOrder(current);
+      unawaited(
+        _syncAllConfigCenters(pullFromExternal: false, pushToExternal: true),
+      );
       widget.onChanged?.call();
       if (mounted) setState(() {});
     }
@@ -738,8 +803,17 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
     final palette = ApplePalette.of(context);
     final useNativeIos26 = IosLiquidGlassBridge.isAvailable;
     final safeBottom = MediaQuery.paddingOf(context).bottom;
+    final detectedCenters = _syncReport?.detectedCenters ??
+        ConfigCenterBridge.detectConfigCenters(
+          widget.sites,
+          activeGroup: widget.activeGroup,
+        );
+    final syncSummaryText = _syncReport?.summaryZh ??
+        (detectedCenters.isNotEmpty
+            ? '已自动兼容 ${detectedCenters.length} 个片源配置中心，一次扫码全源通用'
+            : '兼容 WEX / OK / FTY / CatPaw 等多种源配置中心，一次扫码全源通用');
     final bannerCard = AppleSettingsGlassCard(
-      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 13),
       borderRadius: BorderRadius.circular(18),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -776,10 +850,76 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
               ],
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           Text(
-            '与电视端「🗂我的云盘┃配置」保持一致，支持优汐智1 / 夸父智1 / 嘟嘟无限2 / 阿狸原画',
-            style: TextStyle(color: palette.labelSecondary, fontSize: 11.5),
+            syncSummaryText,
+            style: TextStyle(
+              color: palette.labelSecondary,
+              fontSize: 12,
+              height: 1.35,
+            ),
+          ),
+          if (detectedCenters.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final center in detectedCenters.take(4))
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppleColors.systemBlue
+                          .withValues(alpha: palette.isDark ? 0.22 : 0.10),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      center.displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: palette.isDark
+                            ? const Color(0xFF7DC8FF)
+                            : AppleColors.systemBlue,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              AppleCapsuleButton(
+                key: const ValueKey('config-center-sync-all-btn'),
+                icon: CupertinoIcons.arrow_2_circlepath,
+                label: _syncingCenters ? '正在同步…' : '读取并同步全部源',
+                compact: true,
+                useBackdrop: false,
+                onPressed: _syncingCenters
+                    ? null
+                    : () => _syncAllConfigCenters(
+                          pullFromExternal: true,
+                          pushToExternal: true,
+                        ),
+              ),
+              if (widget.onOpenCatPawSettings != null)
+                AppleCapsuleButton(
+                  key: const ValueKey('config-center-open-catpaw-btn'),
+                  icon: CupertinoIcons.slider_horizontal_3,
+                  label: 'CatPaw 本机配置',
+                  compact: true,
+                  useBackdrop: false,
+                  onPressed: widget.onOpenCatPawSettings,
+                ),
+            ],
           ),
         ],
       ),
@@ -842,7 +982,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
 
     if (widget.embedInIosScaffold) {
       return IosSettingsScaffold(
-        title: '我的云盘',
+        title: '配置中心',
         backLabel: widget.iosBackLabel,
         trailing: useNativeIos26
             ? IosNativeGlassButton(
@@ -851,7 +991,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                 label: '切换盘序',
                 symbolSize: 13,
                 height: 36,
-                maxWidth: 108,
+                maxWidth: 132,
                 accessibilityLabel: '切换盘序',
                 onTap: _rotateDriveOrder,
                 fallback: AppleCapsuleButton(

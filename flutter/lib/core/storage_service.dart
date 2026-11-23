@@ -109,6 +109,9 @@ class StorageService {
   ];
   static const String keyCardSubtitleMode = 'card_subtitle_mode';
   static const String keyPreferredQuality = 'preferred_quality';
+  static const String keyAutoHardwareQuality = 'auto_hardware_quality';
+  static const String keyLastHardwareProfileSummary =
+      'last_hardware_profile_summary';
   static const String keyDefaultAspectMode = 'default_aspect_mode';
   static const String keyPlayerKernel = 'player_kernel';
   static const String keyWebdavUrl = 'webdav_url';
@@ -820,6 +823,10 @@ class StorageService {
       _prefs.getString(keyCardSubtitleMode) ?? 'remarks';
   String get preferredQuality =>
       _prefs.getString(keyPreferredQuality) ?? '4k_netdisk';
+  bool get autoHardwareQualityEnabled =>
+      _prefs.getBool(keyAutoHardwareQuality) ?? true;
+  String get lastHardwareProfileSummary =>
+      _prefs.getString(keyLastHardwareProfileSummary) ?? '';
   String get defaultAspectMode =>
       _prefs.getString(keyDefaultAspectMode) ?? 'contain';
   String get playerKernel =>
@@ -2695,6 +2702,12 @@ class StorageService {
   }
   Future<void> setPreferredQuality(String quality) async {
     await _prefs.setString(keyPreferredQuality, quality.trim());
+  }
+  Future<void> setAutoHardwareQualityEnabled(bool enabled) async {
+    await _prefs.setBool(keyAutoHardwareQuality, enabled);
+  }
+  Future<void> setLastHardwareProfileSummary(String summary) async {
+    await _prefs.setString(keyLastHardwareProfileSummary, summary.trim());
   }
   Future<void> setDefaultAspectMode(String mode) async {
     await _prefs.setString(keyDefaultAspectMode, mode.trim());

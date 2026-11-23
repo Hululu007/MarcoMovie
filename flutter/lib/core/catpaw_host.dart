@@ -514,48 +514,182 @@ class CatPawHost {
     await _writeAtomic(File('${root.path}/drpy-assets.json'), manifestBytes);
   }
 
-  Future<void> _syncNetdiskConfig(Directory root) async {
+  Future<int> _syncNetdiskConfig(
+    Directory root, {
+    StorageService? storageOverride,
+  }) async {
+    var syncedFiles = 0;
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final storage = StorageService(prefs);
+      final storage =
+          storageOverride ?? StorageService(await SharedPreferences.getInstance());
       final quarkCookie = QuarkAccountSession.tryParseCredential(
-          storage.getNetdiskCred('quark'))?.cookie ?? '';
+              storage.getNetdiskCred('quark'))
+          ?.cookie ??
+          '';
       final ucCookie = storage.isNetdiskLoggedIn('uc')
-          ? storage.getNetdiskCred('uc') : '';
+          ? storage.getNetdiskCred('uc')
+          : '';
       final baiduCookie = storage.isNetdiskLoggedIn('baidu')
-          ? storage.getNetdiskCred('baidu') : '';
+          ? storage.getNetdiskCred('baidu')
+          : '';
+      final aliToken = storage.isNetdiskLoggedIn('ali')
+          ? storage.getNetdiskCred('ali')
+          : '';
+      final order = storage.driveOrder;
       final cfgFile = File('${root.path}/wexfnwconfig.json');
-      if (quarkCookie.isEmpty && ucCookie.isEmpty && baiduCookie.isEmpty && !await cfgFile.exists()) {
-        return;
+      if (quarkCookie.isEmpty &&
+          ucCookie.isEmpty &&
+          baiduCookie.isEmpty &&
+          aliToken.isEmpty &&
+          !await cfgFile.exists()) {
+        return 0;
       }
       final payload = jsonEncode({
         'pan': {
           'quark': {'cookie': quarkCookie},
           'uc': {'cookie': ucCookie},
           'baidu': {'cookie': baiduCookie},
+          'ali': {'token': aliToken, 'cookie': aliToken},
         },
+        'order': order,
+        'panOrder': order.join(','),
       });
-      if (_lastSyncedPanJson == payload && await cfgFile.exists()) return;
-      await _writeAtomic(cfgFile, utf8.encode('$payload\n'));
-      _lastSyncedPanJson = payload;
+      final samePayload =
+          _lastSyncedPanJson == payload && await cfgFile.exists();
+      if (!samePayload) {
+        await _writeAtomic(cfgFile, utf8.encode('$payload\n'));
+        syncedFiles++;
+        await _writeAtomic(
+          File('${root.path}/config_center.json'),
+          utf8.encode('$payload\n'),
+        );
+        await _writeCompatCredFiles(
+          root,
+          quarkCookie: quarkCookie,
+          ucCookie: ucCookie,
+          baiduCookie: baiduCookie,
+          aliToken: aliToken,
+          order: order,
+        );
+        _lastSyncedPanJson = payload;
+      }
       await for (final entity in root.list(followLinks: false)) {
         if (entity is Directory) {
           final stateDir = Directory('${entity.path}/state');
           if (await stateDir.exists()) {
             await _writeAtomic(
-                File('${stateDir.path}/wexfnwconfig.json'), utf8.encode('$payload\n'));
+              File('${stateDir.path}/wexfnwconfig.json'),
+              utf8.encode('$payload\n'),
+            );
+            await _writeAtomic(
+              File('${stateDir.path}/config_center.json'),
+              utf8.encode('$payload\n'),
+            );
+            syncedFiles++;
           }
         }
       }
     } catch (_) {}
+    return syncedFiles;
   }
 
-  /// Immediately updates or clears `wexfnwconfig.json` when the user logs into
-  /// or logs out of a cloud drive while the local CatPaw runtime directory exists.
+  Future<void> _writeCompatCredFiles(
+    Directory dir, {
+    required String quarkCookie,
+    required String ucCookie,
+    required String baiduCookie,
+    required String aliToken,
+    required List<String> order,
+  }) async {
+    Future<void> writeOrClean(String name, String value) async {
+      final f = File('${dir.path}/$name');
+      if (value.isEmpty) {
+        if (await f.exists()) {
+          await f.delete();
+        }
+      } else {
+        await _writeAtomic(f, utf8.encode(value));
+      }
+    }
+
+    await writeOrClean('quark_cookie.txt', quarkCookie);
+    await writeOrClean('uc_cookie.txt', ucCookie);
+    await writeOrClean('baidu_cookie.txt', baiduCookie);
+    await writeOrClean('ali_token.txt', aliToken);
+    await writeOrClean('pan_order.txt', order.join(','));
+  }
+
+  /// Reads any existing pan credentials stored by CatPaw / WEX / OK / FTY
+  /// local config centers inside the shared runtime directory.
+  Future<Map<String, dynamic>> readExternalPanCredentials() async {
+    final merged = <String, dynamic>{};
+    try {
+      final root = _root ?? await _storage();
+      final candidateFiles = <File>[
+        File('${root.path}/wexfnwconfig.json'),
+        File('${root.path}/config_center.json'),
+      ];
+      if (await root.exists()) {
+        await for (final entity in root.list(followLinks: false)) {
+          if (entity is Directory) {
+            candidateFiles.add(File('${entity.path}/state/wexfnwconfig.json'));
+            candidateFiles.add(File('${entity.path}/state/config_center.json'));
+          }
+        }
+      }
+      for (final file in candidateFiles) {
+        if (!await file.exists()) continue;
+        try {
+          final decoded = jsonDecode(await file.readAsString());
+          if (decoded is Map<String, dynamic>) {
+            final pan = decoded['pan'];
+            if (pan is Map) {
+              final targetPan = (merged['pan'] as Map<String, dynamic>?) ??
+                  <String, dynamic>{};
+              for (final e in pan.entries) {
+                final key = e.key.toString();
+                if (!targetPan.containsKey(key) && e.value != null) {
+                  targetPan[key] = e.value;
+                }
+              }
+              merged['pan'] = targetPan;
+            }
+            if (!merged.containsKey('order') && decoded['order'] != null) {
+              merged['order'] = decoded['order'];
+            }
+          }
+        } catch (_) {}
+      }
+      Future<void> readCompatFile(String filename, String key) async {
+        if (merged.containsKey(key)) return;
+        final f = File('${root.path}/$filename');
+        if (!await f.exists()) return;
+        final text = (await f.readAsString()).trim();
+        if (text.isNotEmpty) merged[key] = text;
+      }
+
+      await readCompatFile('quark_cookie.txt', 'quark_cookie');
+      await readCompatFile('uc_cookie.txt', 'uc_cookie');
+      await readCompatFile('baidu_cookie.txt', 'baidu_cookie');
+      await readCompatFile('ali_token.txt', 'ali_token');
+      await readCompatFile('pan_order.txt', 'pan_order');
+    } catch (_) {}
+    return merged;
+  }
+
+  /// Immediately updates or clears `wexfnwconfig.json` & multi-source Config
+  /// Center files when the user logs into or logs out of a cloud drive.
   Future<void> syncNetdiskConfig() async {
     final root = _root;
     if (root == null) return;
     await _syncNetdiskConfig(root);
+  }
+
+  /// Ensures the shared runtime directory exists and broadcasts [storage]
+  /// credentials to all compatible CatPaw / WEX / OK / FTY config files.
+  Future<int> syncNetdiskConfigWithStorage(StorageService storage) async {
+    final root = _root ?? await _storage();
+    return _syncNetdiskConfig(root, storageOverride: storage);
   }
 
   static Future<void> _writeAtomic(File file, List<int> bytes) async {

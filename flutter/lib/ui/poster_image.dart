@@ -1,5 +1,6 @@
 import 'dart:async';
 import '../core/emby_library.dart';
+import '../core/media_library_connectors.dart';
 import '../core/catpaw_host.dart';
 import 'dart:collection';
 import 'dart:convert';
@@ -916,7 +917,10 @@ class PosterLoader {
     String year = '',
     bool preferHd = false,
   }) {
-    if (EmbyLibrary.isImage(rawUrl)) return _memory[rawUrl];
+    if (EmbyLibrary.isImage(rawUrl) ||
+        ExternalMediaLibrary.isPrivateImage(rawUrl)) {
+      return _memory[rawUrl];
+    }
     final clean = _cleanTitle(title);
     final targetYear = _extractTargetYear(title, year);
     final scoped = _scopedTitleToken(clean, targetYear);
@@ -999,7 +1003,7 @@ class PosterLoader {
     String title = '',
     String year = '',
   }) {
-    if (EmbyLibrary.isImage(raw)) {
+    if (EmbyLibrary.isImage(raw) || ExternalMediaLibrary.isPrivateImage(raw)) {
       final cached = _memory[raw];
       if (cached != null) return SynchronousFuture(cached);
       return _inflight.putIfAbsent(raw, () => _fetch(raw, const {}, timeout: const Duration(seconds: 8))
@@ -3857,8 +3861,14 @@ class PosterLoader {
     HttpClientRequest? request;
     try {
       if (CatPawHost.matches(url)) url = (await CatPawHost.instance.resolve(url)).toString();
-      final privateImage = EmbyLibrary.isImage(url);
-      final scopedHeaders = privateImage ? await EmbyLibrary.imageHeaders(url) : const <String,String>{};
+      final isEmbyImg = EmbyLibrary.isImage(url);
+      final isExtImg = !isEmbyImg && ExternalMediaLibrary.isPrivateImage(url);
+      final privateImage = isEmbyImg || isExtImg;
+      final scopedHeaders = isEmbyImg
+          ? await EmbyLibrary.imageHeaders(url)
+          : (isExtImg
+              ? await ExternalMediaLibrary.imageHeaders(url)
+              : const <String, String>{});
       request = await _client.getUrl(Uri.parse(url).removeFragment()).timeout(timeout);
       request.followRedirects = !privateImage;
       request.maxRedirects = 6;
@@ -4076,7 +4086,9 @@ class _PosterImageState extends State<PosterImage>
 
   List<String> _computeSubscribedKeys() {
     final raw = widget.url.trim();
-    if (EmbyLibrary.isImage(raw)) return [raw];
+    if (EmbyLibrary.isImage(raw) || ExternalMediaLibrary.isPrivateImage(raw)) {
+      return [raw];
+    }
     final clean = PosterLoader._cleanTitle(widget.title);
     final scoped = PosterLoader._scopedTitleToken(
       clean,
@@ -4233,7 +4245,8 @@ class _PosterImageState extends State<PosterImage>
     if (widget.strictHighRes &&
         !widget.forBackdrop &&
         widget.title.trim().isNotEmpty &&
-        !EmbyLibrary.isImage(widget.url)) {
+        !EmbyLibrary.isImage(widget.url) &&
+        !ExternalMediaLibrary.isPrivateImage(widget.url)) {
       unawaited(_tryUpgradeToHd(widget.title.trim(), null));
     }
   }
@@ -4263,7 +4276,10 @@ class _PosterImageState extends State<PosterImage>
     String requestedTitle,
     Uint8List? currentBytes,
   ) async {
-    if (EmbyLibrary.isImage(widget.url)) return;
+    if (EmbyLibrary.isImage(widget.url) ||
+        ExternalMediaLibrary.isPrivateImage(widget.url)) {
+      return;
+    }
     try {
       final hdBytes = await PosterLoader.loadHdByTitle(
         requestedTitle,
@@ -4331,7 +4347,8 @@ class _PosterImageState extends State<PosterImage>
       if (_wantsHd &&
           !widget.forBackdrop &&
           requestedTitle.isNotEmpty &&
-          !EmbyLibrary.isImage(requestedUrl)) {
+          !EmbyLibrary.isImage(requestedUrl) &&
+          !ExternalMediaLibrary.isPrivateImage(requestedUrl)) {
         unawaited(_verifyAndUpgradeIfLowRes(_bytes ?? data, requestedTitle));
       }
     } catch (_) {
@@ -4339,6 +4356,7 @@ class _PosterImageState extends State<PosterImage>
       if (_wantsHd &&
           requestedTitle.isNotEmpty &&
           !EmbyLibrary.isImage(requestedUrl) &&
+          !ExternalMediaLibrary.isPrivateImage(requestedUrl) &&
           _bytes == null) {
         unawaited(_tryUpgradeToHd(requestedTitle, null));
       }

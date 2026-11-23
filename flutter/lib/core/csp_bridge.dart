@@ -255,11 +255,18 @@ class CspBridge {
     return lowerApi.contains('mydrive') ||
         lowerApi.contains('panwebshare') ||
         lowerApi.contains('panconfig') ||
+        lowerApi.contains('configcenter') ||
+        lowerApi.contains('localconfig') ||
+        lowerApi.contains('wexconfig') ||
+        lowerApi.contains('wexokconfig') ||
         lowerApi.contains('mypan') ||
         lowerApi == 'csp_config' ||
         lowerApi == 'csp_configcenter' ||
         lowerApi.startsWith('csp_push') ||
         lowerKey.contains('mydrive') ||
+        lowerKey.contains('configcenter') ||
+        lowerKey.contains('wexconfig') ||
+        lowerKey.contains('panconfig') ||
         lowerKey == 'config' ||
         lowerKey == 'push_agent' ||
         lowerName.contains('我的云盘') ||

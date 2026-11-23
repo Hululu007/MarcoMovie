@@ -9,7 +9,7 @@ import 'motion/motion_tokens.dart';
 import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, kIsWeb;
+    show TargetPlatform, ValueListenable, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/gestures.dart' show DragStartBehavior;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -115,7 +115,12 @@ PageRoute<T> buildApplePageRoute<T>({
 /// with velocity-inherited left-edge swipe-back and Reduce Motion `150ms`
 /// opacity fade fallback.
 class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
+  static int _interactiveGestureCount = 0;
+
   bool _routeDisposed = false;
+  bool _gestureDriven = false;
+  bool _settling = false;
+  NavigatorState? _gestureNavigator;
 
   Ios27PageRoute({
     required super.builder,
@@ -127,6 +132,7 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
   @override
   void dispose() {
     _routeDisposed = true;
+    _releaseGestureState();
     super.dispose();
   }
 
@@ -135,6 +141,33 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
 
   @override
   Duration get reverseTransitionDuration => Ios27Spring.smooth.nominalDuration;
+
+  void _beginEdgeSwipe(NavigatorState nav) {
+    if (_gestureDriven) return;
+    _gestureDriven = true;
+    _settling = false;
+    _gestureNavigator = nav;
+    _interactiveGestureCount++;
+    nav.didStartUserGesture();
+    changedInternalState();
+  }
+
+  void _releaseGestureState() {
+    if (!_gestureDriven) return;
+    _gestureDriven = false;
+    _settling = false;
+    if (_interactiveGestureCount > 0) {
+      _interactiveGestureCount--;
+    }
+    final nav = _gestureNavigator ?? navigator;
+    _gestureNavigator = null;
+    if (nav != null && nav.userGestureInProgress) {
+      nav.didStopUserGesture();
+    }
+    if (!_routeDisposed) {
+      changedInternalState();
+    }
+  }
 
   @override
   Widget buildTransitions(
@@ -153,20 +186,24 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
         child: child,
       );
     }
-    final isGesture = navigator?.userGestureInProgress ?? false;
+    final navGesturing = navigator?.userGestureInProgress ?? false;
+    final useLinearPrimary = _gestureDriven || navGesturing;
+    final useLinearSecondary = _interactiveGestureCount > 0 || navGesturing;
     final springCurve = Ios27Spring.smooth.curve;
-    final primaryAnim = isGesture
+    final primaryAnim = useLinearPrimary
         ? animation
         : CurvedAnimation(
             parent: animation,
             curve: springCurve,
             reverseCurve: springCurve.flipped,
           );
-    final secondaryAnim = CurvedAnimation(
-      parent: secondaryAnimation,
-      curve: springCurve,
-      reverseCurve: springCurve.flipped,
-    );
+    final secondaryAnim = useLinearSecondary
+        ? secondaryAnimation
+        : CurvedAnimation(
+            parent: secondaryAnimation,
+            curve: springCurve,
+            reverseCurve: springCurve.flipped,
+          );
     final transition = CupertinoPageTransition(
       primaryRouteAnimation: primaryAnim,
       secondaryRouteAnimation: secondaryAnim,
@@ -183,6 +220,7 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
   }
 
   void _updateEdgeSwipeProgress(double value) {
+    if (!_gestureDriven || _settling) return;
     controller?.value = value.clamp(0.0, 1.0);
   }
 
@@ -191,14 +229,21 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
     required double width,
   }) {
     final ctrl = controller;
-    final nav = navigator;
-    if (ctrl == null || nav == null) return;
+    final nav = _gestureNavigator ?? navigator;
+    if (ctrl == null || nav == null || !_gestureDriven) {
+      _releaseGestureState();
+      return;
+    }
+    _settling = true;
     final safeW = math.max(1.0, width);
     final releaseVal = ctrl.value.clamp(0.0, 1.0);
     final shouldPop = velocityPxPerSec > 360.0 || releaseVal < 0.62;
     final normalizedVel = (-velocityPxPerSec / safeW).clamp(-8.0, 8.0);
     if (shouldPop) {
       nav.pop();
+      // Keep _gestureDriven & userGestureInProgress active for the entire
+      // velocity-inherited spring settle so buildTransitions NEVER swaps curves
+      // mid-flight (eliminating the mid-swipe backward jump).
       ctrl
           .animateWith(
             Ios27Spring.smooth.simulation(
@@ -211,30 +256,46 @@ class Ios27PageRoute<T> extends CupertinoPageRoute<T> {
         if (!_routeDisposed && ctrl.status != AnimationStatus.dismissed) {
           ctrl.reverse(from: 0.0);
         }
+        _releaseGestureState();
       });
     } else {
-      ctrl.animateWith(
-        Ios27Spring.smooth.simulation(
-          start: releaseVal,
-          end: 1.0,
-          velocity: normalizedVel,
-        ),
-      );
+      ctrl
+          .animateWith(
+            Ios27Spring.smooth.simulation(
+              start: releaseVal,
+              end: 1.0,
+              velocity: normalizedVel,
+            ),
+          )
+          .whenComplete(() {
+        if (!_routeDisposed && ctrl.status != AnimationStatus.completed) {
+          ctrl.forward(from: 1.0);
+        }
+        _releaseGestureState();
+      });
     }
-    nav.didStopUserGesture();
   }
 
   void _cancelEdgeSwipe() {
     final ctrl = controller;
-    if (ctrl != null) {
-      ctrl.animateWith(
-        Ios27Spring.smooth.simulation(
-          start: ctrl.value.clamp(0.0, 1.0),
-          end: 1.0,
-        ),
-      );
+    if (ctrl == null || !_gestureDriven) {
+      _releaseGestureState();
+      return;
     }
-    navigator?.didStopUserGesture();
+    _settling = true;
+    ctrl
+        .animateWith(
+          Ios27Spring.smooth.simulation(
+            start: ctrl.value.clamp(0.0, 1.0),
+            end: 1.0,
+          ),
+        )
+        .whenComplete(() {
+      if (!_routeDisposed && ctrl.status != AnimationStatus.completed) {
+        ctrl.forward(from: 1.0);
+      }
+      _releaseGestureState();
+    });
   }
 }
 
@@ -260,16 +321,13 @@ class _Ios27SwipeBackWrapperState<T> extends State<_Ios27SwipeBackWrapper<T>> {
   void dispose() {
     if (_dragging) {
       _dragging = false;
-      final nav = widget.route.navigator;
-      if (nav != null && nav.userGestureInProgress) {
-        nav.didStopUserGesture();
-      }
+      widget.route._releaseGestureState();
     }
     super.dispose();
   }
 
   void _onDragStart(DragStartDetails details) {
-    if (_dragging) return;
+    if (_dragging || widget.route._settling) return;
     final nav = widget.route.navigator;
     if (widget.route.isFirst ||
         !widget.route.isCurrent ||
@@ -278,10 +336,10 @@ class _Ios27SwipeBackWrapperState<T> extends State<_Ios27SwipeBackWrapper<T>> {
         nav.userGestureInProgress) {
       return;
     }
-    if (details.globalPosition.dx > 28.0) return;
+    if (details.globalPosition.dx > 32.0) return;
     _dragging = true;
     _dragDx = 0.0;
-    nav.didStartUserGesture();
+    widget.route._beginEdgeSwipe(nav);
   }
 
   void _onDragUpdate(DragUpdateDetails details) {
@@ -317,7 +375,7 @@ class _Ios27SwipeBackWrapperState<T> extends State<_Ios27SwipeBackWrapper<T>> {
           left: 0,
           top: 0,
           bottom: 0,
-          width: 24,
+          width: 28,
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
             dragStartBehavior: DragStartBehavior.down,
@@ -1413,6 +1471,7 @@ class AppleLiquidGlassDock extends StatefulWidget {
   final VoidCallback? onScrollToTop;
   final bool hidden;
   final bool collapsed;
+  final ValueListenable<double>? scrollProgress;
 
   const AppleLiquidGlassDock({
     super.key,
@@ -1425,6 +1484,7 @@ class AppleLiquidGlassDock extends StatefulWidget {
     this.onScrollToTop,
     this.hidden = false,
     this.collapsed = false,
+    this.scrollProgress,
   });
 
   static const double _dockRadius = 31;
@@ -1561,14 +1621,27 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
               ? _buildVertical()
               : SizedBox(
                   height: portraitBarH,
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 260),
-                    switchInCurve: Curves.easeOutCubic,
-                    switchOutCurve: Curves.easeInCubic,
-                    child: widget.collapsed
-                        ? _buildCollapsedLogoButton(context, barH: portraitBarH)
-                        : _buildHorizontal(barH: portraitBarH),
-                  ),
+                  child: widget.scrollProgress != null
+                      ? ValueListenableBuilder<double>(
+                          valueListenable: widget.scrollProgress!,
+                          builder: (ctx, rawP, _) => _buildMorphingHorizontal(
+                            ctx,
+                            barH: portraitBarH,
+                            progress: rawP.clamp(0.0, 1.0),
+                          ),
+                        )
+                      : TweenAnimationBuilder<double>(
+                          tween: Tween<double>(
+                            end: widget.collapsed ? 1.0 : 0.0,
+                          ),
+                          duration: const Duration(milliseconds: 260),
+                          curve: Curves.linear,
+                          builder: (ctx, p, _) => _buildMorphingHorizontal(
+                            ctx,
+                            barH: portraitBarH,
+                            progress: p.clamp(0.0, 1.0),
+                          ),
+                        ),
                 ),
         );
         if (widget.hidden) {
@@ -2013,6 +2086,235 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
         saturation: 1.8,
         child: child,
       ),
+    );
+  }
+
+  Widget _buildMorphingHorizontal(
+    BuildContext context, {
+    required double barH,
+    required double progress,
+  }) {
+    final p = progress.clamp(0.0, 1.0);
+    if (widget.onSearch == null) {
+      return p >= 0.5
+          ? _buildCollapsedLogoButton(context, barH: barH)
+          : _buildHorizontal(barH: barH);
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final n = math.max(widget.items.length, 1);
+        final available =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 360.0;
+        final effGap =
+            available < 330.0 ? 8.0 : AppleLiquidGlassDock._searchGap;
+        final maxCap = available >= 560.0 ? 456.0 : 420.0;
+        final maxRowWidth = math.min(available, maxCap);
+        final maxSearchPill = math.max(120.0, maxRowWidth - barH - effGap);
+        final pillWidth = math.min(
+          maxSearchPill,
+          available >= 560.0 ? 384.0 : 348.0,
+        );
+        final totalRowW = pillWidth + effGap + barH;
+        final itemW = (pillWidth - AppleLiquidGlassDock._pad * 2) / n;
+        final itemH = barH - AppleLiquidGlassDock._pad * 2;
+        final isSliding = _dragLensSlot != null;
+        final lensSlot = _dragLensSlot ?? _safeIndex.toDouble();
+
+        // Distance from capsule center to the stationary right Search/Logo center.
+        final capsuleCenterX = pillWidth * 0.5;
+        final rightCenterX = pillWidth + effGap + barH * 0.5;
+        final dx = rightCenterX - capsuleCenterX;
+        final tabTx = dx * p;
+        final tabScaleX = (1.0 - 0.90 * p).clamp(0.08, 1.0);
+        final tabScaleY = (1.0 - 0.62 * p).clamp(0.28, 1.0);
+        final tabOpacity = (1.0 - p * 1.15).clamp(0.0, 1.0);
+
+        final spinScale = 1.0 - 0.08 * math.sin(p * math.pi);
+        final searchAngle = p * math.pi;
+        final logoAngle = (p - 1.0) * math.pi;
+        final searchOpacity = ((0.62 - p) / 0.28).clamp(0.0, 1.0);
+        final logoOpacity = ((p - 0.34) / 0.28).clamp(0.0, 1.0);
+        final isLogoActive = p >= 0.5;
+        final isDark = ApplePalette.isDarkOf(context);
+
+        final pill = _shell(
+          radius: barH * 0.5,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {},
+            onVerticalDragStart: (_) {},
+            onVerticalDragUpdate: (_) {},
+            onHorizontalDragStart: (d) =>
+                _updateSlidePosition(d.localPosition.dx, itemW),
+            onHorizontalDragUpdate: (d) =>
+                _updateSlidePosition(d.localPosition.dx, itemW),
+            onHorizontalDragEnd: (_) => _endSlide(),
+            onHorizontalDragCancel: () => _endSlide(cancelled: true),
+            child: SizedBox(
+              width: pillWidth,
+              height: barH,
+              child: Stack(
+                children: [
+                  AnimatedPositioned(
+                    duration: isSliding
+                        ? const Duration(milliseconds: 32)
+                        : AppleLiquidGlassDock._motion,
+                    curve: isSliding
+                        ? Curves.linear
+                        : AppleLiquidGlassDock._curve,
+                    left: AppleLiquidGlassDock._pad + itemW * lensSlot,
+                    top: AppleLiquidGlassDock._pad,
+                    width: itemW,
+                    height: itemH,
+                    child: Opacity(
+                      opacity: (1.0 - p * 1.35).clamp(0.0, 1.0),
+                      child: AnimatedScale(
+                        scale: isSliding ? 1.05 : 1.0,
+                        duration: const Duration(milliseconds: 140),
+                        curve: Curves.easeOutCubic,
+                        child: const _DockSelectionLens(),
+                      ),
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.all(AppleLiquidGlassDock._pad),
+                      child: Row(
+                        children: [
+                          for (int i = 0; i < widget.items.length; i++)
+                            Expanded(
+                              child: Builder(
+                                builder: (_) {
+                                  if (p <= 0.001) return _item(i);
+                                  final frac = i / math.max(n - 1, 1);
+                                  final slotP =
+                                      ((p - frac * 0.18) / 0.82).clamp(0.0, 1.0);
+                                  final pullX = (1.0 - frac * 0.45) *
+                                      pillWidth *
+                                      0.24 *
+                                      slotP;
+                                  final slotScale =
+                                      (1.0 - 0.62 * slotP).clamp(0.32, 1.0);
+                                  return Opacity(
+                                    opacity:
+                                        (1.0 - slotP * 1.15).clamp(0.0, 1.0),
+                                    child: Transform.translate(
+                                      offset: Offset(pullX, 0),
+                                      child: Transform.scale(
+                                        scale: slotScale,
+                                        child: _item(i),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        final morphCircle = GestureDetector(
+          key: isLogoActive
+              ? const ValueKey('dock-collapsed-logo-button')
+              : const ValueKey('home-search-button'),
+          behavior: HitTestBehavior.opaque,
+          onTap: isLogoActive
+              ? () => _showFallbackCollapsedBubble(context)
+              : widget.onSearch!,
+          onHorizontalDragStart: (_) {},
+          onVerticalDragStart: (_) {},
+          child: RepaintBoundary(
+            child: Transform.scale(
+              scale: spinScale,
+              child: LiquidGlass(
+                width: barH,
+                height: barH,
+                borderRadius: barH * 0.5,
+                tint: isDark
+                    ? const Color(0x56161414)
+                    : const Color(0xD8FFFFFF),
+                blur: 20,
+                saturation: 1.8,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    if (searchOpacity > 0.01)
+                      Opacity(
+                        opacity: searchOpacity,
+                        child: Transform.rotate(
+                          angle: searchAngle,
+                          child: Icon(
+                            CupertinoIcons.search,
+                            size: 22,
+                            color: isDark
+                                ? Colors.white
+                                : const Color(0xFF14161C),
+                          ),
+                        ),
+                      ),
+                    if (logoOpacity > 0.01)
+                      Opacity(
+                        opacity: logoOpacity,
+                        child: Transform.rotate(
+                          angle: logoAngle,
+                          child: const MarcoBrandLogo(
+                            iconSize: 32,
+                            showWordmark: false,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        return SizedBox(
+          width: totalRowW,
+          height: barH,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              if (tabOpacity > 0.005)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  width: pillWidth,
+                  height: barH,
+                  child: IgnorePointer(
+                    ignoring: p >= 0.35,
+                    child: Opacity(
+                      opacity: tabOpacity,
+                      child: Transform.translate(
+                        offset: Offset(tabTx, 0),
+                        child: Transform.scale(
+                          scaleX: tabScaleX,
+                          scaleY: tabScaleY,
+                          child: pill,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              Positioned(
+                right: 0,
+                top: 0,
+                width: barH,
+                height: barH,
+                child: morphCircle,
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 

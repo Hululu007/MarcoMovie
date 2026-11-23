@@ -17,6 +17,7 @@ import 'js_source_host.dart';
 import 'python_source_assets.dart';
 import 'python_source_host.dart';
 import 'emby_library.dart';
+import 'media_library_connectors.dart';
 import 'checksum_source.dart';
 import 'catpaw_host.dart';
 import 'drpy_source.dart';
@@ -1456,6 +1457,7 @@ class CmsClient {
       return (categories, listing);
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).home();
+    if (site.isExternalMediaLibrary) return ExternalMediaLibrary.home(site);
     if (_usesJs(site)) {
       final raw = await _callJs(site, 'home', [false]);
       final categories = CmsParser.parseCategories(raw);
@@ -1594,6 +1596,9 @@ class CmsClient {
       );
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).list(categoryId, '', page);
+    if (site.isExternalMediaLibrary) {
+      return ExternalMediaLibrary.list(site, categoryId, '', page);
+    }
     if (_usesJs(site)) {
       final wogg = WoggSource.supports(site);
       String normalizeWoggArea(String raw) => switch (raw.trim()) {
@@ -1781,6 +1786,9 @@ class CmsClient {
       return CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmt4'));
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).list('', keyword, page);
+    if (site.isExternalMediaLibrary) {
+      return ExternalMediaLibrary.list(site, '', keyword, page);
+    }
     if (_usesJs(site)) {
       return CmsParser.parseListing(await _callJs(site, 'search', [keyword, false, page]));
     }
@@ -2408,6 +2416,9 @@ class CmsClient {
       return listing.videos.isEmpty ? fallback : _mergeDetail(listing.videos.first, fallback);
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).detail(fallback.id);
+    if (site.isExternalMediaLibrary) {
+      return ExternalMediaLibrary.detail(site, fallback);
+    }
     if (_usesJs(site)) {
       final raw = await _callJs(site, 'detail', [fallback.id,
         if (WoggSource.supports(site)) ...[fallback.title, fallback.year],
@@ -3053,6 +3064,10 @@ class CmsClient {
     }
     if (site.isEmby && episode.url.startsWith('mmemby://play?')) {
       return (await EmbyLibrary.open(site)).resolve(episode);
+    }
+    if (site.isExternalMediaLibrary &&
+        ExternalMediaLibrary.isPlayableScheme(episode.url)) {
+      return ExternalMediaLibrary.resolve(site, episode);
     }
     if (_usesJs(site) && episode.isScriptEpisode) {
       final params = Uri.parse(episode.url).queryParameters;

@@ -306,6 +306,46 @@ class DeploymentChecks(unittest.TestCase):
             self.assertEqual(swift.count('private final class HeadlessMediaWebSniffer'), 1)
             self.assertEqual(swift.count('{'), swift.count('}'))
 
+    def test_ios_round2_native_dock_and_capsule_and_hardware_telemetry_guards(self):
+        liquid_src = (
+            Path(__file__).resolve().parent / 'ios_native' / 'MarcoLiquidGlass.swift'
+        ).read_text(encoding='utf-8')
+        av_src = (
+            Path(__file__).resolve().parent / 'ios_native' / 'MarcoAvPlayerEngine.swift'
+        ).read_text(encoding='utf-8')
+
+        # 1. Brace balance sanity
+        self.assertEqual(liquid_src.count('{'), liquid_src.count('}'))
+        self.assertEqual(av_src.count('{'), av_src.count('}'))
+
+        # 2. Native tab capsule must NOT call super.touchesBegan/Moved/Ended/Cancelled
+        #    (otherwise Dock taps & scrubs leak straight into FlutterView).
+        capsule_start = liquid_src.index('final class MarcoNativeLiquidTabCapsuleView')
+        capsule_end = liquid_src.index('final class MarcoIos27PassthroughChromeView')
+        capsule_block = liquid_src[capsule_start:capsule_end]
+        self.assertNotIn('super.touchesBegan(', capsule_block)
+        self.assertNotIn('super.touchesMoved(', capsule_block)
+        self.assertNotIn('super.touchesEnded(', capsule_block)
+        self.assertNotIn('super.touchesCancelled(', capsule_block)
+        self.assertIn('func setScrollCollapseProgress(', capsule_block)
+
+        # 3. Single-line enforcement on native glass capsule buttons
+        self.assertIn('cfg.titleLineBreakMode = .byTruncatingTail', liquid_src)
+        self.assertIn('self.button.titleLabel?.numberOfLines = 1', liquid_src)
+
+        # 4. Linear Search->Logo rotation + 4-tab roll-in morph
+        self.assertIn('private func applyScrollMorph(', liquid_src)
+        self.assertIn('CGAffineTransform(rotationAngle: searchAngle)', liquid_src)
+        self.assertIn('CGAffineTransform(rotationAngle: logoAngle)', liquid_src)
+        self.assertIn('CATransaction.setDisableActions(true)', liquid_src)
+
+        # 5. Hardware telemetry fields in MarcoAvPlayerEngine (without UIScreen.main)
+        self.assertIn('static func machineIdentifier() -> String', av_src)
+        self.assertIn('"machineIdentifier":', av_src)
+        self.assertIn('"processorCount":', av_src)
+        self.assertIn('"supportsHdrDisplay":', av_src)
+        self.assertNotIn('UIScreen.main', av_src)
+
 
 if __name__ == '__main__':
     unittest.main()

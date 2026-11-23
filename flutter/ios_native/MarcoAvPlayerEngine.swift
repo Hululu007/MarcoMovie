@@ -59,6 +59,25 @@ enum MarcoAvPlayerEngine {
     }
   }
 
+  static func machineIdentifier() -> String {
+    var systemInfo = utsname()
+    uname(&systemInfo)
+    let mirror = Mirror(reflecting: systemInfo.machine)
+    let chars = mirror.children.compactMap { elem -> Character? in
+      guard let value = elem.value as? Int8, value != 0 else { return nil }
+      return Character(UnicodeScalar(UInt8(value)))
+    }
+    return String(chars)
+  }
+
+  static func potentialEdrHeadroom() -> Double {
+    guard let screen = activeWindowScene()?.screen else { return 1.0 }
+    if #available(iOS 16.0, *) {
+      return Double(screen.potentialEDRHeadroom)
+    }
+    return screen.traitCollection.displayGamut == .P3 ? 1.25 : 1.0
+  }
+
   static func thermalStateCode(_ state: ProcessInfo.ThermalState) -> Int {
     switch state {
     case .nominal:
@@ -949,10 +968,19 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     let info = ProcessInfo.processInfo
     let routeName = activeAirPlayRouteName()
     let airPlayActive = (queuePlayer?.isExternalPlaybackActive ?? false) || routeName != nil
+    let headroom = MarcoAvPlayerEngine.potentialEdrHeadroom()
+    let supportsHdr = headroom > 1.05
     return [
       "thermalState": MarcoAvPlayerEngine.thermalStateString(info.thermalState),
       "thermalStateCode": MarcoAvPlayerEngine.thermalStateCode(info.thermalState),
       "physicalMemoryBytes": Int64(info.physicalMemory),
+      "processorCount": info.processorCount,
+      "machineIdentifier": MarcoAvPlayerEngine.machineIdentifier(),
+      "supportsHdrDisplay": supportsHdr,
+      "potentialEdrHeadroom": headroom,
+      "osVersion": UIDevice.current.systemVersion,
+      "isPad": UIDevice.current.userInterfaceIdiom == .pad,
+      "lowPowerMode": info.isLowPowerModeEnabled,
       "isPipSupported": AVPictureInPictureController.isPictureInPictureSupported(),
       "isPipActive": pipController?.isPictureInPictureActive ?? false,
       "isAirPlayActive": airPlayActive,

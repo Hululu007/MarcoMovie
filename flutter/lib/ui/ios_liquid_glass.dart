@@ -888,25 +888,36 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
   double _resolvedWidth(BuildContext context) {
     if (widget.width != null) return widget.width!;
     if (widget.style == 'circle') return widget.height;
+    final cleanLabel = widget.label
+        .replaceAll(RegExp(r'[\r\n]+'), ' ')
+        .trim();
     final painter = TextPainter(
       text: TextSpan(
-        text: widget.label,
+        text: cleanLabel,
         style: const TextStyle(
-          fontSize: 13,
+          fontSize: 13.5,
           fontWeight: FontWeight.w600,
-          letterSpacing: -0.2,
+          letterSpacing: 0.0,
         ),
       ),
       maxLines: 1,
       textDirection: Directionality.of(context),
       textScaler: TextScaler.noScaling,
     )..layout(maxWidth: widget.maxWidth);
-    double extra = 26.0;
-    if (widget.symbol != null && widget.symbol!.isNotEmpty) extra += 22.0;
-    if (widget.trailingSymbol != null && widget.trailingSymbol!.isNotEmpty) {
-      extra += 18.0;
+    // Apple Color Emoji renders wider in UIKit than Skia's fallback metric,
+    // and iOS 26 UIButton.Configuration.glass() adds internal capsule padding.
+    var emojiBuffer = 0.0;
+    for (final rune in cleanLabel.runes) {
+      if (rune > 0xFFFF || (rune >= 0x2600 && rune <= 0x27BF)) {
+        emojiBuffer += 4.5;
+      }
     }
-    return (painter.width + extra).clamp(74.0, widget.maxWidth);
+    double extra = 34.0 + emojiBuffer;
+    if (widget.symbol != null && widget.symbol!.isNotEmpty) extra += 24.0;
+    if (widget.trailingSymbol != null && widget.trailingSymbol!.isNotEmpty) {
+      extra += 20.0;
+    }
+    return (painter.width + extra).clamp(80.0, widget.maxWidth);
   }
 
   @override

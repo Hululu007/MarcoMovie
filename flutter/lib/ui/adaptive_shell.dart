@@ -16,11 +16,13 @@ import 'package:flutter/services.dart';
 import '../core/cms_client.dart';
 import '../core/catpaw_host.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../core/emby_library.dart';
+import 'add_resource_library_sheet.dart';
 import '../core/cms_parser.dart';
+import '../core/config_center_bridge.dart';
 import '../core/app_update.dart';
 import '../core/csp_bridge.dart';
 import '../core/curated_discovery.dart';
+import '../core/device_quality_profiler.dart';
 import '../core/desktop_webview_js_bridge.dart';
 import '../core/download_service.dart';
 import '../core/ios_avplayer_controller.dart';
@@ -278,6 +280,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   // Favorites / History segmented index
   int _librarySegment = 0;
   bool _dockCollapsed = false;
+  final ValueNotifier<double> _dockScrollProgress = ValueNotifier<double>(0.0);
   bool _useRootNativeTabChrome = false;
   int _pushedRouteDepth = 0;
   bool _settingsSecondaryRouteActive = false;
@@ -374,6 +377,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       }
     }
     unawaited(_loadInstalledVersion());
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        !OhosRuntime.isOhos &&
+        !Platform.environment.containsKey('FLUTTER_TEST') &&
+        widget.storage.autoHardwareQualityEnabled &&
+        widget.storage.lastHardwareProfileSummary.isEmpty) {
+      unawaited(DeviceQualityProfiler.detectAndApply(widget.storage));
+    }
     GlassworkBackdrop.reduceTransparency.value =
         widget.storage.glassBlurLevel == 'solid' ||
             widget.storage.glassBlurStrength <= 0.02;
@@ -485,16 +496,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   void _handleRootNativeTabSelected(int index) {
     if (!mounted) return;
     final clamped = index.clamp(0, _iosNativeDockItems.length - 1);
+    final nextProgress = clamped == 0 && _homeScrollController.hasClients
+        ? ((_homeScrollController.offset - 12.0) / 140.0).clamp(0.0, 1.0)
+        : 0.0;
     setState(() {
       _tabIndex = clamped;
-      if (clamped != 0) _dockCollapsed = false;
+      _dockCollapsed = nextProgress >= 0.5;
     });
+    _dockScrollProgress.value = nextProgress;
     if (_useRootNativeTabChrome) {
       unawaited(IosLiquidGlassBridge.setRootTabSelectedIndex(clamped));
+      _lastReportedDockProgress = nextProgress;
       if (clamped != 0) {
-        _lastReportedDockProgress = 0.0;
         unawaited(
-          IosLiquidGlassBridge.setRootTabMinimized(false, progress: 0.0),
+          IosLiquidGlassBridge.setRootTabMinimized(false, animated: true),
+        );
+      } else {
+        unawaited(
+          IosLiquidGlassBridge.setRootTabMinimized(
+            nextProgress >= 0.5,
+            animated: false,
+            progress: nextProgress,
+          ),
         );
       }
     }
@@ -991,6 +1014,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _searchStateRevision.dispose();
     _liveSearchController.dispose();
     _homeScrollController.removeListener(_onHomeScroll);
+    _dockScrollProgress.dispose();
     PosterLoader.cacheRevision.removeListener(_onPosterCacheUpdated);
     _homeScrollController.dispose();
     _windowsDiscoverScrollController.dispose();
@@ -1026,6 +1050,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _windowsLiveChannel = null;
     final saved = widget.storage.loadSavedConfig();
     _config = saved;
+    if (saved != null && saved.publicSupportedSites.isNotEmpty) {
+      unawaited(
+        ConfigCenterBridge.syncAll(
+          storage: widget.storage,
+          sites: saved.publicSupportedSites,
+          pullFromExternal: true,
+          pushToExternal: true,
+        ),
+      );
+    }
     _cachedWatchHistory = widget.storage.getWatchHistory();
     _liveHideUnreachable = widget.storage.liveHideUnreachable;
     unawaited(CmsClient.retainScriptSessions(
@@ -1957,6 +1991,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             context,
             widget.storage,
             initialDriveKey: driveKey.isEmpty ? null : driveKey,
+            sites: _config?.publicSupportedSites ?? const <CmsSite>[],
+            activeGroup: _activeSite?.group ?? '',
+            onOpenCatPawSettings:
+                (_config?.publicSupportedSites.any((s) => s.isCatPaw) ?? false)
+                    ? _showCatPawSettings
+                    : null,
             onChanged: () {
               if (mounted) setState(() {});
             },
@@ -2075,33 +2115,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   void _onHomeScroll() {
     if (!_homeScrollController.hasClients || _tabIndex != 0) return;
     final offset = _homeScrollController.offset;
-    final progress = (offset / 72.0).clamp(0.0, 1.0);
-    if (!_dockCollapsed && offset > 72.0) {
-      setState(() => _dockCollapsed = true);
-      if (_useRootNativeTabChrome) {
-        _lastReportedDockProgress = 1.0;
+    // Strictly linear progress in [0.0, 1.0] across 140pt of downward scroll.
+    // Driven without calling setState() on the full shell tree so scrolling
+    // stays locked at 60/120fps with zero frame drops or snap jumps.
+    final progress = ((offset - 12.0) / 140.0).clamp(0.0, 1.0);
+    _dockCollapsed = progress >= 0.5;
+    if ((_dockScrollProgress.value - progress).abs() >= 0.002 ||
+        (progress == 0.0 && _dockScrollProgress.value != 0.0) ||
+        (progress == 1.0 && _dockScrollProgress.value != 1.0)) {
+      _dockScrollProgress.value = progress;
+    }
+    if (_useRootNativeTabChrome) {
+      final crossedBoundary = (progress == 0.0 && _lastReportedDockProgress != 0.0) ||
+          (progress == 1.0 && _lastReportedDockProgress != 1.0);
+      if (crossedBoundary || (progress - _lastReportedDockProgress).abs() >= 0.004) {
+        _lastReportedDockProgress = progress;
         unawaited(
-          IosLiquidGlassBridge.setRootTabMinimized(true, progress: 1.0),
+          IosLiquidGlassBridge.setRootTabMinimized(
+            _dockCollapsed,
+            animated: false,
+            progress: progress,
+          ),
         );
       }
-    } else if (_dockCollapsed && offset < 36.0) {
-      setState(() => _dockCollapsed = false);
-      if (_useRootNativeTabChrome) {
-        _lastReportedDockProgress = 0.0;
-        unawaited(
-          IosLiquidGlassBridge.setRootTabMinimized(false, progress: 0.0),
-        );
-      }
-    } else if (_useRootNativeTabChrome &&
-        (progress - _lastReportedDockProgress).abs() >= 0.08) {
-      _lastReportedDockProgress = progress;
-      unawaited(
-        IosLiquidGlassBridge.setRootTabMinimized(
-          _dockCollapsed,
-          animated: false,
-          progress: progress,
-        ),
-      );
     }
   }
 
@@ -2112,20 +2148,30 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _homeScrollController.animateTo(
           0,
           duration: useSpring
-              ? Ios27Spring.smooth.nominalDuration
-              : const Duration(milliseconds: 360),
-          curve: useSpring ? Ios27Spring.smooth.curve : Curves.easeOutCubic,
+              ? const Duration(milliseconds: 360)
+              : const Duration(milliseconds: 340),
+          curve: Curves.easeOutCubic,
         ),
       );
-    }
-    if (_dockCollapsed) {
-      setState(() => _dockCollapsed = false);
-    }
-    if (_useRootNativeTabChrome) {
-      _lastReportedDockProgress = 0.0;
-      unawaited(
-        IosLiquidGlassBridge.setRootTabMinimized(false, progress: 0.0),
-      );
+      if (_homeScrollController.offset <= 1.0) {
+        _dockCollapsed = false;
+        _dockScrollProgress.value = 0.0;
+        if (_useRootNativeTabChrome) {
+          _lastReportedDockProgress = 0.0;
+          unawaited(
+            IosLiquidGlassBridge.setRootTabMinimized(false, animated: true),
+          );
+        }
+      }
+    } else {
+      _dockCollapsed = false;
+      _dockScrollProgress.value = 0.0;
+      if (_useRootNativeTabChrome) {
+        _lastReportedDockProgress = 0.0;
+        unawaited(
+          IosLiquidGlassBridge.setRootTabMinimized(false, animated: true),
+        );
+      }
     }
   }
 
@@ -2507,10 +2553,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               heightFactor: 1,
               child: AppleLiquidGlassDock(
                 selectedIndex: safeTabIndex,
-                onSelect: (i) => setState(() {
-                  _tabIndex = i;
-                  if (i != 0) _dockCollapsed = false;
-                }),
+                onSelect: (i) {
+                  final nextP = i == 0 && _homeScrollController.hasClients
+                      ? ((_homeScrollController.offset - 12.0) / 140.0)
+                          .clamp(0.0, 1.0)
+                      : 0.0;
+                  _dockScrollProgress.value = nextP;
+                  setState(() {
+                    _tabIndex = i;
+                    _dockCollapsed = nextP >= 0.5;
+                  });
+                },
                 isLandscape: false,
                 items: dockItems,
                 nativeItems: nativeDockItems,
@@ -2518,6 +2571,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 onScrollToTop: _scrollHomeToTop,
                 hidden: _privacyPortalAnimating,
                 collapsed: _dockCollapsed && safeTabIndex == 0,
+                scrollProgress: safeTabIndex == 0 ? _dockScrollProgress : null,
               ),
             ),
       body: Stack(
@@ -2649,11 +2703,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               : (widget.storage.activeDepotName.isEmpty
                   ? '切换仓库'
                   : widget.storage.activeDepotName);
-          final sourceLabel = _activeSite?.name ??
-              (_privateSessionUnlocked ? '选择隐私源' : '选择片源');
+          final sourceLabel = (_activeSite?.name ??
+                  (_privateSessionUnlocked ? '选择隐私源' : '选择片源'))
+              .replaceAll(RegExp(r'[\r\n\s]+'), ' ')
+              .trim();
           final double sourceMaxW = viewport.isCompactSplit
-              ? (depots.isEmpty ? 148.0 : 120.0)
-              : (compactHeader ? (depots.isEmpty ? 196.0 : 164.0) : 220.0);
+              ? (depots.isEmpty ? 156.0 : 126.0)
+              : (compactHeader ? (depots.isEmpty ? 204.0 : 168.0) : 228.0);
           final sourceControls = Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
@@ -3681,20 +3737,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             final loggedCount = NetdiskService.drives
                 .where((d) => widget.storage.isNetdiskLoggedIn(d.key))
                 .length;
-            void openNetdisk() => unawaited(
-                  _trackSecondaryRoute<void>(
-                    () => showNetdiskAccountSheet(
-                      context,
-                      widget.storage,
-                      onChanged: () {
-                        if (mounted) setState(() {});
-                      },
-                    ),
+            void openNetdisk() {
+              final allSites = _config?.publicSupportedSites ?? const <CmsSite>[];
+              unawaited(
+                _trackSecondaryRoute<void>(
+                  () => showNetdiskAccountSheet(
+                    context,
+                    widget.storage,
+                    sites: allSites,
+                    activeGroup: _activeSite?.group ?? '',
+                    onOpenCatPawSettings: allSites.any((s) => s.isCatPaw)
+                        ? _showCatPawSettings
+                        : null,
+                    onChanged: () {
+                      if (mounted) setState(() {});
+                    },
                   ),
-                );
+                ),
+              );
+            }
             final netdiskLabel = compactHeader
                 ? ''
-                : (loggedCount > 0 ? '网盘 · $loggedCount' : '网盘');
+                : (loggedCount > 0 ? '配置 · $loggedCount' : '配置中心');
             final netdiskGlass = LiquidGlass(
               borderRadius: 999,
               elevated: false,
@@ -3760,8 +3824,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               forceDark: overImmersiveHero,
               width: compactHeader ? 36 : null,
               height: 36,
-              maxWidth: 112,
-              accessibilityLabel: '我的云盘',
+              maxWidth: 124,
+              accessibilityLabel: '配置中心',
               onTap: openNetdisk,
               fallback: fallback,
             );
@@ -9746,17 +9810,26 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       return _buildSettingsQuickActionRow(
                         icon: CupertinoIcons.qrcode_viewfinder,
                         iconBgColor: const Color(0xFF0A84FF),
-                        title: '我的云盘 · 网盘扫码与账号中心',
-                        subtitle: '夸克（我的夸父）/ UC（我的优汐）/ 百度（我的嘟嘟）/ 阿里（我的阿狸）',
+                        title: '配置中心 · 多源网盘扫码与账号',
+                        subtitle: '一次扫码多源通用，支持夸克 / UC / 百度 / 阿里与源配置中心直读',
                         trailingText:
                             loggedCount > 0 ? '已登录 $loggedCount 个' : '去扫码',
-                        onTap: () => showNetdiskAccountSheet(
-                          context,
-                          widget.storage,
-                          onChanged: () {
-                            if (mounted) setState(() {});
-                          },
-                        ),
+                        onTap: () {
+                          final allSites =
+                              _config?.publicSupportedSites ?? const <CmsSite>[];
+                          showNetdiskAccountSheet(
+                            context,
+                            widget.storage,
+                            sites: allSites,
+                            activeGroup: _activeSite?.group ?? '',
+                            onOpenCatPawSettings: allSites.any((s) => s.isCatPaw)
+                                ? _showCatPawSettings
+                                : null,
+                            onChanged: () {
+                              if (mounted) setState(() {});
+                            },
+                          );
+                        },
                       );
                     },
                   ),
@@ -10360,7 +10433,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ('fast_hls', '极速流媒体'),
                   ('default', '站点默认'),
                 ],
-                storage.setPreferredQuality,
+                (v) async {
+                  await storage.setAutoHardwareQualityEnabled(false);
+                  await storage.setPreferredQuality(v);
+                },
               ),
               choices(
                 '画面比例',
@@ -10379,7 +10455,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ('ijk', '自动解码'),
                   ('exo', 'Apple 硬件优先'),
                 ],
-                storage.setPlayerKernel,
+                (v) async {
+                  await storage.setAutoHardwareQualityEnabled(false);
+                  await storage.setPlayerKernel(v);
+                },
               ),
             ]),
           ),
@@ -10497,7 +10576,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 key: const ValueKey('ios-open-import-subscription'),
                 icon: CupertinoIcons.plus_app_fill,
                 iconColor: AppleColors.systemGreen,
-                title: '导入订阅资源',
+                title: '添加资源库',
                 showChevron: true,
                 onTap: () async {
                   await _showImportConfigDialog(iosBackLabel: '订阅与账号');
@@ -10527,7 +10606,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 key: const ValueKey('ios-open-netdisk'),
                 icon: CupertinoIcons.qrcode,
                 iconColor: AppleColors.systemIndigo,
-                title: '我的云盘 · 扫码与账号',
+                title: '配置中心',
                 trailingText:
                     loggedDriveCount > 0 ? '已登录 $loggedDriveCount 个' : '未登录',
                 showChevron: true,
@@ -10535,6 +10614,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   context,
                   storage,
                   iosBackLabel: '订阅与账号',
+                  sites: sites,
+                  activeGroup: _activeSite?.group ?? '',
+                  onOpenCatPawSettings: sites.any((site) => site.isCatPaw)
+                      ? _showCatPawSettings
+                      : null,
                   onChanged: refresh,
                 ),
               ),
@@ -10714,7 +10798,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
               IosSettingsRow(
                 title: '导出诊断日志包',
-                subtitle: '脱敏系统环境信息与最近异常日志',
                 onTap: () => _exportDiagnosticsBundle(context),
               ),
               if (!OhosRuntime.isOhos)
@@ -10723,7 +10806,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   icon: CupertinoIcons.sparkles,
                   iconColor: AppleColors.systemBlue,
                   title: '重新查看新手引导',
-                  subtitle: '回顾配置导入、多端同步与播放手势指南',
                   showChevron: true,
                   onTap: () => _openOnboardingRoute(isReplay: true),
                 ),
@@ -11307,13 +11389,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             AppleGroupedTile(
               icon: CupertinoIcons.qrcode_viewfinder,
               iconBgColor: const Color(0xFF0A84FF),
-              title: '我的云盘 · 网盘扫码与账号中心',
-              subtitle: '夸克（我的夸父）/ UC（我的优汐）/ 百度（我的嘟嘟）/ 阿里（我的阿狸）',
+              title: '配置中心 · 多源网盘扫码与账号',
+              subtitle: '兼容多源配置中心直读，一次扫码全源通用',
               trailingText:
                   loggedDriveCount > 0 ? '已登录 $loggedDriveCount 个' : '去扫码',
               onTap: () => showNetdiskAccountSheet(
                 context,
                 widget.storage,
+                sites: publicSites,
+                activeGroup: _activeSite?.group ?? '',
+                onOpenCatPawSettings: publicSites.any((s) => s.isCatPaw)
+                    ? _showCatPawSettings
+                    : null,
                 onChanged: () {
                   refreshBoth();
                   if (mounted) setState(() {});
@@ -14732,98 +14819,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       ),
     );
   }
-  Future<bool> _connectEmby(
-    BuildContext parent,
-    String group,
-    bool isPrivate,
-  ) async {
-    String server = '', username = '', password = '', error = '';
-    bool busy = false;
-    return await _openIosOrModalPage<bool>(
-          hostContext: parent,
-          title: '连接 Emby 媒体库',
-          backLabel: '导入订阅',
-          builder: (sheet) => StatefulBuilder(
-            builder: (ctx, update) => SingleChildScrollView(
-              padding: EdgeInsets.fromLTRB(
-                18,
-                18,
-                18,
-                18 + MediaQuery.viewInsetsOf(ctx).bottom,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '服务器地址（含端口或子路径）',
-                      keyboardType: TextInputType.url,
-                      autocorrect: false,
-                      onChanged: (v) => server = v,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '用户名',
-                      autocorrect: false,
-                      onChanged: (v) => username = v,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextSelectionMouseGuard(
-                    child: CupertinoTextField(
-                      placeholder: '密码',
-                      obscureText: true,
-                      onChanged: (v) => password = v,
-                    ),
-                  ),
-                  if (error.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 10),
-                      child: Text(error),
-                    ),
-                  CupertinoButton(
-                    onPressed: busy
-                        ? null
-                        : () async {
-                            if (server.trim().isEmpty ||
-                                username.trim().isEmpty) {
-                              update(() => error = '请填写服务器地址和用户名');
-                              return;
-                            }
-                            update(() {
-                              busy = true;
-                              error = '';
-                            });
-                            try {
-                              final entry = await EmbyLibrary.login(
-                                server,
-                                username,
-                                password,
-                                group: group.isEmpty ? '默认分组' : group,
-                                isPrivate: isPrivate,
-                              );
-                              if (!ctx.mounted) return;
-                              await widget.storage.upsertSubscriptions([entry]);
-                              if (ctx.mounted) Navigator.of(ctx).pop(true);
-                            } catch (e) {
-                              if (ctx.mounted)
-                                update(() {
-                                  busy = false;
-                                  error = e.toString();
-                                });
-                            }
-                          },
-                    child: Text(busy ? '正在连接…' : '登录并添加'),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ) ??
-        false;
-  }
   Future<void> _showImportConfigDialog({
     String? initialInput,
     String? initialError,
@@ -14831,406 +14826,31 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     bool initialIsPrivate = false,
     String iosBackLabel = '返回',
   }) async {
-    final urlCtrl = TextEditingController(
-      text: initialInput ??
-          (initialIsPrivate ? '' : widget.storage.configOrigin),
-    );
-    final jsonCtrl = TextEditingController();
-    final groupCtrl = TextEditingController(text: initialGroup);
-    bool isPrivate = initialIsPrivate;
-    bool submitting = false;
-    String? errorText = initialError;
-    final showPrivacyToggle =
-        initialIsPrivate || !widget.storage.hasPrivacyConfigured;
-    const presetGroups = ['默认分组', '主力影视', '超清专线', '电视直播', '动漫番剧'];
-    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    final allSites = _config?.publicSupportedSites ?? const <CmsSite>[];
     await _openIosOrModalPage<void>(
-      title: initialIsPrivate
-          ? '导入隐私订阅'
-          : (isIos ? '导入订阅资源' : '导入订阅资源（支持分组 / 批量导入）'),
+      title: initialIsPrivate ? '添加隐私资源库' : '添加资源库',
       backLabel: iosBackLabel,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setModalState) {
-          Future<void> handleImport() async {
-            setModalState(() {
-              submitting = true;
-              errorText = null;
-            });
-            try {
-              final urlText = urlCtrl.text.trim();
-              final jsonText = jsonCtrl.text.trim();
-              final selectedGroup = groupCtrl.text.trim().isEmpty
-                  ? '默认分组'
-                  : groupCtrl.text.trim();
-              final effectivePrivate = isPrivate ||
-                  selectedGroup.contains('隐私') ||
-                  selectedGroup.contains('私密');
-              final candidateBackup =
-                  jsonText.isNotEmpty ? jsonText : urlText;
-              if (CmsParser.isBackupPayload(candidateBackup)) {
-                await widget.storage.importBackupJson(candidateBackup);
-                if (ctx.mounted) Navigator.of(ctx).pop();
-                _reloadSavedConfig();
-                return;
-              }
-              final entries = await widget.client.resolveBatchSubscriptions(
-                urlInput: urlText,
-                rawTextInput: jsonText,
-                defaultGroup: selectedGroup,
-                isPrivate: effectivePrivate,
-              );
-              await widget.storage.upsertSubscriptions(entries);
-              if (!initialIsPrivate) {
-                _privateSessionUnlocked = false;
-              }
-              if (ctx.mounted) Navigator.of(ctx).pop();
-              _reloadSavedConfig();
-              if (effectivePrivate && !widget.storage.hasPrivacyPassword) {
-                _showSetPrivacyPasswordDialog(
-                  title: '设置隐私访问密码',
-                  subtitle: '请为隐私分组设置访问密码：',
-                );
-              }
-            } catch (e) {
-              setModalState(() {
-                submitting = false;
-                errorText = '导入失败：$e';
-              });
-            }
+      builder: (ctx) => AddResourceLibraryView(
+        storage: widget.storage,
+        client: widget.client,
+        initialInput: initialInput,
+        initialError: initialError,
+        initialGroup: initialGroup,
+        initialIsPrivate: initialIsPrivate,
+        loadedSites: allSites,
+        activeGroup: _activeSite?.group ?? '',
+        onOpenCatPawSettings:
+            allSites.any((s) => s.isCatPaw) ? _showCatPawSettings : null,
+        onLibraryAdded: () {
+          if (!initialIsPrivate) {
+            _privateSessionUnlocked = false;
           }
-          return SingleChildScrollView(
-            padding: EdgeInsets.fromLTRB(
-              20,
-              20,
-              20,
-              20 + MediaQuery.viewInsetsOf(ctx).bottom,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CupertinoButton(padding: EdgeInsets.zero, child: const Text('连接 Emby 媒体库'),
-                  onPressed: submitting ? null : () async {
-                    final added = await _connectEmby(ctx,groupCtrl.text.trim(),isPrivate);
-                    if (added && ctx.mounted) {
-                      Navigator.of(ctx).pop();
-                      _reloadSavedConfig();
-                    }
-                  }),
-                CupertinoButton(
-                  padding: EdgeInsets.zero,
-                  onPressed: submitting ? null : () async {
-                    try {
-                      final picked = await FilePicker.platform.pickFiles(
-                        type: FileType.any,
-                        withData: false,
-                      );
-                      final entry = picked?.files.single;
-                      if (entry == null || !ctx.mounted) return;
-                      final Uint8List rawBytes;
-                      if (entry.path != null && entry.path!.isNotEmpty) {
-                        final file = File(entry.path!);
-                        if (await file.length() > CmsClient.maxResponseBytes) {
-                          throw const FormatException('文件超过 6 MB');
-                        }
-                        rawBytes = await file.readAsBytes();
-                      } else if (entry.bytes != null) {
-                        if (entry.bytes!.length > CmsClient.maxResponseBytes) {
-                          throw const FormatException('文件超过 6 MB');
-                        }
-                        rawBytes = entry.bytes!;
-                      } else {
-                        return;
-                      }
-                      final body = CmsClient.readSubscriptionFile(rawBytes, entry.name);
-                      if (!ctx.mounted) return;
-                      setModalState(() { jsonCtrl.text = body; urlCtrl.clear(); errorText = null; });
-                    } catch (e) {
-                      if (ctx.mounted) setModalState(() => errorText = '读取本地订阅失败：$e');
-                    }
-                  },
-                  child: Text('选择本地订阅或 ZIP 配置包'),
-                ),
-                // 1. Group Selector
-                Text(
-                  '订阅分组（可选择预设或直接输入自定义分组名）',
-                  style: TextStyle(
-                    color: ApplePalette.of(context).labelSecondary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    for (final g in presetGroups)
-                      _buildMiniFilterChip(
-                        label: g,
-                        selected: groupCtrl.text.trim() == g,
-                        onTap: () => setModalState(() => groupCtrl.text = g),
-                      ),
-                  ],
-                ),
-                SizedBox(height: 8),
-                TextSelectionMouseGuard(
-                  child: CupertinoTextField(
-                    controller: groupCtrl,
-                    placeholder: '输入自定义分组名称（如：主力4K、少儿专区）',
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                    style: TextStyle(
-                      color: ApplePalette.of(context).labelPrimary,
-                      fontSize: 13.5,
-                    ),
-                    placeholderStyle: TextStyle(
-                      color: ApplePalette.of(context).labelTertiary,
-                      fontSize: 13,
-                    ),
-                    onChanged: (_) => setModalState(() {}),
-                    decoration: BoxDecoration(
-                      color: ApplePalette.isDarkOf(context)
-                          ? ApplePalette.of(context).groupedSecondary
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: ApplePalette.of(context).separator,
-                        width: 0.65,
-                      ),
-                    ),
-                  ),
-                ),
-                SizedBox(height: 14),
-                if (showPrivacyToggle) ...[
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: ApplePalette.isDarkOf(context)
-                          ? ApplePalette.of(context).groupedSecondary
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(11),
-                      border: Border.all(
-                        color: ApplePalette.of(context).separator,
-                        width: 0.65,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          CupertinoIcons.lock_shield_fill,
-                          color: AppleColors.systemPurple,
-                          size: 18,
-                        ),
-                        SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            '设为隐私分组',
-                            style: TextStyle(
-                              color: ApplePalette.of(context).labelPrimary,
-                              fontSize: 13.5,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        CupertinoSwitch(
-                          value: isPrivate,
-                          activeTrackColor: AppleColors.systemPurple,
-                          onChanged: (v) => setModalState(() {
-                            isPrivate = v;
-                            if (v && groupCtrl.text.trim() == '默认分组') {
-                              groupCtrl.text = '隐私分组';
-                            } else if (!v &&
-                                groupCtrl.text.trim() == '隐私分组') {
-                              groupCtrl.text = '默认分组';
-                            }
-                          }),
-                        ),
-                      ],
-                    ),
-                  ),
-                  SizedBox(height: 14),
-                ],
-                // 3. Multi-subscription URLs input
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '订阅地址（支持多行批量导入 · 兼容 VOD / M3U / JSON / 多仓）',
-                        style: TextStyle(
-                          color: ApplePalette.of(context).labelSecondary,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    CupertinoButton(
-                      padding: EdgeInsets.zero,
-                      minSize: 26,
-                      onPressed: () async {
-                        final data =
-                            await Clipboard.getData(Clipboard.kTextPlain);
-                        final clip = (data?.text ?? '').trim();
-                        if (clip.isEmpty) return;
-                        if (clip.startsWith('{') ||
-                            clip.startsWith('[') ||
-                            clip.startsWith('#EXTM3U') ||
-                            clip.startsWith('<')) {
-                          jsonCtrl.text = clip;
-                        } else {
-                          urlCtrl.text = clip;
-                        }
-                        setModalState(() => errorText = null);
-                      },
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            CupertinoIcons.doc_on_clipboard,
-                            size: 14,
-                            color: AppleColors.systemBlue,
-                          ),
-                          SizedBox(width: 4),
-                          Text(
-                            '粘贴剪贴板',
-                            style: TextStyle(
-                              color: AppleColors.systemBlue,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                TextSelectionMouseGuard(
-                  child: CupertinoTextField(
-                    controller: urlCtrl,
-                    placeholder:
-                        '每行一个订阅地址（如：https://config.example/config.json）\n支持 JSON单仓/多仓、MacCMS VOD接口、M3U/M3U8/TXT 直播与点播',
-                    maxLines: 4,
-                    minLines: 2,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    smartQuotesType: SmartQuotesType.disabled,
-                    smartDashesType: SmartDashesType.disabled,
-                    keyboardType: TextInputType.multiline,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 10,
-                    ),
-                    style: TextStyle(
-                      color: ApplePalette.of(context).labelPrimary,
-                      fontSize: 13.5,
-                    ),
-                    placeholderStyle: TextStyle(
-                      color: ApplePalette.of(context).labelTertiary,
-                      fontSize: 12.5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: ApplePalette.isDarkOf(context)
-                          ? ApplePalette.of(context).groupedSecondary
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(11),
-                      border: Border.all(
-                        color: ApplePalette.of(context).separator,
-                        width: 0.65,
-                      ),
-                    ),
-                  ),
-                ),
-                SizedBox(height: 14),
-                Text(
-                  '或粘贴 JSON / M3U / TXT / JS / PY 配置内容（脚本是否可用取决于运行环境）',
-                  style: TextStyle(
-                    color: ApplePalette.of(context).labelSecondary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextSelectionMouseGuard(
-                  child: CupertinoTextField(
-                    controller: jsonCtrl,
-                    placeholder:
-                        '{"sites": [...]} 或 #EXTM3U 播放列表 或 频道名,https://live.example/tv.m3u8',
-                    maxLines: 4,
-                    minLines: 2,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    smartQuotesType: SmartQuotesType.disabled,
-                    smartDashesType: SmartDashesType.disabled,
-                    padding: const EdgeInsets.all(12),
-                    style: TextStyle(
-                      color: ApplePalette.of(context).labelPrimary,
-                      fontSize: 13,
-                    ),
-                    placeholderStyle: TextStyle(
-                      color: ApplePalette.of(context).labelTertiary,
-                      fontSize: 12.5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: ApplePalette.isDarkOf(context)
-                          ? ApplePalette.of(context).groupedSecondary
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(11),
-                      border: Border.all(
-                        color: ApplePalette.of(context).separator,
-                        width: 0.65,
-                      ),
-                    ),
-                  ),
-                ),
-                if (errorText != null) ...[
-                  const SizedBox(height: 14),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0x26FF453A),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: const Color(0x66FF453A),
-                        width: 0.5,
-                      ),
-                    ),
-                    child: Text(
-                      errorText!,
-                      style: const TextStyle(
-                        color: AppleColors.systemRed,
-                        fontSize: 13,
-                        height: 1.4,
-                      ),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 18),
-                SizedBox(
-                  width: double.infinity,
-                  child: submitting
-                      ? const Center(
-                          child: Padding(
-                            padding: EdgeInsets.symmetric(vertical: 10),
-                            child: CupertinoActivityIndicator(radius: 12),
-                          ),
-                        )
-                      : AppleCapsuleButton(
-                          label: isPrivate ? '保存至隐私隐藏列表' : '导入并启用订阅',
-                          icon: isPrivate
-                              ? CupertinoIcons.lock_fill
-                              : CupertinoIcons.checkmark_circle_fill,
-                          primary: true,
-                          onPressed: handleImport,
-                        ),
-                ),
-              ],
-            ),
+          _reloadSavedConfig();
+        },
+        onNeedsPrivacyPassword: () async {
+          _showSetPrivacyPasswordDialog(
+            title: '设置隐私访问密码',
+            subtitle: '请为隐私分组设置访问密码：',
           );
         },
       ),

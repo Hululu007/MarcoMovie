@@ -324,6 +324,13 @@ class CmsSite {
   /// Supports standard JSON/XML CMS (`type` 0 or 1), remote HTTP spider endpoints (`type` 4),
   /// M3U/TXT VOD playlists (`m3u_vod://`), and TVBox `csp_*` / `.js` spider sites via `CspBridge`.
   bool get isEmby => api.startsWith('emby://account/');
+  bool get isExternalMediaLibrary =>
+      api.startsWith('jellyfin://account/') ||
+      api.startsWith('plex://account/') ||
+      api.startsWith('webdavlib://account/') ||
+      api.startsWith('alist://account/') ||
+      api.startsWith('smbnas://account/') ||
+      api.startsWith('localfile://account/');
   bool get isCatPaw => api.startsWith('catpaw://');
   bool get usesAdapterPack =>
       key != 'mydrive' &&
@@ -343,6 +350,7 @@ class CmsSite {
   bool get canBrowse =>
       key != 'mydrive' &&
       (isEmby ||
+          isExternalMediaLibrary ||
           isCatPaw ||
           (type == 4 && isHttpApi) ||
           (isScriptOrJarApi
@@ -372,7 +380,11 @@ class CmsSite {
             SpiderPluginRegistry.instance.hasPluginOrGatewaySupport(this))) {
       return statusOk;
     }
-    if (isEmby || isCatPaw || isM3uVodApi || (type == 4 && isHttpApi)) {
+    if (isEmby ||
+        isExternalMediaLibrary ||
+        isCatPaw ||
+        isM3uVodApi ||
+        (type == 4 && isHttpApi)) {
       return statusOk;
     }
     if ((type == 3 || isScriptOrJarApi) && CspBridge.isNetdiskSite(this)) {
@@ -935,7 +947,20 @@ class CmsEpisode {
   bool get isScriptEpisode => url.startsWith('mmjs://play?');
   bool get isGatewayEpisode => url.startsWith('mmgw://play?');
   bool get needsSourceResolution =>
-      isScriptEpisode || isGatewayEpisode || url.startsWith('mmcloud://') || url.startsWith('mmemby://play?') || url.startsWith('mmpaw://play?') || url.startsWith('mmt4://play?') || url.startsWith('mmquark://owned?') || url.startsWith('mmwogg://quark?');
+      isScriptEpisode ||
+      isGatewayEpisode ||
+      url.startsWith('mmcloud://') ||
+      url.startsWith('mmemby://play?') ||
+      url.startsWith('mmjellyfin://play?') ||
+      url.startsWith('mmplex://play?') ||
+      url.startsWith('mmwebdav://play?') ||
+      url.startsWith('mmalist://play?') ||
+      url.startsWith('mmsmb://play?') ||
+      url.startsWith('mmlocal://play?') ||
+      url.startsWith('mmpaw://play?') ||
+      url.startsWith('mmt4://play?') ||
+      url.startsWith('mmquark://owned?') ||
+      url.startsWith('mmwogg://quark?');
 
   /// Whether [url] points to an already-downloaded local file (offline playback).
   bool get isLocalFile {
