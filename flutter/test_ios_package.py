@@ -39,6 +39,13 @@ class DeploymentChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_app(self.app)
         self.assertEqual((self.app / 'Runner').read_bytes(), blob)
+        # Xcode 26 Liquid Glass build explicitly validates against iOS 15.0 floor.
+        (self.app / 'Info.plist').write_bytes(plistlib.dumps({'MinimumOSVersion': '15.0'}))
+        validate_app(self.app, max_min_ios='15.0')
+        blob16 = self.binary(0x100000)
+        (self.app / 'Runner').write_bytes(blob16)
+        with self.assertRaises(ValueError):
+            validate_app(self.app, max_min_ios='15.0')
 
     def test_simulator_binary_rejected(self):
         (self.app / 'Runner').write_bytes(self.binary(0x0e0000, 7))

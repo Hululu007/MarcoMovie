@@ -1,6 +1,7 @@
 """Bundle brand logo assets, and configure Apple/Windows native shells."""
 from pathlib import Path
 import json
+import os
 import re
 import plistlib
 import shutil
@@ -1557,12 +1558,17 @@ def main() -> None:
                 ad_changed = True
             if ad_changed:
                 ios_app_delegate.write_text(ad_text, encoding="utf-8")
+    min_ios = os.environ.get("MARCOMOVIE_IOS_MIN_TARGET", "14.0").strip()
+    if min_ios not in ("14.0", "15.0"):
+        min_ios = "14.0"
+    needs_ios14_linker_compat = min_ios == "14.0"
+
     ios_app_fw_plist = ROOT / "ios" / "Flutter" / "AppFrameworkInfo.plist"
     if ios_app_fw_plist.exists():
         text = ios_app_fw_plist.read_text(encoding="utf-8")
         text = re.sub(
             r"(<key>MinimumOSVersion</key>\s*<string>)[^<]+(</string>)",
-            r"\g<1>14.0\g<2>",
+            rf"\g<1>{min_ios}\g<2>",
             text,
         )
         ios_app_fw_plist.write_text(text, encoding="utf-8")
@@ -1572,22 +1578,34 @@ def main() -> None:
             text = xcconfig.read_text(encoding="utf-8")
             text = re.sub(
                 r"(?m)^IPHONEOS_DEPLOYMENT_TARGET\s*=.*$",
-                "IPHONEOS_DEPLOYMENT_TARGET = 14.0",
+                f"IPHONEOS_DEPLOYMENT_TARGET = {min_ios}",
                 text,
             )
-            if "IPHONEOS_DEPLOYMENT_TARGET = 14.0" not in text:
-                text = text.rstrip() + "\nIPHONEOS_DEPLOYMENT_TARGET = 14.0\n"
-            if "-Wl,-no_fixup_chains" not in text:
-                text = text.rstrip() + "\nOTHER_LDFLAGS = $(inherited) -Wl,-no_fixup_chains\n"
-            if "-fno-objc-msgsend-selector-stubs" not in text:
-                text = text.rstrip() + "\nOTHER_CFLAGS = $(inherited) -fno-objc-msgsend-selector-stubs\n"
+            if f"IPHONEOS_DEPLOYMENT_TARGET = {min_ios}" not in text:
+                text = text.rstrip() + f"\nIPHONEOS_DEPLOYMENT_TARGET = {min_ios}\n"
+            if needs_ios14_linker_compat:
+                if "-Wl,-no_fixup_chains" not in text:
+                    text = text.rstrip() + "\nOTHER_LDFLAGS = $(inherited) -Wl,-no_fixup_chains\n"
+                if "-fno-objc-msgsend-selector-stubs" not in text:
+                    text = text.rstrip() + "\nOTHER_CFLAGS = $(inherited) -fno-objc-msgsend-selector-stubs\n"
+            else:
+                text = re.sub(
+                    r"(?m)^OTHER_LDFLAGS\s*=\s*\$\(inherited\)\s+-Wl,-no_fixup_chains\s*$\n?",
+                    "",
+                    text,
+                )
+                text = re.sub(
+                    r"(?m)^OTHER_CFLAGS\s*=\s*\$\(inherited\)\s+-fno-objc-msgsend-selector-stubs\s*$\n?",
+                    "",
+                    text,
+                )
             xcconfig.write_text(text, encoding="utf-8")
     ios_pbx = ROOT / "ios" / "Runner.xcodeproj" / "project.pbxproj"
     if ios_pbx.exists():
         text = ios_pbx.read_text(encoding="utf-8")
         text = re.sub(
             r"IPHONEOS_DEPLOYMENT_TARGET\s*=\s*[0-9.]+;",
-            "IPHONEOS_DEPLOYMENT_TARGET = 14.0;",
+            f"IPHONEOS_DEPLOYMENT_TARGET = {min_ios};",
             text,
         )
         ios_pbx.write_text(text, encoding="utf-8")
@@ -1596,22 +1614,27 @@ def main() -> None:
         text = ios_podfile.read_text(encoding="utf-8")
         text = re.sub(
             r"#?\s*platform\s+:ios\s*,\s*'[^']+'",
-            "platform :ios, '14.0'",
+            f"platform :ios, '{min_ios}'",
             text,
         )
-        if "no_fixup_chains" not in text and "flutter_additional_ios_build_settings(target)" in text:
+        if f"Gem::Version.new('{min_ios}')" not in text and "flutter_additional_ios_build_settings(target)" in text:
+            extra_flags = ""
+            if needs_ios14_linker_compat:
+                extra_flags = (
+                    "      ldflags = Array(config.build_settings['OTHER_LDFLAGS'] || '$(inherited)')\n"
+                    "      ldflags << '-Wl,-no_fixup_chains' unless ldflags.any? { |f| f.to_s.include?('no_fixup_chains') }\n"
+                    "      config.build_settings['OTHER_LDFLAGS'] = ldflags\n"
+                    "      cflags = Array(config.build_settings['OTHER_CFLAGS'] || '$(inherited)')\n"
+                    "      cflags << '-fno-objc-msgsend-selector-stubs' unless cflags.any? { |f| f.to_s.include?('fno-objc-msgsend-selector-stubs') }\n"
+                    "      config.build_settings['OTHER_CFLAGS'] = cflags\n"
+                )
             text = text.replace(
                 "flutter_additional_ios_build_settings(target)",
                 "flutter_additional_ios_build_settings(target)\n"
                 "    target.build_configurations.each do |config|\n"
-                "      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0' if Gem::Version.new(config.build_settings.fetch('IPHONEOS_DEPLOYMENT_TARGET', '0')) < Gem::Version.new('14.0')\n"
-                "      ldflags = Array(config.build_settings['OTHER_LDFLAGS'] || '$(inherited)')\n"
-                "      ldflags << '-Wl,-no_fixup_chains' unless ldflags.any? { |f| f.to_s.include?('no_fixup_chains') }\n"
-                "      config.build_settings['OTHER_LDFLAGS'] = ldflags\n"
-                "      cflags = Array(config.build_settings['OTHER_CFLAGS'] || '$(inherited)')\n"
-                "      cflags << '-fno-objc-msgsend-selector-stubs' unless cflags.any? { |f| f.to_s.include?('fno-objc-msgsend-selector-stubs') }\n"
-                "      config.build_settings['OTHER_CFLAGS'] = cflags\n"
-                "    end",
+                f"      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '{min_ios}' if Gem::Version.new(config.build_settings.fetch('IPHONEOS_DEPLOYMENT_TARGET', '0')) < Gem::Version.new('{min_ios}')\n"
+                + extra_flags
+                + "    end",
             )
         ios_podfile.write_text(text, encoding="utf-8")
     # Windows icon, working directory, immediate window show, and title

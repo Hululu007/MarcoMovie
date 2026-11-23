@@ -1,10 +1,19 @@
-"""Validate real iOS 14 deployment targets (built with Xcode 26/27 SDK), then ad-hoc sign for sideloading."""
+"""Validate real iOS deployment targets (14.0 for Xcode 16 compat, 15.0 for Xcode 26 Liquid Glass), then ad-hoc sign for sideloading."""
+import os
 from pathlib import Path
 import plistlib
 import shutil
 import struct
 import subprocess
 import sys
+
+
+def _parse_min_ios(min_ios: str) -> tuple[tuple[int, int, int], int]:
+    parts = [int(p) for p in min_ios.strip().split(".") if p.strip()]
+    major = parts[0] if len(parts) > 0 else 14
+    minor = parts[1] if len(parts) > 1 else 0
+    patch = parts[2] if len(parts) > 2 else 0
+    return (major, minor, patch), (major << 16) | (minor << 8) | patch
 
 
 def strip_dsym_bundles(app_dir: Path) -> None:
@@ -14,8 +23,10 @@ def strip_dsym_bundles(app_dir: Path) -> None:
             shutil.rmtree(dsym)
 
 
-def validate_app(app_dir: Path) -> None:
+def validate_app(app_dir: Path, max_min_ios: str | None = None) -> None:
     """Reject dependencies compiled for a newer iOS. Rewriting minos hides dyld errors."""
+    target_str = (max_min_ios or os.environ.get("MARCOMOVIE_IOS_MIN_TARGET") or "14.0").strip()
+    max_tuple, max_packed = _parse_min_ios(target_str)
     if not (app_dir / 'Info.plist').is_file():
         raise ValueError('Missing application Info.plist')
     binaries = 0
@@ -25,7 +36,7 @@ def validate_app(app_dir: Path) -> None:
         if path.name == 'Info.plist':
             metadata = plistlib.loads(path.read_bytes())
             minimum = metadata.get('MinimumOSVersion')
-            if minimum and tuple((list(map(int, minimum.split('.'))) + [0, 0])[:3]) > (14, 0, 0):
+            if minimum and tuple((list(map(int, minimum.split('.'))) + [0, 0])[:3]) > max_tuple:
                 raise ValueError(f'{path}: requires iOS {minimum}')
         with path.open('rb') as stream:
             magic = stream.read(4)
@@ -59,10 +70,10 @@ def validate_app(app_dir: Path) -> None:
                     raise ValueError(f'{path}: truncated deployment command')
             if cmd == 0x32:
                 platform, minimum = struct.unpack_from('<II', data, pos + 8)
-                if platform != 2 or minimum > 0x000e0000:
+                if platform != 2 or minimum > max_packed:
                     raise ValueError(f'{path}: incompatible platform {platform}, deployment target {minimum:#x}')
-            if cmd == 0x25 and struct.unpack_from('<I', data, pos + 8)[0] > 0x000e0000:
-                raise ValueError(f'{path}: deployment target exceeds iOS 14.0')
+            if cmd == 0x25 and struct.unpack_from('<I', data, pos + 8)[0] > max_packed:
+                raise ValueError(f'{path}: deployment target exceeds iOS {target_str}')
             pos += length
         if pos != 32 + size or not has_target:
             raise ValueError(f'{path}: missing deployment target or invalid command size')
@@ -107,9 +118,20 @@ def codesign_bundle(app_dir: Path) -> None:
 
 
 def main() -> None:
-    app_dir = Path(sys.argv[1]).resolve()
+    args = sys.argv[1:]
+    max_min_ios = None
+    filtered = []
+    idx = 0
+    while idx < len(args):
+        if args[idx] == "--min-ios" and idx + 1 < len(args):
+            max_min_ios = args[idx + 1]
+            idx += 2
+        else:
+            filtered.append(args[idx])
+            idx += 1
+    app_dir = Path(filtered[0]).resolve()
     strip_dsym_bundles(app_dir)
-    validate_app(app_dir)
+    validate_app(app_dir, max_min_ios=max_min_ios)
     codesign_bundle(app_dir)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app_dir)], check=True)
 
