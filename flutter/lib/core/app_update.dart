@@ -39,6 +39,45 @@ class AppUpdate {
   @visibleForTesting
   static String? debugPublicKeyHexOverride;
 
+  /// Optional testing override for the running iOS major version (e.g. `14` vs
+  /// `15`/`26`) so unit tests can exercise iOS 14 / 15+ package routing on any
+  /// host OS.
+  @visibleForTesting
+  static int? debugIosMajorVersionOverride;
+
+  /// Parses the major iOS version number from [osVersion] (for example
+  /// `"Version 14.8.1 (Build 18H107)"` -> `14`). Returns `null` if unknown.
+  static int? parseIosMajorVersion(String osVersion) {
+    final trimmed = osVersion.trim();
+    if (trimmed.isEmpty) return null;
+    final match = RegExp(
+          r'(?:Version|iOS|iPadOS)\s+(\d+)(?:\.\d+)*',
+          caseSensitive: false,
+        ).firstMatch(trimmed) ??
+        RegExp(r'^(\d+)(?:\.\d+)+').firstMatch(trimmed);
+    if (match == null) return null;
+    return int.tryParse(match.group(1)!);
+  }
+
+  /// True when the current device runs iOS < 15.0 (i.e. iOS 14.x) and must
+  /// pull the dedicated `MarcoMovie-<v>-ios14-unsigned.ipa` compatibility
+  /// package instead of the iOS 15.0+ Liquid Glass main IPA.
+  static bool get prefersIos14CompatPackage {
+    final override = debugIosMajorVersionOverride;
+    if (override != null) return override < 15;
+    if (!Platform.isIOS) return false;
+    final major = parseIosMajorVersion(Platform.operatingSystemVersion);
+    return major != null && major < 15;
+  }
+
+  static Set<String> _iosAssetNames(String version, {required bool ios14}) =>
+      ios14
+          ? <String>{'MarcoMovie-$version-ios14-unsigned.ipa'}
+          : <String>{
+              'MarcoMovie-$version-ios-unsigned.ipa',
+              'MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa',
+            };
+
   static String _effectivePublicKeyHex([String? publicKeyHex]) =>
       (publicKeyHex ?? debugPublicKeyHexOverride ?? defaultUpdatePublicKeyHex)
           .trim();
@@ -141,6 +180,9 @@ class AppUpdate {
   Uri get iosMirrorIpaUrl =>
       iosUrl ?? (throw const FormatException('缺少 iOS 更新包地址'));
 
+  bool get isIos14Compat =>
+      iosUrl != null && iosUrl!.path.endsWith('-ios14-unsigned.ipa');
+
   Uri get trollStoreInstallUrl {
     final target = iosUrl;
     if (target == null || checksum == null || size == null) {
@@ -176,8 +218,12 @@ class AppUpdate {
     return null;
   }
 
-  static AppUpdate parse(Map<String, dynamic> json,
-      {bool github = false, String platform = 'windows'}) {
+  static AppUpdate parse(
+    Map<String, dynamic> json, {
+    bool github = false,
+    String platform = 'windows',
+    bool? preferIos14,
+  }) {
     if (!github && json['platform'] != null && json['platform'] != platform) {
       throw const FormatException('更新包平台不匹配');
     }
@@ -189,6 +235,9 @@ class AppUpdate {
         .firstMatch(normalized.trim());
     if (match == null) throw const FormatException('更新版本信息无效');
     final version = match.group(1)!;
+    final useIos14 =
+        platform == 'ios' && (preferIos14 ?? prefersIos14CompatPackage);
+    final iosNames = _iosAssetNames(version, ios14: useIos14);
     Map? asset;
     if (github) {
       final assets = json['assets'];
@@ -197,10 +246,7 @@ class AppUpdate {
           if (platform == 'windows' &&
               item['name'] == 'MarcoMovie-$version-windows-setup.exe') {
             asset = item;
-          } else if (platform == 'ios' &&
-              (item['name'] == 'MarcoMovie-$version-ios-unsigned.ipa' ||
-                  item['name'] ==
-                      'MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa')) {
+          } else if (platform == 'ios' && iosNames.contains(item['name'])) {
             asset ??= item;
           }
         }
@@ -208,15 +254,40 @@ class AppUpdate {
     } else if (platform == 'windows' && json['windows'] is Map) {
       asset = json['windows'] as Map;
     } else if (platform == 'ios') {
-      if (json['package'] is Map) {
-        asset = json['package'] as Map;
-      } else if (json['packages'] is Map) {
-        final pkgs = json['packages'] as Map;
-        final cand = pkgs['MarcoMovie-$version-ios-unsigned.ipa'] ??
-            pkgs['MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa'];
-        if (cand is Map) asset = cand;
-      } else if (json['ios'] is Map) {
-        asset = json['ios'] as Map;
+      if (useIos14) {
+        final ios14Name = 'MarcoMovie-$version-ios14-unsigned.ipa';
+        if (json['packages'] is Map) {
+          final pkgs = json['packages'] as Map;
+          final cand = pkgs[ios14Name];
+          if (cand is Map) asset = cand;
+        }
+        if (asset == null && json['ios14'] is Map) {
+          asset = json['ios14'] as Map;
+        }
+        if (asset == null && json['package'] is Map) {
+          final pkg = json['package'] as Map;
+          final pkgUrl = pkg['url']?.toString() ?? '';
+          if (pkgUrl.endsWith('/$ios14Name')) {
+            asset = pkg;
+          }
+        }
+      } else {
+        if (json['package'] is Map) {
+          final pkg = json['package'] as Map;
+          final pkgUrl = pkg['url']?.toString() ?? '';
+          if (!pkgUrl.endsWith('-ios14-unsigned.ipa')) {
+            asset = pkg;
+          }
+        }
+        if (asset == null && json['packages'] is Map) {
+          final pkgs = json['packages'] as Map;
+          final cand = pkgs['MarcoMovie-$version-ios-unsigned.ipa'] ??
+              pkgs['MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa'];
+          if (cand is Map) asset = cand;
+        }
+        if (asset == null && json['ios'] is Map) {
+          asset = json['ios'] as Map;
+        }
       }
     }
     final data = asset ?? const <String, dynamic>{};
@@ -236,10 +307,7 @@ class AppUpdate {
         validDigest;
     final verifiedIos = platform == 'ios' &&
         uri != null &&
-        (uri.path.endsWith('/MarcoMovie-$version-ios-unsigned.ipa') ||
-            uri.path.endsWith(
-              '/MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa',
-            )) &&
+        iosNames.any((name) => uri.path.endsWith('/$name')) &&
         validDigest;
     final verified = verifiedWin || verifiedIos;
     return AppUpdate(
@@ -268,22 +336,31 @@ class AppUpdate {
         _ => throw const FormatException('不支持的更新平台'),
       };
 
-  static AppUpdate _githubRelease(dynamic body, String platform) {
+  static AppUpdate _githubRelease(
+    dynamic body,
+    String platform, {
+    bool? preferIos14,
+  }) {
+    final useIos14 =
+        platform == 'ios' && (preferIos14 ?? prefersIos14CompatPackage);
     final candidates = <AppUpdate>[];
     for (final item in (body is List ? body : [body]).whereType<Map>()) {
       if (item['draft'] == true || item['prerelease'] == true) continue;
       try {
-        final release = parse(Map<String, dynamic>.from(item),
-            github: true, platform: platform);
-        final name = 'MarcoMovie-${release.version}-${_suffix(platform)}';
-        final altIosName =
-            'MarcoMovie-${release.version}-ios-iphone-ipad-unsigned.ipa';
+        final release = parse(
+          Map<String, dynamic>.from(item),
+          github: true,
+          platform: platform,
+          preferIos14: useIos14,
+        );
+        final expectedNames = platform == 'ios'
+            ? _iosAssetNames(release.version, ios14: useIos14)
+            : <String>{'MarcoMovie-${release.version}-${_suffix(platform)}'};
         final assets = item['assets'];
         if (assets is! List ||
             !assets.whereType<Map>().any(
                   (asset) =>
-                      (asset['name'] == name ||
-                          (platform == 'ios' && asset['name'] == altIosName)) &&
+                      expectedNames.contains(asset['name']) &&
                       trustedAsset(asset['browser_download_url']) != null,
                 )) {
           continue;
@@ -312,12 +389,15 @@ class AppUpdate {
   static Future<AppUpdate> check({
     http.Client? client,
     String? platform,
+    bool? preferIos14,
     Duration endpointTimeout = const Duration(seconds: 8),
     UpdateCancellation? cancellation,
     void Function(String)? onStage,
   }) async {
     platform ??= currentPlatform;
     _suffix(platform);
+    final useIos14 =
+        platform == 'ios' && (preferIos14 ?? prefersIos14CompatPackage);
     final transport = client ?? http.Client();
     try {
       for (final url in [
@@ -359,7 +439,7 @@ class AppUpdate {
           final work = read().timeout(endpointTimeout);
           final body = await (cancellation?.bind(work) ?? work);
           if (url.contains('api.github.com')) {
-            return _githubRelease(body, platform);
+            return _githubRelease(body, platform, preferIos14: useIos14);
           }
           if (body is! Map<String, dynamic>) {
             continue;
@@ -392,7 +472,11 @@ class AppUpdate {
           if (manifest['prerelease'] == true) {
             continue;
           }
-          final release = parse(manifest, platform: platform);
+          final release = parse(
+            manifest,
+            platform: platform,
+            preferIos14: useIos14,
+          );
           if (platform == 'windows' && release.windowsUrl == null ||
               platform == 'ios' && release.iosUrl == null) {
             continue;
@@ -430,7 +514,9 @@ class AppUpdate {
         checksum == null) {
       throw const FormatException('缺少可信的 iOS 更新信息');
     }
-    final expectedFileName = 'MarcoMovie-$version-ios-unsigned.ipa';
+    final expectedFileName = isIos14Compat
+        ? 'MarcoMovie-$version-ios14-unsigned.ipa'
+        : 'MarcoMovie-$version-ios-unsigned.ipa';
     final installedFile =
         File('${directory.path}${Platform.pathSeparator}$expectedFileName');
     cancellation.check();
@@ -500,7 +586,8 @@ class AppUpdate {
                 ? ''
                 : entity.uri.pathSegments.last;
             if (name != expectedFileName &&
-                RegExp(r'^MarcoMovie-.*-ios-.*unsigned\.ipa$').hasMatch(name)) {
+                RegExp(r'^MarcoMovie-.*-ios(?:14)?-.*unsigned\.ipa$')
+                    .hasMatch(name)) {
               try {
                 await entity.delete();
               } catch (_) {}

@@ -405,6 +405,16 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
                         ),
                       ],
                     ),
+                    if (release != null && release.isIos14Compat) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        '已自动匹配 iOS 14.0+ 兼容版安装包',
+                        style: TextStyle(
+                          color: ApplePalette.of(context).labelSecondary,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ],
                     if (busy) ...[
                       const SizedBox(height: 12),
                       LinearProgressIndicator(
@@ -506,6 +516,16 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
                   color: ApplePalette.of(context).labelPrimary,
                   fontSize: 23,
                   fontWeight: FontWeight.w700)),
+          if (release.isIos14Compat) ...[
+            const SizedBox(height: 4),
+            Text(
+              '已自动匹配 iOS 14.0+ 兼容版安装包',
+              style: TextStyle(
+                color: ApplePalette.of(context).labelSecondary,
+                fontSize: 13,
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
         ],
         if (busy) ...[

@@ -21,6 +21,9 @@ SUFFIXES = {
     'windows': ('windows-setup.exe', 'windows-x64.zip'),
     'macos': ('macos.zip',),
 }
+OPTIONAL_SUFFIXES = {
+    'ios': ('ios14-unsigned.ipa',),
+}
 PLATFORM_LABELS = {
     'ios': 'iPhone / iPad', 'windows': 'Windows', 'macos': 'macOS',
     'appletv': 'Apple TV', 'harmonyos': 'HarmonyOS NEXT',
@@ -32,6 +35,7 @@ NOTE_SUFFIXES = {
     'android-lite.apk': 'android-lite',
     'preview.apk': 'android-tv', 'mobile.apk': 'android-mobile',
     'lite.apk': 'android-lite', 'ios-unsigned.ipa': 'ios',
+    'ios14-unsigned.ipa': 'ios',
     'appletv-unsigned.ipa': 'appletv', 'harmonyos.hap': 'harmonyos',
     'windows-setup.exe': 'windows', 'windows-x64.zip': 'windows',
     'macos.zip': 'macos',
@@ -412,9 +416,24 @@ def sync(output, releases=None):
                 files[name] = body
                 files[name + '.sha256'] = (digest + '  ' + name + '\n').encode('ascii')
             page = patch_card(page, suffix, package)
+        optional_fields = {}
+        for opt_suffix in OPTIONAL_SUFFIXES.get(platform, ()):
+            opt_name = f'MarcoMovie-{version}-{opt_suffix}'
+            if opt_name in names and (opt_name + '.sha256') in names:
+                href, size, digest, body = platform_asset(release, opt_name, output)
+                opt_package = dict(size=size, sha256=digest, url=href if href.startswith('https://') else BASE + opt_name)
+                packages[opt_name] = opt_package
+                if body is not None:
+                    files[opt_name] = body
+                    files[opt_name + '.sha256'] = (digest + '  ' + opt_name + '\n').encode('ascii')
+                if opt_suffix == 'ios14-unsigned.ipa':
+                    optional_fields['ios14'] = opt_package
+                if re.search(r'MarcoMovie-\d+\.\d+\.\d+-' + re.escape(opt_suffix), page):
+                    page = patch_card(page, opt_suffix, opt_package)
         feed = dict(schema=1, platform=platform, versionName=version, prerelease=False,
                     notes=release.get('body') or '', packages=packages,
-                    release_url=f'https://github.com/{REPO}/releases/tag/{release["tag_name"]}')
+                    release_url=f'https://github.com/{REPO}/releases/tag/{release["tag_name"]}',
+                    **optional_fields)
         if platform == 'windows':
             # Installed 0.5.x clients require this exact legacy filename. The
             # public card can use the clearer name, but the update channel must

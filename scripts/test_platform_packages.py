@@ -303,6 +303,55 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn('{#', iss)
         self.assertIn('CurStepChanged(CurStep: TSetupStep)', iss)
 
+    def test_dual_ios_packages_sync_main_and_ios14_into_feed_and_cards(self):
+        main_name = 'MarcoMovie-0.7.5-ios-iphone-ipad-unsigned.ipa'
+        ios14_name = 'MarcoMovie-0.7.5-ios14-unsigned.ipa'
+        ios14_card = (
+            '<div class="dl" data-platform="ios14"><h3>iOS 14</h3>'
+            '<p><span class="package-version">0.7.4</span> · 60.0 MB</p>'
+            '<a href="MarcoMovie-0.7.4-ios14-unsigned.ipa">下载</a>'
+            '<a href="MarcoMovie-0.7.4-ios14-unsigned.ipa.sha256">校验文件</a>'
+            '<code>SHA-256：' + 'a' * 64 + '</code></div>'
+        )
+        (self.out / 'index.html').write_text(
+            self.page.replace('<section class="block"', ios14_card + '<section class="block"'),
+            encoding='utf-8',
+        )
+        release = dict(
+            self.release,
+            tag_name='ios-v0.7.5',
+            body='iOS 0.7.5 dual package release',
+            assets=[
+                {'name': n}
+                for n in (
+                    main_name,
+                    main_name + '.sha256',
+                    'MarcoMovie-0.7.5-ios-unsigned.ipa',
+                    'MarcoMovie-0.7.5-ios-unsigned.ipa.sha256',
+                    ios14_name,
+                    ios14_name + '.sha256',
+                )
+            ],
+        )
+        with patch.object(
+            m,
+            'platform_asset',
+            side_effect=lambda rel, name, out: (
+                'https://github.com/Pilipala9919/MarcoMovie/releases/download/ios-v0.7.5/' + name,
+                63911322 if 'ios14' in name else 63909667,
+                'c' * 64 if 'ios14' in name else 'b' * 64,
+                None,
+            ),
+        ):
+            self.assertEqual(m.sync(self.out, [release]), {'ios': '0.7.5'})
+        feed = json.loads((self.out / 'updates/ios.json').read_text(encoding='utf-8'))
+        self.assertEqual(set(feed['packages']), {main_name, ios14_name})
+        self.assertEqual(feed['ios14']['sha256'], 'c' * 64)
+        page = (self.out / 'index.html').read_text(encoding='utf-8')
+        self.assertIn('MarcoMovie-0.7.5-ios-iphone-ipad-unsigned.ipa.sha256', page)
+        self.assertIn('MarcoMovie-0.7.5-ios14-unsigned.ipa.sha256', page)
+        self.assertIn('SHA-256：' + 'c' * 64, page)
+
 
 if __name__ == '__main__':
     unittest.main()

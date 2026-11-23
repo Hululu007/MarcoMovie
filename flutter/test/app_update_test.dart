@@ -379,4 +379,148 @@ void main() {
     expect(plain, isNot(contains('SHA-256')));
     expect(plain, isNot(contains('公共内容守卫')));
   });
+
+  test('parseIosMajorVersion extracts major iOS version across OS strings', () {
+    expect(AppUpdate.parseIosMajorVersion('Version 14.8.1 (Build 18H107)'), 14);
+    expect(AppUpdate.parseIosMajorVersion('Version 15.0 (Build 19A346)'), 15);
+    expect(AppUpdate.parseIosMajorVersion('Version 16.4 (Build 20E247)'), 16);
+    expect(AppUpdate.parseIosMajorVersion('Version 26.5 (Build 23F10)'), 26);
+    expect(AppUpdate.parseIosMajorVersion('iOS 14.4.2'), 14);
+    expect(AppUpdate.parseIosMajorVersion('14.8'), 14);
+    expect(AppUpdate.parseIosMajorVersion(''), isNull);
+    expect(AppUpdate.parseIosMajorVersion('Windows 10 Pro'), isNull);
+  });
+
+  test('iOS 14 and iOS 15+ devices automatically pick matching IPA from mirror and GitHub', () async {
+    final mainSha = '1' * 64;
+    final ios14Sha = '2' * 64;
+    final mirrorFeed = {
+      'schema': 1,
+      'platform': 'ios',
+      'versionName': '0.7.5',
+      'prerelease': false,
+      'notes': 'iOS 0.7.5 dual package release',
+      'packages': {
+        'MarcoMovie-0.7.5-ios-iphone-ipad-unsigned.ipa': {
+          'url':
+              'https://github.com/Pilipala9919/MarcoMovie/releases/download/ios-v0.7.5/MarcoMovie-0.7.5-ios-iphone-ipad-unsigned.ipa',
+          'size': 63909667,
+          'sha256': mainSha,
+        },
+        'MarcoMovie-0.7.5-ios14-unsigned.ipa': {
+          'url':
+              'https://github.com/Pilipala9919/MarcoMovie/releases/download/ios-v0.7.5/MarcoMovie-0.7.5-ios14-unsigned.ipa',
+          'size': 63911322,
+          'sha256': ios14Sha,
+        },
+      },
+    };
+    final mirrorClient = MockClient((request) async {
+      expect(request.url.path, '/movie/updates/ios.json');
+      return http.Response(jsonEncode(mirrorFeed), 200);
+    });
+
+    // iOS 14 device picks ios14-unsigned.ipa from mirror.
+    AppUpdate.debugIosMajorVersionOverride = 14;
+    addTearDown(() => AppUpdate.debugIosMajorVersionOverride = null);
+    final ios14Release =
+        await AppUpdate.check(client: mirrorClient, platform: 'ios');
+    expect(ios14Release.version, '0.7.5');
+    expect(ios14Release.isIos14Compat, isTrue);
+    expect(
+      ios14Release.iosUrl.toString(),
+      endsWith('/MarcoMovie-0.7.5-ios14-unsigned.ipa'),
+    );
+    expect(ios14Release.checksum, ios14Sha);
+    expect(ios14Release.size, 63911322);
+
+    // iOS 26 / iOS 15+ device picks main ios-iphone-ipad-unsigned.ipa from mirror.
+    AppUpdate.debugIosMajorVersionOverride = 26;
+    final ios26Release =
+        await AppUpdate.check(client: mirrorClient, platform: 'ios');
+    expect(ios26Release.version, '0.7.5');
+    expect(ios26Release.isIos14Compat, isFalse);
+    expect(
+      ios26Release.iosUrl.toString(),
+      endsWith('/MarcoMovie-0.7.5-ios-iphone-ipad-unsigned.ipa'),
+    );
+    expect(ios26Release.checksum, mainSha);
+    expect(ios26Release.size, 63909667);
+
+    // Mirror lacking ios14 package must NOT serve the iOS 15+ IPA to iOS 14;
+    // it falls back to GitHub Releases and selects the newest release carrying ios14.
+    var githubCalls = 0;
+    final fallbackClient = MockClient((request) async {
+      if (request.url.host != 'api.github.com') {
+        return http.Response(
+          jsonEncode({
+            'schema': 1,
+            'platform': 'ios',
+            'versionName': '0.7.6',
+            'prerelease': false,
+            'packages': {
+              'MarcoMovie-0.7.6-ios-iphone-ipad-unsigned.ipa': {
+                'url':
+                    'https://github.com/Pilipala9919/MarcoMovie/releases/download/ios-v0.7.6/MarcoMovie-0.7.6-ios-iphone-ipad-unsigned.ipa',
+                'size': 64000000,
+                'sha256': '3' * 64,
+              },
+            },
+          }),
+          200,
+        );
+      }
+      githubCalls++;
+      return http.Response(
+        jsonEncode([
+          {
+            'tag_name': 'ios-v0.7.6',
+            'draft': false,
+            'prerelease': false,
+            'assets': [
+              {
+                'name': 'MarcoMovie-0.7.6-ios-iphone-ipad-unsigned.ipa',
+                'size': 64000000,
+                'digest': 'sha256:${'3' * 64}',
+                'browser_download_url':
+                    'https://github.com/Pilipala9919/MarcoMovie/releases/download/ios-v0.7.6/MarcoMovie-0.7.6-ios-iphone-ipad-unsigned.ipa',
+              },
+            ],
+          },
+          {
+            'tag_name': 'ios-v0.7.5',
+            'draft': false,
+            'prerelease': false,
+            'assets': [
+              {
+                'name': 'MarcoMovie-0.7.5-ios-iphone-ipad-unsigned.ipa',
+                'size': 63909667,
+                'digest': 'sha256:$mainSha',
+                'browser_download_url':
+                    'https://github.com/Pilipala9919/MarcoMovie/releases/download/ios-v0.7.5/MarcoMovie-0.7.5-ios-iphone-ipad-unsigned.ipa',
+              },
+              {
+                'name': 'MarcoMovie-0.7.5-ios14-unsigned.ipa',
+                'size': 63911322,
+                'digest': 'sha256:$ios14Sha',
+                'browser_download_url':
+                    'https://github.com/Pilipala9919/MarcoMovie/releases/download/ios-v0.7.5/MarcoMovie-0.7.5-ios14-unsigned.ipa',
+              },
+            ],
+          },
+        ]),
+        200,
+      );
+    });
+    AppUpdate.debugIosMajorVersionOverride = 14;
+    final fallbackIos14 =
+        await AppUpdate.check(client: fallbackClient, platform: 'ios');
+    expect(githubCalls, 1);
+    expect(fallbackIos14.version, '0.7.5');
+    expect(fallbackIos14.isIos14Compat, isTrue);
+    expect(
+      fallbackIos14.iosUrl.toString(),
+      endsWith('/MarcoMovie-0.7.5-ios14-unsigned.ipa'),
+    );
+  });
 }
