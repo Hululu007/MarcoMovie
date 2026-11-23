@@ -361,6 +361,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final bool _ownsAnime4kController;
   late final WindowsVideoQualityController _winQualityController;
   BlurayIsoLease? _blurayIsoLease;
+  OfflineHlsLease? _offlineHlsLease;
   List<BlurayChapter> _blurayChapters = const [];
 
   bool get _isIosPlayerPlatform =>
@@ -785,6 +786,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   final Set<String> _failedQualityUrls = <String>{};
   bool _liveDirectFallbackTried = false;
   bool _activeEpisodeUsedLocalProxy = false;
+  bool _liveSessionHasProgress = false;
+  bool _liveStartSpecTriggered = false;
   LiveChannel? _activeLiveChannel;
 
   String get _displayTitle => _activeLiveChannel?.name ?? widget.video.title;
@@ -1020,17 +1023,16 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _playerSubscriptions.clear();
     _playerSubscriptions.add(_player.stream.width.listen((w) {
-      if (!mounted || w == null || w <= 0 || w == _videoWidth) return;
+      if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      if (w == null || w <= 0 || w == _videoWidth) return;
       setState(() {
         _videoWidth = w;
-        if (_isLiveStream && _videoHeight > 0) {
-          _loading = false;
-        }
       });
-      if (_videoWidth > 0 && _videoHeight > 0) {
-        if (_isLiveStream && _playing && !_buffering) {
-          _startup.cancel();
-        }
+      if (_videoWidth > 0 &&
+          _videoHeight > 0 &&
+          (!_isLiveStream || _liveSessionHasProgress) &&
+          !_liveStartSpecTriggered) {
+        _liveStartSpecTriggered = true;
         _startSpecController.onFirstFrameReady(
           enabled: _hudPrefs.effectiveStartSpecHud,
           isLive: _isLiveStream,
@@ -1038,17 +1040,16 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     }));
     _playerSubscriptions.add(_player.stream.height.listen((h) {
-      if (!mounted || h == null || h <= 0 || h == _videoHeight) return;
+      if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      if (h == null || h <= 0 || h == _videoHeight) return;
       setState(() {
         _videoHeight = h;
-        if (_isLiveStream && _videoWidth > 0) {
-          _loading = false;
-        }
       });
-      if (_videoWidth > 0 && _videoHeight > 0) {
-        if (_isLiveStream && _playing && !_buffering) {
-          _startup.cancel();
-        }
+      if (_videoWidth > 0 &&
+          _videoHeight > 0 &&
+          (!_isLiveStream || _liveSessionHasProgress) &&
+          !_liveStartSpecTriggered) {
+        _liveStartSpecTriggered = true;
         _startSpecController.onFirstFrameReady(
           enabled: _hudPrefs.effectiveStartSpecHud,
           isLive: _isLiveStream,
@@ -1119,6 +1120,16 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
       }
       final shouldClearLoading = pos > Duration.zero && _loading;
+      if (_isLiveStream && pos > Duration.zero && !_liveSessionHasProgress) {
+        _liveSessionHasProgress = true;
+        if (_videoWidth > 0 && _videoHeight > 0 && !_liveStartSpecTriggered) {
+          _liveStartSpecTriggered = true;
+          _startSpecController.onFirstFrameReady(
+            enabled: _hudPrefs.effectiveStartSpecHud,
+            isLive: true,
+          );
+        }
+      }
       final shouldClearStaleLiveBuffering =
           _isLiveStream &&
           _buffering &&
@@ -1198,7 +1209,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         } else {
           _duration = dur;
         }
-        final clearedLoading = dur > Duration.zero && _loading;
+        final clearedLoading = !_isLiveStream && dur > Duration.zero && _loading;
         if (clearedLoading) {
           _loading = false;
         }
@@ -1248,7 +1259,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _startup.updateState(playing: playing);
         setState(() {
           _playing = playing;
-          if (playing) {
+          if (playing && (!_isLiveStream || _liveSessionHasProgress)) {
             _loading = false;
             if (!OhosRuntime.isOhos && !_isLiveStream && !widget.embedded) {
               _hasStartedVodPlayback = true;
@@ -1292,10 +1303,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         setState(() => _buffering = buffering);
         if (!buffering) {
           _midPlaybackStallTimer?.cancel();
-          if (_isLiveStream && _playing && _videoWidth > 0 && _videoHeight > 0) {
-            _startup.cancel();
+          if (_playing && (!_isLiveStream || _liveSessionHasProgress)) {
+            _scheduleHide();
           }
-          if (_playing) _scheduleHide();
         } else if (!_isLiveStream &&
             !_loading &&
             !_userSelectedQuality &&
@@ -2122,6 +2132,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     bool useAlternateLiveUa = false,
   }) async {
     _startup.reset();
+    _liveSessionHasProgress = false;
+    _liveStartSpecTriggered = false;
     if (!bypassLocalProxy && !forceLiveLocalProxy && !useAlternateLiveUa) {
       _liveDirectFallbackTried = false;
       _lastLiveUpstreamStatus = null;
@@ -2158,7 +2170,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _playbackErrorCause = null;
     try {
       final previousIsoLease = _blurayIsoLease;
+      final previousOfflineHlsLease = _offlineHlsLease;
       _blurayIsoLease = null;
+      _offlineHlsLease = null;
       _blurayChapters = const [];
       await _playerConfiguration;
       await _changeMedia(session, () async {
@@ -2170,6 +2184,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         await _cloudMedia.releaseUnless(qualityLease);
         await _localMedia.releaseUnless(null);
         await previousIsoLease?.close();
+        await previousOfflineHlsLease?.close();
       });
     } catch (_) {
       if (session == _playSession) _failPlayback();
@@ -2246,6 +2261,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     CloudMediaLease? pendingLease;
     LocalMediaLease? pendingLocalLease;
     BlurayIsoLease? pendingBlurayLease;
+    OfflineHlsLease? pendingOfflineHlsLease;
     List<BlurayChapter> pendingBlurayChapters = const [];
     try {
       var resolvedEpisode = quality ?? (_currentEpisode.isLocalFile
@@ -2348,6 +2364,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           isCancelled: () => !mounted || session != _playSession,
         );
         pendingBlurayChapters = pendingBlurayLease.chapters;
+      } else if (_currentEpisode.isLocalFile &&
+          OfflineHlsLease.isLocalM3u8(safePlayUrl)) {
+        pendingOfflineHlsLease = await OfflineHlsLease.open(safePlayUrl);
       }
       final forceProxyForWindowsHttps =
           Platform.isWindows && parsedTargetUri?.scheme.toLowerCase() == 'https';
@@ -2389,6 +2408,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         await _cloudMedia.discard(pendingLease);
         await _localMedia.discard(pendingLocalLease);
         await pendingBlurayLease?.close();
+        await pendingOfflineHlsLease?.close();
         return;
       }
       var effectiveAudioUrl = resolvedEpisode.externalAudioUrl;
@@ -2399,11 +2419,14 @@ class _PlayerScreenState extends State<PlayerScreen>
           effectiveAudioUrl = proxiedAudio.toString();
         }
       }
-      final effectiveOpenUrl = pendingBlurayLease?.url.toString() ??
+      final effectiveOpenUrl = pendingOfflineHlsLease?.url.toString() ??
+          pendingBlurayLease?.url.toString() ??
           pendingLocalLease?.url.toString() ??
           safePlayUrl;
       final effectiveOpenHeaders =
-          (pendingBlurayLease != null || pendingLocalLease != null)
+          (pendingOfflineHlsLease != null ||
+                  pendingBlurayLease != null ||
+                  pendingLocalLease != null)
               ? const <String, String>{}
               : headers;
       _activeStreamUrl = safePlayUrl;
@@ -2415,6 +2438,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _cloudMedia.adopt(pendingLease);
         _localMedia.adopt(pendingLocalLease);
         _blurayIsoLease = pendingBlurayLease;
+        _offlineHlsLease = pendingOfflineHlsLease;
         _blurayChapters = pendingBlurayChapters;
         _allowEvents = true;
         final hasFallback = _isLiveStream
@@ -2548,6 +2572,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (!identical(_blurayIsoLease, pendingBlurayLease)) {
           await pendingBlurayLease?.close();
         }
+        if (!identical(_offlineHlsLease, pendingOfflineHlsLease)) {
+          await pendingOfflineHlsLease?.close();
+        }
         return;
       }
       _allowHistory = true;
@@ -2559,6 +2586,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       await _localMedia.discard(pendingLocalLease);
       if (!identical(_blurayIsoLease, pendingBlurayLease)) {
         await pendingBlurayLease?.close();
+      }
+      if (!identical(_offlineHlsLease, pendingOfflineHlsLease)) {
+        await pendingOfflineHlsLease?.close();
       }
       if (mounted && session == _playSession) _failPlayback(error);
     }
@@ -3661,7 +3691,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final cloudLease = _cloudMedia.detach();
     final localLease = _localMedia.detach();
     final blurayIsoLease = _blurayIsoLease;
+    final offlineHlsLease = _offlineHlsLease;
     _blurayIsoLease = null;
+    _offlineHlsLease = null;
     _blurayChapters = const [];
     _mediaChanges.whenComplete(() async {
       try {
@@ -3694,7 +3726,11 @@ class _PlayerScreenState extends State<PlayerScreen>
             try {
               await blurayIsoLease?.close();
             } finally {
-              releaseSource?.call();
+              try {
+                await offlineHlsLease?.close();
+              } finally {
+                releaseSource?.call();
+              }
             }
           }
         }

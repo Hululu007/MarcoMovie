@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'ed25519.dart';
+import 'macos_window_bounds.dart';
 
 class UpdateCancelled implements Exception {
   const UpdateCancelled();
@@ -128,6 +129,7 @@ class AppUpdate {
   final String? checksum;
   final int? size;
   final Uri? iosUrl;
+  final Uri? macosUrl;
   const AppUpdate(
     this.version,
     this.notes,
@@ -135,7 +137,17 @@ class AppUpdate {
     this.checksum,
     this.size, [
     this.iosUrl,
+    this.macosUrl,
   ]);
+
+  static List<String> macosAssetNames(String version) => <String>[
+        'MarcoMovie-$version-macos-desktop.zip',
+        'MarcoMovie-$version-macos.zip',
+      ];
+
+  static bool _isTrustedMacosAssetPath(String path, String version) =>
+      path.endsWith('/MarcoMovie-$version-macos-desktop.zip') ||
+      path.endsWith('/MarcoMovie-$version-macos.zip');
 
   // Only use the advertised asset. The download site does not host large IPAs.
   Uri get iosMirrorIpaUrl =>
@@ -194,14 +206,21 @@ class AppUpdate {
       final assets = json['assets'];
       if (assets is List) {
         for (final item in assets.whereType<Map>()) {
+          final itemName = item['name']?.toString() ?? '';
           if (platform == 'windows' &&
-              item['name'] == 'MarcoMovie-$version-windows-setup.exe') {
+              itemName == 'MarcoMovie-$version-windows-setup.exe') {
             asset = item;
           } else if (platform == 'ios' &&
-              (item['name'] == 'MarcoMovie-$version-ios-unsigned.ipa' ||
-                  item['name'] ==
+              (itemName == 'MarcoMovie-$version-ios-unsigned.ipa' ||
+                  itemName ==
                       'MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa')) {
             asset ??= item;
+          } else if (platform == 'macos') {
+            if (itemName == 'MarcoMovie-$version-macos-desktop.zip') {
+              asset = item;
+            } else if (itemName == 'MarcoMovie-$version-macos.zip') {
+              asset ??= item;
+            }
           }
         }
       }
@@ -217,6 +236,19 @@ class AppUpdate {
         if (cand is Map) asset = cand;
       } else if (json['ios'] is Map) {
         asset = json['ios'] as Map;
+      }
+    } else if (platform == 'macos') {
+      if (json['packages'] is Map) {
+        final pkgs = json['packages'] as Map;
+        final cand = pkgs['MarcoMovie-$version-macos-desktop.zip'] ??
+            pkgs['MarcoMovie-$version-macos.zip'];
+        if (cand is Map) asset = cand;
+      }
+      if (asset == null && json['package'] is Map) {
+        asset = json['package'] as Map;
+      }
+      if (asset == null && json['macos'] is Map) {
+        asset = json['macos'] as Map;
       }
     }
     final data = asset ?? const <String, dynamic>{};
@@ -241,7 +273,11 @@ class AppUpdate {
               '/MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa',
             )) &&
         validDigest;
-    final verified = verifiedWin || verifiedIos;
+    final verifiedMacos = platform == 'macos' &&
+        uri != null &&
+        _isTrustedMacosAssetPath(uri.path, version) &&
+        validDigest;
+    final verified = verifiedWin || verifiedIos || verifiedMacos;
     return AppUpdate(
       version,
       (json[github ? 'body' : 'notes'] ?? '').toString(),
@@ -249,6 +285,7 @@ class AppUpdate {
       verified ? digest.toLowerCase() : null,
       verified ? size : null,
       verifiedIos ? uri : null,
+      verifiedMacos ? uri : null,
     );
   }
 
@@ -278,18 +315,22 @@ class AppUpdate {
         final name = 'MarcoMovie-${release.version}-${_suffix(platform)}';
         final altIosName =
             'MarcoMovie-${release.version}-ios-iphone-ipad-unsigned.ipa';
+        final altMacosName = 'MarcoMovie-${release.version}-macos-desktop.zip';
         final assets = item['assets'];
         if (assets is! List ||
             !assets.whereType<Map>().any(
                   (asset) =>
                       (asset['name'] == name ||
-                          (platform == 'ios' && asset['name'] == altIosName)) &&
+                          (platform == 'ios' && asset['name'] == altIosName) ||
+                          (platform == 'macos' &&
+                              asset['name'] == altMacosName)) &&
                       trustedAsset(asset['browser_download_url']) != null,
                 )) {
           continue;
         }
         if (platform == 'windows' && release.windowsUrl == null ||
-            platform == 'ios' && release.iosUrl == null) {
+            platform == 'ios' && release.iosUrl == null ||
+            platform == 'macos' && release.macosUrl == null) {
           continue;
         }
         candidates.add(release);
@@ -394,7 +435,8 @@ class AppUpdate {
           }
           final release = parse(manifest, platform: platform);
           if (platform == 'windows' && release.windowsUrl == null ||
-              platform == 'ios' && release.iosUrl == null) {
+              platform == 'ios' && release.iosUrl == null ||
+              platform == 'macos' && release.macosUrl == null) {
             continue;
           }
           return release;
@@ -520,8 +562,112 @@ class AppUpdate {
     }
   }
 
+  /// Downloads the published macOS ZIP asset to an isolated staging file.
+  /// Only a complete, size- and SHA-256-verified archive is exposed to Finder.
+  Future<File> downloadMacos({
+    required Directory directory,
+    required UpdateCancellation cancellation,
+    http.Client? client,
+    Duration connectionTimeout = const Duration(seconds: 15),
+    Duration stallTimeout = const Duration(seconds: 30),
+    Duration totalTimeout = const Duration(minutes: 10),
+    void Function(int received, int total)? onProgress,
+  }) async {
+    final target = macosUrl;
+    if (target == null ||
+        trustedAsset(target.toString()) == null ||
+        !_isTrustedMacosAssetPath(target.path, version) ||
+        size == null ||
+        checksum == null) {
+      throw const FormatException('缺少可信的 macOS 更新信息');
+    }
+    final rawName =
+        target.pathSegments.isNotEmpty ? target.pathSegments.last : '';
+    final expectedFileName =
+        RegExp(r'^MarcoMovie-\d+\.\d+\.\d+-macos(?:-desktop)?\.zip$')
+                .hasMatch(rawName)
+            ? rawName
+            : 'MarcoMovie-$version-macos-desktop.zip';
+    final installedFile =
+        File('${directory.path}${Platform.pathSeparator}$expectedFileName');
+    cancellation.check();
+    if (await installedFile.exists()) {
+      try {
+        await verifyFile(installedFile);
+        cancellation.check();
+        return installedFile;
+      } on FormatException {
+        await installedFile.delete();
+      }
+    }
+    final transport = client ?? http.Client();
+    final abort = Completer<void>();
+    final deadline = Timer(totalTimeout, () {
+      if (!abort.isCompleted) abort.complete();
+    });
+    cancellation.whenCancelled.then((_) {
+      if (!abort.isCompleted) abort.complete();
+    });
+    Directory? staging;
+    IOSink? sink;
+    try {
+      cancellation.check();
+      await directory.create(recursive: true);
+      staging = await directory.createTemp('.marco-macos-update-');
+      final partial = File('${staging.path}${Platform.pathSeparator}package.part');
+      final request =
+          http.AbortableRequest('GET', target, abortTrigger: abort.future);
+      final response = await cancellation
+          .bind(transport.send(request).timeout(connectionTimeout));
+      if (response.statusCode != 200) {
+        throw HttpException('HTTP ${response.statusCode}');
+      }
+      if (response.contentLength != null && response.contentLength != size) {
+        throw const FormatException('更新包大小与发布清单不一致');
+      }
+      var received = 0;
+      sink = partial.openWrite();
+      Future<void> receive() async {
+        await for (final chunk in response.stream.timeout(stallTimeout)) {
+          cancellation.check();
+          if (abort.isCompleted) throw TimeoutException('更新包下载超时');
+          received += chunk.length;
+          if (received > size!) throw const FormatException('更新包超过发布大小');
+          sink!.add(chunk);
+          onProgress?.call(received, size!);
+        }
+      }
+
+      await cancellation.bind(Future.any([
+        receive(),
+        abort.future.then<void>((_) => throw TimeoutException('更新包下载超时')),
+      ]));
+      await sink.flush();
+      await sink.close();
+      sink = null;
+      cancellation.check();
+      await verifyFile(partial);
+      cancellation.check();
+      if (await installedFile.exists()) {
+        await installedFile.delete();
+      }
+      return await partial.rename(installedFile.path);
+    } finally {
+      deadline.cancel();
+      if (!abort.isCompleted) abort.complete();
+      if (client == null) transport.close();
+      await sink?.close();
+      if (staging != null && await staging.exists()) {
+        await staging.delete(recursive: true);
+      }
+    }
+  }
+
+  static Future<bool> revealMacosPackageInFinder(File file) =>
+      const DefaultMacosWindowPlatformAdapter().revealInFinder(file.path);
+
   Future<void> verifyFile(File file) async {
-    if ((windowsUrl == null && iosUrl == null) ||
+    if ((windowsUrl == null && iosUrl == null && macosUrl == null) ||
         size == null ||
         checksum == null ||
         await file.length() != size) {

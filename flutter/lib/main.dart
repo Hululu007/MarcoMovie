@@ -9,6 +9,7 @@ import 'package:media_kit/media_kit.dart';
 import 'core/app_log.dart';
 import 'core/cms_client.dart';
 import 'core/download_service.dart';
+import 'core/macos_window_bounds.dart';
 import 'core/mdk_platform_player.dart';
 import 'core/ohos_runtime.dart';
 import 'core/storage_service.dart';
@@ -60,6 +61,13 @@ Future<void> main() async {
   GlassworkBackdrop.intensity.value = 0.68;
   AppleTheme.mode.value = AppleTheme.fromPref(storage.appThemeMode);
   await IosLiquidGlassBridge.setAppearanceMode(storage.appThemeMode);
+  if (Platform.isMacOS) {
+    final macBounds = MacosWindowBoundsController.installShared(storage);
+    await macBounds.syncOnStartup(initialThemeMode: AppleTheme.mode.value);
+    AppleTheme.mode.addListener(() {
+      macBounds.applyAppearanceMode(AppleTheme.mode.value);
+    });
+  }
   final client = CmsClient();
   try {
     await DownloadService.instance.init(client);

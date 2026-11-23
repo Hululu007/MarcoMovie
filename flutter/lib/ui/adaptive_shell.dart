@@ -48,6 +48,7 @@ import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
 import 'live_station_badge.dart';
+import 'macos_update_sheet.dart';
 import 'motion/aurora_background.dart';
 import 'motion/ios27_springs.dart';
 import 'motion/player_enter_transition.dart';
@@ -11983,6 +11984,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         title: '软件更新',
         backLabel: '返回',
         builder: (_) => IosUpdateSheet(installedVersion: _currentAppVersion),
+      );
+      return;
+    }
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.macOS) {
+      showAppleModalSheet<void>(
+        context: context,
+        title: '检查版本更新',
+        builder: (_) => MacosUpdateSheet(installedVersion: _currentAppVersion),
       );
       return;
     }

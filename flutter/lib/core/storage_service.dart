@@ -16,6 +16,7 @@ import 'csp_bridge.dart';
 import 'ios_avplayer_controller.dart';
 import 'ios_mpv_profile.dart';
 import 'local_media_proxy.dart';
+import 'macos_window_bounds.dart';
 import 'mdk_platform_player.dart';
 import 'models.dart';
 import 'quark_account.dart';
@@ -2077,10 +2078,21 @@ class StorageService {
   }
 
   String _liveSnapshotKey(LiveSource source) {
+    final sortedHeaders = source.headers.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final headerSig = [
+      for (final e in sortedHeaders) '${e.key}=${e.value}',
+    ].join('\n');
+    final inlineDigest = source.inlineContent.isEmpty
+        ? ''
+        : sha256.convert(utf8.encode(source.inlineContent)).toString();
+    final pluginSig = source.plugin == null
+        ? ''
+        : '${source.plugin!.key}|${source.plugin!.api}|${source.plugin!.ext}';
     final digest = sha256
         .convert(
           utf8.encode(
-            '${source.subscriptionId}|${source.name}|${source.url}|${source.inlineContent.length}',
+            '${source.subscriptionId}|${source.name}|${source.url}|${source.origin}|$headerSig|$inlineDigest|$pluginSig',
           ),
         )
         .toString()
@@ -5531,5 +5543,17 @@ class StorageService {
       await _writeSeriesScrapeOverrides(records);
       seriesScrapeRevision.value++;
     }
+  }
+
+  MacosWindowBounds? loadMacosWindowBounds() =>
+      MacosWindowBounds.tryParseJson(_prefs.getString(MacosWindowBounds.prefKey));
+
+  Future<void> saveMacosWindowBounds(MacosWindowBounds bounds) async {
+    if (!bounds.isValid) return;
+    await _prefs.setString(MacosWindowBounds.prefKey, bounds.toJsonString());
+  }
+
+  Future<void> clearMacosWindowBounds() async {
+    await _prefs.remove(MacosWindowBounds.prefKey);
   }
 }
