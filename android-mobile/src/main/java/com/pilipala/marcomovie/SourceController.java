@@ -2366,6 +2366,68 @@ final class SourceController {
                 });
     }
 
+    /**
+     * Writes an imported local script or playlist to an immutable content-addressed directory
+     * ({@code <dir>/<sha256-16>/<safeName>}) using a request-exclusive temporary file ({@code
+     * fsync} + atomic rename). Preserving the original basename keeps script titles and module
+     * names clean while guaranteeing two concurrent imports of same-named files (e.g., {@code
+     * source.py} from different directories) with different contents never collide or overwrite
+     * each other's backing file.
+     */
+    static java.io.File writeContentAddressedLocalFile(
+            java.io.File dir, String displayName, byte[] utf8Bytes) throws IOException {
+        if (dir == null) throw new IOException("本地存储目录不可用");
+        if (!dir.exists() && !dir.mkdirs()) throw new IOException("无法创建本地存储目录");
+        byte[] data = utf8Bytes == null ? new byte[0] : utf8Bytes;
+        String safeName =
+                (displayName == null ? "imported" : displayName)
+                        .replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
+        if (safeName.isEmpty() || ".".equals(safeName) || "..".equals(safeName)) {
+            safeName = "imported";
+        }
+        String digest = sha256HexPrefix(data, 16);
+        java.io.File bucket = new java.io.File(dir, digest);
+        if (!bucket.exists() && !bucket.mkdirs() && !bucket.isDirectory()) {
+            throw new IOException("无法创建本地存储子目录");
+        }
+        java.io.File target = new java.io.File(bucket, safeName);
+        if (target.isFile() && target.length() == data.length) {
+            return target;
+        }
+        java.io.File tmp = java.io.File.createTempFile("import-", ".tmp", bucket);
+        try {
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(tmp)) {
+                out.write(data);
+                out.getFD().sync();
+            }
+            if (!tmp.renameTo(target)) {
+                // Another concurrent import of identical content may have atomically published the
+                // exact same immutable hash path first.
+                if (!target.isFile() || target.length() != data.length) {
+                    throw new IOException("无法保存导入文件");
+                }
+            }
+            return target;
+        } finally {
+            tmp.delete();
+        }
+    }
+
+    private static String sha256HexPrefix(byte[] data, int hexChars) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(data);
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(Character.forDigit((b >> 4) & 0xf, 16));
+                sb.append(Character.forDigit(b & 0xf, 16));
+            }
+            return sb.length() > hexChars ? sb.substring(0, hexChars) : sb.toString();
+        } catch (Exception e) {
+            return Integer.toHexString(java.util.Arrays.hashCode(data));
+        }
+    }
+
     static void importLocalUri(MainActivity a, Uri uri, boolean preferLive) {
         final long importSeq = beginConfigImport(a);
         final boolean snapshotPrivate = a.privateMode;
@@ -2415,8 +2477,11 @@ final class SourceController {
                                                 && (rawBytes[2] & 0xff) == 0x03
                                                 && (rawBytes[3] & 0xff) == 0x04);
                         if (isZip && !lowerName.endsWith(".jar")) {
-                            LocalSourcePackage pkg =
-                                    LocalSourcePackage.open(a.getFilesDir(), rawBytes);
+                            java.io.File filesDir = a.getFilesDir();
+                            if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                return;
+                            }
+                            LocalSourcePackage pkg = LocalSourcePackage.open(filesDir, rawBytes);
                             a.ui.post(
                                     () -> {
                                         if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
@@ -2437,18 +2502,19 @@ final class SourceController {
                                 || lowerName.endsWith(".txt")) {
                             try {
                                 LiveCatalog.Catalog cat = LiveCatalog.parse(text, "", null);
+                                java.io.File filesDir = a.getFilesDir();
                                 if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
                                     return;
                                 }
-                                String suffix = LiveQualityPolicy.metricKey(text);
-                                if (suffix.length() > 8) suffix = suffix.substring(0, 8);
-                                java.io.File liveFile =
+                                java.io.File liveDir =
                                         new java.io.File(
-                                                a.getFilesDir(), "custom_live_" + suffix + ".txt");
-                                try (java.io.OutputStream out =
-                                        new java.io.FileOutputStream(liveFile)) {
-                                    out.write(text.getBytes("UTF-8"));
-                                }
+                                                filesDir,
+                                                snapshotPrivate
+                                                        ? "local_live_private"
+                                                        : "local_live");
+                                java.io.File liveFile =
+                                        writeContentAddressedLocalFile(
+                                                liveDir, "custom_live.txt", text.getBytes("UTF-8"));
                                 final String liveUrl = Cms.fileUri(liveFile);
                                 final int count = cat.channelCount();
                                 final String liveName = displayName + " (" + count + "台)";
@@ -2473,19 +2539,22 @@ final class SourceController {
                                 || lowerName.endsWith(".py")
                                 || Cms.looksLikeJsSpider(text, displayName)
                                 || Cms.looksLikePySpider(text, displayName)) {
+                            java.io.File filesDir = a.getFilesDir();
+                            // Re-verify ownership AFTER getFilesDir()/storage access and write into
+                            // an immutable content-addressed path isolated by space so an older
+                            // same-named import can never overwrite a newer selection's file.
                             if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
                                 return;
                             }
                             java.io.File spiderDir =
-                                    new java.io.File(a.getFilesDir(), "local_spiders");
-                            if (!spiderDir.exists()) spiderDir.mkdirs();
-                            String safeName =
-                                    displayName.replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
-                            java.io.File savedFile = new java.io.File(spiderDir, safeName);
-                            try (java.io.OutputStream out =
-                                    new java.io.FileOutputStream(savedFile)) {
-                                out.write(text.getBytes("UTF-8"));
-                            }
+                                    new java.io.File(
+                                            filesDir,
+                                            snapshotPrivate
+                                                    ? "local_spiders_private"
+                                                    : "local_spiders");
+                            java.io.File savedFile =
+                                    writeContentAddressedLocalFile(
+                                            spiderDir, displayName, text.getBytes("UTF-8"));
                             String fileOrigin = Cms.fileUri(savedFile);
                             Cms.Config singleCfg = Cms.parseConfig(text, fileOrigin);
                             a.ui.post(
@@ -2525,15 +2594,19 @@ final class SourceController {
                             // Fallback: check if the JSON/text file is actually a live channel list
                             try {
                                 LiveCatalog.Catalog cat = LiveCatalog.parse(text, "", null);
+                                java.io.File filesDir = a.getFilesDir();
                                 if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
                                     return;
                                 }
+                                java.io.File liveDir =
+                                        new java.io.File(
+                                                filesDir,
+                                                snapshotPrivate
+                                                        ? "local_live_private"
+                                                        : "local_live");
                                 java.io.File liveFile =
-                                        new java.io.File(a.getFilesDir(), "custom_live.txt");
-                                try (java.io.OutputStream out =
-                                        new java.io.FileOutputStream(liveFile)) {
-                                    out.write(text.getBytes("UTF-8"));
-                                }
+                                        writeContentAddressedLocalFile(
+                                                liveDir, "custom_live.txt", text.getBytes("UTF-8"));
                                 final String liveUrl = Cms.fileUri(liveFile);
                                 final int count = cat.channelCount();
                                 a.ui.post(

@@ -552,6 +552,7 @@ public final class MainActivity extends Activity {
 
     boolean reduced, prepared, playing, foreground;
     int generation;
+    int fullscreenPlaybackSession;
     final java.util.concurrent.atomic.AtomicLong configImportSeq =
             new java.util.concurrent.atomic.AtomicLong();
     static final int MAX_HOME_SNAPSHOTS = 8;

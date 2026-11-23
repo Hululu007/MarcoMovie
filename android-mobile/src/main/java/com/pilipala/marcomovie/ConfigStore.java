@@ -7,6 +7,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 /** Configuration destination, independent from preferences and media/account storage. */
@@ -296,11 +297,50 @@ final class ConfigStore {
         }
     }
 
+    private static String normalizeOrigin(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private static boolean containsSiteKey(String rawConfig, String siteKey) {
+        if (rawConfig == null
+                || rawConfig.isEmpty()
+                || siteKey == null
+                || siteKey.trim().isEmpty()) {
+            return false;
+        }
+        try {
+            JSONObject root = new JSONObject(Cms.withoutComments(rawConfig));
+            JSONArray sites = root.optJSONArray("sites");
+            if (sites != null) {
+                for (int i = 0; i < sites.length(); i++) {
+                    JSONObject item = sites.optJSONObject(i);
+                    if (item != null && siteKey.equals(item.optString("key", ""))) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            Cms.Config parsed = Cms.parseConfig(rawConfig, null);
+            for (Cms.Site s : parsed.sites) {
+                if (s != null && siteKey.equals(s.key)) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
     /**
      * Loads the last atomically committed config version ({@code config-state.json}) so a cold
      * start after a crash mid-commit can never pair new pointers with an old body or vice versa.
-     * Falls back cleanly to legacy {@code config.json} + preference pointers for pre-bundle
-     * installs.
+     * Distinguishes switching subscriptions (where persisted prefs lagged behind the committed
+     * bundle) from switching sites within the same subscription (preserving the user's latest
+     * {@code fallbackSelectedSite} when {@code fallbackOrigin} matches the committed origin and the
+     * site exists in the committed config). Falls back cleanly to legacy {@code config.json} +
+     * preference pointers for pre-bundle installs.
      */
     synchronized RecoveredState loadRecoveredState(
             String fallbackOrigin, String fallbackSelectedSite) throws IOException {
@@ -314,10 +354,19 @@ final class ConfigStore {
                 if (!body.isEmpty()) {
                     String origin =
                             obj.optBoolean("hasOrigin", false) ? obj.optString("origin", "") : null;
-                    String selected =
+                    String bundleSelected =
                             obj.optBoolean("hasSelectedSite", false)
                                     ? obj.optString("selectedSite", "")
                                     : null;
+                    boolean sameSubscription =
+                            normalizeOrigin(origin).equals(normalizeOrigin(fallbackOrigin));
+                    String effectiveSelected =
+                            sameSubscription
+                                            && fallbackSelectedSite != null
+                                            && !fallbackSelectedSite.isEmpty()
+                                            && containsSiteKey(body, fallbackSelectedSite)
+                                    ? fallbackSelectedSite
+                                    : bundleSelected;
                     boolean needHealBody = !configFile.isFile();
                     if (!needHealBody) {
                         try {
@@ -333,7 +382,7 @@ final class ConfigStore {
                         } catch (Exception ignored) {
                         }
                     }
-                    return new RecoveredState(body, origin, selected, true);
+                    return new RecoveredState(body, origin, effectiveSelected, true);
                 }
             } catch (Exception err) {
                 AppLog.w("ConfigStore", "Read atomic config-state failed; falling back", err);
@@ -352,14 +401,43 @@ final class ConfigStore {
         }
     }
 
+    private static byte[] readAllBytesQuiet(File file) {
+        if (file == null || !file.isFile()) return null;
+        try (InputStream in = new FileInputStream(file);
+                ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            return out.toByteArray();
+        } catch (IOException ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Atomically commits {@code config-state.json} as the single recoverable commit point BEFORE
+     * replacing {@code config.json}. Pre-checks both targets and stages both temp files with {@code
+     * fsync} so any fault or abrupt process termination — including first-time upgrade from a
+     * legacy 0.6.0 directory without {@code config-state.json} — can only ever recover complete A
+     * or complete B, never a mixed origin/body pair.
+     */
     synchronized void writeVersioned(String raw, PointerSnapshot pointers) throws IOException {
         if (!directory.exists() && !directory.mkdirs()) throw new IOException("配置目录不可用");
         if (!directory.isDirectory()) throw new IOException("配置目录不可用");
+        File configTarget = new File(directory, CONFIG_FILE_NAME);
+        File stateTarget = new File(directory, STATE_FILE_NAME);
+        if (configTarget.exists() && !configTarget.isFile()) {
+            throw new IOException("无法保存配置，原配置已保留");
+        }
+        if (stateTarget.exists() && !stateTarget.isFile()) {
+            throw new IOException("无法保存配置状态，原配置已保留");
+        }
+        String body = raw == null ? "" : raw;
         String statePayload;
         try {
             JSONObject obj = new JSONObject();
             obj.put("v", 1);
-            obj.put("raw", raw == null ? "" : raw);
+            obj.put("raw", body);
             if (pointers != null && pointers.origin != null) {
                 obj.put("hasOrigin", true);
                 obj.put("origin", pointers.origin);
@@ -376,18 +454,53 @@ final class ConfigStore {
         } catch (Exception err) {
             throw new IOException("无法序列化配置状态", err);
         }
+        byte[] previousStateBytes = readAllBytesQuiet(stateTarget);
         File pendingState = File.createTempFile("config-state-", ".tmp", directory);
+        File pendingConfig = File.createTempFile("config-", ".tmp", directory);
+        boolean statePublished = false;
         try {
             try (FileOutputStream out = new FileOutputStream(pendingState)) {
                 out.write(statePayload.getBytes("UTF-8"));
                 out.getFD().sync();
             }
-            // Write config.json first; if config.json cannot be replaced, neither config-state.json
-            // nor preferences are touched.
-            write(raw);
-            replaceAtomically(pendingState, new File(directory, STATE_FILE_NAME));
+            try (FileOutputStream out = new FileOutputStream(pendingConfig)) {
+                out.write(body.getBytes("UTF-8"));
+                out.getFD().sync();
+            }
+            // Publish the single-file atomic bundle FIRST. If this fails (including on first-time
+            // migration from legacy 0.6.0), config.json is completely untouched. If the process
+            // dies right after this rename, cold recovery reads complete B from config-state.json
+            // and heals config.json + preferences atomically.
+            replaceAtomically(pendingState, stateTarget);
+            statePublished = true;
+            replaceAtomically(pendingConfig, configTarget);
+        } catch (IOException err) {
+            if (statePublished) {
+                // Best-effort rollback of config-state.json if config.json rename unexpectedly
+                // failed despite passing the pre-check.
+                if (previousStateBytes != null) {
+                    try {
+                        File rollbackTmp =
+                                File.createTempFile("config-state-rb-", ".tmp", directory);
+                        try {
+                            try (FileOutputStream out = new FileOutputStream(rollbackTmp)) {
+                                out.write(previousStateBytes);
+                                out.getFD().sync();
+                            }
+                            replaceAtomically(rollbackTmp, stateTarget);
+                        } finally {
+                            rollbackTmp.delete();
+                        }
+                    } catch (IOException ignored) {
+                    }
+                } else {
+                    stateTarget.delete();
+                }
+            }
+            throw err;
         } finally {
             pendingState.delete();
+            pendingConfig.delete();
         }
     }
 

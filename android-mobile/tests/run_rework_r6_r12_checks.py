@@ -313,6 +313,412 @@ public final class R10InlineProgressCheck {
     )
 
 
+def run_r9_same_name_import_harness(work_dir: Path, base_cp: list[Path]) -> None:
+    """Exercise REAL SourceController.importLocalUri with concurrent same-named source.py imports + private-space switch."""
+    r9_dir = work_dir / "r9-same-name-import"
+    r9_src = r9_dir / "src"
+    r9_classes = r9_dir / "classes"
+    r9_src.mkdir(parents=True, exist_ok=True)
+    r9_classes.mkdir(parents=True, exist_ok=True)
+
+    handler_java = r9_src / "android/os/Handler.java"
+    handler_java.parent.mkdir(parents=True, exist_ok=True)
+    handler_java.write_text(
+        """package android.os;
+import java.util.ArrayList;
+import java.util.List;
+public class Handler {
+    public final List<Runnable> posted = new ArrayList<>();
+    public boolean post(Runnable r) {
+        synchronized (posted) { posted.add(r); }
+        return true;
+    }
+    public void drain() {
+        List<Runnable> copy;
+        synchronized (posted) {
+            copy = new ArrayList<>(posted);
+            posted.clear();
+        }
+        for (Runnable r : copy) r.run();
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    resolver_java = r9_src / "android/content/ContentResolver.java"
+    resolver_java.parent.mkdir(parents=True, exist_ok=True)
+    resolver_java.write_text(
+        """package android.content;
+import android.database.Cursor;
+import android.net.Uri;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
+
+public class ContentResolver {
+    public final Map<String, String> names = new HashMap<>();
+    public final Map<String, String> bodies = new HashMap<>();
+
+    public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
+        final String name = names.getOrDefault(uri.toString(), "source.py");
+        return (Cursor) Proxy.newProxyInstance(
+                Cursor.class.getClassLoader(),
+                new Class<?>[] {Cursor.class},
+                (proxy, method, args) -> {
+                    String m = method.getName();
+                    if ("moveToFirst".equals(m)) return Boolean.TRUE;
+                    if ("getString".equals(m)) return name;
+                    if ("close".equals(m)) return null;
+                    return null;
+                });
+    }
+
+    public InputStream openInputStream(Uri uri) {
+        String body = bodies.getOrDefault(uri.toString(), "");
+        return new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8));
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    activity_java = r9_src / "android/app/Activity.java"
+    activity_java.parent.mkdir(parents=True, exist_ok=True)
+    activity_java.write_text(
+        """package android.app;
+import android.content.ContentResolver;
+import java.io.File;
+public class Activity extends android.content.Context {
+    public boolean isFinishing() { return false; }
+    public boolean isDestroyed() { return false; }
+    public ContentResolver getContentResolver() { return null; }
+    @Override public File getFilesDir() { return null; }
+}
+""",
+        encoding="utf-8",
+    )
+
+    main_activity_java = r9_src / "com/pilipala/marcomovie/MainActivity.java"
+    main_activity_java.parent.mkdir(parents=True, exist_ok=True)
+    main_activity_java.write_text(
+        """package com.pilipala.marcomovie;
+
+import android.content.ContentResolver;
+import android.content.SharedPreferences;
+import java.io.File;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class MainActivity extends android.app.Activity {
+    static final class Screen {
+        final Runnable render;
+        Screen(Runnable render) { this.render = render; }
+    }
+
+    public boolean privateMode, switchingPrivacy;
+    public final AtomicLong configImportSeq = new AtomicLong();
+    public android.os.Handler ui = new android.os.Handler();
+    public ExecutorService worker;
+    public File publicRoot;
+    public ContentResolver resolver;
+    public final AtomicInteger filesDirCalls = new AtomicInteger();
+    public CountDownLatch pauseFirstInFilesDir;
+    public CountDownLatch releaseFirstInFilesDir;
+    public Cms.Config config;
+    public String configOrigin = "";
+    public ConfigStore configStore;
+    public SharedPreferences prefs;
+    public final ArrayDeque<Screen> back = new ArrayDeque<>();
+    public Screen current;
+
+    @Override public boolean isFinishing() { return false; }
+    @Override public boolean isDestroyed() { return false; }
+    boolean isTvDevice() { return false; }
+    void toast(String msg) {}
+    void refresh() {}
+    void closeEngines() {}
+    void home() {}
+    void restore(Screen s) {}
+    String message(Throwable e) { return e == null ? "" : String.valueOf(e.getMessage()); }
+    @Override public ContentResolver getContentResolver() { return resolver; }
+    @Override public File getFilesDir() {
+        int call = filesDirCalls.incrementAndGet();
+        if (call == 1 && pauseFirstInFilesDir != null && releaseFirstInFilesDir != null) {
+            pauseFirstInFilesDir.countDown();
+            try { releaseFirstInFilesDir.await(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+        }
+        if (!privateMode) return publicRoot;
+        File priv = new File(publicRoot, "private-space");
+        priv.mkdirs();
+        return priv;
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    test_java = r9_src / "com/pilipala/marcomovie/R9SameNameImportCheck.java"
+    test_java.parent.mkdir(parents=True, exist_ok=True)
+    test_java.write_text(
+        """package com.pilipala.marcomovie;
+
+import android.content.ContentResolver;
+import android.content.SharedPreferences;
+import android.net.Uri;
+import java.io.File;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+public final class R9SameNameImportCheck {
+    private static void check(boolean cond, String label) {
+        if (!cond) throw new AssertionError("FAIL: " + label);
+        System.out.println("PASS " + label);
+    }
+
+    static final class MemPrefs implements SharedPreferences {
+        final Map<String, Object> data = new HashMap<>();
+        @Override public synchronized Map<String, ?> getAll() { return new HashMap<>(data); }
+        @Override public synchronized String getString(String k, String d) {
+            Object v = data.get(k); return v instanceof String ? (String) v : d;
+        }
+        @Override @SuppressWarnings("unchecked")
+        public synchronized Set<String> getStringSet(String k, Set<String> d) {
+            Object v = data.get(k); return v instanceof Set ? new HashSet<>((Set<String>) v) : d;
+        }
+        @Override public synchronized int getInt(String k, int d) {
+            Object v = data.get(k); return v instanceof Integer ? (Integer) v : d;
+        }
+        @Override public synchronized long getLong(String k, long d) {
+            Object v = data.get(k); return v instanceof Long ? (Long) v : d;
+        }
+        @Override public synchronized float getFloat(String k, float d) {
+            Object v = data.get(k); return v instanceof Float ? (Float) v : d;
+        }
+        @Override public synchronized boolean getBoolean(String k, boolean d) {
+            Object v = data.get(k); return v instanceof Boolean ? (Boolean) v : d;
+        }
+        @Override public synchronized boolean contains(String k) { return data.containsKey(k); }
+        @Override public Editor edit() {
+            return new Editor() {
+                final Map<String, Object> u = new HashMap<>();
+                final Set<String> rm = new HashSet<>();
+                boolean clr;
+                @Override public Editor putString(String k, String v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor putStringSet(String k, Set<String> v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor putInt(String k, int v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor putLong(String k, long v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor putFloat(String k, float v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor putBoolean(String k, boolean v) { u.put(k, v); rm.remove(k); return this; }
+                @Override public Editor remove(String k) { rm.add(k); u.remove(k); return this; }
+                @Override public Editor clear() { clr = true; u.clear(); rm.clear(); return this; }
+                @Override public boolean commit() { apply(); return true; }
+                @Override public void apply() {
+                    synchronized (MemPrefs.this) {
+                        if (clr) data.clear();
+                        for (String r : rm) data.remove(r);
+                        for (Map.Entry<String, Object> e : u.entrySet()) {
+                            if (e.getValue() == null) data.remove(e.getKey());
+                            else data.put(e.getKey(), e.getValue());
+                        }
+                    }
+                }
+            };
+        }
+        @Override public void registerOnSharedPreferenceChangeListener(OnSharedPreferenceChangeListener l) {}
+        @Override public void unregisterOnSharedPreferenceChangeListener(OnSharedPreferenceChangeListener l) {}
+    }
+
+    private static MainActivity newHost(File root, ExecutorService exec, ContentResolver cr) {
+        MainActivity host = new MainActivity();
+        host.publicRoot = root;
+        host.resolver = cr;
+        host.worker = exec;
+        host.prefs = new MemPrefs();
+        host.configStore = new ConfigStore(new File(root, "cfg"));
+        return host;
+    }
+
+    private static String readApiFile(String apiUri) throws Exception {
+        File f = new File(new URI(apiUri));
+        return new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+    }
+
+    private static void drainUntil(MainActivity host, java.util.concurrent.Callable<Boolean> cond)
+            throws Exception {
+        long deadline = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < deadline) {
+            host.ui.drain();
+            ConfigStore.WRITE_EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            host.ui.drain();
+            if (Boolean.TRUE.equals(cond.call())) return;
+            Thread.sleep(10);
+        }
+        throw new AssertionError("Timed out waiting for async import condition");
+    }
+
+    public static void main(String[] args) throws Exception {
+        // -----------------------------------------------------------------
+        // 1. Concurrent same-named source.py from dirA & dirB:
+        //    A stalls in getFilesDir, B completes first, A resumes last ->
+        //    B's actual referenced file & cold-restarted config remain # current-B!
+        // -----------------------------------------------------------------
+        File root1 = Files.createTempDirectory("r9-concurrent-").toFile();
+        ExecutorService exec1 = Executors.newFixedThreadPool(2);
+        try {
+            ContentResolver cr = new ContentResolver();
+            Uri uriA = Uri.parse("content://docs/dirA/source.py");
+            Uri uriB = Uri.parse("content://docs/dirB/source.py");
+            cr.names.put(uriA.toString(), "source.py");
+            cr.names.put(uriB.toString(), "source.py");
+            cr.bodies.put(uriA.toString(), "# old-A\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+            cr.bodies.put(uriB.toString(), "# current-B\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+
+            MainActivity host = newHost(root1, exec1, cr);
+            host.pauseFirstInFilesDir = new CountDownLatch(1);
+            host.releaseFirstInFilesDir = new CountDownLatch(1);
+
+            SourceController.importLocalUri(host, uriA, false);
+            check(host.pauseFirstInFilesDir.await(5, TimeUnit.SECONDS), "R9 harness: A reached getFilesDir before B started");
+
+            SourceController.importLocalUri(host, uriB, false);
+            drainUntil(host, () -> host.config != null && !host.config.sites.isEmpty());
+            String bApi = host.config.sites.get(0).api;
+            check(
+                    readApiFile(bApi).startsWith("# current-B"),
+                    "R9 harness: B's referenced local source file starts with # current-B");
+
+            // Now unblock stale A and let A finish completely!
+            host.releaseFirstInFilesDir.countDown();
+            exec1.shutdown();
+            check(exec1.awaitTermination(5, TimeUnit.SECONDS), "R9 harness: stale A thread drained");
+            host.ui.drain();
+            ConfigStore.WRITE_EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            host.ui.drain();
+
+            // Simulate cold restart: reload config from ConfigStore and read the file referenced by site.api!
+            ConfigStore.RecoveredState restarted =
+                    new ConfigStore(new File(root1, "cfg"))
+                            .loadRecoveredState(
+                                    host.prefs.getString(Prefs.ORIGIN, null),
+                                    host.prefs.getString(Prefs.SELECTED_SITE, null));
+            Cms.Config restartedCfg = Cms.parseConfig(restarted.raw, restarted.origin);
+            String restartedApi = restartedCfg.sites.get(0).api;
+            String restartedContent = readApiFile(restartedApi);
+            check(
+                    bApi.equals(restartedApi)
+                            && restartedContent.startsWith("# current-B")
+                            && readApiFile(bApi).startsWith("# current-B"),
+                    "R9 Round-2: after stale A completes, B's referenced file AND cold-restarted script remain # current-B");
+        } finally {
+            exec1.shutdownNow();
+        }
+
+        // -----------------------------------------------------------------
+        // 2. Private-space switch during same-named source.py import:
+        //    Public A stalls in getFilesDir -> switch to privateMode=true & import Private B ->
+        //    Unblock Public A -> Public A cannot clobber Private B or leak into private space!
+        // -----------------------------------------------------------------
+        File root2 = Files.createTempDirectory("r9-privacy-").toFile();
+        ExecutorService exec2 = Executors.newFixedThreadPool(2);
+        try {
+            ContentResolver cr2 = new ContentResolver();
+            Uri pubA = Uri.parse("content://docs/public/source.py");
+            Uri privB = Uri.parse("content://docs/private/source.py");
+            cr2.names.put(pubA.toString(), "source.py");
+            cr2.names.put(privB.toString(), "source.py");
+            cr2.bodies.put(pubA.toString(), "# public-A\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+            cr2.bodies.put(privB.toString(), "# private-B\\nclass Spider:\\n    def homeContent(self, f): return {}\\n");
+
+            MainActivity host2 = newHost(root2, exec2, cr2);
+            host2.pauseFirstInFilesDir = new CountDownLatch(1);
+            host2.releaseFirstInFilesDir = new CountDownLatch(1);
+
+            host2.privateMode = false;
+            SourceController.importLocalUri(host2, pubA, false);
+            check(host2.pauseFirstInFilesDir.await(5, TimeUnit.SECONDS), "R9 privacy: public A stalled in getFilesDir");
+
+            // Switch to private space with isolated private ConfigStore
+            host2.privateMode = true;
+            host2.configStore = new ConfigStore(new File(new File(root2, "private-space"), "cfg"));
+            SourceController.importLocalUri(host2, privB, false);
+            drainUntil(host2, () -> host2.config != null && !host2.config.sites.isEmpty());
+            String privApi = host2.config.sites.get(0).api;
+            check(
+                    privApi.contains("local_spiders_private")
+                            && readApiFile(privApi).startsWith("# private-B"),
+                    "R9 privacy: private B lives in local_spiders_private with content # private-B");
+
+            // Unblock stale public A!
+            host2.releaseFirstInFilesDir.countDown();
+            exec2.shutdown();
+            check(exec2.awaitTermination(5, TimeUnit.SECONDS), "R9 privacy: stale public A drained");
+            host2.ui.drain();
+            ConfigStore.WRITE_EXECUTOR.submit(() -> {}).get(5, TimeUnit.SECONDS);
+            host2.ui.drain();
+
+            ConfigStore.RecoveredState privRestarted =
+                    new ConfigStore(new File(new File(root2, "private-space"), "cfg"))
+                            .loadRecoveredState(
+                                    host2.prefs.getString(Prefs.ORIGIN, null),
+                                    host2.prefs.getString(Prefs.SELECTED_SITE, null));
+            Cms.Config privCfg = Cms.parseConfig(privRestarted.raw, privRestarted.origin);
+            check(
+                    privApi.equals(privCfg.sites.get(0).api)
+                            && readApiFile(privApi).startsWith("# private-B"),
+                    "R9 Round-2 privacy: stale public A never overwrote private B's file or config");
+        } finally {
+            exec2.shutdownNow();
+        }
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    cp = os.pathsep.join(str(p) for p in [r9_classes, *base_cp])
+    subprocess.run(
+        [
+            JAVAC,
+            "-encoding",
+            "UTF-8",
+            "-cp",
+            cp,
+            "-d",
+            str(r9_classes),
+            str(handler_java),
+            str(resolver_java),
+            str(activity_java),
+            str(main_activity_java),
+            str(test_java),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [JAVA, "-Dfile.encoding=UTF-8", "-cp", cp, "com.pilipala.marcomovie.R9SameNameImportCheck"],
+        cwd=ROOT,
+        check=True,
+        timeout=40,
+    )
+
+
 def verify_r11_update_isolation_ci(work_dir: Path) -> None:
     """Verify R11: single-edition default selection, independent per-edition keystores, and workflow coverage."""
     scripts_dir = ROOT / "scripts"
@@ -519,6 +925,9 @@ public class ContextWrapper extends Context {
         # Verify offline dual-MAP playback & seek AFTER the Java HttpServer has exited!
         master_path = Path((data_dir / "r7-master-path.txt").read_text(encoding="utf-8").strip())
         verify_dual_map_offline_playback_and_seek(master_path)
+
+        # Verify R9 real SourceController.importLocalUri same-named source.py + privacy isolation
+        run_r9_same_name_import_harness(work_dir, runtime_cp)
 
         # Verify R10 real MobileInlinePlayer.captureResumePosition() bytecode
         run_r10_inline_progress_harness(work_dir, runtime_cp)

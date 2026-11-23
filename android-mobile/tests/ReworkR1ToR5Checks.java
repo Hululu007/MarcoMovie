@@ -429,6 +429,155 @@ public final class ReworkR1ToR5Checks {
         check(
                 scSrc.contains("保存失败，原配置已保留") && scSrc.contains("(seq, committed) ->"),
                 "R2 wiring: SourceController commits UI/status updates only on disk write success callback");
+
+        // 3. Round-2 R2a: Normal within-subscription site switch ("跟随上次选择") from first -> second
+        //    must persist "second" on cold restart (must NOT revert to bundle's initial "first"),
+        //    while explicit default site (PREFERRED_SITE) still takes precedence on restoreDefault.
+        File switchDir = new File(workDir, "r2-same-sub-switch");
+        ConfigStore switchStore = new ConfigStore(switchDir);
+        String twoSiteSub =
+                "{\"sites\":["
+                        + "{\"key\":\"first\",\"name\":\"站点一\",\"type\":1,\"api\":\"https://sub.example/first\"},"
+                        + "{\"key\":\"second\",\"name\":\"站点二\",\"type\":1,\"api\":\"https://sub.example/second\"}"
+                        + "]}";
+        final String twoSiteOrigin = "https://sub.example/config.json";
+        final AtomicReference<String> swOrigin = new AtomicReference<>(null);
+        final AtomicReference<String> swSite = new AtomicReference<>(null);
+        ConfigStore.PointerStore swPs =
+                new ConfigStore.PointerStore() {
+                    @Override
+                    public ConfigStore.PointerSnapshot readCurrentPointers() {
+                        return new ConfigStore.PointerSnapshot(swOrigin.get(), swSite.get());
+                    }
+
+                    @Override
+                    public void applyPointers(ConfigStore.PointerSnapshot s) {
+                        swOrigin.set(s.origin);
+                        swSite.set(s.selectedSite);
+                    }
+                };
+        Boolean swInitOk =
+                switchStore
+                        .saveAsync(
+                                twoSiteSub,
+                                new ConfigStore.PointerSnapshot(twoSiteOrigin, "first"),
+                                swPs,
+                                null)
+                        .get(5, TimeUnit.SECONDS);
+        check(
+                Boolean.TRUE.equals(swInitOk),
+                "R2 Round-2 setup: saved two-site subscription on first");
+
+        // User switches site from first -> second (only prefs SELECTED_SITE changes; origin
+        // unchanged)
+        swSite.set("second");
+        ConfigStore.RecoveredState coldAfterSwitch =
+                new ConfigStore(switchDir).loadRecoveredState(twoSiteOrigin, swSite.get());
+        check(
+                coldAfterSwitch != null
+                        && coldAfterSwitch.fromAtomicBundle
+                        && twoSiteOrigin.equals(coldAfterSwitch.origin)
+                        && "second".equals(coldAfterSwitch.selectedSite)
+                        && twoSiteSub.equals(coldAfterSwitch.raw),
+                "R2 Round-2: cold restart after normal first->second switch preserves 'second' (follow-last-selection)");
+
+        // If user prefs held a bogus/removed site key under same origin, fall back to bundle's
+        // valid site
+        ConfigStore.RecoveredState coldRemovedSite =
+                new ConfigStore(switchDir).loadRecoveredState(twoSiteOrigin, "removed_site");
+        check(
+                coldRemovedSite != null && "first".equals(coldRemovedSite.selectedSite),
+                "R2 Round-2: unknown site key under same origin falls back to bundle's valid selectedSite");
+
+        // 4. Round-2 R2b: First-time upgrade from legacy 0.6.0 (only config.json=A, NO
+        // config-state.json)
+        //    must NEVER pair old origin A with new body B at ANY interruption point.
+        String oldOrigin = "https://fixture.invalid/old/config";
+        String freshOrigin = "https://fixture.invalid/fresh/config";
+        String legacyBodyA =
+                "{\"sites\":[{\"key\":\"A\",\"name\":\"A\",\"type\":1,\"api\":\"./A\"}]}";
+        String migrateBodyB =
+                "{\"sites\":[{\"key\":\"B\",\"name\":\"B\",\"type\":1,\"api\":\"./B\"}]}";
+
+        // 4a. Interruption BEFORE config-state.json publish (directory blocker simulates publish
+        // fault):
+        //     config.json MUST remain untouched on A, recovering complete A (origin=old, body=A,
+        // api=old/A).
+        File migFailStateDir = new File(workDir, "r2-legacy-fail-state");
+        migFailStateDir.mkdirs();
+        Files.write(
+                new File(migFailStateDir, "config.json").toPath(),
+                legacyBodyA.getBytes(StandardCharsets.UTF_8));
+        File stateBlocker = new File(migFailStateDir, "config-state.json");
+        check(stateBlocker.mkdir(), "R2 Round-2 setup: created config-state.json fault blocker");
+        boolean migStateFailed = false;
+        try {
+            new ConfigStore(migFailStateDir)
+                    .writeVersioned(
+                            migrateBodyB, new ConfigStore.PointerSnapshot(freshOrigin, "B"));
+        } catch (IOException expected) {
+            migStateFailed = true;
+        }
+        check(
+                migStateFailed,
+                "R2 Round-2: legacy migration fails cleanly when config-state publish fails");
+        stateBlocker.delete();
+        ConfigStore.RecoveredState recCompleteA =
+                new ConfigStore(migFailStateDir).loadRecoveredState(oldOrigin, "A");
+        Cms.Config parsedCompleteA = Cms.parseConfig(recCompleteA.raw, recCompleteA.origin);
+        check(
+                recCompleteA != null
+                        && !recCompleteA.fromAtomicBundle
+                        && oldOrigin.equals(recCompleteA.origin)
+                        && "A".equals(recCompleteA.selectedSite)
+                        && "A".equals(parsedCompleteA.sites.get(0).key)
+                        && "https://fixture.invalid/old/A".equals(parsedCompleteA.sites.get(0).api),
+                "R2 Round-2: legacy migration failure recovers COMPLETE A (never old origin + B body)");
+
+        // 4b. Interruption AFTER config-state.json commits B and BEFORE config.json is replaced
+        //     (process killed between the two atomic renames): cold recovery MUST return COMPLETE B
+        //     and heal config.json to B!
+        File migAfterStateDir = new File(workDir, "r2-legacy-after-state");
+        migAfterStateDir.mkdirs();
+        ConfigStore migStore = new ConfigStore(migAfterStateDir);
+        migStore.writeVersioned(migrateBodyB, new ConfigStore.PointerSnapshot(freshOrigin, "B"));
+        // Simulate crash window before second rename: revert config.json back to legacy A while
+        // config-state.json already holds B and prefs still hold oldOrigin/A.
+        Files.write(
+                new File(migAfterStateDir, "config.json").toPath(),
+                legacyBodyA.getBytes(StandardCharsets.UTF_8));
+        ConfigStore.RecoveredState recCompleteB =
+                new ConfigStore(migAfterStateDir).loadRecoveredState(oldOrigin, "A");
+        Cms.Config parsedCompleteB = Cms.parseConfig(recCompleteB.raw, recCompleteB.origin);
+        String healedConfigDisk = readUtf8(new File(migAfterStateDir, "config.json").toPath());
+        check(
+                recCompleteB != null
+                        && recCompleteB.fromAtomicBundle
+                        && freshOrigin.equals(recCompleteB.origin)
+                        && "B".equals(recCompleteB.selectedSite)
+                        && "B".equals(parsedCompleteB.sites.get(0).key)
+                        && "https://fixture.invalid/fresh/B"
+                                .equals(parsedCompleteB.sites.get(0).api)
+                        && migrateBodyB.equals(healedConfigDisk),
+                "R2 Round-2: crash between state commit and config.json rename recovers COMPLETE B and heals config.json");
+
+        // 4c. Interruption if config.json target is blocked (pre-check fails BEFORE state publish):
+        //     config-state.json is NOT created and error is thrown cleanly.
+        File migFailCfgDir = new File(workDir, "r2-legacy-fail-cfg");
+        migFailCfgDir.mkdirs();
+        File cfgBlocker = new File(migFailCfgDir, "config.json");
+        check(cfgBlocker.mkdir(), "R2 Round-2 setup: created config.json fault blocker");
+        boolean migCfgFailed = false;
+        try {
+            new ConfigStore(migFailCfgDir)
+                    .writeVersioned(
+                            migrateBodyB, new ConfigStore.PointerSnapshot(freshOrigin, "B"));
+        } catch (IOException expected) {
+            migCfgFailed = true;
+        }
+        check(
+                migCfgFailed && !new File(migFailCfgDir, "config-state.json").exists(),
+                "R2 Round-2: blocked config.json fails pre-check without publishing orphan config-state.json");
     }
 
     // -------------------------------------------------------------------------
@@ -631,6 +780,10 @@ public final class ReworkR1ToR5Checks {
         check(
                 pcCommitIdx > 0 && pcCreateIdx > pcCommitIdx,
                 "R4 wiring: PlaybackController.playerPage creates player strictly inside commitPreparedLaunchOnMain");
+        check(
+                pcSrc.contains("isFullscreenSessionActive(a, ticket, sessionId)")
+                        && pcSrc.contains("a.fullscreenPlaybackSession++"),
+                "R4 Round-2 wiring: PlaybackController checks isFullscreenSessionActive and revokes fullscreenPlaybackSession on exit/release");
     }
 
     // -------------------------------------------------------------------------

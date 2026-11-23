@@ -933,6 +933,7 @@ final class PlaybackController {
     }
 
     static void prepareInPlaceSwitch(MainActivity a, Cms.Line line, Cms.Episode episode) {
+        a.fullscreenPlaybackSession++;
         finishSeek(a, false);
         savePlaybackHistory(a, true);
         stopWeb(a);
@@ -990,6 +991,7 @@ final class PlaybackController {
             }
         }
         if (!a.back.isEmpty()) {
+            a.generation++;
             releasePlayer(a);
             a.current = a.back.pop();
             a.renderReturn(a.current);
@@ -1133,6 +1135,7 @@ final class PlaybackController {
         }
         a.generation++;
         final int ticket = a.generation;
+        final int sessionId = ++a.fullscreenPlaybackSession;
         a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (!a.isTvDevice()) {
             a.applyMobileSystemBars(true);
@@ -1246,7 +1249,8 @@ final class PlaybackController {
         final boolean[] initDispatched = new boolean[1];
         final Runnable launchPlayerInit =
                 () -> {
-                    if (initDispatched[0] || ticket != a.generation) return;
+                    if (initDispatched[0] || !isFullscreenSessionActive(a, ticket, sessionId))
+                        return;
                     initDispatched[0] = true;
                     PLAYER_INIT.execute(
                             () -> {
@@ -1276,10 +1280,7 @@ final class PlaybackController {
                                     }
                                     commitPreparedLaunchOnMain(
                                             a.ui::post,
-                                            () ->
-                                                    ticket == a.generation
-                                                            && !a.isFinishing()
-                                                            && !a.isDestroyed(),
+                                            () -> isFullscreenSessionActive(a, ticket, sessionId),
                                             () -> {
                                                 if (useSystemBackend
                                                         && (activeSurface[0] == null
@@ -1370,7 +1371,8 @@ final class PlaybackController {
                                                         });
                                                 ready.setOnPreparedListener(
                                                         mp -> {
-                                                            if (ticket != a.generation
+                                                            if (!isFullscreenSessionActive(
+                                                                            a, ticket, sessionId)
                                                                     || a.player != ready) return;
                                                             a.prepared = true;
                                                             a.historyFallbackInFlight = false;
@@ -1891,7 +1893,8 @@ final class PlaybackController {
                                     AppLog.w("PlaybackController", "player prepare failed", ex);
                                     a.ui.post(
                                             () -> {
-                                                if (ticket == a.generation) {
+                                                if (isFullscreenSessionActive(
+                                                        a, ticket, sessionId)) {
                                                     if (a.playerChrome != null)
                                                         a.playerChrome.setLoading(false);
                                                     a.playStatus.setText(a.message(ex));
@@ -1905,7 +1908,7 @@ final class PlaybackController {
                 new VideoOutput.Listener() {
                     public void available(Surface value) {
                         activeSurface[0] = value;
-                        if (ticket != a.generation) return;
+                        if (!isFullscreenSessionActive(a, ticket, sessionId)) return;
                         if (a.player != null) {
                             a.player.setSurface(value);
                             if (surface.getWidth() > 0 && surface.getHeight() > 0) {
@@ -1917,14 +1920,16 @@ final class PlaybackController {
                     }
 
                     public void resized(int width, int height) {
-                        if (ticket == a.generation && a.player != null) {
+                        if (isFullscreenSessionActive(a, ticket, sessionId) && a.player != null) {
                             a.player.setSurfaceSize(width, height);
                         }
                     }
 
                     public void destroyed() {
                         activeSurface[0] = null;
-                        if (ticket == a.generation && a.player != null) a.player.setSurface(null);
+                        if (isFullscreenSessionActive(a, ticket, sessionId) && a.player != null) {
+                            a.player.setSurface(null);
+                        }
                     }
                 });
         if (!useSystemBackend) {
@@ -2497,6 +2502,22 @@ final class PlaybackController {
     }
 
     /**
+     * Authoritative fullscreen playback ownership check verified on the main thread before creating
+     * or starting a fullscreen player. Prevents a delayed offline/network prepare task from creating
+     * or starting playback after the user leaves fullscreen (including returning to cached
+     * {@link MobileRootShell}) or launches a newer playback session.
+     */
+    static boolean isFullscreenSessionActive(MainActivity a, int ticket, int sessionId) {
+        return a != null
+                && !a.isFinishing()
+                && !a.isDestroyed()
+                && a.generation == ticket
+                && a.fullscreenPlaybackSession == sessionId
+                && a.current != null
+                && a.current.player;
+    }
+
+    /**
      * Runs player instantiation and attachment on the main thread ONLY when {@code ownership}
      * still holds at commit time. This guarantees a stale background prepare task can never
      * construct a process-singleton player (such as {@link MpvPlayer}) and release a newer active
@@ -2739,6 +2760,10 @@ final class PlaybackController {
     }
 
     static void releasePlayer(MainActivity a) {
+        if (a == null) return;
+        // Immediately revoke any in-flight fullscreen PLAYER_INIT session before releasing active
+        // resources so delayed background init can never create or start a player after exit.
+        a.fullscreenPlaybackSession++;
         if (a.inlinePlayer != null) {
             a.inlinePlayer.detach();
             a.inlinePlayer = null;
@@ -2774,7 +2799,10 @@ final class PlaybackController {
             a.player = null;
         }
         VideoOutput.setWindowHdrMode(a, false);
-        a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        android.view.Window win = a.getWindow();
+        if (win != null) {
+            win.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
     }
 
     static boolean dispatchPlaybackKey(MainActivity a, KeyEvent event) {

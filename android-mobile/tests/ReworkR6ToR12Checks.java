@@ -968,13 +968,38 @@ public final class ReworkR6ToR12Checks {
                         Files.readAllBytes(new File(srcRoot, "SourceController.java").toPath()),
                         StandardCharsets.UTF_8);
         int localUriIdx = scSrc.indexOf("static void importLocalUri(");
-        String localUriBody = scSrc.substring(localUriIdx, localUriIdx + 6500);
+        String localUriBody =
+                scSrc.substring(localUriIdx, Math.min(scSrc.length(), localUriIdx + 8500));
         check(
                 localUriBody.contains("final long importSeq = beginConfigImport(a);")
                         && localUriBody.contains("final boolean snapshotPrivate = a.privateMode;")
                         && localUriBody.contains(
-                                "canCommitConfigImport(a, snapshotPrivate, importSeq)"),
-                "R9 wiring: SourceController.importLocalUri guards every async commit with importSeq + space + lifecycle");
+                                "canCommitConfigImport(a, snapshotPrivate, importSeq)")
+                        && localUriBody.contains("writeContentAddressedLocalFile("),
+                "R9 wiring: SourceController.importLocalUri guards every async commit and isolates files by content hash + space");
+
+        // Round-2 R9 unit check: writeContentAddressedLocalFile isolates two same-named source.py
+        // files with different contents while preserving clean basename 'source.py'.
+        File r9Dir = Files.createTempDirectory("r9-content-addressed-").toFile();
+        byte[] bytesA =
+                "# old-A\nclass Spider:\n    def homeContent(self, f): return {}\n"
+                        .getBytes(StandardCharsets.UTF_8);
+        byte[] bytesB =
+                "# current-B\nclass Spider:\n    def homeContent(self, f): return {}\n"
+                        .getBytes(StandardCharsets.UTF_8);
+        File fileB = SourceController.writeContentAddressedLocalFile(r9Dir, "source.py", bytesB);
+        File fileA = SourceController.writeContentAddressedLocalFile(r9Dir, "source.py", bytesA);
+        File fileB2 = SourceController.writeContentAddressedLocalFile(r9Dir, "source.py", bytesB);
+        String readB = new String(Files.readAllBytes(fileB.toPath()), StandardCharsets.UTF_8);
+        String readA = new String(Files.readAllBytes(fileA.toPath()), StandardCharsets.UTF_8);
+        check(
+                "source.py".equals(fileB.getName())
+                        && "source.py".equals(fileA.getName())
+                        && !fileB.getCanonicalPath().equals(fileA.getCanonicalPath())
+                        && fileB.getCanonicalPath().equals(fileB2.getCanonicalPath())
+                        && readB.startsWith("# current-B")
+                        && readA.startsWith("# old-A"),
+                "R9 Round-2: content-addressed storage isolates same-named source.py with clean basename and immutable contents");
     }
 
     // -------------------------------------------------------------------------
