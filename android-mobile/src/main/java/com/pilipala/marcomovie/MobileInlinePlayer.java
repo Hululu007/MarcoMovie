@@ -272,6 +272,7 @@ final class MobileInlinePlayer {
                         if (player != null) {
                             player.setSurface(null);
                             if (!allowBackgroundAudio()) {
+                                pausedForBackground = true;
                                 pause();
                             }
                         }
@@ -301,14 +302,20 @@ final class MobileInlinePlayer {
         flushHistoryProgress();
         if (!keepBgPlay) {
             pausedForBackground = true;
-            if (player != null && prepared && player.isPlaying()) {
+            if (player != null) {
+                // Always revoke playback intent even while buffering (when isPlaying() is false)
+                // so completing the buffer in the background can never start audio output.
                 try {
                     player.pause();
                 } catch (Exception ignored) {
                 }
-                playPauseBtn.setText("▶");
+                if (playPauseBtn != null) {
+                    playPauseBtn.setText("▶");
+                }
             }
-            a.ui.removeCallbacks(ticker);
+            if (a != null && a.ui != null) {
+                a.ui.removeCallbacks(ticker);
+            }
         }
     }
 
@@ -423,31 +430,40 @@ final class MobileInlinePlayer {
 
         a.worker.execute(
                 () -> {
-                    MoviePlayer createdPlayer = null;
                     try {
-                        Map<String, String> headers =
+                        final Map<String, String> headers =
                                 Cms.inheritedHeaders(site.api, ep.url, site.headers);
                         Cms.mergeHeaders(headers, ep.headers);
-                        String effective = PlaybackController.preparePlayUrl(a, site, ep, headers);
-                        MoviePlayer[] out = new MoviePlayer[1];
-                        final PlaybackController.EnginePlan actualPlan =
-                                PlaybackController.createPlayerWithPlan(a, ep, planned, out);
-                        createdPlayer = out[0];
-                        final MoviePlayer mp = createdPlayer;
-                        mp.configureDefaultAudio();
-                        mp.setDataSource(a, Uri.parse(effective), headers);
-                        mp.setOptions(ep.media);
-                        a.ui.post(
+                        final String effective =
+                                PlaybackController.preparePlayUrl(a, site, ep, headers);
+                        PlaybackController.commitPreparedLaunchOnMain(
+                                a.ui::post,
+                                () ->
+                                        !closed
+                                                && !a.isFinishing()
+                                                && !a.isDestroyed()
+                                                && a.inlinePlayer == MobileInlinePlayer.this
+                                                && a.player == null
+                                                && ticket == a.generation
+                                                && serial == loadSerial
+                                                && renderSurface != null
+                                                && renderSurface.isValid(),
                                 () -> {
-                                    if (closed
-                                            || a.isFinishing()
-                                            || a.isDestroyed()
-                                            || ticket != a.generation
-                                            || serial != loadSerial
-                                            || renderSurface == null
-                                            || !renderSurface.isValid()) {
-                                        mp.release();
-                                        return;
+                                    MoviePlayer[] out = new MoviePlayer[1];
+                                    final PlaybackController.EnginePlan actualPlan =
+                                            PlaybackController.createPlayerWithPlan(
+                                                    a, ep, planned, out);
+                                    final MoviePlayer mp = out[0];
+                                    try {
+                                        mp.configureDefaultAudio();
+                                        mp.setDataSource(a, Uri.parse(effective), headers);
+                                        mp.setOptions(ep.media);
+                                    } catch (Throwable setupErr) {
+                                        try {
+                                            mp.release();
+                                        } catch (Exception ignored) {
+                                        }
+                                        throw setupErr;
                                     }
                                     player = mp;
                                     activeEnginePlan = actualPlan;
@@ -527,14 +543,13 @@ final class MobileInlinePlayer {
                                                 return true;
                                             });
                                     mp.prepareAsync();
+                                    return mp;
+                                },
+                                e -> {
+                                    statusLabel.setVisibility(View.VISIBLE);
+                                    statusLabel.setText("播放失败：" + a.message(e));
                                 });
                     } catch (Throwable e) {
-                        if (createdPlayer != null) {
-                            try {
-                                createdPlayer.release();
-                            } catch (Exception ignored) {
-                            }
-                        }
                         a.ui.post(
                                 () -> {
                                     if (closed || serial != loadSerial) return;
@@ -578,9 +593,14 @@ final class MobileInlinePlayer {
     }
 
     void pause() {
-        if (player != null && prepared && player.isPlaying()) {
-            player.pause();
-            playPauseBtn.setText("▶");
+        if (player != null) {
+            try {
+                player.pause();
+            } catch (Exception ignored) {
+            }
+            if (playPauseBtn != null) {
+                playPauseBtn.setText("▶");
+            }
             flushHistoryProgress();
         }
     }

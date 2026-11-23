@@ -1543,8 +1543,7 @@ final class SourcePicker {
 
     private static void saveSelectedConfig(MainActivity a, Cms.Config saved, String origin)
             throws Exception {
-        SourceController.saveConfig(a, saved, origin);
-        show(a);
+        SourceController.saveConfig(a, saved, origin, () -> show(a));
     }
 
     static void showWarehouses(MainActivity a) {

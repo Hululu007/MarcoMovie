@@ -1072,15 +1072,35 @@ public final class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         try {
-            File f = new File(getFilesDir(), "config.json");
-            if (f.exists())
-                try (InputStream i = new FileInputStream(f)) {
-                    config = Cms.parseConfig(Cms.read(i, Cms.MAX_JSON), configOrigin);
-                    SourcePicker.applyEdits(this, config, configOrigin);
-                    if (priorBootCrashes == 0 && !priorLoadingCrash) {
-                        SourcePreferences.restoreDefault(this);
+            String prefOrigin =
+                    prefs.contains(Prefs.ORIGIN) ? prefs.getString(Prefs.ORIGIN, null) : null;
+            String prefSelected =
+                    prefs.contains(Prefs.SELECTED_SITE)
+                            ? prefs.getString(Prefs.SELECTED_SITE, null)
+                            : null;
+            ConfigStore.RecoveredState recovered =
+                    configStore.loadRecoveredState(prefOrigin, prefSelected);
+            if (recovered != null && recovered.raw != null && !recovered.raw.isEmpty()) {
+                configOrigin = recovered.origin == null ? "" : recovered.origin;
+                if (recovered.fromAtomicBundle
+                        && (!Objects.equals(recovered.origin, prefOrigin)
+                                || !Objects.equals(recovered.selectedSite, prefSelected))) {
+                    SharedPreferences.Editor heal = prefs.edit();
+                    if (recovered.origin != null) heal.putString(Prefs.ORIGIN, recovered.origin);
+                    else heal.remove(Prefs.ORIGIN);
+                    if (recovered.selectedSite != null) {
+                        heal.putString(Prefs.SELECTED_SITE, recovered.selectedSite);
+                    } else {
+                        heal.remove(Prefs.SELECTED_SITE);
                     }
+                    heal.apply();
                 }
+                config = Cms.parseConfig(recovered.raw, configOrigin);
+                SourcePicker.applyEdits(this, config, configOrigin);
+                if (priorBootCrashes == 0 && !priorLoadingCrash) {
+                    SourcePreferences.restoreDefault(this);
+                }
+            }
         } catch (Exception e) {
             AppLog.w("MainActivity", "load saved config failed", e);
             config = null;

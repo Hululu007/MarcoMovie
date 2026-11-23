@@ -786,7 +786,12 @@ final class SubscriptionManager {
         Set<String> changedUrls = new HashSet<String>();
 
         for (RefreshCandidate c : candidates.values()) {
-            if (!force && !isDueForDailyUpdate(c.lastUpdated, nowMs)) {
+            boolean activeOutOfSync =
+                    !activeDigest.isEmpty()
+                            && c.url.equals(cleanActiveOrigin)
+                            && !c.previousDigest.isEmpty()
+                            && !c.previousDigest.equals(activeDigest);
+            if (!force && !activeOutOfSync && !isDueForDailyUpdate(c.lastUpdated, nowMs)) {
                 continue;
             }
             checked++;
@@ -831,7 +836,13 @@ final class SubscriptionManager {
                     break;
                 }
             }
-            if (anyMemberChanged) {
+            ConfigLibrary.Entry mergedLibEntry = byOrigin.get(cleanActiveOrigin);
+            boolean mergedOutOfSync =
+                    !activeDigest.isEmpty()
+                            && mergedLibEntry != null
+                            && !mergedLibEntry.digest.isEmpty()
+                            && !mergedLibEntry.digest.equals(activeDigest);
+            if (anyMemberChanged || mergedOutOfSync) {
                 List<ConfigLibrary.Entry> refreshedEntries = library.entries();
                 Map<String, ConfigLibrary.Entry> latestByOrigin =
                         new HashMap<String, ConfigLibrary.Entry>();
@@ -863,6 +874,11 @@ final class SubscriptionManager {
                     activeChanged = true;
                     nextActiveRaw = rebuilt.rawJson;
                     nextActiveOrigin = rebuilt.origin;
+                    if (updated == 0) {
+                        updated++;
+                        updatedNames.add(
+                                cleanSubscriptionLabel(mergedSubscriptionName(rebuilt.groupNames)));
+                    }
                     // Update existing merged entry in-place if still present and unchanged; do not
                     // clobber user selection or resurrect a deleted merged entry.
                     library.updateExistingIfUnchanged(
@@ -873,12 +889,27 @@ final class SubscriptionManager {
                             nowMs);
                 }
             }
-        } else if (Cms.isHttp(cleanActiveOrigin) && changedUrls.contains(cleanActiveOrigin)) {
+        } else if (Cms.isHttp(cleanActiveOrigin)) {
             String newRaw = refreshedRawByUrl.get(cleanActiveOrigin);
             if (newRaw != null && !newRaw.isEmpty()) {
-                activeChanged = true;
-                nextActiveRaw = newRaw;
-                nextActiveOrigin = cleanActiveOrigin;
+                boolean differsFromActive =
+                        changedUrls.contains(cleanActiveOrigin)
+                                || (!activeDigest.isEmpty()
+                                        && !ConfigLibrary.hash(newRaw).equals(activeDigest));
+                if (differsFromActive) {
+                    activeChanged = true;
+                    nextActiveRaw = newRaw;
+                    nextActiveOrigin = cleanActiveOrigin;
+                    if (!changedUrls.contains(cleanActiveOrigin)) {
+                        updated++;
+                        RefreshCandidate activeCandidate = candidates.get(cleanActiveOrigin);
+                        String label =
+                                activeCandidate != null && !activeCandidate.name.isEmpty()
+                                        ? activeCandidate.name
+                                        : cleanActiveOrigin;
+                        updatedNames.add(cleanSubscriptionLabel(label));
+                    }
+                }
             }
         }
 

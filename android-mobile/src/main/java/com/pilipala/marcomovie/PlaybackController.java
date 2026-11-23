@@ -1250,29 +1250,14 @@ final class PlaybackController {
                     initDispatched[0] = true;
                     PLAYER_INIT.execute(
                             () -> {
-                                MoviePlayer candidate = null;
                                 try {
-                                    Map<String, String> mediaHeaders =
+                                    final Map<String, String> mediaHeaders =
                                             Cms.inheritedHeaders(s.api, ep.url, s.headers);
                                     Cms.mergeHeaders(mediaHeaders, ep.headers);
                                     int engPref = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
-                                    EnginePlan plan =
+                                    final EnginePlan plan =
                                             planEngine(engPref, ep.media, MpvPlayer.isAvailable());
-                                    MoviePlayer[] created = new MoviePlayer[1];
-                                    EnginePlan actualPlan =
-                                            createPlayerWithPlan(a, ep, plan, created);
-                                    candidate = created[0];
-                                    if (!actualPlan.fallbackReason.isEmpty()) {
-                                        AppLog.i(
-                                                "PlaybackController",
-                                                "Engine fallback ("
-                                                        + actualPlan.engineLabel
-                                                        + "): "
-                                                        + actualPlan.fallbackReason);
-                                    }
-                                    String playUrl = preparePlayUrl(a, s, ep, mediaHeaders);
-                                    candidate.configureDefaultAudio();
-                                    candidate.setDataSource(a, Uri.parse(playUrl), mediaHeaders);
+                                    final String playUrl = preparePlayUrl(a, s, ep, mediaHeaders);
                                     try {
                                         if (ep.name != null
                                                 && !ep.name.isEmpty()
@@ -1289,20 +1274,43 @@ final class PlaybackController {
                                         }
                                     } catch (Exception ignored) {
                                     }
-                                    candidate.setOptions(ep.media);
-                                    final MoviePlayer ready = candidate;
-                                    a.ui.post(
+                                    commitPreparedLaunchOnMain(
+                                            a.ui::post,
+                                            () ->
+                                                    ticket == a.generation
+                                                            && !a.isFinishing()
+                                                            && !a.isDestroyed(),
                                             () -> {
-                                                if (ticket != a.generation || a.isFinishing()) {
-                                                    ready.release();
-                                                    return;
-                                                }
                                                 if (useSystemBackend
                                                         && (activeSurface[0] == null
                                                                 || !activeSurface[0].isValid())) {
                                                     initDispatched[0] = false;
-                                                    ready.release();
-                                                    return;
+                                                    return null;
+                                                }
+                                                MoviePlayer[] created = new MoviePlayer[1];
+                                                EnginePlan actualPlan =
+                                                        createPlayerWithPlan(a, ep, plan, created);
+                                                final MoviePlayer ready = created[0];
+                                                try {
+                                                    if (!actualPlan.fallbackReason.isEmpty()) {
+                                                        AppLog.i(
+                                                                "PlaybackController",
+                                                                "Engine fallback ("
+                                                                        + actualPlan.engineLabel
+                                                                        + "): "
+                                                                        + actualPlan
+                                                                                .fallbackReason);
+                                                    }
+                                                    ready.configureDefaultAudio();
+                                                    ready.setDataSource(
+                                                            a, Uri.parse(playUrl), mediaHeaders);
+                                                    ready.setOptions(ep.media);
+                                                } catch (Throwable setupErr) {
+                                                    try {
+                                                        ready.release();
+                                                    } catch (Exception ignored) {
+                                                    }
+                                                    throw setupErr;
                                                 }
                                                 a.player = ready;
                                                 if (activeSurface[0] != null
@@ -1920,10 +1928,21 @@ final class PlaybackController {
                                                                 7500L);
                                                     }
                                                 }
+                                                return ready;
+                                            },
+                                            ex -> {
+                                                AppLog.w(
+                                                        "PlaybackController",
+                                                        "player init failed",
+                                                        ex);
+                                                if (a.playerChrome != null) {
+                                                    a.playerChrome.setLoading(false);
+                                                }
+                                                a.playStatus.setText(a.message(ex));
+                                                showControls(a, true);
                                             });
                                 } catch (Exception ex) {
-                                    AppLog.w("PlaybackController", "player init failed", ex);
-                                    if (candidate != null) candidate.release();
+                                    AppLog.w("PlaybackController", "player prepare failed", ex);
                                     a.ui.post(
                                             () -> {
                                                 if (ticket == a.generation) {
@@ -2513,6 +2532,48 @@ final class PlaybackController {
             return new EnginePlan(ENGINE_IJK, false, 0, true, "IJK 兼容模式", "");
         }
         return new EnginePlan(ENGINE_MEDIA3, false, 0, false, "Media3", "");
+    }
+
+    interface SessionOwnership {
+        boolean isCurrentOwner();
+    }
+
+    interface MainThreadDispatcher {
+        void post(Runnable action);
+    }
+
+    interface PlayerFactory<P> {
+        P createAndAttach() throws Throwable;
+    }
+
+    interface LaunchErrorHandler {
+        void onError(Throwable error);
+    }
+
+    /**
+     * Runs player instantiation and attachment on the main thread ONLY when {@code ownership}
+     * still holds at commit time. This guarantees a stale background prepare task can never
+     * construct a process-singleton player (such as {@link MpvPlayer}) and release a newer active
+     * session.
+     */
+    static <P> void commitPreparedLaunchOnMain(
+            MainThreadDispatcher mainThread,
+            final SessionOwnership ownership,
+            final PlayerFactory<P> createAndAttach,
+            final LaunchErrorHandler onError) {
+        mainThread.post(
+                () -> {
+                    if (!ownership.isCurrentOwner()) {
+                        return;
+                    }
+                    try {
+                        createAndAttach.createAndAttach();
+                    } catch (Throwable err) {
+                        if (onError != null && ownership.isCurrentOwner()) {
+                            onError.onError(err);
+                        }
+                    }
+                });
     }
 
     static EnginePlan createPlayerWithPlan(

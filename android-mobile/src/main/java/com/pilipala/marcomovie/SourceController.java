@@ -1367,6 +1367,7 @@ final class SourceController {
                                             : summary.updatedActiveOrigin.trim();
                             final Cms.Config fresh =
                                     Cms.parseConfig(summary.updatedActiveRaw, targetOrigin);
+                            final String failStatusText = stamp + " · 保存失败，原配置已保留";
                             a.ui.post(
                                     () -> {
                                         if (a.isFinishing()
@@ -1374,24 +1375,6 @@ final class SourceController {
                                                 || a.switchingPrivacy
                                                 || a.privateMode != snapshotPrivate) {
                                             return;
-                                        }
-                                        if (recordLastUpdate) {
-                                            a.prefs
-                                                    .edit()
-                                                    .putLong(
-                                                            Prefs.SUBSCRIPTION_LAST_AUTO_UPDATE,
-                                                            now)
-                                                    .putString(
-                                                            Prefs.SUBSCRIPTION_LAST_AUTO_STATUS,
-                                                            finalStatusText)
-                                                    .apply();
-                                        } else {
-                                            a.prefs
-                                                    .edit()
-                                                    .putString(
-                                                            Prefs.SUBSCRIPTION_LAST_AUTO_STATUS,
-                                                            finalStatusText)
-                                                    .apply();
                                         }
                                         String liveOrigin =
                                                 a.configOrigin == null ? "" : a.configOrigin.trim();
@@ -1435,33 +1418,107 @@ final class SourceController {
                                                         fresh.raw,
                                                         nextPointers,
                                                         pointerStoreFor(a),
-                                                        (seq, error, rolledBackTo) ->
-                                                                AppLog.w(
-                                                                        "SourceController",
-                                                                        "Sequenced auto-update write failed",
-                                                                        error));
+                                                        (seq, committed) ->
+                                                                a.ui.post(
+                                                                        () -> {
+                                                                            if (a.isFinishing()
+                                                                                    || a
+                                                                                            .isDestroyed()
+                                                                                    || a.switchingPrivacy
+                                                                                    || a.privateMode
+                                                                                            != snapshotPrivate
+                                                                                    || a.configStore
+                                                                                                    .latestWriteSeq()
+                                                                                            != seq) {
+                                                                                return;
+                                                                            }
+                                                                            if (recordLastUpdate) {
+                                                                                a.prefs
+                                                                                        .edit()
+                                                                                        .putLong(
+                                                                                                Prefs
+                                                                                                        .SUBSCRIPTION_LAST_AUTO_UPDATE,
+                                                                                                now)
+                                                                                        .putString(
+                                                                                                Prefs
+                                                                                                        .SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                                                                finalStatusText)
+                                                                                        .apply();
+                                                                            } else {
+                                                                                a.prefs
+                                                                                        .edit()
+                                                                                        .putString(
+                                                                                                Prefs
+                                                                                                        .SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                                                                finalStatusText)
+                                                                                        .apply();
+                                                                            }
+                                                                            boolean playingNow =
+                                                                                    a.player != null
+                                                                                            || a.inlinePlayer
+                                                                                                    != null
+                                                                                            || (a.current
+                                                                                                            != null
+                                                                                                    && a.current
+                                                                                                            .player);
+                                                                            if (!playingNow) {
+                                                                                closeEngines(a);
+                                                                                a.config = fresh;
+                                                                                a.configOrigin =
+                                                                                        targetOrigin;
+                                                                                if (a.current
+                                                                                                != null
+                                                                                        && a.current
+                                                                                                .home) {
+                                                                                    a.refresh();
+                                                                                }
+                                                                                a.toast(
+                                                                                        "已自动更新 "
+                                                                                                + summary.updatedCount
+                                                                                                + " 个订阅源");
+                                                                            } else {
+                                                                                AppLog.i(
+                                                                                        "SourceController",
+                                                                                        "Daily subscription update saved; deferring live reload during playback");
+                                                                            }
+                                                                        }),
+                                                        (seq, error, rolledBackTo) -> {
+                                                            AppLog.w(
+                                                                    "SourceController",
+                                                                    "Sequenced auto-update write failed",
+                                                                    error);
+                                                            a.ui.post(
+                                                                    () -> {
+                                                                        if (a.isFinishing()
+                                                                                || a.isDestroyed()
+                                                                                || a.switchingPrivacy
+                                                                                || a.privateMode
+                                                                                        != snapshotPrivate
+                                                                                || a.configStore
+                                                                                                .latestWriteSeq()
+                                                                                        != seq) {
+                                                                            return;
+                                                                        }
+                                                                        a.prefs
+                                                                                .edit()
+                                                                                .putString(
+                                                                                        Prefs
+                                                                                                .SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                                                        failStatusText)
+                                                                                .apply();
+                                                                        if (force) {
+                                                                            a.toast(
+                                                                                    "订阅保存失败，原配置已保留："
+                                                                                            + a
+                                                                                                    .message(
+                                                                                                            error));
+                                                                        }
+                                                                    });
+                                                        });
                                         if (!commit.accepted) {
                                             AppLog.i(
                                                     "SourceController",
                                                     "Skipped stale auto-update commit (writeSeq advanced)");
-                                            return;
-                                        }
-                                        boolean playingNow =
-                                                a.player != null
-                                                        || a.inlinePlayer != null
-                                                        || (a.current != null && a.current.player);
-                                        if (!playingNow) {
-                                            closeEngines(a);
-                                            a.config = fresh;
-                                            a.configOrigin = targetOrigin;
-                                            if (a.current != null && a.current.home) {
-                                                a.refresh();
-                                            }
-                                            a.toast("已自动更新 " + summary.updatedCount + " 个订阅源");
-                                        } else {
-                                            AppLog.i(
-                                                    "SourceController",
-                                                    "Daily subscription update saved; deferring live reload during playback");
                                         }
                                     });
                         } else {
@@ -2378,7 +2435,6 @@ final class SourceController {
             else a.refresh();
         } else {
             saveConfig(a, pkg.config, pkg.origin);
-            a.toast("本地包导入成功（共 " + pkg.config.sites.size() + " 个片源）");
         }
     }
 
@@ -2428,16 +2484,27 @@ final class SourceController {
     }
 
     static void saveConfig(MainActivity a, Cms.Config c, String origin) throws Exception {
+        saveConfig(a, c, origin, null);
+    }
+
+    static void saveConfig(
+            final MainActivity a, Cms.Config c, String origin, final Runnable onCommitted)
+            throws Exception {
         a.configImportSeq.incrementAndGet();
         if (!c.warehouse.isEmpty()) origin = c.warehouse;
         else if (!c.origin.isEmpty()) origin = c.origin;
         if (origin == null) origin = "";
-        ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
+        final ConfigLibrary library =
+                a.configStore != null ? new ConfigLibrary(a.configStore.directory) : null;
         String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
-        boolean isLocalFile = ConfigLibrary.isLocalFileOrigin(origin);
-        if (a.isTvDevice() || !isLocalFile) {
+        final boolean isLocalFile = ConfigLibrary.isLocalFileOrigin(origin);
+        final boolean recordInLibrary = library != null && (a.isTvDevice() || !isLocalFile);
+        final Cms.Config previousConfig = a.config;
+        final String previousOrigin = a.configOrigin;
+        final String previousSelected = selected;
+        final boolean snapshotPrivate = a.privateMode;
+        if (recordInLibrary) {
             try {
-                rememberConfig(a, library);
                 String id = ConfigLibrary.identity(origin, c.raw);
                 String previousId =
                         a.config == null
@@ -2449,13 +2516,14 @@ final class SourceController {
                         if (id.equals(entry.id)) selected = entry.selected;
                     }
                 }
-                library.remember(c.raw, origin, configName(c), selected);
             } catch (Exception e) {
                 if (a.isTvDevice()) throw e;
             }
         }
         final String rawConfig = c.raw;
         final String targetOrigin = origin;
+        final String rememberedName = configName(c);
+        final String rememberedSelected = selected;
         SourcePicker.applyEdits(a, c, targetOrigin);
         String currentKey = selected;
         boolean hasSelected = false;
@@ -2475,11 +2543,60 @@ final class SourceController {
         final ConfigStore.PointerSnapshot nextPointers =
                 new ConfigStore.PointerSnapshot(
                         targetOrigin, nextSelectedSite, new SavedState(c, targetOrigin));
+        final Runnable applyCommittedUi =
+                () -> {
+                    a.closeEngines();
+                    a.config = c;
+                    a.configOrigin = targetOrigin;
+                    if (!isLocalFile) {
+                        CloudSyncDialog.onSubscriptionSaved(a, targetOrigin, c.raw);
+                    }
+                    a.back.clear();
+                    a.current = new MainActivity.Screen(a::home);
+                    a.current.render.run();
+                    a.restore(a.current);
+                    a.toast("已导入 " + c.sites.size() + " 个来源");
+                    if (onCommitted != null) {
+                        onCommitted.run();
+                    }
+                };
         if (store != null) {
             store.saveAsync(
                     rawConfig,
                     nextPointers,
                     pointerStore,
+                    (seq, committed) -> {
+                        if (recordInLibrary) {
+                            try {
+                                if (previousConfig != null
+                                        && previousConfig.raw != null
+                                        && !previousConfig.raw.isEmpty()) {
+                                    library.remember(
+                                            previousConfig.raw,
+                                            previousOrigin,
+                                            configName(previousConfig),
+                                            previousSelected);
+                                }
+                                library.remember(
+                                        rawConfig,
+                                        targetOrigin,
+                                        rememberedName,
+                                        rememberedSelected);
+                            } catch (Exception ignored) {
+                            }
+                        }
+                        a.ui.post(
+                                () -> {
+                                    if (store.latestWriteSeq() != seq
+                                            || a.isFinishing()
+                                            || a.isDestroyed()
+                                            || a.switchingPrivacy
+                                            || a.privateMode != snapshotPrivate) {
+                                        return;
+                                    }
+                                    applyCommittedUi.run();
+                                });
+                    },
                     (seq, error, rolledBackTo) ->
                             a.ui.post(
                                     () -> {
@@ -2505,18 +2622,8 @@ final class SourceController {
                                     }));
         } else {
             pointerStore.applyPointers(nextPointers);
+            applyCommittedUi.run();
         }
-        a.closeEngines();
-        a.config = c;
-        a.configOrigin = targetOrigin;
-        if (!isLocalFile) {
-            CloudSyncDialog.onSubscriptionSaved(a, targetOrigin, c.raw);
-        }
-        a.back.clear();
-        a.current = new MainActivity.Screen(a::home);
-        a.current.render.run();
-        a.restore(a.current);
-        a.toast("已导入 " + c.sites.size() + " 个来源");
     }
 
     static String configName(Cms.Config config) {

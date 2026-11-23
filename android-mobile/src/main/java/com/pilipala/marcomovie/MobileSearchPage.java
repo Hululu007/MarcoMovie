@@ -268,11 +268,14 @@ final class MobileSearchPage {
             if (activeSession != null) {
                 activeSession.cancelPool();
             }
+            long currentToken = PAGE_TOKEN.get();
+            long effectivePageToken =
+                    pageToken == currentToken ? pageToken : PAGE_TOKEN.incrementAndGet();
             long seq = QUERY_SEQ.incrementAndGet();
             activeSession =
                     new SearchSession(
                             seq,
-                            pageToken,
+                            effectivePageToken,
                             keyword,
                             privateMode,
                             config,
@@ -318,18 +321,22 @@ final class MobileSearchPage {
 
     static void render(final MobileRootShell shell, final FrameLayout container) {
         final MainActivity a = shell.a;
-        final long pageToken = beginPage();
+        final long[] pageTokenHolder = {beginPage()};
 
         LinearLayout page = a.vertical();
         page.setPadding(a.dp(16), a.statusBarHeight() + a.dp(10), a.dp(16), 0);
         page.addOnAttachStateChangeListener(
                 new View.OnAttachStateChangeListener() {
                     @Override
-                    public void onViewAttachedToWindow(View v) {}
+                    public void onViewAttachedToWindow(View v) {
+                        if (PAGE_TOKEN.get() != pageTokenHolder[0]) {
+                            pageTokenHolder[0] = beginPage();
+                        }
+                    }
 
                     @Override
                     public void onViewDetachedFromWindow(View v) {
-                        if (PAGE_TOKEN.get() == pageToken) {
+                        if (PAGE_TOKEN.get() == pageTokenHolder[0]) {
                             onPageExit();
                         }
                     }
@@ -669,13 +676,14 @@ final class MobileSearchPage {
 
                     final SearchSession session =
                             startSession(
-                                    pageToken,
+                                    pageTokenHolder[0],
                                     q,
                                     a.privateMode,
                                     a.config,
                                     a.engineEpoch,
                                     a.generation,
                                     searchable.size());
+                    pageTokenHolder[0] = session.pageToken;
                     displayedSession[0] = session;
                     statusText.setText(session.status());
 

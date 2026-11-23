@@ -140,11 +140,16 @@ final class IntroSkipEvaluator {
                                 : (posMs >= r.startMs && posMs < r.endMs);
                 if (!withinRange) continue;
                 appliedCreditIndices.add(i);
-                // If there is a post-credits scene (finite endMs well before EOF), seek past
-                // mid-credits even on the last episode or when auto-next is disabled.
-                if (r.endMs > posMs + 1000L && r.endMs < durMs - 2000L) {
-                    return Decision.seek(
-                            r.endMs, "TheIntroDB 已跳过片尾字幕 (" + Math.round(r.endMs / 1000.0) + "s)");
+                // Finite mid-episode credits (ending well before EOF) must NEVER skip the rest of
+                // the episode into the next episode, regardless of when playback enters the window.
+                boolean reachesEnd = r.endMs < 0L || r.endMs >= durMs - 2000L;
+                if (!reachesEnd) {
+                    if (r.endMs > posMs + 1000L) {
+                        return Decision.seek(
+                                r.endMs,
+                                "TheIntroDB 已跳过片尾字幕 (" + Math.round(r.endMs / 1000.0) + "s)");
+                    }
+                    return Decision.NONE;
                 }
                 if (hasNextEpisode && autoNextEnabled) {
                     return Decision.nextEpisode("TheIntroDB 已到片尾，自动切换下一集");

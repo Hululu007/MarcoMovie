@@ -528,7 +528,6 @@ final class UiWidgets {
                                         }
                                         try {
                                             a.saveConfig(parsed, savedOrigin);
-                                            a.toast("配置导入成功（共 " + parsed.sites.size() + " 个片源）");
                                         } catch (Exception ex) {
                                             a.toast("保存配置失败：" + a.message(ex));
                                         }
