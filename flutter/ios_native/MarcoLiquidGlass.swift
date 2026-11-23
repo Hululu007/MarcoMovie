@@ -51,6 +51,13 @@ private enum MarcoLiquidGlassSupport {
     )
   }
 
+  /// Keeps the root Liquid Glass Dock / Logo overlay above dynamically mounted
+  /// Flutter `UiKitView`s inside `rootVC.view` while preserving `rootVC` in the
+  /// responder chain so `logoButton.showsMenuAsPrimaryAction` presents natively.
+  static func bringRootChromeToFront() {
+    MarcoIos27RootTabChromeController.shared.bringToFrontIfNeeded()
+  }
+
   static var isEffectiveDark: Bool {
     return isEffectiveDark(for: nil)
   }
@@ -2842,6 +2849,16 @@ private final class MarcoNativeDockFactory: NSObject, FlutterPlatformViewFactory
 private final class MarcoTraitAwareHostView: UIView {
   var onTraitChanged: (() -> Void)?
 
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil {
+      MarcoLiquidGlassSupport.bringRootChromeToFront()
+      DispatchQueue.main.async {
+        MarcoLiquidGlassSupport.bringRootChromeToFront()
+      }
+    }
+  }
+
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
     super.traitCollectionDidChange(previousTraitCollection)
     if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
@@ -3463,6 +3480,11 @@ private final class MarcoIos27PassthroughChromeView: UIView {
   weak var chromeView: UIView?
   weak var glassContainerView: UIVisualEffectView?
 
+  override func didMoveToSuperview() {
+    super.didMoveToSuperview()
+    layer.zPosition = 1000.0
+  }
+
   override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
     guard !isHidden, alpha > 0.01, isUserInteractionEnabled else { return nil }
     guard let hit = super.hitTest(point, with: event) else { return nil }
@@ -3585,6 +3607,7 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     logoButton.isUserInteractionEnabled = false
     logoButton.transform = CGAffineTransform(rotationAngle: -.pi)
     contentParent.addSubview(logoButton)
+    rebuildLogoMenu()
 
     NotificationCenter.default.addObserver(
       self,
@@ -3699,6 +3722,8 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       image: MarcoLiquidGlassSupport.brandLogoImage,
       accessibilityLabel: "快捷导航"
     )
+    logoButton.showsMenuAsPrimaryAction = true
+    rebuildLogoMenu()
   }
 
   @objc private func handleSceneActivationChanged() {
@@ -4062,32 +4087,34 @@ private final class MarcoIos27RootTabChromeController: NSObject {
           let rootView = rootVC.view else {
       return
     }
-    // Mount on rootView's superview (UIWindow) directly ABOVE rootView so
-    // Flutter's dynamic UiKitView platform views (such as the scrolling Filter
-    // pill or segmented controls mounted inside rootView) can NEVER cover or
-    // intercept hits on the floating Dock / Logo orb, while native UIKit modal
-    // sheets & alerts (UITransitionView added later to UIWindow) still stay
-    // cleanly above the Dock.
-    let targetParent = rootView.superview ?? window
-    let targetFrame = targetParent === rootView ? rootView.bounds : rootView.frame
-    if attachedHostView !== rootView || overlayView.superview !== targetParent {
+    // Keep overlayView mounted inside rootVC.view so UIButton.showsMenuAsPrimaryAction
+    // (`logoButton`'s native UIMenu) ALWAYS has rootVC in its responder chain
+    // (`_viewControllerForAncestor != nil`). Pair with `layer.zPosition = 1000`
+    // (strictly local to rootView.layer, so UIWindow-hosted UIMenus & sheets
+    // stay above it) and `bringToFrontIfNeeded()` invoked from
+    // `MarcoFlutterViewController.viewDidLayoutSubviews()` and every native
+    // FlutterPlatformView's `didMoveToWindow()` so dynamically scrolling
+    // UiKitViews (e.g. Filter button) never cover or intercept hits on the Dock/Logo.
+    overlayView.layer.zPosition = 1000.0
+    if attachedHostView !== rootView || overlayView.superview !== rootView {
       overlayView.removeFromSuperview()
-      overlayView.frame = targetFrame
+      overlayView.frame = rootView.bounds
       chromeView.frame = overlayView.bounds
-      if rootView.superview === targetParent {
-        targetParent.insertSubview(overlayView, aboveSubview: rootView)
-      } else {
-        targetParent.addSubview(overlayView)
-      }
+      rootView.addSubview(overlayView)
       attachedHostView = rootView
-    } else if rootView.superview === targetParent {
-      if let rootIdx = targetParent.subviews.firstIndex(of: rootView),
-         let overlayIdx = targetParent.subviews.firstIndex(of: overlayView),
-         overlayIdx < rootIdx {
-        targetParent.insertSubview(overlayView, aboveSubview: rootView)
-      }
-    } else if targetParent === rootView {
-      targetParent.bringSubviewToFront(overlayView)
+    } else if rootView.subviews.last !== overlayView {
+      rootView.bringSubviewToFront(overlayView)
+    }
+  }
+
+  func bringToFrontIfNeeded() {
+    guard let rootView = attachedHostView ?? MarcoLiquidGlassSupport.activeWindow()?.rootViewController?.view else {
+      return
+    }
+    guard overlayView.superview === rootView else { return }
+    overlayView.layer.zPosition = 1000.0
+    if rootView.subviews.last !== overlayView {
+      rootView.bringSubviewToFront(overlayView)
     }
   }
 
@@ -4097,10 +4124,10 @@ private final class MarcoIos27RootTabChromeController: NSObject {
       return
     }
     attachToRootIfNeeded()
-    let targetParent = overlayView.superview ?? rootView
-    overlayView.frame = targetParent === rootView ? rootView.bounds : rootView.frame
+    overlayView.frame = rootView.bounds
     chromeView.frame = overlayView.bounds
     chromeView.setNeedsLayout()
+    bringToFrontIfNeeded()
   }
 
   func configure(args: [String: Any]) {
@@ -4360,11 +4387,22 @@ private final class MarcoNativeGlassButtonControl: UIView {
     fatalError("init(coder:) has not been implemented")
   }
 
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil {
+      MarcoLiquidGlassSupport.bringRootChromeToFront()
+      DispatchQueue.main.async {
+        MarcoLiquidGlassSupport.bringRootChromeToFront()
+      }
+    }
+  }
+
   override func layoutSubviews() {
     super.layoutSubviews()
     if fallbackBlurView.superview != nil {
       fallbackBlurView.layer.cornerRadius = bounds.height * 0.5
     }
+    MarcoLiquidGlassSupport.bringRootChromeToFront()
   }
 
   @objc private func handleButtonTap() {
@@ -4771,6 +4809,16 @@ private final class MarcoGlassPillHostView: UIView {
   @available(*, unavailable)
   required init?(coder: NSCoder) {
     fatalError("init(coder:) has not been implemented")
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil {
+      MarcoLiquidGlassSupport.bringRootChromeToFront()
+      DispatchQueue.main.async {
+        MarcoLiquidGlassSupport.bringRootChromeToFront()
+      }
+    }
   }
 
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {

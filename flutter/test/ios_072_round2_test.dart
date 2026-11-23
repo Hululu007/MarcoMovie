@@ -17,6 +17,7 @@ import 'package:marco_movie/ui/apple_theme.dart';
 import 'package:marco_movie/ui/cloud_sync_panel.dart';
 import 'package:marco_movie/ui/ios_settings.dart';
 import 'package:marco_movie/ui/netdisk_sheet.dart';
+import 'package:marco_movie/ui/poster_image.dart';
 import 'package:marco_movie/ui/windows_appearance.dart';
 
 void main() {
@@ -470,6 +471,64 @@ void main() {
         expect(storage.iosAnime4kLightweightEnabled, isFalse);
         expect(storage.preferredQuality, '1080p_direct');
         expect(storage.iosHdrToneMappingMode, IosHdrToneMappingMode.hable.id);
+      },
+    );
+
+    test(
+      'Hero HD poster upgrade parses Douban mobile search /movie/subject/, matches prefix variants & upgrades to uncropped /view/photo/l/',
+      () {
+        // 1. Uncropped original-large Douban poster upgrade for full-bleed Hero
+        expect(
+          PosterLoader.upgradeDoubanToOriginalLarge(
+            'https://img1.doubanio.com/view/photo/s_ratio_poster/public/p2935488630.webp',
+          ),
+          'https://img1.doubanio.com/view/photo/l/public/p2935488630.jpg',
+        );
+        expect(
+          PosterLoader.upgradeDoubanToOriginalLarge(
+            'https://img2.doubanio.com/view/photo/l_ratio_poster/public/p2937593221.jpg',
+          ),
+          'https://img2.doubanio.com/view/photo/l/public/p2937593221.jpg',
+        );
+        // 2. Bangumi /r/400/ thumbnail path stripped to original 2K /pic/cover/l/
+        expect(
+          PosterLoader.upgradeUrlToHd(
+            'https://lain.bgm.tv/r/400/pic/cover/l/0f/0f/623249_zCdly.jpg',
+          ),
+          'https://lain.bgm.tv/pic/cover/l/0f/0f/623249_zCdly.jpg',
+        );
+        // 3. Douban mobile search parser extracts strictly /movie/subject/ items
+        //    (ignoring /book/subject/ and /group/) and matches prefix variants
+        //    like 七龙珠超：比鲁斯 <-> 龙珠超：比鲁斯.
+        const sampleHtml = '''
+          <ul class="search_results_subjects">
+            <li><a href="/book/subject/35080870/"><img src="https://img3.doubanio.com/view/subject/l/public/s33682883.jpg"><span class="subject-title">两京十五日</span></a></li>
+            <li><a href="/group/765151/"><img src="https://img1.doubanio.com/view/group/sqxs/public/919498ef7f7c754.jpg"><span class="subject-title">龙珠超：比鲁斯</span></a></li>
+            <li><a href="/movie/subject/38221205/"><img src="https://img3.doubanio.com/view/photo/s_ratio_poster/public/p2935478803.jpg"><span class="subject-title">七龙珠超：比鲁斯</span></a></li>
+            <li><a href="/movie/subject/35235320/"><img src="https://img2.doubanio.com/view/photo/s_ratio_poster/public/p2937593221.jpg"><span class="subject-title">两京十五日</span></a></li>
+          </ul>
+        ''';
+        final dragonBall = PosterLoader.parseDoubanMobileSearchEntries(
+          sampleHtml,
+          '龙珠超：比鲁斯',
+        );
+        expect(dragonBall, hasLength(1));
+        expect(dragonBall.first.id, '38221205');
+        expect(
+          dragonBall.first.coverUrl,
+          'https://img3.doubanio.com/view/photo/l/public/p2935478803.jpg',
+        );
+
+        final twoCapitals = PosterLoader.parseDoubanMobileSearchEntries(
+          sampleHtml,
+          '两京十五日',
+        );
+        expect(twoCapitals, hasLength(1));
+        expect(twoCapitals.first.id, '35235320');
+        expect(
+          twoCapitals.first.coverUrl,
+          'https://img2.doubanio.com/view/photo/l/public/p2937593221.jpg',
+        );
       },
     );
   });

@@ -346,9 +346,18 @@ class DeploymentChecks(unittest.TestCase):
         self.assertIn('"supportsHdrDisplay":', av_src)
         self.assertNotIn('UIScreen.main', av_src)
 
-        # 6. Root Dock / Logo overlay mounts directly above rootView in UIWindow
-        #    so scrolling Flutter UiKitViews (e.g. Filter button) never occlude it.
-        self.assertIn('targetParent.insertSubview(overlayView, aboveSubview: rootView)', liquid_src)
+        # 6. Root Dock / Logo overlay stays inside rootVC.view (so UIButton
+        #    showsMenuAsPrimaryAction always has rootVC in its responder chain)
+        #    while layer.zPosition = 1000 + bringRootChromeToFront() keep it
+        #    above all dynamically mounted Flutter UiKitViews (e.g. Filter).
+        self.assertIn('rootView.addSubview(overlayView)', liquid_src)
+        self.assertIn('overlayView.layer.zPosition = 1000.0', liquid_src)
+        self.assertIn('static func bringRootChromeToFront()', liquid_src)
+        self.assertEqual(liquid_src.count('override func didMoveToWindow()'), 3)
+        prepare_src = (
+            Path(__file__).resolve().parent / 'prepare_platform.py'
+        ).read_text(encoding='utf-8')
+        self.assertIn('MarcoLiquidGlassSupport.bringRootChromeToFront()', prepare_src)
 
         # 7. Native Apple SF Symbols monochrome tab icons (no cartoonish multi-layer shapes)
         self.assertIn('return selected ? "house.fill" : "house"', liquid_src)

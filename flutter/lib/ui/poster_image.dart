@@ -262,11 +262,10 @@ class PosterLoader {
     if (u.startsWith('http://lain.bgm.tv/')) {
       u = u.replaceFirst('http://', 'https://');
     }
-    if (u.contains('lain.bgm.tv/pic/cover/')) {
-      u = u.replaceFirst(
-        RegExp(r'/pic/cover/[csgm]/'),
-        '/pic/cover/l/',
-      );
+    if (u.contains('lain.bgm.tv/')) {
+      u = u
+          .replaceFirst(RegExp(r'/r/\d+/pic/cover/'), '/pic/cover/')
+          .replaceFirst(RegExp(r'/pic/cover/[csgm]/'), '/pic/cover/l/');
     } else if (u.contains('doubanio.com')) {
       u = u
           .replaceFirst('img9.doubanio.com', 'img3.doubanio.com')
@@ -282,12 +281,14 @@ class PosterLoader {
       if (u.endsWith('.webp')) {
         u = '${u.substring(0, u.length - 5)}.jpg';
       }
-    } else if (u.contains('hdslb.com') || u.contains('biliimg.com')) {
+    } else if (u.contains('hdslb.com') ||
+        u.contains('biliimg.com') ||
+        u.contains('meituan.net')) {
       if (u.startsWith('http://')) {
         u = u.replaceFirst('http://', 'https://');
       }
       final atResize = RegExp(
-        r'@(?:\d+[wh]|[^/?#]+\.(?:webp|jpg|jpeg|png|avif)).*$',
+        r'@(?:\d+[wh]|[^/?#]+\.(?:webp|jpg|jpeg|png|avif)|[^/?#]*[wh]_[^/?#]*).*$',
         caseSensitive: false,
       ).firstMatch(u);
       if (atResize != null) {
@@ -318,6 +319,25 @@ class PosterLoader {
           u = u.substring(0, qIdx);
         }
       }
+    }
+    return u;
+  }
+
+  /// Upgrades any Douban photo poster URL (`/s_ratio_poster/`, `/m_ratio_poster/`,
+  /// `/l_ratio_poster/`, `/sqxs/`, `/lpic/`) to the uncropped full-resolution
+  /// `/view/photo/l/` variant (typically `1080x1527`–`1080x1919`) for full-bleed
+  /// Retina Hero billboards.
+  @visibleForTesting
+  static String upgradeDoubanToOriginalLarge(String rawUrl) {
+    var u = upgradeUrlToHd(rawUrl);
+    if (!u.contains('doubanio.com')) return u;
+    u = u
+        .replaceFirst('/view/photo/l_ratio_poster/', '/view/photo/l/')
+        .replaceFirst('/view/photo/m_ratio_poster/', '/view/photo/l/')
+        .replaceFirst('/view/photo/s_ratio_poster/', '/view/photo/l/')
+        .replaceFirst('/view/photo/lpic/', '/view/photo/l/');
+    if (u.endsWith('.webp')) {
+      u = '${u.substring(0, u.length - 5)}.jpg';
     }
     return u;
   }
@@ -461,7 +481,11 @@ class PosterLoader {
         .toList();
     for (final v in variants) {
       if (cNorm == v) return true;
-      if (v.length >= 4 && (cNorm.startsWith(v) || v.startsWith(cNorm))) {
+      if (v.length >= 4 &&
+          (cNorm.startsWith(v) ||
+              v.startsWith(cNorm) ||
+              cNorm.endsWith(v) ||
+              v.endsWith(cNorm))) {
         final shorter = cNorm.length < v.length ? cNorm.length : v.length;
         final longer = cNorm.length > v.length ? cNorm.length : v.length;
         if (shorter / longer >= 0.72) return true;
@@ -609,6 +633,197 @@ class PosterLoader {
       return cmp != 0 ? cmp : a.order.compareTo(b.order);
     });
     return (id: candidates.first.id, isTv: candidates.first.isTv);
+  }
+
+  /// Extracts verified `/movie/subject/{id}` candidates from Douban mobile web
+  /// search HTML (`https://m.douban.com/search/?query=...&type=movie`), strictly
+  /// filtering out `/book/subject/` and `/group/` sections and requiring work
+  /// title verification via [_isSameWorkTitle].
+  @visibleForTesting
+  static List<({String id, String title, String coverUrl})>
+      parseDoubanMobileSearchEntries(String html, String rawTitle) {
+    final cleanTitle = _cleanTitle(rawTitle);
+    if (html.isEmpty || cleanTitle.isEmpty) return const [];
+    final out = <({String id, String title, String coverUrl})>[];
+    final seenIds = <String>{};
+    final anchorRe = RegExp(
+      r'<a\b[^>]*href="/movie/subject/(\d+)/?"[^>]*>([\s\S]*?)</a>',
+      caseSensitive: false,
+    );
+    final titleRe = RegExp(
+      r'<span\b[^>]*class="subject-title"[^>]*>([^<]+)</span>',
+      caseSensitive: false,
+    );
+    final imgRe = RegExp(
+      r'<img\b[^>]*src="(https?://[^"]+)"',
+      caseSensitive: false,
+    );
+    for (final m in anchorRe.allMatches(html)) {
+      final sid = (m.group(1) ?? '').trim();
+      if (sid.isEmpty || !seenIds.add(sid)) continue;
+      final inner = m.group(2) ?? '';
+      final rawItemTitle = (titleRe.firstMatch(inner)?.group(1) ?? '')
+          .replaceAll('&amp;', '&')
+          .replaceAll('&quot;', '"')
+          .replaceAll('&#39;', "'")
+          .replaceAll('&lt;', '<')
+          .replaceAll('&gt;', '>')
+          .trim();
+      if (rawItemTitle.isEmpty || !_isSameWorkTitle(rawItemTitle, cleanTitle)) {
+        continue;
+      }
+      final rawImg = (imgRe.firstMatch(inner)?.group(1) ?? '').trim();
+      final coverUrl =
+          (rawImg.startsWith('http') && !isPersonOrAvatarImageUrl(rawImg))
+              ? upgradeDoubanToOriginalLarge(rawImg)
+              : '';
+      out.add((id: sid, title: rawItemTitle, coverUrl: coverUrl));
+      if (out.length >= 6) break;
+    }
+    return out;
+  }
+
+  /// Resolves a verified Douban subject `{id, isTv}` and uncropped 1080p/2K
+  /// `/view/photo/l/` poster URLs using Douban mobile web search + Rexxar
+  /// subject detail verification when `subject_suggest` returns `[]` or
+  /// `rexxar/search` returns 403.
+  static Future<({String id, bool isTv, List<String> coverUrls})?>
+      _resolveDoubanMobileSearchSubject(
+    String cleanTitle, {
+    required int? targetYear,
+    required String bidCookie,
+  }) async {
+    final variants = _queryVariantsForTitle(cleanTitle);
+    final queries = variants.isNotEmpty ? variants.take(2) : <String>[cleanTitle];
+    List<({String id, String title, String coverUrl})> matched = const [];
+    for (final qv in queries) {
+      final html = await _getRatingTextUrl(
+        Uri.parse(
+          'https://m.douban.com/search/?query=${Uri.encodeQueryComponent(qv)}&type=movie',
+        ),
+        headers: {
+          'User-Agent': _mobileSafariUa,
+          'Referer': 'https://m.douban.com/',
+          'Cookie': bidCookie,
+          'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+        },
+        timeout: const Duration(milliseconds: 2800),
+      );
+      if (html == null || html.isEmpty) continue;
+      matched = parseDoubanMobileSearchEntries(html, cleanTitle);
+      if (matched.isNotEmpty) break;
+    }
+    if (matched.isEmpty) return null;
+
+    Future<({String id, bool isTv, int? year, String detailCover, int order})?>
+        probeDetail(
+      ({String id, String title, String coverUrl}) entry,
+      int order,
+    ) async {
+      final detailHeaders = {
+        'User-Agent': _mobileSafariUa,
+        'Referer': 'https://m.douban.com/movie/subject/${entry.id}/',
+        'Cookie': bidCookie,
+        'Accept': 'application/json, text/plain, */*',
+      };
+      for (final kind in const ['movie', 'tv']) {
+        final body = await _getRatingTextUrl(
+          Uri.parse('https://m.douban.com/rexxar/api/v2/$kind/${entry.id}'),
+          headers: detailHeaders,
+          timeout: const Duration(milliseconds: 2400),
+        );
+        if (body == null || body.isEmpty) continue;
+        try {
+          final decoded = jsonDecode(body);
+          if (decoded is! Map) continue;
+          final dTitle = (decoded['title'] ?? '').toString().trim();
+          if (dTitle.isNotEmpty && !_isSameWorkTitle(dTitle, cleanTitle)) {
+            return null;
+          }
+          final dYear = int.tryParse((decoded['year'] ?? '').toString().trim());
+          final dType = (decoded['type'] ?? kind).toString().toLowerCase();
+          final pic = decoded['pic'];
+          final rawLarge = (pic is Map
+                  ? (pic['large'] ?? pic['normal'] ?? '')
+                  : (decoded['cover_url'] ?? ''))
+              .toString()
+              .trim();
+          final detailCover =
+              (rawLarge.startsWith('http') && !isPersonOrAvatarImageUrl(rawLarge))
+                  ? upgradeDoubanToOriginalLarge(rawLarge)
+                  : '';
+          return (
+            id: entry.id,
+            isTv: dType == 'tv',
+            year: dYear,
+            detailCover: detailCover,
+            order: order,
+          );
+        } catch (_) {}
+      }
+      return null;
+    }
+
+    final toCheck = matched.take(3).toList(growable: false);
+    final details = await Future.wait([
+      for (var i = 0; i < toCheck.length; i++) probeDetail(toCheck[i], i),
+    ]);
+
+    ({String id, bool isTv, int score, int order, String detailCover, String searchCover})?
+        best;
+    for (var i = 0; i < toCheck.length; i++) {
+      final entry = toCheck[i];
+      final detail = details[i];
+      final candYear = detail?.year;
+      var score = 10;
+      if (targetYear != null) {
+        if (candYear != null) {
+          final diff = (candYear - targetYear).abs();
+          if (diff >= 2) continue;
+          score = diff == 0 ? 100 : 50;
+        } else {
+          score = 5;
+        }
+      } else if (candYear != null) {
+        score = 20;
+      }
+      final cand = (
+        id: entry.id,
+        isTv: detail?.isTv ?? false,
+        score: score,
+        order: i,
+        detailCover: detail?.detailCover ?? '',
+        searchCover: entry.coverUrl,
+      );
+      if (best == null ||
+          cand.score > best.score ||
+          (cand.score == best.score && cand.order < best.order)) {
+        best = cand;
+      }
+    }
+
+    if (best == null) {
+      // Only fall back to the first search match when we have no target year
+      // or detail lookup failed for every candidate.
+      if (targetYear != null && details.any((d) => d != null)) {
+        return null;
+      }
+      final first = matched.first;
+      return (
+        id: first.id,
+        isTv: false,
+        coverUrls: first.coverUrl.isNotEmpty
+            ? <String>[first.coverUrl]
+            : const <String>[],
+      );
+    }
+
+    final urls = <String>[];
+    if (best.detailCover.isNotEmpty) urls.add(best.detailCover);
+    if (best.searchCover.isNotEmpty && !urls.contains(best.searchCover)) {
+      urls.add(best.searchCover);
+    }
+    return (id: best.id, isTv: best.isTv, coverUrls: urls);
   }
 
   /// Extracts verified Rotten Tomatoes Tomatometer (`1..100`) from Bing search result blocks.
@@ -885,8 +1100,8 @@ class PosterLoader {
     if (dims != null) {
       final isVerticalHeroHd =
           dims.height >= dims.width * 1.05 &&
-          dims.width >= 640 &&
-          dims.height >= 900;
+          dims.width >= 720 &&
+          dims.height >= 1000;
       final isUltraHighRes = dims.width >= 1200 && dims.height >= 900;
       final ok = isVerticalHeroHd || isUltraHighRes;
       _heroHdDimensionCache[fp] = ok;
@@ -1120,16 +1335,37 @@ class PosterLoader {
       }
 
       // Stage 1: Official verified film/TV poster databases (Douban official
-      // poster gallery + l_ratio_poster, Bangumi, Baidu Baike, Bilibili PGC).
+      // mobile web search + /view/photo/l/ + l_ratio_poster, Bangumi, Baidu
+      // Baike, Bilibili PGC). Also prioritize direct uncropped Douban `/l/`
+      // upgrade when the CMS already supplied a Douban photo URL.
       final resolvedYear =
           year.isNotEmpty ? year : (targetYear?.toString() ?? '');
-      final verifiedUrls = await _resolveCoverUrlsByTitle(
+      final rawVerifiedUrls = await _resolveCoverUrlsByTitle(
         clean,
         year: resolvedYear,
         forceRefreshHd: true,
         verifiedOnly: true,
         includeDoubanPosterGallery: strictHero,
       );
+      final verifiedUrls = <String>[];
+      final seenProbeUrls = <String>{};
+      if (strictHero && hasValidCmsUrl && rawUrl.contains('doubanio.com')) {
+        final directLarge = upgradeDoubanToOriginalLarge(rawUrl);
+        if (directLarge.startsWith('http') &&
+            !isPersonOrAvatarImageUrl(directLarge) &&
+            seenProbeUrls.add(directLarge)) {
+          verifiedUrls.add(directLarge);
+        }
+      }
+      for (final u in rawVerifiedUrls) {
+        final candidate =
+            strictHero && u.contains('doubanio.com')
+                ? upgradeDoubanToOriginalLarge(u)
+                : u;
+        if (seenProbeUrls.add(candidate)) {
+          verifiedUrls.add(candidate);
+        }
+      }
 
       Uint8List? bestBytes;
       int bestScore = 0;
@@ -1162,7 +1398,7 @@ class PosterLoader {
             final isSharp = strictHero
                 ? (await isHeroHdPoster(bestBytes!) &&
                     (bestDims == null ||
-                        (bestDims.width >= 720 && bestDims.height >= 1000)))
+                        (bestDims.width >= 960 && bestDims.height >= 1320)))
                 : await isTrueHdPoster(bestBytes!);
             if (isSharp) {
               return true;
@@ -1556,6 +1792,17 @@ class PosterLoader {
                 _doubanSubjectIdCache[scoped] = matched;
               }
             } catch (_) {}
+          }
+        }
+        if (subject == null) {
+          final mobileMatched = await _resolveDoubanMobileSearchSubject(
+            cleanTitle,
+            targetYear: targetYear,
+            bidCookie: bidCookie,
+          );
+          if (mobileMatched != null) {
+            subject = (id: mobileMatched.id, isTv: mobileMatched.isTv);
+            _doubanSubjectIdCache[scoped] = subject;
           }
         }
         if (subject != null) {
@@ -3032,8 +3279,9 @@ class PosterLoader {
     await Future.wait([
       // Source 1: Bangumi Official Open API (`api.bgm.tv/search/subject/...`) — 1080p/2K `images.large`
       () async {
+        var bangumiFound = false;
         for (final qv in variants.take(2)) {
-          if (primaryHdResults.isNotEmpty) break;
+          if (bangumiFound) break;
           HttpClientRequest? req;
           try {
             final q = Uri.encodeQueryComponent(qv);
@@ -3042,16 +3290,16 @@ class PosterLoader {
             );
             req = await _client
                 .getUrl(uri)
-                .timeout(const Duration(milliseconds: 2600));
+                .timeout(const Duration(milliseconds: 3200));
             req.headers.set('User-Agent', _desktopChromeUa);
             req.headers.set('Accept', 'application/json');
             final resp =
-                await req.close().timeout(const Duration(milliseconds: 2600));
+                await req.close().timeout(const Duration(milliseconds: 3200));
             if (resp.statusCode >= 200 && resp.statusCode < 300) {
               final body = await utf8.decoder
                   .bind(resp)
                   .join()
-                  .timeout(const Duration(milliseconds: 2600));
+                  .timeout(const Duration(milliseconds: 3200));
               final decoded = jsonDecode(body);
               if (decoded is Map && decoded['list'] is List) {
                 final list = decoded['list'] as List;
@@ -3084,6 +3332,7 @@ class PosterLoader {
                       final large = (images['large'] ?? '').toString().trim();
                       if (large.startsWith('http')) {
                         addPrimaryHd(large);
+                        bangumiFound = true;
                       }
                     }
                     final summary = (item['summary'] ?? '').toString().trim();
@@ -3385,6 +3634,35 @@ class PosterLoader {
           if (rexxarMatchedVariant) break;
         }
 
+        // Primary resilient fallback: Douban mobile web search (`m.douban.com/search`)
+        // + Rexxar subject detail (`m.douban.com/rexxar/api/v2/{movie|tv}/{id}`),
+        // which stays reachable even when `subject_suggest` returns `[]` or
+        // `rexxar/search` returns 403, delivering uncropped 1080p/2K `/view/photo/l/`
+        // official vertical posters.
+        if (_doubanSubjectIdCache[scopedKey] == null) {
+          final mobileMatched = await _resolveDoubanMobileSearchSubject(
+            cleanTitle,
+            targetYear: targetYear,
+            bidCookie: bidCookie,
+          );
+          if (mobileMatched != null) {
+            _doubanSubjectIdCache[scopedKey] = (
+              id: mobileMatched.id,
+              isTv: mobileMatched.isTv,
+            );
+            for (final cover in mobileMatched.coverUrls.reversed) {
+              final preferred = includeDoubanPosterGallery
+                  ? upgradeDoubanToOriginalLarge(cover)
+                  : upgradeUrlToHd(cover);
+              if (preferred.startsWith('http') &&
+                  !isPersonOrAvatarImageUrl(preferred) &&
+                  seen.add(preferred)) {
+                primaryHdResults.insert(0, preferred);
+              }
+            }
+          }
+        }
+
         // Official Douban Poster Gallery (`type=R`): delivers true 1080p/2K
         // theatrical & TV vertical posters (`image.large.url`) sorted by
         // highest pixel resolution for full-bleed iOS Hero surfaces.
@@ -3576,68 +3854,74 @@ class PosterLoader {
     final primary = variants.isNotEmpty ? variants.first : cleanTitle;
     if (primary.isEmpty) return const [];
     final yearToken = targetYear != null ? '$targetYear ' : '';
-    final query = Uri.encodeQueryComponent(
-      '"$primary" $yearToken官方海报 竖版 电视剧 电影 -节气 -二十四节气 -模板 -素材 -主播',
-    );
-    final uri = Uri.parse(
-      'https://cn.bing.com/images/async?q=$query&first=0&count=16&qft=+filterui:aspect-tall+filterui:imagesize-large',
-    );
+    final queries = <String>[
+      '$primary $yearToken海报 -模板 -素材 -节气 -二十四节气 -主播',
+      if (yearToken.isNotEmpty)
+        '$primary 官方海报 -模板 -素材 -节气 -二十四节气 -主播',
+    ];
     final out = <String>[];
     final seen = <String>{};
-    HttpClientRequest? req;
-    try {
-      req = await _client
-          .getUrl(uri)
-          .timeout(const Duration(milliseconds: 2600));
-      req.headers.set('User-Agent', _desktopChromeUa);
-      req.headers.set('Referer', 'https://cn.bing.com/');
-      req.headers.set(
-        'Accept',
-        'text/html,application/xhtml+xml,*/*;q=0.8',
+    for (final rawQuery in queries) {
+      if (out.length >= 6) break;
+      final query = Uri.encodeQueryComponent(rawQuery);
+      final uri = Uri.parse(
+        'https://cn.bing.com/images/async?q=$query&first=0&count=16&qft=+filterui:aspect-tall+filterui:imagesize-large',
       );
-      final resp =
-          await req.close().timeout(const Duration(milliseconds: 2600));
-      if (resp.statusCode >= 200 && resp.statusCode < 300) {
-        final html = await utf8.decoder
-            .bind(resp)
-            .join()
+      HttpClientRequest? req;
+      try {
+        req = await _client
+            .getUrl(uri)
             .timeout(const Duration(milliseconds: 2600));
-        final cardMatches = RegExp(
-          r'm=(?:"|&quot;)(\{[^"]*?\})(?:"|&quot;)',
-        ).allMatches(html);
-        for (final cm in cardMatches) {
-          final cardJsonAttr = cm.group(1) ?? '';
-          final tMatch = RegExp(
-            r't&quot;:&quot;([^&]{2,100})&quot;',
-          ).firstMatch(cardJsonAttr);
-          final rawCap = (tMatch?.group(1) ?? '').trim();
-          if (_isNonEntertainmentBingCaption(rawCap) ||
-              _isNonEntertainmentBingCaption(cardJsonAttr)) {
-            continue;
-          }
-          if (strictCaptionOnly && !matchesBingPosterCaption(rawCap, cleanTitle)) {
-            continue;
-          }
-          final mm = RegExp(
-            r'murl&quot;:&quot;(https?://[^&"\x27]+?)&quot;',
-          ).firstMatch(cardJsonAttr);
-          if (mm != null) {
-            final hd = upgradeUrlToHd(mm.group(1)!);
-            if (hd.startsWith('http') &&
-                !isPersonOrAvatarImageUrl(hd) &&
-                seen.add(hd)) {
-              out.add(hd);
-              if (out.length >= 6) break;
+        req.headers.set('User-Agent', _desktopChromeUa);
+        req.headers.set('Referer', 'https://cn.bing.com/');
+        req.headers.set(
+          'Accept',
+          'text/html,application/xhtml+xml,*/*;q=0.8',
+        );
+        final resp =
+            await req.close().timeout(const Duration(milliseconds: 2600));
+        if (resp.statusCode >= 200 && resp.statusCode < 300) {
+          final html = await utf8.decoder
+              .bind(resp)
+              .join()
+              .timeout(const Duration(milliseconds: 2600));
+          final cardMatches = RegExp(
+            r'm=(?:"|&quot;)(\{[^"]*?\})(?:"|&quot;)',
+          ).allMatches(html);
+          for (final cm in cardMatches) {
+            final cardJsonAttr = cm.group(1) ?? '';
+            final tMatch = RegExp(
+              r't&quot;:&quot;([^&]{2,100})&quot;',
+            ).firstMatch(cardJsonAttr);
+            final rawCap = (tMatch?.group(1) ?? '').trim();
+            if (_isNonEntertainmentBingCaption(rawCap) ||
+                _isNonEntertainmentBingCaption(cardJsonAttr)) {
+              continue;
+            }
+            if (strictCaptionOnly && !matchesBingPosterCaption(rawCap, cleanTitle)) {
+              continue;
+            }
+            final mm = RegExp(
+              r'murl&quot;:&quot;(https?://[^&"\x27]+?)&quot;',
+            ).firstMatch(cardJsonAttr);
+            if (mm != null) {
+              final hd = upgradeUrlToHd(mm.group(1)!);
+              if (hd.startsWith('http') &&
+                  !isPersonOrAvatarImageUrl(hd) &&
+                  seen.add(hd)) {
+                out.add(hd);
+                if (out.length >= 6) break;
+              }
             }
           }
+        } else {
+          await resp.drain<void>();
         }
-      } else {
-        await resp.drain<void>();
+      } catch (_) {
+        try {
+          req?.abort();
+        } catch (_) {}
       }
-    } catch (_) {
-      try {
-        req?.abort();
-      } catch (_) {}
     }
     return out;
   }
@@ -3752,6 +4036,23 @@ class PosterLoader {
         add(swapped, const {
           'User-Agent': _mobileSafariUa,
           'Referer': 'https://m.douban.com/',
+          'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        });
+      }
+      if (url.contains('/view/photo/l/public/')) {
+        final ratioUrl = uri
+            .replace(
+              host: 'img3.doubanio.com',
+              scheme: 'https',
+              path: uri.path.replaceFirst(
+                '/view/photo/l/public/',
+                '/view/photo/l_ratio_poster/public/',
+              ),
+            )
+            .toString();
+        add(ratioUrl, const {
+          'User-Agent': _desktopChromeUa,
+          'Referer': 'https://movie.douban.com/',
           'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         });
       }
@@ -4192,10 +4493,15 @@ class _PosterImageState extends State<PosterImage>
       if (hdHit != null && !identical(hdHit, _bytes)) {
         setState(() {
           _bytes = hdHit;
-          _hasVerifiedHd = true;
+          if (!widget.strictHighRes) {
+            _hasVerifiedHd = true;
+          }
         });
         updateKeepAlive();
         _notifyBytes(hdHit);
+        if (widget.strictHighRes && !widget.forBackdrop) {
+          unawaited(_verifyAndUpgradeIfLowRes(hdHit, widget.title.trim()));
+        }
       }
     }
   }

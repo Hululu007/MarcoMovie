@@ -1419,6 +1419,7 @@ def main() -> None:
                     "  }\n\n"
                     "  override func viewDidLayoutSubviews() {\n"
                     "    super.viewDidLayoutSubviews()\n"
+                    "    MarcoLiquidGlassSupport.bringRootChromeToFront()\n"
                     "    let sz = view.bounds.size\n"
                     "    if sz.width > 0, sz.height > 0, sz != lastReportedGeometrySize {\n"
                     "      lastReportedGeometrySize = sz\n"
