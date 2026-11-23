@@ -169,6 +169,57 @@ final class MobileSearchPage {
         }
     }
 
+    /**
+     * Pure incremental-append planner used by {@link #render} to avoid tearing down the
+     * {@link ScrollView} and rebuilding already-visible result cards when additional concurrent
+     * sources arrive (#45). Preserves scroll position and click-target view identity across batches.
+     */
+    static final class IncrementalResultPlan {
+        static final class Diff {
+            final boolean fullRebuild;
+            final int appendFromIndex;
+
+            Diff(boolean fullRebuild, int appendFromIndex) {
+                this.fullRebuild = fullRebuild;
+                this.appendFromIndex = appendFromIndex;
+            }
+        }
+
+        private long boundQuerySeq = -1L;
+        private String boundFilter = "";
+        private boolean boundSidebar;
+        private int processedHitCount;
+        int fullRebuildCount;
+        int incrementalUpdateCount;
+
+        void reset() {
+            boundQuerySeq = -1L;
+            boundFilter = "";
+            processedHitCount = 0;
+        }
+
+        Diff planUpdate(long querySeq, String filter, boolean useSidebar, int totalHits) {
+            String f = filter == null ? "" : filter;
+            boolean needFull =
+                    boundQuerySeq != querySeq
+                            || !boundFilter.equals(f)
+                            || boundSidebar != useSidebar
+                            || totalHits < processedHitCount;
+            if (needFull) {
+                boundQuerySeq = querySeq;
+                boundFilter = f;
+                boundSidebar = useSidebar;
+                processedHitCount = totalHits;
+                fullRebuildCount++;
+                return new Diff(true, 0);
+            }
+            int from = processedHitCount;
+            processedHitCount = totalHits;
+            incrementalUpdateCount++;
+            return new Diff(false, from);
+        }
+    }
+
     private static final Object SESSION_LOCK = new Object();
     private static final AtomicLong QUERY_SEQ = new AtomicLong(0L);
     private static final AtomicLong PAGE_TOKEN = new AtomicLong(0L);
@@ -335,22 +386,40 @@ final class MobileSearchPage {
         page.addView(resultsStage, new LinearLayout.LayoutParams(-1, 0, 1f));
 
         final SearchSession[] displayedSession = {null};
+        final IncrementalResultPlan renderPlan = new IncrementalResultPlan();
+        final LinearLayout[] filterContainerRef = {null};
+        final LinearLayout[] listContainerRef = {null};
+        final TextView[] allFilterChipRef = {null};
+        final Map<String, TextView> siteFilterChips = new LinkedHashMap<>();
         final Runnable[] runSearch = new Runnable[1];
 
         final Runnable rebuildResults =
                 new Runnable() {
                     @Override
                     public void run() {
-                        resultsStage.removeAllViews();
                         final SearchSession session = displayedSession[0];
                         if (session == null
                                 || session.cancelled
                                 || !session.matchesContext(
                                         a.privateMode, a.config, a.engineEpoch)) {
+                            renderPlan.reset();
+                            filterContainerRef[0] = null;
+                            listContainerRef[0] = null;
+                            allFilterChipRef[0] = null;
+                            siteFilterChips.clear();
+                            resultsStage.removeAllViews();
                             return;
                         }
                         List<Hit> snapshot = session.snapshotHits();
-                        if (snapshot.isEmpty()) return;
+                        if (snapshot.isEmpty()) {
+                            renderPlan.reset();
+                            filterContainerRef[0] = null;
+                            listContainerRef[0] = null;
+                            allFilterChipRef[0] = null;
+                            siteFilterChips.clear();
+                            resultsStage.removeAllViews();
+                            return;
+                        }
 
                         Map<String, Integer> siteCounts = new LinkedHashMap<>();
                         Map<String, String> siteNames = new LinkedHashMap<>();
@@ -367,6 +436,57 @@ final class MobileSearchPage {
 
                         boolean useSidebar =
                                 a.mobilePrefs().getBoolean(Prefs.SEARCH_PLATFORM_SIDEBAR, false);
+                        IncrementalResultPlan.Diff diff =
+                                renderPlan.planUpdate(
+                                        session.querySeq, curFilter, useSidebar, snapshot.size());
+
+                        if (!diff.fullRebuild && listContainerRef[0] != null) {
+                            // Incremental path (#45): preserve ScrollView, scrollY, and existing
+                            // cards; update filter counts in-place and append only newly arrived
+                            // matching hits!
+                            if (allFilterChipRef[0] != null) {
+                                allFilterChipRef[0].setText("全部 (" + snapshot.size() + ")");
+                            }
+                            if (filterContainerRef[0] != null) {
+                                for (Map.Entry<String, Integer> e : siteCounts.entrySet()) {
+                                    final String sKey = e.getKey();
+                                    String label =
+                                            useSidebar
+                                                    ? (siteNames.get(sKey)
+                                                            + " ("
+                                                            + e.getValue()
+                                                            + ")")
+                                                    : (siteNames.get(sKey) + " · " + e.getValue());
+                                    TextView existingChip = siteFilterChips.get(sKey);
+                                    if (existingChip != null) {
+                                        existingChip.setText(label);
+                                    } else {
+                                        TextView added =
+                                                addPlatformFilterItem(
+                                                        a,
+                                                        filterContainerRef[0],
+                                                        label,
+                                                        sKey.equals(curFilter),
+                                                        useSidebar,
+                                                        () -> {
+                                                            session.setSelectedSiteFilter(sKey);
+                                                            run();
+                                                        });
+                                        siteFilterChips.put(sKey, added);
+                                    }
+                                }
+                            }
+                            populateHitRowsRange(
+                                    a,
+                                    listContainerRef[0],
+                                    snapshot,
+                                    diff.appendFromIndex,
+                                    curFilter);
+                            return;
+                        }
+
+                        resultsStage.removeAllViews();
+                        siteFilterChips.clear();
                         if (useSidebar) {
                             LinearLayout split = a.row();
                             resultsStage.addView(split, new FrameLayout.LayoutParams(-1, -1));
@@ -375,28 +495,31 @@ final class MobileSearchPage {
                             leftSv.setVerticalScrollBarEnabled(false);
                             LinearLayout leftCol = a.vertical();
                             leftCol.setPadding(0, a.dp(4), a.dp(8), a.dp(104));
-                            addPlatformFilterItem(
-                                    a,
-                                    leftCol,
-                                    "全部 (" + snapshot.size() + ")",
-                                    curFilter.isEmpty(),
-                                    true,
-                                    () -> {
-                                        session.setSelectedSiteFilter("");
-                                        run();
-                                    });
+                            allFilterChipRef[0] =
+                                    addPlatformFilterItem(
+                                            a,
+                                            leftCol,
+                                            "全部 (" + snapshot.size() + ")",
+                                            curFilter.isEmpty(),
+                                            true,
+                                            () -> {
+                                                session.setSelectedSiteFilter("");
+                                                run();
+                                            });
                             for (Map.Entry<String, Integer> e : siteCounts.entrySet()) {
                                 final String sKey = e.getKey();
-                                addPlatformFilterItem(
-                                        a,
-                                        leftCol,
-                                        siteNames.get(sKey) + " (" + e.getValue() + ")",
-                                        sKey.equals(curFilter),
-                                        true,
-                                        () -> {
-                                            session.setSelectedSiteFilter(sKey);
-                                            run();
-                                        });
+                                TextView chip =
+                                        addPlatformFilterItem(
+                                                a,
+                                                leftCol,
+                                                siteNames.get(sKey) + " (" + e.getValue() + ")",
+                                                sKey.equals(curFilter),
+                                                true,
+                                                () -> {
+                                                    session.setSelectedSiteFilter(sKey);
+                                                    run();
+                                                });
+                                siteFilterChips.put(sKey, chip);
                             }
                             leftSv.addView(leftCol);
                             split.addView(leftSv, new LinearLayout.LayoutParams(a.dp(104), -1));
@@ -406,9 +529,11 @@ final class MobileSearchPage {
                             shell.bindScrollBehavior(rightSv);
                             LinearLayout rightCol = a.vertical();
                             rightCol.setPadding(a.dp(4), a.dp(4), 0, a.dp(106));
-                            populateHitRows(a, rightCol, snapshot, curFilter);
+                            populateHitRowsRange(a, rightCol, snapshot, 0, curFilter);
                             rightSv.addView(rightCol);
                             split.addView(rightSv, new LinearLayout.LayoutParams(0, -1, 1f));
+                            filterContainerRef[0] = leftCol;
+                            listContainerRef[0] = rightCol;
                         } else {
                             LinearLayout vBox = a.vertical();
                             resultsStage.addView(vBox, new FrameLayout.LayoutParams(-1, -1));
@@ -417,28 +542,31 @@ final class MobileSearchPage {
                             topHsv.setHorizontalScrollBarEnabled(false);
                             topHsv.setPadding(0, a.dp(2), 0, a.dp(8));
                             LinearLayout chipRow = a.row();
-                            addPlatformFilterItem(
-                                    a,
-                                    chipRow,
-                                    "全部 (" + snapshot.size() + ")",
-                                    curFilter.isEmpty(),
-                                    false,
-                                    () -> {
-                                        session.setSelectedSiteFilter("");
-                                        run();
-                                    });
+                            allFilterChipRef[0] =
+                                    addPlatformFilterItem(
+                                            a,
+                                            chipRow,
+                                            "全部 (" + snapshot.size() + ")",
+                                            curFilter.isEmpty(),
+                                            false,
+                                            () -> {
+                                                session.setSelectedSiteFilter("");
+                                                run();
+                                            });
                             for (Map.Entry<String, Integer> e : siteCounts.entrySet()) {
                                 final String sKey = e.getKey();
-                                addPlatformFilterItem(
-                                        a,
-                                        chipRow,
-                                        siteNames.get(sKey) + " · " + e.getValue(),
-                                        sKey.equals(curFilter),
-                                        false,
-                                        () -> {
-                                            session.setSelectedSiteFilter(sKey);
-                                            run();
-                                        });
+                                TextView chip =
+                                        addPlatformFilterItem(
+                                                a,
+                                                chipRow,
+                                                siteNames.get(sKey) + " · " + e.getValue(),
+                                                sKey.equals(curFilter),
+                                                false,
+                                                () -> {
+                                                    session.setSelectedSiteFilter(sKey);
+                                                    run();
+                                                });
+                                siteFilterChips.put(sKey, chip);
                             }
                             topHsv.addView(chipRow);
                             vBox.addView(topHsv, new LinearLayout.LayoutParams(-1, -2));
@@ -448,9 +576,11 @@ final class MobileSearchPage {
                             shell.bindScrollBehavior(listSv);
                             LinearLayout listCol = a.vertical();
                             listCol.setPadding(0, a.dp(2), 0, a.dp(106));
-                            populateHitRows(a, listCol, snapshot, curFilter);
+                            populateHitRowsRange(a, listCol, snapshot, 0, curFilter);
                             listSv.addView(listCol);
                             vBox.addView(listSv, new LinearLayout.LayoutParams(-1, 0, 1f));
+                            filterContainerRef[0] = chipRow;
+                            listContainerRef[0] = listCol;
                         }
                     }
                 };
@@ -519,6 +649,11 @@ final class MobileSearchPage {
                     saveSearchHistory(a, q);
                     renderHistory.run();
 
+                    renderPlan.reset();
+                    filterContainerRef[0] = null;
+                    listContainerRef[0] = null;
+                    allFilterChipRef[0] = null;
+                    siteFilterChips.clear();
                     resultsStage.removeAllViews();
 
                     final List<Cms.Site> searchable = new ArrayList<>();
@@ -693,7 +828,7 @@ final class MobileSearchPage {
         }
     }
 
-    private static void addPlatformFilterItem(
+    private static TextView addPlatformFilterItem(
             MainActivity a,
             LinearLayout parent,
             String text,
@@ -723,12 +858,19 @@ final class MobileSearchPage {
         if (verticalSidebar) lp.bottomMargin = a.dp(7);
         else lp.rightMargin = a.dp(8);
         parent.addView(tv, lp);
+        return tv;
     }
 
-    private static void populateHitRows(
-            MainActivity a, LinearLayout parent, List<Hit> hits, String selectedSiteFilter) {
+    private static void populateHitRowsRange(
+            MainActivity a,
+            LinearLayout parent,
+            List<Hit> hits,
+            int fromIndex,
+            String selectedSiteFilter) {
         boolean cleanTitle = a.mobilePrefs().getBoolean(Prefs.AI_CLEAN_SEARCH, false);
-        for (final Hit h : hits) {
+        int start = Math.max(0, fromIndex);
+        for (int i = start; i < hits.size(); i++) {
+            final Hit h = hits.get(i);
             if (selectedSiteFilter != null
                     && !selectedSiteFilter.isEmpty()
                     && !selectedSiteFilter.equals(h.site.key)) {
