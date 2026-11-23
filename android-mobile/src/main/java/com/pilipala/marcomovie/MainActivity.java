@@ -2260,12 +2260,19 @@ public final class MainActivity extends Activity {
         // Never disrupt an active playback session when a background spider/netdisk extension
         // unexpectedly calls Activity.finish().
         if (current != null && current.player) {
+            ui.post(
+                    () -> {
+                        if (!isDestroyed() && !allowSystemFinish) {
+                            toast("当前片源扩展触发退出请求，已拦截保护播放");
+                        }
+                    });
             return;
         }
         generation++;
         ui.post(
                 () -> {
                     if (isDestroyed() || allowSystemFinish) return;
+                    final String recoveryMsg = "当前片源主动拒绝运行，已拦截退出请求；请返回或切换其他片源";
                     if (current != null
                             && shouldPopScreenOnPluginFinish(
                                     current.home, current.player, !back.isEmpty())) {
@@ -2274,6 +2281,13 @@ public final class MainActivity extends Activity {
                         current = back.pop();
                         renderReturn(current);
                         restore(current);
+                        toast(recoveryMsg);
+                    } else {
+                        cancelPageRequests();
+                        if (mobileShell != null) {
+                            mobileShell.showSourceRejectedRecovery(recoveryMsg);
+                        }
+                        toast(recoveryMsg);
                     }
                 });
     }

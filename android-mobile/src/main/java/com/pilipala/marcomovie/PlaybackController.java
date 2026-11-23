@@ -163,6 +163,8 @@ final class PlaybackController {
         if (a.current != null && a.current.player) {
             if (a.playStatus != null) a.playStatus.setText(message);
             showControls(a, true);
+        } else if (a.inlinePlayer != null) {
+            a.inlinePlayer.showResolveFailure(message);
         }
         a.toast(message);
     }
@@ -584,10 +586,10 @@ final class PlaybackController {
                                                         error);
                                                 a.changingMiniEpisode = false;
                                                 clearPlaybackLoading(a);
-                                                failInPlaceSwitch(a, "播放信息无法读取，请重试");
+                                                failInPlaceSwitch(a, "解析失败：播放信息无法读取，请重试");
                                             }
                                         });
-                            } catch (Exception error) {
+                            } catch (Throwable error) {
                                 AppLog.w("PlaybackController", "engine.player failed", error);
                                 a.ui.post(
                                         () -> {
@@ -599,7 +601,9 @@ final class PlaybackController {
                                                     a, s, a.resumeAt, "原片源解析失败")) {
                                                 return;
                                             }
-                                            failInPlaceSwitch(a, a.message(error));
+                                            failInPlaceSwitch(
+                                                    a,
+                                                    SourceController.stageMessage("解析失败", error));
                                         });
                             }
                         });
@@ -1391,6 +1395,7 @@ final class PlaybackController {
                                                 ready.setOnTextTracksChangedListener(
                                                         () -> {
                                                             if (ticket == a.generation
+                                                                    && a.player == ready
                                                                     && a.playbackControls
                                                                             == controls) {
                                                                 controls
@@ -1400,6 +1405,7 @@ final class PlaybackController {
                                                 ready.setOnAudioTracksChangedListener(
                                                         () -> {
                                                             if (ticket == a.generation
+                                                                    && a.player == ready
                                                                     && a.playbackControls
                                                                             == controls) {
                                                                 controls
@@ -1409,6 +1415,7 @@ final class PlaybackController {
                                                 ready.setOnHdrChangedListener(
                                                         hdr -> {
                                                             if (ticket != a.generation
+                                                                    || a.player != ready
                                                                     || a.isFinishing()) return;
                                                             boolean hdrSurface =
                                                                     hdr
@@ -1424,7 +1431,8 @@ final class PlaybackController {
                                                         });
                                                 ready.setOnPreparedListener(
                                                         mp -> {
-                                                            if (ticket != a.generation) return;
+                                                            if (ticket != a.generation
+                                                                    || a.player != ready) return;
                                                             a.prepared = true;
                                                             a.historyFallbackInFlight = false;
                                                             a.historyFallbackBookmark = null;
@@ -1532,7 +1540,8 @@ final class PlaybackController {
                                                         });
                                                 ready.setOnVideoSizeChangedListener(
                                                         (mp, w, h) -> {
-                                                            if (ticket == a.generation) {
+                                                            if (ticket == a.generation
+                                                                    && a.player == ready) {
                                                                 if (w > 0
                                                                         && h > 0
                                                                         && mp.isHdrVideo()) {

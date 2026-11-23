@@ -288,6 +288,14 @@ final class MobileInlinePlayer {
         }
     }
 
+    void showResolveFailure(String message) {
+        if (closed || statusLabel == null) return;
+        String text = message == null || message.trim().isEmpty() ? "解析失败，请切换线路或片源" : message;
+        if (!text.startsWith("解析失败")) text = "解析失败：" + text;
+        statusLabel.setVisibility(View.VISIBLE);
+        statusLabel.setText(text);
+    }
+
     private void startResolvedStream() {
         releaseInternalPlayer();
         final Cms.Episode ep = resolvedEpisode;

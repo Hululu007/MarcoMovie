@@ -38,6 +38,50 @@ final class MobileHomePage {
         a.prefs.edit().putString(Prefs.LOADING_SITE, siteKey == null ? "" : siteKey).commit();
     }
 
+    static boolean hasAnyPoster(List<Cms.Video> videos) {
+        if (videos == null || videos.isEmpty()) return false;
+        for (Cms.Video v : videos) {
+            if (v != null && v.poster != null && !v.poster.trim().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Resolves initial home listings for both XML/JSON CMS and script sources. Standard Apple CMS
+     * v10 {@code ?ac=list} omits {@code vod_pic}; when the home response contains videos without
+     * any poster URL, enriches via {@link SourceEngine#homeVideos()} ({@code ?ac=detail&pg=1}) or
+     * the first category before falling back to the posterless list.
+     */
+    static Cms.Listing resolveHomeListing(
+            SourceEngine eng, String homeRaw, List<Cms.Category> parsedCats) throws Exception {
+        Cms.Listing cand = HomeScreen.parseHomeListing(homeRaw);
+        boolean hasPosters = hasAnyPoster(cand.videos);
+        if (cand.videos.isEmpty() || !hasPosters) {
+            try {
+                Cms.Listing enriched = Cms.listing(eng.homeVideos());
+                if (!enriched.videos.isEmpty()
+                        && (cand.videos.isEmpty() || hasAnyPoster(enriched.videos))) {
+                    cand = enriched;
+                    hasPosters = hasAnyPoster(cand.videos);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if ((cand.videos.isEmpty() || !hasPosters) && parsedCats != null && !parsedCats.isEmpty()) {
+            try {
+                Cms.Listing byCat = Cms.listing(eng.category(parsedCats.get(0).id, 1));
+                if (!byCat.videos.isEmpty()
+                        && (cand.videos.isEmpty() || hasAnyPoster(byCat.videos))) {
+                    cand = byCat;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return cand;
+    }
+
     static void render(final MobileRootShell shell, final FrameLayout container) {
         final MainActivity a = shell.a;
         int homeMode = a.mobilePrefs().getInt(Prefs.HOME_MODE, 0);
@@ -214,8 +258,29 @@ final class MobileHomePage {
 
         final TextView statusView = a.text("正在连接片源…", 13, MainActivity.MUTED);
         statusView.setGravity(Gravity.CENTER);
-        statusView.setPadding(a.dp(16), a.dp(28), a.dp(16), a.dp(28));
+        statusView.setPadding(a.dp(16), a.dp(28), a.dp(16), a.dp(12));
         body.addView(statusView, new LinearLayout.LayoutParams(-1, -2));
+
+        final TextView recoverSwitchBtn = a.text("切换其他片源", 13, Color.WHITE);
+        recoverSwitchBtn.setTypeface(null, Typeface.BOLD);
+        recoverSwitchBtn.setGravity(Gravity.CENTER);
+        recoverSwitchBtn.setPadding(a.dp(18), a.dp(9), a.dp(18), a.dp(9));
+        recoverSwitchBtn.setBackground(
+                UiWidgets.glassBg(0xcc242d2a, 0xb8181f1d, a.dp(999), a.dp(0.8f), 0x40ffffff));
+        recoverSwitchBtn.setVisibility(View.GONE);
+        UiWidgets.bindTouchFeedback(recoverSwitchBtn);
+        recoverSwitchBtn.setOnClickListener(v -> shell.showQuickSourceAndModeSheet());
+        LinearLayout.LayoutParams recLp = new LinearLayout.LayoutParams(-2, -2);
+        recLp.gravity = Gravity.CENTER_HORIZONTAL;
+        recLp.bottomMargin = a.dp(14);
+        body.addView(recoverSwitchBtn, recLp);
+
+        shell.onSourceRejected =
+                reason -> {
+                    statusView.setVisibility(View.VISIBLE);
+                    statusView.setText(reason);
+                    recoverSwitchBtn.setVisibility(View.VISIBLE);
+                };
 
         final LinearLayout gridWrap = a.vertical();
         gridWrap.setPadding(a.dp(16), a.dp(4), a.dp(16), 0);
@@ -317,16 +382,20 @@ final class MobileHomePage {
                         gridWrap.removeAllViews();
                         heroHolder.removeAllViews();
                         moreBtn.setVisibility(View.GONE);
+                        recoverSwitchBtn.setVisibility(View.GONE);
                         statusView.setVisibility(View.VISIBLE);
                         statusView.setText("正在加载片单…");
                     } else {
                         moreBtn.setText("正在加载第 " + pageToLoad + " 页…");
                     }
 
-                    // Instant snapshot hit for page 1 home
+                    // Instant snapshot hit for page 1 home (only reuse if posters exist or site has
+                    // none)
                     if (catId.isEmpty() && pageToLoad == 1) {
                         HomeScreen.Snapshot cached = a.homeData.get(site.key);
-                        if (cached != null && !cached.videos.isEmpty()) {
+                        if (cached != null
+                                && !cached.videos.isEmpty()
+                                && hasAnyPoster(cached.videos)) {
                             categories.clear();
                             categories.addAll(cached.categories);
                             currentVideos.clear();
@@ -335,6 +404,7 @@ final class MobileHomePage {
                             totalPages[0] = Math.max(1, cached.pages);
                             rebuildChips.run();
                             statusView.setVisibility(View.GONE);
+                            recoverSwitchBtn.setVisibility(View.GONE);
                             presentVideos(shell, site, cached.videos, heroHolder, gridWrap, true);
                             return;
                         }
@@ -357,22 +427,7 @@ final class MobileHomePage {
                                     if (catId.isEmpty() && pageToLoad == 1) {
                                         homeRaw = eng.home();
                                         parsedCats = Cms.categories(homeRaw);
-                                        Cms.Listing cand =
-                                                new org.json.JSONObject(homeRaw).has("list")
-                                                        ? Cms.listing(homeRaw)
-                                                        : new Cms.Listing();
-                                        if (cand.videos.isEmpty()) {
-                                            try {
-                                                cand = Cms.listing(eng.homeVideos());
-                                            } catch (Throwable ignored) {
-                                            }
-                                        }
-                                        if (cand.videos.isEmpty() && !parsedCats.isEmpty()) {
-                                            cand =
-                                                    Cms.listing(
-                                                            eng.category(parsedCats.get(0).id, 1));
-                                        }
-                                        listing = cand;
+                                        listing = resolveHomeListing(eng, homeRaw, parsedCats);
                                     } else {
                                         homeRaw = null;
                                         parsedCats = null;
@@ -417,6 +472,7 @@ final class MobileHomePage {
                                                         displayList.isEmpty() && pageToLoad == 1
                                                                 ? View.VISIBLE
                                                                 : View.GONE);
+                                                recoverSwitchBtn.setVisibility(View.GONE);
                                                 if (displayList.isEmpty() && pageToLoad == 1) {
                                                     statusView.setText("当前分类暂无内容");
                                                 }
@@ -439,7 +495,8 @@ final class MobileHomePage {
                                                                     + ")");
                                                 }
                                             });
-                                } catch (Exception e) {
+                                } catch (Throwable e) {
+                                    AppLog.w("MobileHomePage", "home/category load failed", e);
                                     a.ui.post(
                                             () -> {
                                                 if (a.isFinishing()
@@ -447,9 +504,11 @@ final class MobileHomePage {
                                                         || myReq != reqId[0]) return;
                                                 statusView.setVisibility(View.VISIBLE);
                                                 statusView.setText(
-                                                        "加载失败：" + a.message(e) + "（点击重试）");
+                                                        SourceController.stageMessage("列表读取失败", e)
+                                                                + "（点击重试）");
                                                 statusView.setOnClickListener(
                                                         v -> fetchListing[0].run());
+                                                recoverSwitchBtn.setVisibility(View.VISIBLE);
                                             });
                                 } finally {
                                     a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();

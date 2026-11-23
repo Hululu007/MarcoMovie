@@ -760,6 +760,7 @@ public class View {
 
     public void setVisibility(int visibility) {
         this.visibility = visibility;
+        onVisibilityChanged(this, visibility);
     }
 
     public int getVisibility() {
@@ -962,6 +963,14 @@ public class View {
 
     public void postInvalidateOnAnimation() {}
 
+    public void postInvalidateDelayed(long delayMilliseconds) {}
+
+    public void requestLayout() {}
+
+    public boolean isAttachedToWindow() {
+        return attachedToWindow;
+    }
+
     public boolean post(Runnable action) {
         return new Handler(Looper.getMainLooper()).post(action);
     }
@@ -977,7 +986,11 @@ public class View {
 
     protected void onDraw(Canvas canvas) {}
 
+    protected void onAttachedToWindow() {}
+
     protected void onDetachedFromWindow() {}
+
+    protected void onVisibilityChanged(View changedView, int visibility) {}
 
     public void addOnAttachStateChangeListener(OnAttachStateChangeListener l) {
         if (l != null && !attachListeners.contains(l)) {
@@ -995,6 +1008,7 @@ public class View {
 
     public void dispatchAttachedToWindow() {
         attachedToWindow = true;
+        onAttachedToWindow();
         for (OnAttachStateChangeListener l : new ArrayList<>(attachListeners)) {
             l.onViewAttachedToWindow(this);
         }

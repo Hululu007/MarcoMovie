@@ -630,7 +630,13 @@ final class SourceController {
                 && s != null
                 && !s.isEmpty()) return s;
         if (e instanceof OutOfMemoryError) return "设备运行内存不足，已保护性中止加载。建议切换轻量片源。";
-        if (e instanceof LinkageError) return "此片源扩展与当前电视系统版本不兼容，请切换其他片源。";
+        if (e instanceof LinkageError) return "此片源扩展与当前系统版本不兼容，请切换其他片源。";
+        if (e instanceof SecurityException) {
+            if (s != null && !s.trim().isEmpty()) {
+                return "当前片源拒绝运行：" + s.trim() + "（请返回或切换其他片源）";
+            }
+            return "当前片源主动拒绝加载，请返回或切换其他片源。";
+        }
         if (e instanceof java.net.UnknownHostException) return "无法解析来源域名，请检查网络或切换其他来源。";
         if (e instanceof javax.net.ssl.SSLException) return "与来源建立安全连接失败，请检查设备时间或切换其他来源。";
         if (e instanceof java.net.SocketTimeoutException) return "来源响应超时，请重试或切换其他来源。";
@@ -645,8 +651,16 @@ final class SourceController {
                         || s.startsWith("响应超过")
                         || s.startsWith("剧集返回")
                         || s.startsWith("媒体地址返回")
-                        || s.startsWith("此剧集"))) return s;
+                        || s.startsWith("此剧集")
+                        || s.startsWith("当前片源"))) return s;
         return "连接超时、来源不可达或数据格式不受支持。请检查配置与网络后重试。";
+    }
+
+    static String stageMessage(String stage, Throwable e) {
+        String detail = message(e);
+        if (stage == null || stage.trim().isEmpty()) return detail;
+        if (detail.startsWith(stage)) return detail;
+        return stage + "：" + detail;
     }
 
     static void learnTitles(MainActivity a, List<Cms.Video> videos) {

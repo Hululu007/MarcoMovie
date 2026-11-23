@@ -528,8 +528,8 @@ final class UiWidgets {
                             }
                             throw parseEx;
                         }
-                    } catch (Exception e) {
-                        a.ui.post(() -> a.toast("配置读取失败：" + a.message(e)));
+                    } catch (Throwable e) {
+                        a.ui.post(() -> a.toast(SourceController.stageMessage("配置读取失败", e)));
                     }
                 });
     }

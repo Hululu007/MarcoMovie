@@ -53,8 +53,14 @@ final class MobileRootShell {
     View searchBubble;
     boolean dockCollapsed;
     boolean renderedPortrait;
+
+    interface TextAction {
+        void run(String text);
+    }
+
     Cms.Site activeSite;
     Runnable reloadCategory;
+    TextAction onSourceRejected;
 
     private final View[] tabItemViews = new View[4];
     private final NavIconView[] tabIconViews = new NavIconView[4];
@@ -108,7 +114,14 @@ final class MobileRootShell {
         a.setContentView(shellRoot);
         a.watchRootLayout(shellRoot);
         expandDock();
+        ImageLoader.resumeMissingPosters(a, shellRoot);
         return true;
+    }
+
+    void showSourceRejectedRecovery(String reason) {
+        if (onSourceRejected != null) {
+            onSourceRejected.run(reason);
+        }
     }
 
     boolean handleBack() {
