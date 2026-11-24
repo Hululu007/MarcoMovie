@@ -236,6 +236,7 @@ public final class LiteProbe extends Instrumentation {
                 runExtended059Checks();
                 runRound2ReworkChecks();
                 runRound3ReworkChecks();
+                runRound4ReworkChecks();
                 newChecksCount = count - baselineCount;
             }
 
@@ -3080,5 +3081,677 @@ public final class LiteProbe extends Instrumentation {
         check(
                 waitStatusContains("确实零命中", 10000),
                 "R3-4: global search on <!DOCTYPE rss> valid empty RSS reports true zero-hit");
+    }
+
+    private static boolean hasServerLog(JSONArray logs, String path, String querySub) {
+        if (logs == null) return false;
+        for (int i = 0; i < logs.length(); i++) {
+            JSONObject rec = logs.optJSONObject(i);
+            if (rec == null || !path.equals(rec.optString("path"))) continue;
+            if (querySub == null || rec.optString("query").contains(querySub)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int countServerLogs(JSONArray logs, String path) {
+        if (logs == null) return 0;
+        int n = 0;
+        for (int i = 0; i < logs.length(); i++) {
+            JSONObject rec = logs.optJSONObject(i);
+            if (rec != null && path.equals(rec.optString("path"))) n++;
+        }
+        return n;
+    }
+
+    private void submitEditSiteForm(
+            final String siteKey,
+            final String newName,
+            final String newApi,
+            final String newPlayUrl) {
+        main(
+                new Runnable() {
+                    public void run() {
+                        LiteCatalog.Site target = findSiteByKey(siteKey);
+                        if (target == null) {
+                            throw new IllegalStateException("Site not found: " + siteKey);
+                        }
+                        a.editSiteFieldsPage(target);
+                        List<android.widget.EditText> edits =
+                                new java.util.ArrayList<android.widget.EditText>();
+                        for (int i = 0; i < a.page.getChildCount(); i++) {
+                            View v = a.page.getChildAt(i);
+                            if (v instanceof android.widget.EditText) {
+                                edits.add((android.widget.EditText) v);
+                            }
+                        }
+                        if (edits.size() < 4) {
+                            throw new IllegalStateException(
+                                    "Unexpected EditText count: " + edits.size());
+                        }
+                        if (newName != null) edits.get(0).setText(newName);
+                        if (newApi != null) edits.get(2).setText(newApi);
+                        if (newPlayUrl != null) edits.get(3).setText(newPlayUrl);
+                        View saveBtn = findChildContainingText(a.page, "保存线路修改");
+                        if (saveBtn == null) {
+                            throw new IllegalStateException(
+                                    "Save button not found in editSiteFieldsPage");
+                        }
+                        saveBtn.performClick();
+                        // Simulate full app restart reload from persisted preferences & site edits
+                        a.loadedConfigSignature = "";
+                        a.loadConfiguredSites();
+                    }
+                });
+    }
+
+    private void runRound4ReworkChecks() throws Exception {
+        final String base = "http://10.0.2.2:8773";
+
+        // === R4 Item 1 (P1): Real edit form two consecutive saves, active clear, explicit global-first, XML->JSON API switch ===
+        importConfigViaPairing(base + "/config-r3-cases");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.writeSiteEditsJson(new JSONObject());
+                        a.loadedConfigSignature = "";
+                        a.loadConfiguredSites();
+                    }
+                });
+
+        // Step 1: Enter manual API + manual parse prefix (/r3-parse-a?url=) and click save
+        submitEditSiteForm("r3_rename_route", null, base + "/r4-cms-custom", base + "/r3-parse-a?url=");
+        final LiteCatalog.Site sAfterEdit1 = findSiteByKey("r3_rename_route");
+        check(
+                sAfterEdit1 != null
+                        && (base + "/r4-cms-custom").equals(sAfterEdit1.api)
+                        && (base + "/r3-parse-a?url=").equals(sAfterEdit1.playUrl)
+                        && sAfterEdit1.explicitSitePlayUrl,
+                "R4-1a: first real edit form save persists manual API and explicit playUrl");
+
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sAfterEdit1;
+                        a.currentDetail = null;
+                        a.detail("r3_rr_1");
+                    }
+                });
+        check(
+                waitDetailId("r3_rr_1", 10000),
+                "R4-1a: manual custom CMS API loaded detail after save #1");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.activeDetailLine = 1;
+                        a.showDetail(a.currentDetail);
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000), "R4-1a: line B played via manual parser after save #1");
+        SystemClock.sleep(500);
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+        JSONArray r4Log1 = fetchServerLogs();
+        check(
+                hasServerLog(r4Log1, "/r4-cms-custom", "ids=r3_rr_1")
+                        && hasServerLog(r4Log1, "/r3-parse-a", null)
+                        && hasServerLog(r4Log1, "/r3-clip-a.mp4", null)
+                        && countServerLogs(r4Log1, "/r3-parse-b") == 0,
+                "R4-1a: server confirmed save #1 hit /r4-cms-custom -> /r3-parse-a -> /r3-clip-a.mp4");
+
+        // Step 2: Re-enter real edit form, ONLY rename, click save, simulate restart reload
+        submitEditSiteForm("r3_rename_route", "二次改名保覆盖", null, null);
+        final LiteCatalog.Site sAfterEdit2 = findSiteByKey("r3_rename_route");
+        check(
+                sAfterEdit2 != null
+                        && "二次改名保覆盖".equals(sAfterEdit2.name)
+                        && (base + "/r4-cms-custom").equals(sAfterEdit2.api)
+                        && (base + "/r3-parse-a?url=").equals(sAfterEdit2.playUrl)
+                        && sAfterEdit2.explicitSitePlayUrl,
+                "R4-1b: second real edit form rename-only save preserves manual API and playUrl after reload");
+
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sAfterEdit2;
+                        a.currentDetail = null;
+                        a.detail("r3_rr_1");
+                    }
+                });
+        check(
+                waitDetailId("r3_rr_1", 10000),
+                "R4-1b: custom CMS API still loaded detail after rename-only save #2");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.activeDetailLine = 1;
+                        a.showDetail(a.currentDetail);
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000), "R4-1b: line B still played via manual parser after save #2");
+        SystemClock.sleep(500);
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+        JSONArray r4Log2 = fetchServerLogs();
+        check(
+                hasServerLog(r4Log2, "/r4-cms-custom", "ids=r3_rr_1")
+                        && hasServerLog(r4Log2, "/r3-parse-a", null)
+                        && hasServerLog(r4Log2, "/r3-clip-a.mp4", null)
+                        && countServerLogs(r4Log2, "/r3-parse-b") == 0
+                        && countServerLogs(r4Log2, "/r3-clip-b.mp4") == 0,
+                "R4-1b: server confirmed save #2 still hit /r4-cms-custom -> /r3-parse-a -> /r3-clip-a.mp4 (0 /r3-parse-b)");
+
+        // Step 3: Active clear playUrl in real edit form reverts to global routing (/r3-parse-b -> /r3-clip-b.mp4)
+        submitEditSiteForm("r3_rename_route", null, null, "");
+        final LiteCatalog.Site sAfterClear = findSiteByKey("r3_rename_route");
+        check(
+                sAfterClear != null && !sAfterClear.explicitSitePlayUrl,
+                "R4-1c: actively clearing playUrl in edit form clears explicit override");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sAfterClear;
+                        a.activeDetailLine = 1;
+                        a.showDetail(a.currentDetail);
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000), "R4-1c: line B played via global route after active clear");
+        SystemClock.sleep(400);
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+        JSONArray r4LogClear = fetchServerLogs();
+        check(
+                hasServerLog(r4LogClear, "/r3-parse-b", null)
+                        && hasServerLog(r4LogClear, "/r3-clip-b.mp4", null)
+                        && countServerLogs(r4LogClear, "/r3-parse-a") == 0,
+                "R4-1c: server confirmed active clear routed line B back to /r3-parse-b -> /r3-clip-b.mp4");
+
+        // Step 4: Deliberately entering the first inherited global parse URL into empty box must stick as explicit
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.writeSiteEditsJson(new JSONObject());
+                        a.loadedConfigSignature = "";
+                        a.loadConfiguredSites();
+                    }
+                });
+        submitEditSiteForm("r3_rename_route", null, null, base + "/r3-with-header?url=");
+        final LiteCatalog.Site sGlobalFirst = findSiteByKey("r3_rename_route");
+        check(
+                sGlobalFirst != null
+                        && sGlobalFirst.explicitSitePlayUrl
+                        && (base + "/r3-with-header?url=").equals(sGlobalFirst.playUrl),
+                "R4-1d: entering global-first parse URL in empty box marks explicitSitePlayUrl=true");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sGlobalFirst;
+                        a.currentDetail = null;
+                        a.detail("r3_rr_1");
+                    }
+                });
+        waitDetailId("r3_rr_1", 10000);
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.activeDetailLine = 1;
+                        a.showDetail(a.currentDetail);
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000), "R4-1d: explicit global-first parser played cleanly");
+        SystemClock.sleep(400);
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+        JSONArray r4LogGf = fetchServerLogs();
+        boolean gfHitWithUa = false;
+        for (int i = 0; i < r4LogGf.length(); i++) {
+            JSONObject rec = r4LogGf.optJSONObject(i);
+            if (rec != null
+                    && "/r3-with-header".equals(rec.optString("path"))
+                    && "ParserMobile/1".equals(rec.optString("userAgent"))
+                    && rec.optInt("status") == 200) {
+                gfHitWithUa = true;
+            }
+        }
+        check(
+                gfHitWithUa
+                        && hasServerLog(r4LogGf, "/r3-clip-b.mp4", null)
+                        && countServerLogs(r4LogGf, "/r3-parse-b") == 0,
+                "R4-1d: server confirmed explicit global-first hit /r3-with-header with UA=ParserMobile/1 (0 /r3-parse-b)");
+
+        // Step 5: Explicit XML site renamed stays XML (ac=videolist); changed to /r4-catalog.json switches to JSON (ac=detail)
+        submitEditSiteForm("r3_xml_gateway", "网关XML改名后", null, null);
+        final LiteCatalog.Site sXmlRenamed = findSiteByKey("r3_xml_gateway");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sXmlRenamed;
+                        a.currentDetail = null;
+                        a.detail("1");
+                    }
+                });
+        check(
+                waitDetailId("1", 10000) && sXmlRenamed != null && sXmlRenamed.type == 0,
+                "R4-1e: explicit XML site renamed via edit form preserves type=0 and loads detail");
+        JSONArray r4LogXml = fetchServerLogs();
+        check(
+                hasServerLog(r4LogXml, "/r3-gateway", "ac=videolist"),
+                "R4-1e: server confirmed renamed XML site sent ac=videolist");
+
+        submitEditSiteForm("r3_xml_gateway", null, base + "/r4-catalog.json", null);
+        final LiteCatalog.Site sMovedJson = findSiteByKey("r3_xml_gateway");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sMovedJson;
+                        a.currentDetail = null;
+                        a.detail("1");
+                    }
+                });
+        check(
+                waitDetailId("1", 10000)
+                        && sMovedJson != null
+                        && sMovedJson.type == 1
+                        && "R4严格JSON片".equals(a.currentDetail.optString("vod_name")),
+                "R4-1f: changing explicit XML site API to /r4-catalog.json switches to type=1 and loads JSON detail");
+        JSONArray r4LogJson = fetchServerLogs();
+        boolean jsonDetail200 = false;
+        boolean jsonAny400 = false;
+        for (int i = 0; i < r4LogJson.length(); i++) {
+            JSONObject rec = r4LogJson.optJSONObject(i);
+            if (rec != null && "/r4-catalog.json".equals(rec.optString("path"))) {
+                if (rec.optString("query").contains("ac=detail") && rec.optInt("status") == 200) {
+                    jsonDetail200 = true;
+                }
+                if (rec.optInt("status") == 400) jsonAny400 = true;
+            }
+        }
+        check(
+                jsonDetail200 && !jsonAny400,
+                "R4-1f: server confirmed /r4-catalog.json received ac=detail (200, 0 HTTP 400)");
+
+        // === R4 Item 2 (P2): Same-episode line switch carries progress; Chinese season & shared short-token conflicts open picker ===
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.writeSiteEditsJson(new JSONObject());
+                        a.loadedConfigSignature = "";
+                        a.loadConfiguredSites();
+                    }
+                });
+        final LiteCatalog.Site sR4Play = findSiteByKey("r3_rename_route");
+        final JSONObject vodCrossResume =
+                new JSONObject()
+                        .put("vod_id", "r4_cross_resume")
+                        .put("vod_name", "R4换线保进度片")
+                        .put("vod_play_from", "A$$$B")
+                        .put(
+                                "vod_play_url",
+                                "EP1$"
+                                        + base
+                                        + "/video.mp4#EP2$"
+                                        + base
+                                        + "/video2.mp4$$$第01集$"
+                                        + base
+                                        + "/case15-a1.mp4#第02集$"
+                                        + base
+                                        + "/case15-b1.mp4");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sR4Play;
+                        a.activeDetailLine = 0;
+                        a.showDetail(vodCrossResume);
+                        a.playingEpisodeIndex = 1;
+                        a.play(base + "/video2.mp4", "EP2");
+                    }
+                });
+        check(waitReady(25000), "R4-2a: line A EP2 prepared");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.player.seekTo(12000);
+                    }
+                });
+        long seekDeadline = SystemClock.elapsedRealtime() + 8000;
+        int posBeforeSwitch = 0;
+        while (SystemClock.elapsedRealtime() < seekDeadline) {
+            final int[] curPos = new int[1];
+            main(
+                    new Runnable() {
+                        public void run() {
+                            curPos[0] = a.player != null ? a.player.getCurrentPosition() : 0;
+                        }
+                    });
+            posBeforeSwitch = curPos[0];
+            if (posBeforeSwitch >= 9000) break;
+            SystemClock.sleep(120);
+        }
+        final List<LiteActivity.PlayLine> crossLines =
+                LiteActivity.extractPlayLines(vodCrossResume, "");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.saveResume();
+                        a.switchToPlayLineInPlayer(crossLines, 1);
+                    }
+                });
+        check(waitReady(25000), "R4-2a: line B 第02集 prepared after switch");
+        SystemClock.sleep(1000);
+        final int[] posAfterSwitch1 = new int[1];
+        final String[] switchedMeta = new String[2];
+        main(
+                new Runnable() {
+                    public void run() {
+                        posAfterSwitch1[0] = a.player != null ? a.player.getCurrentPosition() : 0;
+                        switchedMeta[0] = a.activeSession != null ? a.activeSession.epName : "";
+                        switchedMeta[1] = a.activeSession != null ? a.activeSession.streamUrl : "";
+                    }
+                });
+        SystemClock.sleep(800);
+        final int[] posAfterSwitch2 = new int[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        posAfterSwitch2[0] = a.player != null ? a.player.getCurrentPosition() : 0;
+                        a.onBackPressed();
+                    }
+                });
+        check(
+                "第02集".equals(switchedMeta[0])
+                        && (base + "/case15-b1.mp4").equals(switchedMeta[1])
+                        && posBeforeSwitch >= 9000
+                        && posAfterSwitch1[0] >= 8500
+                        && posAfterSwitch2[0] > posAfterSwitch1[0],
+                "R4-2a: EP2 -> 第02集 carries progress ("
+                        + posBeforeSwitch
+                        + "ms -> "
+                        + posAfterSwitch1[0]
+                        + "ms -> "
+                        + posAfterSwitch2[0]
+                        + "ms) on /case15-b1.mp4");
+
+        // R4-2b: Chinese season "第二季 第02集" -> ["第一季 第02集", "第一季 第03集"] keeps playing & opens picker
+        final JSONObject vodCnSeason =
+                new JSONObject()
+                        .put("vod_id", "r4_cn_season")
+                        .put("vod_name", "R4中文季冲突片")
+                        .put("vod_play_from", "A$$$B")
+                        .put(
+                                "vod_play_url",
+                                "第二季 第02集$"
+                                        + base
+                                        + "/video2.mp4$$$第一季 第02集$"
+                                        + base
+                                        + "/case15-a1.mp4#第一季 第03集$"
+                                        + base
+                                        + "/case15-b1.mp4");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.activeDetailLine = 0;
+                        a.showDetail(vodCnSeason);
+                        a.playingEpisodeIndex = 0;
+                        a.play(base + "/video2.mp4", "第二季 第02集");
+                    }
+                });
+        check(waitReady(25000), "R4-2b: 第二季 第02集 prepared");
+        final List<LiteActivity.PlayLine> cnSeasonLines =
+                LiteActivity.extractPlayLines(vodCnSeason, "");
+        final boolean[] cnPickerShown = new boolean[1];
+        final String[] cnAfterMeta = new String[2];
+        final int[] cnLineAfter = new int[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.switchToPlayLineInPlayer(cnSeasonLines, 1);
+                        cnPickerShown[0] =
+                                a.activeInPlayerDialog != null
+                                        && a.activeInPlayerDialog.isShowing();
+                        cnAfterMeta[0] = a.activeSession != null ? a.activeSession.epName : "";
+                        cnAfterMeta[1] = a.activeSession != null ? a.activeSession.streamUrl : "";
+                        cnLineAfter[0] = a.activeDetailLine;
+                        a.dismissActiveInPlayerDialog();
+                        a.onBackPressed();
+                    }
+                });
+        check(
+                cnPickerShown[0]
+                        && "第二季 第02集".equals(cnAfterMeta[0])
+                        && (base + "/video2.mp4").equals(cnAfterMeta[1])
+                        && cnLineAfter[0] == 0,
+                "R4-2b: 第二季 第02集 -> 第一季 line keeps current playback and opens episode picker");
+
+        // R4-2c: Shared short token "2" across different parsers with season conflict (S02E02 vs S01E02) keeps playing & opens picker
+        final JSONObject vodSharedToken =
+                new JSONObject()
+                        .put("vod_id", "r4_shared_token")
+                        .put("vod_name", "R4短标识冲突片")
+                        .put(
+                                "vod_play_list",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("show", "线A")
+                                                                        .put("from", "A"))
+                                                        .put("url", "S02E02$2"))
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("show", "线B")
+                                                                        .put("from", "B"))
+                                                        .put("url", "S01E02$2#S01E03$3")));
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sR4Play;
+                        a.activeDetailLine = 0;
+                        a.showDetail(vodSharedToken);
+                        a.playingEpisodeIndex = 0;
+                        a.play("2", "S02E02");
+                    }
+                });
+        check(waitReady(25000), "R4-2c: S02E02 (token 2 via /r3-parse-a) prepared");
+        final List<LiteActivity.PlayLine> sharedTokenLines =
+                LiteActivity.extractPlayLines(vodSharedToken, "");
+        final boolean[] stPickerShown = new boolean[1];
+        final String[] stAfterEp = new String[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.switchToPlayLineInPlayer(sharedTokenLines, 1);
+                        stPickerShown[0] =
+                                a.activeInPlayerDialog != null
+                                        && a.activeInPlayerDialog.isShowing();
+                        stAfterEp[0] = a.activeSession != null ? a.activeSession.epName : "";
+                        a.dismissActiveInPlayerDialog();
+                        a.onBackPressed();
+                    }
+                });
+        SystemClock.sleep(300);
+        JSONArray r4LogSt = fetchServerLogs();
+        check(
+                stPickerShown[0]
+                        && "S02E02".equals(stAfterEp[0])
+                        && hasServerLog(r4LogSt, "/r3-parse-a", null)
+                        && countServerLogs(r4LogSt, "/r3-parse-b") == 0,
+                "R4-2c: shared short token 2 with S02E02 vs S01E02 keeps S02E02 playing, opens picker, and sends 0 requests to /r3-parse-b");
+
+        // === R4 Item 3 (P2): Clicking ambiguous legacy history or favorite does NOT auto-request A; cancel preserves record; restoring A+B lets user choose B ===
+        importConfigViaPairing(base + "/config-r3-only-dup1");
+        final String dupA = base + "/cms-dup1";
+        final String dupB = base + "/cms-dup2";
+        main(
+                new Runnable() {
+                    public void run() {
+                        LiteStore.clearHistory(a);
+                        LiteStore.clearFavorites(a);
+                        String[] apis = new String[] {dupA, dupB, ""};
+                        String[] names = new String[] {"甲站电影", "乙站剧集", "乙站剧集（旧记录）"};
+                        for (int i = 0; i < 3; i++) {
+                            LiteStore.HistoryEntry h = new LiteStore.HistoryEntry();
+                            h.siteKey = "dup_cms";
+                            h.siteApi = apis[i];
+                            h.siteName = i == 0 ? "同键甲站" : (i == 1 ? "同键乙站" : "旧源");
+                            h.vodId = "100";
+                            h.vodName = names[i];
+                            h.updatedAt = 20000L + i;
+                            LiteStore.saveHistory(a, h, false);
+
+                            LiteStore.FavoriteEntry f = new LiteStore.FavoriteEntry();
+                            f.siteKey = "dup_cms";
+                            f.siteApi = apis[i];
+                            f.siteName = h.siteName;
+                            f.vodId = "100";
+                            f.vodName = names[i];
+                            f.addedAt = 20000L + i;
+                            LiteStore.toggleFavorite(a, f, false);
+                        }
+                    }
+                });
+
+        // Click legacy history card 0 ("乙站剧集（旧记录）") under only-A config
+        clearServerLogs();
+        final boolean[] histGuardDialog = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.currentDetail = null;
+                        a.historyPage();
+                        a.lastRenderedCards.get(0).performClick();
+                        histGuardDialog[0] =
+                                a.activeRecordSourceDialog != null
+                                        && a.activeRecordSourceDialog.isShowing();
+                    }
+                });
+        SystemClock.sleep(600);
+        JSONArray r4LogHist = fetchServerLogs();
+        final boolean[] histStillNoDetail = new boolean[1];
+        final int[] histCountAfterCancel = new int[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        histStillNoDetail[0] = a.currentDetail == null;
+                        a.dismissActiveRecordSourceDialog();
+                        histCountAfterCancel[0] = LiteStore.getHistory(a).size();
+                    }
+                });
+        check(
+                histGuardDialog[0]
+                        && histStillNoDetail[0]
+                        && countServerLogs(r4LogHist, "/cms-dup1") == 0
+                        && histCountAfterCancel[0] == 3,
+                "R4-3a: clicking ambiguous legacy history shows confirmation dialog with 0 requests to /cms-dup1 and preserves all 3 records on cancel");
+
+        // Click legacy favorite card 0 ("乙站剧集（旧记录）") under only-A config
+        clearServerLogs();
+        final boolean[] favGuardDialog = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.currentDetail = null;
+                        a.favoritesPage();
+                        a.lastRenderedCards.get(0).performClick();
+                        favGuardDialog[0] =
+                                a.activeRecordSourceDialog != null
+                                        && a.activeRecordSourceDialog.isShowing();
+                    }
+                });
+        SystemClock.sleep(600);
+        JSONArray r4LogFav = fetchServerLogs();
+        final boolean[] favStillNoDetail = new boolean[1];
+        final int[] favCountAfterCancel = new int[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        favStillNoDetail[0] = a.currentDetail == null;
+                        a.dismissActiveRecordSourceDialog();
+                        favCountAfterCancel[0] = LiteStore.getFavorites(a).size();
+                    }
+                });
+        check(
+                favGuardDialog[0]
+                        && favStillNoDetail[0]
+                        && countServerLogs(r4LogFav, "/cms-dup1") == 0
+                        && favCountAfterCancel[0] == 3,
+                "R4-3b: clicking ambiguous legacy favorite shares guard dialog with 0 requests to /cms-dup1 and preserves all 3 records on cancel");
+
+        // Restore A+B subscription and verify user can pick B ("同键乙站") to open 乙站剧集
+        importConfigViaPairing(base + "/config-dup-key");
+        clearServerLogs();
+        final int[] restoredOptionCount = new int[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.currentDetail = null;
+                        a.historyPage();
+                        a.lastRenderedCards.get(0).performClick();
+                        if (a.activeRecordSourceDialog != null
+                                && a.activeRecordSourceDialog.isShowing()
+                                && a.activeRecordSourceDialog.getListView() != null) {
+                            restoredOptionCount[0] =
+                                    a.activeRecordSourceDialog.getListView().getCount();
+                            a.activeRecordSourceDialog
+                                    .getListView()
+                                    .performItemClick(
+                                            a.activeRecordSourceDialog
+                                                    .getListView()
+                                                    .getChildAt(1),
+                                            1,
+                                            1);
+                        }
+                    }
+                });
+        check(
+                restoredOptionCount[0] == 2
+                        && waitDetailId("100", 10000)
+                        && "乙站剧集".equals(a.currentDetail.optString("vod_name")),
+                "R4-3c: after restoring A+B subscription, legacy history offers both sources and picking B opens 乙站剧集");
+        JSONArray r4LogRestored = fetchServerLogs();
+        check(
+                hasServerLog(r4LogRestored, "/cms-dup2", "ids=100")
+                        && countServerLogs(r4LogRestored, "/cms-dup1") == 0,
+                "R4-3c: server confirmed picking B requested /cms-dup2?ac=detail&ids=100 (0 /cms-dup1)");
     }
 }

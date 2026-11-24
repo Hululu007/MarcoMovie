@@ -116,6 +116,8 @@ public final class LiteJvmChecks {
         int round2Checks = checks - baselineChecks - round1Checks;
         test059Round3Regressions();
         int round3Checks = checks - baselineChecks - round1Checks - round2Checks;
+        test059Round4Regressions();
+        int round4Checks = checks - baselineChecks - round1Checks - round2Checks - round3Checks;
         int addedChecks = checks - baselineChecks;
         System.out.println(
                 "PASS "
@@ -130,7 +132,9 @@ public final class LiteJvmChecks {
                         + round2Checks
                         + " R2-rework + "
                         + round3Checks
-                        + " R3-rework]; 0 failed, 0 skipped)");
+                        + " R3-rework + "
+                        + round4Checks
+                        + " R4-rework]; 0 failed, 0 skipped)");
     }
 
     private static void testResolveWebdavFileUrlMatrix() throws Exception {
@@ -4741,5 +4745,257 @@ public final class LiteJvmChecks {
                         && validHttp200Empty.optJSONArray("list") != null
                         && validHttp200Empty.optJSONArray("list").length() == 0,
                 "R3-4b: XML error root and JSON 403/500 with empty list fail while MacCMS code=1/200 empty list stay zero-hit");
+    }
+
+    private static void test059Round4Regressions() throws Exception {
+        // === Item 1 (P1): Consecutive edits preserve manual overrides, explicit global-first playUrl, active clear, XML->JSON API switch ===
+        HttpServer r4Http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final String r4Base = "http://127.0.0.1:" + r4Http.getAddress().getPort();
+        final List<String> r4Hits = new java.util.ArrayList<String>();
+        r4Http.createContext(
+                "/",
+                new HttpHandler() {
+                    public void handle(HttpExchange ex) throws java.io.IOException {
+                        String p = ex.getRequestURI().getPath();
+                        String q = ex.getRequestURI().getQuery();
+                        String ua = ex.getRequestHeaders().getFirst("User-Agent");
+                        r4Hits.add(p + (q != null ? "?" + q : "") + "|UA=" + ua);
+                        byte[] body;
+                        int code = 200;
+                        String mime = "application/json; charset=utf-8";
+                        if ("/A".equals(p)) {
+                            if (!"UA-A".equals(ua)) {
+                                code = 403;
+                                mime = "text/plain";
+                                body = "need UA-A".getBytes(StandardCharsets.UTF_8);
+                            } else {
+                                body = ("{\"url\":\"" + r4Base + "/stream-a.mp4\"}").getBytes(StandardCharsets.UTF_8);
+                            }
+                        } else if ("/B".equals(p)) {
+                            body = ("{\"url\":\"" + r4Base + "/stream-b.mp4\"}").getBytes(StandardCharsets.UTF_8);
+                        } else if ("/manual".equals(p)) {
+                            body = ("{\"url\":\"" + r4Base + "/stream-manual.mp4\"}").getBytes(StandardCharsets.UTF_8);
+                        } else if ("/catalog.json".equals(p)) {
+                            if (q != null && q.contains("ac=detail")) {
+                                body = "{\"list\":[{\"vod_id\":\"9\",\"vod_name\":\"JSON OK\"}]}".getBytes(StandardCharsets.UTF_8);
+                            } else {
+                                code = 400;
+                                mime = "text/plain";
+                                body = "need ac=detail".getBytes(StandardCharsets.UTF_8);
+                            }
+                        } else if ("/orig-xml".equals(p)) {
+                            if (q != null && q.contains("ac=videolist")) {
+                                mime = "application/xml; charset=utf-8";
+                                body = "<rss><list><video><id>9</id><name>XML OK</name></video></list></rss>".getBytes(StandardCharsets.UTF_8);
+                            } else {
+                                code = 400;
+                                mime = "text/plain";
+                                body = "need ac=videolist".getBytes(StandardCharsets.UTF_8);
+                            }
+                        } else {
+                            body = "ok".getBytes(StandardCharsets.UTF_8);
+                        }
+                        ex.getResponseHeaders().set("Content-Type", mime);
+                        ex.sendResponseHeaders(code, body.length);
+                        OutputStream os = ex.getResponseBody();
+                        os.write(body);
+                        os.close();
+                    }
+                });
+        r4Http.start();
+        try {
+            String cfgBase =
+                    new JSONObject()
+                            .put(
+                                    "sites",
+                                    new JSONArray()
+                                            .put(
+                                                    new JSONObject()
+                                                            .put("key", "s1")
+                                                            .put("name", "Orig")
+                                                            .put("type", 1)
+                                                            .put("api", r4Base + "/orig-cms")
+                                                            .put("parse", 1)))
+                            .put(
+                                    "parses",
+                                    new JSONArray()
+                                            .put(
+                                                    new JSONObject()
+                                                            .put("name", "PA")
+                                                            .put("type", 1)
+                                                            .put("url", r4Base + "/A?url=")
+                                                            .put("header", new JSONObject().put("User-Agent", "UA-A"))
+                                                            .put("ext", new JSONObject().put("flag", new JSONArray().put("A"))))
+                                            .put(
+                                                    new JSONObject()
+                                                            .put("name", "PB")
+                                                            .put("type", 1)
+                                                            .put("url", r4Base + "/B?url=")
+                                                            .put("ext", new JSONObject().put("flag", new JSONArray().put("B")))))
+                            .toString();
+
+            // R4-1a: manual override with playUrlExplicit=true, then subsequent rename keeps both api and playUrl; explicit clear reverts to global routing
+            JSONObject ovManual =
+                    new JSONObject()
+                            .put("name", "Step1")
+                            .put("api", r4Base + "/custom-cms")
+                            .put("playUrl", r4Base + "/manual?url=")
+                            .put("playUrlExplicit", true);
+            LiteCatalog.Site sStep1 = LiteCatalog.parse(cfgBase, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(sStep1, ovManual);
+            JSONObject ovRename2 = new JSONObject(ovManual.toString()).put("name", "Step2Rename");
+            LiteCatalog.Site sStep2 = LiteCatalog.parse(cfgBase, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(sStep2, ovRename2);
+            LiteCatalog.ResolvedPlay resStep2 =
+                    LiteCatalog.resolvePlayUrl(r4Base + "/watch?id=1", sStep2, "B\n高清");
+            JSONObject ovCleared =
+                    new JSONObject(ovRename2.toString())
+                            .put("playUrl", "")
+                            .put("playUrlExplicit", false);
+            LiteCatalog.Site sCleared = LiteCatalog.parse(cfgBase, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(sCleared, ovCleared);
+            LiteCatalog.ResolvedPlay resCleared =
+                    LiteCatalog.resolvePlayUrl(r4Base + "/watch?id=1", sCleared, "B\n高清");
+            check(
+                    (r4Base + "/custom-cms").equals(sStep2.api)
+                            && (r4Base + "/manual?url=").equals(sStep2.playUrl)
+                            && sStep2.explicitSitePlayUrl
+                            && (r4Base + "/stream-manual.mp4").equals(resStep2.url)
+                            && !sCleared.explicitSitePlayUrl
+                            && (r4Base + "/stream-b.mp4").equals(resCleared.url),
+                    "R4-1a: Consecutive rename preserves manual api+playUrl and active clear reverts to global routing");
+
+            // R4-1b: manually selecting URL equal to inherited first global parse sets explicitSitePlayUrl=true and uses A's headers
+            r4Hits.clear();
+            JSONObject ovGlobalFirst =
+                    new JSONObject()
+                            .put("name", "Orig")
+                            .put("playUrl", r4Base + "/A?url=")
+                            .put("playUrlExplicit", true);
+            LiteCatalog.Site sGlobalFirst = LiteCatalog.parse(cfgBase, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(sGlobalFirst, ovGlobalFirst);
+            LiteCatalog.ResolvedPlay resGlobalFirst =
+                    LiteCatalog.resolvePlayUrl(r4Base + "/watch?id=1", sGlobalFirst, "B\n高清");
+            check(
+                    sGlobalFirst.explicitSitePlayUrl
+                            && (r4Base + "/stream-a.mp4").equals(resGlobalFirst.url)
+                            && r4Hits.size() == 1
+                            && r4Hits.get(0).startsWith("/A?")
+                            && r4Hits.get(0).endsWith("|UA=UA-A"),
+                    "R4-1b: Explicitly picking global-first playUrl forces explicit routing with registered parser headers");
+
+            // R4-1c: explicit type=0 XML site stays type=0 on rename, switches to type=1 (ac=detail) when changed to /catalog.json
+            String cfgXml =
+                    new JSONObject()
+                            .put(
+                                    "sites",
+                                    new JSONArray()
+                                            .put(
+                                                    new JSONObject()
+                                                            .put("key", "sx")
+                                                            .put("name", "XML")
+                                                            .put("type", 0)
+                                                            .put("api", r4Base + "/orig-xml")))
+                            .toString();
+            LiteCatalog.Site sXmlRename = LiteCatalog.parse(cfgXml, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(sXmlRename, new JSONObject().put("name", "XML Renamed"));
+            String xmlDetailUrl = LiteCatalog.cmsDetailUrl(sXmlRename, "9");
+            JSONArray xmlArr = LiteCatalog.list(LiteCatalog.fetch(xmlDetailUrl, null));
+            LiteCatalog.Site sXmlToJson = LiteCatalog.parse(cfgXml, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(
+                    sXmlToJson,
+                    new JSONObject().put("name", "Moved JSON").put("api", r4Base + "/catalog.json"));
+            String jsonDetailUrl = LiteCatalog.cmsDetailUrl(sXmlToJson, "9");
+            JSONArray jsonArr = LiteCatalog.list(LiteCatalog.fetch(jsonDetailUrl, null));
+            check(
+                    sXmlRename.type == 0
+                            && xmlDetailUrl.contains("ac=videolist")
+                            && xmlArr.length() == 1
+                            && sXmlToJson.type == 1
+                            && jsonDetailUrl.contains("ac=detail")
+                            && jsonArr.length() == 1,
+                    "R4-1c: Explicit XML preserves type=0 on rename and switches to type=1 ac=detail when changed to /catalog.json");
+        } finally {
+            r4Http.stop(0);
+        }
+
+        // === Item 2 (P2): Chinese season conflict, shared short token conflict, and canonical cross-line match ===
+        List<LiteActivity.EpisodeItem> cnSeason1Line =
+                LiteActivity.parseLineEpisodes(
+                        "第一季 第02集$http://b.test/s1e2#第一季 第03集$http://b.test/s1e3");
+        int cnSeasonConflict =
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                        cnSeason1Line, "http://a.test/s2e2", "第二季 第02集", 0, 3);
+        check(
+                cnSeasonConflict == -1,
+                "R4-2a: Chinese season 第二季 第02集 refuses 第一季 第02集 / 第一季 第03集");
+
+        List<LiteActivity.EpisodeItem> shortTokenSeason1Line =
+                LiteActivity.parseLineEpisodes("S01E02$2#S01E03$3");
+        int sharedTokenConflict =
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                        shortTokenSeason1Line, "2", "S02E02", 0, 3);
+        int sharedTokenCnConflict =
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                        LiteActivity.parseLineEpisodes("第一季 第02集$2#第一季 第03集$3"),
+                        "2",
+                        "第二季 第02集",
+                        0,
+                        3);
+        check(
+                sharedTokenConflict == -1 && sharedTokenCnConflict == -1,
+                "R4-2b: Explicit season conflict overrides shared per-provider short token 2");
+
+        List<LiteActivity.EpisodeItem> canonTargetLine =
+                LiteActivity.parseLineEpisodes("第01集$http://b.test/1#第02集$http://b.test/2");
+        int canonMatch =
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                        canonTargetLine, "http://a.test/2", "EP2", 1, 2);
+        List<LiteActivity.EpisodeItem> cnSameSeasonLine =
+                LiteActivity.parseLineEpisodes("第二季 第01集$http://b.test/1#第二季 第02集$http://b.test/2");
+        int cnSameSeasonMatch =
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                        cnSameSeasonLine, "http://a.test/s2e2", "S02E02", 1, 2);
+        check(
+                canonMatch == 1 && cnSameSeasonMatch == 1,
+                "R4-2c: Canonical EP2 -> 第02集 and S02E02 -> 第二季 第02集 still match reliably");
+
+        // === Item 3 (P2): Legacy history/favorite record site resolution honors saved-record ambiguity ===
+        LiteCatalog.Site siteDupA = new LiteCatalog.Site();
+        siteDupA.key = "dup";
+        siteDupA.name = "甲站";
+        siteDupA.api = "http://a.test/cms";
+        siteDupA.supported = true;
+        LiteCatalog.Site siteDupB = new LiteCatalog.Site();
+        siteDupB.key = "dup";
+        siteDupB.name = "乙站";
+        siteDupB.api = "http://b.test/cms";
+        siteDupB.supported = true;
+
+        LiteCatalog.RecordSiteResolution resOnlyAAmbig =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(siteDupA), "dup", "", "旧源", false);
+        LiteCatalog.RecordSiteResolution resOnlyAUnique =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(siteDupA), "dup", "", "旧源", true);
+        check(
+                resOnlyAAmbig.matchedSite == null
+                        && resOnlyAAmbig.ambiguousCandidates.size() == 1
+                        && siteDupA == resOnlyAAmbig.ambiguousCandidates.get(0)
+                        && resOnlyAUnique.matchedSite == siteDupA
+                        && resOnlyAUnique.ambiguousCandidates.isEmpty(),
+                "R4-3a: Only-A config with known saved A/B ambiguity blocks auto-open and exposes candidate for confirmation");
+
+        LiteCatalog.RecordSiteResolution resBothAB =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(siteDupA, siteDupB), "dup", "", "旧源", false);
+        LiteCatalog.RecordSiteResolution resExactA =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(siteDupA), "dup", "http://a.test/cms", "甲站", false);
+        check(
+                resBothAB.matchedSite == null
+                        && resBothAB.ambiguousCandidates.size() == 2
+                        && resExactA.matchedSite == siteDupA,
+                "R4-3b: Restored A+B exposes both candidates while API-identified record still opens exact site directly");
     }
 }

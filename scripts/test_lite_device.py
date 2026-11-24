@@ -1118,6 +1118,36 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self._send_bytes(200, 'application/xml; charset=utf-8', b'<!DOCTYPE rss><rss><list page="1"/></rss>')
             return
 
+        # === Round 4 (Items 1-3) E2E Fixture Endpoints ===
+        if path == '/r4-cms-custom':
+            self._send_json(200, {
+                'pagecount': 1,
+                'list': [{
+                    'vod_id': 'r3_rr_1',
+                    'vod_name': 'R4自定义API双线片',
+                    'vod_play_list': [
+                        {'player_info': {'show': '高清', 'from': 'A'}, 'url': f'EP2${base}/watch-r3-shared?id=2'},
+                        {'player_info': {'show': '高清', 'from': 'B'}, 'url': f'EP2${base}/watch-r3-shared?id=2'},
+                    ],
+                }],
+            })
+            return
+        if path == '/r4-catalog.json':
+            ac = qs.get('ac', [''])[0]
+            if ac == 'detail':
+                self._send_json(200, {
+                    'pagecount': 1,
+                    'list': [{
+                        'vod_id': '1',
+                        'vod_name': 'R4严格JSON片',
+                        'vod_play_from': '直链',
+                        'vod_play_url': f'正片${base}/video.mp4',
+                    }],
+                })
+                return
+            self._send_bytes(400, 'text/plain; charset=utf-8', f'r4-catalog.json rejects ac={ac}'.encode('utf-8'))
+            return
+
         self._send_json(404, {'error': f'unknown path {path}'})
 
     def log_message(self, *a):
