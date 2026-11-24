@@ -844,7 +844,8 @@ final class Round2RegressionTests: XCTestCase {
         let server1 = PausableWebDavServer(initialPayload: nil, initialEtag: nil)
         let serviceA = WebDavSyncService(storage: storageA, transport: PausableWebDavTransport(server: server1))
         _ = try await serviceA.syncNow()
-        let createdByA = try XCTUnwrap(await server1.snapshot().payload)
+        let snap1 = await server1.snapshot()
+        let createdByA = try XCTUnwrap(snap1.payload)
 
         // Simulate Device B having started while remote was 404, and A committing right before B's If-None-Match: * PUT
         let serverRace412 = PausableWebDavServer(initialPayload: nil, initialEtag: nil)
@@ -917,9 +918,9 @@ final class Round2RegressionTests: XCTestCase {
           ]
         }
         """
-        let parsedPriv = CmsParser.parseConfig(
-            raw: trickyPrivateJson,
-            groupLabel: "普通分组",
+        let parsedPriv = try CmsParser.parseConfig(
+            trickyPrivateJson,
+            defaultGroup: "普通分组",
             isPrivate: true
         )
         XCTAssertEqual(parsedPriv.sites.count, 1)
@@ -1011,8 +1012,8 @@ final class Round2RegressionTests: XCTestCase {
 
         let backdrop1 = MediaEntryResolver.resolvePublicBackdropPosterUrl(
             ambientPosterSync: coldStorage.preferences().ambientPosterSync,
+            publicDiscoverVideos: [],
             publicWatchHistory: pubHistory,
-            discoverVideos: [],
             config: coldConfig
         )
         XCTAssertEqual(backdrop1, betaPoster, "Backdrop must fall back to public poster and never request private poster")
@@ -1030,8 +1031,8 @@ final class Round2RegressionTests: XCTestCase {
         XCTAssertTrue(pubFavs2.isEmpty)
         let backdrop2 = MediaEntryResolver.resolvePublicBackdropPosterUrl(
             ambientPosterSync: true,
+            publicDiscoverVideos: [],
             publicWatchHistory: pubHistory2,
-            discoverVideos: [],
             config: coldConfig2
         )
         XCTAssertEqual(backdrop2, "", "When only private history exists, backdrop URL must be empty so no poster is fetched")
