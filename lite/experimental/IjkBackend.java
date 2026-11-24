@@ -4,7 +4,7 @@ import android.content.Context;import android.view.SurfaceHolder;import java.uti
 import tv.danmaku.ijk.media.player.*;
 /** Isolated legacy candidate. Never included in the default public build. */
 public final class IjkBackend implements LitePlayer {
- private final IjkMediaPlayer player=new IjkMediaPlayer();private boolean released;
+ private final IjkMediaPlayer player=new IjkMediaPlayer();private volatile boolean released;
  public void open(Context context,String address,Map<String,String> headers,SurfaceHolder holder,final Listener listener)throws Exception {
   // API14 has no MediaCodec. Use CPU decoding and NativeWindow without a GL dependency.
   player.setOption(IjkMediaPlayer.OPT_CATEGORY_PLAYER,"mediacodec",0);

@@ -109,10 +109,32 @@ public final class LiteJvmChecks {
         testConfigPullAndCapabilityStatus();
         testRound2LiteWebdavRobustness();
         testSiteOverridesSearchQrAndCast();
+        int baselineChecks = checks;
+        test059ViewingAndSourceRegressions();
+        int round1Checks = checks - baselineChecks;
+        test059Round2Regressions();
+        int round2Checks = checks - baselineChecks - round1Checks;
+        test059Round3Regressions();
+        int round3Checks = checks - baselineChecks - round1Checks - round2Checks;
+        test059Round4Regressions();
+        int round4Checks = checks - baselineChecks - round1Checks - round2Checks - round3Checks;
+        int addedChecks = checks - baselineChecks;
         System.out.println(
-                "PASS " + checks + " TV Lite JVM checks ("
+                "PASS "
                         + checks
-                        + " total § C5 pull & C6 capability checks passed)");
+                        + " TV Lite JVM checks ("
+                        + baselineChecks
+                        + " baseline + "
+                        + addedChecks
+                        + " new 0.5.9 regressions ["
+                        + round1Checks
+                        + " R1-stage + "
+                        + round2Checks
+                        + " R2-rework + "
+                        + round3Checks
+                        + " R3-rework + "
+                        + round4Checks
+                        + " R4-rework]; 0 failed, 0 skipped)");
     }
 
     private static void testResolveWebdavFileUrlMatrix() throws Exception {
@@ -2711,5 +2733,2410 @@ public final class LiteJvmChecks {
         } finally {
             cast.close();
         }
+    }
+
+    private static void test059ViewingAndSourceRegressions() throws Exception {
+        // 1. Item 1: PlaybackSession history isolation & no live/cast auto-advance
+        LiteCatalog.Site vodSite = new LiteCatalog.Site();
+        vodSite.key = "site_vod";
+        vodSite.name = "点播主站";
+        vodSite.api = "http://vod.example/api.php/provide/vod/";
+        vodSite.type = 1;
+        vodSite.supported = true;
+        JSONObject vodDetail =
+                new JSONObject()
+                        .put("vod_id", "v88")
+                        .put("vod_name", "长安十二时辰")
+                        .put("vod_pic", "http://vod.example/p.jpg");
+        List<LiteActivity.EpisodeItem> eps =
+                Arrays.asList(
+                        new LiteActivity.EpisodeItem("第1集", "http://vod.example/ep1.mp4", 0),
+                        new LiteActivity.EpisodeItem("第2集", "http://vod.example/ep2.mp4", 1),
+                        new LiteActivity.EpisodeItem("第3集", "http://vod.example/ep3.mp4", 2));
+        LiteActivity.PlaybackSession vodSess =
+                LiteActivity.PlaybackSession.forVod(
+                        1,
+                        "http://vod.example/ep2.mp4",
+                        "http://vod.example/ep2.mp4",
+                        "第2集",
+                        null,
+                        vodSite,
+                        vodDetail,
+                        "高清直链",
+                        0,
+                        1,
+                        eps);
+        LiteStore.HistoryEntry histEntry =
+                LiteActivity.buildHistoryEntryForSession(vodSess, 42000, 120000, 1000L);
+        check(
+                histEntry != null
+                        && "site_vod".equals(histEntry.siteKey)
+                        && vodSite.api.equals(histEntry.siteApi)
+                        && "v88".equals(histEntry.vodId)
+                        && "第2集".equals(histEntry.epName)
+                        && histEntry.epIndex == 1
+                        && histEntry.positionMs == 42000,
+                "Item 1: VOD PlaybackSession builds accurate HistoryEntry");
+        LiteStore.HistoryEntry nearEndEntry =
+                LiteActivity.buildHistoryEntryForSession(vodSess, 118000, 120000, 2000L);
+        check(
+                nearEndEntry != null && nearEndEntry.positionMs == 0,
+                "Item 1: VOD session >=95% resets resume position to 0");
+        LiteCatalog.LiveGroup liveGrp = new LiteCatalog.LiveGroup();
+        liveGrp.name = "央视";
+        LiteActivity.PlaybackSession liveSess =
+                LiteActivity.PlaybackSession.forLive(
+                        2,
+                        "http://live.example/cctv1.m3u8",
+                        "CCTV-1",
+                        null,
+                        liveGrp,
+                        0,
+                        0,
+                        0,
+                        0,
+                        null);
+        LiteActivity.PlaybackSession castSess =
+                LiteActivity.PlaybackSession.forCast(
+                        3, "http://cast.example/clip.mp4", "投屏片段", null);
+        check(
+                LiteActivity.buildHistoryEntryForSession(liveSess, 15000, 60000, 3000L) == null
+                        && LiteActivity.buildHistoryEntryForSession(castSess, 15000, 60000, 3000L)
+                                == null,
+                "Item 1: Live and Cast sessions never overwrite VOD history");
+        check(
+                LiteActivity.shouldAutoAdvanceNextEpisode(vodSess)
+                        && !LiteActivity.shouldAutoAdvanceNextEpisode(liveSess)
+                        && !LiteActivity.shouldAutoAdvanceNextEpisode(castSess),
+                "Item 1: Only VOD with remaining episodes auto-advances; live/cast never do");
+        LiteActivity.PlaybackSession lastEpSess =
+                LiteActivity.PlaybackSession.forVod(
+                        4,
+                        "http://vod.example/ep3.mp4",
+                        "http://vod.example/ep3.mp4",
+                        "第3集",
+                        null,
+                        vodSite,
+                        vodDetail,
+                        "高清直链",
+                        0,
+                        2,
+                        eps);
+        check(
+                !LiteActivity.shouldAutoAdvanceNextEpisode(lastEpSess),
+                "Item 1: Final VOD episode does not auto-advance");
+
+        // 2. Item 3: Subscription replacement rebinds existing site to new API/headers or selects new site
+        LiteCatalog.Site oldA = new LiteCatalog.Site();
+        oldA.key = "siteA";
+        oldA.originalKey = "siteA";
+        oldA.name = "站点A";
+        oldA.api = "http://old-a.example/api";
+        oldA.originalApi = oldA.api;
+        oldA.type = 1;
+        oldA.supported = true;
+        LiteCatalog.Site updatedA = new LiteCatalog.Site();
+        updatedA.key = "siteA";
+        updatedA.originalKey = "siteA";
+        updatedA.name = "站点A新版";
+        updatedA.api = "http://new-a.example/api";
+        updatedA.originalApi = updatedA.api;
+        updatedA.headers.put("X-Env", "v2");
+        updatedA.type = 1;
+        updatedA.supported = true;
+        LiteCatalog.Site siteB = new LiteCatalog.Site();
+        siteB.key = "siteB";
+        siteB.originalKey = "siteB";
+        siteB.name = "站点B";
+        siteB.api = "http://b.example/api";
+        siteB.originalApi = siteB.api;
+        siteB.type = 1;
+        siteB.supported = true;
+        LiteCatalog.Site reboundA =
+                LiteCatalog.resolveSelectedSite(
+                        Arrays.asList(updatedA, siteB), oldA, "siteA", oldA.api);
+        check(
+                reboundA == updatedA
+                        && "http://new-a.example/api".equals(reboundA.api)
+                        && "v2".equals(reboundA.headers.get("X-Env"))
+                        && !LiteCatalog.sameSiteBinding(oldA, reboundA),
+                "Item 3: Existing site key rebinds to new config Site with updated URL and headers");
+        LiteCatalog.Site switchedB =
+                LiteCatalog.resolveSelectedSite(Arrays.asList(siteB), oldA, "siteA", oldA.api);
+        check(
+                switchedB == siteB,
+                "Item 3: Removed old site falls back to available new site B");
+        LiteCatalog.Site onlySpider = new LiteCatalog.Site();
+        onlySpider.key = "sp";
+        onlySpider.api = "csp_Demo";
+        onlySpider.type = 3;
+        onlySpider.supported = false;
+        check(
+                LiteCatalog.resolveSelectedSite(Arrays.asList(onlySpider), oldA, "siteA", oldA.api)
+                        == null,
+                "Item 3: Unsupported-only subscription resolves selected site to null");
+
+        // 3. Item 4: Strict MacCMS XML (type=0 uses ac=list + ac=videolist; type=1 keeps ac=detail)
+        final java.util.List<String> xmlQueries =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        HttpServer strictXmlSrv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try {
+            strictXmlSrv.createContext(
+                    "/xml",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            String q = ex.getRequestURI().getRawQuery();
+                            if (q == null) q = "";
+                            xmlQueries.add(q);
+                            if (q.contains("ac=detail")) {
+                                byte[] err = "ac=detail not allowed on strict xml".getBytes(StandardCharsets.UTF_8);
+                                ex.sendResponseHeaders(400, err.length);
+                                ex.getResponseBody().write(err);
+                                ex.close();
+                                return;
+                            }
+                            String body;
+                            if (q.contains("ac=list")) {
+                                body =
+                                        "<?xml version=\"1.0\" encoding=\"utf-8\"?><rss version=\"5.1\">"
+                                                + "<class><ty id=\"1\">电影</ty><ty id=\"2\">剧集</ty></class>"
+                                                + "<list page=\"1\" pagecount=\"2\" pagesize=\"20\" recordcount=\"2\"/></rss>";
+                            } else if (q.contains("ac=videolist") && q.contains("ids=42")) {
+                                body =
+                                        "<?xml version=\"1.0\" encoding=\"utf-8\"?><rss version=\"5.1\">"
+                                                + "<list page=\"1\" pagecount=\"1\"><video><id>42</id><name><![CDATA[严格XML片]]></name>"
+                                                + "<dl><dd flag=\"xmlm3u8\"><![CDATA[正片$http://media.example/xml42.m3u8]]></dd></dl></video></list></rss>";
+                            } else if (q.contains("ac=videolist")) {
+                                body =
+                                        "<?xml version=\"1.0\" encoding=\"utf-8\"?><rss version=\"5.1\">"
+                                                + "<list page=\"2\" pagecount=\"3\"><video><id>42</id><name><![CDATA[严格XML片]]></name>"
+                                                + "<note><![CDATA[HD]]></note></video></list></rss>";
+                            } else {
+                                byte[] err = "missing ac".getBytes(StandardCharsets.UTF_8);
+                                ex.sendResponseHeaders(400, err.length);
+                                ex.getResponseBody().write(err);
+                                ex.close();
+                                return;
+                            }
+                            byte[] out = body.getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/xml; charset=utf-8");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            strictXmlSrv.start();
+            int xPort = strictXmlSrv.getAddress().getPort();
+            LiteCatalog.Site xmlSite = new LiteCatalog.Site();
+            xmlSite.key = "strict_xml";
+            xmlSite.name = "严格XML站";
+            xmlSite.type = 0;
+            xmlSite.api = "http://127.0.0.1:" + xPort + "/xml";
+            xmlSite.supported = true;
+
+            List<LiteCatalog.Category> xmlCats =
+                    LiteCatalog.categories(LiteCatalog.fetch(LiteCatalog.cmsCategoriesUrl(xmlSite), null));
+            JSONObject xmlPage2 =
+                    LiteCatalog.parseCmsResponse(
+                            LiteCatalog.fetch(LiteCatalog.cmsListUrl(xmlSite, "1", "", 2), null));
+            JSONObject xmlSearch =
+                    LiteCatalog.parseCmsResponse(
+                            LiteCatalog.fetch(LiteCatalog.cmsListUrl(xmlSite, "", "严格", 1), null));
+            JSONArray xmlDetailArr =
+                    LiteCatalog.list(LiteCatalog.fetch(LiteCatalog.cmsDetailUrl(xmlSite, "42"), null));
+            check(
+                    xmlCats.size() == 2
+                            && "1".equals(xmlCats.get(0).id)
+                            && xmlPage2.optInt("pagecount") == 3
+                            && xmlSearch.optJSONArray("list").length() == 1
+                            && xmlDetailArr.length() == 1
+                            && "42".equals(xmlDetailArr.getJSONObject(0).optString("vod_id")),
+                    "Item 4: Strict MacCMS XML succeeds for categories/list/page/search/detail using ac=list & ac=videolist");
+            boolean sawDetailOnXml = false;
+            for (int i = 0; i < xmlQueries.size(); i++) {
+                if (xmlQueries.get(i).contains("ac=detail")) sawDetailOnXml = true;
+            }
+            check(!sawDetailOnXml, "Item 4: Strict XML never sends ac=detail");
+            LiteCatalog.Site jsonSite = new LiteCatalog.Site();
+            jsonSite.type = 1;
+            jsonSite.api = "http://127.0.0.1:" + xPort + "/json";
+            check(
+                    LiteCatalog.cmsListUrl(jsonSite, "", "", 1).contains("ac=detail")
+                            && LiteCatalog.cmsDetailUrl(jsonSite, "42").contains("ac=detail"),
+                    "Item 4: JSON CMS (type=1) preserves ac=detail");
+        } finally {
+            strictXmlSrv.stop(0);
+        }
+
+        // 4. Item 5: Structured vod_play_list + deduplication + mixed direct-stream priority
+        JSONObject case15Vod =
+                new JSONObject(
+                        "{\"vod_id\":\"15\",\"vod_name\":\"结构化剧\",\"vod_play_list\":["
+                                + "{\"player_info\":{\"show\":\"直链主线\",\"from\":\"m3u8\"},"
+                                + "\"urls\":{\"1\":{\"name\":\"第1集\",\"url\":\"https://cdn.example/1.m3u8\"},"
+                                + "\"2\":{\"name\":\"第2集\",\"url\":\"https://cdn.example/2.m3u8\"}}},"
+                                + "{\"player_info\":{\"show\":\"备用线路\",\"from\":\"bak\"},"
+                                + "\"url\":\"正片$https://cdn.example/bak.mp4\"}"
+                                + "]}");
+        List<LiteActivity.PlayLine> structLines = LiteActivity.extractPlayLines(case15Vod, "");
+        check(
+                structLines.size() == 2
+                        && "直链主线".equals(structLines.get(0).name)
+                        && structLines.get(0).episodes.size() == 2
+                        && "https://cdn.example/2.m3u8".equals(structLines.get(0).episodes.get(1).url)
+                        && "备用线路".equals(structLines.get(1).name)
+                        && structLines.get(1).episodes.size() == 1
+                        && "https://cdn.example/bak.mp4".equals(structLines.get(1).episodes.get(0).url),
+                "Item 5: Structured vod_play_list yields 2 lines (2 eps & 1 ep) with exact media URLs");
+
+        JSONObject combinedVod =
+                new JSONObject(
+                        "{\"vod_id\":\"15b\",\"vod_name\":\"混合字段剧\","
+                                + "\"vod_play_from\":\"m3u8$$$oldonly\","
+                                + "\"vod_play_url\":\"第1集$https://cdn.example/1.m3u8#第2集$https://cdn.example/2.m3u8$$$老线1$https://cdn.example/old.mp4\","
+                                + "\"vod_play_list\":{\"1\":{\"player_info\":{\"show\":\"直链主线\",\"from\":\"m3u8\"},"
+                                + "\"urls\":{\"1\":{\"name\":\"第1集\",\"url\":\"https://cdn.example/1.m3u8\"},"
+                                + "\"2\":{\"name\":\"第2集\",\"url\":\"https://cdn.example/2.m3u8\"}}},"
+                                + "\"2\":{\"player_info\":{\"show\":\"新增结构线\",\"from\":\"extra\"},"
+                                + "\"url\":\"番外$https://cdn.example/extra.m3u8\"}}}");
+        List<LiteActivity.PlayLine> mergedLines = LiteActivity.extractPlayLines(combinedVod, "");
+        check(
+                mergedLines.size() == 3
+                        && "直链主线".equals(mergedLines.get(0).name)
+                        && "oldonly".equals(mergedLines.get(1).name)
+                        && "新增结构线".equals(mergedLines.get(2).name),
+                "Item 5: Traditional + structured vod_play_list merge cleanly without duplicates and preserve order");
+
+        JSONObject mixedPriorityVod =
+                new JSONObject()
+                        .put("vod_play_from", "解析线路$$$高清直链")
+                        .put(
+                                "vod_play_url",
+                                "第1集$https://video.example/play?id=1$$$第1集$https://cdn.example/direct.m3u8");
+        List<LiteActivity.PlayLine> autoMixed = LiteActivity.extractPlayLines(mixedPriorityVod, "");
+        List<LiteActivity.PlayLine> explicitMixed =
+                LiteActivity.extractPlayLines(mixedPriorityVod, "解析线路");
+        check(
+                autoMixed.size() == 2
+                        && "高清直链".equals(autoMixed.get(0).name)
+                        && "解析线路".equals(explicitMixed.get(0).name),
+                "Item 5: Mixed lines prioritize direct stream by default while respecting explicit preferredLine");
+
+        // 5. Item 6: JSON play parsing (intact URL params, Referer header, proxy loopback, redirects, errors)
+        final String[] capturedRawParseUrl = new String[] {""};
+        final int[] parseHitCount = new int[] {0};
+        final Map<String, String> capturedMediaHeaders =
+                java.util.Collections.synchronizedMap(new HashMap<String, String>());
+        HttpServer parseSrv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try {
+            final int[] pPortHolder = new int[1];
+            parseSrv.createContext(
+                    "/parse",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            parseHitCount[0]++;
+                            String rawQ = ex.getRequestURI().getRawQuery();
+                            String extracted = "";
+                            if (rawQ != null) {
+                                for (String part : rawQ.split("&")) {
+                                    if (part.startsWith("url=")) {
+                                        extracted =
+                                                java.net.URLDecoder.decode(
+                                                        part.substring(4), "UTF-8");
+                                    }
+                                }
+                            }
+                            capturedRawParseUrl[0] = extracted;
+                            String resp =
+                                    "{\"code\":200,\"url\":\"http://127.0.0.1:"
+                                            + pPortHolder[0]
+                                            + "/media.mp4\",\"header\":{\"Referer\":\"https://ref.example/watch\",\"User-Agent\":\"ParseClient/2.0\"}}";
+                            byte[] out = resp.getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            parseSrv.createContext(
+                    "/media.mp4",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            String ref = ex.getRequestHeaders().getFirst("Referer");
+                            String ua = ex.getRequestHeaders().getFirst("User-Agent");
+                            if (ref != null) capturedMediaHeaders.put("Referer", ref);
+                            if (ua != null) capturedMediaHeaders.put("User-Agent", ua);
+                            byte[] out = "MP4DATA".getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "video/mp4");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            parseSrv.createContext(
+                    "/legacy-redir",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            ex.getResponseHeaders()
+                                    .set(
+                                            "Location",
+                                            "http://127.0.0.1:" + pPortHolder[0] + "/media.mp4");
+                            ex.sendResponseHeaders(302, -1);
+                            ex.close();
+                        }
+                    });
+            parseSrv.createContext(
+                    "/legacy-direct-media",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            byte[] out = "DIRECTMP4".getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "video/mp4");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            parseSrv.createContext(
+                    "/parse-empty",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            byte[] out = "{\"code\":200,\"url\":\"\"}".getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            parseSrv.createContext(
+                    "/parse-html",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            byte[] out = "<!doctype html><html><body>player</body></html>".getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "text/html");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            parseSrv.start();
+            int pPort = parseSrv.getAddress().getPort();
+            pPortHolder[0] = pPort;
+
+            String complexRawUrl =
+                    "https://origin.example/v/play?id=99&token=a%26b%3Dc&name=hello%20world";
+            String parseConfig =
+                    "{\"sites\":[{\"key\":\"p_site\",\"name\":\"解析测试\",\"type\":1,"
+                            + "\"api\":\"http://127.0.0.1:"
+                            + pPort
+                            + "/cms\",\"parse\":1}],"
+                            + "\"parses\":[{\"name\":\"测试JSON\",\"type\":1,\"url\":\"http://127.0.0.1:"
+                            + pPort
+                            + "/parse?url=\"}]}";
+            List<LiteCatalog.Site> pSites = LiteCatalog.parse(parseConfig, "");
+            check(
+                    pSites.size() == 1 && pSites.get(0).supported && pSites.get(0).playUrlParseType == 1,
+                    "Item 6: Config with type=1 JSON parse marks site supported with JSON parse type");
+            LiteCatalog.ResolvedPlay resolved =
+                    LiteCatalog.resolvePlayUrl(complexRawUrl, pSites.get(0), "线路1");
+            check(
+                    complexRawUrl.equals(capturedRawParseUrl[0])
+                            && ("http://127.0.0.1:" + pPort + "/media.mp4").equals(resolved.url)
+                            && "https://ref.example/watch".equals(resolved.headers.get("Referer"))
+                            && "ParseClient/2.0".equals(resolved.headers.get("User-Agent")),
+                    "Item 6: JSON parser receives intact encoded URL and returns media URL + Referer/UA");
+
+            int hitsBeforeDirect = parseHitCount[0];
+            LiteCatalog.ResolvedPlay directBypass =
+                    LiteCatalog.resolvePlayUrl(
+                            "http://127.0.0.1:" + pPort + "/media.mp4", pSites.get(0), "直链");
+            check(
+                    parseHitCount[0] == hitsBeforeDirect
+                            && "direct".equals(directBypass.mode)
+                            && ("http://127.0.0.1:" + pPort + "/media.mp4")
+                                    .equals(directBypass.url),
+                    "Item 6: Direct stream bypasses JSON parser on parse=1 site");
+
+            String proxiedLocal =
+                    LiteMediaProxy.wrapIfNeeded(
+                            resolved.url, resolved.headers, LiteMediaProxy.MODE_AUTO, false);
+            check(
+                    proxiedLocal.startsWith("http://127.0.0.1:")
+                            && !proxiedLocal.equals(resolved.url),
+                    "Item 6: MODE_AUTO wraps loopback media URL when custom headers (Referer) are required");
+            String proxiedResp = readHttp(proxiedLocal, null);
+            check(
+                    proxiedResp.equals("200:MP4DATA")
+                            && "https://ref.example/watch"
+                                    .equals(capturedMediaHeaders.get("Referer"))
+                            && "ParseClient/2.0".equals(capturedMediaHeaders.get("User-Agent")),
+                    "Item 6: Media server receives exact Referer and User-Agent via LiteMediaProxy");
+
+            LiteCatalog.Site legacyRedirSite = new LiteCatalog.Site();
+            legacyRedirSite.type = 1;
+            legacyRedirSite.api = "http://127.0.0.1:" + pPort + "/cms";
+            legacyRedirSite.playUrl = "http://127.0.0.1:" + pPort + "/legacy-redir?u=";
+            legacyRedirSite.supported = true;
+            LiteCatalog.ResolvedPlay redirRes =
+                    LiteCatalog.resolvePlayUrl("https://origin.example/page", legacyRedirSite, "");
+            check(
+                    ("http://127.0.0.1:" + pPort + "/media.mp4").equals(redirRes.url),
+                    "Item 6: Legacy prefix HTTP redirect resolves to final media URL");
+
+            LiteCatalog.Site legacyMediaSite = new LiteCatalog.Site();
+            legacyMediaSite.type = 1;
+            legacyMediaSite.api = "http://127.0.0.1:" + pPort + "/cms";
+            legacyMediaSite.playUrl = "http://127.0.0.1:" + pPort + "/legacy-direct-media?u=";
+            legacyMediaSite.supported = true;
+            LiteCatalog.ResolvedPlay directMediaRes =
+                    LiteCatalog.resolvePlayUrl("https://origin.example/item", legacyMediaSite, "");
+            check(
+                    directMediaRes.url.startsWith(
+                            "http://127.0.0.1:" + pPort + "/legacy-direct-media?u="),
+                    "Item 6: Legacy prefix returning direct video/* resolves to playable media URL");
+
+            Map<String, String> crossOriginInput = new HashMap<String, String>();
+            crossOriginInput.put("Authorization", "Bearer secret-token");
+            crossOriginInput.put("Cookie", "sid=secret");
+            crossOriginInput.put("Referer", "https://ref.example/watch");
+            crossOriginInput.put("User-Agent", "SafeUA/1.0");
+            Map<String, String> crossOriginSafe =
+                    LiteCatalog.inheritedHeaders(
+                            new URL("https://parse.example/api"),
+                            new URL("https://cdn.other.example/video.m3u8"),
+                            crossOriginInput);
+            check(
+                    !crossOriginSafe.containsKey("Authorization")
+                            && !crossOriginSafe.containsKey("Cookie")
+                            && "https://ref.example/watch".equals(crossOriginSafe.get("Referer"))
+                            && "SafeUA/1.0".equals(crossOriginSafe.get("User-Agent")),
+                    "Item 6: Cross-origin play resolution strips Authorization/Cookie while keeping Referer/UA");
+
+            LiteCatalog.Site emptyParseSite = new LiteCatalog.Site();
+            emptyParseSite.type = 1;
+            emptyParseSite.api = "http://127.0.0.1:" + pPort + "/cms";
+            emptyParseSite.playUrl = "json:http://127.0.0.1:" + pPort + "/parse-empty?url=";
+            emptyParseSite.playUrlParseType = 1;
+            emptyParseSite.supported = true;
+            boolean emptyFailed = false;
+            try {
+                LiteCatalog.resolvePlayUrl("https://origin.example/page", emptyParseSite, "");
+            } catch (Exception ex) {
+                emptyFailed = ex.getMessage() != null && ex.getMessage().contains("空");
+            }
+            check(emptyFailed, "Item 6: JSON parser empty URL raises clear error");
+
+            LiteCatalog.Site htmlParseSite = new LiteCatalog.Site();
+            htmlParseSite.type = 1;
+            htmlParseSite.api = "http://127.0.0.1:" + pPort + "/cms";
+            htmlParseSite.playUrl = "json:http://127.0.0.1:" + pPort + "/parse-html?url=";
+            htmlParseSite.playUrlParseType = 1;
+            htmlParseSite.supported = true;
+            boolean htmlFailed = false;
+            try {
+                LiteCatalog.resolvePlayUrl("https://origin.example/page", htmlParseSite, "");
+            } catch (Exception ex) {
+                htmlFailed = ex.getMessage() != null && ex.getMessage().contains("网页");
+            }
+            check(htmlFailed, "Item 6: HTML page from JSON parser raises clear limitation error");
+
+            List<LiteCatalog.Site> webOnlySites =
+                    LiteCatalog.parse(
+                            "{\"sites\":[{\"key\":\"w\",\"name\":\"网页源\",\"type\":1,\"api\":\"http://127.0.0.1:"
+                                    + pPort
+                                    + "/cms\",\"parse\":1}],\"parses\":[{\"name\":\"嗅探\",\"type\":0,\"url\":\"http://127.0.0.1:"
+                                    + pPort
+                                    + "/sniff?url=\"}]}",
+                            "");
+            check(
+                    webOnlySites.size() == 1
+                            && webOnlySites.get(0).playbackHint().contains("type=0"),
+                    "Item 6: type=0 web-sniff-only parse config surfaces specific limitation hint");
+
+            List<LiteCatalog.Site> isolatedJsonSites =
+                    LiteCatalog.parse(
+                            "{\"sites\":[{\"key\":\"iso\",\"name\":\"独立解析\",\"type\":1,\"api\":\"http://127.0.0.1:"
+                                    + pPort
+                                    + "/cms\",\"playUrl\":\"json:http://127.0.0.1:"
+                                    + pPort
+                                    + "/parse-empty?url=\"}],\"parses\":[{\"name\":\"全局\",\"type\":1,\"url\":\"http://127.0.0.1:"
+                                    + pPort
+                                    + "/parse?url=\"}]}",
+                            "");
+            check(
+                    isolatedJsonSites.size() == 1 && isolatedJsonSites.get(0).jsonParses.isEmpty(),
+                    "Item 6: Explicit json: playUrl with parse=0 does not mix unrelated global parses[]");
+        } finally {
+            parseSrv.stop(0);
+            try {
+                LiteMediaProxy.get().close();
+            } catch (Exception ignored) {
+            }
+        }
+
+        // 6. Item 7: Lives-only config, inline multi-line channels, redirect-relative M3U, per-line Referer/UA
+        String pureLivesConfig =
+                "{\"lives\":[{\"group\":\"央视高清\",\"channels\":["
+                        + "{\"name\":\"CCTV-1\",\"urls\":["
+                        + "\"线路一$http://live.example/a.m3u8|Referer=https://ref1.example/&User-Agent=UA1\","
+                        + "\"线路二$http://live.example/b.m3u8|Referer=https://ref2.example/&User-Agent=UA2\""
+                        + "]}]}]}";
+        List<LiteCatalog.Site> pureLiveSites = LiteCatalog.parse(pureLivesConfig, "");
+        List<LiteCatalog.LiveSource> pureLiveSources = LiteCatalog.parseLives(pureLivesConfig, "");
+        check(
+                pureLiveSites.isEmpty() && pureLiveSources.size() == 1,
+                "Item 7: Pure lives-only config imports cleanly without sites[]");
+        List<LiteCatalog.LiveGroup> inlineGroups =
+                LiteCatalog.fetchLiveGroups(pureLiveSources.get(0));
+        check(
+                inlineGroups.size() == 1
+                        && "央视高清".equals(inlineGroups.get(0).name)
+                        && inlineGroups.get(0).channels.size() == 1
+                        && inlineGroups.get(0).channels.get(0).urls.size() == 2
+                        && "https://ref1.example/"
+                                .equals(
+                                        inlineGroups.get(0).channels.get(0).headersForLine(0)
+                                                .get("Referer"))
+                        && "https://ref2.example/"
+                                .equals(
+                                        inlineGroups.get(0).channels.get(0).headersForLine(1)
+                                                .get("Referer"))
+                        && "UA2"
+                                .equals(
+                                        inlineGroups.get(0).channels.get(0).headersForLine(1)
+                                                .get("User-Agent")),
+                "Item 7: Inline lives[].channels[].urls builds groups/channels/2 lines with distinct per-line headers");
+
+        HttpServer liveRedirSrv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try {
+            final int[] lPort = new int[1];
+            liveRedirSrv.createContext(
+                    "/entry.m3u",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            ex.getResponseHeaders()
+                                    .set("Location", "http://127.0.0.1:" + lPort[0] + "/sub/list.m3u");
+                            ex.sendResponseHeaders(302, -1);
+                            ex.close();
+                        }
+                    });
+            liveRedirSrv.createContext(
+                    "/sub/list.m3u",
+                    new HttpHandler() {
+                        @Override
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            String m3u =
+                                    "#EXTM3U\n"
+                                            + "#EXTINF:-1 group-title=\"本地组\",双线台\n"
+                                            + "#EXTVLCOPT:http-referrer=https://m3u-ref-1.example/\n"
+                                            + "#EXTVLCOPT:http-user-agent=M3U-UA-1\n"
+                                            + "streams/line1.m3u8\n"
+                                            + "#EXTINF:-1 group-title=\"本地组\",双线台\n"
+                                            + "#EXTVLCOPT:http-referrer=https://m3u-ref-2.example/\n"
+                                            + "#EXTVLCOPT:http-user-agent=M3U-UA-2\n"
+                                            + "../alt/line2.m3u8\n";
+                            byte[] out = m3u.getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "audio/x-mpegurl; charset=utf-8");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            liveRedirSrv.start();
+            lPort[0] = liveRedirSrv.getAddress().getPort();
+            LiteCatalog.LiveSource redirLiveSrc = new LiteCatalog.LiveSource();
+            redirLiveSrc.name = "重定向M3U";
+            redirLiveSrc.url = "http://127.0.0.1:" + lPort[0] + "/entry.m3u";
+            List<LiteCatalog.LiveGroup> redirGroups = LiteCatalog.fetchLiveGroups(redirLiveSrc);
+            check(
+                    redirGroups.size() == 1
+                            && redirGroups.get(0).channels.size() == 1
+                            && ("http://127.0.0.1:" + lPort[0] + "/sub/streams/line1.m3u8")
+                                    .equals(redirGroups.get(0).channels.get(0).urls.get(0))
+                            && ("http://127.0.0.1:" + lPort[0] + "/alt/line2.m3u8")
+                                    .equals(redirGroups.get(0).channels.get(0).urls.get(1))
+                            && "https://m3u-ref-1.example/"
+                                    .equals(
+                                            redirGroups.get(0).channels.get(0).headersForLine(0)
+                                                    .get("Referer"))
+                            && "https://m3u-ref-2.example/"
+                                    .equals(
+                                            redirGroups.get(0).channels.get(0).headersForLine(1)
+                                                    .get("Referer")),
+                    "Item 7: Relative M3U URLs resolve against post-redirect final URL with per-line EXTVLCOPT headers");
+        } finally {
+            liveRedirSrv.stop(0);
+        }
+
+        List<LiteCatalog.LiveGroup> txtGroups =
+                LiteCatalog.parseLiveContent(
+                        "卫视,#genre#\n湖南卫视,http://live.example/hn1.m3u8|Referer=https://r1.example/#http://live.example/hn2.m3u8|Referer=https://r2.example/\n",
+                        "");
+        check(
+                txtGroups.size() == 1
+                        && "卫视".equals(txtGroups.get(0).name)
+                        && txtGroups.get(0).channels.size() == 1
+                        && txtGroups.get(0).channels.get(0).urls.size() == 2
+                        && "https://r1.example/"
+                                .equals(
+                                        txtGroups.get(0).channels.get(0).headersForLine(0)
+                                                .get("Referer"))
+                        && "https://r2.example/"
+                                .equals(
+                                        txtGroups.get(0).channels.get(0).headersForLine(1)
+                                                .get("Referer")),
+                "Item 7: Grouped TXT live playlist preserves multi-line per-line Referer headers");
+
+        String b64LiveUrl =
+                java.util.Base64.getEncoder()
+                        .encodeToString(
+                                "http://live.example/b64.m3u".getBytes(StandardCharsets.UTF_8));
+        List<LiteCatalog.LiveSource> b64LiveSources =
+                LiteCatalog.parseLives(
+                        "{\"lives\":[{\"group\":\"redirect\",\"channels\":[{\"name\":\"live\",\"urls\":[\"proxy://do=live&type=txt&ext="
+                                + b64LiveUrl
+                                + "\"]}]}]}",
+                        "");
+        check(
+                b64LiveSources.size() == 1
+                        && "http://live.example/b64.m3u".equals(b64LiveSources.get(0).url),
+                "Item 7: Legacy proxy:// Base64 live entry remains supported");
+
+        // 7. Item 9: Same siteKey + vodId, different siteApi -> distinct history, favorites, 2-round LiteSync merge & legacy resolution
+        LiteStore.HistoryEntry hA = new LiteStore.HistoryEntry();
+        hA.siteKey = "same_key";
+        hA.siteName = "站点甲";
+        hA.siteApi = "http://a.example/cms";
+        hA.vodId = "100";
+        hA.vodName = "甲站电影";
+        hA.epName = "第1集";
+        hA.epUrl = "http://a.example/1.mp4";
+        hA.positionMs = 12000;
+        hA.updatedAt = 5000L;
+        LiteStore.HistoryEntry hB = new LiteStore.HistoryEntry();
+        hB.siteKey = "same_key";
+        hB.siteName = "站点乙";
+        hB.siteApi = "http://b.example/cms";
+        hB.vodId = "100";
+        hB.vodName = "乙站剧集";
+        hB.epName = "第2集";
+        hB.epUrl = "http://b.example/2.mp4";
+        hB.positionMs = 24000;
+        hB.updatedAt = 6000L;
+        String dualHistJson = LiteStore.recordHistoryJson("[]", hA);
+        dualHistJson = LiteStore.recordHistoryJson(dualHistJson, hB);
+        List<LiteStore.HistoryEntry> dualHist = LiteStore.parseHistoryJson(dualHistJson);
+        check(
+                dualHist.size() == 2
+                        && "甲站电影"
+                                .equals(
+                                        LiteStore.findHistoryInList(
+                                                        dualHist,
+                                                        "same_key",
+                                                        "http://a.example/cms",
+                                                        "100",
+                                                        false)
+                                                .vodName)
+                        && "乙站剧集"
+                                .equals(
+                                        LiteStore.findHistoryInList(
+                                                        dualHist,
+                                                        "same_key",
+                                                        "http://b.example/cms",
+                                                        "100",
+                                                        false)
+                                                .vodName),
+                "Item 9: Same siteKey+vodId with different siteApi keep independent history entries");
+
+        LiteStore.FavoriteEntry fA = new LiteStore.FavoriteEntry();
+        fA.siteKey = "same_key";
+        fA.siteName = "站点甲";
+        fA.siteApi = "http://a.example/cms";
+        fA.vodId = "100";
+        fA.vodName = "甲站电影";
+        fA.addedAt = 5000L;
+        LiteStore.FavoriteEntry fB = new LiteStore.FavoriteEntry();
+        fB.siteKey = "same_key";
+        fB.siteName = "站点乙";
+        fB.siteApi = "http://b.example/cms";
+        fB.vodId = "100";
+        fB.vodName = "乙站剧集";
+        fB.addedAt = 5100L;
+        String dualFavJson = LiteStore.toggleFavoriteJson("[]", fA, false);
+        dualFavJson = LiteStore.toggleFavoriteJson(dualFavJson, fB, false);
+        check(
+                LiteStore.parseFavoritesJson(dualFavJson).size() == 2,
+                "Item 9: Same siteKey+vodId with different siteApi keep independent favorites");
+        String remoteDualPayload =
+                LiteSync.exportPayload(dualHistJson, dualFavJson, "", null, false, 6500L);
+        String afterUnfavA = LiteStore.toggleFavoriteJson(dualFavJson, fA, false);
+        LiteSync.Tombstones unfavATombs = LiteSync.Tombstones.read("");
+        unfavATombs.putMax(
+                "fav:" + LiteSync.itemKey("same_key", "http://a.example/cms", "100"), 7000L);
+        LiteSync.MergeResult syncR1 =
+                LiteSync.merge(
+                        dualHistJson,
+                        afterUnfavA,
+                        unfavATombs.json(),
+                        null,
+                        false,
+                        remoteDualPayload,
+                        7100L);
+        LiteSync.MergeResult syncR2 =
+                LiteSync.merge(
+                        syncR1.historyJson,
+                        syncR1.favoritesJson,
+                        syncR1.tombstonesJson,
+                        null,
+                        false,
+                        remoteDualPayload,
+                        7200L);
+        List<LiteStore.FavoriteEntry> postSyncFavs =
+                LiteStore.parseFavoritesJson(syncR2.favoritesJson);
+        check(
+                syncR1.historyCount == 2
+                        && syncR2.historyCount == 2
+                        && postSyncFavs.size() == 1
+                        && "http://b.example/cms".equals(postSyncFavs.get(0).siteApi)
+                        && "乙站剧集".equals(postSyncFavs.get(0).vodName),
+                "Item 9: Unfavoriting Site A + two LiteSync merges removes Site A while keeping Site B");
+
+        LiteCatalog.Site dupSiteA = new LiteCatalog.Site();
+        dupSiteA.key = "same_key";
+        dupSiteA.name = "站点甲";
+        dupSiteA.api = "http://a.example/cms";
+        dupSiteA.type = 1;
+        dupSiteA.supported = true;
+        LiteCatalog.Site dupSiteB = new LiteCatalog.Site();
+        dupSiteB.key = "same_key";
+        dupSiteB.name = "站点乙";
+        dupSiteB.api = "http://b.example/cms";
+        dupSiteB.type = 1;
+        dupSiteB.supported = true;
+        LiteCatalog.RecordSiteResolution byApi =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(dupSiteA, dupSiteB),
+                        "same_key",
+                        "http://b.example/cms",
+                        "站点乙");
+        LiteCatalog.RecordSiteResolution uniqueLegacy =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(dupSiteA), "same_key", "", "旧站点");
+        LiteCatalog.RecordSiteResolution ambiguousLegacy =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(dupSiteA, dupSiteB), "same_key", "", "旧站点");
+        LiteCatalog.RecordSiteResolution synthesized =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(dupSiteA),
+                        "removed_key",
+                        "http://gone.example/api.php/provide/vod/at/xml/",
+                        "旧XML站");
+        check(
+                byApi.matchedSite == dupSiteB
+                        && uniqueLegacy.matchedSite == dupSiteA
+                        && ambiguousLegacy.matchedSite == null
+                        && ambiguousLegacy.ambiguousCandidates.size() == 2
+                        && synthesized.matchedSite != null
+                        && synthesized.synthesizedFallback
+                        && synthesized.matchedSite.type == 0,
+                "Item 9: Record site resolution prefers siteApi, recovers unique legacy records, flags ambiguous legacy records, and synthesizes removed siteApi");
+
+        // 8. Item 10: Global search feedback distinctions & Python/Spider/JAR/JS/Netdisk capability hints
+        String zeroHit =
+                LiteActivity.formatGlobalSearchSummary(
+                        "冷门片", 3, 3, 3, 0, Arrays.<String>asList(), 0, 1, 2);
+        String partialFailZero =
+                LiteActivity.formatGlobalSearchSummary(
+                        "冷门片", 3, 3, 2, 1, Arrays.asList("慢站"), 0, 0, 0);
+        String partialFailHit =
+                LiteActivity.formatGlobalSearchSummary(
+                        "热门片", 15, 12, 10, 2, Arrays.asList("故障1", "故障2"), 9, 1, 3);
+        String allFail =
+                LiteActivity.formatGlobalSearchSummary(
+                        "热门片", 2, 2, 0, 2, Arrays.asList("坏站A", "坏站B"), 0, 0, 0);
+        String entryScope = LiteActivity.formatSearchEntryScope(15, 1, 2, 1);
+        check(
+                zeroHit.contains("确实零命中")
+                        && zeroHit.contains("Emby")
+                        && zeroHit.contains("跳过 2")
+                        && partialFailZero.contains("2 个正常无命中")
+                        && partialFailZero.contains("1 个失败")
+                        && partialFailHit.contains("10 个成功，2 个失败")
+                        && partialFailHit.contains("上限 12 源")
+                        && allFail.contains("全部失败")
+                        && entryScope.contains("12")
+                        && entryScope.contains("Emby")
+                        && entryScope.contains("Python"),
+                "Item 10: Search feedback distinguishes true 0-hit, partial failure, all-failed, and scope limits");
+
+        LiteCatalog.Site pySite = new LiteCatalog.Site();
+        pySite.key = "py_demo";
+        pySite.name = "Python源";
+        pySite.type = 4;
+        pySite.api = "py_douban";
+        check(
+                LiteCatalog.Site.STATUS_NEEDS_JAR.equals(pySite.capabilityStatus())
+                        && pySite.limitation().contains("Python"),
+                "Item 10: Python plugin site reports specific Python limitation reason");
+    }
+
+    private static JSONObject r2WireItem(String siteKey, String siteApi, String vodId, long ts)
+            throws Exception {
+        JSONObject o =
+                new JSONObject()
+                        .put("site", siteKey)
+                        .put("id", vodId)
+                        .put("title", "Title-" + vodId)
+                        .put("episode", "ep1")
+                        .put("position", ts)
+                        .put("updated", ts);
+        if (siteApi != null && siteApi.length() > 0) {
+            o.put("siteApi", siteApi);
+        }
+        return o;
+    }
+
+    private static String r2WirePayload(JSONObject entry, JSONObject tombs) throws Exception {
+        return new JSONObject()
+                .put("schema", "marco-movie-sync")
+                .put("version", 2)
+                .put("watch_history", new JSONArray().put(entry))
+                .put("favorites", new JSONArray().put(entry))
+                .put("tombstones", tombs == null ? new JSONObject() : tombs)
+                .toString();
+    }
+
+    private static void test059Round2Regressions() throws Exception {
+        // === R1: Legacy 0.5.8 tombstones, unique-site canonicalization, ambiguous multi-site isolation ===
+        String apiA = "http://a.r2.test/cms";
+        String apiB = "http://b.r2.test/cms";
+
+        // R1a: 0.5.8 unscoped tombstone (ts=20) suppresses older API-identified cloud record (ts=10) across 2 syncs
+        String legacyTomb =
+                new JSONObject().put("hist:k\n1", 20L).put("fav:k\n1", 20L).toString();
+        String olderCloudApi = r2WirePayload(r2WireItem("k", apiA, "1", 10L), null);
+        LiteSync.MergeResult r1a1 =
+                LiteSync.merge("[]", "[]", legacyTomb, null, false, olderCloudApi, 25L);
+        LiteSync.MergeResult r1a2 =
+                LiteSync.merge(
+                        r1a1.historyJson,
+                        r1a1.favoritesJson,
+                        r1a1.tombstonesJson,
+                        null,
+                        false,
+                        olderCloudApi,
+                        30L);
+        check(
+                r1a1.historyCount == 0
+                        && r1a1.favoriteCount == 0
+                        && r1a2.historyCount == 0
+                        && r1a2.favoriteCount == 0,
+                "R1a: 0.5.8 unscoped tombstones suppress older API-identified cloud items across 2 syncs");
+
+        // R1b: Local no-API item (ts=10) + sole API-identified cloud update (ts=20) canonicalizes to 1 item
+        String noApiCloud = r2WirePayload(r2WireItem("k", "", "1", 10L), null);
+        LiteSync.MergeResult priorNoApi =
+                LiteSync.merge("[]", "[]", "{}", null, false, noApiCloud, 15L);
+        String apiCloud20 = r2WirePayload(r2WireItem("k", apiA, "1", 20L), null);
+        LiteSync.MergeResult r1b1 =
+                LiteSync.merge(
+                        priorNoApi.historyJson,
+                        priorNoApi.favoritesJson,
+                        priorNoApi.tombstonesJson,
+                        null,
+                        false,
+                        apiCloud20,
+                        30L);
+        LiteSync.MergeResult r1b2 =
+                LiteSync.merge(
+                        r1b1.historyJson,
+                        r1b1.favoritesJson,
+                        r1b1.tombstonesJson,
+                        null,
+                        false,
+                        apiCloud20,
+                        35L);
+        List<LiteStore.FavoriteEntry> r1bFavs = LiteStore.parseFavoritesJson(r1b2.favoritesJson);
+        check(
+                r1b1.historyCount == 1
+                        && r1b1.favoriteCount == 1
+                        && r1b2.historyCount == 1
+                        && r1b2.favoriteCount == 1
+                        && r1bFavs.size() == 1
+                        && apiA.equals(r1bFavs.get(0).siteApi),
+                "R1b: Unique-source no-API record and API-identified update canonicalize without duplication");
+
+        // R1c: Single unfavorite removes both legacy empty-API and scoped API duplicate when unique
+        LiteStore.FavoriteEntry dupLegacy = new LiteStore.FavoriteEntry();
+        dupLegacy.siteKey = "k";
+        dupLegacy.siteApi = "";
+        dupLegacy.vodId = "1";
+        dupLegacy.vodName = "Old";
+        dupLegacy.addedAt = 10L;
+        LiteStore.FavoriteEntry dupScoped = new LiteStore.FavoriteEntry();
+        dupScoped.siteKey = "k";
+        dupScoped.siteApi = apiA;
+        dupScoped.vodId = "1";
+        dupScoped.vodName = "New";
+        dupScoped.addedAt = 20L;
+        String bothDupFavs =
+                new JSONArray().put(dupLegacy.toJson()).put(dupScoped.toJson()).toString();
+        String afterSingleUnfav = LiteStore.toggleFavoriteJson(bothDupFavs, dupScoped, true);
+        check(
+                !LiteStore.containsFavorite(afterSingleUnfav, "k", apiA, "1", true)
+                        && new JSONArray(afterSingleUnfav).length() == 0,
+                "R1c: Single unfavorite on unique site clears both scoped and legacy no-API duplicate");
+
+        // R1d: Legacy favorite toggled off with API + cloud still holding old no-API copy stays deleted across 2 syncs
+        String favOffLocal = LiteStore.toggleFavoriteJson(priorNoApi.favoritesJson, dupScoped, true);
+        String scopedTomb =
+                new JSONObject().put("fav:" + LiteSync.itemKey("k", apiA, "1"), 30L).toString();
+        LiteSync.MergeResult r1d1 =
+                LiteSync.merge("[]", favOffLocal, scopedTomb, null, false, noApiCloud, 40L);
+        LiteSync.MergeResult r1d2 =
+                LiteSync.merge(
+                        r1d1.historyJson,
+                        r1d1.favoritesJson,
+                        r1d1.tombstonesJson,
+                        null,
+                        false,
+                        noApiCloud,
+                        45L);
+        check(
+                r1d1.favoriteCount == 0 && r1d2.favoriteCount == 0,
+                "R1d: Unfavorited unique site does not resurrect from old no-API cloud copy across 2 syncs");
+
+        // R1e: Re-favoriting at ts=35 after a 0.5.8 tombstone at ts=20 preserves the new favorite
+        LiteStore.FavoriteEntry refav = new LiteStore.FavoriteEntry();
+        refav.siteKey = "k";
+        refav.siteApi = apiA;
+        refav.vodId = "1";
+        refav.vodName = "Refav";
+        refav.addedAt = 35L;
+        String refavRaw = LiteStore.toggleFavoriteJson("[]", refav, true);
+        LiteSync.MergeResult r1e =
+                LiteSync.merge("[]", refavRaw, legacyTomb, null, false, olderCloudApi, 40L);
+        check(
+                r1e.favoriteCount == 1
+                        && LiteStore.containsFavorite(r1e.favoritesJson, "k", apiA, "1", true),
+                "R1e: Newer re-favorite (ts=35) overrides older 0.5.8 tombstone (ts=20)");
+
+        // R1f: Ambiguous multi-site key preserves legacy no-API item and isolates Site A unfavorite from Site B
+        LiteCatalog.Site multiA = new LiteCatalog.Site();
+        multiA.key = "k";
+        multiA.name = "A";
+        multiA.api = apiA;
+        multiA.type = 1;
+        multiA.supported = true;
+        LiteCatalog.Site multiB = new LiteCatalog.Site();
+        multiB.key = "k";
+        multiB.name = "B";
+        multiB.api = apiB;
+        multiB.type = 1;
+        multiB.supported = true;
+        List<LiteCatalog.Site> ambigSites = Arrays.asList(multiA, multiB);
+        LiteStore.FavoriteEntry favB = new LiteStore.FavoriteEntry();
+        favB.siteKey = "k";
+        favB.siteApi = apiB;
+        favB.vodId = "1";
+        favB.vodName = "SiteB";
+        favB.addedAt = 25L;
+        String localAmbigFavs =
+                new JSONArray().put(dupLegacy.toJson()).put(favB.toJson()).toString();
+        String remoteBothSites =
+                new JSONObject()
+                        .put("schema", "marco-movie-sync")
+                        .put("version", 2)
+                        .put("watch_history", new JSONArray())
+                        .put(
+                                "favorites",
+                                new JSONArray()
+                                        .put(r2WireItem("k", apiA, "1", 20L))
+                                        .put(r2WireItem("k", apiB, "1", 25L)))
+                        .put("tombstones", new JSONObject())
+                        .toString();
+        String unfavATombOnly =
+                new JSONObject().put("fav:" + LiteSync.itemKey("k", apiA, "1"), 30L).toString();
+        LiteSync.MergeResult r1f1 =
+                LiteSync.merge(
+                        "[]",
+                        localAmbigFavs,
+                        unfavATombOnly,
+                        null,
+                        false,
+                        remoteBothSites,
+                        40L,
+                        ambigSites);
+        LiteSync.MergeResult r1f2 =
+                LiteSync.merge(
+                        r1f1.historyJson,
+                        r1f1.favoritesJson,
+                        r1f1.tombstonesJson,
+                        null,
+                        false,
+                        remoteBothSites,
+                        45L,
+                        ambigSites);
+        check(
+                r1f2.favoriteCount == 2
+                        && !LiteStore.containsFavorite(r1f2.favoritesJson, "k", apiA, "1", false)
+                        && LiteStore.containsFavorite(r1f2.favoritesJson, "k", apiB, "1", false)
+                        && LiteStore.containsFavorite(r1f2.favoritesJson, "k", "", "1", false),
+                "R1f: Ambiguous same-key sites preserve legacy no-API entry and isolate Site A unfavorite from Site B");
+
+        // === R2: Distinct from codes sharing display name, overlapping episode union, safe VOD line switching ===
+        JSONObject dupShowDetail =
+                new JSONObject()
+                        .put(
+                                "vod_play_list",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("show", "高清")
+                                                                        .put("from", "A"))
+                                                        .put("url", "EP1$http://v.test/same.mp4"))
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("show", "高清")
+                                                                        .put("from", "B"))
+                                                        .put("url", "EP1$http://v.test/same.mp4")));
+        List<LiteActivity.PlayLine> dupShowLines = LiteActivity.extractPlayLines(dupShowDetail, "");
+        check(
+                dupShowLines.size() == 2
+                        && "A".equals(dupShowLines.get(0).rawFrom)
+                        && "B".equals(dupShowLines.get(1).rawFrom)
+                        && "高清 [A]".equals(LiteActivity.formatPlayLineLabel(dupShowLines, 0))
+                        && "高清 [B]".equals(LiteActivity.formatPlayLineLabel(dupShowLines, 1)),
+                "R2a: Distinct from codes with identical display name and URL stay separate and disambiguated");
+
+        JSONObject overlapDetail =
+                new JSONObject()
+                        .put("vod_play_from", "one")
+                        .put("vod_play_url", "第1集$http://v.test/1.mp4#第2集$http://v.test/2.mp4")
+                        .put(
+                                "vod_play_list",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("show", "高清")
+                                                                        .put("from", "one"))
+                                                        .put(
+                                                                "url",
+                                                                "第2集$http://v.test/2.mp4#第3集$http://v.test/3.mp4")));
+        List<LiteActivity.PlayLine> overlapLines = LiteActivity.extractPlayLines(overlapDetail, "");
+        check(
+                overlapLines.size() == 1
+                        && overlapLines.get(0).episodes.size() == 3
+                        && "http://v.test/1.mp4".equals(overlapLines.get(0).episodes.get(0).url)
+                        && "http://v.test/2.mp4".equals(overlapLines.get(0).episodes.get(1).url)
+                        && "http://v.test/3.mp4".equals(overlapLines.get(0).episodes.get(2).url),
+                "R2b: Overlapping traditional [1,2] and structured [2,3] episodes union-merge into [1,2,3]");
+
+        List<LiteActivity.EpisodeItem> targetWithTrailer =
+                Arrays.asList(
+                        new LiteActivity.EpisodeItem("Trailer", "http://v.test/tr.mp4", 0),
+                        new LiteActivity.EpisodeItem("EP1", "http://v.test/b1.mp4", 1),
+                        new LiteActivity.EpisodeItem("EP2", "http://v.test/b2.mp4", 2));
+        check(
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                                targetWithTrailer, "http://v.test/a2.mp4", "EP2", 1, 2)
+                        == 2,
+                "R2c: VOD line switch from A/EP2 to B([Trailer,EP1,EP2]) matches index 2 (EP2) instead of index 1");
+
+        List<LiteActivity.EpisodeItem> targetCnWithPreview =
+                Arrays.asList(
+                        new LiteActivity.EpisodeItem("先导预告", "http://v.test/tr.mp4", 0),
+                        new LiteActivity.EpisodeItem("第01集", "http://v.test/c1.mp4", 1),
+                        new LiteActivity.EpisodeItem("第02集", "http://v.test/c2.mp4", 2),
+                        new LiteActivity.EpisodeItem("花絮2", "http://v.test/ex2.mp4", 3));
+        check(
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                                targetCnWithPreview, "http://v.test/a2.mp4", "EP2", 1, 2)
+                        == 2,
+                "R2d: VOD line switch matches canonical episode number across formats while ignoring trailers/extras");
+
+        List<LiteActivity.EpisodeItem> targetUnmatchable =
+                Arrays.asList(
+                        new LiteActivity.EpisodeItem("花絮A", "http://v.test/x1.mp4", 0),
+                        new LiteActivity.EpisodeItem("特辑B", "http://v.test/x2.mp4", 1));
+        List<LiteActivity.EpisodeItem> singleMovieTarget =
+                Arrays.asList(new LiteActivity.EpisodeItem("4K蓝光", "http://v.test/m.mp4", 0));
+        check(
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                                        targetUnmatchable, "http://v.test/a2.mp4", "第2集", 1, 2)
+                                == -1
+                        && LiteActivity.matchEpisodeIndexForLineSwitch(
+                                        singleMovieTarget, "http://v.test/m0.mp4", "正片", 0, 1)
+                                == 0,
+                "R2e: Unmatchable episodes return -1 (open episode picker) while 1-to-1 single movie matches index 0");
+
+        // === R3, R4, R7 HTTP integration checks against local server ===
+        HttpServer r2Http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        HttpServer r2Cross = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final java.util.List<String> parserHits =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        final java.util.List<String> crossHeadersSeen =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        final java.util.concurrent.atomic.AtomicInteger proxyM3uOk =
+                new java.util.concurrent.atomic.AtomicInteger(0);
+        final java.util.concurrent.atomic.AtomicInteger xmlDetailOk =
+                new java.util.concurrent.atomic.AtomicInteger(0);
+        try {
+            final String base = "http://127.0.0.1:" + r2Http.getAddress().getPort();
+            final String crossBase = "http://127.0.0.1:" + r2Cross.getAddress().getPort();
+
+            r2Http.createContext(
+                    "/global-503",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            parserHits.add("/global-503");
+                            byte[] out = "503".getBytes(StandardCharsets.UTF_8);
+                            ex.sendResponseHeaders(503, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            r2Http.createContext(
+                    "/site-parse",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            parserHits.add("/site-parse");
+                            byte[] out =
+                                    ("{\"url\":\"" + base + "/ok.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            r2Http.createContext(
+                    "/override-parse",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            parserHits.add("/override-parse");
+                            byte[] out =
+                                    ("{\"url\":\"" + base + "/override-ok.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            r2Http.createContext(
+                    "/needs-ref",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            String ref = ex.getRequestHeaders().getFirst("Referer");
+                            if (!"https://site.r2.example/".equals(ref)) {
+                                byte[] bad = "403".getBytes(StandardCharsets.UTF_8);
+                                ex.sendResponseHeaders(403, bad.length);
+                                ex.getResponseBody().write(bad);
+                                ex.close();
+                                return;
+                            }
+                            byte[] ok = "#EXTM3U\n#EXTINF:5,\nseg.ts\n".getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/vnd.apple.mpegurl");
+                            ex.sendResponseHeaders(200, ok.length);
+                            ex.getResponseBody().write(ok);
+                            ex.close();
+                        }
+                    });
+            r2Http.createContext(
+                    "/parse-a",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            parserHits.add("/parse-a");
+                            byte[] out =
+                                    ("{\"url\":\"" + base + "/wrong.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            r2Http.createContext(
+                    "/parse-b",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            parserHits.add("/parse-b");
+                            byte[] out =
+                                    ("{\"url\":\"" + base + "/ok-b.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            r2Http.createContext(
+                    "/rel-redir",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            ex.getResponseHeaders().set("Location", base + "/v2/parsers/api");
+                            ex.sendResponseHeaders(302, -1);
+                            ex.close();
+                        }
+                    });
+            r2Http.createContext(
+                    "/v2/parsers/api",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            byte[] out = "{\"url\":\"media/out.m3u8\"}".getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            r2Http.createContext(
+                    "/proxy-m3u",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            String ref = ex.getRequestHeaders().getFirst("Referer");
+                            if (!"https://proxy.r2.example/".equals(ref)) {
+                                byte[] bad = "403".getBytes(StandardCharsets.UTF_8);
+                                ex.sendResponseHeaders(403, bad.length);
+                                ex.getResponseBody().write(bad);
+                                ex.close();
+                                return;
+                            }
+                            proxyM3uOk.incrementAndGet();
+                            byte[] m3u =
+                                    ("#EXTM3U\n#EXTINF:-1 group-title=\"新闻\",CCTV1\n"
+                                                    + base
+                                                    + "/live.m3u8|Referer=https%3A%2F%2Ftv.example%2F&User-Agent=Lite%20TV%2B1\n")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.sendResponseHeaders(200, m3u.length);
+                            ex.getResponseBody().write(m3u);
+                            ex.close();
+                        }
+                    });
+            r2Http.createContext(
+                    "/strict-xml",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            String q = ex.getRequestURI().getRawQuery();
+                            String[] parts = q == null ? new String[0] : q.split("&");
+                            int acCount = 0;
+                            String acVal = "";
+                            String langVal = "";
+                            for (int i = 0; i < parts.length; i++) {
+                                if (parts[i].startsWith("ac=")) {
+                                    acCount++;
+                                    acVal = parts[i].substring(3);
+                                } else if (parts[i].startsWith("lang=")) {
+                                    langVal = parts[i].substring(5);
+                                }
+                            }
+                            if (acCount != 1 || !"videolist".equals(acVal) || !"zh".equals(langVal)) {
+                                byte[] bad = "400".getBytes(StandardCharsets.UTF_8);
+                                ex.sendResponseHeaders(400, bad.length);
+                                ex.getResponseBody().write(bad);
+                                ex.close();
+                                return;
+                            }
+                            xmlDetailOk.incrementAndGet();
+                            byte[] xml =
+                                    "<rss><list page=\"1\"><video><id>9</id><name>XML片</name><dl><dd flag=\"mp4\">正片$http://v.test/9.mp4</dd></dl></video></list></rss>"
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/xml");
+                            ex.sendResponseHeaders(200, xml.length);
+                            ex.getResponseBody().write(xml);
+                            ex.close();
+                        }
+                    });
+            r2Cross.createContext(
+                    "/cross-parse",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            for (String h :
+                                    new String[] {
+                                        "Cookie",
+                                        "Authorization",
+                                        "Proxy-Authorization",
+                                        "X-Api-Key",
+                                        "X-Emby-Token",
+                                        "X-Plex-Token"
+                                    }) {
+                                if (ex.getRequestHeaders().getFirst(h) != null) {
+                                    crossHeadersSeen.add(h);
+                                }
+                            }
+                            byte[] out =
+                                    ("{\"url\":\"" + crossBase + "/cross-ok.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, out.length);
+                            ex.getResponseBody().write(out);
+                            ex.close();
+                        }
+                    });
+            r2Http.start();
+            r2Cross.start();
+
+            // R3a: Explicit site playUrl beats failing global 503 parser
+            parserHits.clear();
+            String r3aCfg =
+                    "{\"parses\":[{\"name\":\"BadGlobal\",\"type\":1,\"url\":\""
+                            + base
+                            + "/global-503?url=\"}],\"sites\":[{\"key\":\"s_exp\",\"name\":\"Exp\",\"type\":1,\"api\":\""
+                            + base
+                            + "/cms\",\"parse\":1,\"playUrl\":\""
+                            + base
+                            + "/site-parse?url=\"}]}";
+            LiteCatalog.Site r3aSite = LiteCatalog.parse(r3aCfg, base).get(0);
+            LiteCatalog.ResolvedPlay r3aRes =
+                    LiteCatalog.resolvePlayUrl(base + "/watch?id=1", r3aSite, "HD");
+            check(
+                    (base + "/ok.mp4").equals(r3aRes.url)
+                            && parserHits.contains("/site-parse")
+                            && !parserHits.contains("/global-503"),
+                "R3a: Explicit site playUrl is tried before global 503 parses[]");
+
+            // R3b: Manual applySiteOverride playUrl overrides failing global 503 parser
+            parserHits.clear();
+            String r3bCfg =
+                    "{\"parses\":[{\"name\":\"BadGlobal\",\"type\":1,\"url\":\""
+                            + base
+                            + "/global-503?url=\"}],\"sites\":[{\"key\":\"s_ovr\",\"name\":\"Ovr\",\"type\":1,\"api\":\""
+                            + base
+                            + "/cms\",\"parse\":1}]}";
+            LiteCatalog.Site r3bOrig = LiteCatalog.parse(r3bCfg, base).get(0);
+            LiteCatalog.applySiteOverride(
+                    r3bOrig, new JSONObject().put("playUrl", base + "/override-parse?url="));
+            LiteCatalog.ResolvedPlay r3bRes =
+                    LiteCatalog.resolvePlayUrl(base + "/watch?id=2", r3bOrig, "HD");
+            check(
+                    (base + "/override-ok.mp4").equals(r3bRes.url)
+                            && parserHits.contains("/override-parse")
+                            && !parserHits.contains("/global-503"),
+                    "R3b: Manual applySiteOverride playUrl takes precedence over global 503 parses[]");
+
+            // R3c: Same-origin legacy prefix sends site Referer on preflight and passes it to resolved headers
+            String r3cCfg =
+                    "{\"sites\":[{\"key\":\"s_ref\",\"name\":\"Ref\",\"type\":1,\"api\":\""
+                            + base
+                            + "/cms\",\"playUrl\":\""
+                            + base
+                            + "/needs-ref?url=\",\"header\":{\"Referer\":\"https://site.r2.example/\"}}]}";
+            LiteCatalog.Site r3cSite = LiteCatalog.parse(r3cCfg, base).get(0);
+            LiteCatalog.ResolvedPlay r3cRes =
+                    LiteCatalog.resolvePlayUrl(base + "/watch?id=3", r3cSite, "HD");
+            check(
+                    "prefix-media".equals(r3cRes.mode)
+                            && "https://site.r2.example/".equals(r3cRes.headers.get("Referer")),
+                    "R3c: Same-origin legacy prefix preflight sends site Referer and preserves it for playback");
+
+            // R3d: Cross-origin parser request strips sensitive credential headers
+            crossHeadersSeen.clear();
+            String r3dCfg =
+                    "{\"sites\":[{\"key\":\"s_x\",\"name\":\"Cross\",\"type\":1,\"api\":\""
+                            + base
+                            + "/cms\",\"playUrl\":\""
+                            + crossBase
+                            + "/cross-parse?url=\",\"header\":{\"Cookie\":\"sid=1\",\"Authorization\":\"Bearer x\",\"Proxy-Authorization\":\"Basic p\",\"X-Api-Key\":\"k\",\"X-Emby-Token\":\"et\",\"X-Plex-Token\":\"pt\"}}]}";
+            LiteCatalog.Site r3dSite = LiteCatalog.parse(r3dCfg, base).get(0);
+            LiteCatalog.ResolvedPlay r3dRes =
+                    LiteCatalog.resolvePlayUrl(base + "/watch?id=4", r3dSite, "HD");
+            check(
+                    (crossBase + "/cross-ok.mp4").equals(r3dRes.url) && crossHeadersSeen.isEmpty(),
+                    "R3d: Cross-origin parser preflight strips Cookie, Authorization, Proxy-Authorization, and API tokens");
+
+            // R3e: Structured display-name vs rawFrom parser routing prefers rawFrom token ("B\n高清")
+            parserHits.clear();
+            String r3eCfg =
+                    "{\"parses\":["
+                            + "{\"name\":\"P1\",\"type\":1,\"url\":\""
+                            + base
+                            + "/parse-a?url=\",\"ext\":{\"flag\":[\"高清\"]}},"
+                            + "{\"name\":\"P2\",\"type\":1,\"url\":\""
+                            + base
+                            + "/parse-b?url=\",\"ext\":{\"flag\":[\"B\"]}}"
+                            + "],\"sites\":[{\"key\":\"s_rt\",\"name\":\"RT\",\"type\":1,\"api\":\""
+                            + base
+                            + "/cms\",\"parse\":1}]}";
+            LiteCatalog.Site r3eSite = LiteCatalog.parse(r3eCfg, base).get(0);
+            LiteCatalog.ResolvedPlay r3eRes =
+                    LiteCatalog.resolvePlayUrl(base + "/watch?id=5", r3eSite, "B\n高清");
+            check(
+                    (base + "/ok-b.mp4").equals(r3eRes.url)
+                            && parserHits.contains("/parse-b")
+                            && !parserHits.contains("/parse-a"),
+                    "R3e: Multi-token line routing key (rawFrom\\nshow) routes parser by rawFrom first");
+
+            // R4a: Query-nested .m3u8? is NOT treated as direct stream and goes to parser
+            parserHits.clear();
+            String nestedQueryUrl =
+                    base + "/watch?next=https%3A%2F%2Fcdn.invalid%2Fvideo.m3u8%3Fticket%3Ddemo&x=.m3u8?k=1";
+            LiteCatalog.ResolvedPlay r4aRes =
+                    LiteCatalog.resolvePlayUrl(nestedQueryUrl, r3aSite, "HD");
+            check(
+                    !LiteCatalog.isDirectStreamUrl(nestedQueryUrl)
+                            && "json-parse".equals(r4aRes.mode)
+                            && (base + "/ok.mp4").equals(r4aRes.url),
+                    "R4a: Web URL carrying .m3u8? only in query string goes through parser instead of direct");
+
+            // R4b: Bare relative media/out.m3u8 resolves against final redirected JSON endpoint URL; non-HTTP still rejected
+            String r4bCfg =
+                    "{\"sites\":[{\"key\":\"s_rel\",\"name\":\"Rel\",\"type\":1,\"api\":\""
+                            + base
+                            + "/cms\",\"playUrl\":\""
+                            + base
+                            + "/rel-redir?url=\"}]}";
+            LiteCatalog.Site r4bSite = LiteCatalog.parse(r4bCfg, base).get(0);
+            LiteCatalog.ResolvedPlay r4bRes =
+                    LiteCatalog.resolvePlayUrl(base + "/watch?id=6", r4bSite, "HD");
+            boolean badSchemeRejected = false;
+            try {
+                LiteCatalog.parseJsonPlayResponse(
+                        "{\"url\":\"file:///etc/passwd\"}", base + "/v2/parsers/api", r4bSite, "bad");
+            } catch (Exception expected) {
+                badSchemeRejected = true;
+            }
+            check(
+                    (base + "/v2/parsers/media/out.m3u8").equals(r4bRes.url) && badSchemeRejected,
+                    "R4b: Bare relative JSON url resolves against final response URL while non-HTTP schemes fail");
+
+            // R4c: Direct stream URLs with query parameters remain direct
+            check(
+                    LiteCatalog.isDirectStreamUrl("https://cdn.example/live/index.m3u8?token=abc")
+                            && LiteCatalog.isDirectStreamUrl("https://cdn.example/video.mp4?sig=1"),
+                    "R4c: True direct .m3u8? and .mp4? stream URLs remain direct");
+
+            // R7a & R7b: proxy:// channel-level Referer reaches playlist + M3U pipe-tail percent-encoded headers decode once
+            String b64ProxyM3u =
+                    java.util.Base64.getEncoder()
+                            .encodeToString((base + "/proxy-m3u").getBytes(StandardCharsets.UTF_8));
+            String r7Cfg =
+                    "{\"lives\":[{\"group\":\"ext\",\"channels\":[{\"name\":\"受保护节目单\",\"header\":{\"Referer\":\"https://proxy.r2.example/\"},\"urls\":[\"proxy://do=live&type=txt&ext="
+                            + b64ProxyM3u
+                            + "\"]}]}]}";
+            List<LiteCatalog.LiveSource> r7Sources = LiteCatalog.parseLives(r7Cfg, base);
+            List<LiteCatalog.LiveGroup> r7Groups = LiteCatalog.fetchLiveGroups(r7Sources.get(0));
+            Map<String, String> chLineHeaders =
+                    r7Groups.get(0).channels.get(0).headersForLine(0);
+            check(
+                    proxyM3uOk.get() == 1 && r7Groups.size() == 1 && r7Groups.get(0).channels.size() == 1,
+                    "R7a: Channel-level Referer is forwarded when fetching proxy:// external live playlist");
+            check(
+                    "https://tv.example/".equals(chLineHeaders.get("Referer"))
+                            && "Lite TV+1".equals(chLineHeaders.get("User-Agent")),
+                    "R7b: M3U pipe-tail percent-encoded headers decode once while preserving literal '+'");
+
+            // R7c: XML API prefilled with ?lang=zh&ac=list deduplicates ac=videolist and preserves lang=zh
+            LiteCatalog.Site r7XmlSite = new LiteCatalog.Site();
+            r7XmlSite.key = "xml_prefill";
+            r7XmlSite.name = "XMLPrefill";
+            r7XmlSite.type = 0;
+            r7XmlSite.api = base + "/strict-xml?lang=zh&ac=list";
+            String detailUrl = LiteCatalog.cmsDetailUrl(r7XmlSite, "9");
+            JSONArray xmlItems = LiteCatalog.list(LiteCatalog.fetch(detailUrl, r7XmlSite.headers));
+            check(
+                    !detailUrl.contains("ac=list")
+                            && detailUrl.contains("ac=videolist")
+                            && detailUrl.contains("lang=zh")
+                            && xmlDetailOk.get() == 1
+                            && xmlItems.length() == 1,
+                    "R7c: XML site URL prefilled with ac=list keeps a single ac=videolist and preserves custom query params");
+        } finally {
+            r2Http.stop(0);
+            r2Cross.stop(0);
+        }
+
+        // === R8: HTTP 200 HTML login page & XML error doc fail; valid empty RSS is true zero-hit ===
+        boolean htmlRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("<html><body>Login required</body></html>");
+        } catch (Exception expected) {
+            htmlRejected = true;
+        }
+        boolean commentedHtmlRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("<!-- gate --><html><body>Auth</body></html>");
+        } catch (Exception expected) {
+            commentedHtmlRejected = true;
+        }
+        check(
+                htmlRejected && commentedHtmlRejected,
+                "R8a: HTTP 200 HTML login page fails CMS parsing instead of returning empty zero-hit list");
+
+        boolean xmlErrRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("<error>upstream unavailable</error>");
+        } catch (Exception expected) {
+            xmlErrRejected = true;
+        }
+        boolean rssErrRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("<rss><error>denied</error></rss>");
+        } catch (Exception expected) {
+            rssErrRejected = true;
+        }
+        check(
+                xmlErrRejected && rssErrRejected,
+                "R8b: HTTP 200 XML error documents fail CMS parsing instead of returning empty zero-hit list");
+
+        JSONObject validEmptyRss =
+                LiteCatalog.parseCmsResponse("<rss><list page='1'></list></rss>");
+        JSONObject classOnlyRss =
+                LiteCatalog.parseCmsResponse("<rss><class><ty id='1'>电影</ty></class></rss>");
+        check(
+                validEmptyRss.optJSONArray("list") != null
+                        && validEmptyRss.optJSONArray("list").length() == 0
+                        && classOnlyRss.optJSONArray("class") != null
+                        && classOnlyRss.optJSONArray("class").length() == 1
+                        && classOnlyRss.optJSONArray("list") == null,
+                "R8c: Valid empty RSS returns empty list (true zero-hit) while class-only XML does not fake empty list");
+    }
+
+    private static void test059Round3Regressions() throws Exception {
+        // === Item 1 (P1 · R1): Preserve unattributed legacy history/favorites when saved evidence proves A & B ===
+        String apiA = "http://a.r3.test/cms";
+        String apiB = "http://b.r3.test/cms";
+        LiteCatalog.Site siteA = new LiteCatalog.Site();
+        siteA.key = "k";
+        siteA.originalKey = "k";
+        siteA.name = "SiteA";
+        siteA.api = apiA;
+        siteA.type = 1;
+        siteA.supported = true;
+        LiteCatalog.Site siteB = new LiteCatalog.Site();
+        siteB.key = "k";
+        siteB.originalKey = "k";
+        siteB.name = "SiteB";
+        siteB.api = apiB;
+        siteB.type = 1;
+        siteB.supported = true;
+        List<LiteCatalog.Site> onlyA = Arrays.asList(siteA);
+        List<LiteCatalog.Site> bothAB = Arrays.asList(siteA, siteB);
+
+        String cloudAllThree =
+                new JSONObject()
+                        .put("schema", "marco-movie-sync")
+                        .put("version", 2)
+                        .put(
+                                "watch_history",
+                                new JSONArray()
+                                        .put(r2WireItem("k", apiA, "1", 11L))
+                                        .put(r2WireItem("k", apiB, "1", 12L))
+                                        .put(r2WireItem("k", "", "1", 10L)))
+                        .put(
+                                "favorites",
+                                new JSONArray()
+                                        .put(r2WireItem("k", apiA, "1", 11L))
+                                        .put(r2WireItem("k", apiB, "1", 12L))
+                                        .put(r2WireItem("k", "", "1", 10L)))
+                        .put("tombstones", new JSONObject())
+                        .toString();
+        LiteSync.MergeResult initialThree =
+                LiteSync.merge("[]", "[]", "{}", null, false, cloudAllThree, 20L, onlyA);
+        check(
+                !LiteSync.isSiteKeyUnambiguouslyUnique(
+                                "k", onlyA, initialThree.historyJson, initialThree.favoritesJson, "{}")
+                        && LiteSync.isSiteKeyUnambiguouslyUnique("k", onlyA, "[]", "[]", "{}"),
+                "R3-1a: Unified site uniqueness includes saved A/B history/favorites evidence even when only A is loaded");
+
+        LiteStore.HistoryEntry updA = new LiteStore.HistoryEntry();
+        updA.siteKey = "k";
+        updA.siteApi = apiA;
+        updA.vodId = "1";
+        updA.vodName = "A";
+        updA.positionMs = 50;
+        updA.updatedAt = 50L;
+        // Even if caller passes collapseLegacyEmptyApi=true, LiteStore itself protects unattributed "" when B exists!
+        String savedHist = LiteStore.recordHistoryJson(initialThree.historyJson, updA, true);
+        LiteStore.FavoriteEntry favA = new LiteStore.FavoriteEntry();
+        favA.siteKey = "k";
+        favA.siteApi = apiA;
+        favA.vodId = "1";
+        favA.vodName = "A";
+        String unfavA = LiteStore.toggleFavoriteJson(initialThree.favoritesJson, favA, true);
+        String scopedTombA =
+                new JSONObject().put("fav:" + LiteSync.itemKey("k", apiA, "1"), 60L).toString();
+        LiteSync.MergeResult rep1 =
+                LiteSync.merge(savedHist, unfavA, scopedTombA, null, false, cloudAllThree, 70L, bothAB);
+        LiteSync.MergeResult rep2 =
+                LiteSync.merge(
+                        rep1.historyJson,
+                        rep1.favoritesJson,
+                        rep1.tombstonesJson,
+                        null,
+                        false,
+                        cloudAllThree,
+                        80L,
+                        bothAB);
+        check(
+                LiteStore.parseHistoryJson(savedHist).size() == 3
+                        && LiteStore.parseFavoritesJson(unfavA).size() == 2
+                        && rep2.favoriteCount == 2
+                        && !LiteStore.containsFavorite(rep2.favoritesJson, "k", apiA, "1", false)
+                        && LiteStore.containsFavorite(rep2.favoritesJson, "k", apiB, "1", false)
+                        && LiteStore.containsFavorite(rep2.favoritesJson, "k", "", "1", false),
+                "R3-1b: Saving/unfavoriting A with B in saved data preserves B and unattributed legacy record across 2 replays");
+
+        String oldBareTomb =
+                new JSONObject().put("hist:k\n1", 20L).put("fav:k\n1", 20L).toString();
+        String cloudOnlyA = r2WirePayload(r2WireItem("k", apiA, "1", 10L), null);
+        LiteSync.MergeResult uniqDel1 =
+                LiteSync.merge("[]", "[]", oldBareTomb, null, false, cloudOnlyA, 25L, onlyA);
+        LiteSync.MergeResult uniqDel2 =
+                LiteSync.merge(
+                        uniqDel1.historyJson,
+                        uniqDel1.favoritesJson,
+                        uniqDel1.tombstonesJson,
+                        null,
+                        false,
+                        cloudOnlyA,
+                        30L,
+                        onlyA);
+        check(
+                uniqDel1.historyCount == 0
+                        && uniqDel1.favoriteCount == 0
+                        && uniqDel2.historyCount == 0
+                        && uniqDel2.favoriteCount == 0,
+                "R3-1c: Unique-source legacy 0.5.8 tombstones remain effective across repeated syncs");
+
+        // === Item 2 (P1 · R2): Bare URL numbering, lineFrom resume, cross-season & singleton switch ===
+        JSONObject bareArrVod =
+                new JSONObject()
+                        .put("vod_id", "bare_arr")
+                        .put("vod_name", "BareArr")
+                        .put(
+                                "vod_play_list",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("from", "plain")
+                                                                        .put("show", "HD"))
+                                                        .put(
+                                                                "urls",
+                                                                new JSONArray()
+                                                                        .put("http://cdn.test/1.mp4")
+                                                                        .put("http://cdn.test/2.mp4"))));
+        LiteActivity.PlayLine bareLine = LiteActivity.extractPlayLines(bareArrVod, "").get(0);
+        List<LiteActivity.EpisodeItem> dupNamedEps =
+                Arrays.asList(
+                        new LiteActivity.EpisodeItem("HD", "http://cdn.test/1.mp4", 0),
+                        new LiteActivity.EpisodeItem("HD", "http://cdn.test/2.mp4", 1));
+        LiteStore.HistoryEntry savedEp2 = new LiteStore.HistoryEntry();
+        savedEp2.epName = "HD";
+        savedEp2.epUrl = "http://cdn.test/2.mp4";
+        savedEp2.epIndex = 1;
+        LiteActivity.EpisodeItem resumedEp =
+                LiteActivity.findSavedEpisodeInLine(dupNamedEps, savedEp2);
+        check(
+                bareLine.episodes.size() == 2
+                        && "第1集".equals(bareLine.episodes.get(0).name)
+                        && "第2集".equals(bareLine.episodes.get(1).name)
+                        && resumedEp != null
+                        && "http://cdn.test/2.mp4".equals(resumedEp.url),
+                "R3-2a: Bare URL array numbers episodes sequentially and resume prioritizes exact epUrl over duplicate names");
+
+        JSONObject sharedUrlLinesVod =
+                new JSONObject()
+                        .put("vod_id", "shared_url")
+                        .put("vod_name", "Shared")
+                        .put(
+                                "vod_play_list",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("from", "A")
+                                                                        .put("show", "HD"))
+                                                        .put("url", "EP2$http://pages.test/shared"))
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("from", "B")
+                                                                        .put("show", "HD"))
+                                                        .put("url", "EP2$http://pages.test/shared")));
+        List<LiteActivity.PlayLine> sharedLines =
+                LiteActivity.extractPlayLines(sharedUrlLinesVod, "");
+        LiteActivity.PlaybackSession sessB =
+                LiteActivity.PlaybackSession.forVod(
+                        1,
+                        "http://cdn.test/b.mp4",
+                        "http://pages.test/shared",
+                        "EP2",
+                        null,
+                        siteA,
+                        sharedUrlLinesVod,
+                        "HD",
+                        "B",
+                        1,
+                        0,
+                        sharedLines.get(1).episodes);
+        LiteStore.HistoryEntry histB =
+                LiteActivity.buildHistoryEntryForSession(sessB, 15000, 120000, 100L);
+        LiteStore.HistoryEntry histBRoundTrip = LiteStore.HistoryEntry.fromJson(histB.toJson());
+        // Also test legacy entry without lineFrom (relying on lineName + lineIndex)
+        LiteStore.HistoryEntry legacyHistB = LiteStore.HistoryEntry.fromJson(histB.toJson());
+        legacyHistB.lineFrom = "";
+        check(
+                "B".equals(histBRoundTrip.lineFrom)
+                        && LiteActivity.resolveSavedLineIndex(sharedLines, histBRoundTrip) == 1
+                        && LiteActivity.resolveSavedLineIndex(sharedLines, legacyHistB) == 1,
+                "R3-2b: Persisted lineFrom and legacy lineIndex fallback both restore line B when A/B share name and URL");
+
+        List<LiteActivity.EpisodeItem> s1Line =
+                LiteActivity.parseLineEpisodes("S01E02$http://b.test/12.mp4#S01E03$http://b.test/13.mp4");
+        List<LiteActivity.EpisodeItem> s2Line =
+                LiteActivity.parseLineEpisodes("S02E01$http://b.test/21.mp4#S02E02$http://b.test/22.mp4");
+        check(
+                LiteActivity.matchEpisodeIndexForLineSwitch(s1Line, "http://a.test/22.mp4", "S02E02", 1, 3)
+                                == -1
+                        && LiteActivity.matchEpisodeIndexForLineSwitch(
+                                        s2Line, "http://a.test/22.mp4", "S02E02", 1, 3)
+                                == 1,
+                "R3-2c: Cross-season S02E02->S01E02 returns -1 while matching S02E02->S02E02 returns 1");
+
+        List<LiteActivity.EpisodeItem> onlyEp3 =
+                LiteActivity.parseLineEpisodes("EP3$http://b.test/3.mp4");
+        List<LiteActivity.EpisodeItem> singleMovie =
+                LiteActivity.parseLineEpisodes("4K蓝光$http://b.test/movie.mp4");
+        check(
+                LiteActivity.matchEpisodeIndexForLineSwitch(onlyEp3, "http://a.test/2.mp4", "EP2", 0, 1)
+                                == -1
+                        && LiteActivity.matchEpisodeIndexForLineSwitch(
+                                        singleMovie, "http://a.test/m.mp4", "正片", 0, 1)
+                                == 0,
+                "R3-2d: Singleton numbered conflict EP2->EP3 returns -1 while unnumbered movie 正片->4K蓝光 matches 0");
+
+        // === Item 3 (P1 · R3): Matching global parser headers, rename preserving inherited routing & type=0 ===
+        HttpServer r3Http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final java.util.List<String> r3Hits =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        try {
+            final String r3Base = "http://127.0.0.1:" + r3Http.getAddress().getPort();
+            r3Http.createContext(
+                    "/with-header",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            String ua = ex.getRequestHeaders().getFirst("User-Agent");
+                            r3Hits.add("/with-header:" + ua);
+                            if (!"ParserMobile/1".equals(ua)) {
+                                byte[] bad = "403".getBytes(StandardCharsets.UTF_8);
+                                ex.sendResponseHeaders(403, bad.length);
+                                ex.getResponseBody().write(bad);
+                                ex.close();
+                                return;
+                            }
+                            byte[] ok =
+                                    ("{\"url\":\"" + r3Base + "/clipB.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, ok.length);
+                            ex.getResponseBody().write(ok);
+                            ex.close();
+                        }
+                    });
+            r3Http.createContext(
+                    "/A",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            r3Hits.add("/A");
+                            byte[] ok =
+                                    ("{\"url\":\"" + r3Base + "/clipA.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, ok.length);
+                            ex.getResponseBody().write(ok);
+                            ex.close();
+                        }
+                    });
+            r3Http.createContext(
+                    "/B",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            r3Hits.add("/B");
+                            byte[] ok =
+                                    ("{\"url\":\"" + r3Base + "/clipB.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, ok.length);
+                            ex.getResponseBody().write(ok);
+                            ex.close();
+                        }
+                    });
+            r3Http.createContext(
+                    "/gateway",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            String q = ex.getRequestURI().getRawQuery();
+                            r3Hits.add("/gateway?" + q);
+                            if (q != null && q.contains("ac=videolist")) {
+                                byte[] xml =
+                                        "<rss><list><video><id>1</id><name>GW</name></video></list></rss>"
+                                                .getBytes(StandardCharsets.UTF_8);
+                                ex.getResponseHeaders().set("Content-Type", "application/xml");
+                                ex.sendResponseHeaders(200, xml.length);
+                                ex.getResponseBody().write(xml);
+                                ex.close();
+                                return;
+                            }
+                            byte[] bad = "400".getBytes(StandardCharsets.UTF_8);
+                            ex.sendResponseHeaders(400, bad.length);
+                            ex.getResponseBody().write(bad);
+                            ex.close();
+                        }
+                    });
+            r3Http.start();
+
+            // R3-3a: Site playUrl same endpoint as global registered parser keeps global parser User-Agent
+            r3Hits.clear();
+            String sameEndpointCfg =
+                    "{\"parses\":[{\"name\":\"WH\",\"type\":1,\"url\":\""
+                            + r3Base
+                            + "/with-header?url=\",\"header\":{\"User-Agent\":\"ParserMobile/1\"},\"ext\":{\"flag\":[\"B\"]}}],"
+                            + "\"sites\":[{\"key\":\"s1\",\"name\":\"S1\",\"type\":1,\"api\":\""
+                            + r3Base
+                            + "/cms\",\"parse\":1,\"playUrl\":\""
+                            + r3Base
+                            + "/with-header?url=\"}]}";
+            LiteCatalog.Site sSame = LiteCatalog.parse(sameEndpointCfg, r3Base).get(0);
+            LiteCatalog.ResolvedPlay resSame =
+                    LiteCatalog.resolvePlayUrl(r3Base + "/watch?id=1", sSame, "B");
+            check(
+                    (r3Base + "/clipB.mp4").equals(resSame.url)
+                            && r3Hits.size() == 1
+                            && "/with-header:ParserMobile/1".equals(r3Hits.get(0)),
+                    "R3-3a: Site playUrl matching global parse inherits its User-Agent and succeeds without 403");
+
+            // R3-3b: Renaming site with unchanged playUrl keeps inherited global parser routing
+            r3Hits.clear();
+            String renameCfg =
+                    "{\"parses\":["
+                            + "{\"name\":\"PA\",\"type\":1,\"url\":\""
+                            + r3Base
+                            + "/A?url=\",\"ext\":{\"flag\":[\"A\"]}},"
+                            + "{\"name\":\"PB\",\"type\":1,\"url\":\""
+                            + r3Base
+                            + "/B?url=\",\"ext\":{\"flag\":[\"B\"]}}"
+                            + "],\"sites\":[{\"key\":\"s2\",\"name\":\"Old\",\"type\":1,\"api\":\""
+                            + r3Base
+                            + "/cms\",\"parse\":1}]}";
+            LiteCatalog.Site sRename = LiteCatalog.parse(renameCfg, r3Base).get(0);
+            LiteCatalog.applySiteOverride(
+                    sRename,
+                    new JSONObject()
+                            .put("name", "Renamed")
+                            .put("group", "G")
+                            .put("api", sRename.api)
+                            .put("playUrl", sRename.playUrl)
+                            .put("ext", "")
+                            .put("searchable", true));
+            LiteCatalog.ResolvedPlay resRename =
+                    LiteCatalog.resolvePlayUrl(r3Base + "/watch?id=2", sRename, "B\n高清");
+            check(
+                    (r3Base + "/clipB.mp4").equals(resRename.url)
+                            && r3Hits.contains("/B")
+                            && !r3Hits.contains("/A"),
+                    "R3-3b: Renaming site with unchanged playUrl preserves inherited rawFrom routing to /B");
+
+            // R3-3c: Renaming explicit type=0 /gateway site preserves type=0 and ac=videolist
+            r3Hits.clear();
+            String gwCfg =
+                    "{\"sites\":[{\"key\":\"gw\",\"name\":\"GW\",\"type\":0,\"api\":\""
+                            + r3Base
+                            + "/gateway\"}]}";
+            LiteCatalog.Site sGw = LiteCatalog.parse(gwCfg, r3Base).get(0);
+            LiteCatalog.applySiteOverride(
+                    sGw,
+                    new JSONObject()
+                            .put("name", "RenamedGW")
+                            .put("group", "G")
+                            .put("api", sGw.api)
+                            .put("playUrl", sGw.playUrl)
+                            .put("ext", "")
+                            .put("searchable", true));
+            String gwDetail = LiteCatalog.cmsDetailUrl(sGw, "1");
+            JSONArray gwItems = LiteCatalog.list(LiteCatalog.fetch(gwDetail, null));
+            check(
+                    sGw.type == 0
+                            && gwDetail.contains("ac=videolist")
+                            && gwItems.length() == 1,
+                    "R3-3c: Renaming explicit type=0 /gateway site preserves type=0 and sends ac=videolist");
+        } finally {
+            r3Http.stop(0);
+        }
+
+        // === Item 4 (P2 · R8): <!DOCTYPE rss> valid zero-hit; XML error root & JSON 403 w/ empty list fail ===
+        JSONObject doctypeRss =
+                LiteCatalog.parseCmsResponse("<!DOCTYPE rss><rss><list page='1'/></rss>");
+        JSONObject prologDoctypeRss =
+                LiteCatalog.parseCmsResponse(
+                        "<?xml version=\"1.0\" encoding=\"utf-8\"?><!DOCTYPE rss><rss><list page='1'/></rss>");
+        boolean doctypeHtmlRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("<!DOCTYPE html><html><body>Login</body></html>");
+        } catch (Exception expected) {
+            doctypeHtmlRejected = true;
+        }
+        check(
+                doctypeRss.optJSONArray("list") != null
+                        && doctypeRss.optJSONArray("list").length() == 0
+                        && prologDoctypeRss.optJSONArray("list") != null
+                        && prologDoctypeRss.optJSONArray("list").length() == 0
+                        && doctypeHtmlRejected,
+                "R3-4a: <!DOCTYPE rss> empty RSS counts as valid zero-hit while <!DOCTYPE html> is rejected");
+
+        boolean xmlErrWithListRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("<error><code>503</code><list/></error>");
+        } catch (Exception expected) {
+            xmlErrWithListRejected = true;
+        }
+        boolean rssErrChildWithListRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("<rss><error>denied</error><list/></rss>");
+        } catch (Exception expected) {
+            rssErrChildWithListRejected = true;
+        }
+        boolean json403WithListRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("{\"code\":403,\"msg\":\"Forbidden\",\"list\":[]}");
+        } catch (Exception expected) {
+            json403WithListRejected = true;
+        }
+        boolean jsonNested500Rejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("{\"data\":{\"code\":500,\"msg\":\"err\",\"list\":[]}}");
+        } catch (Exception expected) {
+            jsonNested500Rejected = true;
+        }
+        JSONObject validMacCmsEmpty =
+                LiteCatalog.parseCmsResponse("{\"code\":1,\"msg\":\"数据列表\",\"list\":[]}");
+        JSONObject validHttp200Empty =
+                LiteCatalog.parseCmsResponse("{\"code\":200,\"msg\":\"ok\",\"list\":[]}");
+        check(
+                xmlErrWithListRejected
+                        && rssErrChildWithListRejected
+                        && json403WithListRejected
+                        && jsonNested500Rejected
+                        && validMacCmsEmpty.optJSONArray("list") != null
+                        && validMacCmsEmpty.optJSONArray("list").length() == 0
+                        && validHttp200Empty.optJSONArray("list") != null
+                        && validHttp200Empty.optJSONArray("list").length() == 0,
+                "R3-4b: XML error root and JSON 403/500 with empty list fail while MacCMS code=1/200 empty list stay zero-hit");
+    }
+
+    private static void test059Round4Regressions() throws Exception {
+        // === Item 1 (P1): Consecutive edits preserve manual overrides, explicit global-first playUrl, active clear, XML->JSON API switch ===
+        HttpServer r4Http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final String r4Base = "http://127.0.0.1:" + r4Http.getAddress().getPort();
+        final List<String> r4Hits = new java.util.ArrayList<String>();
+        r4Http.createContext(
+                "/",
+                new HttpHandler() {
+                    public void handle(HttpExchange ex) throws java.io.IOException {
+                        String p = ex.getRequestURI().getPath();
+                        String q = ex.getRequestURI().getQuery();
+                        String ua = ex.getRequestHeaders().getFirst("User-Agent");
+                        r4Hits.add(p + (q != null ? "?" + q : "") + "|UA=" + ua);
+                        byte[] body;
+                        int code = 200;
+                        String mime = "application/json; charset=utf-8";
+                        if ("/A".equals(p)) {
+                            if (!"UA-A".equals(ua)) {
+                                code = 403;
+                                mime = "text/plain";
+                                body = "need UA-A".getBytes(StandardCharsets.UTF_8);
+                            } else {
+                                body = ("{\"url\":\"" + r4Base + "/stream-a.mp4\"}").getBytes(StandardCharsets.UTF_8);
+                            }
+                        } else if ("/B".equals(p)) {
+                            body = ("{\"url\":\"" + r4Base + "/stream-b.mp4\"}").getBytes(StandardCharsets.UTF_8);
+                        } else if ("/manual".equals(p)) {
+                            body = ("{\"url\":\"" + r4Base + "/stream-manual.mp4\"}").getBytes(StandardCharsets.UTF_8);
+                        } else if ("/catalog.json".equals(p)) {
+                            if (q != null && q.contains("ac=detail")) {
+                                body = "{\"list\":[{\"vod_id\":\"9\",\"vod_name\":\"JSON OK\"}]}".getBytes(StandardCharsets.UTF_8);
+                            } else {
+                                code = 400;
+                                mime = "text/plain";
+                                body = "need ac=detail".getBytes(StandardCharsets.UTF_8);
+                            }
+                        } else if ("/orig-xml".equals(p)) {
+                            if (q != null && q.contains("ac=videolist")) {
+                                mime = "application/xml; charset=utf-8";
+                                body = "<rss><list><video><id>9</id><name>XML OK</name></video></list></rss>".getBytes(StandardCharsets.UTF_8);
+                            } else {
+                                code = 400;
+                                mime = "text/plain";
+                                body = "need ac=videolist".getBytes(StandardCharsets.UTF_8);
+                            }
+                        } else {
+                            body = "ok".getBytes(StandardCharsets.UTF_8);
+                        }
+                        ex.getResponseHeaders().set("Content-Type", mime);
+                        ex.sendResponseHeaders(code, body.length);
+                        OutputStream os = ex.getResponseBody();
+                        os.write(body);
+                        os.close();
+                    }
+                });
+        r4Http.start();
+        try {
+            String cfgBase =
+                    new JSONObject()
+                            .put(
+                                    "sites",
+                                    new JSONArray()
+                                            .put(
+                                                    new JSONObject()
+                                                            .put("key", "s1")
+                                                            .put("name", "Orig")
+                                                            .put("type", 1)
+                                                            .put("api", r4Base + "/orig-cms")
+                                                            .put("parse", 1)))
+                            .put(
+                                    "parses",
+                                    new JSONArray()
+                                            .put(
+                                                    new JSONObject()
+                                                            .put("name", "PA")
+                                                            .put("type", 1)
+                                                            .put("url", r4Base + "/A?url=")
+                                                            .put("header", new JSONObject().put("User-Agent", "UA-A"))
+                                                            .put("ext", new JSONObject().put("flag", new JSONArray().put("A"))))
+                                            .put(
+                                                    new JSONObject()
+                                                            .put("name", "PB")
+                                                            .put("type", 1)
+                                                            .put("url", r4Base + "/B?url=")
+                                                            .put("ext", new JSONObject().put("flag", new JSONArray().put("B")))))
+                            .toString();
+
+            // R4-1a: manual override with playUrlExplicit=true, then subsequent rename keeps both api and playUrl; explicit clear reverts to global routing
+            JSONObject ovManual =
+                    new JSONObject()
+                            .put("name", "Step1")
+                            .put("api", r4Base + "/custom-cms")
+                            .put("playUrl", r4Base + "/manual?url=")
+                            .put("playUrlExplicit", true);
+            LiteCatalog.Site sStep1 = LiteCatalog.parse(cfgBase, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(sStep1, ovManual);
+            JSONObject ovRename2 = new JSONObject(ovManual.toString()).put("name", "Step2Rename");
+            LiteCatalog.Site sStep2 = LiteCatalog.parse(cfgBase, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(sStep2, ovRename2);
+            LiteCatalog.ResolvedPlay resStep2 =
+                    LiteCatalog.resolvePlayUrl(r4Base + "/watch?id=1", sStep2, "B\n高清");
+            JSONObject ovCleared =
+                    new JSONObject(ovRename2.toString())
+                            .put("playUrl", "")
+                            .put("playUrlExplicit", false);
+            LiteCatalog.Site sCleared = LiteCatalog.parse(cfgBase, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(sCleared, ovCleared);
+            LiteCatalog.ResolvedPlay resCleared =
+                    LiteCatalog.resolvePlayUrl(r4Base + "/watch?id=1", sCleared, "B\n高清");
+            check(
+                    (r4Base + "/custom-cms").equals(sStep2.api)
+                            && (r4Base + "/manual?url=").equals(sStep2.playUrl)
+                            && sStep2.explicitSitePlayUrl
+                            && (r4Base + "/stream-manual.mp4").equals(resStep2.url)
+                            && !sCleared.explicitSitePlayUrl
+                            && (r4Base + "/stream-b.mp4").equals(resCleared.url),
+                    "R4-1a: Consecutive rename preserves manual api+playUrl and active clear reverts to global routing");
+
+            // R4-1b: manually selecting URL equal to inherited first global parse sets explicitSitePlayUrl=true and uses A's headers
+            r4Hits.clear();
+            JSONObject ovGlobalFirst =
+                    new JSONObject()
+                            .put("name", "Orig")
+                            .put("playUrl", r4Base + "/A?url=")
+                            .put("playUrlExplicit", true);
+            LiteCatalog.Site sGlobalFirst = LiteCatalog.parse(cfgBase, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(sGlobalFirst, ovGlobalFirst);
+            LiteCatalog.ResolvedPlay resGlobalFirst =
+                    LiteCatalog.resolvePlayUrl(r4Base + "/watch?id=1", sGlobalFirst, "B\n高清");
+            check(
+                    sGlobalFirst.explicitSitePlayUrl
+                            && (r4Base + "/stream-a.mp4").equals(resGlobalFirst.url)
+                            && r4Hits.size() == 1
+                            && r4Hits.get(0).startsWith("/A?")
+                            && r4Hits.get(0).endsWith("|UA=UA-A"),
+                    "R4-1b: Explicitly picking global-first playUrl forces explicit routing with registered parser headers");
+
+            // R4-1c: explicit type=0 XML site stays type=0 on rename, switches to type=1 (ac=detail) when changed to /catalog.json
+            String cfgXml =
+                    new JSONObject()
+                            .put(
+                                    "sites",
+                                    new JSONArray()
+                                            .put(
+                                                    new JSONObject()
+                                                            .put("key", "sx")
+                                                            .put("name", "XML")
+                                                            .put("type", 0)
+                                                            .put("api", r4Base + "/orig-xml")))
+                            .toString();
+            LiteCatalog.Site sXmlRename = LiteCatalog.parse(cfgXml, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(sXmlRename, new JSONObject().put("name", "XML Renamed"));
+            String xmlDetailUrl = LiteCatalog.cmsDetailUrl(sXmlRename, "9");
+            JSONArray xmlArr = LiteCatalog.list(LiteCatalog.fetch(xmlDetailUrl, null));
+            LiteCatalog.Site sXmlToJson = LiteCatalog.parse(cfgXml, r4Base + "/cfg").get(0);
+            LiteCatalog.applySiteOverride(
+                    sXmlToJson,
+                    new JSONObject().put("name", "Moved JSON").put("api", r4Base + "/catalog.json"));
+            String jsonDetailUrl = LiteCatalog.cmsDetailUrl(sXmlToJson, "9");
+            JSONArray jsonArr = LiteCatalog.list(LiteCatalog.fetch(jsonDetailUrl, null));
+            check(
+                    sXmlRename.type == 0
+                            && xmlDetailUrl.contains("ac=videolist")
+                            && xmlArr.length() == 1
+                            && sXmlToJson.type == 1
+                            && jsonDetailUrl.contains("ac=detail")
+                            && jsonArr.length() == 1,
+                    "R4-1c: Explicit XML preserves type=0 on rename and switches to type=1 ac=detail when changed to /catalog.json");
+        } finally {
+            r4Http.stop(0);
+        }
+
+        // === Item 2 (P2): Chinese season conflict, shared short token conflict, and canonical cross-line match ===
+        List<LiteActivity.EpisodeItem> cnSeason1Line =
+                LiteActivity.parseLineEpisodes(
+                        "第一季 第02集$http://b.test/s1e2#第一季 第03集$http://b.test/s1e3");
+        int cnSeasonConflict =
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                        cnSeason1Line, "http://a.test/s2e2", "第二季 第02集", 0, 3);
+        check(
+                cnSeasonConflict == -1,
+                "R4-2a: Chinese season 第二季 第02集 refuses 第一季 第02集 / 第一季 第03集");
+
+        List<LiteActivity.EpisodeItem> shortTokenSeason1Line =
+                LiteActivity.parseLineEpisodes("S01E02$2#S01E03$3");
+        int sharedTokenConflict =
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                        shortTokenSeason1Line, "2", "S02E02", 0, 3);
+        int sharedTokenCnConflict =
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                        LiteActivity.parseLineEpisodes("第一季 第02集$2#第一季 第03集$3"),
+                        "2",
+                        "第二季 第02集",
+                        0,
+                        3);
+        check(
+                sharedTokenConflict == -1 && sharedTokenCnConflict == -1,
+                "R4-2b: Explicit season conflict overrides shared per-provider short token 2");
+
+        List<LiteActivity.EpisodeItem> canonTargetLine =
+                LiteActivity.parseLineEpisodes("第01集$http://b.test/1#第02集$http://b.test/2");
+        int canonMatch =
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                        canonTargetLine, "http://a.test/2", "EP2", 1, 2);
+        List<LiteActivity.EpisodeItem> cnSameSeasonLine =
+                LiteActivity.parseLineEpisodes("第二季 第01集$http://b.test/1#第二季 第02集$http://b.test/2");
+        int cnSameSeasonMatch =
+                LiteActivity.matchEpisodeIndexForLineSwitch(
+                        cnSameSeasonLine, "http://a.test/s2e2", "S02E02", 1, 2);
+        check(
+                canonMatch == 1 && cnSameSeasonMatch == 1,
+                "R4-2c: Canonical EP2 -> 第02集 and S02E02 -> 第二季 第02集 still match reliably");
+
+        // === Item 3 (P2): Legacy history/favorite record site resolution honors saved-record ambiguity ===
+        LiteCatalog.Site siteDupA = new LiteCatalog.Site();
+        siteDupA.key = "dup";
+        siteDupA.name = "甲站";
+        siteDupA.api = "http://a.test/cms";
+        siteDupA.supported = true;
+        LiteCatalog.Site siteDupB = new LiteCatalog.Site();
+        siteDupB.key = "dup";
+        siteDupB.name = "乙站";
+        siteDupB.api = "http://b.test/cms";
+        siteDupB.supported = true;
+
+        LiteCatalog.RecordSiteResolution resOnlyAAmbig =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(siteDupA), "dup", "", "旧源", false);
+        LiteCatalog.RecordSiteResolution resOnlyAUnique =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(siteDupA), "dup", "", "旧源", true);
+        check(
+                resOnlyAAmbig.matchedSite == null
+                        && resOnlyAAmbig.ambiguousCandidates.size() == 1
+                        && siteDupA == resOnlyAAmbig.ambiguousCandidates.get(0)
+                        && resOnlyAUnique.matchedSite == siteDupA
+                        && resOnlyAUnique.ambiguousCandidates.isEmpty(),
+                "R4-3a: Only-A config with known saved A/B ambiguity blocks auto-open and exposes candidate for confirmation");
+
+        LiteCatalog.RecordSiteResolution resBothAB =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(siteDupA, siteDupB), "dup", "", "旧源", false);
+        LiteCatalog.RecordSiteResolution resExactA =
+                LiteCatalog.resolveSiteForRecord(
+                        Arrays.asList(siteDupA), "dup", "http://a.test/cms", "甲站", false);
+        check(
+                resBothAB.matchedSite == null
+                        && resBothAB.ambiguousCandidates.size() == 2
+                        && resExactA.matchedSite == siteDupA,
+                "R4-3b: Restored A+B exposes both candidates while API-identified record still opens exact site directly");
+
+        // === Round 4 P2 follow-up: Manual different-season selection must NOT inherit previous season clock via global resume ===
+        LiteCatalog.Site resumeSite = new LiteCatalog.Site();
+        resumeSite.key = "r4_site";
+        resumeSite.name = "R4站";
+        resumeSite.api = "http://r4.test/cms";
+        JSONObject resumeVod = new JSONObject().put("vod_id", "v_season").put("vod_name", "跨季剧");
+        List<LiteActivity.EpisodeItem> lineBEps =
+                LiteActivity.parseLineEpisodes("S01E02$2#S01E03$3");
+        LiteActivity.PlaybackSession sessS01E02 =
+                LiteActivity.PlaybackSession.forVod(
+                        1, "2", "2", "S01E02", null, resumeSite, resumeVod, "B", "B", 1, 0, lineBEps);
+        LiteActivity.PlaybackSession sessS01E03 =
+                LiteActivity.PlaybackSession.forVod(
+                        2, "3", "3", "S01E03", null, resumeSite, resumeVod, "B", "B", 1, 1, lineBEps);
+        LiteStore.HistoryEntry histS02E02 = new LiteStore.HistoryEntry();
+        histS02E02.siteKey = resumeSite.key;
+        histS02E02.siteApi = resumeSite.api;
+        histS02E02.vodId = "v_season";
+        histS02E02.lineFrom = "A";
+        histS02E02.epName = "S02E02";
+        histS02E02.epUrl = "2";
+        histS02E02.positionMs = 12500;
+        LiteStore.HistoryEntry histOwnS01E02 = new LiteStore.HistoryEntry();
+        histOwnS01E02.siteKey = resumeSite.key;
+        histOwnS01E02.siteApi = resumeSite.api;
+        histOwnS01E02.vodId = "v_season";
+        histOwnS01E02.lineFrom = "B";
+        histOwnS01E02.epName = "S01E02";
+        histOwnS01E02.epUrl = "2";
+        histOwnS01E02.positionMs = 9800;
+
+        int leakFromS02 =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessS01E02,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E02",
+                        histS02E02,
+                        "2",
+                        resumeSite.api,
+                        "",
+                        "",
+                        "",
+                        12500);
+        int leakControlS01E03 =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessS01E03,
+                        "3",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E03",
+                        histS02E02,
+                        "2",
+                        resumeSite.api,
+                        "",
+                        "",
+                        "",
+                        12500);
+        int ownS01Resume =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessS01E02,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E02",
+                        histOwnS01E02,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E02",
+                        "B",
+                        9800);
+        check(
+                leakFromS02 == 0 && leakControlS01E03 == 0 && ownS01Resume == 9800,
+                "R4-2d: Manual S01E02$2 ignores S02E02$2 global/history clock (0ms) while keeping own S01E02$2 history (9800ms)");
+
+        List<LiteActivity.EpisodeItem> legacyHttpEps =
+                LiteActivity.parseLineEpisodes("第一集$http://r4.test/video.mp4");
+        LiteActivity.PlaybackSession sessLegacyHttp =
+                LiteActivity.PlaybackSession.forVod(
+                        3,
+                        "http://r4.test/video.mp4",
+                        "http://r4.test/video.mp4",
+                        "第一集",
+                        null,
+                        resumeSite,
+                        resumeVod,
+                        "直链",
+                        "direct",
+                        0,
+                        0,
+                        legacyHttpEps);
+        int legacy058HttpResume =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessLegacyHttp,
+                        "http://r4.test/video.mp4",
+                        resumeSite.api,
+                        "v_season",
+                        "第一集",
+                        null,
+                        "http://r4.test/video.mp4",
+                        "",
+                        "",
+                        "",
+                        "",
+                        14500);
+        int legacyBareShortTokenNoMeta =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessS01E02,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E02",
+                        null,
+                        "2",
+                        resumeSite.api,
+                        "",
+                        "",
+                        "",
+                        12500);
+        int globalConflictWithMeta =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessS01E02,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E02",
+                        null,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S02E02",
+                        "A",
+                        12500);
+        check(
+                legacy058HttpResume == 14500
+                        && legacyBareShortTokenNoMeta == 0
+                        && globalConflictWithMeta == 0,
+                "R4-2e: Legacy 0.5.8 global HTTP resume still works (14500ms) while ambiguous/conflicting short token global resume returns 0");
     }
 }

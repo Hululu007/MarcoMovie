@@ -69,12 +69,20 @@ public final class LiteMediaProxy {
         return server.getLocalPort();
     }
 
+    private static boolean isSelfProxyUrl(URL u) {
+        LiteMediaProxy current = instance;
+        if (current == null || current.closed || u == null) return false;
+        String host = u.getHost();
+        return "127.0.0.1".equalsIgnoreCase(host) && u.getPort() == current.port();
+    }
+
     public static String wrapIfNeeded(
             String address, Map<String, String> headers, int mode, boolean isIjk) {
         if (address == null || address.length() == 0) return address;
         try {
             String normalized = LiteCatalog.http(address);
             URL u = new URL(normalized);
+            if (isSelfProxyUrl(u)) return normalized;
             String host = u.getHost().toLowerCase(Locale.US);
             boolean isLocal =
                     "127.0.0.1".equals(host) || "localhost".equals(host) || "10.0.2.2".equals(host);
@@ -84,7 +92,7 @@ public final class LiteMediaProxy {
                 return normalized;
             }
             if (mode == MODE_AUTO) {
-                if (isLocal && !(isIjk && isHttps)) return normalized;
+                if (isLocal && !hasCustomHeaders && !(isIjk && isHttps)) return normalized;
                 if (!isHttps && !hasCustomHeaders) return normalized;
             }
             return get().buildProxyUrl(normalized, headers);
