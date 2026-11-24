@@ -53,7 +53,8 @@
 
 ## 仍在完善
 
-- **已发行与待实机验证项（`a919dfd9` / `45b1d3c4` / `0e1ed283` / `36333b60` / `40795cc8` / `1706e22e` / `9cb86ed2` / `78017bfb`）**：
+- **已发行与待实机验证项（`0a1e07d5` / `a919dfd9` / `45b1d3c4` / `0e1ed283` / `36333b60` / `40795cc8` / `1706e22e` / `9cb86ed2` / `78017bfb`）**：
+  - HarmonyOS NEXT `0.1.2`（构建号 `1000003`）已完成提交 `0a1e07d5` 公开合规守卫（`2164` 追踪文件）、`115/115` 项本地 Flutter 回归测试、`7/7` 项 `test_prepare_ohos.py`（含 Node TypeScript 凭据引擎测试）、OpenHarmony Flutter `3.35.7` + HarmonyOS Command Line Tools `26.0.0.821` 云端 Release 打包与 `prepare_ohos.py --verify-hap` 解包校验（Run `45310961797` Jobs `138166288101` / `138167806675`，确认 `minAPIVersion = 50000012`、`arm64-v8a` 与 `37` 项 CatPaw 资产），以及 `harmonyos-v0.1.2` GitHub Release 独立发行（`22fcc43e...`）；因缺少物理鸿蒙真机，API 12 新装冷启动/播放与 API 17+ 从 `0.1.1` 覆盖升级尚未实机验收（`device_install_tested: false`，`device_upgrade_tested: false`）；
   - Windows `0.7.1`（构建号 `78`）已完成提交 `a919dfd9` 公开合规守卫（`1601` 追踪文件，Run `45112032114`）、7 平台全绿云端构建（Run `45112032102` Jobs `137486329825` / `137487699037`，验证随包共存 `fvp.dll` / `mdk.dll` / `ffmpeg-9.dll` / `libass.dll` / `libmpv-2.dll` 与内置 Python `3.11.9` / CatPaw 运行时）、本地 Windows `1336` 项全量 Flutter 测试与 `libmpv-2.dll` 校验，以及 `windows-v0.7.1` GitHub Release 独立发行（安装版 `ae13048d...` / 便携版 `1a992fc9...`）；尚未覆盖所有代际 Intel / AMD 核显实机与全部第三方站点；
   - iOS / iPadOS `0.7.0`（构建号 `93`）与 Windows `0.7.0`（构建号 `77`）已完成提交 `45b1d3c4` 公开合规守卫（`1595` 追踪文件，Run `45065556562`）、7 平台全绿云端构建（Run `45065556517` Jobs `137340782837` / `137341995146` / `137341995186`，Xcode `27.2` + `MinimumOSVersion = 15.0`）、本地 Windows `1329/1329` 全量测试（含 `libmpv-2.dll` 与内置 Python `3.11.9` 自检）以及 `ios-v0.7.0`（`d24a947c...`）与 `windows-v0.7.0`（安装版 `eb16bf2b...` / 便携版 `2d01cf4c...`）GitHub Releases 独立发行；iOS `0.7.0` 尚未完成全型号物理真机覆盖安装验收，Windows `BlurayIsoProxy` 不包含商业加密蓝光 DRM 解密能力；
   - Android 电视 / 盒子 `0.6.2`（版本代码 `99`）已完成构建提交 `0e1ed283` 公开合规检查（`1567` 追踪文件）、`288` 个 Java 文件格式校验、`736` 个应用类 `API 23` 字节码回调校验、全部 `35` 组 Android JVM 回归套件（含 `Tv061FeedbackChecks` `41/41`、`HighQualityUpgradeChecks` `62/62`、`TvUxOptimizationChecks` `219/219`）、官方正式签名打包（`2549f01e...`）及 `android-tv-v0.6.2` GitHub Release 独立发行；本版本尚未完成物理电视/盒子的覆盖安装、真实多订阅在线刷新、网盘实机扫码及 4K / MPV 实机播放验收（`device_install_tested: false`，`device_playback_tested: false`）；
@@ -62,7 +63,7 @@
   - Android 电视 / 盒子 `0.6.0`（版本代码 `96`）已完成提交 `1706e22e` 公开守卫（Run `44915956588`）、Android 云端构建校验（Run `44915956538` Jobs `136881495162` / `136882734363`）、`52/52` TV UX 专项回归、物理 Xiaomi `MiTV-ASTP0`（Android 9，1.5 GB RAM）实机低内存崩溃根治与全链路界面/播放验收，以及 `android-tv-v0.6.0` GitHub Release 独立发行（`f368ff08...`）；
   - Windows `0.6.0`（构建号 `76`）已完成提交 `9cb86ed2` 云端 7 任务全绿构建（Run `44884390833` / `44884390802` / `44884390814`）、物理 Windows 实机界面/直播端到端验证及 `windows-v0.6.0` GitHub Release 独立发行；
   - 其余 3 个近期变动端（Android 手机/平板 `0.5.27`、Android Lite `0.5.8`、macOS `0.5.20`）维持 `78017bfb` 已发行版本，对应物理设备 A/B 对照实机验收仍待继续补齐；
-  - Apple TV 与 HarmonyOS NEXT（`0.1.1`）本轮未作功能改动，且本地未安装 HarmonyOS `hvigorw` 编译工具链，未执行本地 `.hap` 打包。
+  - Apple TV（`0.1.1`）近期未作功能改动，对应物理 Apple TV 真机验收仍待继续补齐。
 - 全部网盘授权流程、任意扩展或直播列表、长时间播放、所有解码器、DRM 授权样本和磁力视频的电视端表现均未完成穷尽验证。配置导入成功不等于可用；第三方服务还可能随时变更。
 
 持久媒体缓存、渲染视图切换等尚未完成。某些文件操作依赖电视的系统文件选择器。不会把未实现功能作为已有能力展示。

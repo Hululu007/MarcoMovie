@@ -1,3 +1,12 @@
+## 2026-11-24 HarmonyOS NEXT 0.1.2 专项稳定性与功能完善：恢复 API 12 最低系统兼容、凭据安全存储与无损迁移、独立更新通道、直播同台换源与暂停防误重开、带请求头首播与原生文档选择器统一（HarmonyOS NEXT 0.1.2）
+
+- [HarmonyOS NEXT 0.1.2](docs/releases/harmonyos-v0.1.2.md)
+- **恢复 API 12 最低系统兼容与 CI 固化**：修复 CI 模板重建导致 `minAPIVersion` / `targetAPIVersion` 被抬升至 `5.0.5(17)` 的问题，锁定 OpenHarmony Flutter 引擎并在打包后强制验证 `minAPIVersion = 50000012`、`arm64-v8a` 与 `37` 项 CatPaw 资产。
+- **凭据安全存储、无损迁移与注销墓碑**：`OhosSystemPlugin` 写入系统 Asset Store（支持长网盘 Cookie 分片）且失败不再静默回落明文 Preferences；升级迁移保留两处异值保护，注销中断后由墓碑记录防止下次启动把已删凭据重新迁回。
+- **鸿蒙独立更新通道与版本比较**：显式识别 HarmonyOS 平台，读取 `/movie/updates/harmonyos.json` 与对应 GitHub Release，校验平台/版本/文件名/大小/SHA-256；手机与智慧屏均区分远端较新、同版与远端较旧，并提供未签名包签名安装指引。
+- **直播同台换源、首帧检测、暂停防误重开与请求头保留**：智慧屏分离“手动换台”与“自动换同台信号”；以 `startRenderFrame` 或有效进度作为首帧证据防止假播放卡死；修复直播主动暂停后因迟到 `playing=true` / `error` 导致自动重开或画面暂停声音继续的问题；`OhosAvPlayerPlugin` 保留 `Referer` 等请求头且界面倍速仅展示可执行档位。
+- **统一触屏/智慧屏原生文档选择器、备份限制与换仓搜索**：触屏与智慧屏订阅/直播/备份导入导出统一走鸿蒙原生文档选择器，统一鸿蒙本地备份 `32 MiB` 限制（WebDAV 保持 `8 MiB` 且不影响其他端旧备份恢复）；智慧屏搜索突破 16 站上限，切仓或换词立即失效并取消旧请求。
+
 ## 2026-11-23 Windows x64 0.7.1 专项体验与解码升级：新增 MDK 核显兼容播放引擎、修复全屏隐藏进度条弹幕静止、剧集内刮削与弹幕集号校准、海报精准匹配及动态漫画/动漫区分（Windows 0.7.1）
 
 - [Windows 0.7.1](docs/releases/windows-v0.7.1.md)
