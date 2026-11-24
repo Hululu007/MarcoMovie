@@ -145,7 +145,7 @@ jobs:
         run: |
           python prepare_platform.py
           flutter pub get
-          flutter test test/conformance_test.dart test/harmonyos_and_tv_ui_test.dart test/harmonyos_candidate_review_test.dart test/playback_startup_test.dart test/app_update_test.dart
+          flutter test test/conformance_test.dart test/harmonyos_and_tv_ui_test.dart test/harmonyos_candidate_review_test.dart test/ohos_metadata_stall_review_test.dart test/shared_backup_roundtrip_review_test.dart test/playback_startup_test.dart test/app_update_test.dart
       - name: Shared script runtime and native patch checks
         run: |
           node scripts/test_js_module_interop.cjs

@@ -79,6 +79,9 @@ class OhosPlatformPlayer extends PlatformPlayer {
   int? _activeSubtitleTrackIndex;
   int _bufferingPercent = 100;
   int _streamBitrate = 0;
+  bool _hasRenderedFirstFrame = false;
+  final StreamController<void> _firstFrameController =
+      StreamController<void>.broadcast();
 
   OhosPlatformPlayer({
     super.configuration = const PlayerConfiguration(),
@@ -91,6 +94,8 @@ class OhosPlatformPlayer extends PlatformPlayer {
   int? get activeSubtitleTrackIndex => _activeSubtitleTrackIndex;
   int get bufferingPercent => _bufferingPercent;
   int get streamBitrate => _streamBitrate;
+  bool get hasRenderedFirstFrame => _hasRenderedFirstFrame;
+  Stream<void> get firstFrameStream => _firstFrameController.stream;
   String get videoResolutionLabel => state.videoResolutionLabel;
   Map<String, String> get properties => Map<String, String>.unmodifiable(_properties);
 
@@ -186,6 +191,20 @@ class OhosPlatformPlayer extends PlatformPlayer {
           state = state.copyWith(width: w, height: h);
           widthController.add(w);
           heightController.add(h);
+        }
+        break;
+      case 'firstFrame':
+      case 'startRenderFrame':
+        _hasRenderedFirstFrame = true;
+        final w = (event['width'] as num?)?.toInt() ?? 0;
+        final h = (event['height'] as num?)?.toInt() ?? 0;
+        if (w > 0 && h > 0 && (state.width != w || state.height != h)) {
+          state = state.copyWith(width: w, height: h);
+          widthController.add(w);
+          heightController.add(h);
+        }
+        if (!_firstFrameController.isClosed) {
+          _firstFrameController.add(null);
         }
         break;
       case 'bufferingPercent':
@@ -313,6 +332,7 @@ class OhosPlatformPlayer extends PlatformPlayer {
     _activeSubtitleTrackIndex = null;
     _bufferingPercent = 0;
     _streamBitrate = 0;
+    _hasRenderedFirstFrame = false;
 
     final hdrRaw = _properties['hdr']?.trim().toLowerCase();
     final preferredHdr = hdrRaw == null || hdrRaw.isEmpty
@@ -386,6 +406,7 @@ class OhosPlatformPlayer extends PlatformPlayer {
     if (pid == null || _disposed) return;
     await _controlChannel.invokeMethod<void>('stop', {'playerId': pid});
     state = state.copyWith(playing: false, buffering: false);
+    _hasRenderedFirstFrame = false;
     playingController.add(false);
     bufferingController.add(false);
   }
@@ -503,6 +524,9 @@ class OhosPlatformPlayer extends PlatformPlayer {
       try {
         await _controlChannel.invokeMethod<void>('dispose', {'playerId': pid});
       } catch (_) {}
+    }
+    if (!_firstFrameController.isClosed) {
+      await _firstFrameController.close();
     }
     await super.dispose();
   }

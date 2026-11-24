@@ -67,6 +67,7 @@ class PlayerSession {
   playing: boolean = false;
   buffering: boolean = false;
   completed: boolean = false;
+  renderedFirstFrame: boolean = false;
   positionMs: number = 0;
   durationMs: number = 0;
   bufferedMs: number = 0;
@@ -537,12 +538,14 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
           session.playing = false;
           session.buffering = false;
           session.completed = false;
+          session.renderedFirstFrame = false;
           this.emitState(session);
           break;
         }
         case 'error': {
           session.playing = false;
           session.buffering = false;
+          session.renderedFirstFrame = false;
           this.emitState(session);
           break;
         }
@@ -612,6 +615,26 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
       this.emitVideoSize(session, width, height);
     });
 
+    avPlayer.on('startRenderFrame', () => {
+      if (session.disposed) {
+        return;
+      }
+      session.renderedFirstFrame = true;
+      session.buffering = false;
+      const width: number = avPlayer.width > 0 ? Math.trunc(avPlayer.width) : session.videoWidth;
+      const height: number = avPlayer.height > 0 ? Math.trunc(avPlayer.height) : session.videoHeight;
+      if (width > 0 && height > 0) {
+        session.videoWidth = width;
+        session.videoHeight = height;
+      }
+      const firstFramePayload: Record<string, Object> = {
+        'type': 'firstFrame',
+        'width': width,
+        'height': height
+      };
+      session.streamHandler.emit(firstFramePayload);
+    });
+
     avPlayer.on('speedDone', (speed: number) => {
       if (session.disposed) {
         return;
@@ -670,6 +693,7 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
     session.playing = false;
     session.buffering = true;
     session.completed = false;
+    session.renderedFirstFrame = false;
     session.positionMs = startPositionMs;
     session.durationMs = 0;
     session.bufferedMs = startPositionMs;
@@ -765,6 +789,7 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
   private async handleStop(playerId: number): Promise<boolean> {
     const session: PlayerSession = this.requireSession(playerId);
     session.pendingAutoPlay = false;
+    session.renderedFirstFrame = false;
     if (this.isPlayableState(session.avPlayer.state)) {
       await session.avPlayer.stop();
     }
@@ -883,6 +908,7 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
       session.avPlayer.off('durationUpdate');
       session.avPlayer.off('bufferingUpdate');
       session.avPlayer.off('videoSizeChange');
+      session.avPlayer.off('startRenderFrame');
       session.avPlayer.off('speedDone');
       session.avPlayer.off('error');
     } catch (_err) {

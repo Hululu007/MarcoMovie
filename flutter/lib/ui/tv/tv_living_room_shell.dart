@@ -1006,7 +1006,9 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
             return;
           }
           if (isBackup) {
-            StorageService.validateLocalBackupUtf8Bytes(rawBytes);
+            if (rawBytes.length > StorageService.maxSyncPayloadBytes) {
+              throw const FormatException('备份文件超过 8 MB 限制');
+            }
             content = utf8.decode(rawBytes, allowMalformed: false);
           } else {
             content = CmsClient.readSubscriptionFile(rawBytes, f.name);
@@ -1017,7 +1019,11 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         return;
       }
       if (isBackup) {
-        await widget.storage.importBackupJson(content);
+        if (OhosRuntime.isOhos) {
+          await widget.storage.importValidatedLocalBackupJson(content);
+        } else {
+          await widget.storage.importBackupJson(content);
+        }
         _reloadConfigAndFetch();
         _showToast('跨端备份已恢复');
       } else {
@@ -1042,9 +1048,9 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
 
   Future<void> _exportBackup() async {
     try {
-      final jsonText = widget.storage.exportValidatedLocalBackupJson();
       const fileName = 'marco-movie-backup.json';
       if (OhosRuntime.isOhos) {
+        final jsonText = widget.storage.exportValidatedLocalBackupJson();
         final saved = await OhosRuntime.saveTextFile(
           fileName: fileName,
           content: jsonText,
@@ -1055,6 +1061,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         }
         return;
       }
+      final jsonText = widget.storage.exportBackupJson();
       await Clipboard.setData(ClipboardData(text: jsonText));
       _showToast('跨端备份 JSON 已复制到剪贴板');
     } on FormatException catch (e) {

@@ -2051,7 +2051,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     try {
       if (CmsParser.isBackupPayload(text)) {
-        await widget.storage.importBackupJson(text);
+        if (OhosRuntime.isOhos) {
+          await widget.storage.importValidatedLocalBackupJson(text);
+        } else {
+          await widget.storage.importBackupJson(text);
+        }
         _reloadSavedConfig();
         _showAppleNotice('已从剪贴板恢复备份', '备份中的配置、收藏与观看历史已同步生效。');
         return;
@@ -15001,7 +15005,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               final candidateBackup =
                   jsonText.isNotEmpty ? jsonText : urlText;
               if (CmsParser.isBackupPayload(candidateBackup)) {
-                await widget.storage.importBackupJson(candidateBackup);
+                if (OhosRuntime.isOhos) {
+                  await widget.storage.importValidatedLocalBackupJson(
+                    candidateBackup,
+                  );
+                } else {
+                  await widget.storage.importBackupJson(candidateBackup);
+                }
                 if (ctx.mounted) Navigator.of(ctx).pop();
                 _reloadSavedConfig();
                 return;
@@ -15412,10 +15422,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           : '跨平台备份导出 / 恢复',
       backLabel: iosBackLabel,
       trailingAction: CupertinoButton(
+        key: const ValueKey('backup-copy-export'),
         padding: const EdgeInsets.symmetric(horizontal: 10),
         minimumSize: const Size(28, 28),
         onPressed: () {
-          Clipboard.setData(ClipboardData(text: effectivePayload()));
+          final payload = effectivePayload();
+          if (OhosRuntime.isOhos) {
+            try {
+              StorageService.encodeValidatedLocalBackupUtf8(payload);
+            } on FormatException catch (e) {
+              _showAppleNotice('复制导出失败', e.message);
+              return;
+            }
+          }
+          Clipboard.setData(ClipboardData(text: payload));
           _showAppleNotice('已复制备份', '备份 JSON 已复制到剪贴板，可发送至其他设备恢复。');
         },
         child: const Text(
@@ -15436,7 +15456,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                '与 Android 电视/手机端 MarcoMovie-1 备份格式双向兼容（本地备份上限 ${StorageService.formatLocalBackupByteLimit()}）：',
+                OhosRuntime.isOhos
+                    ? '与 Android 电视/手机端 MarcoMovie-1 备份格式双向兼容（鸿蒙本地备份上限 ${StorageService.formatLocalBackupByteLimit()}）：'
+                    : '与 Android 电视/手机端 MarcoMovie-1 备份格式双向兼容：',
                 style: TextStyle(
                   color: ApplePalette.of(context).labelSecondary,
                   fontSize: 12,
@@ -15518,11 +15540,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       onPressed: () async {
                         try {
                           final payload = effectivePayload();
-                          final bytes =
-                              StorageService.encodeValidatedLocalBackupUtf8(
-                                payload,
-                              );
                           if (OhosRuntime.isOhos) {
+                            StorageService.encodeValidatedLocalBackupUtf8(
+                              payload,
+                            );
                             final savedUri = await OhosRuntime.saveTextFile(
                               fileName: 'marco-movie-backup.json',
                               content: payload,
@@ -15533,6 +15554,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             _showAppleNotice('导出成功', '备份 JSON 文件已保存。');
                             return;
                           }
+                          final bytes = Uint8List.fromList(utf8.encode(payload));
                           final outputPath = await FilePicker.platform.saveFile(
                             dialogTitle: '导出 Marco Movie 备份 JSON',
                             fileName: 'marco-movie-backup.json',
@@ -15589,24 +15611,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             if (entry.path != null && entry.path!.isNotEmpty) {
                               final file = File(entry.path!);
                               final len = await file.length();
-                              if (len > StorageService.maxLocalBackupBytes) {
-                                throw FormatException(
-                                  '本地备份文件超过 ${StorageService.formatLocalBackupByteLimit()} 限制',
-                                );
+                              if (len > StorageService.maxSyncPayloadBytes) {
+                                throw const FormatException('备份文件超过 8 MB 限制');
                               }
-                              final rawBytes = await file.readAsBytes();
-                              StorageService.validateLocalBackupUtf8Bytes(rawBytes);
-                              byteLength = rawBytes.length;
-                              text = utf8.decode(rawBytes, allowMalformed: false);
+                              byteLength = len;
+                              text = await file.readAsString();
                             } else if (entry.bytes != null) {
-                              StorageService.validateLocalBackupUtf8Bytes(
-                                entry.bytes!,
-                              );
+                              if (entry.bytes!.length > StorageService.maxSyncPayloadBytes) {
+                                throw const FormatException('备份文件超过 8 MB 限制');
+                              }
                               byteLength = entry.bytes!.length;
-                              text = utf8.decode(
-                                entry.bytes!,
-                                allowMalformed: false,
-                              );
+                              text = utf8.decode(entry.bytes!);
                             } else {
                               return;
                             }
@@ -15649,7 +15664,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   primary: true,
                   onPressed: () async {
                     try {
-                      await widget.storage.importBackupJson(effectivePayload());
+                      final payload = effectivePayload();
+                      if (OhosRuntime.isOhos) {
+                        await widget.storage.importValidatedLocalBackupJson(
+                          payload,
+                        );
+                      } else {
+                        await widget.storage.importBackupJson(payload);
+                      }
                       if (ctx.mounted) Navigator.of(ctx).pop();
                       _reloadSavedConfig();
                     } catch (e) {

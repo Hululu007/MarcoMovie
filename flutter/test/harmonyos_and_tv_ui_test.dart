@@ -2946,6 +2946,14 @@ http://127.0.0.1:18080/b1.m3u8
         await tester.sendKeyEvent(LogicalKeyboardKey.space);
         await tester.pump(const Duration(milliseconds: 100));
         expect(pauseCalls, greaterThanOrEqualTo(1));
+
+        // A failed in-flight open must not resume or switch a user-paused live stream.
+        player3.handleNativeEvent({
+          'type': 'error',
+          'code': 5400103,
+          'message': 'AVPlayer error: in-flight source failed after user paused',
+        });
+        await tester.pump(const Duration(milliseconds: 250));
         for (var s = 0; s < 25; s++) {
           await tester.pump(const Duration(seconds: 1));
         }
@@ -3348,10 +3356,10 @@ http://127.0.0.1:18080/b1.m3u8
         expect(pickedExact?.size, limit);
         SharedPreferences.setMockInitialValues({});
         final boundaryStorage = await StorageService.init();
-        await boundaryStorage.importBackupJson(exactPayload);
+        await boundaryStorage.importValidatedLocalBackupJson(exactPayload);
         expect(boundaryStorage.loadSavedConfig()?.sites.first.key, 'b');
 
-        // Over boundary by 1 UTF-8 byte (+1): rejected on BOTH export & import, existing config preserved!
+        // Over boundary by 1 UTF-8 byte (+1): rejected on BOTH HarmonyOS export & import, existing config preserved!
         final overByOnePayload = '$shellPrefix${'a' * (limit - overheadBytes + 1)}$shellSuffix';
         expect(utf8.encode(overByOnePayload).length, limit + 1);
         expect(
@@ -3375,7 +3383,7 @@ http://127.0.0.1:18080/b1.m3u8
           throwsFormatException,
         );
         await expectLater(
-          boundaryStorage.importBackupJson(overByOnePayload),
+          boundaryStorage.importValidatedLocalBackupJson(overByOnePayload),
           throwsFormatException,
         );
         expect(boundaryStorage.loadSavedConfig()?.sites.first.key, 'b');
@@ -3672,6 +3680,286 @@ http://127.0.0.1:18080/b1.m3u8
 
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(seconds: 5));
+      },
+    );
+
+    testWidgets(
+      'R3-1 healthy live stream rendering startRenderFrame without timeUpdate progress is never falsely switched',
+      (tester) async {
+        const avChannel = MethodChannel('com.pilipala.marcomovie/ohos_avplayer');
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+        final opens = <String>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(avChannel, (call) async {
+          if (call.method == 'create') {
+            return <String, dynamic>{'playerId': 81, 'textureId': 810};
+          }
+          if (call.method == 'open') {
+            opens.add((call.arguments as Map)['url'] as String);
+          }
+          return true;
+        });
+
+        const chA = LiveChannel(
+          name: '正常直播无时间轴A',
+          group: '央视频道',
+          urls: [
+            'http://127.0.0.1:18080/live_ok_a1.m3u8',
+            'http://127.0.0.1:18080/live_ok_a2.m3u8',
+          ],
+        );
+        final player = OhosPlatformPlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(key: 'live', name: '直播', type: 0, api: ''),
+              video: CmsVideo(
+                id: chA.name,
+                title: chA.name,
+                lines: [CmsLine(name: chA.group, episodes: chA.episodes)],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              isLive: true,
+              initialLiveChannel: chA,
+              liveGroups: const [LiveGroup(name: '央视频道', channels: [chA])],
+              debugPlayer: Player(platformPlayer: player),
+              debugVideoSurface: const SizedBox.expand(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(opens, ['http://127.0.0.1:18080/live_ok_a1.m3u8']);
+
+        // Metadata arrives, playing starts, AND AVPlayer emits reliable startRenderFrame ('firstFrame')
+        // while never emitting any timeUpdate/position progress.
+        player.handleNativeEvent({
+          'type': 'state',
+          'playing': false,
+          'buffering': true,
+          'completed': false,
+        });
+        player.handleNativeEvent({
+          'type': 'videoSize',
+          'width': 1920,
+          'height': 1080,
+        });
+        player.handleNativeEvent({
+          'type': 'state',
+          'playing': true,
+          'buffering': false,
+          'completed': false,
+        });
+        player.handleNativeEvent({
+          'type': 'firstFrame',
+          'width': 1920,
+          'height': 1080,
+        });
+        expect(player.hasRenderedFirstFrame, isTrue);
+        await tester.pump();
+
+        for (var s = 0; s < 25; s++) {
+          await tester.pump(const Duration(seconds: 1));
+        }
+        // Must remain on A1 with ZERO false retry, ZERO switch to A2, ZERO error overlay
+        expect(opens, ['http://127.0.0.1:18080/live_ok_a1.m3u8']);
+        expect(find.text('重试播放'), findsNothing);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 250));
+      },
+    );
+
+    testWidgets(
+      'R3-2 paused live stream ignores auto-recovery on late error and cleanly reopens when user explicitly resumes',
+      (tester) async {
+        const avChannel = MethodChannel('com.pilipala.marcomovie/ohos_avplayer');
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+        final opens = <String>[];
+        var playCalls = 0;
+        var pauseCalls = 0;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(avChannel, (call) async {
+          if (call.method == 'create') {
+            return <String, dynamic>{'playerId': 82, 'textureId': 820};
+          }
+          if (call.method == 'open') {
+            opens.add((call.arguments as Map)['url'] as String);
+          } else if (call.method == 'play') {
+            playCalls++;
+          } else if (call.method == 'pause') {
+            pauseCalls++;
+          }
+          return true;
+        });
+
+        const chA = LiveChannel(
+          name: '暂停恢复频道A',
+          group: '央视频道',
+          urls: [
+            'http://127.0.0.1:18080/pause_a1.m3u8',
+            'http://127.0.0.1:18080/pause_a2.m3u8',
+          ],
+        );
+        final player = OhosPlatformPlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(key: 'live', name: '直播', type: 0, api: ''),
+              video: CmsVideo(
+                id: chA.name,
+                title: chA.name,
+                lines: [CmsLine(name: chA.group, episodes: chA.episodes)],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              isLive: true,
+              initialLiveChannel: chA,
+              liveGroups: const [LiveGroup(name: '央视频道', channels: [chA])],
+              debugPlayer: Player(platformPlayer: player),
+              debugVideoSurface: const SizedBox.expand(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        player.handleNativeEvent({
+          'type': 'state',
+          'playing': false,
+          'buffering': true,
+          'completed': false,
+        });
+        await tester.pump(const Duration(milliseconds: 100));
+
+        // 1) User explicitly pauses
+        await tester.sendKeyEvent(LogicalKeyboardKey.space);
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(pauseCalls, 1);
+        expect(playCalls, 0);
+
+        // 2) Late native error arrives while paused -> visible paused notice, NO auto open/play/failover
+        player.handleNativeEvent({
+          'type': 'error',
+          'code': 5400103,
+          'message': 'AVPlayer error: late error while paused',
+        });
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(find.textContaining('已暂停'), findsOneWidget);
+        for (var s = 0; s < 20; s++) {
+          await tester.pump(const Duration(seconds: 1));
+        }
+        expect(opens, ['http://127.0.0.1:18080/pause_a1.m3u8']);
+        expect(playCalls, 0);
+
+        // 3) User explicitly resumes -> cleanly reopens A1 (never silently jumped to A2)
+        await tester.sendKeyEvent(LogicalKeyboardKey.space);
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(opens, [
+          'http://127.0.0.1:18080/pause_a1.m3u8',
+          'http://127.0.0.1:18080/pause_a1.m3u8',
+        ]);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 250));
+      },
+    );
+
+    testWidgets(
+      'R3-3 HarmonyOS copy-export enforces the same 32 MiB UTF-8 backup limit as file export/import',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'phone';
+
+        // Seed 8 x ~4.1 MiB subscriptions -> exported JSON > 32 MiB (~36 MiB)
+        final bigExt = 'x' * (4 * 1024 * 1024 + 1024);
+        await storage.saveSubscriptions([
+          for (var i = 0; i < 8; i++)
+            SubscriptionEntry(
+              id: 'big_sub_$i',
+              name: '超大订阅 $i',
+              url: 'http://127.0.0.1:18080/big_$i.json',
+              rawContent: jsonEncode({
+                'sites': [
+                  {
+                    'key': 'big_site_$i',
+                    'name': '大站 $i',
+                    'type': 1,
+                    'api': 'http://127.0.0.1:18080/big/$i',
+                    'ext': bigExt,
+                  },
+                ],
+              }),
+            ),
+        ]);
+        expect(
+          utf8.encode(storage.exportBackupJson()).length,
+          greaterThan(StorageService.maxLocalBackupBytes),
+        );
+
+        String? copiedClipboardText;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copiedClipboardText =
+                (call.arguments as Map)['text']?.toString();
+            return null;
+          }
+          return null;
+        });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, null);
+        });
+
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AdaptiveShell(
+              storage: storage,
+              client: CmsClient(client: _StaticJsonHttpClient('{}')),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.text('设置').last);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        final backupTile = find.text('跨平台备份与恢复').evaluate().isNotEmpty
+            ? find.text('跨平台备份与恢复')
+            : find.text('备份与恢复');
+        await tester.scrollUntilVisible(
+          backupTile,
+          250,
+          scrollable: find.byType(Scrollable).last,
+        );
+        await tester.tap(backupTile);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        // HarmonyOS '复制导出' must reject > 32 MiB without writing to clipboard or claiming success
+        await tester.tap(find.byKey(const ValueKey('backup-copy-export')));
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.text('复制导出失败'), findsOneWidget);
+        expect(find.text('已复制备份'), findsNothing);
+        expect(copiedClipboardText, isNull);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 250));
       },
     );
   });

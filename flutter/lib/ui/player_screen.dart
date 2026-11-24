@@ -391,6 +391,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _wasAvBuffering = false;
   bool _wasAvCompleted = false;
   bool _userPausedPlayback = false;
+  bool _pausedEngineInvalidated = false;
+  bool _ohosRenderedFirstFrame = false;
 
   static String _avGravityForFit(BoxFit fit) => switch (fit) {
     BoxFit.cover => 'resizeAspectFill',
@@ -414,6 +416,15 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _enginePlay() {
     _userPausedPlayback = false;
     _startup.setUserPaused(false);
+    if (_pausedEngineInvalidated && _playbackError.isEmpty) {
+      _pausedEngineInvalidated = false;
+      final resumeMs = _isLiveStream
+          ? 0
+          : (_position.inMilliseconds > 0
+                ? _position.inMilliseconds
+                : _lastKnownPositionMs);
+      return _openCurrentEpisode(resumeMs: resumeMs);
+    }
     return _usingAvPlayer
         ? (_iosAvPlayerController?.play() ?? Future<void>.value())
         : _player.play();
@@ -1059,7 +1070,28 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _playerSubscriptions.clear();
     final boundPlayer = _player;
-    if (boundPlayer.platform is OhosPlatformPlayer) {
+    final isOhosPlatform = boundPlayer.platform is OhosPlatformPlayer;
+    if (isOhosPlatform) {
+      final ohosPlatform = boundPlayer.platform as OhosPlatformPlayer;
+      _playerSubscriptions.add(ohosPlatform.firstFrameStream.listen((_) {
+        if (!mounted ||
+            !identical(boundPlayer, _player) ||
+            !_allowEvents ||
+            !_matchesActiveMedia) {
+          return;
+        }
+        _ohosRenderedFirstFrame = true;
+        if (_loading) {
+          setState(() => _loading = false);
+        }
+        if (_isLiveStream && !_userPausedPlayback) {
+          _startup.markLiveFrameReady();
+        }
+        _startSpecController.onFirstFrameReady(
+          enabled: _hudPrefs.effectiveStartSpecHud,
+          isLive: _isLiveStream,
+        );
+      }));
       _playerSubscriptions.add(boundPlayer.stream.rate.listen((rate) {
         if (!mounted ||
             !identical(boundPlayer, _player) ||
@@ -1079,36 +1111,46 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (!mounted || w == null || w <= 0 || w == _videoWidth) return;
       setState(() {
         _videoWidth = w;
-        if (_isLiveStream && _videoHeight > 0) {
+        if (!isOhosPlatform && _isLiveStream && _videoHeight > 0) {
           _loading = false;
         }
       });
       if (_videoWidth > 0 && _videoHeight > 0) {
-        if (_isLiveStream && _playing && !_buffering) {
+        // HarmonyOS AVPlayer reports stream dimensions during `prepared`
+        // metadata parsing before any frame is decoded/rendered. Keep the
+        // live startup timer armed until `startRenderFrame` or real position
+        // progress arrives.
+        final hasReliableFrame = !isOhosPlatform || _ohosRenderedFirstFrame;
+        if (hasReliableFrame && _isLiveStream && _playing && !_buffering) {
           _startup.markLiveFrameReady();
         }
-        _startSpecController.onFirstFrameReady(
-          enabled: _hudPrefs.effectiveStartSpecHud,
-          isLive: _isLiveStream,
-        );
+        if (hasReliableFrame) {
+          _startSpecController.onFirstFrameReady(
+            enabled: _hudPrefs.effectiveStartSpecHud,
+            isLive: _isLiveStream,
+          );
+        }
       }
     }));
     _playerSubscriptions.add(_player.stream.height.listen((h) {
       if (!mounted || h == null || h <= 0 || h == _videoHeight) return;
       setState(() {
         _videoHeight = h;
-        if (_isLiveStream && _videoWidth > 0) {
+        if (!isOhosPlatform && _isLiveStream && _videoWidth > 0) {
           _loading = false;
         }
       });
       if (_videoWidth > 0 && _videoHeight > 0) {
-        if (_isLiveStream && _playing && !_buffering) {
+        final hasReliableFrame = !isOhosPlatform || _ohosRenderedFirstFrame;
+        if (hasReliableFrame && _isLiveStream && _playing && !_buffering) {
           _startup.markLiveFrameReady();
         }
-        _startSpecController.onFirstFrameReady(
-          enabled: _hudPrefs.effectiveStartSpecHud,
-          isLive: _isLiveStream,
-        );
+        if (hasReliableFrame) {
+          _startSpecController.onFirstFrameReady(
+            enabled: _hudPrefs.effectiveStartSpecHud,
+            isLive: _isLiveStream,
+          );
+        }
       }
     }));
     _playerSubscriptions.add(_player.stream.track.listen((track) {
@@ -1357,7 +1399,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         setState(() => _buffering = buffering);
         if (!buffering) {
           _midPlaybackStallTimer?.cancel();
-          if (_isLiveStream && _playing && _videoWidth > 0 && _videoHeight > 0) {
+          final hasReliableFrame = !isOhosPlatform || _ohosRenderedFirstFrame;
+          if (hasReliableFrame &&
+              _isLiveStream &&
+              _playing &&
+              _videoWidth > 0 &&
+              _videoHeight > 0) {
             _startup.markLiveFrameReady();
           }
           if (_playing) _scheduleHide();
@@ -1451,6 +1498,24 @@ class _PlayerScreenState extends State<PlayerScreen>
               _duration <= Duration.zero &&
               _position <= Duration.zero);
       if (shouldHandleError) {
+        if (_userPausedPlayback) {
+          // A late error arriving after an explicit user pause must NEVER
+          // auto-open, auto-play, or switch live sources. Mark the underlying
+          // engine as needing reopen when the user explicitly resumes.
+          _pausedEngineInvalidated = true;
+          _startup.cancel();
+          _midPlaybackStallTimer?.cancel();
+          _midPlaybackStallEpochsMs.clear();
+          PlaybackWakelock.setEnabled(false);
+          setState(() {
+            _loading = false;
+            _buffering = false;
+            _playing = false;
+            _controlsVisible = true;
+          });
+          _showHud('已暂停 · 当前源已断开，继续播放将重新连接');
+          return;
+        }
         if (_isWindowsPlayerPlatform &&
             _videoKernel.isMdk &&
             widget.debugPlayer == null &&
@@ -2093,7 +2158,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (proxyStatus != null && proxyStatus >= 400) {
       _lastLiveUpstreamStatus = proxyStatus;
     }
-    if (_isLiveStream &&
+    if (!_userPausedPlayback &&
+        _isLiveStream &&
         !_startup.isPastStartupWindow &&
         !_liveDirectFallbackTried) {
       _liveDirectFallbackTried = true;
@@ -2123,7 +2189,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
       return;
     }
-    if (_isLiveStream &&
+    if (!_userPausedPlayback &&
+        _isLiveStream &&
         !_startup.isPastStartupWindow &&
         _currentLine.episodes.length > 1 &&
         _failedLiveEpisodes.length < 8) {
@@ -2150,7 +2217,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         return;
       }
     }
-    if (cloudError.isEmpty &&
+    if (!_userPausedPlayback &&
+        cloudError.isEmpty &&
         !_isLiveStream &&
         !_startup.isPastStartupWindow &&
         !CmsClient.needsSourceVerification(widget.site, error)) {
@@ -2236,6 +2304,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     bool useAlternateLiveUa = false,
   }) async {
     _userPausedPlayback = false;
+    _pausedEngineInvalidated = false;
+    _ohosRenderedFirstFrame = false;
     _startup.reset();
     if (!bypassLocalProxy && !forceLiveLocalProxy && !useAlternateLiveUa) {
       _liveDirectFallbackTried = false;
