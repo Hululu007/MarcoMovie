@@ -336,7 +336,10 @@ public enum CmsParser {
         }
 
         guard removedAny else { return rawContent }
-        guard let sanitizedData = try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]) else {
+        guard let sanitizedData = try? JSONSerialization.data(
+            withJSONObject: root,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        ) else {
             return ""
         }
         return String(decoding: sanitizedData, as: UTF8.self)

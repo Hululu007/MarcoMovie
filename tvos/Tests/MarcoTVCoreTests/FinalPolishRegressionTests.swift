@@ -1435,22 +1435,35 @@ final class FinalPolishRegressionTests: XCTestCase {
         let forbiddenPrivateTokens = [
             "私密子站B",
             "priv_b",
-            "https://priv-b.example/secret-vod",
+            "priv-b.example",
+            "secret-vod",
             "secret-ext-config-b",
             "私密子直播L",
-            "https://priv-live.example/hidden.m3u",
+            "priv-live.example",
+            "hidden.m3u",
             "私密子站影片B",
-            privPoster,
+            "poster-b.jpg",
         ]
+
+        func unescapeSlashes(_ raw: String) -> String {
+            raw
+                .replacingOccurrences(of: "\\\\/", with: "/")
+                .replacingOccurrences(of: "\\/", with: "/")
+        }
 
         // 1) Ordinary Backup export: keeps public A, strips private child VOD B & private child Live L
         let backupJson = try storage.exportBackupJson()
-        XCTAssertTrue(backupJson.contains("公开站A"))
-        XCTAssertTrue(backupJson.contains("https://pub-a.example/vod"))
-        XCTAssertTrue(backupJson.contains("公开影片A"))
+        let backupUnescaped = unescapeSlashes(backupJson)
+        XCTAssertTrue(backupUnescaped.contains("公开站A"))
+        XCTAssertTrue(backupUnescaped.contains("https://pub-a.example/vod"))
+        XCTAssertTrue(backupUnescaped.contains("公开影片A"))
         for token in forbiddenPrivateTokens {
-            XCTAssertFalse(backupJson.contains(token), "Ordinary backup MUST NOT leak private child token '\(token)'")
+            XCTAssertFalse(backupUnescaped.contains(token), "Ordinary backup MUST NOT leak private child token '\(token)'")
         }
+        let decodedBackup = try BackupCodec.decodeBackupJson(backupJson)
+        let backupParsedCfg = try CmsParser.parseConfig(try XCTUnwrap(decodedBackup.subscriptions.first?.rawContent), origin: subUrl)
+        XCTAssertEqual(backupParsedCfg.sites.map(\.rawKey), ["pub_a"])
+        XCTAssertEqual(backupParsedCfg.lives.map(\.name), ["公开直播A"])
 
         // 2) WebDAV sync (with subscriptions + history enabled): keeps public A, strips private children
         try storage.saveWebDavConfig(
@@ -1467,12 +1480,19 @@ final class FinalPolishRegressionTests: XCTestCase {
         _ = try await dav.syncNow()
         let davSnap = await davServer.snapshot()
         let davJson = try XCTUnwrap(davSnap.payload)
-        XCTAssertTrue(davJson.contains("公开站A"))
-        XCTAssertTrue(davJson.contains("https://pub-a.example/vod"))
-        XCTAssertTrue(davJson.contains("公开影片A"))
+        let davUnescaped = unescapeSlashes(davJson)
+        XCTAssertTrue(davUnescaped.contains("公开站A"))
+        XCTAssertTrue(davUnescaped.contains("https://pub-a.example/vod"))
+        XCTAssertTrue(davUnescaped.contains("公开影片A"))
         for token in forbiddenPrivateTokens {
-            XCTAssertFalse(davJson.contains(token), "WebDAV sync MUST NOT leak private child token '\(token)'")
+            XCTAssertFalse(davUnescaped.contains(token), "WebDAV sync MUST NOT leak private child token '\(token)'")
         }
+        let davRoot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(davJson.utf8)) as? [String: Any])
+        let davSubs = try XCTUnwrap(davRoot["subscriptions"] as? [[String: Any]])
+        let davSubRaw = try XCTUnwrap(davSubs.first?["rawContent"] as? String)
+        let davParsedCfg = try CmsParser.parseConfig(davSubRaw, origin: subUrl)
+        XCTAssertEqual(davParsedCfg.sites.map(\.rawKey), ["pub_a"])
+        XCTAssertEqual(davParsedCfg.lives.map(\.name), ["公开直播A"])
 
         // 3) LAN QR `/configure/<token>/sync`: keeps public A, strips private children
         let lan = LanConfigServer(storage: storage, syncService: dav)
@@ -1482,10 +1502,12 @@ final class FinalPolishRegressionTests: XCTestCase {
         let (lanData, lanResp) = try await URLSession.shared.data(from: lanSyncUrl)
         XCTAssertEqual((lanResp as? HTTPURLResponse)?.statusCode, 200)
         let lanJson = String(decoding: lanData, as: UTF8.self)
-        XCTAssertTrue(lanJson.contains("公开站A"))
-        XCTAssertTrue(lanJson.contains("公开影片A"))
+        let lanUnescaped = unescapeSlashes(lanJson)
+        XCTAssertTrue(lanUnescaped.contains("公开站A"))
+        XCTAssertTrue(lanUnescaped.contains("https://pub-a.example/vod"))
+        XCTAssertTrue(lanUnescaped.contains("公开影片A"))
         for token in forbiddenPrivateTokens {
-            XCTAssertFalse(lanJson.contains(token), "LAN QR sync MUST NOT leak private child token '\(token)'")
+            XCTAssertFalse(lanUnescaped.contains(token), "LAN QR sync MUST NOT leak private child token '\(token)'")
         }
 
         // 4) Refresh parent subscription removing private child site B (only public A remains), then COLD RESTART!
