@@ -426,7 +426,6 @@ def verify_legacy_runner_upgrade_swiftc(app_path: Path, flutter_dir: Path, work:
     (runner / "MainFlutterWindow.swift").write_text(legacy_swift, encoding="utf-8")
     (runner / "Release.entitlements").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
         '<plist version="1.0"><dict>\n'
         '  <key>com.apple.security.app-sandbox</key><true/>\n'
         '  <key>com.apple.security.get-task-allow</key><true/>\n'
