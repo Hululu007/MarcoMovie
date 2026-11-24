@@ -1260,9 +1260,10 @@ final class PlaybackController {
                                             Cms.inheritedHeaders(s.api, ep.url, s.headers);
                                     Cms.mergeHeaders(mediaHeaders, ep.headers);
                                     int engPref = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+                                    final String playUrl = preparePlayUrl(a, s, ep, mediaHeaders);
+                                    annotateLocalHlsMpvCompatibility(playUrl, ep.media);
                                     final EnginePlan plan =
                                             planEngine(engPref, ep.media, MpvPlayer.isAvailable());
-                                    final String playUrl = preparePlayUrl(a, s, ep, mediaHeaders);
                                     try {
                                         if (ep.name != null
                                                 && !ep.name.isEmpty()
@@ -1294,6 +1295,18 @@ final class PlaybackController {
                                                         createPlayerWithPlan(a, ep, plan, created);
                                                 final MoviePlayer ready = created[0];
                                                 try {
+                                                    if (engPref == ENGINE_MPV
+                                                            && actualPlan.engine == ENGINE_MEDIA3) {
+                                                        ep.media.put(
+                                                                MEDIA_KEY_SINGLE_PLAY_FALLBACK_FROM_MPV,
+                                                                true);
+                                                    } else {
+                                                        ep.media.remove(
+                                                                MEDIA_KEY_SINGLE_PLAY_FALLBACK_FROM_MPV);
+                                                    }
+                                                } catch (Exception ignored) {
+                                                }
+                                                try {
                                                     if (!actualPlan.fallbackReason.isEmpty()) {
                                                         AppLog.i(
                                                                 "PlaybackController",
@@ -1316,6 +1329,7 @@ final class PlaybackController {
                                                     throw setupErr;
                                                 }
                                                 a.player = ready;
+                                                controls.updateLabels();
                                                 if (activeSurface[0] != null
                                                         && activeSurface[0].isValid()) {
                                                     ready.setSurface(activeSurface[0]);
@@ -2430,6 +2444,10 @@ final class PlaybackController {
     static final int ENGINE_SYSTEM = 1;
     static final int ENGINE_IJK = 2;
     static final int ENGINE_MPV = 3;
+    static final String MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS = "_mpvIncompatibleLocalHls";
+    static final String MEDIA_KEY_SINGLE_PLAY_FALLBACK_FROM_MPV = "_singlePlayFallbackFromMpv";
+    private static final int LOCAL_HLS_INSPECT_MAX_BYTES = 512 * 1024;
+    private static final int LOCAL_HLS_INSPECT_MAX_CHILDREN = 8;
 
     /** Deterministic engine selection plan shared by both fullscreen and mobile inline players. */
     static final class EnginePlan {
@@ -2453,6 +2471,205 @@ final class PlaybackController {
             this.preferIjk = preferIjk;
             this.engineLabel = engineLabel;
             this.fallbackReason = fallbackReason == null ? "" : fallbackReason;
+        }
+    }
+
+    /**
+     * Inspects a local offline HLS playlist (strictly local files, zero network I/O) for fMP4
+     * multi-{@code #EXT-X-MAP} or fMP4 {@code #EXT-X-DISCONTINUITY} layouts. Shipped {@code libmpv}
+     * ({@code libavformat/mov.c}) skips subsequent {@code moov} atoms with
+     * {@code "Found duplicated MOOV Atom. Skipped it"} and fails on zero-reset fMP4 discontinuity
+     * timestamps, causing video freeze and audio drop after the boundary. Ordinary MP4, MPEG-TS
+     * HLS, and single-MAP fMP4 HLS without discontinuities return {@code false} and stay on MPV.
+     */
+    static boolean annotateLocalHlsMpvCompatibility(String playUrl, JSONObject media) {
+        boolean incompatible = requiresMedia3ForMpvIncompatibleLocalHls(playUrl);
+        if (media != null) {
+            try {
+                if (incompatible) {
+                    media.put(MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS, true);
+                } else {
+                    media.remove(MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return incompatible;
+    }
+
+    static boolean requiresMedia3ForMpvIncompatibleLocalHls(String playUrl) {
+        java.io.File rootFile = resolveLocalM3u8File(playUrl);
+        if (rootFile == null || !rootFile.isFile()) return false;
+        String rootText = readLocalUtf8Prefix(rootFile, LOCAL_HLS_INSPECT_MAX_BYTES);
+        if (rootText == null || !rootText.contains("#EXTM3U")) return false;
+        if (mediaPlaylistHasMpvIncompatibleFmp4Layout(rootText)) return true;
+
+        java.io.File parentDir = rootFile.getParentFile();
+        if (parentDir == null) return false;
+        String canonicalParent;
+        try {
+            canonicalParent = parentDir.getCanonicalPath();
+        } catch (Exception ignored) {
+            return false;
+        }
+        java.util.List<String> childRelPaths = extractLocalMasterChildPlaylists(rootText);
+        java.util.Set<String> visited = new java.util.LinkedHashSet<>();
+        int checked = 0;
+        for (String rel : childRelPaths) {
+            if (checked >= LOCAL_HLS_INSPECT_MAX_CHILDREN) break;
+            if (rel == null || rel.isEmpty()) continue;
+            String lower = rel.toLowerCase(Locale.ROOT);
+            if (lower.startsWith("http://")
+                    || lower.startsWith("https://")
+                    || lower.startsWith("file://")
+                    || rel.startsWith("/")
+                    || rel.startsWith("\\")) {
+                continue;
+            }
+            String cleanRel = rel.split("[?#]", 2)[0];
+            if (!isM3uPath(cleanRel)) continue;
+            java.io.File child = new java.io.File(parentDir, cleanRel);
+            String canonicalChild;
+            try {
+                canonicalChild = child.getCanonicalPath();
+            } catch (Exception ignored) {
+                continue;
+            }
+            if (!canonicalChild.startsWith(canonicalParent + java.io.File.separator)) {
+                continue;
+            }
+            if (!visited.add(canonicalChild) || !child.isFile()) continue;
+            checked++;
+            String childText = readLocalUtf8Prefix(child, LOCAL_HLS_INSPECT_MAX_BYTES);
+            if (childText != null && mediaPlaylistHasMpvIncompatibleFmp4Layout(childText)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean mediaPlaylistHasMpvIncompatibleFmp4Layout(String playlistText) {
+        if (playlistText == null || playlistText.isEmpty()) return false;
+        boolean hasDiscontinuity = false;
+        java.util.Set<String> distinctMaps = new java.util.LinkedHashSet<>();
+        String[] lines = playlistText.replace("\r\n", "\n").replace('\r', '\n').split("\n");
+        for (String raw : lines) {
+            String line = raw.trim();
+            if (line.isEmpty()) continue;
+            if ("#EXT-X-DISCONTINUITY".equals(line)) {
+                hasDiscontinuity = true;
+            } else if (line.startsWith("#EXT-X-MAP:")) {
+                String uri = DownloadManager.attribute(line, "URI");
+                if (uri != null && !uri.trim().isEmpty()) {
+                    String byteRange = DownloadManager.attribute(line, "BYTERANGE");
+                    String mapKey =
+                            uri.trim()
+                                    + (byteRange != null && !byteRange.trim().isEmpty()
+                                            ? ("@" + byteRange.trim())
+                                            : "");
+                    distinctMaps.add(mapKey);
+                }
+            }
+        }
+        return distinctMaps.size() >= 2 || (!distinctMaps.isEmpty() && hasDiscontinuity);
+    }
+
+    private static java.util.List<String> extractLocalMasterChildPlaylists(String masterText) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        String[] lines = masterText.replace("\r\n", "\n").replace('\r', '\n').split("\n");
+        boolean nextIsStreamPlaylist = false;
+        for (String raw : lines) {
+            String line = raw.trim();
+            if (line.isEmpty()) continue;
+            if (line.startsWith("#EXT-X-MEDIA:")) {
+                String uri = DownloadManager.attribute(line, "URI");
+                if (uri != null && !uri.trim().isEmpty()) {
+                    out.add(uri.trim());
+                }
+            } else if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                nextIsStreamPlaylist = true;
+            } else if (!line.startsWith("#")) {
+                if (nextIsStreamPlaylist) {
+                    out.add(line);
+                    nextIsStreamPlaylist = false;
+                }
+            }
+        }
+        return out;
+    }
+
+    private static java.io.File resolveLocalM3u8File(String playUrl) {
+        if (playUrl == null) return null;
+        String trimmed = playUrl.trim();
+        if (trimmed.isEmpty()) return null;
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("http://")
+                || lower.startsWith("https://")
+                || lower.startsWith("rtsp://")
+                || lower.startsWith("rtmp://")
+                || lower.startsWith("content://")) {
+            return null;
+        }
+        java.io.File file = null;
+        if (lower.startsWith("file:")) {
+            try {
+                java.net.URI parsed = new java.net.URI(trimmed);
+                if ("file".equalsIgnoreCase(parsed.getScheme()) && parsed.getPath() != null) {
+                    file = new java.io.File(parsed);
+                }
+            } catch (Exception ignored) {
+                int prefixLen = lower.startsWith("file://") ? "file://".length() : "file:".length();
+                String rawPath = trimmed.substring(prefixLen).split("[?#]", 2)[0];
+                file = new java.io.File(decodePercentUtf8(rawPath));
+            }
+        } else {
+            String rawPath = trimmed.split("[?#]", 2)[0];
+            file = new java.io.File(rawPath);
+        }
+        if (file == null || !isM3uPath(file.getName())) return null;
+        return file;
+    }
+
+    private static boolean isM3uPath(String name) {
+        if (name == null || name.isEmpty()) return false;
+        String lower = name.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".m3u8") || lower.endsWith(".m3u");
+    }
+
+    private static String decodePercentUtf8(String input) {
+        if (input == null || input.indexOf('%') < 0) return input == null ? "" : input;
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(input.length());
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            if (c == '%' && i + 2 < input.length()) {
+                int hi = Character.digit(input.charAt(i + 1), 16);
+                int lo = Character.digit(input.charAt(i + 2), 16);
+                if (hi >= 0 && lo >= 0) {
+                    out.write((hi << 4) | lo);
+                    i += 2;
+                    continue;
+                }
+            }
+            byte[] utf8 = String.valueOf(c).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            out.write(utf8, 0, utf8.length);
+        }
+        return new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static String readLocalUtf8Prefix(java.io.File file, int maxBytes) {
+        try (java.io.InputStream in = new java.io.FileInputStream(file)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int total = 0;
+            int n;
+            while (total < maxBytes
+                    && (n = in.read(buf, 0, Math.min(buf.length, maxBytes - total))) != -1) {
+                out.write(buf, 0, n);
+                total += n;
+            }
+            return new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception ignored) {
+            return null;
         }
     }
 
@@ -2492,6 +2709,15 @@ final class PlaybackController {
                         false,
                         swFallback ? "Media3 (软解)" : "Media3",
                         "当前设备不支持 MPV，已回退 Media3");
+            }
+            if (m.optBoolean(MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS)) {
+                return new EnginePlan(
+                        ENGINE_MEDIA3,
+                        swFallback,
+                        swFallback ? m.optInt("_fallbackMode", 2) : 0,
+                        false,
+                        swFallback ? "Media3 (软解)" : "Media3",
+                        "离线多段 fMP4 HLS 不兼容 MPV，本次已回退 Media3（全局仍为 MPV）");
             }
             if (!mpvFallback && !swFallback) {
                 return new EnginePlan(ENGINE_MPV, false, 0, false, "MPV", "");

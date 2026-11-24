@@ -2011,6 +2011,148 @@ public final class ReworkR6ToR12Checks {
                 "R12 wiring: MainActivity clears loading marker on normal onStop, records confirmed crashes, and checks exit reason on boot");
     }
 
+    private static void testMpvOfflineMultiMapHlsRouting(File srcRoot) throws Exception {
+        File tmpRoot = Files.createTempDirectory("mpv-local-hls-routing-").toFile();
+
+        // 1. Dual-MAP fMP4 offline HLS bundle with Chinese + space folder name (percent-encoded
+        // URI)
+        File dualDir = new File(tmpRoot, "双MAP多段离线HLS验收片 全1集.hls");
+        dualDir.mkdirs();
+        Files.write(
+                new File(dualDir, "master.m3u8").toPath(),
+                ("#EXTM3U\n"
+                                + "#EXT-X-VERSION:7\n"
+                                + "#EXT-X-INDEPENDENT-SEGMENTS\n"
+                                + "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"Default\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio.m3u8\"\n"
+                                + "#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=960x540,AUDIO=\"aud\"\n"
+                                + "video.m3u8\n")
+                        .getBytes(StandardCharsets.UTF_8));
+        Files.write(
+                new File(dualDir, "video.m3u8").toPath(),
+                ("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:5\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+                                + "#EXT-X-MAP:URI=\"v_init_0.mp4\"\n#EXTINF:4.000,\nv_000000.m4s\n"
+                                + "#EXT-X-DISCONTINUITY\n"
+                                + "#EXT-X-MAP:URI=\"v_init_1.mp4\"\n#EXTINF:4.000,\nv_000001.m4s\n"
+                                + "#EXT-X-ENDLIST\n")
+                        .getBytes(StandardCharsets.UTF_8));
+        Files.write(
+                new File(dualDir, "audio.m3u8").toPath(),
+                ("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:5\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+                                + "#EXT-X-MAP:URI=\"a_init_0.mp4\"\n#EXTINF:4.000,\na_000000.m4s\n"
+                                + "#EXT-X-DISCONTINUITY\n"
+                                + "#EXT-X-MAP:URI=\"a_init_1.mp4\"\n#EXTINF:4.000,\na_000001.m4s\n"
+                                + "#EXT-X-ENDLIST\n")
+                        .getBytes(StandardCharsets.UTF_8));
+        String dualFileUri = new File(dualDir, "master.m3u8").toURI().toASCIIString();
+        JSONObject dualMedia = new JSONObject();
+        boolean dualIncompatible =
+                PlaybackController.annotateLocalHlsMpvCompatibility(dualFileUri, dualMedia);
+        PlaybackController.EnginePlan dualMpvPlan =
+                PlaybackController.planEngine(PlaybackController.ENGINE_MPV, dualMedia, true);
+        PlaybackController.EnginePlan dualMedia3Plan =
+                PlaybackController.planEngine(PlaybackController.ENGINE_MEDIA3, dualMedia, true);
+        check(
+                dualIncompatible
+                        && dualMedia.optBoolean(
+                                PlaybackController.MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS)
+                        && dualMpvPlan.engine == PlaybackController.ENGINE_MEDIA3
+                        && dualMpvPlan.fallbackReason.contains("Media3")
+                        && dualMpvPlan.fallbackReason.contains("MPV")
+                        && dualMedia3Plan.engine == PlaybackController.ENGINE_MEDIA3
+                        && dualMedia3Plan.fallbackReason.isEmpty(),
+                "MPV offline HLS: percent-encoded dual-MAP fMP4 bundle routes single playback to Media3 when global=MPV, direct Media3 when global=Media3");
+
+        // 2. Single-MAP fMP4 offline HLS bundle (no discontinuity) MUST stay on MPV
+        File singleDir = new File(tmpRoot, "单MAP离线HLS回归片.hls");
+        singleDir.mkdirs();
+        Files.write(
+                new File(singleDir, "master.m3u8").toPath(),
+                ("#EXTM3U\n#EXT-X-VERSION:7\n"
+                                + "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"Default\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio.m3u8\"\n"
+                                + "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO=\"aud\"\n"
+                                + "video.m3u8\n")
+                        .getBytes(StandardCharsets.UTF_8));
+        Files.write(
+                new File(singleDir, "video.m3u8").toPath(),
+                ("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:5\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+                                + "#EXT-X-MAP:URI=\"v_init.mp4\"\n#EXTINF:4.000,\nv_000000.m4s\n"
+                                + "#EXTINF:4.000,\nv_000001.m4s\n#EXT-X-ENDLIST\n")
+                        .getBytes(StandardCharsets.UTF_8));
+        Files.write(
+                new File(singleDir, "audio.m3u8").toPath(),
+                ("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:5\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+                                + "#EXT-X-MAP:URI=\"a_init.mp4\"\n#EXTINF:4.000,\na_000000.m4s\n"
+                                + "#EXTINF:4.000,\na_000001.m4s\n#EXT-X-ENDLIST\n")
+                        .getBytes(StandardCharsets.UTF_8));
+        JSONObject singleMedia = new JSONObject();
+        // Pre-seed stale flag to ensure annotateLocalHlsMpvCompatibility clears it cleanly
+        singleMedia.put(PlaybackController.MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS, true);
+        boolean singleIncompatible =
+                PlaybackController.annotateLocalHlsMpvCompatibility(
+                        new File(singleDir, "master.m3u8").toURI().toASCIIString(), singleMedia);
+        PlaybackController.EnginePlan singleMpvPlan =
+                PlaybackController.planEngine(PlaybackController.ENGINE_MPV, singleMedia, true);
+        check(
+                !singleIncompatible
+                        && !singleMedia.optBoolean(
+                                PlaybackController.MEDIA_KEY_MPV_INCOMPATIBLE_LOCAL_HLS)
+                        && singleMpvPlan.engine == PlaybackController.ENGINE_MPV
+                        && singleMpvPlan.fallbackReason.isEmpty(),
+                "MPV offline HLS: single-MAP fMP4 offline HLS without discontinuity stays on MPV");
+
+        // 3. Ordinary MP4, MPEG-TS discontinuity HLS, remote HTTP, and parent-dir traversal stay
+        // MPV
+        File mp4File = new File(tmpRoot, "sample.mp4");
+        Files.write(mp4File.toPath(), new byte[] {0, 0, 0, 16});
+        File tsDir = new File(tmpRoot, "ts_discont.hls");
+        tsDir.mkdirs();
+        Files.write(
+                new File(tsDir, "master.m3u8").toPath(),
+                ("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:5\n"
+                                + "#EXTINF:4.000,\nv_000000.ts\n#EXT-X-DISCONTINUITY\n"
+                                + "#EXTINF:4.000,\nv_000001.ts\n#EXT-X-ENDLIST\n")
+                        .getBytes(StandardCharsets.UTF_8));
+        File escapeDir = new File(tmpRoot, "escape_test");
+        escapeDir.mkdirs();
+        Files.write(
+                new File(escapeDir, "master.m3u8").toPath(),
+                ("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n../"
+                                + dualDir.getName()
+                                + "/video.m3u8\n")
+                        .getBytes(StandardCharsets.UTF_8));
+        check(
+                !PlaybackController.requiresMedia3ForMpvIncompatibleLocalHls(
+                                mp4File.toURI().toASCIIString())
+                        && !PlaybackController.requiresMedia3ForMpvIncompatibleLocalHls(
+                                new File(tsDir, "master.m3u8").toURI().toASCIIString())
+                        && !PlaybackController.requiresMedia3ForMpvIncompatibleLocalHls(
+                                "http://127.0.0.1:1/hls/master.m3u8")
+                        && !PlaybackController.requiresMedia3ForMpvIncompatibleLocalHls(
+                                new File(escapeDir, "master.m3u8").toURI().toASCIIString()),
+                "MPV offline HLS: ordinary MP4, MPEG-TS discontinuity HLS, remote HTTP, and .. traversal stay on MPV with zero network I/O");
+
+        // 4. UI kernel transparency wiring checks
+        String movieSrc =
+                new String(
+                        Files.readAllBytes(new File(srcRoot, "MoviePlayer.java").toPath()),
+                        StandardCharsets.UTF_8);
+        String controlsSrc =
+                new String(
+                        Files.readAllBytes(new File(srcRoot, "PlaybackControls.java").toPath()),
+                        StandardCharsets.UTF_8);
+        String pcSrc =
+                new String(
+                        Files.readAllBytes(new File(srcRoot, "PlaybackController.java").toPath()),
+                        StandardCharsets.UTF_8);
+        check(
+                movieSrc.contains("Media3（单次回退）")
+                        && movieSrc.contains("public String activeEngineShortLabel()")
+                        && controlsSrc.contains("a.player.activeEngineShortLabel()")
+                        && pcSrc.contains("annotateLocalHlsMpvCompatibility(playUrl, ep.media)")
+                        && pcSrc.contains("controls.updateLabels();"),
+                "MPV offline HLS UI transparency: HUD pill, toolbar engine label, and decoder menu surface actual active kernel while preserving global Prefs.PLAYER_ENGINE");
+    }
+
     public static void main(String[] args) throws Exception {
         File mediaDir = new File(args[0]);
         File workDir = new File(args[1]);
@@ -2021,6 +2163,7 @@ public final class ReworkR6ToR12Checks {
         testR9SlowFileImportGuards(srcRoot);
         testR10KernelFallbackAndProgress(srcRoot);
         testR12LoadingGuardAndCrashAttribution(srcRoot);
+        testMpvOfflineMultiMapHlsRouting(srcRoot);
         System.out.println(checks + " R6-R10 & R12 checks passed");
         System.exit(0);
     }

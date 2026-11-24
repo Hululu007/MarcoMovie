@@ -936,6 +936,11 @@ public final class MpvPlayer extends MoviePlayer {
     }
 
     @Override
+    public String activeEngineShortLabel() {
+        return "MPV";
+    }
+
+    @Override
     public List<String> mediaBadges() {
         if (released) return Collections.emptyList();
         return buildMediaBadges(

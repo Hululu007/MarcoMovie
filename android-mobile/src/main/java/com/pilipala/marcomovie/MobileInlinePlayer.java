@@ -444,6 +444,10 @@ final class MobileInlinePlayer {
                         Cms.mergeHeaders(headers, ep.headers);
                         final String effective =
                                 PlaybackController.preparePlayUrl(a, site, ep, headers);
+                        PlaybackController.annotateLocalHlsMpvCompatibility(effective, ep.media);
+                        final PlaybackController.EnginePlan effectivePlan =
+                                PlaybackController.planEngine(
+                                        engPref, ep.media, MpvPlayer.isAvailable());
                         PlaybackController.commitPreparedLaunchOnMain(
                                 a.ui::post,
                                 () ->
@@ -460,8 +464,23 @@ final class MobileInlinePlayer {
                                     MoviePlayer[] out = new MoviePlayer[1];
                                     final PlaybackController.EnginePlan actualPlan =
                                             PlaybackController.createPlayerWithPlan(
-                                                    a, ep, planned, out);
+                                                    a, ep, effectivePlan, out);
                                     final MoviePlayer mp = out[0];
+                                    try {
+                                        if (engPref == PlaybackController.ENGINE_MPV
+                                                && actualPlan.engine
+                                                        == PlaybackController.ENGINE_MEDIA3) {
+                                            ep.media.put(
+                                                    PlaybackController
+                                                            .MEDIA_KEY_SINGLE_PLAY_FALLBACK_FROM_MPV,
+                                                    true);
+                                        } else {
+                                            ep.media.remove(
+                                                    PlaybackController
+                                                            .MEDIA_KEY_SINGLE_PLAY_FALLBACK_FROM_MPV);
+                                        }
+                                    } catch (Exception ignored) {
+                                    }
                                     try {
                                         mp.configureDefaultAudio();
                                         mp.setDataSource(a, Uri.parse(effective), headers);
