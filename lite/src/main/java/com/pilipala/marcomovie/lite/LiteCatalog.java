@@ -1632,7 +1632,9 @@ public final class LiteCatalog {
                 }
             } else if (s.playUrl.regionMatches(true, 0, "json:", 0, 5)) {
                 s.playUrlParseType = 1;
-                s.jsonParses.addAll(supportedJsonParses);
+                if (siteRequestsParse) {
+                    s.jsonParses.addAll(supportedJsonParses);
+                }
             } else if (siteRequestsParse && !supportedJsonParses.isEmpty()) {
                 s.jsonParses.addAll(supportedJsonParses);
             }

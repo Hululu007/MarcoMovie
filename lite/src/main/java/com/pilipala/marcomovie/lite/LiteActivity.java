@@ -6344,6 +6344,23 @@ public final class LiteActivity extends Activity {
                         action.run();
                     }
                 });
+        b.setOnTouchListener(
+                new View.OnTouchListener() {
+                    public boolean onTouch(View v, MotionEvent ev) {
+                        if (ev.getActionMasked() == MotionEvent.ACTION_UP
+                                && v.isFocusableInTouchMode()
+                                && !v.hasFocus()) {
+                            float x = ev.getX();
+                            float y = ev.getY();
+                            if (x >= 0 && y >= 0 && x <= v.getWidth() && y <= v.getHeight()) {
+                                v.requestFocus();
+                                v.performClick();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                });
         playerControlRow.addView(b, lp);
         return b;
     }
@@ -6357,13 +6374,32 @@ public final class LiteActivity extends Activity {
         for (int i = 0; i < playerControlRow.getChildCount(); i++) {
             View child = playerControlRow.getChildAt(i);
             child.setFocusable(true);
+            child.setFocusableInTouchMode(true);
         }
         View target = playerControlRow.getChildAt(0);
         if (preferRecovery) {
             if (switchLineBtnView != null) target = switchLineBtnView;
             else if (retryBtnView != null) target = retryBtnView;
         }
-        target.requestFocus();
+        if (!target.requestFocus()) {
+            target.requestFocusFromTouch();
+        }
+        final View finalTarget = target;
+        final int targetEpoch = epoch;
+        playerControlRow.post(
+                new Runnable() {
+                    public void run() {
+                        if (!dead
+                                && inPlayback
+                                && epoch == targetEpoch
+                                && finalTarget.isFocusable()
+                                && !isToolbarButtonFocused()) {
+                            if (!finalTarget.requestFocus()) {
+                                finalTarget.requestFocusFromTouch();
+                            }
+                        }
+                    }
+                });
     }
 
     void disableToolbarFocus() {
@@ -6372,6 +6408,7 @@ public final class LiteActivity extends Activity {
             View child = playerControlRow.getChildAt(i);
             child.clearFocus();
             child.setFocusable(false);
+            child.setFocusableInTouchMode(false);
         }
     }
 
