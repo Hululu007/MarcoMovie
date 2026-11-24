@@ -3557,7 +3557,10 @@ public final class LiteProbe extends Instrumentation {
                         && cnLineAfter[0] == 0,
                 "R4-2b: 第二季 第02集 -> 第一季 line keeps current playback and opens episode picker");
 
-        // R4-2c: Shared short token "2" across different parsers with season conflict (S02E02 vs S01E02) keeps playing & opens picker
+        // R4-2c: Shared short token "2" across different parsers with season conflict (S02E02 vs S01E02):
+        // watch S02E02$2 past 12s -> switch to B opens picker -> cancel keeps S02E02 playing at >=10s;
+        // switch again and manually pick S01E02$2 -> hits /r3-parse-b + /r3-clip-b.mp4 and starts at ~0s (NOT ~11.4s);
+        // watch S01E02$2 past 9s and reopen -> restores its OWN progress; picking S01E03$3 starts at ~0s.
         final JSONObject vodSharedToken =
                 new JSONObject()
                         .put("vod_id", "r4_shared_token")
@@ -3593,20 +3596,43 @@ public final class LiteProbe extends Instrumentation {
                     }
                 });
         check(waitReady(25000), "R4-2c: S02E02 (token 2 via /r3-parse-a) prepared");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.player.seekTo(12500);
+                    }
+                });
+        long stSeekEnd = SystemClock.elapsedRealtime() + 8000;
+        int s02PosBefore = 0;
+        while (SystemClock.elapsedRealtime() < stSeekEnd) {
+            final int[] cur = new int[1];
+            main(
+                    new Runnable() {
+                        public void run() {
+                            cur[0] = a.player != null ? a.player.getCurrentPosition() : 0;
+                        }
+                    });
+            s02PosBefore = cur[0];
+            if (s02PosBefore >= 10000) break;
+            SystemClock.sleep(120);
+        }
         final List<LiteActivity.PlayLine> sharedTokenLines =
                 LiteActivity.extractPlayLines(vodSharedToken, "");
         final boolean[] stPickerShown = new boolean[1];
         final String[] stAfterEp = new String[1];
+        final int[] s02PosAfterCancel = new int[1];
         main(
                 new Runnable() {
                     public void run() {
+                        a.saveResume();
                         a.switchToPlayLineInPlayer(sharedTokenLines, 1);
                         stPickerShown[0] =
                                 a.activeInPlayerDialog != null
                                         && a.activeInPlayerDialog.isShowing();
                         stAfterEp[0] = a.activeSession != null ? a.activeSession.epName : "";
                         a.dismissActiveInPlayerDialog();
-                        a.onBackPressed();
+                        s02PosAfterCancel[0] =
+                                a.player != null ? a.player.getCurrentPosition() : 0;
                     }
                 });
         SystemClock.sleep(300);
@@ -3614,9 +3640,126 @@ public final class LiteProbe extends Instrumentation {
         check(
                 stPickerShown[0]
                         && "S02E02".equals(stAfterEp[0])
+                        && s02PosBefore >= 10000
+                        && s02PosAfterCancel[0] >= 10000
                         && hasServerLog(r4LogSt, "/r3-parse-a", null)
                         && countServerLogs(r4LogSt, "/r3-parse-b") == 0,
-                "R4-2c: shared short token 2 with S02E02 vs S01E02 keeps S02E02 playing, opens picker, and sends 0 requests to /r3-parse-b");
+                "R4-2c: shared short token 2 with S02E02 vs S01E02 keeps S02E02 playing ("
+                        + s02PosAfterCancel[0]
+                        + "ms), opens picker, and sends 0 requests to /r3-parse-b on cancel");
+
+        // Now switch to line B again and actually click S01E02$2 (index 0) in the picker
+        clearServerLogs();
+        final boolean[] clickedS01E02 = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.saveResume();
+                        a.switchToPlayLineInPlayer(sharedTokenLines, 1);
+                        if (a.activeInPlayerDialog != null
+                                && a.activeInPlayerDialog.isShowing()
+                                && a.activeInPlayerDialog.getListView() != null) {
+                            a.activeInPlayerDialog
+                                    .getListView()
+                                    .performItemClick(
+                                            a.activeInPlayerDialog.getListView().getChildAt(0),
+                                            0,
+                                            0);
+                            clickedS01E02[0] = true;
+                        }
+                    }
+                });
+        check(
+                clickedS01E02[0] && waitReady(25000),
+                "R4-2d: manually picking S01E02$2 from picker prepared cleanly");
+        SystemClock.sleep(1000);
+        final int[] s01E02PosMs = new int[1];
+        final String[] s01E02Meta = new String[2];
+        main(
+                new Runnable() {
+                    public void run() {
+                        s01E02PosMs[0] = a.player != null ? a.player.getCurrentPosition() : -1;
+                        s01E02Meta[0] = a.activeSession != null ? a.activeSession.epName : "";
+                        s01E02Meta[1] = a.activeSession != null ? a.activeSession.lineFrom : "";
+                    }
+                });
+        JSONArray r4LogS01 = fetchServerLogs();
+        check(
+                "S01E02".equals(s01E02Meta[0])
+                        && "B".equals(s01E02Meta[1])
+                        && hasServerLog(r4LogS01, "/r3-parse-b", "url=2")
+                        && hasServerLog(r4LogS01, "/r3-clip-b.mp4", null)
+                        && s01E02PosMs[0] >= 0
+                        && s01E02PosMs[0] < 4500,
+                "R4-2d: manual S01E02$2 plays /r3-parse-b -> /r3-clip-b.mp4 from start ("
+                        + s01E02PosMs[0]
+                        + "ms, NOT inheriting S02E02's "
+                        + s02PosBefore
+                        + "ms)");
+
+        // Positive control: watching S01E02$2 past 10s and reopening S01E02$2 DOES restore its own progress;
+        // switching to S01E03$3 starts from 0.
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.player.seekTo(10500);
+                    }
+                });
+        long ownSeekEnd = SystemClock.elapsedRealtime() + 8000;
+        int ownSavedPos = 0;
+        while (SystemClock.elapsedRealtime() < ownSeekEnd) {
+            final int[] cur = new int[1];
+            main(
+                    new Runnable() {
+                        public void run() {
+                            cur[0] = a.player != null ? a.player.getCurrentPosition() : 0;
+                        }
+                    });
+            ownSavedPos = cur[0];
+            if (ownSavedPos >= 8500) break;
+            SystemClock.sleep(120);
+        }
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                        a.activeDetailLine = 1;
+                        a.showDetail(vodSharedToken);
+                        a.playingEpisodeIndex = 0;
+                        a.play("2", "S01E02");
+                    }
+                });
+        check(waitReady(25000), "R4-2e: reopening S01E02$2 with its own history prepared");
+        SystemClock.sleep(900);
+        final int[] ownResumedPos = new int[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        ownResumedPos[0] = a.player != null ? a.player.getCurrentPosition() : 0;
+                        a.playingEpisodeIndex = 1;
+                        a.play("3", "S01E03");
+                    }
+                });
+        check(waitReady(25000), "R4-2e: S01E03$3 control prepared");
+        SystemClock.sleep(1000);
+        final int[] s01E03Pos = new int[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        s01E03Pos[0] = a.player != null ? a.player.getCurrentPosition() : -1;
+                        a.onBackPressed();
+                    }
+                });
+        check(
+                ownSavedPos >= 8500
+                        && ownResumedPos[0] >= 7500
+                        && s01E03Pos[0] >= 0
+                        && s01E03Pos[0] < 4500,
+                "R4-2e: S01E02$2 restores its own progress ("
+                        + ownResumedPos[0]
+                        + "ms) while S01E03$3 starts from start ("
+                        + s01E03Pos[0]
+                        + "ms)");
 
         // === R4 Item 3 (P2): Clicking ambiguous legacy history or favorite does NOT auto-request A; cancel preserves record; restoring A+B lets user choose B ===
         importConfigViaPairing(base + "/config-r3-only-dup1");

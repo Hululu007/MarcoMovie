@@ -4997,5 +4997,146 @@ public final class LiteJvmChecks {
                         && resBothAB.ambiguousCandidates.size() == 2
                         && resExactA.matchedSite == siteDupA,
                 "R4-3b: Restored A+B exposes both candidates while API-identified record still opens exact site directly");
+
+        // === Round 4 P2 follow-up: Manual different-season selection must NOT inherit previous season clock via global resume ===
+        LiteCatalog.Site resumeSite = new LiteCatalog.Site();
+        resumeSite.key = "r4_site";
+        resumeSite.name = "R4站";
+        resumeSite.api = "http://r4.test/cms";
+        JSONObject resumeVod = new JSONObject().put("vod_id", "v_season").put("vod_name", "跨季剧");
+        List<LiteActivity.EpisodeItem> lineBEps =
+                LiteActivity.parseLineEpisodes("S01E02$2#S01E03$3");
+        LiteActivity.PlaybackSession sessS01E02 =
+                LiteActivity.PlaybackSession.forVod(
+                        1, "2", "2", "S01E02", null, resumeSite, resumeVod, "B", "B", 1, 0, lineBEps);
+        LiteActivity.PlaybackSession sessS01E03 =
+                LiteActivity.PlaybackSession.forVod(
+                        2, "3", "3", "S01E03", null, resumeSite, resumeVod, "B", "B", 1, 1, lineBEps);
+        LiteStore.HistoryEntry histS02E02 = new LiteStore.HistoryEntry();
+        histS02E02.siteKey = resumeSite.key;
+        histS02E02.siteApi = resumeSite.api;
+        histS02E02.vodId = "v_season";
+        histS02E02.lineFrom = "A";
+        histS02E02.epName = "S02E02";
+        histS02E02.epUrl = "2";
+        histS02E02.positionMs = 12500;
+        LiteStore.HistoryEntry histOwnS01E02 = new LiteStore.HistoryEntry();
+        histOwnS01E02.siteKey = resumeSite.key;
+        histOwnS01E02.siteApi = resumeSite.api;
+        histOwnS01E02.vodId = "v_season";
+        histOwnS01E02.lineFrom = "B";
+        histOwnS01E02.epName = "S01E02";
+        histOwnS01E02.epUrl = "2";
+        histOwnS01E02.positionMs = 9800;
+
+        int leakFromS02 =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessS01E02,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E02",
+                        histS02E02,
+                        "2",
+                        resumeSite.api,
+                        "",
+                        "",
+                        "",
+                        12500);
+        int leakControlS01E03 =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessS01E03,
+                        "3",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E03",
+                        histS02E02,
+                        "2",
+                        resumeSite.api,
+                        "",
+                        "",
+                        "",
+                        12500);
+        int ownS01Resume =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessS01E02,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E02",
+                        histOwnS01E02,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E02",
+                        "B",
+                        9800);
+        check(
+                leakFromS02 == 0 && leakControlS01E03 == 0 && ownS01Resume == 9800,
+                "R4-2d: Manual S01E02$2 ignores S02E02$2 global/history clock (0ms) while keeping own S01E02$2 history (9800ms)");
+
+        List<LiteActivity.EpisodeItem> legacyHttpEps =
+                LiteActivity.parseLineEpisodes("第一集$http://r4.test/video.mp4");
+        LiteActivity.PlaybackSession sessLegacyHttp =
+                LiteActivity.PlaybackSession.forVod(
+                        3,
+                        "http://r4.test/video.mp4",
+                        "http://r4.test/video.mp4",
+                        "第一集",
+                        null,
+                        resumeSite,
+                        resumeVod,
+                        "直链",
+                        "direct",
+                        0,
+                        0,
+                        legacyHttpEps);
+        int legacy058HttpResume =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessLegacyHttp,
+                        "http://r4.test/video.mp4",
+                        resumeSite.api,
+                        "v_season",
+                        "第一集",
+                        null,
+                        "http://r4.test/video.mp4",
+                        "",
+                        "",
+                        "",
+                        "",
+                        14500);
+        int legacyBareShortTokenNoMeta =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessS01E02,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E02",
+                        null,
+                        "2",
+                        resumeSite.api,
+                        "",
+                        "",
+                        "",
+                        12500);
+        int globalConflictWithMeta =
+                LiteActivity.resolveSavedResumeMsForEntries(
+                        sessS01E02,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S01E02",
+                        null,
+                        "2",
+                        resumeSite.api,
+                        "v_season",
+                        "S02E02",
+                        "A",
+                        12500);
+        check(
+                legacy058HttpResume == 14500
+                        && legacyBareShortTokenNoMeta == 0
+                        && globalConflictWithMeta == 0,
+                "R4-2e: Legacy 0.5.8 global HTTP resume still works (14500ms) while ambiguous/conflicting short token global resume returns 0");
     }
 }
