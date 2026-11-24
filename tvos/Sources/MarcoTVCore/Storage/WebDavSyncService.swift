@@ -164,6 +164,21 @@ public final class WebDavSyncService: @unchecked Sendable {
         return SHA256.hash(data: Data(input.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Deterministic wire subscription ID (`sub_<12-hex-sha256>`) shared across fresh installs
+    /// and legacy upgraded/backup-restored devices independent of subscription body or remote `subscriptions`.
+    public static func canonicalWireSubscriptionId(
+        url: String,
+        rawContent: String,
+        warehouseUrl: String = ""
+    ) -> String? {
+        let hasIdentity = !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !warehouseUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasIdentity else { return nil }
+        let sk = canonicalSubscriptionSyncKey(url: url, rawContent: rawContent, warehouseUrl: warehouseUrl)
+        return "sub_\(sk.prefix(12))"
+    }
+
     public static func baseCollectionDepth(rawBaseUrl: String, fileURL: URL) -> Int {
         let allSegs = fileURL.pathComponents.filter { $0 != "/" && !$0.isEmpty }
         guard allSegs.count > 1 else { return 0 }
@@ -282,18 +297,21 @@ public final class WebDavSyncService: @unchecked Sendable {
 
     private static func buildPrivacyConfig(
         from snapshot: TvStorageManager.SyncStorageSnapshot,
-        extraPrivateSubIds: Set<String> = []
+        extraPrivateSubIds: Set<String> = [],
+        extraPrivateSiteKeys: Set<String> = []
     ) -> CmsConfig {
         TvStorageManager.buildOwnershipConfig(
             from: snapshot.subscriptions,
             knownPrivateSubscriptionIds: snapshot.knownPrivateSubscriptionIds.union(extraPrivateSubIds),
-            knownPrivateSiteKeys: snapshot.knownPrivateSiteKeys,
+            knownPrivateSiteKeys: snapshot.knownPrivateSiteKeys.union(extraPrivateSiteKeys),
             ambiguousLegacyRawKeys: snapshot.ambiguousLegacyRawKeys
         )
     }
 
     private static func serializePublicSubscriptions(_ entries: [SubscriptionEntry]) -> [[String: Any]] {
-        let pubSubs = entries.filter { !$0.isEffectivelyPrivate && !$0.rawContent.isEmpty }
+        let pubSubs = entries
+            .compactMap { $0.sanitizedForPublicExport() }
+            .filter { !$0.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         var subsPayload: [[String: Any]] = []
         var seenKeys = Set<String>()
         for s in pubSubs {
@@ -356,14 +374,33 @@ public final class WebDavSyncService: @unchecked Sendable {
         syncHistory: Bool
     ) throws -> String {
         let privacyConfig = Self.buildPrivacyConfig(from: snapshot)
+        var localIdToOutboundId: [String: String] = [:]
+        for s in snapshot.subscriptions where !s.isEffectivelyPrivate && !s.id.isEmpty {
+            if let wireId = Self.canonicalWireSubscriptionId(
+                url: s.url,
+                rawContent: s.rawContent,
+                warehouseUrl: s.warehouseUrl
+            ), wireId != s.id {
+                localIdToOutboundId[s.id] = wireId
+            }
+        }
+
         let publicHist = syncHistory
             ? snapshot.watchHistory.filter { !privacyConfig.isPrivateSiteKey($0.site) }
             : []
         let publicFavs = syncHistory
             ? snapshot.favorites.filter { !privacyConfig.isPrivateSiteKey($0.site) }
             : []
-        let hist = publicHist.map { $0.toDictionary() }
-        let favs = publicFavs.map { $0.toDictionary() }
+        let hist = publicHist.map { item -> [String: Any] in
+            var out = item
+            out.site = Self.rewriteSiteKey(item.site, using: localIdToOutboundId)
+            return out.toDictionary()
+        }
+        let favs = publicFavs.map { fav -> [String: Any] in
+            var out = fav
+            out.site = Self.rewriteSiteKey(fav.site, using: localIdToOutboundId)
+            return out.toDictionary()
+        }
 
         let rawTombs = snapshot.tombstones
         var tombs: [String: Int64] = [:]
@@ -375,7 +412,8 @@ public final class WebDavSyncService: @unchecked Sendable {
                     {
                         continue
                     }
-                    tombs[k] = v
+                    let outKey = Self.rewriteHistoryTombstoneKey(k, using: localIdToOutboundId)
+                    tombs[outKey] = max(v, tombs[outKey] ?? 0)
                 }
             } else if Self.isSubscriptionTombstone(k) {
                 if syncSubscriptions { tombs[k] = v }
@@ -385,7 +423,8 @@ public final class WebDavSyncService: @unchecked Sendable {
         }
         if syncHistory {
             for f in publicFavs where f.updated > 0 {
-                let addKey = "add:\(f.key)"
+                let mappedSite = Self.rewriteSiteKey(f.site, using: localIdToOutboundId)
+                let addKey = "add:\(mappedSite)\n\(f.id)"
                 let prev = tombs[addKey] ?? 0
                 if f.updated > prev { tombs[addKey] = f.updated }
             }
@@ -589,13 +628,27 @@ public final class WebDavSyncService: @unchecked Sendable {
             }
         }
 
-        // Map remote subscription IDs to local subscription IDs whenever both devices have the
-        // same canonical subscription (even if syncSubscriptions is toggled off), and detect any
-        // previously-public remote subscription that has since been switched to private locally.
+        // Map remote subscription IDs & canonical wire IDs (`sub_<12-hex-sha256>`) to local
+        // subscription IDs independent of remote `subscriptions` (works even when `syncSubscriptions`
+        // is disabled and remote file starts empty!), and detect previously-public subscriptions
+        // that have since been switched to private locally.
         var remoteIdToLocalId: [String: String] = [:]
         var localIdToOutboundId: [String: String] = [:]
+        var localIdToCanonicalWireId: [String: String] = [:]
+        var remoteIdToCanonicalWireId: [String: String] = [:]
         var scrubPrivateSubIds = Set<String>()
         var scrubRemoteSubTombs: [String: Int64] = [:]
+
+        for s in localPrivate where !s.id.isEmpty {
+            if let wirePrivId = Self.canonicalWireSubscriptionId(
+                url: s.url,
+                rawContent: s.rawContent,
+                warehouseUrl: s.warehouseUrl
+            ) {
+                localIdToCanonicalWireId[s.id] = wirePrivId
+                scrubPrivateSubIds.insert(wirePrivId)
+            }
+        }
 
         for rawMap in (remoteSubsRaw ?? []) {
             let candidate = SubscriptionEntry.fromDictionary(rawMap)
@@ -604,20 +657,22 @@ public final class WebDavSyncService: @unchecked Sendable {
                 rawContent: candidate.rawContent,
                 warehouseUrl: candidate.warehouseUrl
             )
+            let candidateWireId = "sub_\(sk.prefix(12))"
+            if !candidate.id.isEmpty {
+                remoteIdToCanonicalWireId[candidate.id] = candidateWireId
+            }
             if localPrivateSubSyncKeys.contains(sk)
                 || (!candidate.id.isEmpty && snapshot.knownPrivateSubscriptionIds.contains(candidate.id))
             {
                 if !candidate.id.isEmpty {
                     scrubPrivateSubIds.insert(candidate.id)
                 }
+                scrubPrivateSubIds.insert(candidateWireId)
                 scrubRemoteSubTombs["sub:\(sk)"] = max(nowMs, candidate.updatedAt + 1)
                 continue
             }
             if let localMatch = localPublicBySyncKey[sk], !candidate.id.isEmpty, candidate.id != localMatch.id {
                 remoteIdToLocalId[candidate.id] = localMatch.id
-                if !syncSubscriptions {
-                    localIdToOutboundId[localMatch.id] = candidate.id
-                }
             }
         }
 
@@ -746,12 +801,61 @@ public final class WebDavSyncService: @unchecked Sendable {
             outboundSubTombs = remoteSubTombsRaw
         }
 
+        // Complete canonical wire ID maps (`sub_<12-hex-sha256>`) across final local subscriptions
+        // so history, favorites, and tombstones always map cleanly across devices with different
+        // legacy local IDs EVEN when `syncSubscriptions == false` and remote has no `subscriptions`.
+        for s in finalSubscriptions where !s.id.isEmpty {
+            guard let wireId = Self.canonicalWireSubscriptionId(
+                url: s.url,
+                rawContent: s.rawContent,
+                warehouseUrl: s.warehouseUrl
+            ) else {
+                continue
+            }
+            localIdToCanonicalWireId[s.id] = wireId
+            if s.isEffectivelyPrivate {
+                scrubPrivateSubIds.insert(wireId)
+            } else if wireId != s.id {
+                remoteIdToLocalId[wireId] = s.id
+                localIdToOutboundId[s.id] = wireId
+            }
+        }
+
+        var extraPrivateSiteKeys = Set<String>()
+        for privKey in snapshot.knownPrivateSiteKeys {
+            let wireKey = Self.rewriteSiteKey(privKey, using: localIdToCanonicalWireId)
+            if wireKey != privKey {
+                extraPrivateSiteKeys.insert(wireKey)
+            }
+        }
+
         // Build privacy evaluation config covering current private subs, historically deleted
-        // private subs/site keys, and any remote subscription IDs just transitioned to private.
+        // private subs/site keys, canonical wire IDs, and any remote subscription IDs just transitioned to private.
         let effectivePrivacyConfig = Self.buildPrivacyConfig(
             from: snapshot,
-            extraPrivateSubIds: scrubPrivateSubIds
+            extraPrivateSubIds: scrubPrivateSubIds,
+            extraPrivateSiteKeys: extraPrivateSiteKeys
         )
+
+        func canonicalWireSiteKey(_ siteKey: String) -> String {
+            let step1 = Self.rewriteSiteKey(siteKey, using: remoteIdToCanonicalWireId)
+            return Self.rewriteSiteKey(step1, using: localIdToCanonicalWireId)
+        }
+
+        func isTransitionedPrivateSite(_ siteKey: String) -> Bool {
+            if snapshot.transitionedToPrivateSiteKeys.contains(siteKey) {
+                return true
+            }
+            if let parsed = CmsSite.parseScopedKey(siteKey),
+               snapshot.transitionedToPrivateSubIds.contains(parsed.subscriptionId)
+            {
+                return true
+            }
+            for subId in snapshot.transitionedToPrivateSubIds where !subId.isEmpty && siteKey.hasSuffix("_\(subId)") {
+                return true
+            }
+            return false
+        }
 
         // 2. Watch history, favorites & hist:/fav:/add: tombstones
         var finalHistory = localHist
@@ -778,9 +882,9 @@ public final class WebDavSyncService: @unchecked Sendable {
                 {
                     let scrubTs = max(nowMs, orig.updated + 1)
                     scrubRemoteHistTombs["hist:\(orig.key)"] = max(scrubTs, scrubRemoteHistTombs["hist:\(orig.key)"] ?? 0)
-                    if remapped.key != orig.key {
-                        scrubRemoteHistTombs["hist:\(remapped.key)"] = max(scrubTs, scrubRemoteHistTombs["hist:\(remapped.key)"] ?? 0)
-                    }
+                    let wireSite = canonicalWireSiteKey(remapped.site != orig.site ? remapped.site : orig.site)
+                    let wireTomb = "hist:\(wireSite)\n\(orig.id)"
+                    scrubRemoteHistTombs[wireTomb] = max(scrubTs, scrubRemoteHistTombs[wireTomb] ?? 0)
                     continue
                 }
                 remappedRemotePublicHist.append(remapped)
@@ -796,13 +900,30 @@ public final class WebDavSyncService: @unchecked Sendable {
                     let scrubTs = max(nowMs, orig.updated + 1)
                     scrubRemoteHistTombs["fav:\(orig.key)"] = max(scrubTs, scrubRemoteHistTombs["fav:\(orig.key)"] ?? 0)
                     scrubRemoveAddKeys.insert("add:\(orig.key)")
-                    if remapped.key != orig.key {
-                        scrubRemoteHistTombs["fav:\(remapped.key)"] = max(scrubTs, scrubRemoteHistTombs["fav:\(remapped.key)"] ?? 0)
-                        scrubRemoveAddKeys.insert("add:\(remapped.key)")
-                    }
+                    let wireSite = canonicalWireSiteKey(remapped.site != orig.site ? remapped.site : orig.site)
+                    let wireTomb = "fav:\(wireSite)\n\(orig.id)"
+                    scrubRemoteHistTombs[wireTomb] = max(scrubTs, scrubRemoteHistTombs[wireTomb] ?? 0)
+                    scrubRemoveAddKeys.insert("add:\(wireSite)\n\(orig.id)")
                     continue
                 }
                 remappedRemotePublicFavs.append(remapped)
+            }
+
+            // When a previously-public subscription or child site transitioned to private on this device,
+            // emit canonical wire scrub tombstones so peer devices with different legacy IDs recognize the
+            // removal on their next syncs and never re-upload old titles/posters to remote.
+            for item in localPrivateHist where isTransitionedPrivateSite(item.site) {
+                let wireSite = canonicalWireSiteKey(item.site)
+                let scrubTs = max(nowMs, item.updated + 1)
+                let wireTomb = "hist:\(wireSite)\n\(item.id)"
+                scrubRemoteHistTombs[wireTomb] = max(scrubTs, scrubRemoteHistTombs[wireTomb] ?? 0)
+            }
+            for fav in localPrivateFavs where isTransitionedPrivateSite(fav.site) {
+                let wireSite = canonicalWireSiteKey(fav.site)
+                let scrubTs = max(nowMs, fav.updated + 1)
+                let wireTomb = "fav:\(wireSite)\n\(fav.id)"
+                scrubRemoteHistTombs[wireTomb] = max(scrubTs, scrubRemoteHistTombs[wireTomb] ?? 0)
+                scrubRemoveAddKeys.insert("add:\(wireSite)\n\(fav.id)")
             }
 
             var mergedHistTombs: [String: Int64] = [:]
@@ -817,19 +938,21 @@ public final class WebDavSyncService: @unchecked Sendable {
             }
             for (origKey, ts) in remoteHistTombsRaw {
                 let mappedKey = Self.rewriteHistoryTombstoneKey(origKey, using: remoteIdToLocalId)
-                if let origSite = Self.siteKeyFromHistoryTombstone(origKey),
-                   effectivePrivacyConfig.isPrivateSiteKey(origSite)
-                {
+                let origIsPrivate = Self.siteKeyFromHistoryTombstone(origKey).map { effectivePrivacyConfig.isPrivateSiteKey($0) } ?? false
+                let mappedIsPrivate = Self.siteKeyFromHistoryTombstone(mappedKey).map { effectivePrivacyConfig.isPrivateSiteKey($0) } ?? false
+                if origIsPrivate || mappedIsPrivate {
                     if origKey.hasPrefix("add:") {
                         scrubRemoveAddKeys.insert(origKey)
-                    }
-                    continue
-                }
-                if let mappedSite = Self.siteKeyFromHistoryTombstone(mappedKey),
-                   effectivePrivacyConfig.isPrivateSiteKey(mappedSite)
-                {
-                    if mappedKey.hasPrefix("add:") {
-                        scrubRemoveAddKeys.insert(mappedKey)
+                        scrubRemoveAddKeys.insert(Self.rewriteHistoryTombstoneKey(origKey, using: localIdToCanonicalWireId))
+                    } else {
+                        // Preserve existing remote hist:/fav: scrub tombstones for peer devices without
+                        // importing them into this device's local private history/favorite tombstones.
+                        scrubRemoteHistTombs[origKey] = max(ts, scrubRemoteHistTombs[origKey] ?? 0)
+                        let wireKey = Self.rewriteHistoryTombstoneKey(
+                            Self.rewriteHistoryTombstoneKey(origKey, using: remoteIdToCanonicalWireId),
+                            using: localIdToCanonicalWireId
+                        )
+                        scrubRemoteHistTombs[wireKey] = max(ts, scrubRemoteHistTombs[wireKey] ?? 0)
                     }
                     continue
                 }

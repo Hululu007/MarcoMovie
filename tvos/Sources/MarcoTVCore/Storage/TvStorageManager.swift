@@ -123,7 +123,7 @@ public enum BackupCodec {
     public static let keyAmbientPosterSync = "ambient_poster_sync"
 
     public static func encodeBackupJson(_ payload: BackupPayload) throws -> String {
-        let publicSubs = payload.subscriptions.filter { !$0.isEffectivelyPrivate }
+        let publicSubs = payload.subscriptions.compactMap { $0.sanitizedForPublicExport() }
         let privateSubs = payload.subscriptions.filter { $0.isEffectivelyPrivate }
         let privateConfig = TvStorageManager.buildOwnershipConfig(
             from: payload.subscriptions,
@@ -141,7 +141,8 @@ public enum BackupCodec {
             : payload.preferences.preferredSiteKey
 
         let primaryOrigin = !payload.origin.isEmpty ? payload.origin : (publicSubs.first?.url ?? "")
-        let primaryRawConfig = !payload.rawConfig.isEmpty ? payload.rawConfig : (publicSubs.first?.rawContent ?? "")
+        let rawPrimary = !payload.rawConfig.isEmpty ? payload.rawConfig : (publicSubs.first?.rawContent ?? "")
+        let primaryRawConfig = CmsParser.sanitizePublicRawConfig(rawPrimary)
 
         let configField: Any = {
             let trimmed = primaryRawConfig.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -432,6 +433,8 @@ public final class TvStorageManager: @unchecked Sendable {
         var knownPrivateSubscriptionIds: [String] = []
         var knownPrivateSiteKeys: [String] = []
         var ambiguousLegacyRawKeys: [String] = []
+        var transitionedToPrivateSubIds: [String]?
+        var transitionedToPrivateSiteKeys: [String]?
     }
 
     private struct KeychainAnchorSnapshot: Codable {
@@ -444,6 +447,8 @@ public final class TvStorageManager: @unchecked Sendable {
         var knownPrivateSubscriptionIds: [String]?
         var knownPrivateSiteKeys: [String]?
         var ambiguousLegacyRawKeys: [String]?
+        var transitionedToPrivateSubIds: [String]?
+        var transitionedToPrivateSiteKeys: [String]?
     }
 
     private static let accountAnchorSnapshot = "anchor_snapshot_zlib_v1"
@@ -465,6 +470,8 @@ public final class TvStorageManager: @unchecked Sendable {
     private var knownPrivateSubscriptionIdsCache: Set<String> = []
     private var knownPrivateSiteKeysCache: Set<String> = []
     private var ambiguousLegacyRawKeysCache: Set<String> = []
+    private var transitionedToPrivateSubIdsCache: Set<String> = []
+    private var transitionedToPrivateSiteKeysCache: Set<String> = []
     private var mutationVersionCounter: UInt64 = 0
     private(set) public var recoveredFromKeychainAnchor = false
     private(set) public var needsSubscriptionContentRefresh = false
@@ -477,6 +484,8 @@ public final class TvStorageManager: @unchecked Sendable {
         let knownPrivateSubscriptionIds: Set<String>
         let knownPrivateSiteKeys: Set<String>
         let ambiguousLegacyRawKeys: Set<String>
+        let transitionedToPrivateSubIds: Set<String>
+        let transitionedToPrivateSiteKeys: Set<String>
         let version: UInt64
     }
 
@@ -527,10 +536,14 @@ public final class TvStorageManager: @unchecked Sendable {
                 knownPrivateSubscriptionIdsCache = Set(meta.knownPrivateSubscriptionIds)
                 knownPrivateSiteKeysCache = Set(meta.knownPrivateSiteKeys)
                 ambiguousLegacyRawKeysCache = Set(meta.ambiguousLegacyRawKeys)
+                transitionedToPrivateSubIdsCache = Set(meta.transitionedToPrivateSubIds ?? [])
+                transitionedToPrivateSiteKeysCache = Set(meta.transitionedToPrivateSiteKeys ?? [])
             } else {
                 knownPrivateSubscriptionIdsCache = []
                 knownPrivateSiteKeysCache = []
                 ambiguousLegacyRawKeysCache = []
+                transitionedToPrivateSubIdsCache = []
+                transitionedToPrivateSiteKeysCache = []
             }
             syncMetadataTrackersLocked()
             recoveredFromKeychainAnchor = false
@@ -546,6 +559,8 @@ public final class TvStorageManager: @unchecked Sendable {
             knownPrivateSubscriptionIdsCache = Set(anchor.knownPrivateSubscriptionIds ?? [])
             knownPrivateSiteKeysCache = Set(anchor.knownPrivateSiteKeys ?? [])
             ambiguousLegacyRawKeysCache = Set(anchor.ambiguousLegacyRawKeys ?? [])
+            transitionedToPrivateSubIdsCache = Set(anchor.transitionedToPrivateSubIds ?? [])
+            transitionedToPrivateSiteKeysCache = Set(anchor.transitionedToPrivateSiteKeys ?? [])
             subscriptionsCache = anchor.subscriptions.map { stub in
                 // Legacy v1 Keychain stubs omitted `isPrivate`; when privacy cannot be determined,
                 // conservatively treat the recovered subscription as private to avoid exposing hidden sources.
@@ -590,6 +605,8 @@ public final class TvStorageManager: @unchecked Sendable {
             knownPrivateSubscriptionIdsCache = []
             knownPrivateSiteKeysCache = []
             ambiguousLegacyRawKeysCache = []
+            transitionedToPrivateSubIdsCache = []
+            transitionedToPrivateSiteKeysCache = []
             recoveredFromKeychainAnchor = false
             needsSubscriptionContentRefresh = false
         }
@@ -609,10 +626,13 @@ public final class TvStorageManager: @unchecked Sendable {
         let previousSubs = subscriptionsCache
         // Preserve historical ambiguity & deleted private identities before overwriting subscriptions.
         syncMetadataTrackersLocked(additionalSubs: previousSubs)
+        for nextSub in entries where !nextSub.id.isEmpty && nextSub.isEffectivelyPrivate {
+            if let prev = previousSubs.first(where: { $0.id == nextSub.id }), !prev.isEffectivelyPrivate {
+                transitionedToPrivateSubIdsCache.insert(nextSub.id)
+            }
+        }
         subscriptionsCache = entries
-        syncMetadataTrackersLocked(additionalSubs: previousSubs.filter { prev in
-            !entries.contains(where: { $0.id == prev.id })
-        })
+        syncMetadataTrackersLocked(additionalSubs: previousSubs)
         mutationVersionCounter &+= 1
         recomputeNeedsRefreshLocked()
         writeCodableAtomically(subscriptionsCache, to: cachesDirectory.appendingPathComponent("subscriptions.json"))
@@ -673,13 +693,11 @@ public final class TvStorageManager: @unchecked Sendable {
             }
             // Deterministic cross-device subscription ID derived from canonical URL/warehouse/content
             // so two Apple TVs importing the same URL produce identical canonical site keys.
-            let syncKey = WebDavSyncService.canonicalSubscriptionSyncKey(
+            if let deterministic = WebDavSyncService.canonicalWireSubscriptionId(
                 url: cleanUrl,
                 rawContent: rawContent,
                 warehouseUrl: effectiveWarehouseForId
-            )
-            let deterministic = "sub_\(syncKey.prefix(12))"
-            if !existingIdsSnapshot.contains(deterministic) {
+            ), !existingIdsSnapshot.contains(deterministic) {
                 return deterministic
             }
             return "sub_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(10).lowercased())"
@@ -795,6 +813,10 @@ public final class TvStorageManager: @unchecked Sendable {
             depots: normalizedDepots
         )
 
+        let previousEntry = existingIdx.map { subscriptionsCache[$0] }
+        if let prev = previousEntry, !prev.isEffectivelyPrivate && effectivePrivate && !subId.isEmpty {
+            transitionedToPrivateSubIdsCache.insert(subId)
+        }
         if let idx = existingIdx {
             subscriptionsCache[idx] = entry
         } else {
@@ -824,7 +846,7 @@ public final class TvStorageManager: @unchecked Sendable {
             writeCodableAtomically(tombstonesCache, to: cachesDirectory.appendingPathComponent("tombstones.json"))
         }
         writeCodableAtomically(subscriptionsCache, to: cachesDirectory.appendingPathComponent("subscriptions.json"))
-        syncMetadataTrackersLocked()
+        syncMetadataTrackersLocked(additionalSubs: previousEntry.map { [$0] } ?? [])
         persistPrivacyMetaLocked()
         mutationVersionCounter &+= 1
         recomputeNeedsRefreshLocked()
@@ -873,6 +895,7 @@ public final class TvStorageManager: @unchecked Sendable {
         var allOwners: [SiteOwnershipRecord] = []
         var privateSubIds = knownPrivateSubscriptionIds
         var publicSubIds = Set<String>()
+        var unhydratedPublicSubIds = Set<String>()
         var primarySpider = ""
         var seenDepotUrls = Set<String>()
 
@@ -883,6 +906,9 @@ public final class TvStorageManager: @unchecked Sendable {
                     privateSubIds.insert(sub.id)
                 } else {
                     publicSubIds.insert(sub.id)
+                    if sub.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        unhydratedPublicSubIds.insert(sub.id)
+                    }
                     privateSubIds.remove(sub.id)
                 }
             }
@@ -973,6 +999,7 @@ public final class TvStorageManager: @unchecked Sendable {
             siteOwners: allOwners,
             privateSubscriptionIds: privateSubIds,
             publicSubscriptionIds: publicSubIds,
+            unhydratedPublicSubscriptionIds: unhydratedPublicSubIds,
             knownPrivateSiteKeys: knownPrivateSiteKeys,
             ambiguousLegacyRawKeys: ambiguousLegacyRawKeys
         )
@@ -1261,6 +1288,8 @@ public final class TvStorageManager: @unchecked Sendable {
             knownPrivateSubscriptionIds: knownPrivateSubscriptionIdsCache,
             knownPrivateSiteKeys: knownPrivateSiteKeysCache,
             ambiguousLegacyRawKeys: ambiguousLegacyRawKeysCache,
+            transitionedToPrivateSubIds: transitionedToPrivateSubIdsCache,
+            transitionedToPrivateSiteKeys: transitionedToPrivateSiteKeysCache,
             version: mutationVersionCounter
         )
     }
@@ -1285,6 +1314,8 @@ public final class TvStorageManager: @unchecked Sendable {
             knownPrivateSubscriptionIds: knownPrivateSubscriptionIdsCache,
             knownPrivateSiteKeys: knownPrivateSiteKeysCache,
             ambiguousLegacyRawKeys: ambiguousLegacyRawKeysCache,
+            transitionedToPrivateSubIds: transitionedToPrivateSubIdsCache,
+            transitionedToPrivateSiteKeys: transitionedToPrivateSiteKeysCache,
             version: mutationVersionCounter
         )
         let outcome = try transform(live)
@@ -1416,7 +1447,7 @@ public final class TvStorageManager: @unchecked Sendable {
     public func exportBackupJson(exportedAt: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) throws -> String {
         let cfg = mergedConfig()
         lock.lock()
-        let pubSubs = subscriptionsCache.filter { !$0.isEffectivelyPrivate }
+        let pubSubs = subscriptionsCache.compactMap { $0.sanitizedForPublicExport() }
         let safeHist = historyCache.filter { cfg.isPublicDisplayAllowed($0.site) }
         let safeFavs = favoritesCache.filter { cfg.isPublicDisplayAllowed($0.site) }
         var safePrefs = preferencesCache
@@ -1481,6 +1512,8 @@ public final class TvStorageManager: @unchecked Sendable {
         knownPrivateSubscriptionIdsCache = []
         knownPrivateSiteKeysCache = []
         ambiguousLegacyRawKeysCache = []
+        transitionedToPrivateSubIdsCache = []
+        transitionedToPrivateSiteKeysCache = []
         recoveredFromKeychainAnchor = false
         needsSubscriptionContentRefresh = false
         try? FileManager.default.removeItem(at: cachesDirectory)
@@ -1496,19 +1529,19 @@ public final class TvStorageManager: @unchecked Sendable {
     // MARK: - Historical Ambiguity & Private Identity Trackers
 
     private func syncMetadataTrackersLocked(additionalSubs: [SubscriptionEntry] = []) {
-        let combined = subscriptionsCache + additionalSubs
         var rawOwnersByKey: [String: Set<String>] = [:]
         var activePublicRawKeys = Set<String>()
         var activePrivateRawKeys = Set<String>()
         var activePublicSubIds = Set<String>()
-        var parsedSitesBySubId: [String: (isPrivate: Bool, sites: [(rawKey: String, canonicalKey: String)])] = [:]
+        var previousPublicSiteKeys = Set<String>()
+        var currentParsedSitesBySubId: [String: (isPrivate: Bool, sites: [(rawKey: String, canonicalKey: String, isPrivate: Bool)])] = [:]
 
-        for sub in combined {
+        func inspectSub(_ sub: SubscriptionEntry, isCurrent: Bool) {
             let subPriv = sub.isEffectivelyPrivate
             if !sub.id.isEmpty {
                 if subPriv {
                     knownPrivateSubscriptionIdsCache.insert(sub.id)
-                } else if subscriptionsCache.contains(where: { $0.id == sub.id && !$0.isEffectivelyPrivate }) {
+                } else if isCurrent {
                     activePublicSubIds.insert(sub.id)
                 }
             }
@@ -1522,10 +1555,10 @@ public final class TvStorageManager: @unchecked Sendable {
                       defaultName: sub.name
                   )
             else {
-                continue
+                return
             }
             var intraCounts: [String: Int] = [:]
-            var entries: [(rawKey: String, canonicalKey: String)] = []
+            var entries: [(rawKey: String, canonicalKey: String, isPrivate: Bool)] = []
             for site in cfg.sites {
                 let raw = site.rawKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? site.key
@@ -1535,19 +1568,36 @@ public final class TvStorageManager: @unchecked Sendable {
                 let disambig = occ == 0 ? raw : "\(raw)#\(occ + 1)"
                 let canonical = CmsSite.canonicalScopedKey(rawKey: disambig, subscriptionId: sub.id)
                 let ownerTag = sub.id.isEmpty ? sub.url : sub.id
+                let sitePriv = subPriv || site.isEffectivelyPrivate
                 rawOwnersByKey[raw, default: []].insert(ownerTag)
-                if subPriv || site.isEffectivelyPrivate {
+                if sitePriv {
                     activePrivateRawKeys.insert(raw)
                     knownPrivateSiteKeysCache.insert(canonical)
                     if !sub.id.isEmpty {
                         knownPrivateSiteKeysCache.insert("\(raw)_\(sub.id)")
                     }
-                } else if subscriptionsCache.contains(where: { $0.id == sub.id && !$0.isEffectivelyPrivate }) {
+                } else if isCurrent {
                     activePublicRawKeys.insert(raw)
+                } else {
+                    previousPublicSiteKeys.insert(canonical)
                 }
-                entries.append((raw, canonical))
+                entries.append((raw, canonical, sitePriv))
             }
-            parsedSitesBySubId[sub.id] = (subPriv, entries)
+            if isCurrent {
+                currentParsedSitesBySubId[sub.id] = (subPriv, entries)
+            }
+        }
+
+        for prevSub in additionalSubs {
+            inspectSub(prevSub, isCurrent: false)
+        }
+        for curSub in subscriptionsCache {
+            inspectSub(curSub, isCurrent: true)
+        }
+
+        // Detect child sites that transitioned from public -> private (e.g. via subscription edit/refresh)
+        for curKey in previousPublicSiteKeys where knownPrivateSiteKeysCache.contains(curKey) {
+            transitionedToPrivateSiteKeysCache.insert(curKey)
         }
 
         // Any raw site key ever shared across 2+ distinct subscriptions stays permanently ambiguous
@@ -1556,20 +1606,23 @@ public final class TvStorageManager: @unchecked Sendable {
             ambiguousLegacyRawKeysCache.insert(rawKey)
         }
 
-        // If a private subscription has a bare rawKey that no currently-active public subscription
-        // owns, also remember that bare key so deleting the private sub does not expose legacy bare records.
+        // If a private subscription or private child site has a bare rawKey that no currently-active
+        // public site owns, also remember that bare key so removal does not expose legacy bare records.
         for raw in activePrivateRawKeys where !activePublicRawKeys.contains(raw) {
             knownPrivateSiteKeysCache.insert(raw)
         }
 
-        // If a subscription was explicitly toggled back from private to public (still present as public),
-        // release its subscription ID and site keys from the private set.
+        // Only release keys for sites that are CURRENTLY present AND CURRENTLY public in `subscriptionsCache`.
+        // Private child sites inside a public parent subscription (and removed formerly-private child sites)
+        // MUST remain in `knownPrivateSiteKeysCache`!
         for pubSubId in activePublicSubIds {
             knownPrivateSubscriptionIdsCache.remove(pubSubId)
-            if let info = parsedSitesBySubId[pubSubId], !info.isPrivate {
-                for entry in info.sites {
+            transitionedToPrivateSubIdsCache.remove(pubSubId)
+            if let info = currentParsedSitesBySubId[pubSubId], !info.isPrivate {
+                for entry in info.sites where !entry.isPrivate {
                     knownPrivateSiteKeysCache.remove(entry.canonicalKey)
                     knownPrivateSiteKeysCache.remove("\(entry.rawKey)_\(pubSubId)")
+                    transitionedToPrivateSiteKeysCache.remove(entry.canonicalKey)
                     if !activePrivateRawKeys.contains(entry.rawKey) {
                         knownPrivateSiteKeysCache.remove(entry.rawKey)
                     }
@@ -1610,7 +1663,9 @@ public final class TvStorageManager: @unchecked Sendable {
         let meta = PrivacyAndIdentityMetadata(
             knownPrivateSubscriptionIds: Array(knownPrivateSubscriptionIdsCache).sorted(),
             knownPrivateSiteKeys: Array(knownPrivateSiteKeysCache).sorted(),
-            ambiguousLegacyRawKeys: Array(ambiguousLegacyRawKeysCache).sorted()
+            ambiguousLegacyRawKeys: Array(ambiguousLegacyRawKeysCache).sorted(),
+            transitionedToPrivateSubIds: Array(transitionedToPrivateSubIdsCache).sorted(),
+            transitionedToPrivateSiteKeys: Array(transitionedToPrivateSiteKeysCache).sorted()
         )
         writeCodableAtomically(meta, to: cachesDirectory.appendingPathComponent("privacy_meta.json"))
     }
@@ -1653,7 +1708,9 @@ public final class TvStorageManager: @unchecked Sendable {
             tombstones: tombstonesCache,
             knownPrivateSubscriptionIds: Array(knownPrivateSubscriptionIdsCache).sorted(),
             knownPrivateSiteKeys: Array(knownPrivateSiteKeysCache).sorted(),
-            ambiguousLegacyRawKeys: Array(ambiguousLegacyRawKeysCache).sorted()
+            ambiguousLegacyRawKeys: Array(ambiguousLegacyRawKeysCache).sorted(),
+            transitionedToPrivateSubIds: Array(transitionedToPrivateSubIdsCache).sorted(),
+            transitionedToPrivateSiteKeys: Array(transitionedToPrivateSiteKeysCache).sorted()
         )
         guard let rawJson = try? JSONEncoder().encode(snapshot),
               let compressed = ConfigDecoder.compressDeflate(rawJson)

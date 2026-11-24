@@ -266,6 +266,7 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         guard let matchedEpIndex = Self.matchingEpisodeIndex(
             for: currentEpisode,
             currentIndex: target.episodeIndex,
+            sourceEpisodeCount: target.currentLine?.episodes.count ?? 0,
             in: targetLine.episodes
         ) else {
             let requestedName = currentEpisode?.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -339,6 +340,7 @@ public final class PlaybackSessionCoordinator: ObservableObject {
             if Self.matchingEpisodeIndex(
                 for: currentEpisode,
                 currentIndex: target.episodeIndex,
+                sourceEpisodeCount: target.currentLine?.episodes.count ?? 0,
                 in: candidateLine.episodes
             ) != nil {
                 return switchVodLine(to: candidateIdx)
@@ -478,6 +480,7 @@ public final class PlaybackSessionCoordinator: ObservableObject {
     public static func matchingEpisodeIndex(
         for currentEpisode: CmsEpisode?,
         currentIndex: Int,
+        sourceEpisodeCount: Int = 1,
         in targetEpisodes: [CmsEpisode]
     ) -> Int? {
         guard !targetEpisodes.isEmpty else { return nil }
@@ -515,10 +518,12 @@ public final class PlaybackSessionCoordinator: ObservableObject {
             return nil
         }
 
-        // 3. Single-feature movie equivalence: ONLY allow matching differing quality labels
-        //    (e.g. "正片" <-> "蓝光" / "HD中字") when BOTH lines are single-feature main movies
-        //    and NEITHER is a distinct bonus/special title (like "片尾访谈" vs "制作花絮").
-        if targetEpisodes.count == 1,
+        // 3. Single-feature movie equivalence: ONLY allow auto-inheriting breakpoint across differing
+        //    labels when BOTH source and target lines are confirmed single-feature (1 episode each)
+        //    and BOTH names consist exclusively of generic feature/quality/language tags
+        //    (e.g. "正片" <-> "蓝光 1080P 国语"), NEVER distinct part/content names like "上集 1080P" vs "下集 1080P".
+        if sourceEpisodeCount == 1,
+           targetEpisodes.count == 1,
            currentIndex == 0,
            isGenericSingleFeatureLabel(curNorm),
            isGenericSingleFeatureLabel(normalizeEpisodeTitle(targetEpisodes[0].name))
@@ -526,8 +531,8 @@ public final class PlaybackSessionCoordinator: ObservableObject {
             return 0
         }
 
-        // 4. Non-numbered episodes whose titles do NOT match (e.g. "片尾访谈" vs "制作花絮"):
-        //    NEVER fall back blindly by array index! Prompt the user with explicit choices instead.
+        // 4. Non-numbered episodes whose titles do NOT match (e.g. "片尾访谈" vs "制作花絮",
+        //    or "上集 1080P" vs "下集 1080P"): NEVER fall back blindly; prompt user to choose.
         return nil
     }
 
@@ -540,18 +545,57 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         "先导", "片花", "纪录", "剪辑", "pv", "cm", "sp", "ova", "oad", "mv",
     ]
 
-    private static let genericMainFeatureTokens: [String] = [
-        "正片", "完整版", "全集", "电影", "高清", "超清", "蓝光", "原画",
-        "国语", "粤语", "中字", "双语", "抢先版", "hd", "bd", "4k", "1080p",
-        "720p", "ts", "tc", "cam", "uhd", "remux", "hdr",
-    ]
+    private static let genericCjkFeatureTokens: [String] = [
+        "中英双字", "中文字幕", "国粤双语", "蓝光原盘", "未删减版", "未删减",
+        "完整版", "抢先版", "高清版", "超清版", "蓝光版", "无水印",
+        "正片", "全集", "电影", "高清", "超清", "蓝光", "原画",
+        "国语", "粤语", "英语", "日语", "韩语", "中字", "双语", "中英",
+    ].sorted { $0.count > $1.count }
+
+    private static let genericAsciiFeatureTokens: [String] = [
+        "2160p", "1080p", "720p", "480p", "blu-ray", "bluray", "remux", "fullhd",
+        "web-dl", "webdl", "hdrip", "bdrip", "dvdrip", "uhd", "fhd", "hdr", "sdr",
+        "4k", "8k", "2k", "hd", "bd", "ts", "tc", "cam", "dvd",
+    ].sorted { $0.count > $1.count }
 
     private static func isGenericSingleFeatureLabel(_ normalized: String) -> Bool {
         guard !normalized.isEmpty else { return false }
         if nonEpisodeSpecialMarkers.contains(where: { normalized.contains($0) }) {
             return false
         }
-        return genericMainFeatureTokens.contains(where: { normalized.contains($0) })
+
+        var residual = normalized
+        var matchedAnyToken = false
+
+        // Strip ASCII quality/format tags strictly at ASCII alphanumeric boundaries so words like
+        // "watch" or "parts" are never partially stripped.
+        for token in genericAsciiFeatureTokens {
+            let escaped = NSRegularExpression.escapedPattern(for: token)
+            let pattern = "(?<![a-z0-9])\(escaped)(?![a-z0-9])"
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                let nsRange = NSRange(residual.startIndex..<residual.endIndex, in: residual)
+                if regex.firstMatch(in: residual, options: [], range: nsRange) != nil {
+                    matchedAnyToken = true
+                    residual = regex.stringByReplacingMatches(in: residual, options: [], range: nsRange, withTemplate: " ")
+                }
+            }
+        }
+
+        for token in genericCjkFeatureTokens {
+            if residual.contains(token) {
+                matchedAnyToken = true
+                residual = residual.replacingOccurrences(of: token, with: " ")
+            }
+        }
+
+        guard matchedAnyToken else { return false }
+
+        // Only whitespace and harmless separators/brackets may remain; any residual content word
+        // (e.g. "上集", "下集", "part1", "导演版") disqualifies automatic single-feature equivalence.
+        let allowedSeparators = CharacterSet.whitespacesAndNewlines
+            .union(CharacterSet(charactersIn: "-_/·•|+.,:;()[]【】（）「」『』<>《》"))
+        let remaining = residual.unicodeScalars.filter { !allowedSeparators.contains($0) }
+        return remaining.isEmpty
     }
 
     private static func extractCanonicalEpisodeNumber(_ normalized: String) -> Int? {

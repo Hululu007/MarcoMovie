@@ -1237,5 +1237,387 @@ final class TvOSSimulatorVerificationTests: XCTestCase {
         XCTAssertEqual((fastResp as? HTTPURLResponse)?.statusCode, 200)
         XCTAssertTrue(String(decoding: fastData, as: UTF8.self).contains("#EXTM3U"))
     }
+
+    // MARK: - Sim Test 5: Deleting Unrelated Sub During Slow Discover/Live Allows Finish & Pagination While Private Drops Cleanly
+
+    func testSim05_DeletingUnrelatedSubDuringSlowDiscoverAndLiveAllowsFinishAndPaginationWhilePrivateDropped() async throws {
+        let slowServer = SimSlowCatalogServer()
+        try await slowServer.start()
+        defer { slowServer.stop() }
+
+        let dir = try makeTempDir("slow-unrelated-delete")
+        let storage = TvStorageManager(cachesDirectory: dir, keychain: InMemoryKeychainStore())
+        let rawA = """
+        {
+          "sites": [{"key":"slow_site_a","name":"慢源A","type":1,"api":"\(slowServer.baseUrl)/api/slow_a"}],
+          "lives": [{"name":"慢直播A","url":"\(slowServer.baseUrl)/live/slow_a.m3u"}]
+        }
+        """
+        let rawB = """
+        {
+          "sites": [{"key":"other_site_b","name":"无关源B","type":1,"api":"\(slowServer.baseUrl)/api/other_b"}],
+          "lives": [{"name":"无关直播B","url":"\(slowServer.baseUrl)/live/other_b.m3u"}]
+        }
+        """
+        let (subA, _) = try storage.upsertSubscription(id: "sub_slow_a", name: "订阅A", url: "\(slowServer.baseUrl)/sub/a.json", rawContent: rawA, isPrivate: false, nowMs: 1_000)
+        let (subB, _) = try storage.upsertSubscription(id: "sub_other_b", name: "无关订阅B", url: "\(slowServer.baseUrl)/sub/b.json", rawContent: rawB, isPrivate: false, nowMs: 1_100)
+
+        let app = AppViewModel(storage: storage)
+        // Let AppViewModel.init()'s background startup task finish cleanly while server is ungated
+        try? await Task.sleep(nanoseconds: 350_000_000)
+
+        let siteA = try XCTUnwrap(app.config.publicAvailableSites.first(where: { $0.subscriptionId == subA.id }))
+        let liveAIdx = try XCTUnwrap(app.config.publicSupportedLives.firstIndex(where: { $0.subscriptionId == subA.id }))
+
+        // Select Site A and gate slow server before kicking off controlled slow Discover & Live loads
+        storage.updatePreferences { $0.selectedSiteKey = siteA.key }
+        app.reloadLocalState()
+        XCTAssertEqual(app.activeSite?.key, siteA.key)
+
+        slowServer.resetCounters()
+        slowServer.setGated(true)
+        let discoverTask = Task { await app.loadHomeForActiveSite() }
+        let liveTask = Task { await app.loadLiveCatalog(sourceIndex: liveAIdx) }
+
+        let gateDeadline = Date().addingTimeInterval(5.0)
+        while Date() < gateDeadline {
+            if slowServer.parkedCount(pathPrefix: "/api/slow_a") >= 1
+                && slowServer.parkedCount(pathPrefix: "/live/slow_a.m3u") >= 1
+                && app.isLoadingDiscover
+                && app.isLoadingLive
+            {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 30_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(slowServer.parkedCount(pathPrefix: "/api/slow_a"), 1)
+        XCTAssertGreaterThanOrEqual(slowServer.parkedCount(pathPrefix: "/live/slow_a.m3u"), 1)
+        XCTAssertTrue(app.isLoadingDiscover)
+        XCTAssertTrue(app.isLoadingLive)
+
+        // Delete UNRELATED subscription B while A is slowly loading Discover & Live!
+        storage.removeSubscription(id: subB.id)
+        app.reloadLocalState()
+
+        // Release gate -> A MUST finish loading cleanly, clear loading flags, and allow page 2 pagination!
+        slowServer.setGated(false)
+        await discoverTask.value
+        await liveTask.value
+
+        XCTAssertFalse(app.isLoadingDiscover, "Deleting unrelated sub B must NOT leave isLoadingDiscover stuck true")
+        XCTAssertFalse(app.isLoadingLive, "Deleting unrelated sub B must NOT leave isLoadingLive stuck true")
+        XCTAssertEqual(app.discoverVideos.count, 6, "Site A page 1 must finish loading despite unrelated sub B deletion")
+        XCTAssertEqual(app.currentPage, 1)
+        XCTAssertEqual(app.totalPageCount, 2)
+        XCTAssertTrue(app.liveGroups.flatMap(\.channels).contains(where: { $0.name == "慢源频道A" }))
+
+        // Continue paginating to page 2!
+        let lastPage1Video = try XCTUnwrap(app.discoverVideos.last)
+        await app.loadMoreDiscoverIfNeeded(currentVideo: lastPage1Video)
+        XCTAssertFalse(app.isLoadingMore)
+        XCTAssertEqual(app.currentPage, 2)
+        XCTAssertEqual(app.discoverVideos.count, 8, "Site A must continue paginating to page 2 cleanly")
+
+        // Part 2: Start another slow Discover & Live load on A, then switch A ITSELF to PRIVATE while in flight!
+        slowServer.resetCounters()
+        slowServer.setGated(true)
+        let privDiscoverTask = Task { await app.loadHomeForActiveSite() }
+        let privLiveTask = Task { await app.loadLiveCatalog(sourceIndex: 0) }
+
+        let privGateDeadline = Date().addingTimeInterval(5.0)
+        while Date() < privGateDeadline {
+            if slowServer.parkedCount(pathPrefix: "/api/slow_a") >= 1
+                && slowServer.parkedCount(pathPrefix: "/live/slow_a.m3u") >= 1
+            {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 30_000_000)
+        }
+
+        // Switch Subscription A itself to PRIVATE while slow requests are in flight
+        var curSubs = storage.subscriptions()
+        curSubs[curSubs.firstIndex(where: { $0.id == subA.id })!].isPrivate = true
+        storage.saveSubscriptions(curSubs)
+        app.reloadLocalState()
+
+        slowServer.setGated(false)
+        await privDiscoverTask.value
+        await privLiveTask.value
+
+        XCTAssertTrue(app.discoverVideos.isEmpty, "Late Discover response from now-private A must be dropped")
+        XCTAssertTrue(app.liveGroups.isEmpty, "Late Live response from now-private A must be dropped")
+        XCTAssertFalse(app.isLoadingDiscover, "Dropped private Discover load must not leave isLoadingDiscover stuck true")
+        XCTAssertFalse(app.isLoadingLive, "Dropped private Live load must not leave isLoadingLive stuck true")
+    }
+
+    // MARK: - Sim Test 6: Public Sub Removing Private Child Site B -> Cold Start Zero Poster Requests
+
+    func testSim06_PublicSubPrivateChildRemovedColdStartZeroPosterRequests() async throws {
+        let mediaServer = SimLoopbackMediaServer()
+        mediaServer.setPosterPng(
+            makePosterPng(top: UIColor(red: 0.10, green: 0.32, blue: 0.58, alpha: 1), bottom: UIColor(red: 0.04, green: 0.08, blue: 0.16, alpha: 1), title: "公开影片A"),
+            forPath: "/poster/public_1.png"
+        )
+        mediaServer.setPosterPng(
+            makePosterPng(top: UIColor(red: 0.65, green: 0.14, blue: 0.22, alpha: 1), bottom: UIColor(red: 0.16, green: 0.04, blue: 0.07, alpha: 1), title: "私密子片B"),
+            forPath: "/poster/secret_99.png"
+        )
+        try await mediaServer.start()
+        defer { mediaServer.stop() }
+
+        let dir = try makeTempDir("mixed-child-remove")
+        let keychain = InMemoryKeychainStore()
+        let storage = TvStorageManager(cachesDirectory: dir, keychain: keychain)
+
+        let mixedRaw = """
+        {
+          "sites": [
+            {"key":"pub_a","name":"公开站A","type":1,"api":"\(mediaServer.baseUrl)/api/public"},
+            {"key":"priv_b","name":"私密子站B","type":1,"api":"\(mediaServer.baseUrl)/api/private","isPrivate":true}
+          ],
+          "lives": [
+            {"name":"私密直播L","url":"\(mediaServer.baseUrl)/live/private.m3u","isPrivate":true}
+          ]
+        }
+        """
+        let subUrl = "\(mediaServer.baseUrl)/sub/mixed.json"
+        let (parentSub, _) = try storage.upsertSubscription(
+            id: "sub_sim_mixed",
+            name: "混合公开订阅",
+            url: subUrl,
+            rawContent: mixedRaw,
+            isPrivate: false,
+            nowMs: 1_000
+        )
+
+        let pubAKey = CmsSite.canonicalScopedKey(rawKey: "pub_a", subscriptionId: parentSub.id)
+        let privBKey = CmsSite.canonicalScopedKey(rawKey: "priv_b", subscriptionId: parentSub.id)
+        storage.updatePreferences { $0.ambientPosterSync = true }
+        storage.upsertWatchHistory(
+            WatchHistoryItem(site: pubAKey, id: "101", title: "星际漫游记", poster: "\(mediaServer.baseUrl)/poster/public_1.png", line: "极速主线", episode: "第1集", index: 0, position: 60_000, duration: 1_800_000, updated: 2_000)
+        )
+        storage.upsertWatchHistory(
+            WatchHistoryItem(site: privBKey, id: "99", title: "机密子片B", poster: "\(mediaServer.baseUrl)/poster/secret_99.png", line: "私密线路", episode: "第1集", index: 0, position: 145_000, duration: 1_800_000, updated: 3_000)
+        )
+        _ = storage.toggleFavorite(site: privBKey, video: CmsVideo(id: "99", title: "机密子片B", poster: "\(mediaServer.baseUrl)/poster/secret_99.png"), nowMs: 3_100)
+
+        // Refresh parent subscription removing private child B (only public A remains)
+        let refreshedRaw = """
+        {
+          "sites": [
+            {"key":"pub_a","name":"公开站A","type":1,"api":"\(mediaServer.baseUrl)/api/public"}
+          ]
+        }
+        """
+        _ = try storage.upsertSubscription(
+            id: parentSub.id,
+            name: parentSub.name,
+            url: subUrl,
+            rawContent: refreshedRaw,
+            isPrivate: false,
+            nowMs: 4_000
+        )
+
+        // Cold restart and render BOTH Discover and Library on live Apple TV Simulator!
+        mediaServer.resetPosterCounts()
+        let restartedStorage = TvStorageManager(cachesDirectory: dir, keychain: keychain)
+        let appCold = AppViewModel(storage: restartedStorage)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        appCold.selectedTab = .discover
+        _ = try await renderAndCapture(
+            LivingRoomShellView().environmentObject(appCold),
+            filename: "07a_child_removed_discover.png",
+            settleSeconds: 0.7
+        )
+        appCold.selectedTab = .library
+        _ = try await renderAndCapture(
+            LivingRoomShellView().environmentObject(appCold),
+            filename: "07b_child_removed_library.png",
+            settleSeconds: 0.7
+        )
+
+        XCTAssertTrue(appCold.watchHistory.contains(where: { $0.id == "101" }))
+        XCTAssertFalse(appCold.watchHistory.contains(where: { $0.id == "99" }), "Removed private child B must never appear on home/library after cold start")
+        XCTAssertFalse(appCold.favorites.contains(where: { $0.id == "99" }))
+        XCTAssertFalse(appCold.backdropPosterUrl.contains("secret_99"))
+        XCTAssertEqual(
+            mediaServer.posterHitCount(forPath: "/poster/secret_99.png"),
+            0,
+            "Removed private child B poster must NEVER be requested after cold start"
+        )
+        XCTAssertEqual(
+            restartedStorage.watchHistory().first(where: { $0.id == "99" })?.position,
+            145_000,
+            "Local breakpoint for removed private child B must remain preserved in storage"
+        )
+    }
+}
+
+private final class SimSlowCatalogServer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var listener: NWListener?
+    private let queue = DispatchQueue(label: "marco.sim.slow.catalog.server")
+    private(set) var port: UInt16 = 0
+    private var gated = false
+    private var parked: [(path: String, sendAction: () -> Void)] = []
+    private var parkedCounts: [String: Int] = [:]
+
+    var baseUrl: String { "http://127.0.0.1:\(port)" }
+
+    func resetCounters() {
+        lock.lock()
+        parkedCounts.removeAll()
+        lock.unlock()
+    }
+
+    func setGated(_ enable: Bool) {
+        var toFlush: [() -> Void] = []
+        lock.lock()
+        gated = enable
+        if !enable {
+            toFlush = parked.map(\.sendAction)
+            parked.removeAll()
+        }
+        lock.unlock()
+        for fn in toFlush { fn() }
+    }
+
+    func parkedCount(pathPrefix: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return parkedCounts.reduce(0) { acc, kv in
+            kv.key.hasPrefix(pathPrefix) ? acc + kv.value : acc
+        }
+    }
+
+    func start() async throws {
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: 0)
+        let listener = try NWListener(using: params)
+        self.listener = listener
+        listener.newConnectionHandler = { [weak self] conn in
+            self?.handle(conn)
+        }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let resumed = NSLock()
+            var done = false
+            listener.stateUpdateHandler = { state in
+                resumed.lock()
+                defer { resumed.unlock() }
+                guard !done else { return }
+                switch state {
+                case .ready:
+                    done = true
+                    self.port = listener.port?.rawValue ?? 0
+                    cont.resume()
+                case .failed(let err):
+                    done = true
+                    cont.resume(throwing: err)
+                default:
+                    break
+                }
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    func stop() {
+        setGated(false)
+        listener?.cancel()
+        listener = nil
+    }
+
+    private func handle(_ conn: NWConnection) {
+        conn.start(queue: queue)
+        readReq(conn: conn, buffer: Data())
+    }
+
+    private func readReq(conn: NWConnection, buffer: Data) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 32768) { [weak self] data, _, isComplete, _ in
+            guard let self else {
+                conn.cancel()
+                return
+            }
+            var next = buffer
+            if let data { next.append(data) }
+            if let range = next.range(of: Data("\r\n\r\n".utf8)) {
+                let head = String(decoding: next[..<range.lowerBound], as: UTF8.self)
+                let reqParts = (head.components(separatedBy: "\r\n").first ?? "").split(separator: " ")
+                let rawTarget = reqParts.count >= 2 ? String(reqParts[1]) : "/"
+                self.dispatch(conn: conn, rawTarget: rawTarget)
+                return
+            }
+            if isComplete {
+                conn.cancel()
+            } else {
+                self.readReq(conn: conn, buffer: next)
+            }
+        }
+    }
+
+    private func dispatch(conn: NWConnection, rawTarget: String) {
+        let comps = URLComponents(string: "http://127.0.0.1\(rawTarget)")
+        let path = comps?.path ?? rawTarget
+        let query = Dictionary(uniqueKeysWithValues: (comps?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        let page = Int(query["pg"] ?? "1") ?? 1
+
+        let sendAction: () -> Void = { [weak self] in
+            guard let self else {
+                conn.cancel()
+                return
+            }
+            if path == "/api/slow_a" {
+                let videos: [[String: Any]] = (page == 2)
+                    ? [
+                        ["vod_id": "v7", "vod_name": "慢源第2页-7", "vod_pic": "", "vod_remarks": "HD"],
+                        ["vod_id": "v8", "vod_name": "慢源第2页-8", "vod_pic": "", "vod_remarks": "HD"],
+                    ]
+                    : (1...6).map { i in
+                        ["vod_id": "v\(i)", "vod_name": "慢源第1页-\(i)", "vod_pic": "", "vod_remarks": "HD"]
+                    }
+                let obj: [String: Any] = [
+                    "code": 1,
+                    "page": page,
+                    "pagecount": 2,
+                    "class": [["type_id": "1", "type_name": "电影"]],
+                    "list": videos,
+                ]
+                let body = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
+                self.writeHttp(conn: conn, contentType: "application/json; charset=utf-8", body: body)
+            } else if path == "/live/slow_a.m3u" {
+                let m3u = "#EXTM3U\n#EXTINF:-1 group-title=\"慢源分组\",慢源频道A\n\(self.baseUrl)/stream/a.m3u8\n"
+                self.writeHttp(conn: conn, contentType: "text/plain; charset=utf-8", body: Data(m3u.utf8))
+            } else {
+                let obj: [String: Any] = ["code": 1, "page": 1, "pagecount": 1, "class": [], "list": []]
+                let body = (try? JSONSerialization.data(withJSONObject: obj)) ?? Data("{}".utf8)
+                self.writeHttp(conn: conn, contentType: "application/json; charset=utf-8", body: body)
+            }
+        }
+
+        let shouldPark: Bool = {
+            guard path == "/api/slow_a" || path == "/live/slow_a.m3u" else { return false }
+            lock.lock()
+            defer { lock.unlock() }
+            if gated {
+                parked.append((path: path, sendAction: sendAction))
+                parkedCounts[path, default: 0] += 1
+                return true
+            }
+            return false
+        }()
+        if !shouldPark {
+            sendAction()
+        }
+    }
+
+    private func writeHttp(conn: NWConnection, contentType: String, body: Data) {
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        var payload = Data(head.utf8)
+        payload.append(body)
+        conn.send(content: payload, completion: .contentProcessed { _ in
+            conn.cancel()
+        })
+    }
 }
 #endif

@@ -318,7 +318,7 @@ def main() -> int:
     if new_crashes:
         print(f"ERROR: New crash reports detected: {new_crashes}", file=sys.stderr)
         return 4
-    if test_summary["total_failed"] != 0 or test_summary["simulator_ui_e2e_tests_passed"] < 4:
+    if test_summary["total_failed"] != 0 or test_summary["simulator_ui_e2e_tests_passed"] < 6:
         print("ERROR: Expected all simulator UI/E2E tests to pass", file=sys.stderr)
         return 5
     return 0

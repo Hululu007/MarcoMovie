@@ -113,6 +113,34 @@ public struct SubscriptionEntry: Codable, Hashable, Identifiable, Sendable {
         isPrivate || group.contains("隐私") || group.contains("私密")
     }
 
+    /// Returns a public-export-safe copy with all private child VOD sites, private live sources,
+    /// and private depots stripped from `rawContent` and `depots`, or `nil` if the subscription itself is private.
+    public func sanitizedForPublicExport() -> SubscriptionEntry? {
+        guard !isEffectivelyPrivate else { return nil }
+        var copy = self
+        copy.isPrivate = false
+        copy.depots = depots.filter { !$0.isPrivate }
+        let sanitizedRaw = CmsParser.sanitizePublicRawConfig(rawContent, defaultGroup: group)
+        if sanitizedRaw != rawContent {
+            copy.rawContent = sanitizedRaw
+            if let parsed = try? CmsParser.parseConfig(
+                sanitizedRaw,
+                origin: url,
+                defaultGroup: group,
+                isPrivate: false,
+                subscriptionId: id,
+                defaultName: name
+            ) {
+                copy.siteCount = parsed.sites.count
+                copy.liveCount = parsed.lives.count
+            } else {
+                copy.siteCount = 0
+                copy.liveCount = 0
+            }
+        }
+        return copy
+    }
+
     public func toDictionary() -> [String: Any] {
         [
             "id": id,
@@ -993,6 +1021,7 @@ public struct CmsConfig: Codable, Hashable, Sendable {
     public var siteOwners: [SiteOwnershipRecord]
     public var privateSubscriptionIds: Set<String>
     public var publicSubscriptionIds: Set<String>
+    public var unhydratedPublicSubscriptionIds: Set<String>
     public var knownPrivateSiteKeys: Set<String>
     public var ambiguousLegacyRawKeys: Set<String>
 
@@ -1005,6 +1034,7 @@ public struct CmsConfig: Codable, Hashable, Sendable {
         siteOwners: [SiteOwnershipRecord] = [],
         privateSubscriptionIds: Set<String> = [],
         publicSubscriptionIds: Set<String> = [],
+        unhydratedPublicSubscriptionIds: Set<String> = [],
         knownPrivateSiteKeys: Set<String> = [],
         ambiguousLegacyRawKeys: Set<String> = []
     ) {
@@ -1016,13 +1046,14 @@ public struct CmsConfig: Codable, Hashable, Sendable {
         self.siteOwners = siteOwners
         self.privateSubscriptionIds = privateSubscriptionIds
         self.publicSubscriptionIds = publicSubscriptionIds
+        self.unhydratedPublicSubscriptionIds = unhydratedPublicSubscriptionIds
         self.knownPrivateSiteKeys = knownPrivateSiteKeys
         self.ambiguousLegacyRawKeys = ambiguousLegacyRawKeys
     }
 
     private enum CodingKeys: String, CodingKey {
         case sites, lives, depots, parses, spider, siteOwners, privateSubscriptionIds
-        case publicSubscriptionIds, knownPrivateSiteKeys, ambiguousLegacyRawKeys
+        case publicSubscriptionIds, unhydratedPublicSubscriptionIds, knownPrivateSiteKeys, ambiguousLegacyRawKeys
     }
 
     public init(from decoder: Decoder) throws {
@@ -1035,6 +1066,7 @@ public struct CmsConfig: Codable, Hashable, Sendable {
         self.siteOwners = try c.decodeIfPresent([SiteOwnershipRecord].self, forKey: .siteOwners) ?? []
         self.privateSubscriptionIds = try c.decodeIfPresent(Set<String>.self, forKey: .privateSubscriptionIds) ?? []
         self.publicSubscriptionIds = try c.decodeIfPresent(Set<String>.self, forKey: .publicSubscriptionIds) ?? []
+        self.unhydratedPublicSubscriptionIds = try c.decodeIfPresent(Set<String>.self, forKey: .unhydratedPublicSubscriptionIds) ?? []
         self.knownPrivateSiteKeys = try c.decodeIfPresent(Set<String>.self, forKey: .knownPrivateSiteKeys) ?? []
         self.ambiguousLegacyRawKeys = try c.decodeIfPresent(Set<String>.self, forKey: .ambiguousLegacyRawKeys) ?? []
     }
@@ -1125,9 +1157,10 @@ public struct CmsConfig: Codable, Hashable, Sendable {
             }) {
                 return !byPair.isPrivate
             }
-            // Allow URL-only Keychain-recovered public subscriptions waiting for startup refresh,
-            // but fail-closed on unknown/stranger subscription IDs (e.g. synced from another device's private source).
-            return publicSubscriptionIds.contains(parsed.subscriptionId)
+            // Only allow unhydrated URL-only Keychain-recovered public subscriptions waiting for startup
+            // refresh. Once a public subscription IS hydrated, removed (e.g. formerly private) child sites
+            // MUST NOT regain public display eligibility merely because their parent subscription is public!
+            return unhydratedPublicSubscriptionIds.contains(parsed.subscriptionId)
         }
         let byRaw = owners.filter { $0.rawKey == clean }
         if !byRaw.isEmpty {

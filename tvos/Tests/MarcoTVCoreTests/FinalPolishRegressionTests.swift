@@ -1233,6 +1233,395 @@ final class FinalPolishRegressionTests: XCTestCase {
         XCTAssertEqual(headerProxy.activeSessionCount(), 0)
     }
 
+    // MARK: - Closeout Item 1: Legacy Different IDs History-Only Sync & Private Scrub Anti-Resurrection
+
+    func testCloseoutItem1_LegacyDifferentIdsHistoryOnlySyncAndPrivateScrubAntiResurrection() async throws {
+        let dirA = FileManager.default.temporaryDirectory.appendingPathComponent("MarcoCloseout1A_\(UUID().uuidString)", isDirectory: true)
+        let dirB = FileManager.default.temporaryDirectory.appendingPathComponent("MarcoCloseout1B_\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: dirA)
+            try? FileManager.default.removeItem(at: dirB)
+        }
+
+        let sharedUrl = "https://legacy-shared.example/sub.json"
+        let sharedRaw = #"{"sites":[{"key":"cms","name":"旧版共源站","type":1,"api":"https://legacy-shared.example/vod"}]}"#
+
+        defer { FinalStubURLProtocol.uninstall() }
+        FinalStubURLProtocol.install { request in
+            let url = request.url ?? URL(string: "https://legacy-shared.example/vod")!
+            let json = #"{"list":[{"vod_id":"42","vod_name":"星际穿越·旧ID","vod_play_from":"主线","vod_play_url":"正片$https://cdn.example/interstellar.m3u8"}]}"#
+            return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(json.utf8))
+        }
+        let sessionCfg = URLSessionConfiguration.ephemeral
+        sessionCfg.protocolClasses = [FinalStubURLProtocol.self]
+        let client = CmsClient(session: URLSession(configuration: sessionCfg))
+
+        let storageA = TvStorageManager(cachesDirectory: dirA, keychain: InMemoryKeychainStore())
+        let storageB = TvStorageManager(cachesDirectory: dirB, keychain: InMemoryKeychainStore())
+
+        // Simulate legacy upgraded / backup-restored devices with DIFFERENT local subscription IDs for the same URL
+        let (subA, _) = try storageA.upsertSubscription(id: "sub_legacy_old_a", name: "旧设备A源", url: sharedUrl, rawContent: sharedRaw, nowMs: 1_000)
+        let (subB, _) = try storageB.upsertSubscription(id: "sub_legacy_old_b", name: "旧设备B源", url: sharedUrl, rawContent: sharedRaw, nowMs: 1_100)
+        XCTAssertNotEqual(subA.id, subB.id)
+
+        // Turn OFF subscription sync on BOTH devices; start from an EMPTY WebDAV server!
+        let historyOnlyDavCfg = WebDavConfig(
+            url: "https://dav.example/remote.php/dav/files/user",
+            username: "u",
+            password: "synthetic-test-password",
+            syncSubscriptions: false,
+            syncHistory: true
+        )
+        try storageA.saveWebDavConfig(historyOnlyDavCfg)
+        try storageB.saveWebDavConfig(historyOnlyDavCfg)
+
+        let server = FinalMockWebDavServer()
+        let davA = WebDavSyncService(storage: storageA, transport: FinalMockWebDavTransport(server: server))
+        let davB = WebDavSyncService(storage: storageB, transport: FinalMockWebDavTransport(server: server))
+
+        // 1) A watches & favorites movie 42 -> syncs to empty WebDAV
+        let siteA = try XCTUnwrap(storageA.mergedConfig().publicAvailableSites.first)
+        let movie42 = CmsVideo(id: "42", title: "星际穿越·旧ID", poster: "https://cdn.example/interstellar.jpg")
+        storageA.upsertWatchHistory(
+            WatchHistoryItem(
+                site: siteA.key,
+                id: "42",
+                title: movie42.title,
+                poster: movie42.poster,
+                line: "主线",
+                episode: "正片",
+                index: 0,
+                position: 85_000,
+                duration: 6_000_000,
+                updated: 2_000
+            )
+        )
+        XCTAssertTrue(storageA.toggleFavorite(site: siteA.key, video: movie42, nowMs: 2_100))
+        _ = try await davA.syncNow()
+
+        let snapAfterA = await server.snapshot()
+        let remoteJsonAfterA = try XCTUnwrap(snapAfterA.payload)
+        let remoteObjAfterA = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(remoteJsonAfterA.utf8)) as? [String: Any])
+        XCTAssertNil(remoteObjAfterA["subscriptions"], "Closing subscription sync must NOT write subscriptions body/URL to WebDAV")
+
+        // 2) B syncs (with syncSubscriptions=false) -> resolves A's breakpoint & favorite to B's own sub_legacy_old_b!
+        _ = try await davB.syncNow()
+        let cfgB = storageB.mergedConfig()
+        let siteB = try XCTUnwrap(cfgB.publicAvailableSites.first)
+        let histOnB = try XCTUnwrap(MediaEntryResolver.publicVisibleWatchHistory(storageB.watchHistory(), in: cfgB).first)
+        let favOnB = try XCTUnwrap(MediaEntryResolver.publicVisibleFavorites(storageB.favorites(), in: cfgB).first)
+
+        let resolvedB = try await MediaEntryResolver.resolveWatchHistoryEntry(histOnB, config: cfgB, cmsClient: client)
+        guard case .ready(let bSiteResolved, let bVidResolved, let bResume) = resolvedB else {
+            return XCTFail("Device B must map A's history-only sync record onto B's legacy subscription ID")
+        }
+        XCTAssertEqual(bSiteResolved.key, siteB.key)
+        XCTAssertEqual(bVidResolved.title, "星际穿越·旧ID")
+        XCTAssertEqual(bResume?.resumePosition, 85_000)
+
+        let resolvedFavB = try await MediaEntryResolver.resolveFavoriteEntry(favOnB, config: cfgB, watchHistory: storageB.watchHistory(), cmsClient: client)
+        guard case .ready = resolvedFavB else {
+            return XCTFail("Device B must resolve A's favorite under history-only sync")
+        }
+
+        // 3) B resumes to 240s, un-favorites 42, syncs back -> A receives 240s & favorite deletion!
+        storageB.upsertWatchHistory(
+            WatchHistoryItem(
+                site: siteB.key,
+                id: "42",
+                title: movie42.title,
+                poster: movie42.poster,
+                line: "主线",
+                episode: "正片",
+                index: 0,
+                position: 240_000,
+                duration: 6_000_000,
+                updated: 4_000
+            )
+        )
+        XCTAssertFalse(storageB.toggleFavorite(site: siteB.key, video: movie42, nowMs: 4_100))
+        _ = try await davB.syncNow()
+
+        _ = try await davA.syncNow()
+        let histA = storageA.watchHistory().filter { $0.id == "42" }
+        XCTAssertEqual(histA.count, 1)
+        XCTAssertEqual(histA.first?.position, 240_000)
+        XCTAssertTrue(storageA.favorites().filter { $0.id == "42" }.isEmpty, "Device A must receive B's unfavorite under history-only sync")
+
+        // 4) Both devices hold an old record (title + poster); A switches source to PRIVATE -> A syncs -> B syncs TWICE!
+        //    Remote payload MUST never resurrect the old title or poster, and A's local private breakpoint MUST remain.
+        let secretMovie = CmsVideo(id: "88", title: "旧私密大片标题", poster: "https://old-secret.invalid/poster88.jpg")
+        storageA.upsertWatchHistory(
+            WatchHistoryItem(site: siteA.key, id: "88", title: secretMovie.title, poster: secretMovie.poster, line: "主线", episode: "第1集", index: 0, position: 310_000, duration: 3_600_000, updated: 6_000)
+        )
+        XCTAssertTrue(storageA.toggleFavorite(site: siteA.key, video: secretMovie, nowMs: 6_100))
+        _ = try await davA.syncNow()
+        _ = try await davB.syncNow()
+        XCTAssertTrue(storageB.watchHistory().contains(where: { $0.title == "旧私密大片标题" }))
+        XCTAssertTrue(storageB.favorites().contains(where: { $0.title == "旧私密大片标题" }))
+
+        // A switches subscription to PRIVATE and syncs (scrubs remote & emits canonical wire tombstones)
+        var subsA = storageA.subscriptions()
+        subsA[subsA.firstIndex(where: { $0.id == subA.id })!].isPrivate = true
+        storageA.saveSubscriptions(subsA)
+        _ = try await davA.syncNow()
+        // Sync A a second time before B syncs to verify A preserves remote scrub tombstones!
+        _ = try await davA.syncNow()
+
+        // B syncs TWICE while still having syncSubscriptions=false and different legacy ID sub_legacy_old_b!
+        _ = try await davB.syncNow()
+        let snapAfterB1 = await server.snapshot()
+        let remoteAfterB1 = try XCTUnwrap(snapAfterB1.payload)
+        XCTAssertFalse(remoteAfterB1.contains("旧私密大片标题"), "B's 1st sync must recognize A's scrub tombstone and never re-upload old title")
+        XCTAssertFalse(remoteAfterB1.contains("https://old-secret.invalid/poster88.jpg"), "B's 1st sync must never re-upload old poster")
+
+        _ = try await davB.syncNow()
+        let snapAfterB2 = await server.snapshot()
+        let remoteAfterB2 = try XCTUnwrap(snapAfterB2.payload)
+        XCTAssertFalse(remoteAfterB2.contains("旧私密大片标题"), "B's 2nd sync must still keep remote free of old title")
+        XCTAssertFalse(remoteAfterB2.contains("https://old-secret.invalid/poster88.jpg"), "B's 2nd sync must still keep remote free of old poster")
+        let remoteObjAfterB2 = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(remoteAfterB2.utf8)) as? [String: Any])
+        XCTAssertNil(remoteObjAfterB2["subscriptions"], "Subscriptions must remain absent when subscription sync is off")
+
+        // Device A's local private breakpoint & favorite MUST remain intact!
+        XCTAssertEqual(storageA.watchHistory().first(where: { $0.id == "88" })?.position, 310_000)
+        XCTAssertTrue(storageA.favorites().contains(where: { $0.id == "88" }))
+    }
+
+    // MARK: - Closeout Item 2: Public Subscription with Private Child VOD & Live Filtered Everywhere + Removal Cold Start
+
+    func testCloseoutItem2_PublicSubPrivateChildVodAndLiveFilteredAcrossBackupWebDavLanQrAndRemovalColdStart() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("MarcoCloseout2_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let keychain = InMemoryKeychainStore()
+        let storage = TvStorageManager(cachesDirectory: dir, keychain: keychain)
+
+        let mixedRaw = """
+        {
+          "sites": [
+            {"key":"pub_a","name":"公开站A","type":1,"api":"https://pub-a.example/vod"},
+            {"key":"priv_b","name":"私密子站B","type":1,"api":"https://priv-b.example/secret-vod","isPrivate":true,"ext":"secret-ext-config-b"}
+          ],
+          "lives": [
+            {"name":"公开直播A","url":"https://pub-a.example/live.m3u"},
+            {"name":"私密子直播L","url":"https://priv-live.example/hidden.m3u","isPrivate":true}
+          ]
+        }
+        """
+        let subUrl = "https://mixed-parent.example/sub.json"
+        let (parentSub, _) = try storage.upsertSubscription(
+            id: "sub_mixed_parent",
+            name: "混合公开订阅",
+            url: subUrl,
+            rawContent: mixedRaw,
+            isPrivate: false,
+            nowMs: 1_000
+        )
+
+        let pubAKey = CmsSite.canonicalScopedKey(rawKey: "pub_a", subscriptionId: parentSub.id)
+        let privBKey = CmsSite.canonicalScopedKey(rawKey: "priv_b", subscriptionId: parentSub.id)
+        let pubPoster = "https://pub-a.example/poster-a.jpg"
+        let privPoster = "https://priv-b.example/poster-b.jpg"
+
+        storage.upsertWatchHistory(
+            WatchHistoryItem(site: pubAKey, id: "a1", title: "公开影片A", poster: pubPoster, line: "线1", episode: "第1集", index: 0, position: 30_000, duration: 1_800_000, updated: 2_000)
+        )
+        storage.upsertWatchHistory(
+            WatchHistoryItem(site: privBKey, id: "b1", title: "私密子站影片B", poster: privPoster, line: "线1", episode: "第1集", index: 0, position: 95_000, duration: 1_800_000, updated: 2_500)
+        )
+        _ = storage.toggleFavorite(site: pubAKey, video: CmsVideo(id: "a1", title: "公开影片A", poster: pubPoster), nowMs: 2_100)
+        _ = storage.toggleFavorite(site: privBKey, video: CmsVideo(id: "b1", title: "私密子站影片B", poster: privPoster), nowMs: 2_600)
+
+        let forbiddenPrivateTokens = [
+            "私密子站B",
+            "priv_b",
+            "https://priv-b.example/secret-vod",
+            "secret-ext-config-b",
+            "私密子直播L",
+            "https://priv-live.example/hidden.m3u",
+            "私密子站影片B",
+            privPoster,
+        ]
+
+        // 1) Ordinary Backup export: keeps public A, strips private child VOD B & private child Live L
+        let backupJson = try storage.exportBackupJson()
+        XCTAssertTrue(backupJson.contains("公开站A"))
+        XCTAssertTrue(backupJson.contains("https://pub-a.example/vod"))
+        XCTAssertTrue(backupJson.contains("公开影片A"))
+        for token in forbiddenPrivateTokens {
+            XCTAssertFalse(backupJson.contains(token), "Ordinary backup MUST NOT leak private child token '\(token)'")
+        }
+
+        // 2) WebDAV sync (with subscriptions + history enabled): keeps public A, strips private children
+        try storage.saveWebDavConfig(
+            WebDavConfig(
+                url: "https://dav.example/remote.php/dav/files/user",
+                username: "u",
+                password: "synthetic-test-password",
+                syncSubscriptions: true,
+                syncHistory: true
+            )
+        )
+        let davServer = FinalMockWebDavServer()
+        let dav = WebDavSyncService(storage: storage, transport: FinalMockWebDavTransport(server: davServer))
+        _ = try await dav.syncNow()
+        let davSnap = await davServer.snapshot()
+        let davJson = try XCTUnwrap(davSnap.payload)
+        XCTAssertTrue(davJson.contains("公开站A"))
+        XCTAssertTrue(davJson.contains("https://pub-a.example/vod"))
+        XCTAssertTrue(davJson.contains("公开影片A"))
+        for token in forbiddenPrivateTokens {
+            XCTAssertFalse(davJson.contains(token), "WebDAV sync MUST NOT leak private child token '\(token)'")
+        }
+
+        // 3) LAN QR `/configure/<token>/sync`: keeps public A, strips private children
+        let lan = LanConfigServer(storage: storage, syncService: dav)
+        defer { lan.stop() }
+        _ = try await lan.start(loopbackOnly: true)
+        let lanSyncUrl = URL(string: "\(lan.configureUrl(forHost: "127.0.0.1"))/sync")!
+        let (lanData, lanResp) = try await URLSession.shared.data(from: lanSyncUrl)
+        XCTAssertEqual((lanResp as? HTTPURLResponse)?.statusCode, 200)
+        let lanJson = String(decoding: lanData, as: UTF8.self)
+        XCTAssertTrue(lanJson.contains("公开站A"))
+        XCTAssertTrue(lanJson.contains("公开影片A"))
+        for token in forbiddenPrivateTokens {
+            XCTAssertFalse(lanJson.contains(token), "LAN QR sync MUST NOT leak private child token '\(token)'")
+        }
+
+        // 4) Refresh parent subscription removing private child site B (only public A remains), then COLD RESTART!
+        let refreshedRaw = """
+        {
+          "sites": [
+            {"key":"pub_a","name":"公开站A","type":1,"api":"https://pub-a.example/vod"}
+          ],
+          "lives": [
+            {"name":"公开直播A","url":"https://pub-a.example/live.m3u"}
+          ]
+        }
+        """
+        _ = try storage.upsertSubscription(
+            id: parentSub.id,
+            name: parentSub.name,
+            url: subUrl,
+            rawContent: refreshedRaw,
+            isPrivate: false,
+            nowMs: 5_000
+        )
+
+        let restarted = TvStorageManager(cachesDirectory: dir, keychain: keychain)
+        let cfgAfterRestart = restarted.mergedConfig()
+        let pubHistAfter = MediaEntryResolver.publicVisibleWatchHistory(restarted.watchHistory(), in: cfgAfterRestart)
+        let pubFavAfter = MediaEntryResolver.publicVisibleFavorites(restarted.favorites(), in: cfgAfterRestart)
+
+        XCTAssertTrue(pubHistAfter.contains(where: { $0.id == "a1" }))
+        XCTAssertFalse(pubHistAfter.contains(where: { $0.id == "b1" }), "Removed private child site B must NEVER regain public home eligibility after cold restart")
+        XCTAssertFalse(pubFavAfter.contains(where: { $0.id == "b1" }))
+
+        let backdropAfter = MediaEntryResolver.resolvePublicBackdropPosterUrl(
+            ambientPosterSync: true,
+            publicDiscoverVideos: [],
+            publicWatchHistory: restarted.watchHistory(),
+            config: cfgAfterRestart
+        )
+        XCTAssertEqual(backdropAfter, pubPoster)
+        XCTAssertNotEqual(backdropAfter, privPoster)
+
+        // Local private breakpoint for B MUST remain preserved on device!
+        XCTAssertEqual(restarted.watchHistory().first(where: { $0.id == "b1" })?.position, 95_000)
+    }
+
+    // MARK: - Closeout Item 3: Multi-Part Quality-Tagged Line Switch Prompts While True Single-Feature Carries Breakpoint
+
+    @MainActor
+    func testCloseoutItem3_MultiPartQualityTaggedLineSwitchPromptsWhileSingleFeatureCarriesBreakpoint() async throws {
+        let site = CmsSite(key: "part_site", name: "上下集源", type: 1, api: "https://part.example/vod")
+        let twoPartVideo = CmsVideo(
+            id: "two_part_1",
+            title: "双部曲电影",
+            lines: [
+                CmsLine(
+                    name: "线路A",
+                    episodes: [
+                        CmsEpisode(name: "上集 1080P", url: "https://cdn.example/a_part1.m3u8"),
+                        CmsEpisode(name: "下集 1080P", url: "https://cdn.example/a_part2.m3u8"),
+                    ]
+                ),
+                CmsLine(
+                    name: "线路B",
+                    episodes: [
+                        CmsEpisode(name: "下集 1080P", url: "https://cdn.example/b_part2.m3u8"),
+                    ]
+                ),
+            ]
+        )
+
+        let engine = FinalMockPlaybackEngine()
+        let coord = PlaybackSessionCoordinator(
+            initialTarget: PlaybackTargetDescriptor(site: site, video: twoPartVideo, lineIndex: 0, episodeIndex: 0, initialSeekMs: 0),
+            engine: engine,
+            resolver: { target in
+                let ep = target.currentEpisode!
+                return ResolvedPlayback(originalUrl: ep.url, playableUrl: URL(string: ep.url)!)
+            },
+            progressRecorder: { _, _, _ in }
+        )
+
+        coord.startInitialLoad()
+        try await waitUntil { engine.loads.count == 1 }
+        engine.markReady(positionMs: 180_000)
+        let tokBefore = engine.activeItemToken
+
+        // Switching from A's "上集 1080P" to B (which ONLY has "下集 1080P") MUST prompt instead of auto-carrying breakpoint!
+        let outcome = coord.switchVodLine(to: 1)
+        guard case .missingEpisode(let info) = outcome else {
+            return XCTFail("Switching from '上集 1080P' (2-episode line A) to line B containing only '下集 1080P' must prompt, got \(outcome)")
+        }
+        XCTAssertEqual(info.requestedEpisodeName, "上集 1080P")
+        XCTAssertEqual(info.fallbackEpisodeName, "下集 1080P")
+        XCTAssertEqual(info.carrySeekMs, 180_000)
+        XCTAssertEqual(coord.target.lineIndex, 0)
+        XCTAssertEqual(coord.target.episodeIndex, 0)
+        XCTAssertEqual(engine.activeItemToken, tokBefore)
+        coord.teardownAndPersist()
+
+        // Even when both lines have only 1 item, distinct content names with quality tags ("上集 1080P" vs "下集 1080P") must NOT match!
+        XCTAssertNil(
+            PlaybackSessionCoordinator.matchingEpisodeIndex(
+                for: CmsEpisode(name: "上集 1080P", url: "https://cdn.example/1.m3u8"),
+                currentIndex: 0,
+                sourceEpisodeCount: 1,
+                in: [CmsEpisode(name: "下集 1080P", url: "https://cdn.example/2.m3u8")]
+            )
+        )
+
+        // Confirmed single-feature lines whose names are purely generic/quality tags MUST still carry breakpoint!
+        let singleFeatureVideo = CmsVideo(
+            id: "single_movie_1",
+            title: "单正片电影",
+            lines: [
+                CmsLine(name: "主线", episodes: [CmsEpisode(name: "正片 1080P", url: "https://cdn.example/m1.m3u8")]),
+                CmsLine(name: "蓝光备线", episodes: [CmsEpisode(name: "蓝光 4K 国语中字", url: "https://cdn.example/m2.m3u8")]),
+            ]
+        )
+        let singleEngine = FinalMockPlaybackEngine()
+        let singleCoord = PlaybackSessionCoordinator(
+            initialTarget: PlaybackTargetDescriptor(site: site, video: singleFeatureVideo, lineIndex: 0, episodeIndex: 0, initialSeekMs: 0),
+            engine: singleEngine,
+            resolver: { target in
+                let ep = target.currentEpisode!
+                return ResolvedPlayback(originalUrl: ep.url, playableUrl: URL(string: ep.url)!)
+            },
+            progressRecorder: { _, _, _ in }
+        )
+        singleCoord.startInitialLoad()
+        try await waitUntil { singleEngine.loads.count == 1 }
+        singleEngine.markReady(positionMs: 450_000)
+
+        let singleOutcome = singleCoord.switchVodLine(to: 1)
+        XCTAssertEqual(singleOutcome, .switched(lineIndex: 1, episodeIndex: 0, seekMs: 450_000))
+        singleCoord.teardownAndPersist()
+    }
+
     // MARK: - Async Wait Helper
 
     @MainActor

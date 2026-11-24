@@ -103,12 +103,15 @@ public final class AppViewModel: ObservableObject {
     @Published public private(set) var searchBatches: [SiteSearchBatch] = []
     @Published public private(set) var isSearching = false
 
-    // Privacy & in-flight request guards
-    private var stateReloadGeneration: UInt64 = 0
+    // Privacy & per-source in-flight request guards
+    private var sourceInvalidationCounter: UInt64 = 0
+    private var siteInvalidationEpochs: [String: UInt64] = [:]
+    private var liveInvalidationEpochs: [String: UInt64] = [:]
     private var discoverRequestToken: UInt64 = 0
     private var liveRequestToken: UInt64 = 0
     private var searchRequestToken: UInt64 = 0
     private var loadedLiveSourceIdentity: String?
+    private var loadingLiveSourceIdentity: String?
     private var activeLiveSourceIdentity: String?
     private var liveLoadTask: Task<Void, Never>?
 
@@ -164,8 +167,15 @@ public final class AppViewModel: ObservableObject {
         let avail = config.publicAvailableSites
         let publicSiteKeys = Set(avail.map(\.key))
         let publicLiveIds = Set(config.publicSupportedLives.map(PublicCatalogScopeGuard.liveSourceIdentity))
-        if publicSiteKeys != previousPublicSiteKeys || publicLiveIds != previousPublicLiveIds {
-            stateReloadGeneration &+= 1
+        // Invalidate ONLY sources that actually disappeared or turned private, so deleting an
+        // unrelated subscription B never aborts or stalls an active slow load for still-public source A.
+        for removedSiteKey in previousPublicSiteKeys.subtracting(publicSiteKeys) {
+            sourceInvalidationCounter &+= 1
+            siteInvalidationEpochs[removedSiteKey] = sourceInvalidationCounter
+        }
+        for removedLiveId in previousPublicLiveIds.subtracting(publicLiveIds) {
+            sourceInvalidationCounter &+= 1
+            liveInvalidationEpochs[removedLiveId] = sourceInvalidationCounter
         }
 
         let resolvedSelected: CmsSite? = {
@@ -205,10 +215,10 @@ public final class AppViewModel: ObservableObject {
             isLoadingMore = false
         }
 
-        // Purge any in-memory search results whose sources became private or disabled,
-        // and invalidate slow in-flight search batches for removed/private sources.
+        // Purge any in-memory search results whose sources became private or disabled;
+        // late batches from removed/private sites are rejected per-site via siteInvalidationEpochs.
         searchBatches = searchBatches.filter { publicSiteKeys.contains($0.site.key) }
-        if !previousPublicSiteKeys.subtracting(publicSiteKeys).isEmpty {
+        if publicSiteKeys.isEmpty {
             searchTask?.cancel()
             searchRequestToken &+= 1
             isSearching = false
@@ -216,22 +226,31 @@ public final class AppViewModel: ObservableObject {
 
         // Reconcile Live TV strictly by source identity (not list index!) so switching a live
         // source to private clears its channels even when another public live source shifts into
-        // the exact same `selectedLiveSourceIndex`.
+        // the exact same `selectedLiveSourceIndex`, while deleting an unrelated live source does
+        // not abort an in-flight load for a still-public live source.
+        if let loadedId = loadedLiveSourceIdentity, !publicLiveIds.contains(loadedId) {
+            loadedLiveSourceIdentity = nil
+            selectedLiveGroupIndex = 0
+            liveGroups = []
+        }
         let liveReconciliation = PublicCatalogScopeGuard.reconcileLiveSourceSelection(
-            previousLoadedIdentity: loadedLiveSourceIdentity,
+            previousLoadedIdentity: loadingLiveSourceIdentity ?? loadedLiveSourceIdentity,
             currentSelectedIndex: selectedLiveSourceIndex,
             publicLives: config.publicSupportedLives
         )
         selectedLiveSourceIndex = liveReconciliation.nextIndex
-        loadedLiveSourceIdentity = liveReconciliation.nextLoadedIdentity
         if liveReconciliation.shouldClearLoadedGroups {
             liveLoadTask?.cancel()
             liveLoadTask = nil
             liveRequestToken &+= 1
+            loadedLiveSourceIdentity = nil
+            loadingLiveSourceIdentity = nil
             selectedLiveGroupIndex = 0
             liveGroups = []
             liveError = nil
             isLoadingLive = false
+        } else if loadingLiveSourceIdentity == nil {
+            loadedLiveSourceIdentity = liveReconciliation.nextLoadedIdentity
         }
 
         if let openCtx = selectedDetailContext, !publicSiteKeys.contains(openCtx.site.key) {
@@ -369,14 +388,20 @@ public final class AppViewModel: ObservableObject {
         guard let site = activeSite else {
             categories = []
             discoverVideos = []
+            isLoadingDiscover = false
             return
         }
         discoverRequestToken &+= 1
         let reqToken = discoverRequestToken
-        let reqEpoch = stateReloadGeneration
         let reqSiteKey = site.key
+        let reqEpoch = siteInvalidationEpochs[reqSiteKey, default: 0]
         isLoadingDiscover = true
         discoverError = nil
+        defer {
+            if reqToken == discoverRequestToken {
+                isLoadingDiscover = false
+            }
+        }
         do {
             let payload = try await cmsClient.fetchHome(site: site)
             guard !Task.isCancelled,
@@ -384,7 +409,7 @@ public final class AppViewModel: ObservableObject {
                   PublicCatalogScopeGuard.canAcceptDiscoverResponse(
                       siteKey: reqSiteKey,
                       requestEpoch: reqEpoch,
-                      currentEpoch: stateReloadGeneration,
+                      currentEpoch: siteInvalidationEpochs[reqSiteKey, default: 0],
                       activeSiteKey: activeSite?.key,
                       config: config
                   )
@@ -402,11 +427,14 @@ public final class AppViewModel: ObservableObject {
                 config: config
             )
         } catch {
-            guard reqToken == discoverRequestToken, reqEpoch == stateReloadGeneration else { return }
+            guard reqToken == discoverRequestToken,
+                  reqEpoch == siteInvalidationEpochs[reqSiteKey, default: 0],
+                  activeSite?.key == reqSiteKey,
+                  !config.isPrivateSiteKey(reqSiteKey)
+            else {
+                return
+            }
             discoverError = error.localizedDescription
-        }
-        if reqToken == discoverRequestToken {
-            isLoadingDiscover = false
         }
     }
 
@@ -419,10 +447,15 @@ public final class AppViewModel: ObservableObject {
         }
         discoverRequestToken &+= 1
         let reqToken = discoverRequestToken
-        let reqEpoch = stateReloadGeneration
         let reqSiteKey = site.key
+        let reqEpoch = siteInvalidationEpochs[reqSiteKey, default: 0]
         isLoadingDiscover = true
         discoverError = nil
+        defer {
+            if reqToken == discoverRequestToken {
+                isLoadingDiscover = false
+            }
+        }
         do {
             let listing = try await cmsClient.fetchCategory(site: site, categoryId: categoryId, page: 1)
             guard !Task.isCancelled,
@@ -431,7 +464,7 @@ public final class AppViewModel: ObservableObject {
                   PublicCatalogScopeGuard.canAcceptDiscoverResponse(
                       siteKey: reqSiteKey,
                       requestEpoch: reqEpoch,
-                      currentEpoch: stateReloadGeneration,
+                      currentEpoch: siteInvalidationEpochs[reqSiteKey, default: 0],
                       activeSiteKey: activeSite?.key,
                       config: config
                   )
@@ -442,11 +475,14 @@ public final class AppViewModel: ObservableObject {
             currentPage = listing.page
             totalPageCount = listing.pageCount
         } catch {
-            guard reqToken == discoverRequestToken, reqEpoch == stateReloadGeneration else { return }
+            guard reqToken == discoverRequestToken,
+                  reqEpoch == siteInvalidationEpochs[reqSiteKey, default: 0],
+                  activeSite?.key == reqSiteKey,
+                  !config.isPrivateSiteKey(reqSiteKey)
+            else {
+                return
+            }
             discoverError = error.localizedDescription
-        }
-        if reqToken == discoverRequestToken {
-            isLoadingDiscover = false
         }
     }
 
@@ -460,10 +496,15 @@ public final class AppViewModel: ObservableObject {
             return
         }
         let reqToken = discoverRequestToken
-        let reqEpoch = stateReloadGeneration
         let reqSiteKey = site.key
+        let reqEpoch = siteInvalidationEpochs[reqSiteKey, default: 0]
         let reqCategoryId = selectedCategoryId
         isLoadingMore = true
+        defer {
+            if reqToken == discoverRequestToken {
+                isLoadingMore = false
+            }
+        }
         let nextPage = currentPage + 1
         if let nextListing = try? await cmsClient.fetchCategory(
             site: site,
@@ -476,12 +517,11 @@ public final class AppViewModel: ObservableObject {
                   PublicCatalogScopeGuard.canAcceptDiscoverResponse(
                       siteKey: reqSiteKey,
                       requestEpoch: reqEpoch,
-                      currentEpoch: stateReloadGeneration,
+                      currentEpoch: siteInvalidationEpochs[reqSiteKey, default: 0],
                       activeSiteKey: activeSite?.key,
                       config: config
                   )
             else {
-                isLoadingMore = false
                 return
             }
             let existingIds = Set(discoverVideos.map(\.id))
@@ -490,7 +530,6 @@ public final class AppViewModel: ObservableObject {
             currentPage = nextPage
             totalPageCount = max(totalPageCount, nextListing.pageCount)
         }
-        isLoadingMore = false
     }
 
     // MARK: - Live TV
@@ -502,16 +541,19 @@ public final class AppViewModel: ObservableObject {
         guard lives.indices.contains(sourceIndex) else {
             liveGroups = []
             loadedLiveSourceIdentity = nil
+            loadingLiveSourceIdentity = nil
+            isLoadingLive = false
             return
         }
         let targetSource = lives[sourceIndex]
         let targetIdentity = PublicCatalogScopeGuard.liveSourceIdentity(targetSource)
         liveRequestToken &+= 1
         let reqToken = liveRequestToken
-        let reqEpoch = stateReloadGeneration
+        let reqEpoch = liveInvalidationEpochs[targetIdentity, default: 0]
 
         selectedLiveSourceIndex = sourceIndex
         selectedLiveGroupIndex = 0
+        loadingLiveSourceIdentity = targetIdentity
         isLoadingLive = true
         liveError = nil
         let client = cmsClient
@@ -519,14 +561,22 @@ public final class AppViewModel: ObservableObject {
             do {
                 let groups = try await client.fetchLiveGroups(for: targetSource)
                 await MainActor.run { [weak self] in
-                    guard let strongSelf = self,
-                          !Task.isCancelled,
+                    guard let strongSelf = self else { return }
+                    defer {
+                        if reqToken == strongSelf.liveRequestToken {
+                            strongSelf.isLoadingLive = false
+                            if strongSelf.loadingLiveSourceIdentity == targetIdentity {
+                                strongSelf.loadingLiveSourceIdentity = nil
+                            }
+                        }
+                    }
+                    guard !Task.isCancelled,
                           PublicCatalogScopeGuard.canAcceptLiveResponse(
                               sourceIdentity: targetIdentity,
                               requestToken: reqToken,
                               currentToken: strongSelf.liveRequestToken,
                               requestEpoch: reqEpoch,
-                              currentEpoch: strongSelf.stateReloadGeneration,
+                              currentEpoch: strongSelf.liveInvalidationEpochs[targetIdentity, default: 0],
                               config: strongSelf.config
                           )
                     else {
@@ -534,19 +584,28 @@ public final class AppViewModel: ObservableObject {
                     }
                     strongSelf.liveGroups = groups
                     strongSelf.loadedLiveSourceIdentity = targetIdentity
-                    strongSelf.isLoadingLive = false
                 }
             } catch {
                 await MainActor.run { [weak self] in
-                    guard let strongSelf = self,
-                          !Task.isCancelled,
+                    guard let strongSelf = self else { return }
+                    defer {
+                        if reqToken == strongSelf.liveRequestToken {
+                            strongSelf.isLoadingLive = false
+                            if strongSelf.loadingLiveSourceIdentity == targetIdentity {
+                                strongSelf.loadingLiveSourceIdentity = nil
+                            }
+                        }
+                    }
+                    guard !Task.isCancelled,
                           reqToken == strongSelf.liveRequestToken,
-                          reqEpoch == strongSelf.stateReloadGeneration
+                          reqEpoch == strongSelf.liveInvalidationEpochs[targetIdentity, default: 0],
+                          strongSelf.config.publicSupportedLives.contains(where: {
+                              PublicCatalogScopeGuard.liveSourceIdentity($0) == targetIdentity
+                          })
                     else {
                         return
                     }
                     strongSelf.liveError = error.localizedDescription
-                    strongSelf.isLoadingLive = false
                 }
             }
         }
@@ -639,11 +698,13 @@ public final class AppViewModel: ObservableObject {
         searchTask?.cancel()
         searchRequestToken &+= 1
         let reqToken = searchRequestToken
-        let reqEpoch = stateReloadGeneration
+        let sitesSnapshot = config.publicAvailableSites
+        let reqEpochsBySite = Dictionary(
+            uniqueKeysWithValues: sitesSnapshot.map { ($0.key, siteInvalidationEpochs[$0.key, default: 0]) }
+        )
         searchBatches = []
         isSearching = true
 
-        let sitesSnapshot = config.publicAvailableSites
         searchTask = Task { [weak self] in
             guard let client = self?.cmsClient else { return }
             _ = await client.searchAllSites(sites: sitesSnapshot, keyword: kw) { [weak self] batch in
@@ -654,8 +715,8 @@ public final class AppViewModel: ObservableObject {
                               siteKey: batch.site.key,
                               requestToken: reqToken,
                               currentToken: strongSelf.searchRequestToken,
-                              requestEpoch: reqEpoch,
-                              currentEpoch: strongSelf.stateReloadGeneration,
+                              requestEpoch: reqEpochsBySite[batch.site.key, default: 0],
+                              currentEpoch: strongSelf.siteInvalidationEpochs[batch.site.key, default: 0],
                               config: strongSelf.config
                           )
                     else {
