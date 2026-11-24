@@ -234,6 +234,7 @@ public final class LiteProbe extends Instrumentation {
 
             if (extended) {
                 runExtended059Checks();
+                runRound2ReworkChecks();
                 newChecksCount = count - baselineCount;
             }
 
@@ -325,6 +326,110 @@ public final class LiteProbe extends Instrumentation {
                 LiteStore.isFavorite(
                         a, legacyEmptyApi.siteKey, a.sites.get(0).api, legacyEmptyApi.vodId, true),
                 "upgrade: 0.5.9 recognizes legacy 0.5.8 empty-siteApi favorite");
+
+        // R1 post-upgrade verification: 0.5.8 unscoped tombstone (20) vs older API-identified cloud (10),
+        // canonicalizing no-API record + API update, single unfavorite, 2 consecutive syncs, and restart!
+        final String siteKey = a.sites.get(0).key;
+        final String siteApi = a.sites.get(0).api;
+        JSONObject deletedOlderCloud =
+                new JSONObject()
+                        .put("site", siteKey)
+                        .put("siteApi", siteApi)
+                        .put("id", "058_deleted")
+                        .put("title", "0.5.8已删影片")
+                        .put("episode", "第1集")
+                        .put("position", 5000)
+                        .put("updated", 10L);
+        JSONObject updatedLegacyCloud =
+                new JSONObject()
+                        .put("site", siteKey)
+                        .put("siteApi", siteApi)
+                        .put("id", "demo_legacy")
+                        .put("title", "旧版无API影片")
+                        .put("episode", "第2集")
+                        .put("position", 12000)
+                        .put("updated", 1700000003000L);
+        String cloudPayload =
+                new JSONObject()
+                        .put("schema", "marco-movie-sync")
+                        .put("version", 2)
+                        .put(
+                                "watch_history",
+                                new JSONArray().put(deletedOlderCloud).put(updatedLegacyCloud))
+                        .put(
+                                "favorites",
+                                new JSONArray().put(deletedOlderCloud).put(updatedLegacyCloud))
+                        .put("tombstones", new JSONObject())
+                        .toString();
+        LiteSync.MergeResult upM1 = a.mergeAndApplyOnAnyThread(cloudPayload);
+        LiteSync.MergeResult upM2 = a.mergeAndApplyOnAnyThread(cloudPayload);
+        check(
+                upM1.historyCount == 2
+                        && upM1.favoriteCount == 2
+                        && upM2.historyCount == 2
+                        && upM2.favoriteCount == 2
+                        && LiteStore.findHistory(a, siteKey, siteApi, "058_deleted", true) == null
+                        && !LiteStore.isFavorite(a, siteKey, siteApi, "058_deleted", true),
+                "upgrade R1: 0.5.8 tombstone(20) blocks older API cloud(10) and no-API+API canonicalize without duplicates across 2 syncs");
+
+        LiteStore.FavoriteEntry legacyFavEntry = new LiteStore.FavoriteEntry();
+        legacyFavEntry.siteKey = siteKey;
+        legacyFavEntry.siteApi = siteApi;
+        legacyFavEntry.vodId = "demo_legacy";
+        legacyFavEntry.vodName = "旧版无API影片";
+        boolean stillFavAfterSingleToggle = LiteStore.toggleFavorite(a, legacyFavEntry, true);
+        a.recordFavoriteToggleTombstone(siteKey, siteApi, "demo_legacy", false, true);
+        check(
+                !stillFavAfterSingleToggle
+                        && !LiteStore.isFavorite(a, siteKey, siteApi, "demo_legacy", true)
+                        && LiteStore.getFavorites(a).size() == 1,
+                "upgrade R1: single unfavorite clears canonicalized legacy favorite");
+
+        String oldNoApiCloudCopy =
+                new JSONObject()
+                        .put("schema", "marco-movie-sync")
+                        .put("version", 2)
+                        .put("watch_history", new JSONArray())
+                        .put(
+                                "favorites",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", siteKey)
+                                                        .put("id", "demo_legacy")
+                                                        .put("title", "旧版无API影片")
+                                                        .put("updated", 1700000001000L)))
+                        .put("tombstones", new JSONObject())
+                        .toString();
+        LiteSync.MergeResult upUnfav1 = a.mergeAndApplyOnAnyThread(oldNoApiCloudCopy);
+        LiteSync.MergeResult upUnfav2 = a.mergeAndApplyOnAnyThread(oldNoApiCloudCopy);
+        check(
+                upUnfav1.favoriteCount == 1
+                        && upUnfav2.favoriteCount == 1
+                        && !LiteStore.isFavorite(a, siteKey, siteApi, "demo_legacy", true)
+                        && LiteStore.isFavorite(a, siteKey, siteApi, "demo", true),
+                "upgrade R1: two consecutive merges after unfavorite do not resurrect old no-API copy");
+
+        // Restart LiteActivity to confirm persistence across cold restart
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.finish();
+                    }
+                });
+        SystemClock.sleep(500);
+        a =
+                (LiteActivity)
+                        startActivitySync(
+                                new Intent(getTargetContext(), LiteActivity.class)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        check(
+                a != null
+                        && LiteStore.getFavorites(a).size() == 1
+                        && LiteStore.isFavorite(a, siteKey, siteApi, "demo", true)
+                        && !LiteStore.isFavorite(a, siteKey, siteApi, "demo_legacy", true)
+                        && LiteStore.findHistory(a, siteKey, siteApi, "058_deleted", true) == null,
+                "upgrade R1: post-sync unfavorite and no-resurrection state persist across activity restart");
     }
 
     private void runBaseline28Checks() throws Exception {
@@ -1527,5 +1632,836 @@ public final class LiteProbe extends Instrumentation {
         check(
                 waitStatusContains("确实零命中", 10000),
                 "Item 10: all-succeeding empty search explicitly reports true zero-hit");
+    }
+
+    private static View findChildWithText(View root, String exactText) {
+        if (root instanceof android.widget.TextView
+                && exactText.equals(((android.widget.TextView) root).getText().toString())) {
+            return root;
+        }
+        if (root instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) root;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View found = findChildWithText(g.getChildAt(i), exactText);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private void runRound2ReworkChecks() throws Exception {
+        final String base = "http://10.0.2.2:8773";
+
+        // === R2: Distinct from codes sharing display name, overlapping episode union, safe VOD line switch ===
+        JSONObject dupShow =
+                new JSONObject()
+                        .put(
+                                "vod_play_list",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("show", "高清")
+                                                                        .put("from", "A"))
+                                                        .put("url", "EP1$" + base + "/video.mp4"))
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("show", "高清")
+                                                                        .put("from", "B"))
+                                                        .put("url", "EP1$" + base + "/video2.mp4")));
+        List<LiteActivity.PlayLine> dupLines = LiteActivity.extractPlayLines(dupShow, "");
+        check(
+                dupLines.size() == 2
+                        && "A".equals(dupLines.get(0).rawFrom)
+                        && "B".equals(dupLines.get(1).rawFrom),
+                "R2: distinct from codes A/B sharing display name '高清' are both kept on API14");
+
+        JSONObject overlapVod =
+                new JSONObject()
+                        .put("vod_play_from", "one")
+                        .put(
+                                "vod_play_url",
+                                "1$" + base + "/video.mp4#2$" + base + "/video2.mp4")
+                        .put(
+                                "vod_play_list",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("show", "高清")
+                                                                        .put("from", "one"))
+                                                        .put(
+                                                                "url",
+                                                                "2$"
+                                                                        + base
+                                                                        + "/video2.mp4#3$"
+                                                                        + base
+                                                                        + "/case15-b1.mp4")));
+        List<LiteActivity.PlayLine> ovLines = LiteActivity.extractPlayLines(overlapVod, "");
+        check(
+                ovLines.size() == 1 && ovLines.get(0).episodes.size() == 3,
+                "R2: overlapping traditional [1,2] and structured [2,3] episodes merge into [1,2,3] on API14");
+
+        final JSONObject switchVod =
+                new JSONObject()
+                        .put("vod_id", "r2_switch")
+                        .put("vod_name", "R2换线防跳集")
+                        .put("vod_play_from", "A$$$B$$$C")
+                        .put(
+                                "vod_play_url",
+                                "EP1$"
+                                        + base
+                                        + "/video.mp4#EP2$"
+                                        + base
+                                        + "/video2.mp4$$$Trailer$"
+                                        + base
+                                        + "/short-live.mp4#EP1$"
+                                        + base
+                                        + "/case15-a1.mp4#EP2$"
+                                        + base
+                                        + "/case15-b1.mp4$$$花絮A$"
+                                        + base
+                                        + "/video.mp4#特辑B$"
+                                        + base
+                                        + "/video2.mp4");
+        final LiteCatalog.Site dummySwitchSite =
+                LiteCatalog.parse(
+                                "{\"sites\":[{\"key\":\"r2_sw\",\"name\":\"R2Switch\",\"type\":1,\"api\":\""
+                                        + base
+                                        + "/cms-a\"}]}",
+                                base)
+                        .get(0);
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = dummySwitchSite;
+                        a.activeDetailLine = 0;
+                        a.showDetail(switchVod);
+                        a.playingEpisodeIndex = 1;
+                        a.play(base + "/video2.mp4", "EP2");
+                    }
+                });
+        check(waitReady(25000), "R2: line A/EP2 prepared before line switch");
+        final List<LiteActivity.PlayLine> swLines = LiteActivity.extractPlayLines(switchVod, "");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.showInPlayerLineDialog(swLines);
+                    }
+                });
+        SystemClock.sleep(350);
+        // Select line B (index 1) via D-pad (ICS exits touch mode on first DPAD_DOWN)
+        for (int tries = 0; tries < 5; tries++) {
+            final int[] selPos = new int[] {-1};
+            main(
+                    new Runnable() {
+                        public void run() {
+                            if (a.activeInPlayerDialog != null
+                                    && a.activeInPlayerDialog.getListView() != null) {
+                                selPos[0] =
+                                        a.activeInPlayerDialog
+                                                .getListView()
+                                                .getSelectedItemPosition();
+                            }
+                        }
+                    });
+            if (selPos[0] == 1) break;
+            pressKey(KeyEvent.KEYCODE_DPAD_DOWN);
+        }
+        pressKey(KeyEvent.KEYCODE_DPAD_CENTER);
+        SystemClock.sleep(600);
+        check(
+                waitReady(25000)
+                        && a.activeSession != null
+                        && "B".equals(a.activeSession.lineName)
+                        && "EP2".equals(a.activeSession.epName)
+                        && (base + "/case15-b1.mp4").equals(a.activeSession.streamUrl)
+                        && waitClockAdvances(),
+                "R2: D-pad VOD line switch A/EP2 -> B([Trailer,EP1,EP2]) plays B/EP2 (not EP1) and advances clock (got "
+                        + (a.activeSession != null
+                                ? (a.activeSession.lineName
+                                        + "/"
+                                        + a.activeSession.epName
+                                        + " "
+                                        + a.activeSession.streamUrl)
+                                : "null")
+                        + ")");
+
+        // Switch from B/EP2 to unmatchable line C ([花絮A, 特辑B]) -> must open episode picker instead of jumping!
+        final String beforeAmbigUrl = a.activeSession.streamUrl;
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.switchToPlayLineInPlayer(swLines, 2);
+                    }
+                });
+        SystemClock.sleep(350);
+        final boolean[] ambigDialogOpen = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        ambigDialogOpen[0] =
+                                a.activeInPlayerDialog != null && a.activeInPlayerDialog.isShowing();
+                        a.dismissActiveInPlayerDialog();
+                    }
+                });
+        check(
+                ambigDialogOpen[0]
+                        && waitStatusContains("未能自动匹配当前剧集", 2000)
+                        && a.activeSession != null
+                        && beforeAmbigUrl.equals(a.activeSession.streamUrl),
+                "R2: uncertain target line C opens episode picker without jumping to wrong episode");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // === R5: Active cast controllable; after exiting cast A, stale bridge cannot control local VOD B ===
+        final LiteCast.Bridge castBridge = a.createCastBridge();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.playCastStream(
+                                base + "/video.mp4",
+                                "R5投屏A",
+                                Collections.<String, String>emptyMap());
+                    }
+                });
+        check(waitReady(25000), "R5: active cast A prepared");
+        SystemClock.sleep(400);
+        check(
+                "PLAYING".equals(castBridge.transportState()) && castBridge.durationMs() > 0,
+                "R5: active cast bridge reports PLAYING and valid duration");
+        castBridge.pause();
+        SystemClock.sleep(500);
+        check(
+                "PAUSED_PLAYBACK".equals(castBridge.transportState()),
+                "R5: active cast bridge pause() pauses cast playback");
+        castBridge.resume();
+        SystemClock.sleep(500);
+        check(
+                "PLAYING".equals(castBridge.transportState()),
+                "R5: active cast bridge resume() resumes cast playback");
+        // Exit cast A and start local VOD B
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+        SystemClock.sleep(300);
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = dummySwitchSite;
+                        a.activeDetailLine = 0;
+                        a.showDetail(switchVod);
+                        a.playingEpisodeIndex = 0;
+                        a.play(base + "/video.mp4", "EP1");
+                    }
+                });
+        check(waitReady(25000), "R5: local VOD B prepared after exiting cast A");
+        SystemClock.sleep(600);
+        check(
+                "STOPPED".equals(castBridge.transportState())
+                        && castBridge.positionMs() == 0
+                        && castBridge.durationMs() == 0,
+                "R5: stale cast bridge reports STOPPED and 0ms during local VOD B");
+        castBridge.pause();
+        castBridge.stop();
+        SystemClock.sleep(500);
+        final boolean[] localStillPlaying = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        localStillPlaying[0] =
+                                a.inPlayback
+                                        && !a.inCastPlayback
+                                        && a.player != null
+                                        && a.player.isPlaying();
+                    }
+                });
+        check(
+                localStillPlaying[0],
+                "R5: stale cast bridge pause()/stop() cannot interrupt local VOD B");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // === R3 & R4 & R7 & R8: Parser precedence, override, prefix headers, rawFrom routing, nested/relative URL, proxy Referer, M3U %decode, XML single ac, search failure ===
+        importConfigViaPairing(base + "/config-r2-parse");
+
+        // R3a: Explicit site playUrl beats failing global 503 parser
+        final LiteCatalog.Site sExplicit = findSiteByKey("r2_explicit");
+        check(sExplicit != null && sExplicit.supported, "R3: loaded r2_explicit site");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sExplicit;
+                        a.detail("r2_exp_1");
+                    }
+                });
+        check(waitDetailId("r2_exp_1", 10000), "R3: loaded r2_explicit detail");
+        main(
+                new Runnable() {
+                    public void run() {
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000) && waitClockAdvances(), "R3: explicit site playUrl resolves and plays");
+        JSONArray r3aLogs = fetchServerLogs();
+        boolean sawSiteParse = false, sawExpMedia = false, sawGlobal503 = false;
+        for (int i = 0; i < r3aLogs.length(); i++) {
+            String p = r3aLogs.getJSONObject(i).optString("path");
+            if ("/r2-site-parse".equals(p)) sawSiteParse = true;
+            if ("/r2-ok-explicit.mp4".equals(p)) sawExpMedia = true;
+            if ("/r2-global-503".equals(p)) sawGlobal503 = true;
+        }
+        check(
+                sawSiteParse && sawExpMedia && !sawGlobal503,
+                "R3: server logs confirm /r2-site-parse + /r2-ok-explicit.mp4 hit and /r2-global-503 skipped");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // R3b: Manual override playUrl overrides global 503 parser
+        final LiteCatalog.Site sOverrideBefore = findSiteByKey("r2_override");
+        check(sOverrideBefore != null, "R3: found r2_override site");
+        main(
+                new Runnable() {
+                    public void run() {
+                        try {
+                            JSONObject edits = a.readSiteEditsJson();
+                            JSONObject overrides = edits.optJSONObject("overrides");
+                            if (overrides == null) overrides = new JSONObject();
+                            overrides.put(
+                                    sOverrideBefore.siteId(),
+                                    new JSONObject().put("playUrl", base + "/r2-override-parse?url="));
+                            edits.put("overrides", overrides);
+                            a.writeSiteEditsJson(edits);
+                            a.loadedConfigSignature = "";
+                            a.loadConfiguredSites();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                });
+        final LiteCatalog.Site sOverrideAfter = findSiteByKey("r2_override");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sOverrideAfter;
+                        a.detail("r2_ovr_1");
+                    }
+                });
+        check(waitDetailId("r2_ovr_1", 10000), "R3: loaded r2_override detail");
+        main(
+                new Runnable() {
+                    public void run() {
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000) && waitClockAdvances(), "R3: overridden playUrl resolves and plays");
+        JSONArray r3bLogs = fetchServerLogs();
+        boolean sawOvrParse = false, sawOvrMedia = false, sawOvr503 = false;
+        for (int i = 0; i < r3bLogs.length(); i++) {
+            String p = r3bLogs.getJSONObject(i).optString("path");
+            if ("/r2-override-parse".equals(p)) sawOvrParse = true;
+            if ("/r2-ok-override.mp4".equals(p)) sawOvrMedia = true;
+            if ("/r2-global-503".equals(p)) sawOvr503 = true;
+        }
+        check(
+                sawOvrParse && sawOvrMedia && !sawOvr503,
+                "R3: manual override hit /r2-override-parse + /r2-ok-override.mp4 without hitting 503");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // R3c: Same-origin legacy prefix sends site Referer on preflight and plays (0 403s)
+        final LiteCatalog.Site sPrefix = findSiteByKey("r2_prefix");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sPrefix;
+                        a.detail("r2_pre_1");
+                    }
+                });
+        check(waitDetailId("r2_pre_1", 10000), "R3: loaded r2_prefix detail");
+        main(
+                new Runnable() {
+                    public void run() {
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000) && waitClockAdvances(), "R3: same-origin prefix with Referer plays");
+        JSONArray r3cLogs = fetchServerLogs();
+        boolean sawPrefix200 = false, sawPrefix403 = false;
+        for (int i = 0; i < r3cLogs.length(); i++) {
+            JSONObject row = r3cLogs.getJSONObject(i);
+            if ("/r2-prefix-ref".equals(row.optString("path"))) {
+                int st = row.optInt("status");
+                if ((st == 200 || st == 206) && "https://r2-site.example/".equals(row.optString("referer"))) {
+                    sawPrefix200 = true;
+                }
+                if (st == 403) sawPrefix403 = true;
+            }
+        }
+        check(
+                sawPrefix200 && !sawPrefix403,
+                "R3: same-origin prefix preflight and playback received site Referer with 0 403s");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // R3d: Structured display name "高清" with rawFrom="B" routes to parser B (/r2-ok-b.mp4, NOT /r2-wrong.mp4)
+        final LiteCatalog.Site sRouting = findSiteByKey("r2_routing");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sRouting;
+                        a.detail("r2_rt_1");
+                    }
+                });
+        check(waitDetailId("r2_rt_1", 10000), "R3: loaded r2_routing detail");
+        main(
+                new Runnable() {
+                    public void run() {
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000) && waitClockAdvances(), "R3: structured from=B routed and played");
+        JSONArray r3dLogs = fetchServerLogs();
+        boolean sawParseB = false, sawOkB = false, sawWrong = false;
+        for (int i = 0; i < r3dLogs.length(); i++) {
+            String p = r3dLogs.getJSONObject(i).optString("path");
+            if ("/r2-parse-b".equals(p)) sawParseB = true;
+            if ("/r2-ok-b.mp4".equals(p)) sawOkB = true;
+            if ("/r2-parse-wrong".equals(p) || "/r2-wrong.mp4".equals(p)) sawWrong = true;
+        }
+        check(
+                sawParseB && sawOkB && !sawWrong,
+                "R3: structured show='高清'/from='B' routed to /r2-parse-b and played /r2-ok-b.mp4");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // R4: Query-nested .m3u8? goes to parser + redirected JSON bare relative media/out.m3u8 resolves & plays
+        final LiteCatalog.Site sRel = findSiteByKey("r2_rel_query");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sRel;
+                        a.detail("r2_r4_1");
+                    }
+                });
+        check(waitDetailId("r2_r4_1", 10000), "R4: loaded r2_rel_query detail");
+        main(
+                new Runnable() {
+                    public void run() {
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(
+                waitReady(30000) && waitClockAdvances(),
+                "R4: query-nested .m3u8? parsed & bare relative media/out.m3u8 played on API14");
+        JSONArray r4Logs = fetchServerLogs();
+        boolean sawRelEntry = false, sawRelMedia = false;
+        for (int i = 0; i < r4Logs.length(); i++) {
+            String p = r4Logs.getJSONObject(i).optString("path");
+            if ("/r2-rel-parse-entry".equals(p)) sawRelEntry = true;
+            if ("/r2-v2/parsers/media/out.m3u8".equals(p)) sawRelMedia = true;
+        }
+        check(
+                sawRelEntry && sawRelMedia,
+                "R4: server logs confirm parser hit and final-URL relative /r2-v2/parsers/media/out.m3u8 fetched");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // R7: proxy:// channel Referer + M3U %encoded Referer playback + XML prefilled ?lang=zh&ac=list
+        clearServerLogs();
+        List<LiteCatalog.LiveSource> r7Lives =
+                LiteCatalog.parseLives(
+                        a.getPreferences(0).getString("config", ""),
+                        a.getPreferences(0).getString("address", ""));
+        check(!r7Lives.isEmpty(), "R7: parsed proxy:// live source");
+        final List<LiteCatalog.LiveGroup> r7Groups = LiteCatalog.fetchLiveGroups(r7Lives.get(0));
+        check(
+                !r7Groups.isEmpty() && !r7Groups.get(0).channels.isEmpty(),
+                "R7: fetched proxy:// M3U playlist using channel-level Referer");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.playLiveChannel(
+                                r7Groups.get(0), 0, 0, Collections.<String, String>emptyMap());
+                    }
+                });
+        check(
+                waitReady(30000) && waitClockAdvances(),
+                "R7: played M3U channel with percent-decoded Referer header");
+        JSONArray r7Logs = fetchServerLogs();
+        boolean sawProxyM3u200 = false, sawPctHls200 = false, sawR7403 = false;
+        for (int i = 0; i < r7Logs.length(); i++) {
+            JSONObject row = r7Logs.getJSONObject(i);
+            String p = row.optString("path");
+            int st = row.optInt("status");
+            if ("/r2-proxy-m3u".equals(p) && st == 200) sawProxyM3u200 = true;
+            if ("/r2-pct-hls/stream.m3u8".equals(p)
+                    && st == 200
+                    && "https://r2-pct-tv.example/".equals(row.optString("referer"))) {
+                sawPctHls200 = true;
+            }
+            if (st == 403) sawR7403 = true;
+        }
+        check(
+                sawProxyM3u200 && sawPctHls200 && !sawR7403,
+                "R7: server confirmed proxy Referer + percent-decoded HLS Referer with 0 403s");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        final LiteCatalog.Site sXmlPre = findSiteByKey("r2_xml_prefill");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sXmlPre;
+                        a.detail("r2_xml_1");
+                    }
+                });
+        check(
+                waitDetailId("r2_xml_1", 10000)
+                        && "预带XML片".equals(a.currentDetail.optString("vod_name")),
+                "R7: XML source prefilled with ?lang=zh&ac=list loads detail cleanly with single ac=videolist");
+
+        // R8: Single-source HTML login & XML error fail (not zero-hit), plus all-failed, partial-failed, pure empty RSS
+        final LiteCatalog.Site sHtml = findSiteByKey("r2_html_login");
+        final LiteCatalog.Site sXmlErr = findSiteByKey("r2_xml_error");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sHtml;
+                        a.catalog("测试", "", 1);
+                    }
+                });
+        check(
+                waitStatusContains("加载失败", 10000) && !a.status.getText().toString().contains("零命中"),
+                "R8: single-source HTTP 200 HTML login page reports failure instead of zero-hit");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sXmlErr;
+                        a.catalog("测试", "", 1);
+                    }
+                });
+        check(
+                waitStatusContains("加载失败", 10000) && !a.status.getText().toString().contains("零命中"),
+                "R8: single-source HTTP 200 XML error doc reports failure instead of zero-hit");
+
+        importConfigViaPairing(base + "/config-r2-all-fail-search");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.globalSearch("测试");
+                    }
+                });
+        check(
+                waitStatusContains("全部失败", 10000),
+                "R8: global search across HTML login + XML error sites reports all-failed");
+
+        importConfigViaPairing(base + "/config-r2-partial-fail-search");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.globalSearch("测试");
+                    }
+                });
+        check(
+                waitStatusContains("1 个正常无命中", 10000) && waitStatusContains("2 个失败", 2000),
+                "R8: global search with 1 valid empty RSS + 2 error sites reports partial failure");
+
+        importConfigViaPairing(base + "/config-r2-pure-empty-rss");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.globalSearch("测试");
+                    }
+                });
+        check(
+                waitStatusContains("确实零命中", 10000),
+                "R8: global search on valid empty RSS reports true zero-hit");
+
+        // === R6: First-time QR '当前源' pill, cross-source category isolation, history reorder identity focus, >15s post-error timer ===
+        // R6a: First-time QR import from empty config reveals usable currentSiteNavPill immediately
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.getPreferences(0)
+                                .edit()
+                                .remove("config")
+                                .remove("address")
+                                .remove("selected_site")
+                                .remove("selected_site_api")
+                                .commit();
+                        a.selected = null;
+                        a.loadedConfigSignature = "";
+                        a.home();
+                    }
+                });
+        check(
+                a.currentSiteNavPill != null
+                        && a.currentSiteNavPill.getVisibility() == View.GONE,
+                "R6a: currentSiteNavPill starts hidden when no config is imported");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.configure();
+                    }
+                });
+        long qrDl = SystemClock.uptimeMillis() + 5000;
+        while (a.pairing == null && SystemClock.uptimeMillis() < qrDl) SystemClock.sleep(100);
+        String qrResp =
+                request(
+                        a.pairing.port(),
+                        "/" + a.pairing.token,
+                        "url=" + URLEncoder.encode(base + "/config-v059", "UTF-8"));
+        check(qrResp.startsWith("200:"), "R6a: first-time QR import returned 200");
+        SystemClock.sleep(600);
+        final boolean[] pillReady = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        pillReady[0] =
+                                a.currentSiteNavPill != null
+                                        && a.currentSiteNavPill.getVisibility() == View.VISIBLE;
+                        if (pillReady[0]) a.currentSiteNavPill.performClick();
+                    }
+                });
+        check(
+                pillReady[0] && waitCardsAtLeast(1, 10000),
+                "R6a: first-time QR import immediately makes top '当前源' button visible and clickable");
+
+        // R6b: Site A (cat1='动作') -> Global Search -> Site B detail -> Back -> click '当前：辅站B' must NOT show '动作' or send t=cat1 to B
+        final LiteCatalog.Site r6SiteA = findSiteByKey("site_a");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = r6SiteA;
+                        a.categories.clear();
+                        a.categoriesSiteId = r6SiteA.siteId();
+                        a.catalog("", "", 1);
+                    }
+                });
+        check(waitCardsAtLeast(2, 10000) && !a.categories.isEmpty(), "R6b: Site A categories loaded");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.globalSearch("共搜");
+                    }
+                });
+        check(waitCardsAtLeast(2, 10000), "R6b: global search rendered Site A & Site B cards");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.lastRenderedCards.get(1).performClick();
+                    }
+                });
+        check(
+                waitDetailId("vod_b1", 10000) && "site_b".equals(a.selected.key),
+                "R6b: opened Site B detail from global search");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+        check(waitCardsAtLeast(2, 10000), "R6b: back returned to global search");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.currentSiteNavPill.performClick();
+                    }
+                });
+        check(waitCardsAtLeast(1, 10000), "R6b: clicked '当前：辅站B' pill");
+        final boolean[] leakedActionChip = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        leakedActionChip[0] = findChildWithText(a.page, "动作") != null;
+                    }
+                });
+        JSONArray r6bLogs = fetchServerLogs();
+        boolean sentACatToB = false;
+        for (int i = 0; i < r6bLogs.length(); i++) {
+            JSONObject row = r6bLogs.getJSONObject(i);
+            if ("/cms-b".equals(row.optString("path")) && row.optString("query").contains("t=cat1")) {
+                sentACatToB = true;
+            }
+        }
+        check(
+                !leakedActionChip[0] && !sentACatToB,
+                "R6b: clicking '当前：辅站B' never renders Site A's '动作' category or sends t=cat1 to B");
+
+        // R6c: History list reorders after playback -> Back restores focus by video identity (index 0, NOT stale index 1)
+        LiteStore.clearHistory(a);
+        LiteStore.HistoryEntry m1 = new LiteStore.HistoryEntry();
+        m1.siteKey = r6SiteA.key;
+        m1.siteName = r6SiteA.name;
+        m1.siteApi = r6SiteA.api;
+        m1.vodId = "vod_drama";
+        m1.vodName = "连播测试剧";
+        m1.epName = "第1集";
+        m1.epUrl = base + "/video.mp4";
+        m1.updatedAt = 20000L;
+        LiteStore.HistoryEntry m2 = new LiteStore.HistoryEntry();
+        m2.siteKey = r6SiteA.key;
+        m2.siteName = r6SiteA.name;
+        m2.siteApi = r6SiteA.api;
+        m2.vodId = "vod_case15";
+        m2.vodName = "结构化选集测试片";
+        m2.epName = "第01集";
+        m2.epUrl = base + "/case15-a1.mp4";
+        m2.updatedAt = 10000L;
+        LiteStore.saveHistory(a, m2, true);
+        LiteStore.saveHistory(a, m1, true);
+        // History order is now [0: vod_drama, 1: vod_case15]
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.historyPage();
+                    }
+                });
+        check(waitCardsAtLeast(2, 5000), "R6c: history page rendered 2 items");
+        main(
+                new Runnable() {
+                    public void run() {
+                        // Click index 1 (vod_case15)
+                        a.lastRenderedCards.get(1).performClick();
+                    }
+                });
+        check(waitDetailId("vod_case15", 10000), "R6c: opened index 1 history item (vod_case15)");
+        // Simulate playback moving vod_case15 to index 0 (newest updatedAt)
+        m2.updatedAt = 30000L;
+        LiteStore.saveHistory(a, m2, true);
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+        SystemClock.sleep(400);
+        check(
+                "history".equals(a.currentPageKind) && a.lastRestoredFocusIndex == 0,
+                "R6c: history reorder restores focus by video identity to index 0 (got "
+                        + a.lastRestoredFocusIndex
+                        + ")");
+
+        // R6d: After fast playback error, waiting >15s must NOT overwrite error text or steal focus
+        List<LiteCatalog.LiveSource> r6Lives =
+                LiteCatalog.parseLives(
+                        a.getPreferences(0).getString("config", ""),
+                        a.getPreferences(0).getString("address", ""));
+        final List<LiteCatalog.LiveGroup> r6Groups = LiteCatalog.fetchLiveGroups(r6Lives.get(0));
+        int fastBadCh = -1;
+        for (int i = 0; i < r6Groups.get(0).channels.size(); i++) {
+            if ("坏线快错台".equals(r6Groups.get(0).channels.get(i).name)) {
+                fastBadCh = i;
+                break;
+            }
+        }
+        final int fastBadChFinal = fastBadCh;
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.playLiveChannel(
+                                r6Groups.get(0),
+                                fastBadChFinal,
+                                0,
+                                Collections.<String, String>emptyMap());
+                    }
+                });
+        check(
+                waitFailed(15000) && waitStatusContains("无法播放", 2000),
+                "R6d: bad fast-error line failed with error message");
+        final View[] backToolbarBtn = new View[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        backToolbarBtn[0] = findChildWithText(a.playerControlRow, "返回");
+                        if (backToolbarBtn[0] != null) {
+                            backToolbarBtn[0].requestFocus();
+                        }
+                    }
+                });
+        check(
+                backToolbarBtn[0] != null && backToolbarBtn[0].hasFocus(),
+                "R6d: moved focus away from switchLine button to '返回'");
+        SystemClock.sleep(16500);
+        final String[] post16sStatus = new String[1];
+        final boolean[] backStillFocused = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        post16sStatus[0] = a.status != null ? a.status.getText().toString() : "";
+                        backStillFocused[0] =
+                                backToolbarBtn[0] != null && backToolbarBtn[0].hasFocus();
+                    }
+                });
+        check(
+                post16sStatus[0].contains("无法播放")
+                        && !post16sStatus[0].contains("播放准备较慢")
+                        && backStillFocused[0],
+                "R6d: >15s after playback error, stale slow-prepare timer neither overwrote error text nor stole focus");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
     }
 }

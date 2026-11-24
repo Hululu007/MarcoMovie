@@ -164,6 +164,13 @@ public final class LiteUpgradeProbe extends Instrumentation {
 
             LiteStore.setHistoryRaw(activity, histArr.toString());
             LiteStore.setFavoritesRaw(activity, favArr.toString());
+            // Also seed real 0.5.8 unscoped tombstones (ts=20) to verify R1 no-resurrection after upgrade
+            String legacyTombs =
+                    new JSONObject()
+                            .put("hist:" + realKey + "\n058_deleted", 20L)
+                            .put("fav:" + realKey + "\n058_deleted", 20L)
+                            .toString();
+            LiteStore.setTombstonesRaw(activity, legacyTombs);
             activity.getPreferences(0)
                     .edit()
                     .putString("resume_address", "http://10.0.2.2:8773/video.mp4")
@@ -173,8 +180,10 @@ public final class LiteUpgradeProbe extends Instrumentation {
             List<LiteStore.HistoryEntry> seededHist = LiteStore.getHistory(activity);
             List<LiteStore.FavoriteEntry> seededFav = LiteStore.getFavorites(activity);
             check(
-                    seededHist.size() == 2 && seededFav.size() == 2,
-                    "0.5.8 history & favorites written and readable");
+                    seededHist.size() == 2
+                            && seededFav.size() == 2
+                            && LiteStore.getTombstonesRaw(activity).contains("058_deleted"),
+                    "0.5.8 history, favorites & unscoped tombstones written and readable");
             result.putString(
                     "stream",
                     "PASS "

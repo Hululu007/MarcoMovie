@@ -1,5 +1,6 @@
 """Run isolated synthetic + E2E tests strictly on the API 14 emulator. Never selects a physical TV/phone."""
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -231,6 +232,119 @@ def build_fixture_configs() -> dict:
             'sites': [
                 {'key': 'dup_cms', 'name': '同键甲站', 'api': f'{base}/cms-dup1', 'type': 1, 'searchable': 1},
                 {'key': 'dup_cms', 'name': '同键乙站', 'api': f'{base}/cms-dup2', 'type': 1, 'searchable': 1},
+            ]
+        },
+        '/config-r2-parse': {
+            'parses': [
+                {'name': 'FailGlobal503', 'type': 1, 'url': f'{base}/r2-global-503?url='},
+                {'name': 'ParseShowHD', 'type': 1, 'url': f'{base}/r2-parse-wrong?url=', 'ext': {'flag': ['高清']}},
+                {'name': 'ParseFromB', 'type': 1, 'url': f'{base}/r2-parse-b?url=', 'ext': {'flag': ['B']}},
+            ],
+            'sites': [
+                {
+                    'key': 'r2_explicit',
+                    'name': 'R2显式解析站',
+                    'api': f'{base}/r2-cms-explicit',
+                    'type': 1,
+                    'parse': 1,
+                    'playUrl': f'{base}/r2-site-parse?url=',
+                    'searchable': 0,
+                },
+                {
+                    'key': 'r2_override',
+                    'name': 'R2手动覆盖站',
+                    'api': f'{base}/r2-cms-override',
+                    'type': 1,
+                    'parse': 1,
+                    'searchable': 0,
+                },
+                {
+                    'key': 'r2_prefix',
+                    'name': 'R2同源前缀头站',
+                    'api': f'{base}/r2-cms-prefix',
+                    'type': 1,
+                    'playUrl': f'{base}/r2-prefix-ref?url=',
+                    'header': {'Referer': 'https://r2-site.example/'},
+                    'searchable': 0,
+                },
+                {
+                    'key': 'r2_routing',
+                    'name': 'R2结构化路由站',
+                    'api': f'{base}/r2-cms-routing',
+                    'type': 1,
+                    'parse': 1,
+                    'searchable': 0,
+                },
+                {
+                    'key': 'r2_rel_query',
+                    'name': 'R2相对嵌套解析站',
+                    'api': f'{base}/r2-cms-r4',
+                    'type': 1,
+                    'parse': 1,
+                    'playUrl': f'{base}/r2-rel-parse-entry?url=',
+                    'searchable': 0,
+                },
+                {
+                    'key': 'r2_xml_prefill',
+                    'name': 'R2预带acXML站',
+                    'api': f'{base}/r2-xml-prefill?lang=zh&ac=list',
+                    'type': 0,
+                    'searchable': 0,
+                },
+                {
+                    'key': 'r2_html_login',
+                    'name': 'R2登录页假成功站',
+                    'api': f'{base}/r2-html-login',
+                    'type': 1,
+                    'searchable': 1,
+                },
+                {
+                    'key': 'r2_xml_error',
+                    'name': 'R2错误XML站',
+                    'api': f'{base}/r2-xml-error',
+                    'type': 0,
+                    'searchable': 1,
+                },
+                {
+                    'key': 'r2_rss_empty',
+                    'name': 'R2合法空RSS站',
+                    'api': f'{base}/r2-rss-empty',
+                    'type': 0,
+                    'searchable': 1,
+                },
+            ],
+            'lives': [
+                {
+                    'group': 'R2代理节目单',
+                    'channels': [
+                        {
+                            'name': '受保护Proxy节目单',
+                            'header': {'Referer': 'https://r2-proxy-ref.example/'},
+                            'urls': [
+                                'proxy://do=live&type=txt&ext='
+                                + base64.b64encode(f'{base}/r2-proxy-m3u'.encode('utf-8')).decode('ascii')
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+        '/config-r2-all-fail-search': {
+            'sites': [
+                {'key': 'r2_html_login', 'name': 'R2登录页站', 'api': f'{base}/r2-html-login', 'type': 1, 'searchable': 1},
+                {'key': 'r2_xml_error', 'name': 'R2错误XML站', 'api': f'{base}/r2-xml-error', 'type': 0, 'searchable': 1},
+            ]
+        },
+        '/config-r2-partial-fail-search': {
+            'sites': [
+                {'key': 'r2_html_login', 'name': 'R2登录页站', 'api': f'{base}/r2-html-login', 'type': 1, 'searchable': 1},
+                {'key': 'r2_xml_error', 'name': 'R2错误XML站', 'api': f'{base}/r2-xml-error', 'type': 0, 'searchable': 1},
+                {'key': 'r2_rss_empty', 'name': 'R2合法空RSS站', 'api': f'{base}/r2-rss-empty', 'type': 0, 'searchable': 1},
+            ]
+        },
+        '/config-r2-pure-empty-rss': {
+            'sites': [
+                {'key': 'r2_rss_empty', 'name': 'R2合法空RSS站', 'api': f'{base}/r2-rss-empty', 'type': 0, 'searchable': 1},
             ]
         },
     }
@@ -682,6 +796,162 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     ],
                 },
             )
+            return
+
+        # === Round 2 (R2-R8) E2E Fixture Endpoints ===
+        if path in ('/r2-ok-explicit.mp4', '/r2-ok-override.mp4', '/r2-ok-b.mp4'):
+            self._send_bytes(200, 'video/mp4', (self.media_dir / 'baseline.mp4').read_bytes())
+            return
+        if path == '/r2-wrong.mp4':
+            self._send_bytes(200, 'video/mp4', (self.media_dir / 'video2.mp4').read_bytes())
+            return
+        if path == '/r2-global-503':
+            self._send_bytes(503, 'text/plain; charset=utf-8', b'global parser down')
+            return
+        if path == '/r2-site-parse':
+            self._send_json(200, {'url': f'{base}/r2-ok-explicit.mp4'})
+            return
+        if path == '/r2-override-parse':
+            self._send_json(200, {'url': f'{base}/r2-ok-override.mp4'})
+            return
+        if path == '/r2-parse-wrong':
+            self._send_json(200, {'url': f'{base}/r2-wrong.mp4'})
+            return
+        if path == '/r2-parse-b':
+            self._send_json(200, {'url': f'{base}/r2-ok-b.mp4'})
+            return
+        if path == '/r2-prefix-ref':
+            got_ref = self.headers.get('Referer', '')
+            if got_ref != 'https://r2-site.example/':
+                self._send_bytes(403, 'text/plain; charset=utf-8', f'missing site Referer: {got_ref}'.encode('utf-8'))
+                return
+            self._send_bytes(200, 'video/mp4', (self.media_dir / 'baseline.mp4').read_bytes())
+            return
+        if path == '/r2-rel-parse-entry':
+            record_req(self.command, path, query, self.headers, 302)
+            self.send_response(302)
+            self.send_header('Location', f'{base}/r2-v2/parsers/api')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        if path == '/r2-v2/parsers/api':
+            self._send_json(200, {'url': 'media/out.m3u8'})
+            return
+        if path == '/r2-v2/parsers/media/out.m3u8':
+            self._send_bytes(200, 'application/vnd.apple.mpegurl', (self.media_dir / 'stream.m3u8').read_bytes())
+            return
+        if path.startswith('/r2-v2/parsers/media/segment') and path.endswith('.ts'):
+            name = path.rsplit('/', 1)[1]
+            self._send_bytes(200, 'video/mp2t', (self.media_dir / name).read_bytes())
+            return
+        if path == '/r2-cms-explicit':
+            self._send_json(200, {
+                'pagecount': 1,
+                'list': [{
+                    'vod_id': 'r2_exp_1',
+                    'vod_name': 'R2显式解析片',
+                    'vod_play_from': '高清',
+                    'vod_play_url': f'正片${base}/watch-exp?id=1',
+                }],
+            })
+            return
+        if path == '/r2-cms-override':
+            self._send_json(200, {
+                'pagecount': 1,
+                'list': [{
+                    'vod_id': 'r2_ovr_1',
+                    'vod_name': 'R2覆盖解析片',
+                    'vod_play_from': '高清',
+                    'vod_play_url': f'正片${base}/watch-ovr?id=2',
+                }],
+            })
+            return
+        if path == '/r2-cms-prefix':
+            self._send_json(200, {
+                'pagecount': 1,
+                'list': [{
+                    'vod_id': 'r2_pre_1',
+                    'vod_name': 'R2前缀头片',
+                    'vod_play_from': '前缀线',
+                    'vod_play_url': f'正片${base}/watch-pre?id=3',
+                }],
+            })
+            return
+        if path == '/r2-cms-routing':
+            self._send_json(200, {
+                'pagecount': 1,
+                'list': [{
+                    'vod_id': 'r2_rt_1',
+                    'vod_name': 'R2结构化路由片',
+                    'vod_play_list': [
+                        {
+                            'player_info': {'show': '高清', 'from': 'B'},
+                            'url': f'正片${base}/watch-rt?id=4',
+                        }
+                    ],
+                }],
+            })
+            return
+        if path == '/r2-cms-r4':
+            self._send_json(200, {
+                'pagecount': 1,
+                'list': [{
+                    'vod_id': 'r2_r4_1',
+                    'vod_name': 'R4嵌套相对片',
+                    'vod_play_from': '解析线',
+                    'vod_play_url': f'正片${base}/watch-r4?next=https://cdn.invalid/fake.m3u8?ticket=demo',
+                }],
+            })
+            return
+        if path == '/r2-proxy-m3u':
+            got_ref = self.headers.get('Referer', '')
+            if got_ref != 'https://r2-proxy-ref.example/':
+                self._send_bytes(403, 'text/plain; charset=utf-8', f'proxy m3u missing ref: {got_ref}'.encode('utf-8'))
+                return
+            m3u = (
+                '#EXTM3U\n'
+                '#EXTINF:-1 group-title="R2解码组",百分号编码台\n'
+                f'{base}/r2-pct-hls/stream.m3u8|Referer=https%3A%2F%2Fr2-pct-tv.example%2F\n'
+            )
+            self._send_bytes(200, 'audio/x-mpegurl; charset=utf-8', m3u.encode('utf-8'))
+            return
+        if path.startswith('/r2-pct-hls/'):
+            got_ref = self.headers.get('Referer', '')
+            if got_ref != 'https://r2-pct-tv.example/':
+                self._send_bytes(403, 'text/plain; charset=utf-8', f'pct hls wrong ref: {got_ref}'.encode('utf-8'))
+                return
+            name = path.rsplit('/', 1)[1]
+            mime = 'application/vnd.apple.mpegurl' if name.endswith('.m3u8') else 'video/mp2t'
+            self._send_bytes(200, mime, (self.media_dir / name).read_bytes())
+            return
+        if path == '/r2-xml-prefill':
+            ac_list = qs.get('ac', [])
+            lang_val = qs.get('lang', [''])[0]
+            if len(ac_list) != 1 or lang_val != 'zh':
+                self._send_bytes(400, 'text/plain; charset=utf-8', f'bad xml query: {query}'.encode('utf-8'))
+                return
+            if ac_list[0] == 'list':
+                xml = '<?xml version="1.0" encoding="utf-8"?><rss><class><ty id="1">预带分类</ty></class><list page="1" pagecount="1"/></rss>'
+                self._send_bytes(200, 'application/xml; charset=utf-8', xml.encode('utf-8'))
+                return
+            if ac_list[0] == 'videolist':
+                xml = (
+                    '<?xml version="1.0" encoding="utf-8"?><rss><list page="1" pagecount="1">'
+                    '<video><id>r2_xml_1</id><name><![CDATA[预带XML片]]></name>'
+                    f'<dl><dd flag="xml"><![CDATA[正片${base}/video.mp4]]></dd></dl></video></list></rss>'
+                )
+                self._send_bytes(200, 'application/xml; charset=utf-8', xml.encode('utf-8'))
+                return
+            self._send_bytes(400, 'text/plain; charset=utf-8', f'unsupported ac: {ac_list}'.encode('utf-8'))
+            return
+        if path == '/r2-html-login':
+            self._send_bytes(200, 'text/html; charset=utf-8', b'<html><body>Login required</body></html>')
+            return
+        if path == '/r2-xml-error':
+            self._send_bytes(200, 'application/xml; charset=utf-8', b'<error>upstream unavailable</error>')
+            return
+        if path == '/r2-rss-empty':
+            self._send_bytes(200, 'application/xml; charset=utf-8', b'<?xml version="1.0" encoding="utf-8"?><rss><list page="1" pagecount="1"></list></rss>')
             return
 
         self._send_json(404, {'error': f'unknown path {path}'})
