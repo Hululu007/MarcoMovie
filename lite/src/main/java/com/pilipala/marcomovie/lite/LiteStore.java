@@ -435,6 +435,9 @@ public final class LiteStore {
             appPrefs.edit()
                     .remove("resume_address")
                     .remove("resume_site_api")
+                    .remove("resume_vod_id")
+                    .remove("resume_ep_name")
+                    .remove("resume_line_from")
                     .remove("resume_ms")
                     .apply();
         }

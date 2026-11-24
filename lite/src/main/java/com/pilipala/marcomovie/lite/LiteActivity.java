@@ -7404,6 +7404,108 @@ public final class LiteActivity extends Activity {
         }
     }
 
+    static int resolveSavedResumeMsForEntries(
+            PlaybackSession session,
+            String identity,
+            String siteApi,
+            String vodId,
+            String fallbackTitle,
+            LiteStore.HistoryEntry h,
+            String savedResumeAddr,
+            String savedResumeApi,
+            String savedResumeVodId,
+            String savedResumeEpName,
+            String savedResumeLineFrom,
+            int savedResumeMs) {
+        if (session != null && session.kind != PlaybackSession.KIND_VOD) return 0;
+        String sa = siteApi == null ? "" : siteApi;
+        String vId = vodId == null ? "" : vodId;
+        String epTitle = session != null ? session.epName : fallbackTitle;
+        boolean isHttpIdentity =
+                identity != null
+                        && (identity.regionMatches(true, 0, "http://", 0, 7)
+                                || identity.regionMatches(true, 0, "https://", 0, 8));
+        if (h != null) {
+            if (identity != null
+                    && identity.length() > 0
+                    && identity.equals(h.epUrl)
+                    && !hasExplicitEpisodeConflict(epTitle, h.epName)
+                    && (isHttpIdentity
+                            || canonicalSeasonNumber(epTitle)
+                                    == canonicalSeasonNumber(h.epName))) {
+                return Math.max(0, h.positionMs);
+            }
+            boolean exactNameMatch =
+                    epTitle != null && epTitle.length() > 0 && epTitle.equals(h.epName);
+            boolean canonicalMatch =
+                    !exactNameMatch
+                            && epTitle != null
+                            && epTitle.length() > 0
+                            && sameCanonicalEpisode(epTitle, h.epName);
+            if (exactNameMatch || canonicalMatch) {
+                boolean safeNameResume = true;
+                if (session != null && !session.lineEpisodes.isEmpty()) {
+                    int sameMatchCount = 0;
+                    boolean historyUrlInSameLine = false;
+                    for (int i = 0; i < session.lineEpisodes.size(); i++) {
+                        EpisodeItem item = session.lineEpisodes.get(i);
+                        if (exactNameMatch
+                                ? epTitle.equals(item.name)
+                                : sameCanonicalEpisode(epTitle, item.name)) {
+                            sameMatchCount++;
+                        }
+                        if (h.epUrl != null
+                                && h.epUrl.length() > 0
+                                && h.epUrl.equals(item.url)) {
+                            historyUrlInSameLine = true;
+                        }
+                    }
+                    if (sameMatchCount > 1 || historyUrlInSameLine) {
+                        safeNameResume = false;
+                    }
+                }
+                if (safeNameResume) {
+                    return Math.max(0, h.positionMs);
+                }
+            }
+            // Authoritative per-video history exists for a different or conflicting episode:
+            // never fall through to the legacy global resume pref and leak another episode's clock.
+            return 0;
+        }
+        String rAddr = savedResumeAddr == null ? "" : savedResumeAddr;
+        String rApi = savedResumeApi == null ? "" : savedResumeApi;
+        String rVodId = savedResumeVodId == null ? "" : savedResumeVodId;
+        String rEpName = savedResumeEpName == null ? "" : savedResumeEpName;
+        String rLineFrom = savedResumeLineFrom == null ? "" : savedResumeLineFrom;
+        boolean apiCompatible =
+                rApi.length() == 0 || sa.length() == 0 || rApi.equals(sa);
+        boolean vodCompatible =
+                rVodId.length() == 0 || vId.length() == 0 || rVodId.equals(vId);
+        boolean epCompatible =
+                !hasExplicitEpisodeConflict(epTitle, rEpName)
+                        && (isHttpIdentity
+                                || rEpName.length() == 0
+                                || canonicalSeasonNumber(epTitle)
+                                        == canonicalSeasonNumber(rEpName));
+        boolean tokenReliable =
+                isHttpIdentity
+                        || (rEpName.length() > 0
+                                && (rLineFrom.length() == 0
+                                        || session == null
+                                        || session.lineFrom.length() == 0
+                                        || rLineFrom.equals(session.lineFrom)));
+        if (apiCompatible
+                && vodCompatible
+                && epCompatible
+                && tokenReliable
+                && identity != null
+                && identity.length() > 0
+                && identity.equals(rAddr)) {
+            if (savedResumeMs > 0) return savedResumeMs;
+        }
+        return 0;
+    }
+
     int findSavedResumeMs(PlaybackSession session, String identity) {
         if (session != null && session.kind != PlaybackSession.KIND_VOD) return 0;
         String sk = session != null && session.siteKey.length() > 0
@@ -7415,63 +7517,24 @@ public final class LiteActivity extends Activity {
         String vId = session != null && session.vodId.length() > 0
                 ? session.vodId
                 : (currentDetail != null ? currentDetail.optString("vod_id", "") : "");
-        String epTitle = session != null ? session.epName : playbackTitle;
-        if (sk.length() > 0 && vId.length() > 0) {
-            LiteStore.HistoryEntry h =
-                    LiteStore.findHistory(this, sk, sa, vId, isUniqueSiteKey(sk));
-            if (h != null) {
-                if (identity != null
-                        && identity.length() > 0
-                        && identity.equals(h.epUrl)
-                        && !hasExplicitEpisodeConflict(epTitle, h.epName)) {
-                    return Math.max(0, h.positionMs);
-                }
-                boolean exactNameMatch =
-                        epTitle != null && epTitle.length() > 0 && epTitle.equals(h.epName);
-                boolean canonicalMatch =
-                        !exactNameMatch
-                                && epTitle != null
-                                && epTitle.length() > 0
-                                && sameCanonicalEpisode(epTitle, h.epName);
-                if (exactNameMatch || canonicalMatch) {
-                    boolean safeNameResume = true;
-                    if (session != null && !session.lineEpisodes.isEmpty()) {
-                        int sameMatchCount = 0;
-                        boolean historyUrlInSameLine = false;
-                        for (int i = 0; i < session.lineEpisodes.size(); i++) {
-                            EpisodeItem item = session.lineEpisodes.get(i);
-                            if (exactNameMatch
-                                    ? epTitle.equals(item.name)
-                                    : sameCanonicalEpisode(epTitle, item.name)) {
-                                sameMatchCount++;
-                            }
-                            if (h.epUrl != null
-                                    && h.epUrl.length() > 0
-                                    && h.epUrl.equals(item.url)) {
-                                historyUrlInSameLine = true;
-                            }
-                        }
-                        if (sameMatchCount > 1 || historyUrlInSameLine) {
-                            safeNameResume = false;
-                        }
-                    }
-                    if (safeNameResume) {
-                        return Math.max(0, h.positionMs);
-                    }
-                }
-            }
-        }
-        String savedResumeAddr = getPreferences(0).getString("resume_address", "");
-        String savedResumeApi = getPreferences(0).getString("resume_site_api", "");
-        boolean apiCompatible =
-                savedResumeApi.length() == 0
-                        || sa.length() == 0
-                        || savedResumeApi.equals(sa);
-        if (apiCompatible && identity != null && identity.equals(savedResumeAddr)) {
-            int ms = getPreferences(0).getInt("resume_ms", 0);
-            if (ms > 0) return ms;
-        }
-        return 0;
+        LiteStore.HistoryEntry h =
+                (sk.length() > 0 && vId.length() > 0)
+                        ? LiteStore.findHistory(this, sk, sa, vId, isUniqueSiteKey(sk))
+                        : null;
+        android.content.SharedPreferences p = getPreferences(0);
+        return resolveSavedResumeMsForEntries(
+                session,
+                identity,
+                sa,
+                vId,
+                playbackTitle,
+                h,
+                p.getString("resume_address", ""),
+                p.getString("resume_site_api", ""),
+                p.getString("resume_vod_id", ""),
+                p.getString("resume_ep_name", ""),
+                p.getString("resume_line_from", ""),
+                p.getInt("resume_ms", 0));
     }
 
     boolean playNextEpisodeFromSession(PlaybackSession session) {
@@ -7860,6 +7923,9 @@ public final class LiteActivity extends Activity {
                         .edit()
                         .putString("resume_address", entry.epUrl)
                         .putString("resume_site_api", entry.siteApi)
+                        .putString("resume_vod_id", entry.vodId)
+                        .putString("resume_ep_name", entry.epName)
+                        .putString("resume_line_from", entry.lineFrom)
                         .putInt("resume_ms", entry.positionMs)
                         .apply();
                 LiteStore.saveHistory(this, entry, isUniqueSiteKey(entry.siteKey));
@@ -7871,6 +7937,9 @@ public final class LiteActivity extends Activity {
                         .edit()
                         .putString("resume_address", session.playbackIdentity)
                         .putString("resume_site_api", session.siteApi)
+                        .putString("resume_vod_id", session.vodId)
+                        .putString("resume_ep_name", session.epName)
+                        .putString("resume_line_from", session.lineFrom)
                         .putInt("resume_ms", Math.max(0, adjustedPos))
                         .apply();
             }
