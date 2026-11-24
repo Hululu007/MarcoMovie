@@ -3846,7 +3846,7 @@ http://127.0.0.1:18080/b1.m3u8
         expect(pauseCalls, 1);
         expect(playCalls, 0);
 
-        // 2) Late native error arrives while paused -> visible paused notice, NO auto open/play/failover
+        // 2) Late native error arrives directly while paused -> visible paused notice persists, NO auto open/play/failover
         player.handleNativeEvent({
           'type': 'error',
           'code': 5400103,
@@ -3857,6 +3857,7 @@ http://127.0.0.1:18080/b1.m3u8
         for (var s = 0; s < 20; s++) {
           await tester.pump(const Duration(seconds: 1));
         }
+        expect(find.textContaining('已暂停'), findsOneWidget);
         expect(opens, ['http://127.0.0.1:18080/pause_a1.m3u8']);
         expect(playCalls, 0);
 
@@ -3867,6 +3868,133 @@ http://127.0.0.1:18080/b1.m3u8
           'http://127.0.0.1:18080/pause_a1.m3u8',
           'http://127.0.0.1:18080/pause_a1.m3u8',
         ]);
+        expect(find.textContaining('已暂停'), findsNothing);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 250));
+      },
+    );
+
+    testWidgets(
+      'R4-1 paused live stream keeps pause intent across delayed playing=true -> playing=false -> error and only reopens on user continue',
+      (tester) async {
+        const avChannel = MethodChannel('com.pilipala.marcomovie/ohos_avplayer');
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+        final opens = <String>[];
+        var playCalls = 0;
+        var pauseCalls = 0;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(avChannel, (call) async {
+          if (call.method == 'create') {
+            return <String, dynamic>{'playerId': 83, 'textureId': 830};
+          }
+          if (call.method == 'open') {
+            opens.add((call.arguments as Map)['url'] as String);
+          } else if (call.method == 'play') {
+            playCalls++;
+          } else if (call.method == 'pause') {
+            pauseCalls++;
+          }
+          return true;
+        });
+
+        const chA = LiveChannel(
+          name: '迟到回报暂停频道A',
+          group: '央视频道',
+          urls: [
+            'http://127.0.0.1:18080/pause_late_a1.m3u8',
+            'http://127.0.0.1:18080/pause_late_a2.m3u8',
+          ],
+        );
+        final player = OhosPlatformPlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(key: 'live', name: '直播', type: 0, api: ''),
+              video: CmsVideo(
+                id: chA.name,
+                title: chA.name,
+                lines: [CmsLine(name: chA.group, episodes: chA.episodes)],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              isLive: true,
+              initialLiveChannel: chA,
+              liveGroups: const [LiveGroup(name: '央视频道', channels: [chA])],
+              debugPlayer: Player(platformPlayer: player),
+              debugVideoSurface: const SizedBox.expand(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(opens, ['http://127.0.0.1:18080/pause_late_a1.m3u8']);
+
+        // 1) A1 begins starting -> user explicitly pauses
+        player.handleNativeEvent({
+          'type': 'state',
+          'playing': false,
+          'buffering': true,
+          'completed': false,
+        });
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.sendKeyEvent(LogicalKeyboardKey.space);
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(pauseCalls, 1);
+        expect(playCalls, 0);
+
+        // 2) Delayed native playing=true arrives after user pause -> pause intent stays intact
+        //    and native pause is re-issued so audio cannot continue while UI is paused.
+        player.handleNativeEvent({
+          'type': 'state',
+          'playing': true,
+          'buffering': false,
+          'completed': false,
+        });
+        await tester.pump();
+        expect(pauseCalls, greaterThanOrEqualTo(2));
+        expect(playCalls, 0);
+
+        // 3) Native settles to playing=false, then reports terminal error
+        player.handleNativeEvent({
+          'type': 'state',
+          'playing': false,
+          'buffering': false,
+          'completed': false,
+        });
+        await tester.pump();
+        player.handleNativeEvent({
+          'type': 'error',
+          'code': 5400103,
+          'message': 'AVPlayer error: stream failed after delayed playing while paused',
+        });
+        await tester.pump(const Duration(milliseconds: 200));
+
+        // 4) Wait 20 seconds: UI STILL shows paused notice, A1 open count stays 1, never switches to A2
+        for (var s = 0; s < 20; s++) {
+          await tester.pump(const Duration(seconds: 1));
+        }
+        expect(find.textContaining('已暂停'), findsOneWidget);
+        expect(opens, ['http://127.0.0.1:18080/pause_late_a1.m3u8']);
+        expect(playCalls, 0);
+
+        // 5) User explicitly clicks the center play/continue button -> NOW opens A1 for the 2nd time
+        final playBtn = find.byKey(const Key('player-center-play-pause'));
+        if (playBtn.evaluate().isNotEmpty) {
+          await tester.tap(playBtn);
+        } else {
+          await tester.sendKeyEvent(LogicalKeyboardKey.space);
+        }
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(opens, [
+          'http://127.0.0.1:18080/pause_late_a1.m3u8',
+          'http://127.0.0.1:18080/pause_late_a1.m3u8',
+        ]);
+        expect(find.textContaining('已暂停'), findsNothing);
 
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(milliseconds: 250));

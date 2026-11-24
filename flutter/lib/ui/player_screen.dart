@@ -416,6 +416,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _enginePlay() {
     _userPausedPlayback = false;
     _startup.setUserPaused(false);
+    if (_hudText.startsWith('已暂停')) {
+      _hudTimer?.cancel();
+      if (mounted) {
+        setState(() => _hudText = '');
+      } else {
+        _hudText = '';
+      }
+    }
     if (_pausedEngineInvalidated && _playbackError.isEmpty) {
       _pausedEngineInvalidated = false;
       final resumeMs = _isLiveStream
@@ -1339,12 +1347,21 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _playerSubscriptions.add(_player.stream.playing.listen((playing) {
       if (mounted && _allowEvents && _matchesActiveMedia) {
+        if (playing && _userPausedPlayback) {
+          // A late async play() settled after the user explicitly paused.
+          // Preserve the user's pause intent and drive the native player back
+          // to paused so UI and audio stay aligned.
+          _startup.updateState(playing: false, userPaused: true);
+          if (_playing) {
+            setState(() => _playing = false);
+          }
+          PlaybackWakelock.setEnabled(false);
+          unawaited(_player.pause());
+          return;
+        }
         if (playing && widget.site.isEmby && _embySession == null) {
           _openCurrentEpisode(resumeMs: 0);
           return;
-        }
-        if (playing) {
-          _userPausedPlayback = false;
         }
         _startup.updateState(
           playing: playing,
@@ -1513,7 +1530,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             _playing = false;
             _controlsVisible = true;
           });
-          _showHud('已暂停 · 当前源已断开，继续播放将重新连接');
+          _showHud('已暂停 · 当前源已断开，继续播放将重新连接', persistent: true);
           return;
         }
         if (_isWindowsPlayerPlatform &&
@@ -1646,8 +1663,18 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     _startup.position(nextPos);
-    if (nextPlaying) {
-      _userPausedPlayback = false;
+    if (nextPlaying && _userPausedPlayback) {
+      _startup.updateState(
+        playing: false,
+        buffering: nextBuffering,
+        userPaused: true,
+      );
+      _playing = false;
+      _buffering = nextBuffering;
+      PlaybackWakelock.setEnabled(false);
+      unawaited(ctrl.pause());
+      if (mounted) setState(() {});
+      return;
     }
     _startup.updateState(
       playing: nextPlaying,
@@ -2306,6 +2333,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     _userPausedPlayback = false;
     _pausedEngineInvalidated = false;
     _ohosRenderedFirstFrame = false;
+    if (_hudText.startsWith('已暂停')) {
+      _hudTimer?.cancel();
+      _hudText = '';
+    }
     _startup.reset();
     if (!bypassLocalProxy && !forceLiveLocalProxy && !useAlternateLiveUa) {
       _liveDirectFallbackTried = false;
@@ -3437,10 +3468,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     _scheduleHide();
   }
 
-  void _showHud(String text) {
+  void _showHud(String text, {bool persistent = false}) {
     if (!mounted) return;
     _hudTimer?.cancel();
     setState(() => _hudText = text);
+    if (persistent) return;
     _hudTimer = Timer(const Duration(milliseconds: 1100), () {
       if (mounted && !_speedBoosting && _hudText == text) {
         setState(() => _hudText = '');

@@ -369,6 +369,8 @@ class PrepareOhosTests(unittest.TestCase):
             self.assertIn(f"'type': '{event_type}'", av_plugin)
         self.assertIn("avPlayer.on('startRenderFrame'", av_plugin)
         self.assertIn("session.avPlayer.off('startRenderFrame')", av_plugin)
+        self.assertIn("enforcePause(session)", av_plugin)
+        self.assertIn("if (!session.pendingAutoPlay)", av_plugin)
         self.assertIn("avPlayer.surfaceId = session.surfaceId", av_plugin)
         self.assertIn("createMediaSourceWithUrl", av_plugin)
         self.assertIn("APPLICATION_M3U8", av_plugin)
