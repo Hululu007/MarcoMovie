@@ -226,6 +226,11 @@ public final class LiteStore {
     }
 
     public static String recordHistoryJson(String existingRaw, HistoryEntry entry) {
+        return recordHistoryJson(existingRaw, entry, false);
+    }
+
+    public static String recordHistoryJson(
+            String existingRaw, HistoryEntry entry, boolean collapseLegacyEmptyApi) {
         if (historyCorrupted || isMalformedHistory(existingRaw)) {
             historyCorrupted = true;
             logWarn("Skipping history record because history is corrupted", null);
@@ -236,18 +241,26 @@ public final class LiteStore {
         }
         List<HistoryEntry> current = parseHistoryJson(existingRaw);
         JSONArray next = new JSONArray();
+        String entryApi = normApi(entry.siteApi);
         try {
             if (entry.updatedAt <= 0L) entry.updatedAt = System.currentTimeMillis();
             next.put(entry.toJson());
             for (int i = 0; i < current.size() && next.length() < MAX_HISTORY; i++) {
                 HistoryEntry old = current.get(i);
-                if (sameVideo(
-                        old.siteKey,
-                        old.siteApi,
-                        old.vodId,
-                        entry.siteKey,
-                        entry.siteApi,
-                        entry.vodId)) continue;
+                boolean dupExact =
+                        sameVideo(
+                                old.siteKey,
+                                old.siteApi,
+                                old.vodId,
+                                entry.siteKey,
+                                entryApi,
+                                entry.vodId);
+                boolean dupLegacy =
+                        collapseLegacyEmptyApi
+                                && entryApi.length() > 0
+                                && normApi(old.siteApi).length() == 0
+                                && sameVideoLegacy(old.siteKey, old.vodId, entry.siteKey, entry.vodId);
+                if (dupExact || dupLegacy) continue;
                 next.put(old.toJson());
             }
         } catch (Exception e) {
@@ -257,16 +270,27 @@ public final class LiteStore {
     }
 
     public static void saveHistory(Context context, HistoryEntry entry) {
+        saveHistory(context, entry, false);
+    }
+
+    public static void saveHistory(
+            Context context, HistoryEntry entry, boolean collapseLegacyEmptyApi) {
         if (context == null) return;
-        saveHistory(prefs(context), entry);
+        saveHistory(prefs(context), entry, collapseLegacyEmptyApi);
     }
 
     public static void saveHistory(SharedPreferences sp, HistoryEntry entry) {
+        saveHistory(sp, entry, false);
+    }
+
+    public static void saveHistory(
+            SharedPreferences sp, HistoryEntry entry, boolean collapseLegacyEmptyApi) {
         if (sp == null || entry == null) return;
         if (isHistoryCorrupted(sp)) {
             return;
         }
-        String updated = recordHistoryJson(sp.getString(KEY_HISTORY, "[]"), entry);
+        String updated =
+                recordHistoryJson(sp.getString(KEY_HISTORY, "[]"), entry, collapseLegacyEmptyApi);
         if (!isHistoryCorrupted()) {
             sp.edit().putString(KEY_HISTORY, updated).apply();
         }
@@ -515,23 +539,24 @@ public final class LiteStore {
             }
             for (int i = 0; i < list.size() && next.length() < MAX_FAVORITES; i++) {
                 FavoriteEntry old = list.get(i);
-                boolean skip =
+                boolean skipExact =
                         removedExact
-                                ? sameVideo(
+                                && sameVideo(
                                         old.siteKey,
                                         old.siteApi,
                                         old.vodId,
                                         entry.siteKey,
                                         entryApi,
-                                        entry.vodId)
-                                : (removedLegacy
-                                        && normApi(old.siteApi).length() == 0
-                                        && sameVideoLegacy(
-                                                old.siteKey,
-                                                old.vodId,
-                                                entry.siteKey,
-                                                entry.vodId));
-                if (!skip) {
+                                        entry.vodId);
+                boolean skipLegacy =
+                        (removedLegacy || (removedExact && allowLegacyEmptyApi && entryApi.length() > 0))
+                                && normApi(old.siteApi).length() == 0
+                                && sameVideoLegacy(
+                                        old.siteKey,
+                                        old.vodId,
+                                        entry.siteKey,
+                                        entry.vodId);
+                if (!skipExact && !skipLegacy) {
                     next.put(old.toJson());
                 }
             }
@@ -632,7 +657,7 @@ public final class LiteStore {
         return api == null ? "" : api.trim();
     }
 
-    private static boolean sameVideoLegacy(String siteA, String vodA, String siteB, String vodB) {
+    public static boolean sameVideoLegacy(String siteA, String vodA, String siteB, String vodB) {
         String sa = siteA == null ? "" : siteA.trim();
         String sb = siteB == null ? "" : siteB.trim();
         String va = vodA == null ? "" : vodA.trim();
