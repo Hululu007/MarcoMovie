@@ -69,9 +69,9 @@ private actor PausableWebDavServer {
     var rejectIfNoneMatchWithStatus: Int?
     var injectPayloadBeforeNextIfNoneMatch: (payload: String, etag: String)?
 
-    private var putPausedWaiter: CheckedContinuation<Void, Never>?
     private var putResumeGate: CheckedContinuation<Void, Never>?
     private var hasPausedRequestedPut = false
+    private var preResumedPut = false
 
     init(initialPayload: String? = nil, initialEtag: String? = nil) {
         self.payload = initialPayload
@@ -81,6 +81,7 @@ private actor PausableWebDavServer {
     func configurePause(onPutNumber number: Int?) {
         pauseOnPutNumber = number
         hasPausedRequestedPut = false
+        preResumedPut = false
     }
 
     func configureIfNoneMatchRejection(status: Int?, concurrentRemote: (payload: String, etag: String)?) {
@@ -88,21 +89,23 @@ private actor PausableWebDavServer {
         injectPayloadBeforeNextIfNoneMatch = concurrentRemote
     }
 
-    func waitUntilPutPaused() async {
-        if hasPausedRequestedPut { return }
-        await withCheckedContinuation { cont in
-            if hasPausedRequestedPut {
-                cont.resume()
-            } else {
-                putPausedWaiter = cont
+    func waitUntilPutPaused(timeoutNs: UInt64 = 5_000_000_000) async throws {
+        let start = DispatchTime.now().uptimeNanoseconds
+        while !hasPausedRequestedPut {
+            if DispatchTime.now().uptimeNanoseconds - start > timeoutNs {
+                throw MarcoError.networkFailure("Timed out waiting for mock WebDAV PUT to pause")
             }
+            try await Task.sleep(nanoseconds: 10_000_000)
         }
     }
 
     func resumePausedPut() {
-        let gate = putResumeGate
-        putResumeGate = nil
-        gate?.resume()
+        if let gate = putResumeGate {
+            putResumeGate = nil
+            gate.resume()
+        } else {
+            preResumedPut = true
+        }
     }
 
     func snapshot() -> (payload: String?, etag: String?, putCount: Int, unconditionalPutCount: Int) {
@@ -135,11 +138,17 @@ private actor PausableWebDavServer {
 
             if pauseOnPutNumber == currentPutNo {
                 hasPausedRequestedPut = true
-                let waiter = putPausedWaiter
-                putPausedWaiter = nil
-                waiter?.resume()
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    putResumeGate = cont
+                if !preResumedPut {
+                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                        if preResumedPut {
+                            preResumedPut = false
+                            cont.resume()
+                        } else {
+                            putResumeGate = cont
+                        }
+                    }
+                } else {
+                    preResumedPut = false
                 }
             }
 
@@ -549,7 +558,8 @@ final class Round2RegressionTests: XCTestCase {
 
         let initialRemoteJson = """
         {
-          "version": 1,
+          "schema": "marco-movie-sync",
+          "version": 2,
           "exportedAt": 1500,
           "subscriptions": [
             {
@@ -560,7 +570,7 @@ final class Round2RegressionTests: XCTestCase {
               "format": "JSON",
               "enabled": true,
               "updatedAt": 1500,
-              "content": "\(rawRemote.replacingOccurrences(of: "\"", with: "\\\""))"
+              "rawContent": "\(rawRemote.replacingOccurrences(of: "\"", with: "\\\""))"
             }
           ],
           "watchHistory": [
@@ -584,7 +594,7 @@ final class Round2RegressionTests: XCTestCase {
               "title": "远端收藏",
               "poster": "",
               "remarks": "",
-              "addedAt": 1500
+              "updated": 1500
             }
           ],
           "tombstones": {}
@@ -609,7 +619,7 @@ final class Round2RegressionTests: XCTestCase {
             try await service.syncNow()
         }
 
-        await mockServer.waitUntilPutPaused()
+        try await mockServer.waitUntilPutPaused()
 
         // Mutate storage CONCURRENTLY while PUT #1 is paused in flight:
         // 1) Add new favorite
@@ -664,7 +674,7 @@ final class Round2RegressionTests: XCTestCase {
         let syncTask2 = Task {
             try await service2.syncNow()
         }
-        await mockServer.waitUntilPutPaused()
+        try await mockServer.waitUntilPutPaused()
 
         XCTAssertTrue(restarted1.toggleFavorite(site: siteKeepKey, video: CmsVideo(id: "fav_disabled_cat", title: "关闭历史同步时新增收藏")))
         restarted1.upsertWatchHistory(
@@ -725,7 +735,8 @@ final class Round2RegressionTests: XCTestCase {
         // Case A: Startup refresh failed (rawContent still empty) and remote has a different subscription only.
         let remoteOtherOnly = """
         {
-          "version": 1,
+          "schema": "marco-movie-sync",
+          "version": 2,
           "exportedAt": 4000,
           "subscriptions": [
             {
@@ -736,7 +747,7 @@ final class Round2RegressionTests: XCTestCase {
               "format": "JSON",
               "enabled": true,
               "updatedAt": 4000,
-              "content": "{\\"sites\\":[{\\"key\\":\\"other_s\\",\\"name\\":\\"其他站\\",\\"type\\":1,\\"api\\":\\"https://other.example/vod\\"}]}"
+              "rawContent": "{\\"sites\\":[{\\"key\\":\\"other_s\\",\\"name\\":\\"其他站\\",\\"type\\":1,\\"api\\":\\"https://other.example/vod\\"}]}"
             }
           ],
           "watchHistory": [],
@@ -767,7 +778,8 @@ final class Round2RegressionTests: XCTestCase {
         // Case B: Remote now holds a hydrated copy of the same subscription URL -> local stub gets hydrated seamlessly!
         let remoteHydrated = """
         {
-          "version": 1,
+          "schema": "marco-movie-sync",
+          "version": 2,
           "exportedAt": 6000,
           "subscriptions": [
             {
@@ -778,7 +790,7 @@ final class Round2RegressionTests: XCTestCase {
               "format": "JSON",
               "enabled": true,
               "updatedAt": 6000,
-              "content": "\(rawStub.replacingOccurrences(of: "\"", with: "\\\""))"
+              "rawContent": "\(rawStub.replacingOccurrences(of: "\"", with: "\\\""))"
             }
           ],
           "watchHistory": [],
@@ -1655,6 +1667,10 @@ final class Round2RegressionTests: XCTestCase {
             lock.lock()
             self.continuation = continuation
             lock.unlock()
+
+            queue.asyncAfter(deadline: .now() + 10.0) {
+                self.complete(.failure(MarcoError.networkFailure("Raw loopback HTTP request timed out after 10s")))
+            }
 
             conn.stateUpdateHandler = { state in
                 switch state {
