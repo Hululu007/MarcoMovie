@@ -220,6 +220,7 @@ def main() -> int:
         "CODE_SIGNING_ALLOWED=YES",
         "CODE_SIGN_IDENTITY=-",
         "CODE_SIGNING_REQUIRED=NO",
+        "ONLY_ACTIVE_ARCH=YES",
     ]
     print(f"+ {' '.join(xcodebuild_cmd)}", flush=True)
     log_lines: list[str] = []

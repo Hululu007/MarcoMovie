@@ -825,7 +825,7 @@ final class TvOSSimulatorVerificationTests: XCTestCase {
             site: site,
             ruleSource: rule,
             origin: "https://sim-drpy.invalid/rule.js",
-            httpTransport: { url, _, _, _ in
+            httpTransport: { url, _, _, _, _ in
                 JsHttpResponse(statusCode: 200, headers: [:], body: Data("<html></html>".utf8), finalUrl: url)
             }
         )
@@ -1144,7 +1144,7 @@ final class TvOSSimulatorVerificationTests: XCTestCase {
         let switchOutcome = coordinator.switchVodLine(to: 1)
         switch switchOutcome {
         case .missingEpisode(let info):
-            XCTAssertEqual(info.sourceEpisodeName, "片尾访谈")
+            XCTAssertEqual(info.requestedEpisodeName, "片尾访谈")
             XCTAssertEqual(info.fallbackEpisodeName, "制作花絮")
             XCTAssertEqual(info.targetLineName, "B线")
             XCTAssertEqual(coordinator.target.lineIndex, 0, "Must stay on A线 until user picks on missing-episode sheet")
