@@ -97,13 +97,18 @@ public final class LiteActivity extends Activity {
     SurfaceView surface;
     FrameLayout playback;
     LinearLayout playerTopBar, playerBottomPanel, playerControlRow;
-    TextView aspectBtnView, pauseResumeBtnView, proxyBtnView;
+    TextView aspectBtnView, pauseResumeBtnView, proxyBtnView, switchLineBtnView, retryBtnView;
+    TextView currentSiteNavPill;
     int videoWidth, videoHeight, aspectMode;
     java.util.List<LiteCatalog.Site> sites = new ArrayList<LiteCatalog.Site>();
     LiteCatalog.Site selected;
     java.util.List<LiteCatalog.Category> categories = new ArrayList<LiteCatalog.Category>();
     volatile int epoch;
     volatile boolean ready, dead;
+    boolean playbackFailed;
+    PlaybackSession activeSession;
+    PlaybackSession lastSuspendedSession;
+    int playbackSessionSeq;
     JSONObject currentDetail;
     int activeDetailLine;
     int activeEpisodeGroup;
@@ -111,11 +116,14 @@ public final class LiteActivity extends Activity {
     List<EpisodeItem> currentLineEpisodes = new ArrayList<EpisodeItem>();
     int playingEpisodeIndex = -1;
     LiteCatalog.LiveGroup playingLiveGroup;
+    int lastLiveSourceIndex;
+    int lastLiveGroupIndex;
     int playingLiveChannelIndex = -1;
     int playingLiveUrlIndex = 0;
     Map<String, String> playingLiveSourceHeaders = Collections.emptyMap();
     final Object importLock = new Object();
     boolean homeVisible, inPlayback, backgrounded, inDetail, inCastPlayback;
+    String loadedConfigSignature = "";
     LiteCast castServer;
     WifiManager.MulticastLock castMulticastLock;
     boolean castMuted;
@@ -151,6 +159,260 @@ public final class LiteActivity extends Activity {
             this.url = url;
             this.originalIndex = originalIndex;
         }
+    }
+
+    static final class PlaybackSession {
+        static final int KIND_VOD = 0;
+        static final int KIND_LIVE = 1;
+        static final int KIND_CAST = 2;
+
+        final int kind;
+        final int generation;
+        final String streamUrl;
+        final String playbackIdentity;
+        final String displayTitle;
+        final Map<String, String> headers;
+        // Immutable VOD metadata snapshot
+        final String siteKey;
+        final String siteName;
+        final String siteApi;
+        final String vodId;
+        final String vodName;
+        final String vodPic;
+        final String lineName;
+        final int lineIndex;
+        final String epName;
+        final String epUrl;
+        final int epIndex;
+        final List<EpisodeItem> lineEpisodes;
+        final boolean embySource;
+        // Immutable Live metadata snapshot
+        final LiteCatalog.LiveGroup liveGroup;
+        final int liveSourceIndex;
+        final int liveGroupIndex;
+        final int liveChannelIndex;
+        final int liveUrlIndex;
+        final Map<String, String> liveSourceHeaders;
+
+        private PlaybackSession(
+                int kind,
+                int generation,
+                String streamUrl,
+                String playbackIdentity,
+                String displayTitle,
+                Map<String, String> headers,
+                String siteKey,
+                String siteName,
+                String siteApi,
+                String vodId,
+                String vodName,
+                String vodPic,
+                String lineName,
+                int lineIndex,
+                String epName,
+                String epUrl,
+                int epIndex,
+                List<EpisodeItem> lineEpisodes,
+                boolean embySource,
+                LiteCatalog.LiveGroup liveGroup,
+                int liveSourceIndex,
+                int liveGroupIndex,
+                int liveChannelIndex,
+                int liveUrlIndex,
+                Map<String, String> liveSourceHeaders) {
+            this.kind = kind;
+            this.generation = generation;
+            this.streamUrl = streamUrl == null ? "" : streamUrl;
+            this.playbackIdentity = playbackIdentity == null ? "" : playbackIdentity;
+            this.displayTitle = displayTitle == null ? "" : displayTitle;
+            this.headers =
+                    headers == null || headers.isEmpty()
+                            ? Collections.<String, String>emptyMap()
+                            : Collections.unmodifiableMap(
+                                    new LinkedHashMap<String, String>(headers));
+            this.siteKey = siteKey == null ? "" : siteKey;
+            this.siteName = siteName == null ? "" : siteName;
+            this.siteApi = siteApi == null ? "" : siteApi;
+            this.vodId = vodId == null ? "" : vodId;
+            this.vodName = vodName == null ? "" : vodName;
+            this.vodPic = vodPic == null ? "" : vodPic;
+            this.lineName = lineName == null ? "" : lineName;
+            this.lineIndex = Math.max(0, lineIndex);
+            this.epName = epName == null ? "" : epName;
+            this.epUrl = epUrl == null ? "" : epUrl;
+            this.epIndex = epIndex;
+            this.lineEpisodes =
+                    lineEpisodes == null || lineEpisodes.isEmpty()
+                            ? Collections.<EpisodeItem>emptyList()
+                            : Collections.unmodifiableList(
+                                    new ArrayList<EpisodeItem>(lineEpisodes));
+            this.embySource = embySource;
+            this.liveGroup = liveGroup;
+            this.liveSourceIndex = liveSourceIndex;
+            this.liveGroupIndex = liveGroupIndex;
+            this.liveChannelIndex = liveChannelIndex;
+            this.liveUrlIndex = liveUrlIndex;
+            this.liveSourceHeaders =
+                    liveSourceHeaders == null || liveSourceHeaders.isEmpty()
+                            ? Collections.<String, String>emptyMap()
+                            : Collections.unmodifiableMap(
+                                    new LinkedHashMap<String, String>(liveSourceHeaders));
+        }
+
+        static PlaybackSession forVod(
+                int generation,
+                String streamUrl,
+                String identity,
+                String epName,
+                Map<String, String> headers,
+                LiteCatalog.Site site,
+                JSONObject detail,
+                String lineName,
+                int lineIndex,
+                int epIndex,
+                List<EpisodeItem> lineEpisodes) {
+            String sKey = site != null && site.key != null ? site.key : "";
+            String sName = site != null && site.name != null ? site.name : "";
+            String sApi = site != null && site.api != null ? site.api : "";
+            String vId = detail != null ? detail.optString("vod_id", "") : "";
+            String vName = detail != null ? detail.optString("vod_name", epName) : epName;
+            String vPic = detail != null ? detail.optString("vod_pic", "") : "";
+            boolean isEmby = sApi.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX);
+            return new PlaybackSession(
+                    KIND_VOD,
+                    generation,
+                    streamUrl,
+                    identity,
+                    epName,
+                    headers,
+                    sKey,
+                    sName,
+                    sApi,
+                    vId,
+                    vName,
+                    vPic,
+                    lineName,
+                    lineIndex,
+                    epName,
+                    identity,
+                    epIndex,
+                    lineEpisodes,
+                    isEmby,
+                    null,
+                    0,
+                    0,
+                    -1,
+                    0,
+                    null);
+        }
+
+        static PlaybackSession forLive(
+                int generation,
+                String streamUrl,
+                String title,
+                Map<String, String> headers,
+                LiteCatalog.LiveGroup group,
+                int sourceIndex,
+                int groupIndex,
+                int channelIndex,
+                int urlIndex,
+                Map<String, String> sourceHeaders) {
+            return new PlaybackSession(
+                    KIND_LIVE,
+                    generation,
+                    streamUrl,
+                    streamUrl,
+                    title,
+                    headers,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    0,
+                    "",
+                    "",
+                    -1,
+                    null,
+                    false,
+                    group,
+                    sourceIndex,
+                    groupIndex,
+                    channelIndex,
+                    urlIndex,
+                    sourceHeaders);
+        }
+
+        static PlaybackSession forCast(
+                int generation,
+                String streamUrl,
+                String title,
+                Map<String, String> headers) {
+            return new PlaybackSession(
+                    KIND_CAST,
+                    generation,
+                    streamUrl,
+                    streamUrl,
+                    title,
+                    headers,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    0,
+                    "",
+                    "",
+                    -1,
+                    null,
+                    false,
+                    null,
+                    0,
+                    0,
+                    -1,
+                    0,
+                    null);
+        }
+    }
+
+    public static LiteStore.HistoryEntry buildHistoryEntryForSession(
+            PlaybackSession session, int posMs, int durMs, long updatedAt) {
+        if (session == null
+                || session.kind != PlaybackSession.KIND_VOD
+                || session.vodId.length() == 0
+                || session.epUrl.length() == 0) {
+            return null;
+        }
+        int adjustedPos = posMs;
+        if (durMs > 0 && adjustedPos >= durMs * 0.95) adjustedPos = 0;
+        LiteStore.HistoryEntry entry = new LiteStore.HistoryEntry();
+        entry.siteKey = session.siteKey;
+        entry.siteName = session.siteName;
+        entry.siteApi = session.siteApi;
+        entry.vodId = session.vodId;
+        entry.vodName = session.vodName.length() > 0 ? session.vodName : session.epName;
+        entry.vodPic = session.vodPic;
+        entry.lineName = session.lineName;
+        entry.lineIndex = session.lineIndex;
+        entry.epName = session.epName;
+        entry.epUrl = session.epUrl;
+        entry.epIndex = Math.max(0, session.epIndex);
+        entry.positionMs = Math.max(0, adjustedPos);
+        entry.durationMs = Math.max(0, durMs);
+        entry.updatedAt = updatedAt > 0L ? updatedAt : System.currentTimeMillis();
+        return entry;
+    }
+
+    public static boolean shouldAutoAdvanceNextEpisode(PlaybackSession session) {
+        return session != null
+                && session.kind == PlaybackSession.KIND_VOD
+                && !session.lineEpisodes.isEmpty()
+                && session.epIndex >= 0
+                && session.epIndex + 1 < session.lineEpisodes.size();
     }
 
     final Runnable hideOsdTask =
@@ -357,18 +619,22 @@ public final class LiteActivity extends Activity {
     }
 
     void base(String title) {
-        homeVisible = false;
-        inPlayback = false;
-        inCastPlayback = false;
-        castStatusView = null;
-        playingLiveGroup = null;
-        playingLiveSourceHeaders = Collections.emptyMap();
+        epoch++;
         ui.removeCallbacks(clockTick);
         ui.removeCallbacks(hideOsdTask);
-        epoch++;
         cancelWork();
         closePairing();
         release();
+        homeVisible = false;
+        inPlayback = false;
+        inCastPlayback = false;
+        playbackFailed = false;
+        castStatusView = null;
+        currentSiteNavPill = null;
+        switchLineBtnView = null;
+        retryBtnView = null;
+        playingLiveGroup = null;
+        playingLiveSourceHeaders = Collections.emptyMap();
         mainScroll = new ScrollView(this);
         mainScroll.setFillViewport(true);
         mainScroll.setBackgroundColor(COLOR_BG);
@@ -410,14 +676,15 @@ public final class LiteActivity extends Activity {
                     }
                 });
         if (selected != null && selected.supported) {
-            addNavPill(
-                    navRow,
-                    "当前：" + truncate(selected.name, 8),
-                    new Runnable() {
-                        public void run() {
-                            catalog("", 1);
-                        }
-                    });
+            currentSiteNavPill =
+                    addNavPill(
+                            navRow,
+                            "当前：" + truncate(selected.name, 8),
+                            new Runnable() {
+                                public void run() {
+                                    catalog("", "", 1);
+                                }
+                            });
         }
         addNavPill(
                 navRow,
@@ -479,7 +746,7 @@ public final class LiteActivity extends Activity {
         page.addView(header, new LinearLayout.LayoutParams(-1, -2));
     }
 
-    void addNavPill(LinearLayout row, String label, final Runnable action) {
+    TextView addNavPill(LinearLayout row, String label, final Runnable action) {
         final TextView pill = text(label, 14);
         pill.setPadding(dp(12), dp(6), dp(12), dp(6));
         pill.setGravity(Gravity.CENTER);
@@ -502,6 +769,7 @@ public final class LiteActivity extends Activity {
                     }
                 });
         row.addView(pill, lp);
+        return pill;
     }
 
     static String truncate(String s, int maxChars) {
@@ -695,7 +963,24 @@ public final class LiteActivity extends Activity {
         return rawSites;
     }
 
-    void loadConfiguredSites() {
+    String currentConfigSignature() {
+        android.content.SharedPreferences sp = getPreferences(0);
+        return sp.getString("address", "")
+                + "\n"
+                + sp.getLong("sub_updated_at", 0L)
+                + "\n"
+                + sp.getString("config", "").hashCode()
+                + "\n"
+                + sp.getString("emby_libraries", "{}").hashCode()
+                + "\n"
+                + sp.getString(sitePrefsKey(), "{}").hashCode();
+    }
+
+    boolean loadConfiguredSites() {
+        String sig = currentConfigSignature();
+        boolean configChanged = !sig.equals(loadedConfigSignature);
+        loadedConfigSignature = sig;
+
         sites = loadRawConfiguredSites();
         applySiteEdits();
         String preferred = getPreferences(0).getString("preferred_site_identity", "");
@@ -709,34 +994,80 @@ public final class LiteActivity extends Activity {
                 break;
             }
         }
-        if (selected == null && !sites.isEmpty()) {
-            String lastKey = getPreferences(0).getString("selected_site", "");
-            for (int i = 0; i < sites.size(); i++) {
-                LiteCatalog.Site s = sites.get(i);
-                if (s.supported && s.key.equals(lastKey)) {
-                    selected = s;
-                    break;
-                }
+        LiteCatalog.Site previous = selected;
+        String lastKey = getPreferences(0).getString("selected_site", "");
+        String lastApi = getPreferences(0).getString("selected_site_api", "");
+        LiteCatalog.Site rebound =
+                LiteCatalog.resolveSelectedSite(sites, previous, lastKey, lastApi);
+        boolean bindingChanged = !LiteCatalog.sameSiteBinding(previous, rebound);
+        selected = rebound;
+        if (bindingChanged || configChanged) {
+            if (bindingChanged) {
+                categories.clear();
+                lastCategory = "";
+                lastPage = 1;
+                lastQuery = "";
             }
-            if (selected == null) {
-                for (int i = 0; i < sites.size(); i++) {
-                    if (sites.get(i).supported) {
-                        selected = sites.get(i);
-                        break;
-                    }
-                }
+            getPreferences(0)
+                    .edit()
+                    .putString("selected_site", selected != null ? selected.key : "")
+                    .putString("selected_site_api", selected != null ? selected.api : "")
+                    .putString("loading_site", "")
+                    .apply();
+        }
+        return bindingChanged || configChanged;
+    }
+
+    void onSubscriptionReplaced(boolean bumpEpoch) {
+        if (bumpEpoch) {
+            epoch++;
+            cancelWork();
+        }
+        currentDetail = null;
+        categories.clear();
+        lastCategory = "";
+        lastPage = 1;
+        lastQuery = "";
+        loadedConfigSignature = "";
+        loadConfiguredSites();
+        if (currentSiteNavPill != null) {
+            if (selected != null && selected.supported) {
+                currentSiteNavPill.setVisibility(View.VISIBLE);
+                currentSiteNavPill.setText("当前：" + truncate(selected.name, 8));
+            } else {
+                currentSiteNavPill.setVisibility(View.GONE);
             }
         }
     }
 
     void home() {
         inDetail = false;
+        loadConfiguredSites();
         base("MARCO MOVIE  Lite");
         homeVisible = true;
-        status.setText("Android 4.0+ 电视轻量兼容版 · 遥控器方向键与确认键操作 · 不含任何影视资源");
-
-        loadConfiguredSites();
         final String raw = getPreferences(0).getString("config", "");
+        final String addr = getPreferences(0).getString("address", "");
+        int supportedCountHome = 0;
+        for (int i = 0; i < sites.size(); i++) {
+            if (sites.get(i).supported) supportedCountHome++;
+        }
+        List<LiteCatalog.LiveSource> liveSourcesHome = LiteCatalog.parseLives(raw, addr);
+        if (!sites.isEmpty() && supportedCountHome == 0) {
+            status.setText(
+                    "当前订阅共 "
+                            + sites.size()
+                            + " 个片源，均需外部插件/脚本或不受支持的类型，Android 4.0 轻量版无法直接浏览；"
+                            + (liveSourcesHome.isEmpty()
+                                    ? "请更换标准 JSON/XML CMS 订阅或长按线路手动编辑。"
+                                    : "可点击顶部「直播」观看已导入的直播频道。"));
+        } else if (sites.isEmpty() && !liveSourcesHome.isEmpty()) {
+            status.setText(
+                    "当前为纯直播订阅（共 "
+                            + liveSourcesHome.size()
+                            + " 个直播入口），点击顶部「直播」即可浏览频道与切线。");
+        } else {
+            status.setText("Android 4.0+ 电视轻量兼容版 · 遥控器方向键与确认键操作 · 不含任何影视资源");
+        }
 
         LinearLayout quickBar = new LinearLayout(this);
         quickBar.setOrientation(LinearLayout.HORIZONTAL);
@@ -978,12 +1309,16 @@ public final class LiteActivity extends Activity {
                                         if (s.supported) {
                                             selected = s;
                                             categories.clear();
+                                            lastCategory = "";
+                                            lastPage = 1;
+                                            lastQuery = "";
                                             getPreferences(0)
                                                     .edit()
                                                     .putString("selected_site", s.key)
+                                                    .putString("selected_site_api", s.api)
                                                     .putString("loading_site", s.key)
                                                     .commit();
-                                            catalog("", 1);
+                                            catalog("", "", 1);
                                         } else {
                                             String lim = s.limitation();
                                             String msg =
@@ -1284,6 +1619,8 @@ public final class LiteActivity extends Activity {
                                         }
                                         int safeGrp =
                                                 Math.max(0, Math.min(groupIdx, groups.size() - 1));
+                                        lastLiveSourceIndex = safeSourceIdx;
+                                        lastLiveGroupIndex = safeGrp;
                                         HorizontalScrollView grpScroll =
                                                 new HorizontalScrollView(LiteActivity.this);
                                         LinearLayout grpRow = new LinearLayout(LiteActivity.this);
@@ -1406,11 +1743,19 @@ public final class LiteActivity extends Activity {
                         + (ch.urls.size() > 1
                                 ? " (源 " + (safeUrl + 1) + "/" + ch.urls.size() + ")"
                                 : "");
-        playingLiveGroup = group;
-        playingLiveChannelIndex = safeCh;
-        playingLiveUrlIndex = safeUrl;
-        playingLiveSourceHeaders = cleanSourceHeaders;
-        playResolved(url, url, title, mergedHeaders, null);
+        PlaybackSession session =
+                PlaybackSession.forLive(
+                        ++playbackSessionSeq,
+                        url,
+                        title,
+                        mergedHeaders,
+                        group,
+                        lastLiveSourceIndex,
+                        lastLiveGroupIndex,
+                        safeCh,
+                        safeUrl,
+                        cleanSourceHeaders);
+        playResolved(session, null);
     }
 
     String sitePrefsKey() {
@@ -2310,8 +2655,10 @@ public final class LiteActivity extends Activity {
                                         ui.post(
                                                 new Runnable() {
                                                     public void run() {
+                                                        if (dead) return;
+                                                        onSubscriptionReplaced(true);
                                                         scheduleAutoPush(true);
-                                                        if (!dead) home();
+                                                        home();
                                                     }
                                                 });
                                     }
@@ -2404,8 +2751,10 @@ public final class LiteActivity extends Activity {
                                                         ui.post(
                                                                 new Runnable() {
                                                                     public void run() {
+                                                                        if (dead) return;
+                                                                        onSubscriptionReplaced(true);
                                                                         scheduleAutoPush(true);
-                                                                        if (!dead) home();
+                                                                        home();
                                                                     }
                                                                 });
                                                     }
@@ -2455,9 +2804,20 @@ public final class LiteActivity extends Activity {
                                     ui.post(
                                             new Runnable() {
                                                 public void run() {
+                                                    if (dead) return;
+                                                    onSubscriptionReplaced(false);
                                                     scheduleAutoPush(true);
-                                                    if (pairing != null)
-                                                        status.setText("配置已保存，点击“返回片库”选择片源。");
+                                                    if (pairing != null && status != null) {
+                                                        if (selected != null && selected.supported) {
+                                                            status.setText(
+                                                                    "配置已保存，当前源已切换为「"
+                                                                            + selected.name
+                                                                            + "」，可直接点击顶部“当前源”或“返回片库”浏览。");
+                                                        } else {
+                                                            status.setText(
+                                                                    "配置已保存（当前配置无可直接浏览的标准点播源，可返回片库查看提示或进入「直播」）。");
+                                                        }
+                                                    }
                                                 }
                                             });
                                 }
@@ -2668,8 +3028,10 @@ public final class LiteActivity extends Activity {
                             .remove("address")
                             .remove("config")
                             .remove("selected_site")
+                            .remove("selected_site_api")
                             .commit();
                     selected = null;
+                    loadedConfigSignature = "";
                 } else if (res.activeSubscription != null
                         && fetchedRaw != null
                         && fetchedRaw.trim().length() > 0) {
@@ -2680,7 +3042,9 @@ public final class LiteActivity extends Activity {
                         try {
                             List<LiteCatalog.Site> parsed =
                                     LiteCatalog.parse(fetchedRaw, fetchedOrigin);
-                            if (!parsed.isEmpty()) {
+                            List<LiteCatalog.LiveSource> parsedLives =
+                                    LiteCatalog.parseLives(fetchedRaw, fetchedOrigin);
+                            if (!parsed.isEmpty() || !parsedLives.isEmpty()) {
                                 android.content.SharedPreferences.Editor ed =
                                         getPreferences(0)
                                                 .edit()
@@ -2688,7 +3052,8 @@ public final class LiteActivity extends Activity {
                                                 .putString("config", fetchedRaw)
                                                 .putLong(
                                                         "sub_updated_at",
-                                                        res.activeSubscription.updatedAt);
+                                                        res.activeSubscription.updatedAt)
+                                                .remove("selected_site_api");
                                 if (res.activeSubscription.selectedSiteKey.length() > 0) {
                                     ed.putString(
                                             "selected_site",
@@ -2696,6 +3061,7 @@ public final class LiteActivity extends Activity {
                                 }
                                 ed.commit();
                                 selected = null;
+                                loadedConfigSignature = "";
                             }
                         } catch (Throwable applyFailure) {
                             if (applyFailure instanceof Error) throw (Error) applyFailure;
@@ -3154,16 +3520,30 @@ public final class LiteActivity extends Activity {
 
     void catalog(final String keyword, final String categoryId, final int number) {
         inDetail = false;
-        lastQuery = keyword;
-        lastCategory = categoryId;
-        lastPage = number;
-        if (selected == null) {
-            loadConfiguredSites();
-            if (selected == null) {
-                home();
-                return;
+        LiteCatalog.Site beforeRebind = selected;
+        boolean rebounded = loadConfiguredSites();
+        if (selected == null || !selected.supported) {
+            home();
+            if (status != null) {
+                status.setText(
+                        sites.isEmpty()
+                                ? "当前没有可用的标准点播片源，请先导入配置或前往「直播」。"
+                                : "当前订阅中仅剩需插件/脚本环境或不受支持的片源，轻量版无法直接浏览。");
             }
+            return;
         }
+        final String effectiveCategoryId =
+                (rebounded && !LiteCatalog.sameSiteBinding(beforeRebind, selected))
+                        ? ""
+                        : (categoryId == null ? "" : categoryId);
+        final int effectivePage =
+                (rebounded && !LiteCatalog.sameSiteBinding(beforeRebind, selected))
+                        ? 1
+                        : Math.max(1, number);
+        final String effectiveKeyword = keyword == null ? "" : keyword;
+        lastQuery = effectiveKeyword;
+        lastCategory = effectiveCategoryId;
+        lastPage = effectivePage;
         base(selected.name);
         final int id = epoch;
         final LiteCatalog.Site site = selected;
@@ -3189,10 +3569,10 @@ public final class LiteActivity extends Activity {
                                 home();
                             }
                         }));
-        if (keyword != null && keyword.length() > 0) {
+        if (effectiveKeyword.length() > 0) {
             topActions.add(
                     makeActionButton(
-                            "清除搜索：「" + truncate(keyword, 6) + "」",
+                            "清除搜索：「" + truncate(effectiveKeyword, 6) + "」",
                             true,
                             new Runnable() {
                                 public void run() {
@@ -3202,7 +3582,7 @@ public final class LiteActivity extends Activity {
         }
         addGridViews(page, topActions, topActions.size(), 42);
 
-        showCategories(keyword, categoryId);
+        showCategories(effectiveKeyword, effectiveCategoryId);
         work(
                 new Job() {
                     public void run() throws Exception {
@@ -3213,9 +3593,9 @@ public final class LiteActivity extends Activity {
                                                 LiteActivity.this, site.api)
                                         : null;
                         if (categories.isEmpty()
-                                && keyword.length() == 0
-                                && categoryId.length() == 0
-                                && number == 1) {
+                                && effectiveKeyword.length() == 0
+                                && effectiveCategoryId.length() == 0
+                                && effectivePage == 1) {
                             try {
                                 String homeRaw =
                                         emby != null
@@ -3232,26 +3612,26 @@ public final class LiteActivity extends Activity {
                         String url =
                                 emby != null
                                         ? ""
-                                        : categoryId.length() > 0
+                                        : effectiveCategoryId.length() > 0
                                                 ? LiteCatalog.query(
                                                         site.api,
                                                         "ac",
                                                         "detail",
                                                         "pg",
-                                                        "" + number,
+                                                        "" + effectivePage,
                                                         "t",
-                                                        categoryId)
+                                                        effectiveCategoryId)
                                                 : LiteCatalog.query(
                                                         site.api,
                                                         "ac",
                                                         "detail",
                                                         "pg",
-                                                        "" + number,
+                                                        "" + effectivePage,
                                                         "wd",
-                                                        keyword);
+                                                        effectiveKeyword);
                         final JSONObject response =
                                 emby != null
-                                        ? emby.list(categoryId, keyword, number)
+                                        ? emby.list(effectiveCategoryId, effectiveKeyword, effectivePage)
                                         : LiteCatalog.parseCmsResponse(
                                                 LiteCatalog.fetch(url, site.headers));
                         final List<LiteCatalog.Category> fetchedCategories = loadedCategories;
@@ -3267,13 +3647,13 @@ public final class LiteActivity extends Activity {
                                                 .commit();
                                         if (dead || id != epoch) return;
                                         categories = fetchedCategories;
-                                        showCategories(keyword, categoryId);
+                                        showCategories(effectiveKeyword, effectiveCategoryId);
 
                                         status.setText(
                                                 list.length() == 0
                                                         ? "没有结果"
                                                         : "第 "
-                                                                + number
+                                                                + effectivePage
                                                                 + " / "
                                                                 + pageCount
                                                                 + " 页（共 "
@@ -3304,7 +3684,7 @@ public final class LiteActivity extends Activity {
                                         addGridViews(page, cards, posterColumns(), -2);
 
                                         List<View> pagerBtns = new ArrayList<View>();
-                                        if (number > 1) {
+                                        if (effectivePage > 1) {
                                             pagerBtns.add(
                                                     makeActionButton(
                                                             "上一页",
@@ -3312,13 +3692,13 @@ public final class LiteActivity extends Activity {
                                                             new Runnable() {
                                                                 public void run() {
                                                                     catalog(
-                                                                            keyword,
-                                                                            categoryId,
-                                                                            number - 1);
+                                                                            effectiveKeyword,
+                                                                            effectiveCategoryId,
+                                                                            effectivePage - 1);
                                                                 }
                                                             }));
                                         }
-                                        if (number < pageCount) {
+                                        if (effectivePage < pageCount) {
                                             pagerBtns.add(
                                                     makeActionButton(
                                                             "下一页",
@@ -3326,9 +3706,9 @@ public final class LiteActivity extends Activity {
                                                             new Runnable() {
                                                                 public void run() {
                                                                     catalog(
-                                                                            keyword,
-                                                                            categoryId,
-                                                                            number + 1);
+                                                                            effectiveKeyword,
+                                                                            effectiveCategoryId,
+                                                                            effectivePage + 1);
                                                                 }
                                                             }));
                                         }
@@ -4290,10 +4670,21 @@ public final class LiteActivity extends Activity {
         return out;
     }
 
+    String resolveCurrentLineName(JSONObject detailObj, int lineIdx) {
+        if (detailObj == null) return "";
+        String[] orderedNames =
+                orderedPlayLines(
+                                detailObj, getPreferences(0).getString("preferred_line", ""))[1];
+        return lineIdx >= 0 && lineIdx < orderedNames.length ? orderedNames[lineIdx] : "";
+    }
+
     void play(final String address, final String name) {
-        playingLiveGroup = null;
-        playingLiveSourceHeaders = Collections.emptyMap();
         final LiteCatalog.Site source = selected;
+        final JSONObject detailSnap = currentDetail;
+        final int lineIdxSnap = activeDetailLine;
+        final String lineNameSnap = resolveCurrentLineName(detailSnap, lineIdxSnap);
+        final int epIdxSnap = playingEpisodeIndex;
+        final List<EpisodeItem> episodesSnap = new ArrayList<EpisodeItem>(currentLineEpisodes);
         String finalAddress = address;
         if (source != null
                 && source.playUrl != null
@@ -4302,12 +4693,22 @@ public final class LiteActivity extends Activity {
             finalAddress = source.playUrl + address;
         }
         if (source == null || !source.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)) {
-            playResolved(
-                    finalAddress,
-                    address,
-                    name,
-                    source == null ? Collections.<String, String>emptyMap() : source.headers,
-                    null);
+            PlaybackSession session =
+                    PlaybackSession.forVod(
+                            ++playbackSessionSeq,
+                            finalAddress,
+                            address,
+                            name,
+                            source == null
+                                    ? Collections.<String, String>emptyMap()
+                                    : source.headers,
+                            source,
+                            detailSnap,
+                            lineNameSnap,
+                            lineIdxSnap,
+                            epIdxSnap,
+                            episodesSnap);
+            playResolved(session, null);
             return;
         }
         base(name);
@@ -4330,35 +4731,106 @@ public final class LiteActivity extends Activity {
                                             reporter.stop(0);
                                             return;
                                         }
-                                        playResolved(stream, address, name, headers, reporter);
+                                        PlaybackSession session =
+                                                PlaybackSession.forVod(
+                                                        ++playbackSessionSeq,
+                                                        stream,
+                                                        address,
+                                                        name,
+                                                        headers,
+                                                        source,
+                                                        detailSnap,
+                                                        lineNameSnap,
+                                                        lineIdxSnap,
+                                                        epIdxSnap,
+                                                        episodesSnap);
+                                        playResolved(session, reporter);
                                     }
                                 });
                     }
                 });
     }
 
+    void rebuildPlaybackSession(PlaybackSession session) {
+        if (session == null) return;
+        if (session.kind == PlaybackSession.KIND_LIVE && session.liveGroup != null) {
+            playLiveChannel(
+                    session.liveGroup,
+                    session.liveChannelIndex,
+                    session.liveUrlIndex,
+                    session.liveSourceHeaders);
+            return;
+        }
+        if (session.kind == PlaybackSession.KIND_CAST) {
+            playCastStream(session.streamUrl, session.displayTitle, session.headers);
+            return;
+        }
+        if (session.embySource) {
+            play(session.epUrl, session.epName);
+            return;
+        }
+        PlaybackSession rebuilt =
+                new PlaybackSession(
+                        session.kind,
+                        ++playbackSessionSeq,
+                        session.streamUrl,
+                        session.playbackIdentity,
+                        session.displayTitle,
+                        session.headers,
+                        session.siteKey,
+                        session.siteName,
+                        session.siteApi,
+                        session.vodId,
+                        session.vodName,
+                        session.vodPic,
+                        session.lineName,
+                        session.lineIndex,
+                        session.epName,
+                        session.epUrl,
+                        session.epIndex,
+                        session.lineEpisodes,
+                        session.embySource,
+                        session.liveGroup,
+                        session.liveSourceIndex,
+                        session.liveGroupIndex,
+                        session.liveChannelIndex,
+                        session.liveUrlIndex,
+                        session.liveSourceHeaders);
+        playResolved(rebuilt, null);
+    }
+
     void playResolved(
-            final String address,
-            final String identity,
-            final String name,
-            final Map<String, String> headers,
-            com.pilipala.emby.EmbyLibrary.Reporter reporter) {
-        LiteCatalog.LiveGroup savedLiveGroup = playingLiveGroup;
-        int savedLiveCh = playingLiveChannelIndex;
-        int savedLiveUrl = playingLiveUrlIndex;
-        Map<String, String> savedLiveHeaders = playingLiveSourceHeaders;
-        base(name);
-        playingLiveGroup = savedLiveGroup;
-        playingLiveChannelIndex = savedLiveCh;
-        playingLiveUrlIndex = savedLiveUrl;
-        playingLiveSourceHeaders = savedLiveHeaders;
+            final PlaybackSession session, com.pilipala.emby.EmbyLibrary.Reporter reporter) {
+        if (session == null) return;
+        base(session.displayTitle);
+        activeSession = session;
+        lastSuspendedSession = null;
         embyReporter = reporter;
-        playbackTitle = name;
-        playbackAddress = identity;
+        playbackTitle = session.displayTitle;
+        playbackAddress = session.playbackIdentity;
         inPlayback = true;
+        inCastPlayback = session.kind == PlaybackSession.KIND_CAST;
+        playbackFailed = false;
+        if (session.kind == PlaybackSession.KIND_LIVE) {
+            playingLiveGroup = session.liveGroup;
+            lastLiveSourceIndex = session.liveSourceIndex;
+            lastLiveGroupIndex = session.liveGroupIndex;
+            playingLiveChannelIndex = session.liveChannelIndex;
+            playingLiveUrlIndex = session.liveUrlIndex;
+            playingLiveSourceHeaders = session.liveSourceHeaders;
+        } else {
+            playingLiveGroup = null;
+            playingLiveChannelIndex = -1;
+            playingLiveUrlIndex = 0;
+            playingLiveSourceHeaders = Collections.emptyMap();
+        }
         videoWidth = 0;
         videoHeight = 0;
         final int id = epoch;
+        final String address = session.streamUrl;
+        final String identity = session.playbackIdentity;
+        final String name = session.displayTitle;
+        final Map<String, String> headers = session.headers;
 
         playback = new FrameLayout(this);
         playback.setBackgroundColor(0xff000000);
@@ -4391,8 +4863,8 @@ public final class LiteActivity extends Activity {
         playerTopBar.addView(backBtn, new LinearLayout.LayoutParams(-2, -2));
 
         String fullHeading =
-                currentDetail != null
-                        ? (currentDetail.optString("vod_name", "") + " · " + name)
+                session.kind == PlaybackSession.KIND_VOD && session.vodName.length() > 0
+                        ? (session.vodName + " · " + name)
                         : name;
         TextView heading = text(fullHeading, 19);
         heading.setSingleLine(true);
@@ -4453,14 +4925,18 @@ public final class LiteActivity extends Activity {
                     }
                 });
 
+        HorizontalScrollView controlScroll = new HorizontalScrollView(this);
+        controlScroll.setHorizontalScrollBarEnabled(false);
+        controlScroll.setFocusable(false);
         playerControlRow = new LinearLayout(this);
         playerControlRow.setOrientation(LinearLayout.HORIZONTAL);
         playerControlRow.setGravity(Gravity.CENTER_VERTICAL);
         playerControlRow.setPadding(0, dp(4), 0, dp(2));
-        buildPlayerControlButtons(address, identity, name, headers);
-        playerBottomPanel.addView(playerControlRow, new LinearLayout.LayoutParams(-1, -2));
+        buildPlayerControlButtons(session);
+        controlScroll.addView(playerControlRow, new FrameLayout.LayoutParams(-2, -2));
+        playerBottomPanel.addView(controlScroll, new LinearLayout.LayoutParams(-1, -2));
 
-        status = text("正在准备播放…", 14);
+        status = text("正在准备播放… 可按上下/菜单键打开工具栏换线，或按返回键退出", 14);
         status.setTextColor(COLOR_MUTED);
         playerBottomPanel.addView(status, new LinearLayout.LayoutParams(-1, -2));
         playback.addView(playerBottomPanel, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
@@ -4470,7 +4946,7 @@ public final class LiteActivity extends Activity {
                 .addCallback(
                         new SurfaceHolder.Callback() {
                             public void surfaceCreated(SurfaceHolder holder) {
-                                if (id != epoch || dead) return;
+                                if (id != epoch || dead || session != activeSession) return;
                                 try {
                                     LiteCatalog.http(address);
                                     boolean useCandidate =
@@ -4496,15 +4972,25 @@ public final class LiteActivity extends Activity {
                                             holder,
                                             new LitePlayer.Listener() {
                                                 public void prepared() {
-                                                    if (expected != player) return;
+                                                    if (dead
+                                                            || id != epoch
+                                                            || session != activeSession
+                                                            || expected != player) {
+                                                        return;
+                                                    }
                                                     ready = true;
-                                                    int resumeMs = findSavedResumeMs(identity);
-                                                    if (resumeMs > 0
-                                                            && expected.getDuration() > 0
-                                                            && resumeMs
-                                                                    < expected.getDuration()
-                                                                            - 2000) {
-                                                        expected.seekTo(resumeMs);
+                                                    playbackFailed = false;
+                                                    if (session.kind == PlaybackSession.KIND_VOD) {
+                                                        int resumeMs =
+                                                                findSavedResumeMs(
+                                                                        session, identity);
+                                                        if (resumeMs > 0
+                                                                && expected.getDuration() > 0
+                                                                && resumeMs
+                                                                        < expected.getDuration()
+                                                                                - 2000) {
+                                                            expected.seekTo(resumeMs);
+                                                        }
                                                     }
                                                     expected.start();
                                                     updateKeepScreenOn(true);
@@ -4518,25 +5004,36 @@ public final class LiteActivity extends Activity {
                                                 }
 
                                                 public void error(int what, int extra) {
-                                                    if (expected != player) return;
+                                                    if (dead
+                                                            || id != epoch
+                                                            || session != activeSession
+                                                            || expected != player) {
+                                                        return;
+                                                    }
                                                     ready = false;
+                                                    playbackFailed = true;
                                                     updateKeepScreenOn(false);
                                                     stopEmbySession();
                                                     setOsdVisibility(View.VISIBLE);
+                                                    enableToolbarFocusAndSelect(true);
                                                     status.setText(
                                                             expected.name()
                                                                     + "无法播放（"
                                                                     + what
                                                                     + "/"
                                                                     + extra
-                                                                    + "），可按上下键切换线路/代理或返回选择其他资源。");
+                                                                    + "），可按方向键与确认键切换线路/重试或按返回键退出。");
                                                 }
 
                                                 public void size(final int w, final int h) {
                                                     ui.post(
                                                             new Runnable() {
                                                                 public void run() {
-                                                                    if (expected != player
+                                                                    if (dead
+                                                                            || id != epoch
+                                                                            || session
+                                                                                    != activeSession
+                                                                            || expected != player
                                                                             || w <= 0
                                                                             || h <= 0) return;
                                                                     videoWidth = w;
@@ -4547,11 +5044,30 @@ public final class LiteActivity extends Activity {
                                                 }
 
                                                 public void completed() {
-                                                    if (expected == player) {
-                                                        updateKeepScreenOn(false);
-                                                        stopEmbySession();
-                                                        if (playNextEpisodeIfAvailable()) return;
-                                                        setOsdVisibility(View.VISIBLE);
+                                                    if (dead
+                                                            || id != epoch
+                                                            || session != activeSession
+                                                            || expected != player) {
+                                                        return;
+                                                    }
+                                                    updateKeepScreenOn(false);
+                                                    stopEmbySession();
+                                                    if (shouldAutoAdvanceNextEpisode(session)) {
+                                                        if (playNextEpisodeFromSession(session)) {
+                                                            return;
+                                                        }
+                                                    }
+                                                    setOsdVisibility(View.VISIBLE);
+                                                    enableToolbarFocusAndSelect(
+                                                            session.kind
+                                                                    != PlaybackSession.KIND_VOD);
+                                                    if (session.kind == PlaybackSession.KIND_LIVE) {
+                                                        status.setText(
+                                                                "当前直播流已结束，可切换线路/频道或按返回键回到频道列表。");
+                                                    } else if (session.kind
+                                                            == PlaybackSession.KIND_CAST) {
+                                                        status.setText("投屏播放结束 · 按返回键回到投屏页");
+                                                    } else {
                                                         status.setText("播放结束 · 返回选集");
                                                     }
                                                 }
@@ -4559,17 +5075,34 @@ public final class LiteActivity extends Activity {
                                     ui.postDelayed(
                                             new Runnable() {
                                                 public void run() {
-                                                    if (player == expected && !ready)
+                                                    if (!dead
+                                                            && id == epoch
+                                                            && session == activeSession
+                                                            && player == expected
+                                                            && !ready) {
+                                                        setOsdVisibility(View.VISIBLE);
+                                                        enableToolbarFocusAndSelect(true);
                                                         status.setText(
-                                                                "播放准备较慢，可按上下键切换线路或按返回选择其他资源。");
+                                                                "播放准备较慢，可按方向键与确认键切换线路/重试，或按返回选择其他资源。");
+                                                    }
                                                 }
                                             },
                                             15000);
                                 } catch (Exception failure) {
-                                    release();
-                                    status.setText("无法打开播放地址，请返回选择其他资源。");
+                                    ready = false;
+                                    playbackFailed = true;
+                                    stopEmbySession();
+                                    releasePlayerInstanceOnly(false);
+                                    setOsdVisibility(View.VISIBLE);
+                                    enableToolbarFocusAndSelect(true);
+                                    status.setText("无法打开播放地址，可切换线路/重试或按返回选择其他资源。");
                                 } catch (LinkageError unavailable) {
-                                    release();
+                                    ready = false;
+                                    playbackFailed = true;
+                                    stopEmbySession();
+                                    releasePlayerInstanceOnly(false);
+                                    setOsdVisibility(View.VISIBLE);
+                                    enableToolbarFocusAndSelect(true);
                                     status.setText("此设备无法加载实验解码器，请使用系统解码。");
                                 }
                             }
@@ -4578,17 +5111,15 @@ public final class LiteActivity extends Activity {
                                     SurfaceHolder h, int f, int w, int height) {}
 
                             public void surfaceDestroyed(SurfaceHolder h) {
-                                if (id == epoch) release();
+                                if (id == epoch && session == activeSession) release();
                             }
                         });
     }
 
-    void buildPlayerControlButtons(
-            final String address,
-            final String identity,
-            final String name,
-            final Map<String, String> headers) {
+    void buildPlayerControlButtons(final PlaybackSession session) {
         playerControlRow.removeAllViews();
+        switchLineBtnView = null;
+        retryBtnView = null;
         pauseResumeBtnView =
                 addPlayerToolbarButton(
                         "暂停/播放",
@@ -4597,16 +5128,18 @@ public final class LiteActivity extends Activity {
                                 togglePlayPause();
                             }
                         });
-        if (playingLiveGroup != null && !playingLiveGroup.channels.isEmpty()) {
+        if (session.kind == PlaybackSession.KIND_LIVE
+                && session.liveGroup != null
+                && !session.liveGroup.channels.isEmpty()) {
             addPlayerToolbarButton(
                     "上一台",
                     new Runnable() {
                         public void run() {
                             playLiveChannel(
-                                    playingLiveGroup,
-                                    playingLiveChannelIndex - 1,
+                                    session.liveGroup,
+                                    session.liveChannelIndex - 1,
                                     0,
-                                    playingLiveSourceHeaders);
+                                    session.liveSourceHeaders);
                         }
                     });
             addPlayerToolbarButton(
@@ -4614,35 +5147,37 @@ public final class LiteActivity extends Activity {
                     new Runnable() {
                         public void run() {
                             playLiveChannel(
-                                    playingLiveGroup,
-                                    playingLiveChannelIndex + 1,
+                                    session.liveGroup,
+                                    session.liveChannelIndex + 1,
                                     0,
-                                    playingLiveSourceHeaders);
+                                    session.liveSourceHeaders);
                         }
                     });
             final LiteCatalog.LiveChannel ch =
-                    playingLiveGroup.channels.get(playingLiveChannelIndex);
+                    session.liveGroup.channels.get(session.liveChannelIndex);
             if (ch.urls.size() > 1) {
-                addPlayerToolbarButton(
-                        "换源 (" + (playingLiveUrlIndex + 1) + "/" + ch.urls.size() + ")",
-                        new Runnable() {
-                            public void run() {
-                                playLiveChannel(
-                                        playingLiveGroup,
-                                        playingLiveChannelIndex,
-                                        playingLiveUrlIndex + 1,
-                                        playingLiveSourceHeaders);
-                            }
-                        });
+                switchLineBtnView =
+                        addPlayerToolbarButton(
+                                "换源 (" + (session.liveUrlIndex + 1) + "/" + ch.urls.size() + ")",
+                                new Runnable() {
+                                    public void run() {
+                                        playLiveChannel(
+                                                session.liveGroup,
+                                                session.liveChannelIndex,
+                                                session.liveUrlIndex + 1,
+                                                session.liveSourceHeaders);
+                                    }
+                                });
             }
-        } else if (currentDetail != null && !currentLineEpisodes.isEmpty()) {
-            if (playingEpisodeIndex >= 0
-                    && playingEpisodeIndex + 1 < currentLineEpisodes.size()) {
+        } else if (session.kind == PlaybackSession.KIND_VOD
+                && currentDetail != null
+                && !currentLineEpisodes.isEmpty()) {
+            if (shouldAutoAdvanceNextEpisode(session)) {
                 addPlayerToolbarButton(
                         "下一集",
                         new Runnable() {
                             public void run() {
-                                playNextEpisodeIfAvailable();
+                                playNextEpisodeFromSession(session);
                             }
                         });
             }
@@ -4659,15 +5194,24 @@ public final class LiteActivity extends Activity {
             final String[] orderedUrls = orderedLines[0];
             final String[] orderedNames = orderedLines[1];
             if (orderedUrls.length > 1) {
-                addPlayerToolbarButton(
-                        "换线路",
-                        new Runnable() {
-                            public void run() {
-                                showInPlayerLineDialog(orderedUrls, orderedNames);
-                            }
-                        });
+                switchLineBtnView =
+                        addPlayerToolbarButton(
+                                "换线路",
+                                new Runnable() {
+                                    public void run() {
+                                        showInPlayerLineDialog(orderedUrls, orderedNames);
+                                    }
+                                });
             }
         }
+        retryBtnView =
+                addPlayerToolbarButton(
+                        "重试",
+                        new Runnable() {
+                            public void run() {
+                                rebuildPlaybackSession(session);
+                            }
+                        });
         aspectBtnView =
                 addPlayerToolbarButton(
                         "比例：" + aspectLabel(aspectMode),
@@ -4696,9 +5240,16 @@ public final class LiteActivity extends Activity {
                                                 + 1)
                                                 % 3;
                                 getPreferences(0).edit().putInt("proxy_mode", next).commit();
-                                playResolved(address, identity, name, headers, embyReporter);
+                                rebuildPlaybackSession(session);
                             }
                         });
+        addPlayerToolbarButton(
+                "返回",
+                new Runnable() {
+                    public void run() {
+                        onBackPressed();
+                    }
+                });
     }
 
     TextView addPlayerToolbarButton(String label, final Runnable action) {
@@ -4730,12 +5281,21 @@ public final class LiteActivity extends Activity {
     }
 
     void enableToolbarFocusAndSelectFirst() {
+        enableToolbarFocusAndSelect(false);
+    }
+
+    void enableToolbarFocusAndSelect(boolean preferRecovery) {
         if (playerControlRow == null || playerControlRow.getChildCount() == 0) return;
         for (int i = 0; i < playerControlRow.getChildCount(); i++) {
             View child = playerControlRow.getChildAt(i);
             child.setFocusable(true);
         }
-        playerControlRow.getChildAt(0).requestFocus();
+        View target = playerControlRow.getChildAt(0);
+        if (preferRecovery) {
+            if (switchLineBtnView != null) target = switchLineBtnView;
+            else if (retryBtnView != null) target = retryBtnView;
+        }
+        target.requestFocus();
     }
 
     void disableToolbarFocus() {
@@ -4787,9 +5347,10 @@ public final class LiteActivity extends Activity {
                 saveResume();
                 scheduleAutoPush(true);
             } else if (embyReporter == null
-                    && selected != null
-                    && selected.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)) {
-                play(playbackAddress, playbackTitle);
+                    && activeSession != null
+                    && activeSession.kind == PlaybackSession.KIND_VOD
+                    && activeSession.embySource) {
+                play(activeSession.epUrl, activeSession.epName);
                 return;
             } else player.start();
             updateKeepScreenOn(player.isPlaying());
@@ -4811,18 +5372,25 @@ public final class LiteActivity extends Activity {
         }
     }
 
-    int findSavedResumeMs(String identity) {
+    int findSavedResumeMs(PlaybackSession session, String identity) {
+        if (session != null && session.kind != PlaybackSession.KIND_VOD) return 0;
         if (identity != null
                 && identity.equals(getPreferences(0).getString("resume_address", ""))) {
             int ms = getPreferences(0).getInt("resume_ms", 0);
             if (ms > 0) return ms;
         }
-        if (selected != null && currentDetail != null) {
-            LiteStore.HistoryEntry h =
-                    LiteStore.findHistory(
-                            this, selected.key, currentDetail.optString("vod_id", ""));
+        String sk = session != null && session.siteKey.length() > 0
+                ? session.siteKey
+                : (selected != null ? selected.key : "");
+        String vId = session != null && session.vodId.length() > 0
+                ? session.vodId
+                : (currentDetail != null ? currentDetail.optString("vod_id", "") : "");
+        String epTitle = session != null ? session.epName : playbackTitle;
+        if (sk.length() > 0 && vId.length() > 0) {
+            LiteStore.HistoryEntry h = LiteStore.findHistory(this, sk, vId);
             if (h != null
-                    && (identity.equals(h.epUrl) || playbackTitle.equals(h.epName))
+                    && ((identity != null && identity.equals(h.epUrl))
+                            || (epTitle != null && epTitle.equals(h.epName)))
                     && h.positionMs > 0) {
                 return h.positionMs;
             }
@@ -4830,7 +5398,19 @@ public final class LiteActivity extends Activity {
         return 0;
     }
 
+    boolean playNextEpisodeFromSession(PlaybackSession session) {
+        if (!shouldAutoAdvanceNextEpisode(session)) return false;
+        int nextIdx = session.epIndex + 1;
+        EpisodeItem nextEp = session.lineEpisodes.get(nextIdx);
+        playingEpisodeIndex = nextEp.originalIndex;
+        play(nextEp.url, nextEp.name);
+        return true;
+    }
+
     boolean playNextEpisodeIfAvailable() {
+        if (activeSession != null) {
+            return playNextEpisodeFromSession(activeSession);
+        }
         if (currentDetail == null || currentLineEpisodes.isEmpty()) return false;
         int nextIdx = playingEpisodeIndex + 1;
         if (nextIdx >= 0 && nextIdx < currentLineEpisodes.size()) {
@@ -4981,11 +5561,17 @@ public final class LiteActivity extends Activity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
         int k = e.getKeyCode();
-        if (inPlayback && player != null && ready) {
+        if (inPlayback) {
             if (isToolbarButtonFocused()) {
-                scheduleOsdHide();
-                if (k == KeyEvent.KEYCODE_DPAD_UP && e.getAction() == KeyEvent.ACTION_DOWN) {
-                    disableToolbarFocus();
+                if (ready) {
+                    scheduleOsdHide();
+                    if (k == KeyEvent.KEYCODE_DPAD_UP && e.getAction() == KeyEvent.ACTION_DOWN) {
+                        disableToolbarFocus();
+                        return true;
+                    }
+                } else if ((k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN)
+                        && e.getAction() == KeyEvent.ACTION_DOWN) {
+                    setOsdVisibility(View.VISIBLE);
                     return true;
                 }
                 return super.dispatchKeyEvent(e);
@@ -4994,7 +5580,9 @@ public final class LiteActivity extends Activity {
                     || k == KeyEvent.KEYCODE_DPAD_DOWN
                     || k == KeyEvent.KEYCODE_MENU) {
                 if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
-                    if (playingLiveGroup != null
+                    if (ready
+                            && player != null
+                            && playingLiveGroup != null
                             && playerTopBar != null
                             && playerTopBar.getVisibility() != View.VISIBLE
                             && (k == KeyEvent.KEYCODE_DPAD_UP
@@ -5008,7 +5596,7 @@ public final class LiteActivity extends Activity {
                         return true;
                     }
                     setOsdVisibility(View.VISIBLE);
-                    enableToolbarFocusAndSelectFirst();
+                    enableToolbarFocusAndSelect(!ready);
                     scheduleOsdHide();
                 }
                 return true;
@@ -5017,6 +5605,13 @@ public final class LiteActivity extends Activity {
                     || k == KeyEvent.KEYCODE_ENTER
                     || k == KeyEvent.KEYCODE_DPAD_LEFT
                     || k == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                if (!ready || player == null) {
+                    if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
+                        setOsdVisibility(View.VISIBLE);
+                        enableToolbarFocusAndSelect(true);
+                    }
+                    return true;
+                }
                 if (e.getAction() == KeyEvent.ACTION_DOWN) {
                     try {
                         if (k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT) {
@@ -5087,41 +5682,33 @@ public final class LiteActivity extends Activity {
     }
 
     void saveResume() {
-        if (player == null || !ready || playbackAddress.isEmpty()) return;
+        PlaybackSession session = activeSession;
+        if (player == null
+                || !ready
+                || session == null
+                || session.kind != PlaybackSession.KIND_VOD) {
+            return;
+        }
         try {
             int pos = player.getCurrentPosition(), dur = player.getDuration();
-            if (dur > 0 && pos >= dur * 0.95) pos = 0;
-            int safePos = Math.max(0, pos);
-            getPreferences(0)
-                    .edit()
-                    .putString("resume_address", playbackAddress)
-                    .putInt("resume_ms", safePos)
-                    .apply();
-            if (selected != null && currentDetail != null && playingLiveGroup == null) {
-                LiteStore.HistoryEntry entry = new LiteStore.HistoryEntry();
-                entry.siteKey = selected.key;
-                entry.siteName = selected.name;
-                entry.siteApi = selected.api;
-                entry.vodId = currentDetail.optString("vod_id", "");
-                entry.vodName = currentDetail.optString("vod_name", playbackTitle);
-                entry.vodPic = currentDetail.optString("vod_pic", "");
-                String[] orderedNames =
-                        orderedPlayLines(
-                                        currentDetail,
-                                        getPreferences(0).getString("preferred_line", ""))[1];
-                entry.lineName =
-                        activeDetailLine >= 0 && activeDetailLine < orderedNames.length
-                                ? orderedNames[activeDetailLine]
-                                : "";
-                entry.lineIndex = activeDetailLine;
-                entry.epName = playbackTitle;
-                entry.epUrl = playbackAddress;
-                entry.epIndex = Math.max(0, playingEpisodeIndex);
-                entry.positionMs = safePos;
-                entry.durationMs = Math.max(0, dur);
-                entry.updatedAt = System.currentTimeMillis();
+            LiteStore.HistoryEntry entry =
+                    buildHistoryEntryForSession(session, pos, dur, System.currentTimeMillis());
+            if (entry != null) {
+                getPreferences(0)
+                        .edit()
+                        .putString("resume_address", entry.epUrl)
+                        .putInt("resume_ms", entry.positionMs)
+                        .apply();
                 LiteStore.saveHistory(this, entry);
                 scheduleAutoPush(true);
+            } else if (session.playbackIdentity.length() > 0) {
+                int adjustedPos = pos;
+                if (dur > 0 && adjustedPos >= dur * 0.95) adjustedPos = 0;
+                getPreferences(0)
+                        .edit()
+                        .putString("resume_address", session.playbackIdentity)
+                        .putInt("resume_ms", Math.max(0, adjustedPos))
+                        .apply();
             }
         } catch (Exception ignored) {
         }
@@ -5149,19 +5736,48 @@ public final class LiteActivity extends Activity {
         }
     }
 
+    void releasePlayerInstanceOnly(boolean wasReady) {
+        final LitePlayer oldPlayer = player;
+        player = null;
+        if (oldPlayer == null) return;
+        if (wasReady) {
+            try {
+                oldPlayer.release();
+            } catch (Throwable ignored) {
+            }
+            return;
+        }
+        Thread releaser =
+                new Thread(
+                        new Runnable() {
+                            public void run() {
+                                try {
+                                    oldPlayer.release();
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                        },
+                        "lite-player-release");
+        releaser.setDaemon(true);
+        releaser.start();
+        try {
+            releaser.join(250);
+        } catch (InterruptedException ignored) {
+        }
+    }
+
     void release() {
+        boolean wasReady = ready;
         updateKeepScreenOn(false);
         saveResume();
         stopEmbySession();
         ready = false;
+        activeSession = null;
         touchSeeking = false;
         sliderSeeking = false;
         ui.removeCallbacks(clockTick);
         ui.removeCallbacks(hideOsdTask);
-        if (player != null) {
-            player.release();
-            player = null;
-        }
+        releasePlayerInstanceOnly(wasReady);
     }
 
     void closePairing() {
@@ -5455,15 +6071,14 @@ public final class LiteActivity extends Activity {
     void playCastStream(String url, String title, Map<String, String> headers) {
         try {
             String normalized = LiteCatalog.http(url);
-            currentDetail = null;
-            playingLiveGroup = null;
-            playingLiveSourceHeaders = Collections.emptyMap();
             String displayTitle =
                     title != null && title.trim().length() > 0 ? title.trim() : "无线投屏播放";
             Map<String, String> safeHeaders =
                     headers != null ? headers : Collections.<String, String>emptyMap();
-            playResolved(normalized, normalized, displayTitle, safeHeaders, null);
-            inCastPlayback = true;
+            PlaybackSession session =
+                    PlaybackSession.forCast(
+                            ++playbackSessionSeq, normalized, displayTitle, safeHeaders);
+            playResolved(session, null);
         } catch (Exception e) {
             if (status != null) status.setText("投屏地址无效或不受支持");
         }
@@ -5658,7 +6273,7 @@ public final class LiteActivity extends Activity {
             return;
         }
         if (inPlayback && playingLiveGroup != null) {
-            livePage();
+            livePage(lastLiveSourceIndex, lastLiveGroupIndex);
             return;
         }
         if (inPlayback && currentDetail != null) {
@@ -5695,9 +6310,15 @@ public final class LiteActivity extends Activity {
         syncCastServer();
         if (backgrounded) {
             backgrounded = false;
-            if (inPlayback && inCastPlayback) {
+            PlaybackSession suspended = lastSuspendedSession;
+            lastSuspendedSession = null;
+            if (inPlayback && (inCastPlayback || (suspended != null && suspended.kind == PlaybackSession.KIND_CAST))) {
                 inCastPlayback = false;
                 castPage();
+            } else if (inPlayback && (playingLiveGroup != null || (suspended != null && suspended.kind == PlaybackSession.KIND_LIVE))) {
+                int sIdx = suspended != null ? suspended.liveSourceIndex : lastLiveSourceIndex;
+                int gIdx = suspended != null ? suspended.liveGroupIndex : lastLiveGroupIndex;
+                livePage(sIdx, gIdx);
             } else if (inPlayback && currentDetail != null) {
                 showDetail(currentDetail);
             } else {
@@ -5710,6 +6331,7 @@ public final class LiteActivity extends Activity {
     protected void onStop() {
         super.onStop();
         backgrounded = true;
+        lastSuspendedSession = activeSession;
         epoch++;
         cancelWork();
         closePairing();

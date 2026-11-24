@@ -181,6 +181,79 @@ public final class LiteCatalog {
         }
     }
 
+    public static Site resolveSelectedSite(
+            List<Site> availableSites,
+            Site previousSelected,
+            String savedSelectedKey,
+            String savedSelectedApi) {
+        if (availableSites == null || availableSites.isEmpty()) return null;
+        if (previousSelected != null) {
+            String prevId = previousSelected.siteId();
+            String prevKey = previousSelected.key == null ? "" : previousSelected.key;
+            String prevApi = previousSelected.api == null ? "" : previousSelected.api;
+            for (int i = 0; i < availableSites.size(); i++) {
+                Site s = availableSites.get(i);
+                if (s != null && s.supported && prevId.equals(s.siteId())) {
+                    return s;
+                }
+            }
+            if (prevKey.length() > 0 && prevApi.length() > 0) {
+                for (int i = 0; i < availableSites.size(); i++) {
+                    Site s = availableSites.get(i);
+                    if (s != null
+                            && s.supported
+                            && prevKey.equals(s.key)
+                            && prevApi.equals(s.api)) {
+                        return s;
+                    }
+                }
+            }
+            if (prevKey.length() > 0) {
+                for (int i = 0; i < availableSites.size(); i++) {
+                    Site s = availableSites.get(i);
+                    if (s != null && s.supported && prevKey.equals(s.key)) {
+                        return s;
+                    }
+                }
+            }
+        }
+        String sk = savedSelectedKey == null ? "" : savedSelectedKey.trim();
+        String sa = savedSelectedApi == null ? "" : savedSelectedApi.trim();
+        if (sk.length() > 0 && sa.length() > 0) {
+            for (int i = 0; i < availableSites.size(); i++) {
+                Site s = availableSites.get(i);
+                if (s != null && s.supported && sk.equals(s.key) && sa.equals(s.api)) {
+                    return s;
+                }
+            }
+        }
+        if (sk.length() > 0) {
+            for (int i = 0; i < availableSites.size(); i++) {
+                Site s = availableSites.get(i);
+                if (s != null && s.supported && sk.equals(s.key)) {
+                    return s;
+                }
+            }
+        }
+        for (int i = 0; i < availableSites.size(); i++) {
+            Site s = availableSites.get(i);
+            if (s != null && s.supported) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    public static boolean sameSiteBinding(Site a, Site b) {
+        if (a == b) return true;
+        if (a == null || b == null) return false;
+        String ka = a.key == null ? "" : a.key;
+        String kb = b.key == null ? "" : b.key;
+        String aa = a.api == null ? "" : a.api;
+        String ab = b.api == null ? "" : b.api;
+        return ka.equals(kb) && aa.equals(ab) && a.type == b.type;
+    }
+
     public static final class Category {
         public String id, name;
     }
