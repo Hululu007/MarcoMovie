@@ -184,8 +184,96 @@ public final class LiteCatalog {
         }
 
         public String limitation() {
-            return capabilityReason(capabilityStatus());
+            String status = capabilityStatus();
+            if (STATUS_NEEDS_JAR.equals(status) && isPythonApi(api)) {
+                return "此来源需要 Python 插件运行环境，基础版尚未支持";
+            }
+            return capabilityReason(status);
         }
+    }
+
+    public static final class RecordSiteResolution {
+        public final Site matchedSite;
+        public final List<Site> ambiguousCandidates;
+        public final boolean synthesizedFallback;
+
+        public RecordSiteResolution(
+                Site matchedSite, List<Site> ambiguousCandidates, boolean synthesizedFallback) {
+            this.matchedSite = matchedSite;
+            this.ambiguousCandidates =
+                    ambiguousCandidates == null || ambiguousCandidates.isEmpty()
+                            ? Collections.<Site>emptyList()
+                            : Collections.unmodifiableList(
+                                    new ArrayList<Site>(ambiguousCandidates));
+            this.synthesizedFallback = synthesizedFallback;
+        }
+    }
+
+    public static RecordSiteResolution resolveSiteForRecord(
+            List<Site> availableSites, String siteKey, String siteApi, String siteName) {
+        String sk = siteKey == null ? "" : siteKey.trim();
+        String sa = siteApi == null ? "" : siteApi.trim();
+        String sn = siteName == null ? "" : siteName.trim();
+        if (sa.length() > 0) {
+            if (availableSites != null) {
+                for (int i = 0; i < availableSites.size(); i++) {
+                    Site s = availableSites.get(i);
+                    if (s != null
+                            && s.supported
+                            && sk.equals(s.key == null ? "" : s.key.trim())
+                            && sa.equals(s.api == null ? "" : s.api.trim())) {
+                        return new RecordSiteResolution(s, null, false);
+                    }
+                }
+                for (int i = 0; i < availableSites.size(); i++) {
+                    Site s = availableSites.get(i);
+                    if (s != null
+                            && s.supported
+                            && sa.equals(s.api == null ? "" : s.api.trim())) {
+                        return new RecordSiteResolution(s, null, false);
+                    }
+                }
+            }
+            boolean validApi = sa.startsWith("emby://account/");
+            if (!validApi) {
+                try {
+                    http(sa);
+                    validApi = true;
+                } catch (Exception ignored) {
+                }
+            }
+            if (validApi) {
+                Site fallback = new Site();
+                fallback.key = sk;
+                fallback.originalKey = sk;
+                fallback.name = sn.length() > 0 ? sn : "已存片源";
+                fallback.api = sa;
+                fallback.originalApi = sa;
+                fallback.type =
+                        sa.startsWith("emby://") ? 1 : (hasXmlInUrlPath(sa) ? 0 : 1);
+                fallback.supported = true;
+                return new RecordSiteResolution(fallback, null, true);
+            }
+            return new RecordSiteResolution(null, null, false);
+        }
+        List<Site> matches = new ArrayList<Site>();
+        if (availableSites != null && sk.length() > 0) {
+            for (int i = 0; i < availableSites.size(); i++) {
+                Site s = availableSites.get(i);
+                if (s != null
+                        && s.supported
+                        && sk.equals(s.key == null ? "" : s.key.trim())) {
+                    matches.add(s);
+                }
+            }
+        }
+        if (matches.size() == 1) {
+            return new RecordSiteResolution(matches.get(0), null, false);
+        }
+        if (matches.size() > 1) {
+            return new RecordSiteResolution(null, matches, false);
+        }
+        return new RecordSiteResolution(null, null, false);
     }
 
     public static Site resolveSelectedSite(
@@ -883,10 +971,18 @@ public final class LiteCatalog {
         return t.startsWith("<!doctype") || t.startsWith("<html");
     }
 
+    static boolean isPythonApi(String api) {
+        if (api == null) return false;
+        String lower = api.trim().toLowerCase(Locale.ROOT).split("[?#]", 2)[0];
+        return lower.startsWith("py_") || lower.endsWith(".py");
+    }
+
     static boolean isScriptOrJarApi(String api) {
         if (api == null) return false;
         String lower = api.trim().toLowerCase(Locale.ROOT).split("[?#]", 2)[0];
         return lower.startsWith("csp_")
+                || lower.startsWith("js_")
+                || lower.startsWith("py_")
                 || lower.endsWith(".js")
                 || lower.endsWith(".mjs")
                 || lower.endsWith(".py")
@@ -1581,6 +1677,7 @@ public final class LiteCatalog {
             }
             if (!s.api.startsWith("csp_")
                     && !s.api.startsWith("js_")
+                    && !s.api.startsWith("py_")
                     && base != null
                     && base.length() > 0) {
                 try {

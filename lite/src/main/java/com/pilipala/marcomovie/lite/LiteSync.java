@@ -237,7 +237,17 @@ public final class LiteSync {
     }
 
     public static String itemKey(String siteKey, String vodId) {
-        return (siteKey == null ? "" : siteKey) + "\n" + (vodId == null ? "" : vodId);
+        return itemKey(siteKey, "", vodId);
+    }
+
+    public static String itemKey(String siteKey, String siteApi, String vodId) {
+        String sk = siteKey == null ? "" : siteKey.trim();
+        String sa = siteApi == null ? "" : siteApi.trim();
+        String vi = vodId == null ? "" : vodId.trim();
+        if (sa.length() > 0) {
+            return sk + "\n" + sa + "\n" + vi;
+        }
+        return sk + "\n" + vi;
     }
 
     public static String subscriptionIdentity(String origin, String raw) {
@@ -390,7 +400,7 @@ public final class LiteSync {
         JSONArray favArr = new JSONArray();
         for (int i = 0; i < favs.size(); i++) {
             LiteStore.FavoriteEntry f = favs.get(i);
-            String k = itemKey(f.siteKey, f.vodId);
+            String k = itemKey(f.siteKey, f.siteApi, f.vodId);
             long ts = Math.max(1L, Math.max(f.addedAt, tombs.get("add:" + k)));
             try {
                 favArr.put(
@@ -442,7 +452,7 @@ public final class LiteSync {
         for (int i = 0; i < localFavs.size(); i++) {
             LiteStore.FavoriteEntry lf = localFavs.get(i);
             if (lf.addedAt > 0L) {
-                tombs.putMax("add:" + itemKey(lf.siteKey, lf.vodId), lf.addedAt);
+                tombs.putMax("add:" + itemKey(lf.siteKey, lf.siteApi, lf.vodId), lf.addedAt);
             }
         }
 
@@ -510,14 +520,14 @@ public final class LiteSync {
                 new LinkedHashMap<String, LiteStore.HistoryEntry>();
         for (int i = 0; i < localHist.size(); i++) {
             LiteStore.HistoryEntry e = localHist.get(i);
-            String k = itemKey(e.siteKey, e.vodId);
+            String k = itemKey(e.siteKey, e.siteApi, e.vodId);
             long delAt = tombs.get("hist:" + k);
             if (delAt > 0L && delAt >= e.updatedAt) continue;
             histMap.put(k, e);
         }
         for (int i = 0; i < remoteHist.size(); i++) {
             LiteStore.HistoryEntry r = remoteHist.get(i);
-            String k = itemKey(r.siteKey, r.vodId);
+            String k = itemKey(r.siteKey, r.siteApi, r.vodId);
             long delAt = tombs.get("hist:" + k);
             if (delAt > 0L && delAt >= r.updatedAt) continue;
             LiteStore.HistoryEntry cur = histMap.get(k);
@@ -554,7 +564,7 @@ public final class LiteSync {
                 new LinkedHashMap<String, LiteStore.FavoriteEntry>();
         for (int i = 0; i < localFavs.size(); i++) {
             LiteStore.FavoriteEntry f = localFavs.get(i);
-            String k = itemKey(f.siteKey, f.vodId);
+            String k = itemKey(f.siteKey, f.siteApi, f.vodId);
             long addTs = Math.max(1L, Math.max(f.addedAt, tombs.get("add:" + k)));
             long delTs = tombs.get("fav:" + k);
             if (delTs > addTs) continue;
@@ -564,7 +574,7 @@ public final class LiteSync {
         }
         for (int i = 0; i < remoteFavs.size(); i++) {
             LiteStore.FavoriteEntry rf = remoteFavs.get(i);
-            String k = itemKey(rf.siteKey, rf.vodId);
+            String k = itemKey(rf.siteKey, rf.siteApi, rf.vodId);
             long effAdd = Math.max(1L, Math.max(rf.addedAt, tombs.get("add:" + k)));
             long delTs = tombs.get("fav:" + k);
             if (delTs > effAdd) continue;

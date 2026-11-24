@@ -125,6 +125,9 @@ public final class LiteActivity extends Activity {
     Map<String, String> playingLiveSourceHeaders = Collections.emptyMap();
     final Object importLock = new Object();
     boolean homeVisible, inPlayback, backgrounded, inDetail, inCastPlayback;
+    String currentPageKind = "";
+    DetailOrigin detailOrigin;
+    List<View> lastRenderedCards = new ArrayList<View>();
     String loadedConfigSignature = "";
     LiteCast castServer;
     WifiManager.MulticastLock castMulticastLock;
@@ -178,6 +181,276 @@ public final class LiteActivity extends Activity {
             this.url = url;
             this.originalIndex = originalIndex;
         }
+    }
+
+    static final class DetailOrigin {
+        static final int KIND_HOME = 0;
+        static final int KIND_CATALOG = 1;
+        static final int KIND_GLOBAL_SEARCH = 2;
+        static final int KIND_HISTORY = 3;
+        static final int KIND_FAVORITES = 4;
+
+        final int kind;
+        final int scrollY;
+        final int focusIndex;
+        final LiteCatalog.Site catalogSite;
+        final List<LiteCatalog.Category> catalogCategories;
+        final String catalogKeyword;
+        final String catalogCategoryId;
+        final int catalogPage;
+        final int catalogPageCount;
+        final List<JSONObject> catalogItems;
+        final String searchKeyword;
+        final List<JSONObject> searchItems;
+        final List<LiteCatalog.Site> searchSites;
+        final String searchSummary;
+
+        private DetailOrigin(
+                int kind,
+                int scrollY,
+                int focusIndex,
+                LiteCatalog.Site catalogSite,
+                List<LiteCatalog.Category> catalogCategories,
+                String catalogKeyword,
+                String catalogCategoryId,
+                int catalogPage,
+                int catalogPageCount,
+                List<JSONObject> catalogItems,
+                String searchKeyword,
+                List<JSONObject> searchItems,
+                List<LiteCatalog.Site> searchSites,
+                String searchSummary) {
+            this.kind = kind;
+            this.scrollY = Math.max(0, scrollY);
+            this.focusIndex = focusIndex;
+            this.catalogSite = catalogSite;
+            this.catalogCategories =
+                    catalogCategories == null
+                            ? Collections.<LiteCatalog.Category>emptyList()
+                            : Collections.unmodifiableList(
+                                    new ArrayList<LiteCatalog.Category>(catalogCategories));
+            this.catalogKeyword = catalogKeyword == null ? "" : catalogKeyword;
+            this.catalogCategoryId = catalogCategoryId == null ? "" : catalogCategoryId;
+            this.catalogPage = Math.max(1, catalogPage);
+            this.catalogPageCount = Math.max(1, catalogPageCount);
+            this.catalogItems =
+                    catalogItems == null
+                            ? Collections.<JSONObject>emptyList()
+                            : Collections.unmodifiableList(new ArrayList<JSONObject>(catalogItems));
+            this.searchKeyword = searchKeyword == null ? "" : searchKeyword;
+            this.searchItems =
+                    searchItems == null
+                            ? Collections.<JSONObject>emptyList()
+                            : Collections.unmodifiableList(new ArrayList<JSONObject>(searchItems));
+            this.searchSites =
+                    searchSites == null
+                            ? Collections.<LiteCatalog.Site>emptyList()
+                            : Collections.unmodifiableList(
+                                    new ArrayList<LiteCatalog.Site>(searchSites));
+            this.searchSummary = searchSummary == null ? "" : searchSummary;
+        }
+
+        static DetailOrigin forSimple(int kind, int scrollY, int focusIndex) {
+            return new DetailOrigin(
+                    kind, scrollY, focusIndex, null, null, "", "", 1, 1, null, "", null, null, "");
+        }
+
+        static DetailOrigin forCatalog(
+                int scrollY,
+                int focusIndex,
+                LiteCatalog.Site site,
+                List<LiteCatalog.Category> cats,
+                String keyword,
+                String categoryId,
+                int page,
+                int pageCount,
+                List<JSONObject> items) {
+            return new DetailOrigin(
+                    KIND_CATALOG,
+                    scrollY,
+                    focusIndex,
+                    site,
+                    cats,
+                    keyword,
+                    categoryId,
+                    page,
+                    pageCount,
+                    items,
+                    "",
+                    null,
+                    null,
+                    "");
+        }
+
+        static DetailOrigin forGlobalSearch(
+                int scrollY,
+                int focusIndex,
+                String keyword,
+                List<JSONObject> items,
+                List<LiteCatalog.Site> itemSites,
+                String summary) {
+            return new DetailOrigin(
+                    KIND_GLOBAL_SEARCH,
+                    scrollY,
+                    focusIndex,
+                    null,
+                    null,
+                    "",
+                    "",
+                    1,
+                    1,
+                    null,
+                    keyword,
+                    items,
+                    itemSites,
+                    summary);
+        }
+    }
+
+    static final class SiteSearchOutcome {
+        final LiteCatalog.Site site;
+        final boolean succeeded;
+        final List<JSONObject> items;
+        final String error;
+
+        SiteSearchOutcome(
+                LiteCatalog.Site site, boolean succeeded, List<JSONObject> items, String error) {
+            this.site = site;
+            this.succeeded = succeeded;
+            this.items =
+                    items == null
+                            ? Collections.<JSONObject>emptyList()
+                            : Collections.unmodifiableList(new ArrayList<JSONObject>(items));
+            this.error = error == null ? "" : error;
+        }
+    }
+
+    public static String formatSearchEntryScope(
+            int totalEligibleStandard,
+            int embyCount,
+            int unsupportedCount,
+            int nonSearchableCount) {
+        int capped = Math.min(12, Math.max(0, totalEligibleStandard));
+        StringBuilder sb = new StringBuilder();
+        if (totalEligibleStandard > 0) {
+            sb.append("全站聚合搜索范围：")
+                    .append(
+                            totalEligibleStandard > capped
+                                    ? ("前 " + capped + "/" + totalEligibleStandard + " 个")
+                                    : (capped + " 个"))
+                    .append("标准 CMS 源（最多 12 源、4 并发、每源 8 条）");
+        } else {
+            sb.append("当前无可用于全站聚合搜索的标准 CMS 源");
+        }
+        if (embyCount > 0) {
+            sb.append("；另有 ")
+                    .append(embyCount)
+                    .append(" 个 Emby 媒体库（不参与聚合搜索，请进入对应 Emby 库内搜索）");
+        }
+        if (unsupportedCount > 0) {
+            sb.append("；已跳过 ")
+                    .append(unsupportedCount)
+                    .append(" 个需外部 Spider/JAR/JS/Python 或网盘插件的源");
+        }
+        if (nonSearchableCount > 0) {
+            sb.append("；另有 ")
+                    .append(nonSearchableCount)
+                    .append(" 个源关闭了搜索");
+        }
+        sb.append("。");
+        return sb.toString();
+    }
+
+    public static String formatGlobalSearchSummary(
+            String keyword,
+            int totalEligibleStandard,
+            int searchedCount,
+            int succeededCount,
+            int failedCount,
+            List<String> failedSiteNames,
+            int resultCount,
+            int embyCount,
+            int unsupportedCount) {
+        String kw = keyword == null ? "" : keyword.trim();
+        StringBuilder failedPreview = new StringBuilder();
+        if (failedSiteNames != null && !failedSiteNames.isEmpty()) {
+            int limit = Math.min(3, failedSiteNames.size());
+            for (int i = 0; i < limit; i++) {
+                if (i > 0) failedPreview.append("、");
+                failedPreview.append(failedSiteNames.get(i));
+            }
+            if (failedSiteNames.size() > limit) {
+                failedPreview.append(" 等 ").append(failedSiteNames.size()).append(" 个");
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        if (searchedCount > 0 && failedCount >= searchedCount) {
+            sb.append("全站搜索全部失败（共请求 ")
+                    .append(searchedCount)
+                    .append(" 个标准源，均未响应");
+            if (failedPreview.length() > 0) {
+                sb.append("：").append(failedPreview);
+            }
+            sb.append("），请检查网络或片源状态");
+        } else if (resultCount == 0 && failedCount == 0) {
+            sb.append("未检索到「")
+                    .append(kw)
+                    .append("」相关结果（已检索 ")
+                    .append(searchedCount)
+                    .append(" 个标准源，全部响应正常、确实零命中）");
+        } else if (resultCount == 0) {
+            sb.append("未检索到「")
+                    .append(kw)
+                    .append("」相关结果（已检索 ")
+                    .append(searchedCount)
+                    .append(" 个标准源：")
+                    .append(succeededCount)
+                    .append(" 个正常无命中，")
+                    .append(failedCount)
+                    .append(" 个失败");
+            if (failedPreview.length() > 0) {
+                sb.append("：").append(failedPreview);
+            }
+            sb.append("）");
+        } else if (failedCount == 0) {
+            sb.append("已检索 ")
+                    .append(searchedCount)
+                    .append(" 个标准源（全部成功），共找到 ")
+                    .append(resultCount)
+                    .append(" 条结果");
+        } else {
+            sb.append("已检索 ")
+                    .append(searchedCount)
+                    .append(" 个标准源（")
+                    .append(succeededCount)
+                    .append(" 个成功，")
+                    .append(failedCount)
+                    .append(" 个失败");
+            if (failedPreview.length() > 0) {
+                sb.append("：").append(failedPreview);
+            }
+            sb.append("），共找到 ")
+                    .append(resultCount)
+                    .append(" 条结果");
+        }
+        if (totalEligibleStandard > searchedCount && searchedCount > 0) {
+            sb.append(" · 范围：前 ")
+                    .append(searchedCount)
+                    .append("/")
+                    .append(totalEligibleStandard)
+                    .append(" 源（上限 12 源）");
+        }
+        if (embyCount > 0) {
+            sb.append(" · 未含 ")
+                    .append(embyCount)
+                    .append(" 个 Emby 库（请进对应库内搜索）");
+        }
+        if (unsupportedCount > 0) {
+            sb.append(" · 跳过 ")
+                    .append(unsupportedCount)
+                    .append(" 个插件/脚本源");
+        }
+        return sb.toString();
     }
 
     static final class PlaybackSession {
@@ -645,8 +918,11 @@ public final class LiteActivity extends Activity {
         closePairing();
         release();
         homeVisible = false;
+        inDetail = false;
         inPlayback = false;
         inCastPlayback = false;
+        currentPageKind = "";
+        lastRenderedCards = new ArrayList<View>();
         playbackFailed = false;
         activeSurfaceHolder = null;
         pendingResolvedPlay = null;
@@ -1061,11 +1337,86 @@ public final class LiteActivity extends Activity {
         }
     }
 
+    int currentScrollY() {
+        return mainScroll != null ? Math.max(0, mainScroll.getScrollY()) : 0;
+    }
+
+    void restoreScrollAndFocus(
+            final List<View> targetViews, final int scrollY, final int focusIndex) {
+        final ScrollView sv = mainScroll;
+        final int targetId = epoch;
+        if (sv == null) return;
+        if (scrollY <= 0 && (targetViews == null || focusIndex < 0)) return;
+        sv.post(
+                new Runnable() {
+                    public void run() {
+                        if (dead || epoch != targetId) return;
+                        if (targetViews != null && !targetViews.isEmpty() && focusIndex >= 0) {
+                            int safeIdx = Math.min(focusIndex, targetViews.size() - 1);
+                            View target = targetViews.get(safeIdx);
+                            if (target != null && target.isFocusable()) {
+                                target.requestFocus();
+                            }
+                        }
+                        if (scrollY > 0) {
+                            sv.post(
+                                    new Runnable() {
+                                        public void run() {
+                                            if (!dead && epoch == targetId && sv == mainScroll) {
+                                                sv.scrollTo(0, scrollY);
+                                            }
+                                        }
+                                    });
+                        }
+                    }
+                });
+    }
+
+    boolean isUniqueSiteKey(String siteKey) {
+        String sk = siteKey == null ? "" : siteKey.trim();
+        if (sk.length() == 0) return true;
+        int count = 0;
+        for (int i = 0; i < sites.size(); i++) {
+            LiteCatalog.Site s = sites.get(i);
+            if (s != null && s.supported && sk.equals(s.key == null ? "" : s.key.trim())) {
+                count++;
+                if (count > 1) return false;
+            }
+        }
+        return true;
+    }
+
+    static String shortHostTag(String api) {
+        if (api == null || api.trim().length() == 0) return "";
+        try {
+            java.net.URL u = new java.net.URL(api.trim());
+            String host = u.getHost();
+            int port = u.getPort();
+            String path = u.getPath();
+            StringBuilder sb = new StringBuilder();
+            if (host != null && host.length() > 0) {
+                sb.append(host);
+                if (port > 0) sb.append(':').append(port);
+            }
+            if (path != null && path.length() > 1) {
+                String clean = path.length() > 18 ? path.substring(0, 18) : path;
+                sb.append(clean);
+            }
+            return sb.toString();
+        } catch (Exception ignored) {
+            return truncate(api, 24);
+        }
+    }
+
     void home() {
-        inDetail = false;
+        home(0, -1);
+    }
+
+    void home(final int restoreScrollY, final int restoreFocusIndex) {
         loadConfiguredSites();
         base("MARCO MOVIE  Lite");
         homeVisible = true;
+        currentPageKind = "home";
         final String raw = getPreferences(0).getString("config", "");
         final String addr = getPreferences(0).getString("address", "");
         int supportedCountHome = 0;
@@ -1208,10 +1559,11 @@ public final class LiteActivity extends Activity {
         addGridViews(page, quickBtns, isTvOrLandscape() ? 3 : 2, 46);
 
         List<LiteStore.HistoryEntry> history = LiteStore.getHistory(this);
+        List<View> homeHistCards = new ArrayList<View>();
         if (!history.isEmpty()) {
             addSectionHeader("继续观看");
-            List<View> histCards = new ArrayList<View>();
             for (int i = 0; i < Math.min(history.size(), 6); i++) {
+                final int cardIdx = i;
                 final LiteStore.HistoryEntry h = history.get(i);
                 String progress =
                         h.epName
@@ -1234,13 +1586,19 @@ public final class LiteActivity extends Activity {
                 card.setOnClickListener(
                         new View.OnClickListener() {
                             public void onClick(View v) {
+                                detailOrigin =
+                                        DetailOrigin.forSimple(
+                                                DetailOrigin.KIND_HOME,
+                                                currentScrollY(),
+                                                cardIdx);
                                 openHistoryOrFavorite(
                                         h.siteKey, h.siteApi, h.siteName, h.vodId, h.vodName);
                             }
                         });
-                histCards.add(card);
+                homeHistCards.add(card);
             }
-            addGridViews(page, histCards, isTvOrLandscape() ? 3 : 1, 60);
+            addGridViews(page, homeHistCards, isTvOrLandscape() ? 3 : 1, 60);
+            lastRenderedCards = homeHistCards;
         }
 
         String preferred = getPreferences(0).getString("preferred_site_identity", "");
@@ -1364,30 +1722,53 @@ public final class LiteActivity extends Activity {
             }
             addGridViews(page, siteButtons, siteButtons.size() <= 3 ? 1 : siteColumns(), 48);
         }
+        if (restoreScrollY > 0 || restoreFocusIndex >= 0) {
+            restoreScrollAndFocus(homeHistCards, restoreScrollY, restoreFocusIndex);
+        }
     }
 
     void openHistoryOrFavorite(
-            String siteKey, String siteApi, String siteName, String vodId, String vodName) {
+            final String siteKey,
+            final String siteApi,
+            final String siteName,
+            final String vodId,
+            final String vodName) {
         loadConfiguredSites();
-        LiteCatalog.Site match = null;
-        for (int i = 0; i < sites.size(); i++) {
-            LiteCatalog.Site s = sites.get(i);
-            if (s.supported && (s.key.equals(siteKey) || s.api.equals(siteApi))) {
-                match = s;
-                break;
-            }
-        }
-        if (match == null && siteApi != null && siteApi.length() > 0) {
-            match = new LiteCatalog.Site();
-            match.key = siteKey;
-            match.name = siteName.length() > 0 ? siteName : "已存片源";
-            match.api = siteApi;
-            match.type = LiteCatalog.hasXmlInUrlPath(siteApi) ? 0 : 1;
-            match.supported = true;
-        }
-        if (match != null) {
-            selected = match;
+        final LiteCatalog.RecordSiteResolution res =
+                LiteCatalog.resolveSiteForRecord(sites, siteKey, siteApi, siteName);
+        if (res.matchedSite != null) {
+            selected = res.matchedSite;
             detail(vodId);
+        } else if (!res.ambiguousCandidates.isEmpty()) {
+            String[] labels = new String[res.ambiguousCandidates.size()];
+            for (int i = 0; i < res.ambiguousCandidates.size(); i++) {
+                LiteCatalog.Site cand = res.ambiguousCandidates.get(i);
+                labels[i] = cand.name + " (" + shortHostTag(cand.api) + ")";
+            }
+            if (status != null) {
+                status.setText(
+                        "旧记录未保存接口地址，当前有 "
+                                + res.ambiguousCandidates.size()
+                                + " 个同名片源，请选择要打开的来源（原记录已保留）。");
+            }
+            new AlertDialog.Builder(this)
+                    .setTitle(
+                            "选择来源"
+                                    + (vodName != null && vodName.trim().length() > 0
+                                            ? " · " + vodName.trim()
+                                            : ""))
+                    .setItems(
+                            labels,
+                            new DialogInterface.OnClickListener() {
+                                public void onClick(DialogInterface dialog, int which) {
+                                    if (which >= 0 && which < res.ambiguousCandidates.size()) {
+                                        selected = res.ambiguousCandidates.get(which);
+                                        detail(vodId);
+                                    }
+                                }
+                            })
+                    .setNegativeButton("取消", null)
+                    .show();
         } else if (!sites.isEmpty() && vodName != null && vodName.trim().length() > 0) {
             globalSearch(vodName.trim());
         } else {
@@ -1438,7 +1819,12 @@ public final class LiteActivity extends Activity {
     }
 
     void historyPage() {
+        historyPage(0, -1);
+    }
+
+    void historyPage(final int restoreScrollY, final int restoreFocusIndex) {
         base("观看历史");
+        currentPageKind = "history";
         final List<LiteStore.HistoryEntry> list = LiteStore.getHistory(this);
         button(
                 "多端云同步（同步观看进度与收藏）",
@@ -1495,19 +1881,36 @@ public final class LiteActivity extends Activity {
                 });
         List<View> cards = new ArrayList<View>();
         for (int i = 0; i < list.size(); i++) {
+            final int cardIdx = i;
             final LiteStore.HistoryEntry h = list.get(i);
             String remark =
                     h.epName
                             + (h.positionMs > 0 ? " " + formatTime(h.positionMs) : "");
+            String subSite = h.siteName;
+            if (h.siteApi != null && h.siteApi.length() > 0) {
+                for (int j = 0; j < list.size(); j++) {
+                    if (j != i
+                            && h.siteName.equals(list.get(j).siteName)
+                            && !h.siteApi.equals(list.get(j).siteApi)) {
+                        subSite = h.siteName + " · " + shortHostTag(h.siteApi);
+                        break;
+                    }
+                }
+            }
             cards.add(
                     createPosterCard(
                             h.vodName,
                             h.vodPic,
                             remark,
-                            h.siteName,
+                            subSite,
                             Collections.<String, String>emptyMap(),
                             new Runnable() {
                                 public void run() {
+                                    detailOrigin =
+                                            DetailOrigin.forSimple(
+                                                    DetailOrigin.KIND_HISTORY,
+                                                    currentScrollY(),
+                                                    cardIdx);
                                     openHistoryOrFavorite(
                                             h.siteKey,
                                             h.siteApi,
@@ -1518,10 +1921,17 @@ public final class LiteActivity extends Activity {
                             }));
         }
         addGridViews(page, cards, posterColumns(), -2);
+        lastRenderedCards = cards;
+        restoreScrollAndFocus(cards, restoreScrollY, restoreFocusIndex);
     }
 
     void favoritesPage() {
+        favoritesPage(0, -1);
+    }
+
+    void favoritesPage(final int restoreScrollY, final int restoreFocusIndex) {
         base("我的收藏");
+        currentPageKind = "favorites";
         final List<LiteStore.FavoriteEntry> list = LiteStore.getFavorites(this);
         button(
                 "多端云同步（同步观看进度与收藏）",
@@ -1554,16 +1964,33 @@ public final class LiteActivity extends Activity {
                 });
         List<View> cards = new ArrayList<View>();
         for (int i = 0; i < list.size(); i++) {
+            final int cardIdx = i;
             final LiteStore.FavoriteEntry f = list.get(i);
+            String subSite = f.siteName;
+            if (f.siteApi != null && f.siteApi.length() > 0) {
+                for (int j = 0; j < list.size(); j++) {
+                    if (j != i
+                            && f.siteName.equals(list.get(j).siteName)
+                            && !f.siteApi.equals(list.get(j).siteApi)) {
+                        subSite = f.siteName + " · " + shortHostTag(f.siteApi);
+                        break;
+                    }
+                }
+            }
             cards.add(
                     createPosterCard(
                             f.vodName,
                             f.vodPic,
                             f.vodRemarks,
-                            f.siteName,
+                            subSite,
                             Collections.<String, String>emptyMap(),
                             new Runnable() {
                                 public void run() {
+                                    detailOrigin =
+                                            DetailOrigin.forSimple(
+                                                    DetailOrigin.KIND_FAVORITES,
+                                                    currentScrollY(),
+                                                    cardIdx);
                                     openHistoryOrFavorite(
                                             f.siteKey,
                                             f.siteApi,
@@ -1574,6 +2001,8 @@ public final class LiteActivity extends Activity {
                             }));
         }
         addGridViews(page, cards, posterColumns(), -2);
+        lastRenderedCards = cards;
+        restoreScrollAndFocus(cards, restoreScrollY, restoreFocusIndex);
     }
 
     void livePage() {
@@ -2972,7 +3401,7 @@ public final class LiteActivity extends Activity {
         LiteSync.Tombstones t = LiteSync.Tombstones.read(LiteStore.getTombstonesRaw(this));
         for (int i = 0; i < list.size(); i++) {
             LiteStore.HistoryEntry e = list.get(i);
-            t.putMax("hist:" + LiteSync.itemKey(e.siteKey, e.vodId), now);
+            t.putMax("hist:" + LiteSync.itemKey(e.siteKey, e.siteApi, e.vodId), now);
         }
         LiteStore.setTombstonesRaw(this, t.json());
     }
@@ -2983,16 +3412,21 @@ public final class LiteActivity extends Activity {
         LiteSync.Tombstones t = LiteSync.Tombstones.read(LiteStore.getTombstonesRaw(this));
         for (int i = 0; i < list.size(); i++) {
             LiteStore.FavoriteEntry f = list.get(i);
-            String k = LiteSync.itemKey(f.siteKey, f.vodId);
+            String k = LiteSync.itemKey(f.siteKey, f.siteApi, f.vodId);
             t.putMax("fav:" + k, now);
             t.stamps.remove("add:" + k);
         }
         LiteStore.setTombstonesRaw(this, t.json());
     }
 
-    void recordFavoriteToggleTombstone(String siteKey, String vodId, boolean nowFavorited) {
+    void recordFavoriteToggleTombstone(
+            String siteKey,
+            String siteApi,
+            String vodId,
+            boolean nowFavorited,
+            boolean alsoTombstoneLegacyEmptyApi) {
         long now = System.currentTimeMillis();
-        String k = LiteSync.itemKey(siteKey, vodId);
+        String k = LiteSync.itemKey(siteKey, siteApi, vodId);
         LiteSync.Tombstones t = LiteSync.Tombstones.read(LiteStore.getTombstonesRaw(this));
         if (nowFavorited) {
             t.stamps.put("add:" + k, Long.valueOf(now));
@@ -3000,6 +3434,11 @@ public final class LiteActivity extends Activity {
         } else {
             t.stamps.put("fav:" + k, Long.valueOf(now));
             t.stamps.remove("add:" + k);
+            if (alsoTombstoneLegacyEmptyApi && siteApi != null && siteApi.trim().length() > 0) {
+                String legacyKey = LiteSync.itemKey(siteKey, "", vodId);
+                t.stamps.put("fav:" + legacyKey, Long.valueOf(now));
+                t.stamps.remove("add:" + legacyKey);
+            }
         }
         LiteStore.setTombstonesRaw(this, t.json());
     }
@@ -3553,7 +3992,6 @@ public final class LiteActivity extends Activity {
     }
 
     void catalog(final String keyword, final String categoryId, final int number) {
-        inDetail = false;
         LiteCatalog.Site beforeRebind = selected;
         boolean rebounded = loadConfiguredSites();
         if (selected == null || !selected.supported) {
@@ -3579,44 +4017,11 @@ public final class LiteActivity extends Activity {
         lastCategory = effectiveCategoryId;
         lastPage = effectivePage;
         base(selected.name);
+        currentPageKind = "catalog";
         final int id = epoch;
         final LiteCatalog.Site site = selected;
 
-        LinearLayout actionRow = new LinearLayout(this);
-        actionRow.setOrientation(LinearLayout.HORIZONTAL);
-        List<View> topActions = new ArrayList<View>();
-        topActions.add(
-                makeActionButton(
-                        "搜索此来源",
-                        false,
-                        new Runnable() {
-                            public void run() {
-                                search();
-                            }
-                        }));
-        topActions.add(
-                makeActionButton(
-                        "切换片源",
-                        false,
-                        new Runnable() {
-                            public void run() {
-                                home();
-                            }
-                        }));
-        if (effectiveKeyword.length() > 0) {
-            topActions.add(
-                    makeActionButton(
-                            "清除搜索：「" + truncate(effectiveKeyword, 6) + "」",
-                            true,
-                            new Runnable() {
-                                public void run() {
-                                    catalog("", "", 1);
-                                }
-                            }));
-        }
-        addGridViews(page, topActions, topActions.size(), 42);
-
-        showCategories(effectiveKeyword, effectiveCategoryId);
+        addCatalogHeaderControls(effectiveKeyword, effectiveCategoryId);
         work(
                 new Job() {
                     public void run() throws Exception {
@@ -3659,6 +4064,11 @@ public final class LiteActivity extends Activity {
                         final List<LiteCatalog.Category> fetchedCategories = loadedCategories;
                         final JSONArray list = response.optJSONArray("list");
                         if (list == null) throw new java.io.IOException();
+                        final List<JSONObject> items = new ArrayList<JSONObject>();
+                        for (int i = 0; i < Math.min(list.length(), 60); i++) {
+                            JSONObject video = list.optJSONObject(i);
+                            if (video != null) items.add(video);
+                        }
                         final int pageCount = Math.max(1, response.optInt("pagecount", 1));
                         ui.post(
                                 new Runnable() {
@@ -3670,90 +4080,193 @@ public final class LiteActivity extends Activity {
                                         if (dead || id != epoch) return;
                                         categories = fetchedCategories;
                                         showCategories(effectiveKeyword, effectiveCategoryId);
-
-                                        status.setText(
-                                                list.length() == 0
-                                                        ? "没有结果"
-                                                        : "第 "
-                                                                + effectivePage
-                                                                + " / "
-                                                                + pageCount
-                                                                + " 页（共 "
-                                                                + list.length()
-                                                                + " 项）");
-                                        List<View> cards = new ArrayList<View>();
-                                        for (int i = 0; i < Math.min(list.length(), 60); i++) {
-                                            final JSONObject video = list.optJSONObject(i);
-                                            if (video == null) continue;
-                                            final String vodId = video.optString("vod_id");
-                                            String vodName = video.optString("vod_name", "未命名");
-                                            String vodPic = video.optString("vod_pic", "");
-                                            String vodRemarks = video.optString("vod_remarks", "");
-                                            String vodYear = video.optString("vod_year", "");
-                                            cards.add(
-                                                    createPosterCard(
-                                                            vodName,
-                                                            vodPic,
-                                                            vodRemarks,
-                                                            vodYear,
-                                                            site.headers,
-                                                            new Runnable() {
-                                                                public void run() {
-                                                                    detail(vodId);
-                                                                }
-                                                            }));
-                                        }
-                                        addGridViews(page, cards, posterColumns(), -2);
-
-                                        List<View> pagerBtns = new ArrayList<View>();
-                                        if (effectivePage > 1) {
-                                            pagerBtns.add(
-                                                    makeActionButton(
-                                                            "上一页",
-                                                            false,
-                                                            new Runnable() {
-                                                                public void run() {
-                                                                    catalog(
-                                                                            effectiveKeyword,
-                                                                            effectiveCategoryId,
-                                                                            effectivePage - 1);
-                                                                }
-                                                            }));
-                                        }
-                                        if (effectivePage < pageCount) {
-                                            pagerBtns.add(
-                                                    makeActionButton(
-                                                            "下一页",
-                                                            true,
-                                                            new Runnable() {
-                                                                public void run() {
-                                                                    catalog(
-                                                                            effectiveKeyword,
-                                                                            effectiveCategoryId,
-                                                                            effectivePage + 1);
-                                                                }
-                                                            }));
-                                        }
-                                        if (cards.size() > 8) {
-                                            pagerBtns.add(
-                                                    makeActionButton(
-                                                            "返回顶部",
-                                                            false,
-                                                            new Runnable() {
-                                                                public void run() {
-                                                                    if (mainScroll != null)
-                                                                        mainScroll.fullScroll(
-                                                                                View.FOCUS_UP);
-                                                                }
-                                                            }));
-                                        }
-                                        if (!pagerBtns.isEmpty()) {
-                                            addGridViews(page, pagerBtns, pagerBtns.size(), 46);
-                                        }
+                                        renderCatalogResults(
+                                                site,
+                                                effectiveKeyword,
+                                                effectiveCategoryId,
+                                                effectivePage,
+                                                pageCount,
+                                                items,
+                                                0,
+                                                -1);
                                     }
                                 });
                     }
                 });
+    }
+
+    void addCatalogHeaderControls(final String effectiveKeyword, final String effectiveCategoryId) {
+        List<View> topActions = new ArrayList<View>();
+        topActions.add(
+                makeActionButton(
+                        "搜索此来源",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                search();
+                            }
+                        }));
+        topActions.add(
+                makeActionButton(
+                        "切换片源",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                home();
+                            }
+                        }));
+        if (effectiveKeyword.length() > 0) {
+            topActions.add(
+                    makeActionButton(
+                            "清除搜索：「" + truncate(effectiveKeyword, 6) + "」",
+                            true,
+                            new Runnable() {
+                                public void run() {
+                                    catalog("", "", 1);
+                                }
+                            }));
+        }
+        addGridViews(page, topActions, topActions.size(), 42);
+        showCategories(effectiveKeyword, effectiveCategoryId);
+    }
+
+    void restoreCatalog(DetailOrigin origin) {
+        if (origin == null || origin.catalogSite == null) {
+            catalog(lastQuery, lastCategory, lastPage);
+            return;
+        }
+        selected = origin.catalogSite;
+        categories = new ArrayList<LiteCatalog.Category>(origin.catalogCategories);
+        lastQuery = origin.catalogKeyword;
+        lastCategory = origin.catalogCategoryId;
+        lastPage = origin.catalogPage;
+        base(selected.name);
+        currentPageKind = "catalog";
+        addCatalogHeaderControls(origin.catalogKeyword, origin.catalogCategoryId);
+        renderCatalogResults(
+                selected,
+                origin.catalogKeyword,
+                origin.catalogCategoryId,
+                origin.catalogPage,
+                origin.catalogPageCount,
+                origin.catalogItems,
+                origin.scrollY,
+                origin.focusIndex);
+    }
+
+    void renderCatalogResults(
+            final LiteCatalog.Site site,
+            final String effectiveKeyword,
+            final String effectiveCategoryId,
+            final int effectivePage,
+            final int pageCount,
+            final List<JSONObject> items,
+            final int restoreScrollY,
+            final int restoreFocusIndex) {
+        if (items.isEmpty()) {
+            status.setText(
+                    effectiveKeyword.length() > 0
+                            ? "当前源「"
+                                    + site.name
+                                    + "」中未检索到「"
+                                    + effectiveKeyword
+                                    + "」相关结果（响应正常，确实零命中）"
+                            : "没有结果");
+        } else {
+            status.setText(
+                    (effectiveKeyword.length() > 0 ? "搜索「" + effectiveKeyword + "」 · " : "")
+                            + "第 "
+                            + effectivePage
+                            + " / "
+                            + pageCount
+                            + " 页（共 "
+                            + items.size()
+                            + " 项）");
+        }
+        final List<LiteCatalog.Category> catsSnap =
+                new ArrayList<LiteCatalog.Category>(categories);
+        List<View> cards = new ArrayList<View>();
+        for (int i = 0; i < items.size(); i++) {
+            final int cardIdx = i;
+            final JSONObject video = items.get(i);
+            final String vodId = video.optString("vod_id");
+            String vodName = video.optString("vod_name", "未命名");
+            String vodPic = video.optString("vod_pic", "");
+            String vodRemarks = video.optString("vod_remarks", "");
+            String vodYear = video.optString("vod_year", "");
+            cards.add(
+                    createPosterCard(
+                            vodName,
+                            vodPic,
+                            vodRemarks,
+                            vodYear,
+                            site.headers,
+                            new Runnable() {
+                                public void run() {
+                                    detailOrigin =
+                                            DetailOrigin.forCatalog(
+                                                    currentScrollY(),
+                                                    cardIdx,
+                                                    site,
+                                                    catsSnap,
+                                                    effectiveKeyword,
+                                                    effectiveCategoryId,
+                                                    effectivePage,
+                                                    pageCount,
+                                                    items);
+                                    selected = site;
+                                    detail(vodId);
+                                }
+                            }));
+        }
+        addGridViews(page, cards, posterColumns(), -2);
+        lastRenderedCards = cards;
+
+        List<View> pagerBtns = new ArrayList<View>();
+        if (effectivePage > 1) {
+            pagerBtns.add(
+                    makeActionButton(
+                            "上一页",
+                            false,
+                            new Runnable() {
+                                public void run() {
+                                    catalog(
+                                            effectiveKeyword,
+                                            effectiveCategoryId,
+                                            effectivePage - 1);
+                                }
+                            }));
+        }
+        if (effectivePage < pageCount) {
+            pagerBtns.add(
+                    makeActionButton(
+                            "下一页",
+                            true,
+                            new Runnable() {
+                                public void run() {
+                                    catalog(
+                                            effectiveKeyword,
+                                            effectiveCategoryId,
+                                            effectivePage + 1);
+                                }
+                            }));
+        }
+        if (cards.size() > 8) {
+            pagerBtns.add(
+                    makeActionButton(
+                            "返回顶部",
+                            false,
+                            new Runnable() {
+                                public void run() {
+                                    if (mainScroll != null)
+                                        mainScroll.fullScroll(View.FOCUS_UP);
+                                }
+                            }));
+        }
+        if (!pagerBtns.isEmpty()) {
+            addGridViews(page, pagerBtns, pagerBtns.size(), 46);
+        }
+        restoreScrollAndFocus(cards, restoreScrollY, restoreFocusIndex);
     }
 
     @SuppressWarnings("deprecation")
@@ -3903,8 +4416,28 @@ public final class LiteActivity extends Activity {
         loadConfiguredSites();
         String title = selected != null ? "搜索 · " + selected.name : "全站搜索";
         base(title);
+        currentPageKind = "search";
         final int searchSession = epoch;
-        status.setText("支持手机扫码打字输入、遥控器快捷键盘，或点击输入框调起系统输入法：");
+        int eligibleStd = 0;
+        int embyCount = 0;
+        int unsupportedCount = 0;
+        int nonSearchableCount = 0;
+        for (int i = 0; i < sites.size(); i++) {
+            LiteCatalog.Site s = sites.get(i);
+            if (!s.supported) {
+                unsupportedCount++;
+            } else if (s.api != null && s.api.startsWith("emby://")) {
+                embyCount++;
+            } else if (s.searchable) {
+                eligibleStd++;
+            } else {
+                nonSearchableCount++;
+            }
+        }
+        status.setText(
+                "支持手机扫码打字输入、遥控器快捷键盘，或点击输入框调起系统输入法 · "
+                        + formatSearchEntryScope(
+                                eligibleStd, embyCount, unsupportedCount, nonSearchableCount));
 
         final EditText input = new EditText(this);
         input.setSingleLine();
@@ -4104,17 +4637,50 @@ public final class LiteActivity extends Activity {
 
     void globalSearch(final String keyword) {
         loadConfiguredSites();
-        base("全站搜索 · " + keyword);
+        final String cleanKeyword = keyword == null ? "" : keyword.trim();
+        lastQuery = cleanKeyword;
+        base("全站搜索 · " + cleanKeyword);
+        currentPageKind = "global_search";
         final int id = epoch;
         final List<LiteCatalog.Site> searchableSites = new ArrayList<LiteCatalog.Site>();
-        for (int i = 0; i < sites.size() && searchableSites.size() < 12; i++) {
+        int totalEligibleStandardCount = 0;
+        int embyCountVal = 0;
+        int unsupportedCountVal = 0;
+        int nonSearchableCountVal = 0;
+        for (int i = 0; i < sites.size(); i++) {
             LiteCatalog.Site s = sites.get(i);
-            if (s.supported && s.searchable && !s.api.startsWith("emby://")) {
-                searchableSites.add(s);
+            if (!s.supported) {
+                unsupportedCountVal++;
+            } else if (s.api != null && s.api.startsWith("emby://")) {
+                embyCountVal++;
+            } else if (!s.searchable) {
+                nonSearchableCountVal++;
+            } else {
+                totalEligibleStandardCount++;
+                if (searchableSites.size() < 12) {
+                    searchableSites.add(s);
+                }
             }
         }
+        final int totalEligibleStandard = totalEligibleStandardCount;
+        final int embyCount = embyCountVal;
+        final int unsupportedCount = unsupportedCountVal;
         if (searchableSites.isEmpty()) {
-            status.setText("没有可聚合检索的标准片源，请先导入配置。");
+            if (embyCount > 0) {
+                status.setText(
+                        "当前没有可聚合检索的标准 CMS 片源（已配置 "
+                                + embyCount
+                                + " 个 Emby 媒体库，请从首页进入对应 Emby 库执行库内搜索）。");
+            } else if (unsupportedCount > 0) {
+                status.setText(
+                        "当前配置中的 "
+                                + unsupportedCount
+                                + " 个片源均需外部 Spider / JAR / JS / Python 或网盘插件，轻量版无法执行全站聚合搜索。");
+            } else if (nonSearchableCountVal > 0) {
+                status.setText("当前配置中的标准片源均未开启搜索（searchable=0）。");
+            } else {
+                status.setText("没有可聚合检索的标准片源，请先导入配置。");
+            }
             return;
         }
         work(
@@ -4123,52 +4689,67 @@ public final class LiteActivity extends Activity {
                         final List<JSONObject> merged = new ArrayList<JSONObject>();
                         final List<LiteCatalog.Site> matchedSites =
                                 new ArrayList<LiteCatalog.Site>();
+                        int okCount = 0;
+                        int failCount = 0;
+                        final List<String> failedSiteNames = new ArrayList<String>();
                         ExecutorService searchPool =
                                 Executors.newFixedThreadPool(Math.min(4, searchableSites.size()));
                         try {
-                            List<Future<List<JSONObject>>> futures =
-                                    new ArrayList<Future<List<JSONObject>>>(searchableSites.size());
+                            List<Future<SiteSearchOutcome>> futures =
+                                    new ArrayList<Future<SiteSearchOutcome>>(
+                                            searchableSites.size());
                             for (int i = 0; i < searchableSites.size(); i++) {
                                 final LiteCatalog.Site s = searchableSites.get(i);
                                 futures.add(
                                         searchPool.submit(
-                                                new Callable<List<JSONObject>>() {
-                                                    public List<JSONObject> call() {
+                                                new Callable<SiteSearchOutcome>() {
+                                                    public SiteSearchOutcome call() {
                                                         List<JSONObject> found =
                                                                 new ArrayList<JSONObject>();
                                                         if (dead
                                                                 || id != epoch
                                                                 || Thread.currentThread()
                                                                         .isInterrupted()) {
-                                                            return found;
+                                                            return new SiteSearchOutcome(
+                                                                    s, false, found, "cancelled");
                                                         }
                                                         try {
                                                             String u =
                                                                     LiteCatalog.cmsListUrl(
-                                                                            s, "", keyword, 1);
+                                                                            s, "", cleanKeyword, 1);
                                                             JSONObject resp =
                                                                     LiteCatalog.parseCmsResponse(
                                                                             LiteCatalog.fetch(
                                                                                     u, s.headers));
                                                             JSONArray arr =
                                                                     resp.optJSONArray("list");
-                                                            if (arr != null) {
-                                                                for (int j = 0;
-                                                                        j < Math.min(arr.length(), 8);
-                                                                        j++) {
-                                                                    JSONObject v =
-                                                                            arr.optJSONObject(j);
-                                                                    if (v != null
-                                                                            && v.optString("vod_id")
-                                                                                            .length()
-                                                                                    > 0) {
-                                                                        found.add(v);
-                                                                    }
+                                                            if (arr == null) {
+                                                                return new SiteSearchOutcome(
+                                                                        s,
+                                                                        false,
+                                                                        found,
+                                                                        "missing list");
+                                                            }
+                                                            for (int j = 0;
+                                                                    j < Math.min(arr.length(), 8);
+                                                                    j++) {
+                                                                JSONObject v = arr.optJSONObject(j);
+                                                                if (v != null
+                                                                        && v.optString("vod_id")
+                                                                                        .length()
+                                                                                > 0) {
+                                                                    found.add(v);
                                                                 }
                                                             }
-                                                        } catch (Throwable ignored) {
+                                                            return new SiteSearchOutcome(
+                                                                    s, true, found, "");
+                                                        } catch (Throwable err) {
+                                                            return new SiteSearchOutcome(
+                                                                    s,
+                                                                    false,
+                                                                    found,
+                                                                    err.getMessage());
                                                         }
-                                                        return found;
                                                     }
                                                 }));
                             }
@@ -4178,59 +4759,127 @@ public final class LiteActivity extends Activity {
                                 }
                                 LiteCatalog.Site s = searchableSites.get(i);
                                 try {
-                                    List<JSONObject> siteItems = futures.get(i).get();
-                                    for (int j = 0; j < siteItems.size(); j++) {
-                                        merged.add(siteItems.get(j));
-                                        matchedSites.add(s);
+                                    SiteSearchOutcome outcome = futures.get(i).get();
+                                    if (outcome != null && outcome.succeeded) {
+                                        okCount++;
+                                        for (int j = 0; j < outcome.items.size(); j++) {
+                                            merged.add(outcome.items.get(j));
+                                            matchedSites.add(s);
+                                        }
+                                    } else {
+                                        failCount++;
+                                        failedSiteNames.add(s.name);
                                     }
                                 } catch (InterruptedException ie) {
                                     Thread.currentThread().interrupt();
                                     return;
                                 } catch (Throwable ignored) {
+                                    failCount++;
+                                    failedSiteNames.add(s.name);
                                 }
                             }
                         } finally {
                             searchPool.shutdownNow();
                         }
+                        final String summaryText =
+                                formatGlobalSearchSummary(
+                                        cleanKeyword,
+                                        totalEligibleStandard,
+                                        searchableSites.size(),
+                                        okCount,
+                                        failCount,
+                                        failedSiteNames,
+                                        merged.size(),
+                                        embyCount,
+                                        unsupportedCount);
                         ui.post(
                                 new Runnable() {
                                     public void run() {
                                         if (dead || id != epoch) return;
-                                        status.setText(
-                                                merged.isEmpty()
-                                                        ? "未检索到「" + keyword + "」相关结果"
-                                                        : "检索了 "
-                                                                + searchableSites.size()
-                                                                + " 个片源，共找到 "
-                                                                + merged.size()
-                                                                + " 条结果：");
-                                        List<View> cards = new ArrayList<View>();
-                                        for (int i = 0; i < merged.size(); i++) {
-                                            final JSONObject v = merged.get(i);
-                                            final LiteCatalog.Site s = matchedSites.get(i);
-                                            cards.add(
-                                                    createPosterCard(
-                                                            v.optString("vod_name", "未命名"),
-                                                            v.optString("vod_pic", ""),
-                                                            v.optString("vod_remarks", ""),
-                                                            "来源：" + s.name,
-                                                            s.headers,
-                                                            new Runnable() {
-                                                                public void run() {
-                                                                    selected = s;
-                                                                    detail(v.optString("vod_id"));
-                                                                }
-                                                            }));
-                                        }
-                                        addGridViews(page, cards, posterColumns(), -2);
+                                        renderGlobalSearchResults(
+                                                cleanKeyword,
+                                                merged,
+                                                matchedSites,
+                                                summaryText,
+                                                0,
+                                                -1,
+                                                false);
                                     }
                                 });
                     }
                 });
     }
 
+    void renderGlobalSearchResults(
+            final String keyword,
+            final List<JSONObject> merged,
+            final List<LiteCatalog.Site> matchedSites,
+            final String summaryText,
+            final int restoreScrollY,
+            final int restoreFocusIndex,
+            boolean rebuildBase) {
+        if (rebuildBase) {
+            base("全站搜索 · " + keyword);
+        }
+        currentPageKind = "global_search";
+        lastQuery = keyword;
+        status.setText(summaryText);
+        List<View> topOps = new ArrayList<View>();
+        topOps.add(
+                makeActionButton(
+                        "重新搜索",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                search();
+                            }
+                        }));
+        topOps.add(
+                makeActionButton(
+                        "返回首页",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                home();
+                            }
+                        }));
+        addGridViews(page, topOps, topOps.size(), 42);
+        List<View> cards = new ArrayList<View>();
+        for (int i = 0; i < merged.size(); i++) {
+            final int cardIdx = i;
+            final JSONObject v = merged.get(i);
+            final LiteCatalog.Site s = matchedSites.get(i);
+            cards.add(
+                    createPosterCard(
+                            v.optString("vod_name", "未命名"),
+                            v.optString("vod_pic", ""),
+                            v.optString("vod_remarks", ""),
+                            "来源：" + s.name,
+                            s.headers,
+                            new Runnable() {
+                                public void run() {
+                                    detailOrigin =
+                                            DetailOrigin.forGlobalSearch(
+                                                    currentScrollY(),
+                                                    cardIdx,
+                                                    keyword,
+                                                    merged,
+                                                    matchedSites,
+                                                    summaryText);
+                                    selected = s;
+                                    detail(v.optString("vod_id"));
+                                }
+                            }));
+        }
+        addGridViews(page, cards, posterColumns(), -2);
+        lastRenderedCards = cards;
+        restoreScrollAndFocus(cards, restoreScrollY, restoreFocusIndex);
+    }
+
     void detail(final String videoId) {
         base("影片详情");
+        inDetail = true;
+        currentPageKind = "detail";
         final int id = epoch;
         final LiteCatalog.Site site = selected;
         work(
@@ -4538,9 +5187,10 @@ public final class LiteActivity extends Activity {
 
     @SuppressWarnings("deprecation")
     void showDetail(final JSONObject video) {
-        inDetail = true;
         final String vodName = video.optString("vod_name", "影片详情");
         base(vodName);
+        inDetail = true;
+        currentPageKind = "detail";
         currentDetail = video;
 
         final String vodId = video.optString("vod_id", "");
@@ -4564,7 +5214,9 @@ public final class LiteActivity extends Activity {
             names[i] = playLines.get(i).name;
         }
 
-        final LiteStore.HistoryEntry savedHist = LiteStore.findHistory(this, siteKey, vodId);
+        final boolean uniqueSite = isUniqueSiteKey(siteKey);
+        final LiteStore.HistoryEntry savedHist =
+                LiteStore.findHistory(this, siteKey, siteApi, vodId, uniqueSite);
         if (activeDetailLine < 0) {
             activeDetailLine = 0;
             if (savedHist != null) {
@@ -4713,7 +5365,8 @@ public final class LiteActivity extends Activity {
                                 }
                             }));
         }
-        final boolean isFav = LiteStore.isFavorite(this, siteKey, vodId);
+        final boolean isFav =
+                LiteStore.isFavorite(this, siteKey, siteApi, vodId, uniqueSite);
         detailActions.add(
                 makeActionButton(
                         isFav ? "★ 已收藏" : "♡ 加入收藏",
@@ -4728,9 +5381,24 @@ public final class LiteActivity extends Activity {
                                 entry.vodName = vodName;
                                 entry.vodPic = vodPic;
                                 entry.vodRemarks = vodRemarks;
+                                String rawFavsBefore =
+                                        LiteStore.getFavoritesRaw(LiteActivity.this);
+                                boolean hadLegacyFav =
+                                        uniqueSite
+                                                && siteApi.length() > 0
+                                                && !LiteStore.containsFavorite(
+                                                        rawFavsBefore,
+                                                        siteKey,
+                                                        siteApi,
+                                                        vodId,
+                                                        false)
+                                                && LiteStore.containsFavorite(
+                                                        rawFavsBefore, siteKey, "", vodId, false);
                                 boolean nowFav =
-                                        LiteStore.toggleFavorite(LiteActivity.this, entry);
-                                recordFavoriteToggleTombstone(siteKey, vodId, nowFav);
+                                        LiteStore.toggleFavorite(
+                                                LiteActivity.this, entry, uniqueSite);
+                                recordFavoriteToggleTombstone(
+                                        siteKey, siteApi, vodId, nowFav, hadLegacyFav);
                                 scheduleAutoPush(true);
                                 showDetail(video);
                             }
@@ -5774,26 +6442,34 @@ public final class LiteActivity extends Activity {
 
     int findSavedResumeMs(PlaybackSession session, String identity) {
         if (session != null && session.kind != PlaybackSession.KIND_VOD) return 0;
-        if (identity != null
-                && identity.equals(getPreferences(0).getString("resume_address", ""))) {
-            int ms = getPreferences(0).getInt("resume_ms", 0);
-            if (ms > 0) return ms;
-        }
         String sk = session != null && session.siteKey.length() > 0
                 ? session.siteKey
                 : (selected != null ? selected.key : "");
+        String sa = session != null && session.siteApi.length() > 0
+                ? session.siteApi
+                : (selected != null ? selected.api : "");
         String vId = session != null && session.vodId.length() > 0
                 ? session.vodId
                 : (currentDetail != null ? currentDetail.optString("vod_id", "") : "");
         String epTitle = session != null ? session.epName : playbackTitle;
         if (sk.length() > 0 && vId.length() > 0) {
-            LiteStore.HistoryEntry h = LiteStore.findHistory(this, sk, vId);
+            LiteStore.HistoryEntry h =
+                    LiteStore.findHistory(this, sk, sa, vId, isUniqueSiteKey(sk));
             if (h != null
                     && ((identity != null && identity.equals(h.epUrl))
-                            || (epTitle != null && epTitle.equals(h.epName)))
-                    && h.positionMs > 0) {
-                return h.positionMs;
+                            || (epTitle != null && epTitle.equals(h.epName)))) {
+                return Math.max(0, h.positionMs);
             }
+        }
+        String savedResumeAddr = getPreferences(0).getString("resume_address", "");
+        String savedResumeApi = getPreferences(0).getString("resume_site_api", "");
+        boolean apiCompatible =
+                savedResumeApi.length() == 0
+                        || sa.length() == 0
+                        || savedResumeApi.equals(sa);
+        if (apiCompatible && identity != null && identity.equals(savedResumeAddr)) {
+            int ms = getPreferences(0).getInt("resume_ms", 0);
+            if (ms > 0) return ms;
         }
         return 0;
     }
@@ -6098,6 +6774,7 @@ public final class LiteActivity extends Activity {
                 getPreferences(0)
                         .edit()
                         .putString("resume_address", entry.epUrl)
+                        .putString("resume_site_api", entry.siteApi)
                         .putInt("resume_ms", entry.positionMs)
                         .apply();
                 LiteStore.saveHistory(this, entry);
@@ -6108,6 +6785,7 @@ public final class LiteActivity extends Activity {
                 getPreferences(0)
                         .edit()
                         .putString("resume_address", session.playbackIdentity)
+                        .putString("resume_site_api", session.siteApi)
                         .putInt("resume_ms", Math.max(0, adjustedPos))
                         .apply();
             }
@@ -6662,6 +7340,40 @@ public final class LiteActivity extends Activity {
                 });
     }
 
+    void restoreFromDetailOrigin(DetailOrigin origin) {
+        if (origin == null) {
+            if (selected != null) catalog(lastQuery, lastCategory, lastPage);
+            else home();
+            return;
+        }
+        switch (origin.kind) {
+            case DetailOrigin.KIND_GLOBAL_SEARCH:
+                renderGlobalSearchResults(
+                        origin.searchKeyword,
+                        origin.searchItems,
+                        origin.searchSites,
+                        origin.searchSummary,
+                        origin.scrollY,
+                        origin.focusIndex,
+                        true);
+                return;
+            case DetailOrigin.KIND_HISTORY:
+                historyPage(origin.scrollY, origin.focusIndex);
+                return;
+            case DetailOrigin.KIND_FAVORITES:
+                favoritesPage(origin.scrollY, origin.focusIndex);
+                return;
+            case DetailOrigin.KIND_CATALOG:
+                restoreCatalog(origin);
+                return;
+            case DetailOrigin.KIND_HOME:
+                home(origin.scrollY, origin.focusIndex);
+                return;
+            default:
+                home();
+        }
+    }
+
     @Override
     public void onBackPressed() {
         if (homeVisible) {
@@ -6681,9 +7393,15 @@ public final class LiteActivity extends Activity {
             showDetail(currentDetail);
             return;
         }
-        if (inDetail && selected != null) {
-            catalog(lastQuery, lastCategory, lastPage);
-            return;
+        if (inDetail) {
+            if (detailOrigin != null) {
+                restoreFromDetailOrigin(detailOrigin);
+                return;
+            }
+            if (selected != null) {
+                catalog(lastQuery, lastCategory, lastPage);
+                return;
+            }
         }
         home();
     }
