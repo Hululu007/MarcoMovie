@@ -341,8 +341,8 @@ jobs:
           python3 prepare_platform.py
           flutter config --enable-macos-desktop
           flutter create --platforms=macos --project-name=marco_movie .
-          python3 prepare_platform.py
           flutter pub get
+          python3 prepare_platform.py
           flutter analyze --no-fatal-infos --no-fatal-warnings
           cmake -S packages/quickjs_engine/native -B packages/quickjs_engine/native/build -DCMAKE_BUILD_TYPE=Release
           cmake --build packages/quickjs_engine/native/build --parallel 4
@@ -462,6 +462,8 @@ jobs:
           lipo -info "$MAIN_BIN" | grep -q "x86_64"
           lipo -info "$UNZIPPED_APP/Contents/Frameworks/node/bin/node" | grep -q "arm64"
           lipo -info "$UNZIPPED_APP/Contents/Frameworks/node/bin/node" | grep -q "x86_64"
+          strings "$UNZIPPED_APP/Contents/Frameworks/Avcodec.framework/Versions/A/Avcodec" | grep -q "pgssub"
+          echo "AVCODEC_PGSSUB_DECODER=PASS" | tee -a "$REPORT"
           # Ensure ffprobe/ffmpeg are available on macOS runner for separate-audio HLS & unmodified Mpv verification
           if ! command -v ffprobe >/dev/null 2>&1 || ! command -v ffmpeg >/dev/null 2>&1; then
             HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ffmpeg

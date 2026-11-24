@@ -7,6 +7,7 @@ import shutil
 import struct
 import subprocess
 import sys
+from urllib.parse import unquote, urlparse
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 IOS_LIQUID_GLASS_SWIFT_PATH = Path(__file__).resolve().parent / "ios_native" / "MarcoLiquidGlass.swift"
@@ -1435,6 +1436,72 @@ def _write_windows_ico(ico_path: Path, source_png: Path) -> None:
     ico_path.write_bytes(directory + payload)
 
 
+def _upgrade_macos_media_kit_mpv_v073() -> None:
+    """Upgrade pub-cached media_kit_libs_macos_video Makefile from v0.6.0 to v0.7.3 on macOS.
+
+    media_kit_libs_macos_video 1.1.4 (latest on pub.dev) bundles libmpv-darwin-build v0.6.0,
+    whose Avcodec.framework omits FFmpeg's pgssub decoder, preventing Blu-ray PGS subtitles
+    from rendering on macOS. Official upstream v0.7.3 enables --enable-decoder=pgssub while
+    retaining -mmacosx-version-min=10.9 and identical mpv 0.36.0 / FFmpeg 6.0 ABI.
+    """
+    if sys.platform != "darwin":
+        return
+    pkg_cfg = ROOT / ".dart_tool" / "package_config.json"
+    if not pkg_cfg.is_file():
+        return
+    try:
+        cfg = json.loads(pkg_cfg.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    target_ver = "v0.7.3"
+    target_sha = "2e58ac66b0ea875239bf4db29b3ef2100a719df1d61fa1e780c38d651d4c9f27"
+    for pkg in cfg.get("packages", []):
+        if pkg.get("name") != "media_kit_libs_macos_video":
+            continue
+        root_uri = pkg.get("rootUri", "")
+        if not root_uri:
+            continue
+        if root_uri.startswith("file://"):
+            pkg_root = Path(unquote(urlparse(root_uri).path))
+        else:
+            pkg_root = (pkg_cfg.parent / root_uri).resolve()
+        macos_dir = pkg_root / "macos"
+        makefile = macos_dir / "Makefile"
+        if not makefile.is_file():
+            return
+        src = makefile.read_text(encoding="utf-8")
+        if f"MPV_XCFRAMEWORKS_VERSION={target_ver}" in src and target_sha in src:
+            print(f"media_kit_libs_macos_video Makefile already at libmpv {target_ver}: {makefile}", flush=True)
+            return
+        updated = re.sub(
+            r"^MPV_XCFRAMEWORKS_VERSION=.*$",
+            f"MPV_XCFRAMEWORKS_VERSION={target_ver}",
+            src,
+            flags=re.MULTILINE,
+        )
+        updated = re.sub(
+            r"^MPV_XCFRAMEWORKS_SHA256SUM=.*$",
+            f"MPV_XCFRAMEWORKS_SHA256SUM={target_sha}",
+            updated,
+            flags=re.MULTILINE,
+        )
+        if updated != src:
+            makefile.write_text(updated, encoding="utf-8")
+            fw_dir = macos_dir / "Frameworks"
+            if fw_dir.is_dir():
+                for child in fw_dir.iterdir():
+                    if child.name.endswith(".xcframework") or child.name == ".symlinks":
+                        if child.is_dir() and not child.is_symlink():
+                            shutil.rmtree(child)
+                        else:
+                            child.unlink(missing_ok=True)
+            print(
+                f"Upgraded media_kit_libs_macos_video Makefile to libmpv {target_ver} (pgssub enabled): {makefile}",
+                flush=True,
+            )
+        return
+
+
 def main() -> None:
     subprocess.run([sys.executable, str(REPO_ROOT / 'scripts/prepare_python_html.py'), '--check'], check=True)
     subprocess.run([sys.executable, str(REPO_ROOT / 'scripts/prepare_python_modules.py'), '--check'], check=True)
@@ -1675,6 +1742,7 @@ def main() -> None:
             text,
         )
         macos_pbx.write_text(text, encoding="utf-8")
+    _upgrade_macos_media_kit_mpv_v073()
     # iOS Info.plist, deployment target, and opaque AppIcon set
     ios_runner = ROOT / "ios" / "Runner"
     if ios_runner.exists():
