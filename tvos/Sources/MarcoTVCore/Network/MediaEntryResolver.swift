@@ -67,16 +67,7 @@ public enum MediaEntryResolver {
                 reason: "该内容属于私密订阅，当前普通模式下不可打开（记录已保留）"
             )
         }
-        if config.ambiguousLegacyRawKeys.contains(cleanKey) {
-            return .unavailable(
-                siteKey: cleanKey,
-                reason: "旧记录来源「\(cleanKey)」曾对应多个重名片源，无法自动判断原属来源，记录已保留"
-            )
-        }
         let rawMatches = owners.filter { $0.rawKey == cleanKey }
-        if rawMatches.count == 1, let singleOwner = rawMatches.first {
-            return resolveOwner(singleOwner, requestedKey: cleanKey, in: config)
-        }
         if rawMatches.count > 1 {
             // Multiple subscriptions share the same bare site key -> refuse to guess!
             let labels = rawMatches
@@ -87,6 +78,15 @@ public enum MediaEntryResolver {
                 siteKey: cleanKey,
                 reason: "旧记录来源「\(cleanKey)」存在多个重名片源（\(labels)），无法自动判断原属来源，记录已保留"
             )
+        }
+        if config.ambiguousLegacyRawKeys.contains(cleanKey) {
+            return .unavailable(
+                siteKey: cleanKey,
+                reason: "旧记录来源「\(cleanKey)」曾对应多个重名片源，无法自动判断原属来源，记录已保留"
+            )
+        }
+        if rawMatches.count == 1, let singleOwner = rawMatches.first {
+            return resolveOwner(singleOwner, requestedKey: cleanKey, in: config)
         }
 
         // 5. Fallback if caller passed a private-sub legacy suffix whose rawContent wasn't parsed

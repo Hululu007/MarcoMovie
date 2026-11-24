@@ -1194,12 +1194,12 @@ final class FinalPolishRegressionTests: XCTestCase {
         let fastSegUrl = try XCTUnwrap(URL(string: fastSegLine))
 
         // Start slow HLS segment download for Session A and wait until upstream is actively streaming
-        let slowDownloadTask = Task { () -> Bool in
+        let slowDownloadTask = Task { () -> Int? in
             do {
-                _ = try await URLSession.shared.data(from: slowSegUrl)
-                return true
+                let (_, resp) = try await URLSession.shared.data(from: slowSegUrl)
+                return (resp as? HTTPURLResponse)?.statusCode
             } catch {
-                return false
+                return nil
             }
         }
         try await waitUntil {
@@ -1213,8 +1213,11 @@ final class FinalPolishRegressionTests: XCTestCase {
         try await waitUntil(timeoutNs: 4_000_000_000) {
             hlsServer.snapshot().slowCancelled >= 1 && headerProxy.activeRequestCount(for: sidA) == 0
         }
-        let slowCompletedNormally = await slowDownloadTask.value
-        XCTAssertFalse(slowCompletedNormally, "Slow segment download must abort when Session A exits")
+        let slowHttpStatus = await slowDownloadTask.value
+        XCTAssertTrue(
+            slowHttpStatus == nil || slowHttpStatus == 404,
+            "Slow segment download must abort (or hit 404 if URLSession auto-retries GET after socket reset), got HTTP \(String(describing: slowHttpStatus))"
+        )
         XCTAssertFalse(headerProxy.hasActiveSession(sidA))
         XCTAssertGreaterThanOrEqual(headerProxy.cancelledRequestCount(), 1)
 
