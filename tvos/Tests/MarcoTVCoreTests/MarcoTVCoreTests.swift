@@ -819,6 +819,13 @@ final class MarcoTVCoreTests: XCTestCase {
                 return candidate
             }
         }
+        #else
+        if let mainRes = Bundle.main.resourceURL {
+            let candidate = mainRes.appendingPathComponent("js-host")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
         #endif
         let testFileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let fallback = testFileDir

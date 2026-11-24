@@ -306,6 +306,28 @@ class TvOSWorkspaceTests(unittest.TestCase):
             rel_path = f"../{c_file.relative_to(TVOS_DIR).as_posix()}"
             self.assertIn(rel_path, referenced_paths, f"{rel_path} missing from project.pbxproj")
 
+        # Verify unit-test target exists for tvOS Simulator without leaking into Release config
+        self.assertIn(
+            "../Tests/MarcoMovieTVSimulatorTests/TvOSSimulatorVerificationTests.swift",
+            referenced_paths,
+        )
+        target_names = {
+            obj.get("name")
+            for obj in objects.values()
+            if isinstance(obj, dict) and obj.get("isa") == "PBXNativeTarget"
+        }
+        self.assertIn("MarcoMovieTVTests", target_names)
+        app_target = next(
+            obj
+            for obj in objects.values()
+            if isinstance(obj, dict) and obj.get("isa") == "PBXNativeTarget" and obj.get("name") == "MarcoMovieTV"
+        )
+        app_cfg_list = objects[app_target["buildConfigurationList"]]
+        app_rel_cfg = next(
+            objects[cid] for cid in app_cfg_list["buildConfigurations"] if objects[cid]["name"] == "Release"
+        )
+        self.assertNotIn("OTHER_LDFLAGS", app_rel_cfg["buildSettings"])
+
     def test_swift_files_have_balanced_delimiters_and_imports(self) -> None:
         swift_files = sorted(TVOS_DIR.rglob("*.swift"))
         self.assertGreaterEqual(len(swift_files), 28)

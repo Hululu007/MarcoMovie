@@ -110,3 +110,27 @@ jobs:
           path: |
             flutter/dist/*.ipa
             flutter/dist/*.sha256
+
+  verify-appletv-simulator:
+    name: Apple TV Simulator (tvOS) Runtime Tests, Cold-Start & Screenshots
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare tvOS project from clean checkout
+        run: python3 tvos/prepare_tvos.py
+      - name: Run real Apple TV Simulator verification, UI tests & screenshot capture
+        run: python3 tvos/run_tvos_simulator_verify.py --output-dir tvos/sim-evidence
+      - name: Upload Apple TV Simulator verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MarcoMovie-AppleTV-Simulator-Evidence
+          if-no-files-found: warn
+          path: |
+            tvos/sim-evidence/simulator-report.json
+            tvos/sim-evidence/xcodebuild-simulator-test.log
+            tvos/sim-evidence/screenshots/*.png

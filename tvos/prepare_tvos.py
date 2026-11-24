@@ -624,6 +624,10 @@ def generate_xcodeproj() -> Path:
     c_sources = sorted((TVOS_DIR / "Sources" / "CQuickJS").glob("*.c"))
     core_swift_sources = sorted((TVOS_DIR / "Sources" / "MarcoTVCore").rglob("*.swift"))
     app_swift_sources = sorted((TVOS_DIR / "Sources" / "MarcoMovieTV").rglob("*.swift"))
+    test_swift_sources = sorted((TVOS_DIR / "Tests" / "MarcoTVCoreTests").rglob("*.swift"))
+    sim_tests_dir = TVOS_DIR / "Tests" / "MarcoMovieTVSimulatorTests"
+    if sim_tests_dir.is_dir():
+        test_swift_sources.extend(sorted(sim_tests_dir.rglob("*.swift")))
 
     objects: dict[str, dict] = {}
 
@@ -700,6 +704,27 @@ def generate_xcodeproj() -> Path:
         app_file_refs.append(fref)
         app_build_files.append(bfile)
 
+    test_build_files: list[str] = []
+    test_file_refs: list[str] = []
+    for s_path in test_swift_sources:
+        rpath = rel_to_runner(s_path)
+        fref = put(
+            _pbx_id(f"fref:{rpath}"),
+            {
+                "isa": "PBXFileReference",
+                "lastKnownFileType": "sourcecode.swift",
+                "name": s_path.name,
+                "path": rpath,
+                "sourceTree": "<group>",
+            },
+        )
+        bfile = put(
+            _pbx_id(f"bfile:tests:{rpath}"),
+            {"isa": "PBXBuildFile", "fileRef": fref},
+        )
+        test_file_refs.append(fref)
+        test_build_files.append(bfile)
+
     # Resource & product file references
     assets_fref = put(
         _pbx_id("fref:Assets.xcassets"),
@@ -770,6 +795,16 @@ def generate_xcodeproj() -> Path:
             "sourceTree": "BUILT_PRODUCTS_DIR",
         },
     )
+    tests_prod_ref = put(
+        _pbx_id("prod:MarcoMovieTVTests.xctest"),
+        {
+            "isa": "PBXFileReference",
+            "explicitFileType": "wrapper.cfbundle",
+            "includeInIndex": "0",
+            "path": "MarcoMovieTVTests.xctest",
+            "sourceTree": "BUILT_PRODUCTS_DIR",
+        },
+    )
 
     assets_bfile = put(_pbx_id("bfile:Assets.xcassets"), {"isa": "PBXBuildFile", "fileRef": assets_fref})
     jshost_bfile = put(_pbx_id("bfile:js-host"), {"isa": "PBXBuildFile", "fileRef": jshost_fref})
@@ -799,11 +834,15 @@ def generate_xcodeproj() -> Path:
             "sourceTree": "<group>",
         },
     )
+    tests_group = put(
+        _pbx_id("grp:MarcoMovieTVTests"),
+        {"isa": "PBXGroup", "children": test_file_refs, "name": "MarcoMovieTVTests", "sourceTree": "<group>"},
+    )
     products_group = put(
         _pbx_id("grp:Products"),
         {
             "isa": "PBXGroup",
-            "children": [cquickjs_prod_ref, core_prod_ref, app_prod_ref],
+            "children": [cquickjs_prod_ref, core_prod_ref, app_prod_ref, tests_prod_ref],
             "name": "Products",
             "sourceTree": "<group>",
         },
@@ -812,7 +851,7 @@ def generate_xcodeproj() -> Path:
         _pbx_id("grp:Main"),
         {
             "isa": "PBXGroup",
-            "children": [cquickjs_group, core_group, app_group, products_group],
+            "children": [cquickjs_group, core_group, app_group, tests_group, products_group],
             "sourceTree": "<group>",
         },
     )
@@ -860,6 +899,33 @@ def generate_xcodeproj() -> Path:
             "isa": "PBXResourcesBuildPhase",
             "buildActionMask": "2147483647",
             "files": [assets_bfile, jshost_bfile, catpaw_bfile],
+            "runOnlyForDeploymentPostprocessing": "0",
+        },
+    )
+    tests_sources_phase = put(
+        _pbx_id("phase:sources:MarcoMovieTVTests"),
+        {
+            "isa": "PBXSourcesBuildPhase",
+            "buildActionMask": "2147483647",
+            "files": test_build_files,
+            "runOnlyForDeploymentPostprocessing": "0",
+        },
+    )
+    tests_frameworks_phase = put(
+        _pbx_id("phase:frameworks:MarcoMovieTVTests"),
+        {
+            "isa": "PBXFrameworksBuildPhase",
+            "buildActionMask": "2147483647",
+            "files": [],
+            "runOnlyForDeploymentPostprocessing": "0",
+        },
+    )
+    tests_resources_phase = put(
+        _pbx_id("phase:resources:MarcoMovieTVTests"),
+        {
+            "isa": "PBXResourcesBuildPhase",
+            "buildActionMask": "2147483647",
+            "files": [],
             "runOnlyForDeploymentPostprocessing": "0",
         },
     )
@@ -952,7 +1018,11 @@ def generate_xcodeproj() -> Path:
         "HEADER_SEARCH_PATHS": ["$(SRCROOT)/../Sources/CQuickJS/include"],
         "SWIFT_INCLUDE_PATHS": ["$(SRCROOT)/../Sources/CQuickJS/include"],
     }
-    core_cfg_list = make_config_list("MarcoTVCore", core_common, core_common)
+    core_cfg_list = make_config_list(
+        "MarcoTVCore",
+        {**core_common, "ENABLE_TESTABILITY": "YES"},
+        core_common,
+    )
 
     app_common = {
         "ASSETCATALOG_COMPILER_APPICON_NAME": "App Icon & Top Shelf Image",
@@ -966,13 +1036,34 @@ def generate_xcodeproj() -> Path:
         "PRODUCT_NAME": "MarcoMovieTV",
         "SWIFT_INCLUDE_PATHS": ["$(BUILT_PRODUCTS_DIR)", "$(SRCROOT)/../Sources/CQuickJS/include"],
     }
-    app_cfg_list = make_config_list("MarcoMovieTV", app_common, app_common)
+    app_debug = {
+        **app_common,
+        "DEAD_CODE_STRIPPING": "NO",
+        "DEFINES_MODULE": "YES",
+        "ENABLE_TESTABILITY": "YES",
+        "OTHER_LDFLAGS": ["$(inherited)", "-force_load", "$(BUILT_PRODUCTS_DIR)/libMarcoTVCore.a"],
+    }
+    app_cfg_list = make_config_list("MarcoMovieTV", app_debug, app_common)
+
+    tests_common = {
+        "BUNDLE_LOADER": "$(TEST_HOST)",
+        "CODE_SIGN_STYLE": "Manual",
+        "GENERATE_INFOPLIST_FILE": "YES",
+        "HEADER_SEARCH_PATHS": ["$(SRCROOT)/../Sources/CQuickJS/include"],
+        "LD_RUNPATH_SEARCH_PATHS": ["$(inherited)", "@executable_path/Frameworks", "@loader_path/Frameworks"],
+        "PRODUCT_BUNDLE_IDENTIFIER": f"{BUNDLE_IDENTIFIER}.tests",
+        "PRODUCT_NAME": "MarcoMovieTVTests",
+        "SWIFT_INCLUDE_PATHS": ["$(BUILT_PRODUCTS_DIR)", "$(SRCROOT)/../Sources/CQuickJS/include"],
+        "TEST_HOST": "$(BUILT_PRODUCTS_DIR)/MarcoMovieTV.app/MarcoMovieTV",
+    }
+    tests_cfg_list = make_config_list("MarcoMovieTVTests", tests_common, tests_common)
 
     # Targets & dependencies
     project_id = _pbx_id("project:MarcoMovieTV")
     cquickjs_target_id = _pbx_id("target:CQuickJS")
     core_target_id = _pbx_id("target:MarcoTVCore")
     app_target_id = _pbx_id("target:MarcoMovieTV")
+    tests_target_id = _pbx_id("target:MarcoMovieTVTests")
 
     put(
         cquickjs_target_id,
@@ -1063,11 +1154,46 @@ def generate_xcodeproj() -> Path:
         },
     )
 
+    proxy_tests_to_app = put(
+        _pbx_id("proxy:tests->app"),
+        {
+            "isa": "PBXContainerItemProxy",
+            "containerPortal": project_id,
+            "proxyType": "1",
+            "remoteGlobalIDString": app_target_id,
+            "remoteInfo": "MarcoMovieTV",
+        },
+    )
+    dep_tests_to_app = put(
+        _pbx_id("dep:tests->app"),
+        {"isa": "PBXTargetDependency", "target": app_target_id, "targetProxy": proxy_tests_to_app},
+    )
+    put(
+        tests_target_id,
+        {
+            "isa": "PBXNativeTarget",
+            "buildConfigurationList": tests_cfg_list,
+            "buildPhases": [tests_sources_phase, tests_frameworks_phase, tests_resources_phase],
+            "buildRules": [],
+            "dependencies": [dep_tests_to_app],
+            "name": "MarcoMovieTVTests",
+            "productName": "MarcoMovieTVTests",
+            "productReference": tests_prod_ref,
+            "productType": "com.apple.product-type.bundle.unit-test",
+        },
+    )
+
     put(
         project_id,
         {
             "isa": "PBXProject",
-            "attributes": {"LastSwiftUpdateCheck": "1500", "LastUpgradeCheck": "1500"},
+            "attributes": {
+                "LastSwiftUpdateCheck": "1500",
+                "LastUpgradeCheck": "1500",
+                "TargetAttributes": {
+                    tests_target_id: {"TestTargetID": app_target_id},
+                },
+            },
             "buildConfigurationList": proj_cfg_list,
             "compatibilityVersion": "Xcode 14.0",
             "developmentRegion": "zh_CN",
@@ -1077,7 +1203,7 @@ def generate_xcodeproj() -> Path:
             "productRefGroup": products_group,
             "projectDirPath": "",
             "projectRoot": "",
-            "targets": [cquickjs_target_id, core_target_id, app_target_id],
+            "targets": [cquickjs_target_id, core_target_id, app_target_id, tests_target_id],
         },
     )
 
@@ -1104,8 +1230,18 @@ def generate_xcodeproj() -> Path:
          <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
             <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{app_target_id}" BuildableName="MarcoMovieTV.app" BlueprintName="MarcoMovieTV" ReferencedContainer="container:MarcoMovieTV.xcodeproj"/>
          </BuildActionEntry>
+         <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{tests_target_id}" BuildableName="MarcoMovieTVTests.xctest" BlueprintName="MarcoMovieTVTests" ReferencedContainer="container:MarcoMovieTV.xcodeproj"/>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
+   <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+      <Testables>
+         <TestableReference skipped="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{tests_target_id}" BuildableName="MarcoMovieTVTests.xctest" BlueprintName="MarcoMovieTVTests" ReferencedContainer="container:MarcoMovieTV.xcodeproj"/>
+         </TestableReference>
+      </Testables>
+   </TestAction>
    <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" allowLocationSimulation="YES">
       <BuildableProductRunnable runnableDebuggingMode="0">
          <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{app_target_id}" BuildableName="MarcoMovieTV.app" BlueprintName="MarcoMovieTV" ReferencedContainer="container:MarcoMovieTV.xcodeproj"/>
