@@ -992,16 +992,25 @@ void main() {
           player.setActiveSubtitleTrack(srtTrack, available: allSubTracks);
 
           // Optional real Mpv.framework-rendered frame image notifier for PNG evidence.
-          final videoFrameNotifier = ValueNotifier<Uint8List?>(null);
-          addTearDown(videoFrameNotifier.dispose);
+          // Pre-decode PNGs synchronously via decodeImageFromList + RawImage so
+          // RepaintBoundary captures never lag by 1 async decode frame.
+          final videoFrameNotifier = ValueNotifier<ui.Image?>(null);
 
-          Uint8List? loadMpvFrame(String name) {
-            if (mpvFramesDirPath.isEmpty) return null;
+          Future<void> setMpvFrame(String name) async {
+            if (mpvFramesDirPath.isEmpty) return;
             final f = File('$mpvFramesDirPath/$name');
-            return f.existsSync() ? f.readAsBytesSync() : null;
+            if (!f.existsSync()) return;
+            final bytes = f.readAsBytesSync();
+            final decoded = await tester.runAsync(
+              () => decodeImageFromList(bytes),
+            );
+            final prev = videoFrameNotifier.value;
+            videoFrameNotifier.value = decoded;
+            await tester.pump();
+            prev?.dispose();
           }
 
-          videoFrameNotifier.value = loadMpvFrame('mpv_video_only.png');
+          await setMpvFrame('mpv_video_only.png');
 
           final boundaryKey = GlobalKey();
           const site = CmsSite(
@@ -1050,6 +1059,9 @@ void main() {
                       textStyle: TextStyle(
                         fontFamily: hasRealFont ? 'VerifyFont' : null,
                       ),
+                      actionTextStyle: TextStyle(
+                        fontFamily: hasRealFont ? 'VerifyFont' : null,
+                      ),
                     ),
                   ),
                   useMaterial3: true,
@@ -1070,16 +1082,17 @@ void main() {
                     }),
                   ),
                   debugDanmuSettings: const DanmuSettings(enabled: false),
-                  debugVideoSurface: ValueListenableBuilder<Uint8List?>(
+                  debugVideoSurface: ValueListenableBuilder<ui.Image?>(
                     valueListenable: videoFrameNotifier,
-                    builder: (_, bytes, __) {
-                      if (bytes != null) {
+                    builder: (_, image, __) {
+                      if (image != null) {
                         return ColoredBox(
                           color: Colors.black,
-                          child: Image.memory(
-                            bytes,
-                            fit: BoxFit.contain,
-                            gaplessPlayback: true,
+                          child: SizedBox.expand(
+                            child: FittedBox(
+                              fit: BoxFit.contain,
+                              child: RawImage(image: image),
+                            ),
                           ),
                         );
                       }
@@ -1295,32 +1308,29 @@ void main() {
             );
 
             if (artifactsDirPath.isNotEmpty) {
-              final liftedBytes = loadMpvFrame(nativeCase.liftedFrame);
-              if (liftedBytes != null) {
-                videoFrameNotifier.value = liftedBytes;
-                await tester.pump(const Duration(milliseconds: 120));
-                await _captureRepaintBoundaryPng(
-                  tester,
-                  boundaryKey,
-                  File(
-                    '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_2_shown.png',
-                  ),
-                );
-                // Dragging progress with native track active (at same t=00:02)
-                final g2 = await tester.startGesture(thumbAtTwoSec);
-                await tester.pump(const Duration(milliseconds: 50));
-                await g2.moveBy(const Offset(10, 0));
-                await tester.pump(const Duration(milliseconds: 120));
-                await _captureRepaintBoundaryPng(
-                  tester,
-                  boundaryKey,
-                  File(
-                    '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_3_dragging.png',
-                  ),
-                );
-                await g2.up();
-                await tester.pump(const Duration(milliseconds: 80));
-              }
+              await setMpvFrame(nativeCase.liftedFrame);
+              await tester.pump(const Duration(milliseconds: 120));
+              await _captureRepaintBoundaryPng(
+                tester,
+                boundaryKey,
+                File(
+                  '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_2_shown.png',
+                ),
+              );
+              // Dragging progress with native track active (at same t=00:02)
+              final g2 = await tester.startGesture(thumbAtTwoSec);
+              await tester.pump(const Duration(milliseconds: 50));
+              await g2.moveBy(const Offset(10, 0));
+              await tester.pump(const Duration(milliseconds: 120));
+              await _captureRepaintBoundaryPng(
+                tester,
+                boundaryKey,
+                File(
+                  '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_3_dragging.png',
+                ),
+              );
+              await g2.up();
+              await tester.pump(const Duration(milliseconds: 80));
             }
 
             // Let HUD auto-hide -> sub-pos must restore to 100!
@@ -1330,18 +1340,15 @@ void main() {
             expect(player.platformImpl.properties['sub-pos'], '100');
 
             if (artifactsDirPath.isNotEmpty) {
-              final hiddenBytes = loadMpvFrame(nativeCase.hiddenFrame);
-              if (hiddenBytes != null) {
-                videoFrameNotifier.value = hiddenBytes;
-                await tester.pump(const Duration(milliseconds: 120));
-                await _captureRepaintBoundaryPng(
-                  tester,
-                  boundaryKey,
-                  File(
-                    '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_1_hidden_slim.png',
-                  ),
-                );
-              }
+              await setMpvFrame(nativeCase.hiddenFrame);
+              await tester.pump(const Duration(milliseconds: 120));
+              await _captureRepaintBoundaryPng(
+                tester,
+                boundaryKey,
+                File(
+                  '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_1_hidden_slim.png',
+                ),
+              );
             }
 
             // Re-wake HUD for next track iteration
@@ -1361,6 +1368,8 @@ void main() {
           await mouse.removePointer();
           await tester.pumpWidget(const SizedBox.shrink());
           await tester.pump(const Duration(milliseconds: 500));
+          videoFrameNotifier.value?.dispose();
+          videoFrameNotifier.dispose();
           await player.dispose();
         },
       );
