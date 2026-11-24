@@ -462,7 +462,7 @@ jobs:
           lipo -info "$MAIN_BIN" | grep -q "x86_64"
           lipo -info "$UNZIPPED_APP/Contents/Frameworks/node/bin/node" | grep -q "arm64"
           lipo -info "$UNZIPPED_APP/Contents/Frameworks/node/bin/node" | grep -q "x86_64"
-          strings "$UNZIPPED_APP/Contents/Frameworks/Avcodec.framework/Versions/A/Avcodec" | grep -q "pgssub"
+          python3 -c 'import pathlib, sys; assert b"pgssub" in pathlib.Path(sys.argv[1]).read_bytes(), "pgssub decoder missing"' "$UNZIPPED_APP/Contents/Frameworks/Avcodec.framework/Versions/A/Avcodec"
           echo "AVCODEC_PGSSUB_DECODER=PASS" | tee -a "$REPORT"
           # Ensure ffprobe/ffmpeg are available on macOS runner for separate-audio HLS & unmodified Mpv verification
           if ! command -v ffprobe >/dev/null 2>&1 || ! command -v ffmpeg >/dev/null 2>&1; then
