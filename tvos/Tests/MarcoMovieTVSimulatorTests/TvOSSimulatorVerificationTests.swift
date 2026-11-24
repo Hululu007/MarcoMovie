@@ -1207,7 +1207,10 @@ final class TvOSSimulatorVerificationTests: XCTestCase {
         window.rootViewController = emptyHost
         let cancelDeadline = Date().addingTimeInterval(4.0)
         while Date() < cancelDeadline {
-            if hlsServer.stats().slowCancelled >= 1 && appModel.proxyServer.cancelledRequestCount() >= 1 {
+            if hlsServer.stats().slowCancelled >= 1
+                && appModel.proxyServer.activeSessionCount() == 0
+                && appModel.proxyServer.activeRequestCount() == 0
+            {
                 break
             }
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
@@ -1220,10 +1223,15 @@ final class TvOSSimulatorVerificationTests: XCTestCase {
             1,
             "Exiting TvPlayerView must cancel the in-flight slow HLS upstream download promptly"
         )
-        XCTAssertGreaterThanOrEqual(
-            appModel.proxyServer.cancelledRequestCount(),
-            1,
-            "LocalHeaderProxyServer must record cancelled in-flight request upon TvPlayerView exit"
+        XCTAssertEqual(
+            appModel.proxyServer.activeSessionCount(),
+            0,
+            "LocalHeaderProxyServer must revoke the exited TvPlayerView session"
+        )
+        XCTAssertEqual(
+            appModel.proxyServer.activeRequestCount(),
+            0,
+            "LocalHeaderProxyServer must have zero active upstream requests after TvPlayerView exit"
         )
 
         // Verify next playback session starts cleanly right after exit
