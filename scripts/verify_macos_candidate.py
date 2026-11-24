@@ -34,12 +34,14 @@ from pathlib import Path
 
 MPV_PROBE_C = r'''
 #include <dlfcn.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 typedef struct mpv_handle mpv_handle;
+typedef struct mpv_render_context mpv_render_context;
 typedef struct mpv_event {
   int event_id;
   int error;
@@ -47,11 +49,27 @@ typedef struct mpv_event {
   void *data;
 } mpv_event;
 
+typedef struct mpv_render_param {
+  int type;
+  void *data;
+} mpv_render_param;
+
 enum {
   MPV_EVENT_NONE = 0,
   MPV_EVENT_SHUTDOWN = 1,
   MPV_EVENT_END_FILE = 7,
   MPV_EVENT_FILE_LOADED = 8,
+};
+
+enum {
+  MPV_RENDER_PARAM_INVALID = 0,
+  MPV_RENDER_PARAM_API_TYPE = 1,
+  MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME = 12,
+  MPV_RENDER_PARAM_SW_SIZE = 17,
+  MPV_RENDER_PARAM_SW_FORMAT = 18,
+  MPV_RENDER_PARAM_SW_STRIDE = 19,
+  MPV_RENDER_PARAM_SW_POINTER = 20,
+  MPV_RENDER_UPDATE_FRAME = 1,
 };
 
 typedef unsigned long (*fn_api_version)(void);
@@ -64,6 +82,10 @@ typedef char *(*fn_get_property_string)(mpv_handle *, const char *);
 typedef int (*fn_set_property_string)(mpv_handle *, const char *, const char *);
 typedef void (*fn_free)(void *);
 typedef void (*fn_terminate_destroy)(mpv_handle *);
+typedef int (*fn_render_context_create)(mpv_render_context **, mpv_handle *, mpv_render_param *);
+typedef uint64_t (*fn_render_context_update)(mpv_render_context *);
+typedef int (*fn_render_context_render)(mpv_render_context *, mpv_render_param *);
+typedef void (*fn_render_context_free)(mpv_render_context *);
 
 static char *prop_or_none(fn_get_property_string get_prop, fn_free mfree, mpv_handle *ctx, const char *name, char *buf, size_t len) {
   char *val = get_prop(ctx, name);
@@ -126,50 +148,172 @@ int main(int argc, char **argv) {
   set_opt(ctx, "demuxer-lavf-o", "protocol_whitelist=[file,http,https,tcp,tls,crypto,data]");
 
   if (strcmp(mode, "subframe") == 0) {
-    // arg4 = sid ("no", "1", "2", "3"), arg5 = sub-pos ("100", "88", "92"), arg6 = out_dir
+    // arg4 = sid ("no", "1", "2", "3"), arg5 = sub-pos ("100", "88", "92"), arg6 = out_ppm_path
     const char *sid = arg4[0] ? arg4 : "no";
     const char *sub_pos = arg5[0] ? arg5 : "100";
-    const char *out_dir = arg6[0] ? arg6 : ".";
-    set_opt(ctx, "vo", "image");
-    set_opt(ctx, "vo-image-format", "png");
-    set_opt(ctx, "vo-image-outdir", out_dir);
-    set_opt(ctx, "untimed", "yes");
-    set_opt(ctx, "frames", "21");
+    const char *out_ppm = arg6[0] ? arg6 : "frame.ppm";
+    fn_render_context_create rc_create = (fn_render_context_create)dlsym(handle, "mpv_render_context_create");
+    fn_render_context_update rc_update = (fn_render_context_update)dlsym(handle, "mpv_render_context_update");
+    fn_render_context_render rc_render = (fn_render_context_render)dlsym(handle, "mpv_render_context_render");
+    fn_render_context_free rc_free = (fn_render_context_free)dlsym(handle, "mpv_render_context_free");
+    if (!rc_create || !rc_update || !rc_render || !rc_free) {
+      fprintf(stderr, "missing mpv_render_context symbols\n");
+      destroy(ctx);
+      dlclose(handle);
+      return 11;
+    }
+
+    set_opt(ctx, "vo", "libmpv");
+    set_opt(ctx, "hwdec", "no");
     set_opt(ctx, "sid", sid);
     set_opt(ctx, "sub-ass", "yes");
     set_opt(ctx, "sub-ass-override", "yes");
     set_opt(ctx, "sub-visibility", strcmp(sid, "no") == 0 ? "no" : "yes");
     set_opt(ctx, "sub-pos", sub_pos);
+    set_opt(ctx, "speed", "2");
     if (init(ctx) < 0) {
       fprintf(stderr, "mpv_initialize failed (subframe)\n");
       destroy(ctx);
+      dlclose(handle);
       return 13;
     }
+
+    mpv_render_context *rctx = NULL;
+    char api_sw[] = "sw";
+    mpv_render_param create_params[] = {
+      {MPV_RENDER_PARAM_API_TYPE, api_sw},
+      {MPV_RENDER_PARAM_INVALID, NULL},
+    };
+    int rc_err = rc_create(&rctx, ctx, create_params);
+    if (rc_err < 0 || !rctx) {
+      fprintf(stderr, "mpv_render_context_create(sw) failed: %d\n", rc_err);
+      destroy(ctx);
+      dlclose(handle);
+      return 31;
+    }
+
+    const int width = 1280;
+    const int height = 720;
+    size_t stride = (size_t)width * 4;
+    uint8_t *fb = (uint8_t *)calloc((size_t)height, stride);
+    if (!fb) {
+      rc_free(rctx);
+      destroy(ctx);
+      dlclose(handle);
+      return 32;
+    }
+    int sw_size[2] = {width, height};
+    char sw_fmt[] = "bgr0";
+    int block_flag = 0;
+    mpv_render_param render_params[] = {
+      {MPV_RENDER_PARAM_SW_SIZE, sw_size},
+      {MPV_RENDER_PARAM_SW_FORMAT, sw_fmt},
+      {MPV_RENDER_PARAM_SW_STRIDE, &stride},
+      {MPV_RENDER_PARAM_SW_POINTER, fb},
+      {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block_flag},
+      {MPV_RENDER_PARAM_INVALID, NULL},
+    };
+
     const char *load_args[] = {"loadfile", uri, NULL};
     if (cmd(ctx, load_args) < 0) {
       fprintf(stderr, "loadfile failed (subframe)\n");
+      free(fb);
+      rc_free(rctx);
       destroy(ctx);
+      dlclose(handle);
       return 14;
     }
-    int ended = 0;
-    for (int i = 0; i < 300; i++) {
-      mpv_event *ev = wait_event(ctx, 0.1);
-      if (!ev) continue;
-      if (ev->event_id == MPV_EVENT_END_FILE || ev->event_id == MPV_EVENT_SHUTDOWN) {
-        ended = 1;
-        break;
+
+    int loaded = 0;
+    int rendered = 0;
+    double cur_pos = 0.0;
+    for (int i = 0; i < 200; i++) {
+      while (1) {
+        mpv_event *ev = wait_event(ctx, 0.0);
+        if (!ev || ev->event_id == MPV_EVENT_NONE) break;
+        if (ev->event_id == MPV_EVENT_FILE_LOADED) {
+          loaded = 1;
+          // Explicitly re-apply requested sid & sub-pos once tracks are loaded
+          set_prop(ctx, "sid", sid);
+          set_prop(ctx, "sub-pos", sub_pos);
+          set_prop(ctx, "sub-ass", "yes");
+          set_prop(ctx, "sub-ass-override", "yes");
+          set_prop(ctx, "sub-visibility", strcmp(sid, "no") == 0 ? "no" : "yes");
+        }
       }
+      uint64_t upd = rc_update(rctx);
+      if (upd & MPV_RENDER_UPDATE_FRAME) {
+        if (rc_render(rctx, render_params) == 0) {
+          rendered++;
+        }
+      }
+      if (loaded) {
+        char pos_buf[64];
+        prop_or_none(get_prop, mfree, ctx, "time-pos", pos_buf, sizeof(pos_buf));
+        cur_pos = atof(pos_buf);
+        if (cur_pos >= 1.75) {
+          set_prop(ctx, "pause", "yes");
+          if (cur_pos > 4.20) {
+            const char *seek_args[] = {"seek", "2.0", "absolute+exact", NULL};
+            cmd(ctx, seek_args);
+          }
+          for (int k = 0; k < 12; k++) {
+            usleep(30000);
+            while (1) {
+              mpv_event *ev = wait_event(ctx, 0.0);
+              if (!ev || ev->event_id == MPV_EVENT_NONE) break;
+            }
+            rc_update(rctx);
+            if (rc_render(rctx, render_params) == 0) {
+              rendered++;
+            }
+          }
+          prop_or_none(get_prop, mfree, ctx, "time-pos", pos_buf, sizeof(pos_buf));
+          cur_pos = atof(pos_buf);
+          break;
+        }
+      }
+      usleep(35000);
     }
-    char applied_sid[64], applied_pos[64], applied_ass[64], applied_ov[64];
+
+    char applied_sid[64], applied_pos[64], applied_ass[64], applied_ov[64], track_list[2048];
     prop_or_none(get_prop, mfree, ctx, "sid", applied_sid, sizeof(applied_sid));
     prop_or_none(get_prop, mfree, ctx, "sub-pos", applied_pos, sizeof(applied_pos));
     prop_or_none(get_prop, mfree, ctx, "sub-ass", applied_ass, sizeof(applied_ass));
     prop_or_none(get_prop, mfree, ctx, "sub-ass-override", applied_ov, sizeof(applied_ov));
-    printf("SUBFRAME_DONE=1 ENDED=%d SID=%s SUB_POS=%s SUB_ASS=%s SUB_ASS_OVERRIDE=%s\n",
-           ended, applied_sid, applied_pos, applied_ass, applied_ov);
+    prop_or_none(get_prop, mfree, ctx, "track-list", track_list, sizeof(track_list));
+    printf("SUBFRAME_DONE=1 LOADED=%d RENDERED=%d POS=%.3f SID=%s SUB_POS=%s SUB_ASS=%s SUB_ASS_OVERRIDE=%s\n",
+           loaded, rendered, cur_pos, applied_sid, applied_pos, applied_ass, applied_ov);
+    printf("TRACK_LIST=%s\n", track_list);
+
+    int write_ok = 0;
+    if (loaded && rendered > 0) {
+      FILE *fp = fopen(out_ppm, "wb");
+      if (fp) {
+        fprintf(fp, "P6\n%d %d\n255\n", width, height);
+        uint8_t *row_rgb = (uint8_t *)malloc((size_t)width * 3);
+        if (row_rgb) {
+          for (int y = 0; y < height; y++) {
+            const uint8_t *src = fb + (size_t)y * stride;
+            for (int x = 0; x < width; x++) {
+              row_rgb[x * 3 + 0] = src[x * 4 + 2]; // R
+              row_rgb[x * 3 + 1] = src[x * 4 + 1]; // G
+              row_rgb[x * 3 + 2] = src[x * 4 + 0]; // B
+            }
+            fwrite(row_rgb, 1, (size_t)width * 3, fp);
+          }
+          free(row_rgb);
+          write_ok = 1;
+        }
+        fclose(fp);
+      }
+    }
+
+    free(fb);
+    rc_free(rctx);
     destroy(ctx);
     dlclose(handle);
-    return ended ? 0 : 30;
+    return write_ok ? 0 : 30;
   }
 
   set_opt(ctx, "vo", "null");
@@ -597,9 +741,18 @@ def build_pgs_sup(out_path: Path) -> None:
         + ods_body
     )
 
-    # Display set 2: Clear at t=4.60s
+    # Display set 2: Refresh Epoch Start at t=1.60s so seeking/playback around t=2.0s always hits a keyframe
+    pts_show2 = int(1.60 * 90000)
+    pcs_show2 = struct.pack(
+        ">HHBHBBBBHBBHH",
+        vid_w, vid_h, 0x10,
+        1, 0x80, 0, 0, 1,
+        0, 0, 0, obj_x, obj_y,
+    )
+
+    # Display set 3: Clear at t=4.60s
     pts_clear = int(4.60 * 90000)
-    pcs_clear = struct.pack(">HHBHBBBB", vid_w, vid_h, 0x10, 1, 0x00, 0, 0, 0)
+    pcs_clear = struct.pack(">HHBHBBBB", vid_w, vid_h, 0x10, 2, 0x00, 0, 0, 0)
 
     data = b"".join([
         _pgs_segment(pts_show, 0x16, pcs_show),
@@ -607,6 +760,11 @@ def build_pgs_sup(out_path: Path) -> None:
         _pgs_segment(pts_show, 0x14, pds_show),
         _pgs_segment(pts_show, 0x15, ods_show),
         _pgs_segment(pts_show, 0x80, b""),
+        _pgs_segment(pts_show2, 0x16, pcs_show2),
+        _pgs_segment(pts_show2, 0x17, wds_show),
+        _pgs_segment(pts_show2, 0x14, pds_show),
+        _pgs_segment(pts_show2, 0x15, ods_show),
+        _pgs_segment(pts_show2, 0x80, b""),
         _pgs_segment(pts_clear, 0x16, pcs_clear),
         _pgs_segment(pts_clear, 0x80, b""),
     ])
@@ -772,6 +930,57 @@ def find_pixel_y_bounds(
     return y_min, y_max, count
 
 
+def _png_chunk(tag: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+
+
+def ppm_to_png(ppm_path: Path, png_path: Path) -> tuple[int, int]:
+    """Pure-Python P6 PPM -> standard 24-bit RGB PNG converter (zero encoder deps)."""
+    data = ppm_path.read_bytes()
+    if not data.startswith(b"P6"):
+        raise ValueError(f"Not a binary P6 PPM file: {ppm_path}")
+    idx = 2
+    tokens: list[bytes] = []
+    n = len(data)
+    while len(tokens) < 3 and idx < n:
+        while idx < n and data[idx] in b" \t\r\n":
+            idx += 1
+        if idx < n and data[idx] == ord("#"):
+            while idx < n and data[idx] != ord("\n"):
+                idx += 1
+            continue
+        start = idx
+        while idx < n and data[idx] not in b" \t\r\n":
+            idx += 1
+        if idx > start:
+            tokens.append(data[start:idx])
+    if len(tokens) != 3:
+        raise ValueError(f"Malformed PPM header in {ppm_path}")
+    width, height, maxval = int(tokens[0]), int(tokens[1]), int(tokens[2])
+    if maxval != 255:
+        raise ValueError(f"Unsupported PPM maxval {maxval}")
+    if idx < n and data[idx] in b" \t\r\n":
+        idx += 1
+    rgb = data[idx:idx + width * height * 3]
+    if len(rgb) != width * height * 3:
+        raise ValueError(f"Truncated PPM payload in {ppm_path}: got {len(rgb)} bytes, expected {width * height * 3}")
+    stride = width * 3
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)  # Filter type 0 (None)
+        raw.extend(rgb[y * stride:(y + 1) * stride])
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    png_bytes = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(raw), level=6))
+        + _png_chunk(b"IEND", b"")
+    )
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    png_path.write_bytes(png_bytes)
+    return width, height
+
+
 def verify_unmodified_mpv_subtitles_and_tags(
     probe_bin: Path,
     mpv_bin: Path,
@@ -817,17 +1026,21 @@ def verify_unmodified_mpv_subtitles_and_tags(
 
     rendered_paths: dict[str, Path] = {}
     for filename, sid, sub_pos in renders:
-        frame_work = work / f"render_{filename.replace('.png', '')}"
-        frame_work.mkdir(parents=True, exist_ok=True)
-        run_cmd([
+        ppm_path = work / filename.replace(".png", ".ppm")
+        proc = run_cmd([
             str(probe_bin), str(mpv_bin), "subframe", str(sub_mkv),
-            sid, sub_pos, str(frame_work),
-        ])
-        pngs = sorted(frame_work.glob("*.png"))
-        if not pngs:
-            raise AssertionError(f"Mpv.framework vo=image emitted no PNG for {filename} (sid={sid}, sub-pos={sub_pos})")
+            sid, sub_pos, str(ppm_path),
+        ], capture_output=True)
+        print(proc.stdout.strip(), flush=True)
+        if f"SID={sid} " not in proc.stdout:
+            raise AssertionError(
+                f"Mpv.framework failed to select expected subtitle track SID={sid} for {filename} "
+                f"(possible missing decoder in Avcodec.framework):\n{proc.stdout}\n{proc.stderr}"
+            )
+        if not ppm_path.exists() or ppm_path.stat().st_size == 0:
+            raise AssertionError(f"Mpv.framework SW render emitted no PPM for {filename} (sid={sid}, sub-pos={sub_pos})")
         dest = out_frames_dir / filename
-        shutil.copy2(pngs[-1], dest)
+        ppm_to_png(ppm_path, dest)
         rendered_paths[filename] = dest
 
     # Pixel-level geometric assertions on the REAL Mpv.framework rendered frames!
@@ -1092,6 +1305,14 @@ def main() -> int:
                 str(pgs_check_png),
             ])
             w, h, rgb = decode_png_rgb(pgs_check_png)
+            # Also roundtrip-test our pure-Python PPM -> PNG encoder locally
+            rt_ppm = work / "rt.ppm"
+            rt_png = work / "rt.png"
+            rt_ppm.write_bytes(f"P6\n{w} {h}\n255\n".encode("ascii") + rgb)
+            ppm_to_png(rt_ppm, rt_png)
+            w2, h2, rgb2 = decode_png_rgb(rt_png)
+            if (w2, h2) != (w, h) or rgb2 != rgb:
+                raise AssertionError(f"ppm_to_png roundtrip mismatch: {(w2, h2)} vs {(w, h)}")
             y_min, y_max, cnt = find_pixel_y_bounds(
                 rgb, w, h, 360, h,
                 lambda r, g, b: (g > 150 and r < 140) or (r > 190 and g > 190 and b > 190),

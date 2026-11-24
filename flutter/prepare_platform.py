@@ -1633,6 +1633,38 @@ def main() -> None:
             "platform :osx, '11.0'",
             text,
         )
+        mpv_upgrade_marker = "# MarcoMovie: upgrade media_kit macOS libmpv to v0.7.3 (enables FFmpeg pgssub Blu-ray PGS decoder)"
+        if mpv_upgrade_marker not in text and "flutter_install_all_macos_pods" in text:
+            mpv_upgrade_ruby = (
+                f"  {mpv_upgrade_marker}\n"
+                "  begin\n"
+                "    require 'fileutils'\n"
+                "    mk_macos_dir = File.expand_path('Flutter/ephemeral/.symlinks/plugins/media_kit_libs_macos_video/macos', __dir__)\n"
+                "    mk_makefile = File.join(mk_macos_dir, 'Makefile')\n"
+                "    if File.exist?(mk_makefile)\n"
+                "      mk_src = File.read(mk_makefile)\n"
+                "      target_ver = 'v0.7.3'\n"
+                "      target_sha = '2e58ac66b0ea875239bf4db29b3ef2100a719df1d61fa1e780c38d651d4c9f27'\n"
+                "      unless mk_src.include?(\"MPV_XCFRAMEWORKS_VERSION=#{target_ver}\")\n"
+                "        mk_src = mk_src.sub(/^MPV_XCFRAMEWORKS_VERSION=.*$/, \"MPV_XCFRAMEWORKS_VERSION=#{target_ver}\")\n"
+                "        mk_src = mk_src.sub(/^MPV_XCFRAMEWORKS_SHA256SUM=.*$/, \"MPV_XCFRAMEWORKS_SHA256SUM=#{target_sha}\")\n"
+                "        File.write(mk_makefile, mk_src)\n"
+                "        Dir.glob(File.join(mk_macos_dir, 'Frameworks', '*.xcframework')).each { |p| FileUtils.rm_rf(p) }\n"
+                "        FileUtils.rm_rf(File.join(mk_macos_dir, 'Frameworks', '.symlinks'))\n"
+                "        Pod::UI.puts(\"MarcoMovie: upgraded media_kit macOS libmpv to #{target_ver} (pgssub enabled)\")\n"
+                "      end\n"
+                "    end\n"
+                "  rescue => e\n"
+                "    Pod::UI.warn(\"MarcoMovie: skipped libmpv v0.7.3 upgrade: #{e}\")\n"
+                "  end\n\n"
+            )
+            text = re.sub(
+                r"(^\s*flutter_install_all_macos_pods\b)",
+                lambda m: mpv_upgrade_ruby + m.group(1),
+                text,
+                count=1,
+                flags=re.MULTILINE,
+            )
         macos_podfile.write_text(text, encoding="utf-8")
     macos_pbx = ROOT / "macos" / "Runner.xcodeproj" / "project.pbxproj"
     if macos_pbx.exists():
