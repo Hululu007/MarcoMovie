@@ -915,6 +915,16 @@ class CmsEpisode {
   /// Short-lived quality choices returned for one episode; not saved in history.
   final List<CmsEpisode> variants;
   final String externalAudioUrl;
+
+  /// Optional structured source metadata (e.g. Emby ParentIndexNumber / IndexNumber / ItemId)
+  /// and optional file/container metadata hints used by unified episode recognition.
+  final int? sourceSeasonNumber;
+  final int? sourceEpisodeNumber;
+  final String sourceItemId;
+  final String originalFileName;
+  final String directoryPath;
+  final Map<String, String> containerTags;
+
   const CmsEpisode({
     required this.name,
     required this.url,
@@ -922,6 +932,12 @@ class CmsEpisode {
     this.playbackSession = const {},
     this.variants = const [],
     this.externalAudioUrl = '',
+    this.sourceSeasonNumber,
+    this.sourceEpisodeNumber,
+    this.sourceItemId = '',
+    this.originalFileName = '',
+    this.directoryPath = '',
+    this.containerTags = const {},
   });
   String? get cloudProvider {
     final uri = Uri.tryParse(url);

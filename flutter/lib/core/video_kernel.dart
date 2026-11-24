@@ -644,7 +644,11 @@ class VideoKernel {
 
   /// Renders media_kit subtitles as an independent layer strictly ABOVE
   /// `DanmuLayer` and BELOW HUD controls when `externalSubtitleOverlay` is enabled.
-  Widget? buildSubtitleOverlay() {
+  Widget? buildSubtitleOverlay({
+    Key? subtitleViewKey,
+    EdgeInsets padding = const EdgeInsets.fromLTRB(16.0, 0.0, 16.0, 24.0),
+    bool visible = true,
+  }) {
     if (OhosRuntime.isOhos ||
         debugSurface != null ||
         ohosPlatform != null ||
@@ -656,10 +660,17 @@ class VideoKernel {
     if (ctrl.player.platform?.configuration.libass ?? false) {
       return null;
     }
-    return SubtitleView(
+    final view = SubtitleView(
+      key: subtitleViewKey,
       controller: ctrl,
-      configuration: const SubtitleViewConfiguration(),
+      configuration: SubtitleViewConfiguration(
+        padding: padding,
+      ),
     );
+    if (!visible) {
+      return Opacity(opacity: 0.0, child: view);
+    }
+    return view;
   }
 }
 

@@ -9,11 +9,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart' show SubtitleViewState;
 import '../core/anime4k_controller.dart';
 import '../core/bluray_iso_proxy.dart';
 import '../core/cast_service.dart';
 import '../core/catpaw_host.dart';
 import '../core/cms_client.dart';
+import '../core/container_metadata_reader.dart';
 import '../core/download_service.dart';
 import '../core/danmu/dandanplay_provider.dart';
 import '../core/danmu/danmu_prefs.dart';
@@ -31,6 +33,7 @@ import '../core/playback_startup.dart';
 import '../core/playback_wakelock.dart';
 import '../core/ohos_runtime.dart';
 import '../core/series_scraper.dart';
+import '../core/subtitle_layout.dart';
 import '../core/video_kernel.dart';
 import '../core/web_media_resolver.dart';
 import '../core/windows_tray_service.dart';
@@ -65,6 +68,7 @@ import 'player/slim_progress_bar.dart';
 import 'player/speed_capsule.dart';
 import 'player/start_spec_overlay.dart';
 import 'poster_image.dart';
+import 'series_scrape_sheet.dart';
 import 'source_verification_dialog.dart';
 import 'tv/tv_player_overlay.dart';
 import 'windows_title_bar.dart';
@@ -255,6 +259,18 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _hudFadingOut = false;
   bool _hudAutoHidden = false;
   Timer? _hudUnmountTimer;
+  final GlobalKey<SubtitleViewState> _subtitleViewKey =
+      GlobalKey<SubtitleViewState>();
+  double _measuredDesktopBottomBarHeight = 0.0;
+  SubtitleRenderMode _subtitleRenderMode =
+      SubtitleRenderMode.flutterTextOverlay;
+  int _lastAppliedMpvSubPos = 100;
+  bool? _lastAppliedMpvSubVisible;
+  bool _mpvSubtitleAssInitialized = false;
+  double _lastAppliedSubtitleOverlayBottomPadding = -1.0;
+  Size _lastVideoStackViewport = Size.zero;
+  bool _subtitleSyncScheduled = false;
+  int _subtitleSyncEpoch = 0;
   bool _screenLocked = false;
   bool _lockButtonVisible = false;
   Timer? _lockHideTimer;
@@ -355,8 +371,12 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _danmuSessionGen = 0;
   bool _danmuBoundForEpisode = false;
   DanmuCandidate? _matchedDanmuCandidate;
+  List<DanmuCandidate> _pendingDanmuCandidates = const <DanmuCandidate>[];
   int? _scrapedDanmuEpisodeNumber;
   int _activeDanmuEpisodeOffset = 0;
+  final Map<String, Map<String, String>> _runtimeContainerTags =
+      <String, Map<String, String>>{};
+  int _containerProbeGen = 0;
   OnboardingPrefs? _onboardingPrefs;
   bool _hasStartedVodPlayback = false;
   bool _firstPlayHintDismissedThisSession = false;
@@ -917,6 +937,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       ..addListener(_onHudSubstateChanged);
     _skipCountdown.addListener(_onHudSubstateChanged);
     _startSpecController.addListener(_onHudSubstateChanged);
+    widget.storage.seriesScrapeRevision.addListener(
+      _onPlayerSeriesScrapeRevision,
+    );
     IosLiquidGlassBridge.reduceTransparencyNotifier.addListener(
       _onReduceTransparencyChanged,
     );
@@ -1283,6 +1306,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (extra.isNotEmpty) _extraTrackSpecInfo = extra;
         });
       }
+      _scheduleSyncNativeSubtitleState();
+      Future<void>.microtask(() {
+        if (mounted) unawaited(_syncNativeSubtitleState());
+      });
     }));
     _playerSubscriptions.add(_player.stream.tracks.listen((tracks) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
@@ -1314,6 +1341,11 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (_audioCodec.isEmpty && aCodec.isNotEmpty) _audioCodec = aCodec;
         });
       }
+      _scheduleSyncNativeSubtitleState();
+      Future<void>.microtask(() {
+        if (mounted) unawaited(_syncNativeSubtitleState());
+      });
+      _probeCurrentEpisodeContainerTags(_playSession);
     }));
 
     _playerSubscriptions.add(_player.stream.position.listen((pos) {
@@ -2158,11 +2190,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               nextLine.episodes.any((e) => !e.isDirectPlayable)) {
             continue;
           }
-          final nextEpIdx = CspBridge.matchEpisodeIndexInLine(
-            nextLine,
-            currentEpName,
-            _episodeIndex,
-          );
+          final nextEpIdx = _matchEpisodeIndexInTargetLine(nextLineIdx);
           final candidateEp = nextLine.episodes[nextEpIdx];
           if (!PlaybackRecoveryPolicy.isAutomaticLineCandidate(candidateEp)) {
             continue;
@@ -2809,6 +2837,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _allowHistory = true;
       await _engineSetRate(_isLiveStream ? 1.0 : _normalSpeed);
       if (!mounted || session != _playSession) return;
+      _probeCurrentEpisodeContainerTags(session);
       _scheduleHide();
     } catch (error) {
       await _cloudMedia.discard(pendingLease);
@@ -3580,6 +3609,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       await dyn.setProperty('vid', 'auto');
       await dyn.setProperty('audio-display', 'no');
+      if (_desktop && !OhosRuntime.isOhos) {
+        // Keep libass prepared so embedded ASS fonts load on file open and
+        // `sub-pos` can shift bottom ASS/PGS subtitles without moving top signs.
+        await dyn.setProperty('sub-ass', 'yes');
+        await dyn.setProperty('sub-ass-override', 'yes');
+        await dyn.setProperty('sub-pos', '$_lastAppliedMpvSubPos');
+        _mpvSubtitleAssInitialized = true;
+      }
       if (_isIosPlayerPlatform) {
         await IosMpvProfile.applyToPlayer(
           _player,
@@ -3850,6 +3887,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _skipCountdown.dispose();
     _startSpecController.removeListener(_onHudSubstateChanged);
     _startSpecController.dispose();
+    widget.storage.seriesScrapeRevision.removeListener(
+      _onPlayerSeriesScrapeRevision,
+    );
     _castController.removeListener(_onCastStateChanged);
     _castController.dispose();
     _danmuMatchToken?.cancel();
@@ -4409,6 +4449,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _danmuSessionGen++;
     _danmuBoundForEpisode = false;
     _matchedDanmuCandidate = null;
+    _pendingDanmuCandidates = const <DanmuCandidate>[];
     _scrapedDanmuEpisodeNumber = null;
     final cache = _danmuCache;
     if (cache != null) {
@@ -4419,6 +4460,180 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  void _onPlayerSeriesScrapeRevision() {
+    if (!mounted) return;
+    setState(() {});
+    if (!_isLiveStream && _danmuSettings.effectiveEnabled) {
+      _reloadDanmuAfterCalibration();
+    }
+  }
+
+  void _reloadDanmuAfterCalibration() {
+    if (OhosRuntime.isOhos || _isLiveStream) return;
+    _danmuMatchToken?.cancel();
+    _danmuMatchToken = null;
+    _danmuSessionGen++;
+    _danmuBoundForEpisode = false;
+    _matchedDanmuCandidate = null;
+    _pendingDanmuCandidates = const <DanmuCandidate>[];
+    final cache = _danmuCache;
+    if (cache != null) {
+      unawaited(cache.bindSession(''));
+    }
+    if (_danmuSettings.effectiveEnabled) {
+      _bindDanmuForCurrentEpisode();
+    }
+  }
+
+  LineEpisodeScrapeResult _scrapeLineEpisodesFor(
+    CmsLine line, {
+    SeriesScrapeOverride? override,
+  }) {
+    final ov = override ??
+        widget.storage.getSeriesScrapeOverride(
+          widget.site.key,
+          widget.video.id,
+          isPrivate: widget.site.isEffectivelyPrivate,
+        );
+    final effectiveTitle = (ov != null && ov.effectiveDanmuTitle.isNotEmpty)
+        ? ov.effectiveDanmuTitle
+        : widget.video.title;
+    return SeriesScraper.scrapeLineEpisodes(
+      line.episodes,
+      seriesTitle: effectiveTitle,
+      episodeOffset: ov?.episodeOffset ?? 0,
+      manualOverrides: ov?.episodeNumberOverrides ?? const {},
+      episodeCalibrations: ov?.episodeCalibrations ?? const {},
+      runtimeContainerTags: _runtimeContainerTags,
+    );
+  }
+
+  ScrapedEpisodeInfo? _currentScrapedEpisodeInfo({
+    SeriesScrapeOverride? override,
+  }) {
+    if (_isLiveStream) return null;
+    final scrape = _scrapeLineEpisodesFor(_currentLine, override: override);
+    return scrape.infoForOriginalIndex(_episodeIndex);
+  }
+
+  int _matchEpisodeIndexInTargetLine(int targetLineIndex) {
+    final targetLine = _lines[targetLineIndex];
+    if (targetLine.episodes.isEmpty) return 0;
+    if (!_isLiveStream) {
+      final srcInfo = _currentScrapedEpisodeInfo();
+      if (srcInfo != null) {
+        final targetScrape = _scrapeLineEpisodesFor(targetLine);
+        final matched = SeriesScraper.matchEpisodeIndexInScrapedLine(
+          srcInfo,
+          targetScrape,
+        );
+        if (matched != null &&
+            matched >= 0 &&
+            matched < targetLine.episodes.length) {
+          return matched;
+        }
+      }
+    }
+    return CspBridge.matchEpisodeIndexInLine(
+      targetLine,
+      _currentEpisode.name,
+      _episodeIndex,
+    );
+  }
+
+  void _probeCurrentEpisodeContainerTags(int session) {
+    if (!mounted ||
+        _isLiveStream ||
+        session != _playSession ||
+        OhosRuntime.isOhos ||
+        _usingAvPlayer ||
+        _videoKernel.mdkPlatform != null ||
+        _videoKernel.ohosPlatform != null) {
+      return;
+    }
+    final platform = _player.platform;
+    if (platform == null) return;
+    final ep = _currentEpisode;
+    final stableKey = SeriesScraper.stableEpisodeKey(ep);
+    if (stableKey.isEmpty) return;
+    final gen = ++_containerProbeGen;
+    final beforeInfo = _currentScrapedEpisodeInfo();
+
+    unawaited(() async {
+      try {
+        final dyn = platform as dynamic;
+        String? rawMeta;
+        String? mediaTitle;
+        try {
+          final m = await dyn.getProperty('metadata');
+          if (m != null) rawMeta = m.toString();
+        } catch (_) {}
+        try {
+          final mt = await dyn.getProperty('media-title');
+          if (mt != null) mediaTitle = mt.toString();
+        } catch (_) {}
+        if (!mounted || session != _playSession || gen != _containerProbeGen) {
+          return;
+        }
+        final parsed = ContainerMetadataReader.parseMpvMetadataJson(
+          rawMeta,
+          mediaTitle: mediaTitle,
+          fallbackFileName:
+              ep.originalFileName.isNotEmpty ? ep.originalFileName : ep.name,
+        );
+        if (parsed.isEmpty) return;
+        final existing = _runtimeContainerTags[stableKey];
+        bool changed = existing == null || existing.length != parsed.length;
+        if (!changed) {
+          for (final entry in parsed.entries) {
+            if (existing[entry.key] != entry.value) {
+              changed = true;
+              break;
+            }
+          }
+        }
+        if (!changed) return;
+        _runtimeContainerTags[stableKey] = parsed;
+        ContainerMetadataCache.putByStableKey(stableKey, parsed);
+        final afterInfo = _currentScrapedEpisodeInfo();
+        setState(() {});
+        final identityChanged =
+            beforeInfo?.seasonNumber != afterInfo?.seasonNumber ||
+                beforeInfo?.resolvedEpisodeNumber !=
+                    afterInfo?.resolvedEpisodeNumber ||
+                beforeInfo?.status != afterInfo?.status;
+        if (identityChanged && _danmuSettings.effectiveEnabled) {
+          _reloadDanmuAfterCalibration();
+        }
+      } catch (_) {}
+    }());
+  }
+
+  Future<void> _openPlayerSeriesScrapeSheet() async {
+    if (_isLiveStream || widget.site.isEffectivelyPrivate) return;
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final beforeOverride = widget.storage.getSeriesScrapeOverride(
+      widget.site.key,
+      widget.video.id,
+      isPrivate: false,
+    );
+    await showSeriesScrapeSheet(
+      context,
+      site: widget.site,
+      video: widget.video,
+      storage: widget.storage,
+      activeLine: _currentLine,
+      initialOverride: beforeOverride,
+      initialTab: 1,
+      focusEpisodeIndex: _episodeIndex,
+      runtimeContainerTags: _runtimeContainerTags,
+      pendingDanmuCandidates: _pendingDanmuCandidates,
+      onSelectDanmuCandidate: _manualBindDanmuCandidate,
+    );
+    // Note: seriesScrapeRevision listener immediately updates UI & reloads
+    // danmu from current playback timestamp while preserving play/pause state.
+  }
+
   ({
     DanmuMatchQuery query,
     int? scrapedEpisodeNumber,
@@ -4426,6 +4641,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     String effectiveTitle,
     bool isMotionComic,
     SeriesScrapeOverride? override,
+    ScrapedEpisodeInfo? episodeInfo,
+    bool canAutoMatch,
   }) _resolveDanmuMatchContext() {
     final override = widget.storage.getSeriesScrapeOverride(
       widget.site.key,
@@ -4443,28 +4660,26 @@ class _PlayerScreenState extends State<PlayerScreen>
             extraContext: '${widget.video.tag} ${widget.video.remarks}',
           );
     final episodeOffset = override?.episodeOffset ?? 0;
-    final lineEps = _currentLine.episodes;
-    final scrape = SeriesScraper.scrapeLineEpisodes(
-      lineEps,
-      seriesTitle: effectiveTitle,
-      episodeOffset: episodeOffset,
-      manualOverrides: override?.episodeNumberOverrides ?? const {},
-    );
-    final epInfo =
-        (_episodeIndex >= 0 && _episodeIndex < scrape.byOriginalIndex.length)
-            ? scrape.byOriginalIndex[_episodeIndex]
-            : null;
+    final scrape = _scrapeLineEpisodesFor(_currentLine, override: override);
+    final epInfo = scrape.infoForOriginalIndex(_episodeIndex);
     final int? scrapedEpNum = epInfo?.resolvedEpisodeNumber;
+    final bool needsConfirmation = epInfo?.needsConfirmation ?? false;
+    final bool isUnoverriddenSpecial =
+        epInfo != null && epInfo.isSpecial && !epInfo.hasManualOverride;
+
     final int effectiveEpNum;
+    final bool canAutoMatch;
     if (scrapedEpNum != null && scrapedEpNum > 0) {
       effectiveEpNum = scrapedEpNum;
-    } else if (epInfo != null &&
-        epInfo.isSpecial &&
-        !epInfo.hasManualOverride) {
-      // Do not falsely treat a leading trailer/SP as Episode 1 for danmu.
+      canAutoMatch = true;
+    } else if (needsConfirmation || isUnoverriddenSpecial) {
+      // Never auto-fabricate an episode number from list index when the file
+      // is 待确认 or a trailer/special.
       effectiveEpNum = 0;
+      canAutoMatch = false;
     } else {
-      effectiveEpNum = math.max(1, _episodeIndex + 1 + episodeOffset);
+      effectiveEpNum = 0;
+      canAutoMatch = false;
     }
     final effectiveDurMs = _duration.inMilliseconds > 0
         ? _duration.inMilliseconds
@@ -4474,7 +4689,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         : widget.video.year;
     final query = DanmuMatchQuery(
       title: effectiveTitle,
-      episodeTitle: _currentEpisode.name,
+      episodeTitle: epInfo != null &&
+              !epInfo.needsConfirmation &&
+              epInfo.formattedSeasonEpisode.isNotEmpty
+          ? epInfo.formattedSeasonEpisode
+          : _currentEpisode.name,
       episodeIndex: effectiveEpNum,
       durationSec: effectiveDurMs > 0 ? effectiveDurMs ~/ 1000 : 0,
       seasonNumber: epInfo?.seasonNumber,
@@ -4490,6 +4709,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       effectiveTitle: effectiveTitle,
       isMotionComic: isMotionComic,
       override: override,
+      episodeInfo: epInfo,
+      canAutoMatch: canAutoMatch,
     );
   }
 
@@ -4504,9 +4725,17 @@ class _PlayerScreenState extends State<PlayerScreen>
           ? '当前匹配：${parts.join(" · ")}'
           : '已绑定弹幕（ID ${matched.animeId}）';
     }
+    final epInfo = _currentScrapedEpisodeInfo();
+    if (epInfo != null && epInfo.needsConfirmation) {
+      return '当前识别：待确认（请在选集 → 识别／校准本集确认）';
+    }
+    if (_pendingDanmuCandidates.isNotEmpty) {
+      return '弹幕服务仅返回相近/邻集候选，请手动选择';
+    }
     final epNum = _scrapedDanmuEpisodeNumber;
     if (epNum != null && epNum > 0) {
-      return '当前识别：第 $epNum 集（${_danmuBoundForEpisode ? "已加载" : "待匹配"}）';
+      final label = epInfo?.readableSeasonEpisodeZh ?? '第 $epNum 集';
+      return '当前识别：$label（${_danmuBoundForEpisode ? "已加载" : "待匹配"}）';
     }
     return '当前集：${_currentEpisode.name}';
   }
@@ -4545,6 +4774,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _danmuMatchToken?.cancel();
     final gen = ++_danmuSessionGen;
     _matchedDanmuCandidate = candidate;
+    _pendingDanmuCandidates = const <DanmuCandidate>[];
     unawaited(() async {
       try {
         await cache.bindSession(candidate.boundEpisodeId);
@@ -4601,6 +4831,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _matchedDanmuCandidate = null;
     _danmuBoundForEpisode = false;
+    _pendingDanmuCandidates = const <DanmuCandidate>[];
     _bindDanmuForCurrentEpisode();
   }
 
@@ -4629,6 +4860,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     final ctx = _resolveDanmuMatchContext();
     _scrapedDanmuEpisodeNumber = ctx.scrapedEpisodeNumber;
     _activeDanmuEpisodeOffset = ctx.episodeOffset;
+    _pendingDanmuCandidates = const <DanmuCandidate>[];
+
+    if (!ctx.canAutoMatch) {
+      _matchedDanmuCandidate = null;
+      _danmuBoundForEpisode = false;
+      unawaited(cache.bindSession(''));
+      return;
+    }
     final query = ctx.query;
 
     unawaited(() async {
@@ -4638,19 +4877,34 @@ class _PlayerScreenState extends State<PlayerScreen>
           cancelToken: token,
         );
         if (!mounted || gen != _danmuSessionGen || token.isCancelled) return;
-        if (candidates.isEmpty) return;
+        if (candidates.isEmpty) {
+          _matchedDanmuCandidate = null;
+          _danmuBoundForEpisode = false;
+          return;
+        }
         var best = candidates.first;
         for (final c in candidates.skip(1)) {
           if (c.confidence > best.confidence) best = c;
         }
-        if (best.boundEpisodeId.trim().isEmpty || best.confidence < 0.35) {
+        if (best.boundEpisodeId.trim().isEmpty ||
+            best.confidence < DandanplayProvider.autoBindMinConfidence) {
+          // Server only returned neighbor/low-confidence candidates: do NOT
+          // silently bind a wrong episode; retain them for explicit user choice.
+          _matchedDanmuCandidate = null;
+          _danmuBoundForEpisode = false;
+          _pendingDanmuCandidates = List<DanmuCandidate>.unmodifiable(
+            candidates.where((c) => c.boundEpisodeId.trim().isNotEmpty),
+          );
+          if (mounted) setState(() {});
           return;
         }
         await cache.bindSession(best.boundEpisodeId);
         if (!mounted || gen != _danmuSessionGen || token.isCancelled) return;
         _matchedDanmuCandidate = best;
+        _pendingDanmuCandidates = const <DanmuCandidate>[];
         _danmuBoundForEpisode = true;
         cache.onPlaybackTick(_position.inMilliseconds, playing: _playing);
+        if (mounted) setState(() {});
       } catch (_) {
         // Isolated danmu fetch failure must never disturb video playback.
       }
@@ -4899,6 +5153,127 @@ class _PlayerScreenState extends State<PlayerScreen>
     return '$sign${absSec}s';
   }
 
+  bool get _usesDesktopSubtitleHudLayout =>
+      _desktop && !OhosRuntime.shouldUseTvUi(widget.storage.tvUiMode);
+
+  bool get _isDesktopBottomControlsVisible =>
+      _usesDesktopSubtitleHudLayout &&
+      !_screenLocked &&
+      !_castController.isCasting &&
+      ((_controlsVisible && !_hudFadingOut) || _isSliderDragging);
+
+  double _effectiveDesktopBottomControlsHeight(EdgeInsets viewPadding) {
+    if (_measuredDesktopBottomBarHeight > 0.0) {
+      return _measuredDesktopBottomBarHeight;
+    }
+    final fallback = widget.embedded ? 64.0 : (_isLiveStream ? 50.0 : 86.0);
+    return fallback + viewPadding.bottom;
+  }
+
+  double _computeSubtitleBottomPadding(EdgeInsets viewPadding) {
+    if (!_usesDesktopSubtitleHudLayout) {
+      return SubtitleLayoutGeometry.defaultBottomPadding;
+    }
+    return SubtitleLayoutGeometry.computeTextOverlayBottomPadding(
+      hudControlsVisible: _isDesktopBottomControlsVisible,
+      measuredBottomBarHeight:
+          _effectiveDesktopBottomControlsHeight(viewPadding),
+      bottomSafeInset: viewPadding.bottom,
+    );
+  }
+
+  void _handleDesktopBottomControlsHeightChanged(double height) {
+    if (!mounted || height <= 0.0) return;
+    if ((height - _measuredDesktopBottomBarHeight).abs() < 0.5) return;
+    setState(() {
+      _measuredDesktopBottomBarHeight = height;
+    });
+    _scheduleSyncNativeSubtitleState();
+  }
+
+  void _scheduleSyncNativeSubtitleState() {
+    if (_subtitleSyncScheduled || !mounted) return;
+    _subtitleSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _subtitleSyncScheduled = false;
+      if (!mounted) return;
+      unawaited(_syncNativeSubtitleState());
+    });
+  }
+
+  Future<void> _syncNativeSubtitleState() async {
+    if (!mounted ||
+        OhosRuntime.isOhos ||
+        _usingAvPlayer ||
+        _videoKernel.mdkPlatform != null ||
+        _videoKernel.ohosPlatform != null) {
+      return;
+    }
+    final platform = _player.platform;
+    if (platform == null) return;
+    final epoch = ++_subtitleSyncEpoch;
+    final selected = _player.state.track.subtitle;
+    final available = _player.state.tracks.subtitle;
+
+    String? liveSid;
+    if (selected.id == 'auto') {
+      try {
+        final rawSid = await (platform as dynamic).getProperty('sid');
+        if (rawSid != null) {
+          liveSid = rawSid.toString().trim();
+        }
+      } catch (_) {}
+    }
+    if (!mounted || epoch != _subtitleSyncEpoch) return;
+
+    final resolved = SubtitleLayoutGeometry.resolveActiveTrack(
+      selected: selected,
+      available: available,
+      mpvSid: liveSid,
+    );
+    final mode = SubtitleLayoutGeometry.classifyTrack(resolved);
+    if (mode != _subtitleRenderMode) {
+      setState(() {
+        _subtitleRenderMode = mode;
+      });
+    }
+
+    final wantsNative = mode == SubtitleRenderMode.mpvNativeAss ||
+        mode == SubtitleRenderMode.mpvNativeBitmap;
+    final viewPadding = MediaQuery.viewPaddingOf(context);
+    final viewport = _lastVideoStackViewport.isEmpty
+        ? MediaQuery.sizeOf(context)
+        : _lastVideoStackViewport;
+    final targetSubPos = wantsNative
+        ? SubtitleLayoutGeometry.computeMpvSubPos(
+            viewport: viewport,
+            videoWidth: _videoWidth,
+            videoHeight: _videoHeight,
+            fit: _fit,
+            hudControlsVisible: _isDesktopBottomControlsVisible,
+            measuredBottomBarHeight:
+                _effectiveDesktopBottomControlsHeight(viewPadding),
+          )
+        : 100;
+
+    try {
+      final dyn = platform as dynamic;
+      if (wantsNative && !_mpvSubtitleAssInitialized) {
+        await dyn.setProperty('sub-ass', 'yes');
+        await dyn.setProperty('sub-ass-override', 'yes');
+        _mpvSubtitleAssInitialized = true;
+      }
+      if (_lastAppliedMpvSubVisible != wantsNative) {
+        await dyn.setProperty('sub-visibility', wantsNative ? 'yes' : 'no');
+        _lastAppliedMpvSubVisible = wantsNative;
+      }
+      if (_lastAppliedMpvSubPos != targetSubPos) {
+        await dyn.setProperty('sub-pos', '$targetSubPos');
+        _lastAppliedMpvSubPos = targetSubPos;
+      }
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
     final viewPadding = MediaQuery.viewPaddingOf(context);
@@ -4929,8 +5304,45 @@ class _PlayerScreenState extends State<PlayerScreen>
                 : math.max(16.0, viewPadding.top + 76.0)))
         : math.max(16.0, viewPadding.top + 16.0);
 
-    final subtitleOverlay =
-        widget.debugSubtitleLayer ?? _videoKernel.buildSubtitleOverlay();
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final subtitleBottomPadding = _computeSubtitleBottomPadding(viewPadding);
+    final subtitleAnimDuration =
+        reduceMotion ? Duration.zero : const Duration(milliseconds: 200);
+    final showFlutterTextSubtitles =
+        _subtitleRenderMode != SubtitleRenderMode.mpvNativeAss &&
+            _subtitleRenderMode != SubtitleRenderMode.mpvNativeBitmap;
+    final subtitleOverlay = widget.debugSubtitleLayer ??
+        _videoKernel.buildSubtitleOverlay(
+          subtitleViewKey: _subtitleViewKey,
+          padding: EdgeInsets.fromLTRB(
+            SubtitleLayoutGeometry.defaultHorizontalPadding,
+            0.0,
+            SubtitleLayoutGeometry.defaultHorizontalPadding,
+            subtitleBottomPadding,
+          ),
+          visible: showFlutterTextSubtitles,
+        );
+    if (widget.debugSubtitleLayer == null &&
+        subtitleOverlay != null &&
+        (subtitleBottomPadding - _lastAppliedSubtitleOverlayBottomPadding)
+                .abs() >=
+            0.5) {
+      _lastAppliedSubtitleOverlayBottomPadding = subtitleBottomPadding;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _subtitleViewKey.currentState?.setPadding(
+          EdgeInsets.fromLTRB(
+            SubtitleLayoutGeometry.defaultHorizontalPadding,
+            0.0,
+            SubtitleLayoutGeometry.defaultHorizontalPadding,
+            subtitleBottomPadding,
+          ),
+          duration: subtitleAnimDuration,
+        );
+      });
+    }
+    _scheduleSyncNativeSubtitleState();
+
     final effectiveDanmuSpeed = (_gestureFsm.isSpeedBoosting ||
             _gestureFsm.isSpeedLockReady ||
             _gestureFsm.isSpeedLocked)
@@ -4955,39 +5367,62 @@ class _PlayerScreenState extends State<PlayerScreen>
                   )
                 : null));
 
-    final videoStack = Stack(
-      key: const Key('player-video-stack'),
-      fit: StackFit.expand,
-      children: [
-        Center(
-          key: const Key('player-video-surface-layer'),
-          child: RepaintBoundary(
-            child: _usingAvPlayer &&
-                    widget.debugVideoSurface == null &&
-                    _iosAvPlayerController != null
-                ? _iosAvPlayerController!.buildView(
-                    key: const Key('ios-avplayer-surface'),
-                  )
-                : _videoKernel.buildVideoSurface(
-                    fit: _fit,
-                    videoWidth: _videoWidth,
-                    videoHeight: _videoHeight,
-                    externalSubtitleOverlay: !OhosRuntime.isOhos,
-                  ),
-          ),
-        ),
-        // M3b: DanmuLayer strictly ABOVE video surface and BELOW subtitles & HUD.
-        if (activeDanmuWidget != null && !OhosRuntime.isOhos)
-          Positioned.fill(
-            key: const Key('player-danmu-layer'),
-            child: IgnorePointer(child: activeDanmuWidget),
-          ),
-        // M3b: Subtitles strictly ABOVE DanmuLayer and BELOW HUD overlays.
-        if (subtitleOverlay != null)
-          Positioned.fill(
-            key: const Key('player-subtitle-layer'),
-            child: IgnorePointer(child: subtitleOverlay),
-          ),
+    final Widget? positionedSubtitleChild = subtitleOverlay == null
+        ? null
+        : (widget.debugSubtitleLayer != null && _usesDesktopSubtitleHudLayout
+            ? AnimatedPadding(
+                key: const Key('player-subtitle-padding'),
+                duration: subtitleAnimDuration,
+                curve: Curves.easeOutCubic,
+                padding: EdgeInsets.only(bottom: subtitleBottomPadding),
+                child: subtitleOverlay,
+              )
+            : subtitleOverlay);
+
+    final videoStack = LayoutBuilder(
+      builder: (stackCtx, stackConstraints) {
+        final nextViewport = stackConstraints.biggest;
+        if (nextViewport.width > 0 &&
+            nextViewport.height > 0 &&
+            ((nextViewport.width - _lastVideoStackViewport.width).abs() >= 1.0 ||
+                (nextViewport.height - _lastVideoStackViewport.height).abs() >=
+                    1.0)) {
+          _lastVideoStackViewport = nextViewport;
+          _scheduleSyncNativeSubtitleState();
+        }
+        return Stack(
+          key: const Key('player-video-stack'),
+          fit: StackFit.expand,
+          children: [
+            Center(
+              key: const Key('player-video-surface-layer'),
+              child: RepaintBoundary(
+                child: _usingAvPlayer &&
+                        widget.debugVideoSurface == null &&
+                        _iosAvPlayerController != null
+                    ? _iosAvPlayerController!.buildView(
+                        key: const Key('ios-avplayer-surface'),
+                      )
+                    : _videoKernel.buildVideoSurface(
+                        fit: _fit,
+                        videoWidth: _videoWidth,
+                        videoHeight: _videoHeight,
+                        externalSubtitleOverlay: !OhosRuntime.isOhos,
+                      ),
+              ),
+            ),
+            // M3b: DanmuLayer strictly ABOVE video surface and BELOW subtitles & HUD.
+            if (activeDanmuWidget != null && !OhosRuntime.isOhos)
+              Positioned.fill(
+                key: const Key('player-danmu-layer'),
+                child: IgnorePointer(child: activeDanmuWidget),
+              ),
+            // M3b: Subtitles strictly ABOVE DanmuLayer and BELOW HUD overlays.
+            if (positionedSubtitleChild != null)
+              Positioned.fill(
+                key: const Key('player-subtitle-layer'),
+                child: IgnorePointer(child: positionedSubtitleChild),
+              ),
         if (_playerBrightness < 0.995)
           IgnorePointer(
             child: ColoredBox(
@@ -5144,6 +5579,8 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
           ),
       ],
+    );
+      },
     );
 
     final Widget surfaceWidget = _useEnhancedHud
@@ -6641,13 +7078,11 @@ class _PlayerScreenState extends State<PlayerScreen>
                                 ? _position.inMilliseconds
                                 : _lastKnownPositionMs;
                             _saveProgress(immediate: true, syncImmediate: false);
+                            final matchedEpIdx =
+                                _matchEpisodeIndexInTargetLine(idx);
                             setState(() {
                               _lineIndex = idx;
-                              _episodeIndex = CspBridge.matchEpisodeIndexInLine(
-                                _lines[idx],
-                                _currentEpisode.name,
-                                _episodeIndex,
-                              );
+                              _episodeIndex = matchedEpIdx;
                             });
                             _openCurrentEpisode(resumeMs: keepPos);
                           },
@@ -7884,6 +8319,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _scheduleHide();
       },
       onToggleExpand: _toggleOrientation,
+      onBottomControlsHeightChanged: _handleDesktopBottomControlsHeightChanged,
     );
   }
 
@@ -7978,6 +8414,8 @@ class _PlayerScreenState extends State<PlayerScreen>
               _scheduleHide();
             },
             onToggleExpand: _toggleOrientation,
+            onBottomControlsHeightChanged:
+                _handleDesktopBottomControlsHeightChanged,
           ),
         ),
       ),
@@ -8102,14 +8540,36 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ],
               ),
               SizedBox(height: 2 * scale),
-              Text(
-                '${_currentEpisode.name} · ${_currentLine.name}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: AppleColors.labelSecondary,
-                  fontSize: 12 * scale,
-                ),
+              Builder(
+                builder: (_) {
+                  final epInfo = _currentScrapedEpisodeInfo();
+                  final rawFile = epInfo != null &&
+                          epInfo.originalFileName.isNotEmpty
+                      ? epInfo.originalFileName
+                      : _currentEpisode.name;
+                  final parts = <String>[
+                    if (epInfo != null && !epInfo.isSpecial)
+                      epInfo.formattedSeasonEpisode
+                    else if (epInfo != null && epInfo.isSpecial)
+                      epInfo.displayLabel,
+                    if (rawFile.isNotEmpty &&
+                        (epInfo == null ||
+                            rawFile != epInfo.formattedSeasonEpisode &&
+                                rawFile != epInfo.displayLabel))
+                      rawFile,
+                    _currentLine.name,
+                  ];
+                  return Text(
+                    parts.join(' · '),
+                    key: const Key('player-header-episode-label'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: AppleColors.labelSecondary,
+                      fontSize: 12 * scale,
+                    ),
+                  );
+                },
               ),
             ],
           ),
@@ -9465,6 +9925,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         );
         if (!mounted || session != _playSession || picked == null) return;
         _player.setSubtitleTrack(picked);
+        _scheduleSyncNativeSubtitleState();
         if (picked == SubtitleTrack.no()) {
           _showHud('已关闭内嵌字幕');
         } else {
@@ -9558,6 +10019,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 onTap: () {
                   Navigator.of(ctx).pop();
                   _player.setSubtitleTrack(SubtitleTrack.no());
+                  _scheduleSyncNativeSubtitleState();
                   _showHud('已关闭内嵌字幕');
                 },
               ),
@@ -9580,6 +10042,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   onTap: () {
                     Navigator.of(ctx).pop();
                     _player.setSubtitleTrack(t);
+                    _scheduleSyncNativeSubtitleState();
                     _showHud('已切换字幕：${label.isEmpty ? t.id : label}');
                   },
                 );
@@ -11015,13 +11478,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ? _position.inMilliseconds
                     : _lastKnownPositionMs;
                 _saveProgress(immediate: true, syncImmediate: false);
+                final matchedEpIdx = _matchEpisodeIndexInTargetLine(i);
                 setState(() {
                   _lineIndex = i;
-                  _episodeIndex = CspBridge.matchEpisodeIndexInLine(
-                    _lines[i],
-                    _currentEpisode.name,
-                    _episodeIndex,
-                  );
+                  _episodeIndex = matchedEpIdx;
                 });
                 _openCurrentEpisode(resumeMs: keepPos);
               },
@@ -11059,18 +11519,53 @@ class _PlayerScreenState extends State<PlayerScreen>
     final parses = widget.storage.loadSavedConfig()?.parses ?? const [];
     String? episodeChecker(CmsEpisode ep) =>
         _episodeUnavailableReason(ep, parses);
+    final override = widget.storage.getSeriesScrapeOverride(
+      widget.site.key,
+      widget.video.id,
+      isPrivate: widget.site.isEffectivelyPrivate,
+    );
+    final scrapeResults = _isLiveStream
+        ? null
+        : List<LineEpisodeScrapeResult>.generate(
+            _lines.length,
+            (i) => _scrapeLineEpisodesFor(_lines[i], override: override),
+            growable: false,
+          );
+    final canCalibrate = !_isLiveStream && !widget.site.isEffectivelyPrivate;
     Widget buildPicker(BuildContext ctx) => PlayerEpisodePickerSheet(
       lines: _lines,
       initialLineIndex: _lineIndex,
       activeLineIndex: _lineIndex,
       activeEpisodeIndex: _episodeIndex,
       episodeUnavailableReason: episodeChecker,
+      lineScrapeResults: scrapeResults,
+      scrapeOverride: override,
+      onCalibrateCurrent: canCalibrate
+          ? () {
+              Navigator.of(ctx).pop();
+              unawaited(_openPlayerSeriesScrapeSheet());
+            }
+          : null,
       onSelect: (lineIdx, epIdx) {
         Navigator.of(ctx).pop();
         _failedLinesForEpisode.clear();
         _failedLiveEpisodes.clear();
-        final sameEpisode = epIdx == _episodeIndex;
-        final keepPos = sameEpisode
+        final curInfo = _currentScrapedEpisodeInfo(override: override);
+        final nextInfo = (scrapeResults != null &&
+                lineIdx >= 0 &&
+                lineIdx < scrapeResults.length)
+            ? scrapeResults[lineIdx].infoForOriginalIndex(epIdx)
+            : null;
+        final sameLogicalEpisode = (lineIdx == _lineIndex && epIdx == _episodeIndex) ||
+            (curInfo != null &&
+                nextInfo != null &&
+                !curInfo.needsConfirmation &&
+                !nextInfo.needsConfirmation &&
+                curInfo.resolvedEpisodeNumber != null &&
+                curInfo.resolvedEpisodeNumber ==
+                    nextInfo.resolvedEpisodeNumber &&
+                curInfo.seasonNumber == nextInfo.seasonNumber);
+        final keepPos = sameLogicalEpisode
             ? (_position.inMilliseconds >= 1000
                   ? _position.inMilliseconds
                   : _lastKnownPositionMs)
@@ -11153,6 +11648,9 @@ class PlayerEpisodePickerSheet extends StatefulWidget {
   final int activeLineIndex;
   final int activeEpisodeIndex;
   final String? Function(CmsEpisode episode)? episodeUnavailableReason;
+  final List<LineEpisodeScrapeResult>? lineScrapeResults;
+  final SeriesScrapeOverride? scrapeOverride;
+  final VoidCallback? onCalibrateCurrent;
   final void Function(int lineIndex, int episodeIndex) onSelect;
 
   const PlayerEpisodePickerSheet({
@@ -11162,6 +11660,9 @@ class PlayerEpisodePickerSheet extends StatefulWidget {
     required this.activeLineIndex,
     required this.activeEpisodeIndex,
     this.episodeUnavailableReason,
+    this.lineScrapeResults,
+    this.scrapeOverride,
+    this.onCalibrateCurrent,
     required this.onSelect,
   });
 
@@ -11242,15 +11743,39 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
   @override
   Widget build(BuildContext context) {
     final episodes = _line.episodes;
-    final total = episodes.length;
+    final safeLineIdx = widget.lines.isEmpty
+        ? 0
+        : _previewLineIndex.clamp(0, widget.lines.length - 1).toInt();
+    final lineScrape = (widget.lineScrapeResults != null &&
+            safeLineIdx < widget.lineScrapeResults!.length)
+        ? widget.lineScrapeResults![safeLineIdx]
+        : null;
+    final sortByScraped = widget.scrapeOverride?.sortByScrapedEpisode ??
+        (lineScrape?.sourceOrderScrambled == true);
+    final hideSpecials = widget.scrapeOverride?.hideSpecials ?? false;
+    final orderedAll = lineScrape != null
+        ? List<int>.of(
+            lineScrape.orderedIndices(
+              sortByScraped: sortByScraped,
+              hideSpecials: hideSpecials,
+            ),
+          )
+        : List<int>.generate(episodes.length, (i) => i);
+    if (safeLineIdx == widget.activeLineIndex &&
+        widget.activeEpisodeIndex >= 0 &&
+        widget.activeEpisodeIndex < episodes.length &&
+        !orderedAll.contains(widget.activeEpisodeIndex)) {
+      orderedAll.insert(0, widget.activeEpisodeIndex);
+    }
+    final total = orderedAll.length;
     final groupCount = total <= 0 ? 1 : ((total - 1) ~/ _groupSize) + 1;
     final safeGroup = _groupIndex.clamp(0, math.max(0, groupCount - 1)).toInt();
     final int startIdx = safeGroup * _groupSize;
     final int endIdx = math.min(startIdx + _groupSize, total);
 
-    final indices = <int>[for (int i = startIdx; i < endIdx; i++) i];
+    final indices = orderedAll.sublist(startIdx, endIdx);
     if (_descending) {
-      indices.sort((a, b) => b.compareTo(a));
+      indices.setAll(0, indices.reversed.toList(growable: false));
     }
 
     final screenSize = MediaQuery.sizeOf(context);
@@ -11260,9 +11785,6 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
         : (screenSize.width >= 580
             ? 4
             : (screenSize.width < 360 ? 2 : 3));
-    final safeLineIdx = widget.lines.isEmpty
-        ? 0
-        : _previewLineIndex.clamp(0, widget.lines.length - 1).toInt();
     final lineBlockedReason = safeLineIdx < _cachedLineBlockedReasons.length
         ? _cachedLineBlockedReasons[safeLineIdx]
         : null;
@@ -11381,6 +11903,46 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
               ),
             ),
             const SizedBox(width: 8),
+              if (widget.onCalibrateCurrent != null) ...[
+                GestureDetector(
+                  key: const Key('player-episode-calibrate-btn'),
+                  onTap: widget.onCalibrateCurrent,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 11,
+                      vertical: 7,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0x380A84FF),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: const Color(0x8060A5FA),
+                        width: 0.7,
+                      ),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          CupertinoIcons.sparkles,
+                          size: 13,
+                          color: Color(0xFF93C5FD),
+                        ),
+                        SizedBox(width: 4),
+                        Text(
+                          '识别／校准本集',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
               GestureDetector(
                 onTap: () => setState(() => _descending = !_descending),
                 child: Container(
@@ -11534,9 +12096,21 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                       _previewLineIndex == widget.activeLineIndex &&
                       epIndex == widget.activeEpisodeIndex;
                   final parsed = _ParsedEpisodeLabel.parse(ep.name, epIndex);
-                  final numBadge =
-                      '#${(epIndex + 1).toString().padLeft(2, '0')}';
-                  final badgeText = isUnavailable ? '不可解析' : parsed.sizeBadge;
+                  final epInfo = lineScrape?.infoForOriginalIndex(epIndex);
+                  final numBadge = epInfo != null
+                      ? epInfo.formattedSeasonEpisode
+                      : '#${(epIndex + 1).toString().padLeft(2, '0')}';
+                  final tileTitle = epInfo != null &&
+                          epInfo.originalFileName.isNotEmpty
+                      ? epInfo.originalFileName
+                      : parsed.title;
+                  final badgeText = isUnavailable
+                      ? '不可解析'
+                      : (epInfo != null && epInfo.hasManualOverride
+                          ? '已校准'
+                          : (epInfo != null && epInfo.qualityTag.isNotEmpty
+                              ? epInfo.qualityTag
+                              : parsed.sizeBadge));
 
                   final tile = GestureDetector(
                     onTap: () {
@@ -11595,18 +12169,22 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                                 ),
                                 const SizedBox(width: 4),
                               ],
-                              Text(
-                                numBadge,
-                                style: TextStyle(
-                                  color: selected
-                                      ? const Color(0xE6FFFFFF)
-                                      : AppleColors.labelTertiary,
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w700,
+                              Expanded(
+                                child: Text(
+                                  numBadge,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: selected
+                                        ? const Color(0xE6FFFFFF)
+                                        : AppleColors.labelTertiary,
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.w700,
+                                  ),
                                 ),
                               ),
-                              const Spacer(),
-                              if (badgeText.isNotEmpty)
+                              if (badgeText.isNotEmpty) ...[
+                                const SizedBox(width: 4),
                                 Container(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 5.5,
@@ -11620,6 +12198,8 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                                   ),
                                   child: Text(
                                     badgeText,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
                                       color: selected
                                           ? Colors.white
@@ -11629,11 +12209,12 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                                     ),
                                   ),
                                 ),
+                              ],
                             ],
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            parsed.title,
+                            tileTitle,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(

@@ -277,8 +277,12 @@ class _DetailScreenState extends State<DetailScreen> {
         : _video.title;
     final offset = ov?.episodeOffset ?? 0;
     final overrides = ov?.episodeNumberOverrides ?? const <String, int>{};
+    final calibs = ov?.episodeCalibrations ??
+        const <String, EpisodeManualCalibration>{};
     final sig =
-        '${line.name}|${line.episodes.length}|$title|$offset|${overrides.entries.map((e) => "${e.key}:${e.value}").join(",")}';
+        '${line.name}|${line.episodes.length}|$title|$offset|'
+        '${overrides.entries.map((e) => "${e.key}:${e.value}").join(",")}|'
+        '${calibs.entries.map((e) => "${e.key}:${e.value.seasonNumber}:${e.value.episodeNumber}:${e.value.isSpecial}").join(",")}';
     if (identical(_cachedScrapeLine, line) &&
         _cachedScrapeSig == sig &&
         _cachedScrapeResult != null) {
@@ -289,6 +293,7 @@ class _DetailScreenState extends State<DetailScreen> {
       seriesTitle: title,
       episodeOffset: offset,
       manualOverrides: overrides,
+      episodeCalibrations: calibs,
     );
     _cachedScrapeLine = line;
     _cachedScrapeSig = sig;
@@ -4118,16 +4123,25 @@ class _DetailScreenState extends State<DetailScreen> {
               final ep = line.episodes[originalIdx];
               final epScrape =
                   _scrapeResultForLine(line).byOriginalIndex[originalIdx];
-              final realEpNum = epScrape.resolvedEpisodeNumber ?? (posIdx + 1);
+              final resolvedEpNum = epScrape.resolvedEpisodeNumber;
+              final realEpNum = resolvedEpNum ?? (posIdx + 1);
               final unavailReason = _episodeUnavailableReason(ep);
               final isUnavailable = unavailReason != null;
               final isCurrent = !isUnavailable && originalIdx == currentActiveEpIdx;
               final (cleanTitle, parsedBadge) =
                   _parseEpisodeDisplay(ep.name, realEpNum);
               final specBadge = isUnavailable ? '不可解析' : parsedBadge;
-              final unitLabel = epScrape.isSpecial
-                  ? epScrape.displayLabel
-                  : (_isVarietyShow ? '第$realEpNum期' : '第$realEpNum集');
+              final unitLabel = epScrape.needsConfirmation
+                  ? '待确认'
+                  : (epScrape.isSpecial
+                      ? epScrape.displayLabel
+                      : (epScrape.seasonNumber != null &&
+                              epScrape.seasonNumber! > 0 &&
+                              resolvedEpNum != null
+                          ? '第${epScrape.seasonNumber}季 第$resolvedEpNum集'
+                          : (_isVarietyShow
+                              ? '第$realEpNum期'
+                              : '第$realEpNum集')));
               final subMeta = isUnavailable
                   ? unavailReason
                   : [
@@ -4136,12 +4150,15 @@ class _DetailScreenState extends State<DetailScreen> {
                       unitLabel,
                       if (specBadge != null) specBadge,
                     ].join(' · ');
-              final headline =
-                  _formatEpisodeCardHeadline(cleanTitle, realEpNum);
-              final epDesc = _resolveAuthenticEpisodeSummary(
-                realEpNum,
-                cleanTitle,
-              );
+              final headline = epScrape.needsConfirmation
+                  ? (ep.name.trim().isNotEmpty ? ep.name.trim() : '待确认')
+                  : _formatEpisodeCardHeadline(cleanTitle, realEpNum);
+              final epDesc = epScrape.needsConfirmation
+                  ? ''
+                  : _resolveAuthenticEpisodeSummary(
+                      realEpNum,
+                      cleanTitle,
+                    );
 
               final card = GestureDetector(
                 key: ValueKey('ep_card_${safeLineIdx}_$originalIdx'),
@@ -4250,9 +4267,19 @@ class _DetailScreenState extends State<DetailScreen> {
                                             ),
                                             const SizedBox(width: 3),
                                             Text(
-                                              epScrape.isSpecial
-                                                  ? epScrape.displayLabel
-                                                  : 'E${realEpNum.toString().padLeft(2, '0')}',
+                                              epScrape.needsConfirmation
+                                                  ? '待确认'
+                                                  : (epScrape.isSpecial
+                                                      ? epScrape.displayLabel
+                                                      : (epScrape.seasonNumber !=
+                                                                  null &&
+                                                              epScrape.seasonNumber! >
+                                                                  0 &&
+                                                              resolvedEpNum !=
+                                                                  null
+                                                          ? epScrape
+                                                              .formattedSeasonEpisode
+                                                          : 'E${realEpNum.toString().padLeft(2, '0')}')),
                                               style: TextStyle(
                                                 color: isCurrent
                                                     ? const Color(0xFF121215)
@@ -5028,8 +5055,10 @@ class _DetailScreenState extends State<DetailScreen> {
       if (ov.hideSpecials) {
         statusParts.add('隐藏特别篇');
       }
-      if (ov.episodeNumberOverrides.isNotEmpty) {
-        statusParts.add('手动 ${ov.episodeNumberOverrides.length} 集');
+      final manualCount =
+          ov.episodeCalibrations.length + ov.episodeNumberOverrides.length;
+      if (manualCount > 0) {
+        statusParts.add('手动 $manualCount 集');
       }
     }
 

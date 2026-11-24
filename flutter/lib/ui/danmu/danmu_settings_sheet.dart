@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/danmu/block_filter.dart';
+import '../../core/danmu/dandanplay_provider.dart';
 import '../../core/danmu/danmu_prefs.dart';
 import '../../core/danmu/provider.dart';
 import '../../core/ohos_runtime.dart';
@@ -93,7 +94,10 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
   late final TextEditingController _appIdCtrl;
   late final TextEditingController _appSecretCtrl;
   final TextEditingController _blockRuleCtrl = TextEditingController();
+  final TextEditingController _newSourceCtrl = TextEditingController();
   String? _ruleError;
+  String? _sourceError;
+  List<String> _pendingAuthOrigins = const <String>[];
   late int _episodeOffset;
   late String _matchSummary;
 
@@ -106,6 +110,13 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     _serverUrlsCtrl = TextEditingController(text: _settings.serverUrls);
     _appIdCtrl = TextEditingController(text: _settings.appId);
     _appSecretCtrl = TextEditingController(text: _settings.appSecret);
+    _loadPendingAuthOrigins();
+  }
+
+  Future<void> _loadPendingAuthOrigins() async {
+    final pending = await DanmuPrefs.loadPendingAuthOrigins();
+    if (!mounted) return;
+    setState(() => _pendingAuthOrigins = pending);
   }
 
   @override
@@ -114,25 +125,123 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     _appIdCtrl.dispose();
     _appSecretCtrl.dispose();
     _blockRuleCtrl.dispose();
+    _newSourceCtrl.dispose();
     super.dispose();
   }
 
-  void _update(DanmuSettings next, {bool persist = true}) {
-    setState(() => _settings = next);
+  void _update(
+    DanmuSettings next, {
+    bool persist = true,
+    bool markExplicitSourcesEdit = false,
+  }) {
+    setState(() {
+      _settings = next;
+      if (next.appId.trim().isNotEmpty && next.appSecret.trim().isNotEmpty) {
+        _pendingAuthOrigins = const <String>[];
+      }
+    });
     widget.onChanged(next);
     if (persist && widget.persistAutomatically && !OhosRuntime.isOhos) {
-      DanmuPrefs.save(next);
+      DanmuPrefs.save(
+        next,
+        markExplicitSourcesEdit: markExplicitSourcesEdit,
+      );
     }
   }
 
   void _saveServerFields() {
+    setState(() => _sourceError = null);
+    final pendingAdd = _newSourceCtrl.text.trim();
+    final combinedRaw = pendingAdd.isEmpty
+        ? _serverUrlsCtrl.text
+        : '${_serverUrlsCtrl.text}\n$pendingAdd';
+    final normalized = DandanplayProvider.parseConfiguredOrigins(combinedRaw);
+    final nextText = normalized.join('\n');
+    if (_serverUrlsCtrl.text.trim() != nextText) {
+      _serverUrlsCtrl.text = nextText;
+    }
+    if (pendingAdd.isNotEmpty) {
+      _newSourceCtrl.clear();
+    }
     _update(
       _settings.copyWith(
-        serverUrls: _serverUrlsCtrl.text,
+        serverUrls: nextText,
         appId: _appIdCtrl.text,
         appSecret: _appSecretCtrl.text,
       ),
+      markExplicitSourcesEdit: true,
     );
+  }
+
+  void _applyOrigins(List<String> origins) {
+    final text = origins.join('\n');
+    _serverUrlsCtrl.text = text;
+    setState(() => _sourceError = null);
+    _update(
+      _settings.copyWith(
+        serverUrls: text,
+        appId: _appIdCtrl.text,
+        appSecret: _appSecretCtrl.text,
+      ),
+      markExplicitSourcesEdit: true,
+    );
+  }
+
+  void _addSourceOrigin() {
+    final raw = _newSourceCtrl.text.trim();
+    if (raw.isEmpty) return;
+    final normalized = DandanplayProvider.normalizeOriginOrNull(raw);
+    if (normalized == null) {
+      setState(
+        () => _sourceError =
+            '请输入有效的 HTTP/HTTPS 地址（可带端口与子路径，如 https://danmu.example:8443/api）',
+      );
+      return;
+    }
+    final current = List<String>.of(_settings.normalizedOrigins);
+    if (current.contains(normalized)) {
+      setState(() => _sourceError = '该弹幕源已在列表中');
+      return;
+    }
+    if (current.length >= DandanplayProvider.maxServers) {
+      setState(() => _sourceError = '弹幕源最多支持 ${DandanplayProvider.maxServers} 个');
+      return;
+    }
+    current.add(normalized);
+    _newSourceCtrl.clear();
+    _applyOrigins(current);
+  }
+
+  void _moveSource(int index, int delta) {
+    final current = List<String>.of(_settings.normalizedOrigins);
+    final target = index + delta;
+    if (index < 0 ||
+        index >= current.length ||
+        target < 0 ||
+        target >= current.length) {
+      return;
+    }
+    final item = current.removeAt(index);
+    current.insert(target, item);
+    _applyOrigins(current);
+  }
+
+  void _removeSource(int index) {
+    final current = List<String>.of(_settings.normalizedOrigins);
+    if (index < 0 || index >= current.length) return;
+    current.removeAt(index);
+    _applyOrigins(current);
+  }
+
+  void _clearAllSources() {
+    _applyOrigins(const <String>[]);
+  }
+
+  Future<void> _dismissPendingAuthBanner() async {
+    await DanmuPrefs.clearPendingAuthOrigins();
+    if (mounted) {
+      setState(() => _pendingAuthOrigins = const <String>[]);
+    }
   }
 
   void _addBlockRule() {
@@ -558,9 +667,54 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
             ],
           ),
           const Divider(height: 28, color: AppleColors.separator),
-          _sectionTitle('兼容弹幕服务地址（每行一个，最多 8 个，默认留空）'),
+          _sectionTitle('兼容弹幕服务地址（按顺序优先，支持端口与子路径，最多 8 个）'),
+          if (_pendingAuthOrigins.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Container(
+              key: const Key('danmu-pending-auth-banner'),
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0x28FF9F0A),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0x66FF9F0A)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '已从 WebDAV 恢复需要认证的弹幕源',
+                    style: TextStyle(
+                      color: Color(0xFFFFD60A),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '为保护凭据安全，AppId 与 AppSecret 仅保存在各自设备，请在本机补录后点击「保存服务配置」：\n${_pendingAuthOrigins.join('\n')}',
+                    style: const TextStyle(
+                      color: AppleColors.labelPrimary,
+                      fontSize: 12,
+                      height: 1.4,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      key: const Key('danmu-pending-auth-dismiss'),
+                      onPressed: _dismissPendingAuthBanner,
+                      child: const Text('无需认证，忽略提示'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 6),
           TextField(
+            key: const Key('danmu-server-urls-field'),
             controller: _serverUrlsCtrl,
             minLines: 2,
             maxLines: 4,
@@ -576,10 +730,120 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
             children: [
               Expanded(
                 child: TextField(
+                  key: const Key('danmu-source-add-input'),
+                  controller: _newSourceCtrl,
+                  style: const TextStyle(color: AppleColors.labelPrimary),
+                  decoration: InputDecoration(
+                    hintText: 'https://danmu.example:8443/subpath',
+                    errorText: _sourceError,
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  onSubmitted: (_) => _addSourceOrigin(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.tonal(
+                key: const Key('danmu-source-add-btn'),
+                onPressed: _addSourceOrigin,
+                child: const Text('新增源'),
+              ),
+            ],
+          ),
+          if (_settings.normalizedOrigins.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Column(
+              children: [
+                for (var i = 0; i < _settings.normalizedOrigins.length; i++)
+                  Container(
+                    key: Key('danmu-source-row-$i'),
+                    margin: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.10),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: i == 0
+                                ? const Color(0x330A84FF)
+                                : Colors.white.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            i == 0 ? '主源' : '备用 ${i + 1}',
+                            style: TextStyle(
+                              color: i == 0
+                                  ? const Color(0xFF64D2FF)
+                                  : AppleColors.labelSecondary,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _settings.normalizedOrigins[i],
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppleColors.labelPrimary,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          key: Key('danmu-source-up-$i'),
+                          tooltip: '上移',
+                          visualDensity: VisualDensity.compact,
+                          onPressed: i == 0 ? null : () => _moveSource(i, -1),
+                          icon: const Icon(Icons.arrow_upward, size: 16),
+                        ),
+                        IconButton(
+                          key: Key('danmu-source-down-$i'),
+                          tooltip: '下移',
+                          visualDensity: VisualDensity.compact,
+                          onPressed: i == _settings.normalizedOrigins.length - 1
+                              ? null
+                              : () => _moveSource(i, 1),
+                          icon: const Icon(Icons.arrow_downward, size: 16),
+                        ),
+                        IconButton(
+                          key: Key('danmu-source-delete-$i'),
+                          tooltip: '删除',
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () => _removeSource(i),
+                          icon: const Icon(Icons.delete_outline, size: 16),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  key: const Key('danmu-app-id-field'),
                   controller: _appIdCtrl,
                   style: const TextStyle(color: AppleColors.labelPrimary),
                   decoration: const InputDecoration(
-                    labelText: 'AppId（可选）',
+                    labelText: 'AppId（仅本机保存）',
                     border: OutlineInputBorder(),
                   ),
                 ),
@@ -587,11 +851,12 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
               const SizedBox(width: 8),
               Expanded(
                 child: TextField(
+                  key: const Key('danmu-app-secret-field'),
                   controller: _appSecretCtrl,
                   obscureText: true,
                   style: const TextStyle(color: AppleColors.labelPrimary),
                   decoration: const InputDecoration(
-                    labelText: 'AppSecret（可选）',
+                    labelText: 'AppSecret（仅本机保存）',
                     border: OutlineInputBorder(),
                   ),
                 ),
@@ -599,12 +864,21 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
             ],
           ),
           const SizedBox(height: 8),
-          Align(
-            alignment: Alignment.centerRight,
-            child: FilledButton(
-              onPressed: _saveServerFields,
-              child: const Text('保存服务配置'),
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                key: const Key('danmu-sources-clear-btn'),
+                onPressed: _clearAllSources,
+                child: const Text('清空全部弹幕源'),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(
+                key: const Key('danmu-save-server-btn'),
+                onPressed: _saveServerFields,
+                child: const Text('保存服务配置'),
+              ),
+            ],
           ),
           const Divider(height: 28, color: AppleColors.separator),
           _sectionTitle(

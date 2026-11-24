@@ -1,9 +1,13 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
+import 'dart:convert';
+import 'dart:math' as math;
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../ohos_runtime.dart';
 import 'block_filter.dart';
 import 'dandanplay_provider.dart';
+import 'danmu_source_sync.dart';
 
 /// Immutable user preferences for the segmented danmu engine and layer.
 ///
@@ -163,39 +167,217 @@ class DanmuPrefs {
   static const String keyShowBottom = 'danmu_show_bottom';
   static const String keyMaxRows = 'danmu_max_rows';
   static const String keyBlockRules = 'danmu_block_rules';
+  static const String keySourcesInitialized = 'danmu_sources_initialized';
+  static const String keySourcesUpdatedAt = 'danmu_sources_updated_at';
+  static const String keySourcesRevision = 'danmu_sources_revision';
+  static const String keySourcesClearedAt = 'danmu_sources_cleared_at';
+  static const String keySourcesAuthHints = 'danmu_sources_auth_hints';
+  static const String keySourcesBaseSnapshot = 'danmu_sources_sync_base_v1';
+  static const String keyPendingAuthOrigins = 'danmu_pending_auth_origins';
+
+  /// Optional listener invoked when user mutates danmu source addresses/order
+  /// so WebDAV auto-sync can schedule a background sync automatically.
+  static void Function()? onSourcesChanged;
+
+  static final Expando<void Function()> _prefsSourcesChangedHooks =
+      Expando<void Function()>();
+
+  /// Binds a per-[SharedPreferences] mutation hook so multiple isolated
+  /// [StorageService] profiles do not cross-trigger auto-sync.
+  static void registerSourcesChangedHook(
+    SharedPreferences prefs,
+    void Function()? listener,
+  ) {
+    _prefsSourcesChangedHooks[prefs] = listener;
+  }
+
+  static Future<void> clearPendingAuthOrigins({
+    SharedPreferences? prefs,
+  }) async {
+    if (OhosRuntime.isOhos) return;
+    final sp = prefs ?? await SharedPreferences.getInstance();
+    await sp.setString(keyPendingAuthOrigins, '[]');
+  }
+
+  static List<String> _readStringSetJson(SharedPreferences sp, String key) {
+    final raw = (sp.getString(key) ?? '').trim();
+    if (raw.isEmpty) return const <String>[];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return List<String>.unmodifiable(
+          decoded
+              .map((e) => (e ?? '').toString().trim())
+              .where((s) => s.isNotEmpty),
+        );
+      }
+    } catch (_) {}
+    return const <String>[];
+  }
+
+  static bool _sameOriginOrder(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  static Future<List<String>> loadPendingAuthOrigins({
+    SharedPreferences? prefs,
+  }) async {
+    if (OhosRuntime.isOhos) return const <String>[];
+    final sp = prefs ?? await SharedPreferences.getInstance();
+    return readPendingAuthOriginsSync(sp);
+  }
+
+  static List<String> readPendingAuthOriginsSync(SharedPreferences sp) {
+    if (OhosRuntime.isOhos) return const <String>[];
+    final appId = (sp.getString(keyAppId) ?? '').trim();
+    final appSecret = (sp.getString(keyAppSecret) ?? '').trim();
+    if (appId.isNotEmpty && appSecret.isNotEmpty) {
+      return const <String>[];
+    }
+    final activeOrigins = DandanplayProvider.parseConfiguredOrigins(
+      sp.getString(keyServerUrls) ?? '',
+    ).toSet();
+    return List<String>.unmodifiable(
+      _readStringSetJson(sp, keyPendingAuthOrigins)
+          .where((u) => activeOrigins.contains(u)),
+    );
+  }
+
+  static ({
+    DanmuSourceSyncDocument local,
+    DanmuSourceSyncDocument? base,
+    bool hasLocalCredentials,
+    List<String> pendingAuthOrigins,
+  }) readSyncStateSync(SharedPreferences sp) {
+    final rawUrls =
+        sp.getString(keyServerUrls) ?? DandanplayProvider.defaultServerUrls;
+    final origins = DandanplayProvider.parseConfiguredOrigins(rawUrls);
+    final appId = (sp.getString(keyAppId) ?? '').trim();
+    final appSecret = (sp.getString(keyAppSecret) ?? '').trim();
+    final hasCreds = appId.isNotEmpty && appSecret.isNotEmpty;
+
+    final authHints = _readStringSetJson(sp, keySourcesAuthHints).toSet();
+    final entries = origins
+        .map(
+          (url) => DanmuSyncSourceEntry(
+            url: url,
+            requiresAuth: hasCreds || authHints.contains(url),
+          ),
+        )
+        .toList(growable: false);
+
+    final updatedAt = sp.getInt(keySourcesUpdatedAt) ?? 0;
+    final revision = sp.getInt(keySourcesRevision) ?? 0;
+    final clearedAt = sp.getInt(keySourcesClearedAt) ?? 0;
+    final initialized = (sp.getBool(keySourcesInitialized) ?? false) ||
+        origins.isNotEmpty ||
+        updatedAt > 0 ||
+        clearedAt > 0;
+
+    final localDoc = DanmuSourceSyncDocument(
+      updatedAt: updatedAt,
+      revision: revision,
+      clearedAt: clearedAt,
+      initialized: initialized,
+      sources: entries,
+    );
+    final baseDoc = DanmuSourceSyncDocument.tryParseJson(
+      sp.getString(keySourcesBaseSnapshot),
+      treatAsRemote: false,
+    );
+    return (
+      local: localDoc,
+      base: baseDoc,
+      hasLocalCredentials: hasCreds,
+      pendingAuthOrigins: readPendingAuthOriginsSync(sp),
+    );
+  }
+
+  /// Applies a merged/restored [DanmuSourceSyncDocument] to [prefs] while
+  /// strictly preserving local device `appId` and `appSecret`.
+  static Future<void> applySyncedDocument(
+    DanmuSourceSyncDocument doc, {
+    required SharedPreferences prefs,
+    required List<String> pendingAuthOrigins,
+  }) async {
+    if (OhosRuntime.isOhos) return;
+    final normalized = doc.copyWith(
+      initialized: true,
+      sources: DanmuSourceSyncDocument.sanitizeEntries(doc.sources),
+    );
+    await prefs.setString(keyServerUrls, normalized.toMultilineServerUrls());
+    await prefs.setBool(keySourcesInitialized, true);
+    await prefs.setInt(keySourcesUpdatedAt, normalized.updatedAt);
+    await prefs.setInt(keySourcesRevision, normalized.revision);
+    await prefs.setInt(keySourcesClearedAt, normalized.clearedAt);
+    final authHints = normalized.sources
+        .where((s) => s.requiresAuth)
+        .map((s) => s.url)
+        .toList(growable: false);
+    await prefs.setString(keySourcesAuthHints, jsonEncode(authHints));
+    await prefs.setString(
+      keySourcesBaseSnapshot,
+      jsonEncode(normalized.toLocalSnapshotMap()),
+    );
+    await prefs.setString(
+      keyPendingAuthOrigins,
+      jsonEncode(pendingAuthOrigins),
+    );
+  }
 
   static Future<DanmuSettings> load({SharedPreferences? prefs}) async {
-    if (OhosRuntime.isOhos) {
-      return const DanmuSettings(enabled: false);
-    }
+    if (OhosRuntime.isOhos) return const DanmuSettings();
     final sp = prefs ?? await SharedPreferences.getInstance();
-    final rawRules = sp.getStringList(keyBlockRules) ?? const <String>[];
     return DanmuSettings(
       enabled: sp.getBool(keyEnabled) ?? false,
-      serverUrls: sp.getString(keyServerUrls) ?? DandanplayProvider.defaultServerUrls,
+      serverUrls:
+          sp.getString(keyServerUrls) ?? DandanplayProvider.defaultServerUrls,
       appId: sp.getString(keyAppId) ?? '',
       appSecret: sp.getString(keyAppSecret) ?? '',
       opacity: DanmuSettings.clampOpacity(sp.getDouble(keyOpacity) ?? 0.85),
-      displayArea: DanmuSettings.snapArea(sp.getDouble(keyDisplayArea) ?? 0.50),
-      fontSize: DanmuSettings.clampFontSize(sp.getDouble(keyFontSize) ?? 20.0),
+      displayArea:
+          DanmuSettings.snapArea(sp.getDouble(keyDisplayArea) ?? 0.50),
+      fontSize:
+          DanmuSettings.clampFontSize(sp.getDouble(keyFontSize) ?? 20.0),
       speedMultiplier:
           DanmuSettings.snapSpeed(sp.getDouble(keySpeedMultiplier) ?? 1.0),
-      timeOffsetMs:
-          DanmuSettings.clampTimeOffsetMs(sp.getInt(keyTimeOffsetMs) ?? 0),
+      timeOffsetMs: DanmuSettings.clampTimeOffsetMs(
+        sp.getInt(keyTimeOffsetMs) ?? 0,
+      ),
       showScroll: sp.getBool(keyShowScroll) ?? true,
       showTop: sp.getBool(keyShowTop) ?? true,
       showBottom: sp.getBool(keyShowBottom) ?? true,
       maxRows: DanmuSettings.clampMaxRows(sp.getInt(keyMaxRows) ?? 14),
-      blockRules: DanmuSettings.sanitizeBlockRules(rawRules),
+      blockRules: DanmuSettings.sanitizeBlockRules(
+        sp.getStringList(keyBlockRules) ?? const <String>[],
+      ),
     );
   }
 
   static Future<void> save(
     DanmuSettings settings, {
     SharedPreferences? prefs,
+    bool markExplicitSourcesEdit = false,
+    bool triggerSync = true,
+    int? nowMs,
   }) async {
     if (OhosRuntime.isOhos) return;
     final sp = prefs ?? await SharedPreferences.getInstance();
+    final prevOrigins = DandanplayProvider.parseConfiguredOrigins(
+      sp.getString(keyServerUrls) ?? '',
+    );
+    final nextOrigins = DandanplayProvider.parseConfiguredOrigins(
+      settings.serverUrls,
+    );
+    final originsChanged = !_sameOriginOrder(prevOrigins, nextOrigins);
+    final hasCreds =
+        settings.appId.trim().isNotEmpty && settings.appSecret.trim().isNotEmpty;
+    final prevAuthHints = _readStringSetJson(sp, keySourcesAuthHints).toSet();
+
     await sp.setBool(keyEnabled, settings.enabled);
     await sp.setString(keyServerUrls, settings.serverUrls);
     await sp.setString(keyAppId, settings.appId);
@@ -222,5 +404,43 @@ class DanmuPrefs {
       keyBlockRules,
       DanmuSettings.sanitizeBlockRules(settings.blockRules),
     );
+
+    final nextAuthHints = <String>{
+      for (final u in nextOrigins)
+        if (hasCreds || prevAuthHints.contains(u)) u,
+    };
+    final authHintsChanged =
+        nextAuthHints.length != prevAuthHints.length ||
+            !nextAuthHints.containsAll(prevAuthHints);
+
+    if (hasCreds) {
+      await sp.setString(keyPendingAuthOrigins, '[]');
+    } else if (originsChanged) {
+      final activeSet = nextOrigins.toSet();
+      final filteredPending = _readStringSetJson(sp, keyPendingAuthOrigins)
+          .where((u) => activeSet.contains(u))
+          .toList(growable: false);
+      await sp.setString(keyPendingAuthOrigins, jsonEncode(filteredPending));
+    }
+
+    if (originsChanged || markExplicitSourcesEdit || authHintsChanged) {
+      final ts = math.max(
+        nowMs ?? DateTime.now().millisecondsSinceEpoch,
+        (sp.getInt(keySourcesUpdatedAt) ?? 0) + 1,
+      );
+      final rev = (sp.getInt(keySourcesRevision) ?? 0) + 1;
+      await sp.setBool(keySourcesInitialized, true);
+      await sp.setInt(keySourcesUpdatedAt, ts);
+      await sp.setInt(keySourcesRevision, rev);
+      await sp.setInt(keySourcesClearedAt, nextOrigins.isEmpty ? ts : 0);
+      await sp.setString(
+        keySourcesAuthHints,
+        jsonEncode(nextAuthHints.toList(growable: false)),
+      );
+      if (triggerSync) {
+        _prefsSourcesChangedHooks[sp]?.call();
+        onSourcesChanged?.call();
+      }
+    }
   }
 }

@@ -6,9 +6,12 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/material.dart' show Colors;
 import 'package:flutter/services.dart';
 
+import '../core/danmu/danmu_prefs.dart';
 import '../core/lan_sync_server.dart';
+import '../core/ohos_runtime.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
+import 'danmu/danmu_settings_sheet.dart';
 import 'ios_liquid_glass.dart';
 import 'ios_settings.dart';
 import 'local_qr_code.dart';
@@ -114,12 +117,17 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
   bool _autoSync = true;
   bool _syncSubs = true;
   bool _syncHistory = true;
+  bool _syncDanmu = false;
   bool _obscurePass = true;
   bool _syncingWebdav = false;
+  bool _retryingDanmu = false;
   bool _syncingLan = false;
   bool _startingLanServer = false;
   String? _feedbackMessage;
   bool _feedbackIsError = false;
+  String? _danmuFeedbackMessage;
+  bool _danmuFeedbackIsError = false;
+  List<String> _pendingDanmuAuthOrigins = const <String>[];
 
   LanSyncServer? _lanServer;
   List<String> _lanHosts = const [];
@@ -139,10 +147,21 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
     _autoSync = widget.storage.webdavAuto;
     _syncSubs = widget.storage.webdavSyncSubs;
     _syncHistory = widget.storage.webdavSyncHistory;
+    _syncDanmu = widget.storage.webdavSyncDanmu;
+    _pendingDanmuAuthOrigins = widget.storage.danmuPendingAuthOrigins;
+    widget.storage.danmuSourcesRevision.addListener(_onDanmuRevisionChanged);
+  }
+
+  void _onDanmuRevisionChanged() {
+    if (!mounted) return;
+    setState(() {
+      _pendingDanmuAuthOrigins = widget.storage.danmuPendingAuthOrigins;
+    });
   }
 
   @override
   void dispose() {
+    widget.storage.danmuSourcesRevision.removeListener(_onDanmuRevisionChanged);
     final server = _lanServer;
     _lanServer = null;
     if (server != null) {
@@ -177,6 +196,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
       auto: _autoSync,
       syncSubs: _syncSubs,
       syncHistory: _syncHistory,
+      syncDanmu: _syncDanmu,
     );
     _confirmedUrl = nextUrl;
     _confirmedPass = nextPass;
@@ -209,7 +229,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
   }
 
   Future<void> _handleSaveAndWebdavSync() async {
-    if (_syncingWebdav) return;
+    if (_syncingWebdav || _retryingDanmu) return;
     final trimmedUrl = _urlCtrl.text.trim();
     if (trimmedUrl.isEmpty) {
       _notifyNotice('请填写地址', '请先填写 WebDAV 服务器目录或文件地址。', isError: true);
@@ -222,16 +242,60 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
     setState(() {
       _syncingWebdav = true;
       _feedbackMessage = null;
+      _danmuFeedbackMessage = null;
+      _danmuFeedbackIsError = false;
     });
     try {
       await _saveWebdavFields();
       final res = await widget.storage.syncWithWebdav();
       widget.onSynced?.call(subscriptionsChanged: res.subscriptionsChanged);
-      final subPart = _syncSubs ? ' · 订阅 ${res.subscriptionCount} 个' : '';
-      _notifyNotice(
-        'WebDAV 同步完成',
-        '已合并观看历史 ${res.historyCount} 条 · 收藏 ${res.favoriteCount} 部$subPart。',
-      );
+      if (mounted) {
+        setState(() {
+          _pendingDanmuAuthOrigins = res.danmuPendingAuthOrigins.isNotEmpty
+              ? res.danmuPendingAuthOrigins
+              : widget.storage.danmuPendingAuthOrigins;
+        });
+      }
+      if (res.mainSynced && res.danmuError != null) {
+        final subPart = _syncSubs ? ' · 订阅 ${res.subscriptionCount} 个' : '';
+        if (mounted) {
+          setState(() {
+            _danmuFeedbackMessage = '弹幕源文件同步失败：${res.danmuError}';
+            _danmuFeedbackIsError = true;
+          });
+        }
+        _notifyNotice(
+          '主文件已同步，弹幕源同步失败',
+          '主同步文件已完成：观看历史 ${res.historyCount} 条 · 收藏 ${res.favoriteCount} 部$subPart。',
+        );
+      } else if (!res.mainSynced && res.danmuSynced) {
+        if (mounted) {
+          setState(() {
+            _danmuFeedbackMessage =
+                '弹幕源文件已同步：共 ${res.danmuSourceCount} 个弹幕源（含地址、端口、子路径与优先顺序）。';
+            _danmuFeedbackIsError = false;
+          });
+        }
+        _notifyNotice(
+          'WebDAV 弹幕源同步完成',
+          '已同步弹幕源 ${res.danmuSourceCount} 个。',
+        );
+      } else {
+        final subPart = _syncSubs ? ' · 订阅 ${res.subscriptionCount} 个' : '';
+        final danmuPart =
+            res.danmuSynced ? ' · 弹幕源 ${res.danmuSourceCount} 个' : '';
+        if (res.danmuSynced && mounted) {
+          setState(() {
+            _danmuFeedbackMessage =
+                '弹幕源文件已同步：共 ${res.danmuSourceCount} 个弹幕源。';
+            _danmuFeedbackIsError = false;
+          });
+        }
+        _notifyNotice(
+          'WebDAV 同步完成',
+          '已合并观看历史 ${res.historyCount} 条 · 收藏 ${res.favoriteCount} 部$subPart$danmuPart。',
+        );
+      }
     } catch (e) {
       final msg = e is FormatException ? e.message : e.toString();
       _notifyNotice('WebDAV 同步未完成', msg, isError: true);
@@ -240,6 +304,59 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         setState(() => _syncingWebdav = false);
       }
     }
+  }
+
+  Future<void> _handleRetryDanmuSync() async {
+    if (_syncingWebdav || _retryingDanmu) return;
+    setState(() {
+      _retryingDanmu = true;
+    });
+    try {
+      final res = await widget.storage.syncDanmuSourcesWithWebdav();
+      widget.onSynced?.call(subscriptionsChanged: false);
+      if (mounted) {
+        setState(() {
+          _danmuFeedbackMessage =
+              '弹幕源文件重试成功：已同步 ${res.sourceCount} 个弹幕源。';
+          _danmuFeedbackIsError = false;
+          _pendingDanmuAuthOrigins = res.pendingAuthOrigins.isNotEmpty
+              ? res.pendingAuthOrigins
+              : widget.storage.danmuPendingAuthOrigins;
+        });
+      }
+      widget.onNotice?.call(
+        '弹幕源同步完成',
+        '弹幕源文件重试成功：已同步 ${res.sourceCount} 个弹幕源。',
+      );
+    } catch (e) {
+      final msg = e is FormatException ? e.message : e.toString();
+      if (mounted) {
+        setState(() {
+          _danmuFeedbackMessage = '弹幕源文件同步失败：$msg';
+          _danmuFeedbackIsError = true;
+        });
+      }
+      widget.onNotice?.call('弹幕源同步失败', msg);
+    } finally {
+      if (mounted) {
+        setState(() => _retryingDanmu = false);
+      }
+    }
+  }
+
+  Future<void> _openDanmuSettingsForCredentials() async {
+    if (OhosRuntime.isOhos) return;
+    final current = await DanmuPrefs.load();
+    if (!mounted) return;
+    await DanmuSettingsSheet.show(
+      context,
+      initialSettings: current,
+      onChanged: (_) {},
+    );
+    if (!mounted) return;
+    setState(() {
+      _pendingDanmuAuthOrigins = widget.storage.danmuPendingAuthOrigins;
+    });
   }
 
   Future<void> _handleSaveOnly() async {
@@ -265,6 +382,8 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         pass: '',
         auto: _autoSync,
         syncSubs: _syncSubs,
+        syncHistory: _syncHistory,
+        syncDanmu: _syncDanmu,
       );
       _urlCtrl.clear();
       _userCtrl.clear();
@@ -467,6 +586,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         if (_feedbackMessage != null && _feedbackMessage!.isNotEmpty) ...[
           const SizedBox(height: 14),
           Container(
+            key: const ValueKey('sync-main-feedback'),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
             decoration: BoxDecoration(
               color: _feedbackIsError
@@ -492,18 +612,132 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
             ),
           ),
         ],
+        if (_danmuFeedbackMessage != null &&
+            _danmuFeedbackMessage!.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Container(
+            key: const ValueKey('sync-danmu-feedback'),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            decoration: BoxDecoration(
+              color: _danmuFeedbackIsError
+                  ? const Color(0x28FF453A)
+                  : const Color(0x2430D158),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: _danmuFeedbackIsError
+                    ? const Color(0x66FF453A)
+                    : const Color(0x6630D158),
+                width: 0.6,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _danmuFeedbackMessage!,
+                  style: TextStyle(
+                    color: _danmuFeedbackIsError
+                        ? const Color(0xFFFF6961)
+                        : const Color(0xFF30D158),
+                    fontSize: 13,
+                    height: 1.4,
+                  ),
+                ),
+                if (_danmuFeedbackIsError) ...[
+                  const SizedBox(height: 8),
+                  CupertinoButton(
+                    key: const ValueKey('sync-retry-danmu-btn'),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    minimumSize: const Size(0, 30),
+                    color: const Color(0x38FF453A),
+                    borderRadius: BorderRadius.circular(8),
+                    onPressed: _retryingDanmu ? null : _handleRetryDanmuSync,
+                    child: Text(
+                      _retryingDanmu ? '正在重试弹幕源同步…' : '重试弹幕源同步',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+        if (_pendingDanmuAuthOrigins.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Container(
+            key: const ValueKey('sync-danmu-auth-prompt'),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            decoration: BoxDecoration(
+              color: const Color(0x28FF9F0A),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: const Color(0x66FF9F0A),
+                width: 0.6,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '已恢复需要认证的弹幕源，请补录本机凭据',
+                  style: TextStyle(
+                    color: Color(0xFFFFD60A),
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '地址与备用顺序已从 WebDAV 同步，App ID / Secret 仅留在各自设备：${_pendingDanmuAuthOrigins.join('、')}',
+                  style: TextStyle(
+                    color: settingsInk(context),
+                    fontSize: 12.5,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                CupertinoButton(
+                  key: const ValueKey('sync-danmu-open-settings-btn'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  minimumSize: const Size(0, 30),
+                  color: const Color(0x40FF9F0A),
+                  borderRadius: BorderRadius.circular(8),
+                  onPressed: _openDanmuSettingsForCredentials,
+                  child: const Text(
+                    '前往弹幕设置补录 / 关联凭据',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 20),
         IosSettingsGroup(
           header: '同步范围与自动化',
           footer:
-              '开启「同时同步我的订阅源配置」后，新手机、平板、电脑或电视连上同一账号或局域网即可一步拉取公开订阅源、观看历史与收藏；关闭时也不会覆盖云端已有订阅。',
+              '「同步弹幕源」可单独开启，使用同目录派生文件（如 family.json 对应 family.danmu.json），旧设备同步视频源时不会覆盖弹幕源；App ID / Secret 始终仅留在各自设备。',
           children: [
             IosSettingsSwitchRow(
               key: const ValueKey('sync-switch-auto'),
               icon: CupertinoIcons.arrow_2_circlepath,
               iconColor: AppleColors.systemGreen,
               title: '自动云同步',
-              subtitle: '启动时静默拉取最新进度，播放进度、收藏与订阅变更自动同步',
+              subtitle: '启动时静默拉取最新进度，播放进度、收藏、订阅与弹幕源变更自动同步',
               value: _autoSync,
               onChanged: (v) async {
                 final prev = _autoSync;
@@ -516,6 +750,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                     auto: v,
                     syncSubs: _syncSubs,
                     syncHistory: _syncHistory,
+                    syncDanmu: _syncDanmu,
                   );
                   widget.onSynced?.call(subscriptionsChanged: false);
                 } catch (e) {
@@ -537,7 +772,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
               onChanged: (v) async {
                 setState(() => _syncSubs = v);
                 await widget.storage.setWebdavSyncSubs(v);
-                if (!v && !_syncHistory) {
+                if (!v && !_syncHistory && !_syncDanmu) {
                   setState(() => _syncHistory = true);
                   await widget.storage.setWebdavSyncHistory(true);
                 }
@@ -549,24 +784,43 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
               icon: CupertinoIcons.clock_fill,
               iconColor: AppleColors.systemBlue,
               title: '同时同步观看历史与收藏',
-              subtitle: '关闭后仅同步订阅源配置，方便与家人共享片源但隔离各自观看记录',
+              subtitle: '关闭后仅同步已开启的订阅源或弹幕源，方便隔离各自观看记录',
               value: _syncHistory,
               onChanged: (v) async {
                 setState(() => _syncHistory = v);
                 await widget.storage.setWebdavSyncHistory(v);
-                if (!v && !_syncSubs) {
+                if (!v && !_syncSubs && !_syncDanmu) {
                   setState(() => _syncSubs = true);
                   await widget.storage.setWebdavSyncSubs(true);
                 }
                 widget.onSynced?.call(subscriptionsChanged: false);
               },
             ),
+            if (!OhosRuntime.isOhos)
+              IosSettingsSwitchRow(
+                key: const ValueKey('sync-switch-danmu'),
+                icon: CupertinoIcons.chat_bubble_2_fill,
+                iconColor: AppleColors.systemOrange,
+                title: '同步弹幕源',
+                subtitle: '同步弹幕服务地址、端口、子路径与备用源顺序（可单独开启，不含本机 App ID / Secret）',
+                value: _syncDanmu,
+                onChanged: (v) async {
+                  setState(() => _syncDanmu = v);
+                  await widget.storage.setWebdavSyncDanmu(v);
+                  if (!v && !_syncSubs && !_syncHistory) {
+                    setState(() => _syncHistory = true);
+                    await widget.storage.setWebdavSyncHistory(true);
+                  }
+                  widget.onSynced?.call(subscriptionsChanged: false);
+                },
+              ),
           ],
         ),
         const SizedBox(height: 20),
         IosSettingsGroup(
           header: 'WebDAV 私有云同步（坚果云 / NAS / Alist / Nextcloud）',
-          footer: '填写目录地址即可自动读写 marco-movie-sync.json；坚果云等服务请使用「应用专用密码」。',
+          footer:
+              '填写目录地址即可自动读写 marco-movie-sync.json；开启「同步弹幕源」时会在同目录生成派生文件（例如 family.json 对应 family.danmu.json）；坚果云等服务请使用「应用专用密码」。',
           dividerIndent: 16,
           children: [
             _buildFieldRow(

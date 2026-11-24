@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'container_metadata_reader.dart';
 import 'models.dart';
 
 /// Broad media work form used to prevent cross-medium mismatches (especially
@@ -16,10 +17,97 @@ enum MediaWorkForm {
   game,
 }
 
+/// Confidence/resolution state for a single episode item.
+enum EpisodeRecognitionStatus {
+  /// Explicitly confirmed by the user (highest priority).
+  confirmed,
+
+  /// Cleanly recognized from structured source metadata, internal container
+  /// tags, or explicit filename/directory markers without conflict.
+  autoMatched,
+
+  /// Recognized as trailer / preview / SP / OVA / episode 0 special.
+  special,
+
+  /// Insufficient evidence (e.g. only `1080p` or empty name) or conflicting
+  /// evidence across sources/tags/filenames. Must display `待确认` and never
+  /// auto-bind using list position.
+  needsConfirmation,
+}
+
+/// User-confirmed manual calibration record keyed by stable file/item identity.
+class EpisodeManualCalibration {
+  final int? seasonNumber;
+  final int? episodeNumber;
+  final bool isSpecial;
+  final String workTitle;
+  final int updatedAtMs;
+
+  const EpisodeManualCalibration({
+    this.seasonNumber,
+    this.episodeNumber,
+    this.isSpecial = false,
+    this.workTitle = '',
+    this.updatedAtMs = 0,
+  });
+
+  bool get isEmpty =>
+      !isSpecial &&
+      (episodeNumber == null || episodeNumber! <= 0) &&
+      (seasonNumber == null || seasonNumber! <= 0) &&
+      workTitle.trim().isEmpty;
+
+  EpisodeManualCalibration copyWith({
+    int? seasonNumber,
+    bool clearSeasonNumber = false,
+    int? episodeNumber,
+    bool clearEpisodeNumber = false,
+    bool? isSpecial,
+    String? workTitle,
+    int? updatedAtMs,
+  }) {
+    return EpisodeManualCalibration(
+      seasonNumber:
+          clearSeasonNumber ? null : (seasonNumber ?? this.seasonNumber),
+      episodeNumber:
+          clearEpisodeNumber ? null : (episodeNumber ?? this.episodeNumber),
+      isSpecial: isSpecial ?? this.isSpecial,
+      workTitle: workTitle ?? this.workTitle,
+      updatedAtMs: updatedAtMs ?? this.updatedAtMs,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        if (seasonNumber != null && seasonNumber! > 0)
+          'seasonNumber': seasonNumber,
+        if (episodeNumber != null && episodeNumber! > 0)
+          'episodeNumber': episodeNumber,
+        if (isSpecial) 'isSpecial': true,
+        if (workTitle.trim().isNotEmpty) 'workTitle': workTitle.trim(),
+        if (updatedAtMs > 0) 'updatedAtMs': updatedAtMs,
+      };
+
+  factory EpisodeManualCalibration.fromJson(Map<String, dynamic> json) {
+    final s = (json['seasonNumber'] as num?)?.toInt() ??
+        int.tryParse((json['seasonNumber'] ?? '').toString());
+    final e = (json['episodeNumber'] as num?)?.toInt() ??
+        int.tryParse((json['episodeNumber'] ?? '').toString());
+    return EpisodeManualCalibration(
+      seasonNumber: s != null && s > 0 ? s : null,
+      episodeNumber: e != null && e > 0 ? e : null,
+      isSpecial: json['isSpecial'] == true,
+      workTitle: (json['workTitle'] ?? '').toString().trim(),
+      updatedAtMs: (json['updatedAtMs'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
 /// Result of scraping an individual episode filename/label within a [CmsLine].
 class ScrapedEpisodeInfo {
   final int originalIndex;
   final String rawName;
+  final String originalFileName;
+  final String stableKey;
   final int? seasonNumber;
   final int? rawEpisodeNumber;
   final int? endEpisodeNumber;
@@ -30,10 +118,19 @@ class ScrapedEpisodeInfo {
   final String displayLabel;
   final double confidence;
   final bool hasManualOverride;
+  final EpisodeRecognitionStatus status;
+  final String evidenceSource;
+  final List<String> evidenceDetails;
+  final bool hasConflict;
+  final String recognizedWorkTitle;
+  final int? suggestedSeasonNumber;
+  final int? suggestedEpisodeNumber;
 
   const ScrapedEpisodeInfo({
     required this.originalIndex,
     required this.rawName,
+    this.originalFileName = '',
+    this.stableKey = '',
     this.seasonNumber,
     this.rawEpisodeNumber,
     this.endEpisodeNumber,
@@ -44,11 +141,81 @@ class ScrapedEpisodeInfo {
     required this.displayLabel,
     this.confidence = 0.0,
     this.hasManualOverride = false,
+    this.status = EpisodeRecognitionStatus.autoMatched,
+    this.evidenceSource = '',
+    this.evidenceDetails = const <String>[],
+    this.hasConflict = false,
+    this.recognizedWorkTitle = '',
+    this.suggestedSeasonNumber,
+    this.suggestedEpisodeNumber,
   });
 
+  bool get needsConfirmation =>
+      status == EpisodeRecognitionStatus.needsConfirmation;
+
   /// Effective 1-based episode number used for episode metadata lookup & danmu.
-  int? get resolvedEpisodeNumber =>
-      isSpecial ? null : (effectiveEpisodeNumber ?? rawEpisodeNumber);
+  /// Strictly `null` for specials and `待确认` items so list positions never
+  /// masquerade as confirmed episode numbers.
+  int? get resolvedEpisodeNumber => (isSpecial || needsConfirmation)
+      ? null
+      : (effectiveEpisodeNumber ?? rawEpisodeNumber);
+
+  /// Canonical short season/episode badge (`S02E10`, `第 10 集`, `预告`, `待确认`).
+  String get formattedSeasonEpisode {
+    if (needsConfirmation) return '待确认';
+    if (isSpecial) return displayLabel;
+    final ep = resolvedEpisodeNumber;
+    if (ep == null || ep <= 0) return '待确认';
+    if (seasonNumber != null && seasonNumber! > 0) {
+      final s = seasonNumber!.toString().padLeft(2, '0');
+      final e = ep.toString().padLeft(2, '0');
+      return 'S${s}E$e';
+    }
+    return '第 $ep 集';
+  }
+
+  /// Human-readable Chinese summary (`第2季 第10集 (S02E10)` / `第 10 集` / `待确认`).
+  String get readableSeasonEpisodeZh {
+    if (needsConfirmation) return '待确认';
+    if (isSpecial) return displayLabel;
+    final ep = resolvedEpisodeNumber;
+    if (ep == null || ep <= 0) return '待确认';
+    if (seasonNumber != null && seasonNumber! > 0) {
+      return '第$seasonNumber季 第$ep集 ($formattedSeasonEpisode)';
+    }
+    return '第 $ep 集';
+  }
+
+  ScrapedEpisodeInfo withSuggestions({
+    int? suggestedSeasonNumber,
+    int? suggestedEpisodeNumber,
+  }) {
+    return ScrapedEpisodeInfo(
+      originalIndex: originalIndex,
+      rawName: rawName,
+      originalFileName: originalFileName,
+      stableKey: stableKey,
+      seasonNumber: seasonNumber,
+      rawEpisodeNumber: rawEpisodeNumber,
+      endEpisodeNumber: endEpisodeNumber,
+      effectiveEpisodeNumber: effectiveEpisodeNumber,
+      isSpecial: isSpecial,
+      specialTag: specialTag,
+      qualityTag: qualityTag,
+      displayLabel: displayLabel,
+      confidence: confidence,
+      hasManualOverride: hasManualOverride,
+      status: status,
+      evidenceSource: evidenceSource,
+      evidenceDetails: evidenceDetails,
+      hasConflict: hasConflict,
+      recognizedWorkTitle: recognizedWorkTitle,
+      suggestedSeasonNumber:
+          suggestedSeasonNumber ?? this.suggestedSeasonNumber,
+      suggestedEpisodeNumber:
+          suggestedEpisodeNumber ?? this.suggestedEpisodeNumber,
+    );
+  }
 }
 
 /// Line-level episode scrape report with natural numeric ordering & diagnostics.
@@ -197,6 +364,7 @@ class SeriesScrapeOverride {
   final String danmuAnimeId;
   final String danmuOrigin;
   final Map<String, int> episodeNumberOverrides;
+  final Map<String, EpisodeManualCalibration> episodeCalibrations;
   final int updatedAtMs;
 
   const SeriesScrapeOverride({
@@ -217,6 +385,7 @@ class SeriesScrapeOverride {
     this.danmuAnimeId = '',
     this.danmuOrigin = '',
     this.episodeNumberOverrides = const {},
+    this.episodeCalibrations = const {},
     this.updatedAtMs = 0,
   });
 
@@ -231,6 +400,7 @@ class SeriesScrapeOverride {
       sortByScrapedEpisode != null ||
       hideSpecials ||
       episodeNumberOverrides.isNotEmpty ||
+      episodeCalibrations.isNotEmpty ||
       danmuTitleOverride.trim().isNotEmpty ||
       danmuAnimeId.trim().isNotEmpty;
 
@@ -264,6 +434,7 @@ class SeriesScrapeOverride {
     String? danmuAnimeId,
     String? danmuOrigin,
     Map<String, int>? episodeNumberOverrides,
+    Map<String, EpisodeManualCalibration>? episodeCalibrations,
     int? updatedAtMs,
   }) {
     return SeriesScrapeOverride(
@@ -288,6 +459,7 @@ class SeriesScrapeOverride {
       danmuOrigin: danmuOrigin ?? this.danmuOrigin,
       episodeNumberOverrides:
           episodeNumberOverrides ?? this.episodeNumberOverrides,
+      episodeCalibrations: episodeCalibrations ?? this.episodeCalibrations,
       updatedAtMs: updatedAtMs ?? this.updatedAtMs,
     );
   }
@@ -312,6 +484,11 @@ class SeriesScrapeOverride {
         'danmuOrigin': danmuOrigin,
         if (episodeNumberOverrides.isNotEmpty)
           'episodeNumberOverrides': episodeNumberOverrides,
+        if (episodeCalibrations.isNotEmpty)
+          'episodeCalibrations': {
+            for (final entry in episodeCalibrations.entries)
+              entry.key: entry.value.toJson(),
+          },
         'updatedAtMs': updatedAtMs,
       };
 
@@ -326,6 +503,22 @@ class SeriesScrapeOverride {
             : int.tryParse(entry.value.toString());
         if (k.isNotEmpty && v != null && v > 0) {
           epOverrides[k] = v;
+        }
+      }
+    }
+    final rawCalibs = json['episodeCalibrations'];
+    final epCalibs = <String, EpisodeManualCalibration>{};
+    if (rawCalibs is Map) {
+      for (final entry in rawCalibs.entries) {
+        final k = entry.key.toString().trim();
+        final v = entry.value;
+        if (k.isNotEmpty && v is Map) {
+          final parsed = EpisodeManualCalibration.fromJson(
+            Map<String, dynamic>.from(v),
+          );
+          if (!parsed.isEmpty) {
+            epCalibs[k] = parsed;
+          }
         }
       }
     }
@@ -353,6 +546,7 @@ class SeriesScrapeOverride {
       danmuAnimeId: (json['danmuAnimeId'] ?? '').toString().trim(),
       danmuOrigin: (json['danmuOrigin'] ?? '').toString().trim(),
       episodeNumberOverrides: epOverrides,
+      episodeCalibrations: epCalibs,
       updatedAtMs: (json['updatedAtMs'] as num?)?.toInt() ?? 0,
     );
   }
@@ -713,38 +907,187 @@ class SeriesScraper {
     return text.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
-  /// Scrapes a single episode filename/label into structured season, episode
-  /// number, special classification, and clean display label.
-  static ScrapedEpisodeInfo scrapeEpisodeName(
+  static const Set<String> _volatileQueryParams = <String>{
+    'token',
+    'sign',
+    'sig',
+    'auth',
+    'expires',
+    'exp',
+    'timestamp',
+    'ts',
+    't',
+    'key',
+    'signature',
+    'api_key',
+    'playsessionid',
+    'x-amz-signature',
+    'x-amz-credential',
+    'x-amz-date',
+    'x-amz-expires',
+    'x-amz-security-token',
+  };
+
+  /// Derives a stable file or item identifier for [episode] so manual episode
+  /// calibrations follow the true underlying file/item across line reorders,
+  /// renames, restarts, and volatile auth query tokens.
+  static String stableEpisodeKey(CmsEpisode episode) {
+    final rawUrl = episode.url.trim();
+    if (rawUrl.startsWith('mmemby://play?')) {
+      final uri = Uri.tryParse(rawUrl);
+      final id = (uri?.queryParameters['id'] ?? '').trim();
+      if (id.isNotEmpty) return 'emby:$id';
+    }
+    final sourceId = episode.sourceItemId.trim();
+    if (sourceId.isNotEmpty) {
+      if (episode.playbackSession.containsKey('ItemId')) {
+        return 'emby:$sourceId';
+      }
+      return 'item:$sourceId';
+    }
+    final sessionItemId = (episode.playbackSession['ItemId'] ?? '').toString().trim();
+    if (sessionItemId.isNotEmpty) {
+      return 'emby:$sessionItemId';
+    }
+    if (episode.isLocalFile) {
+      final localPath =
+          ContainerMetadataReader.resolveLocalFilePath(rawUrl) ?? rawUrl;
+      return 'file:${localPath.replaceAll('\\', '/')}';
+    }
+    if (rawUrl.isNotEmpty) {
+      final uri = Uri.tryParse(rawUrl);
+      if (uri != null && uri.hasScheme) {
+        final scheme = uri.scheme.toLowerCase();
+        final host = uri.host.toLowerCase();
+        final port = uri.hasPort ? ':${uri.port}' : '';
+        final path = uri.path;
+        final kept = <String>[];
+        final keys = uri.queryParameters.keys.toList()..sort();
+        for (final k in keys) {
+          final lk = k.toLowerCase();
+          if (_volatileQueryParams.contains(lk)) continue;
+          final v = uri.queryParameters[k] ?? '';
+          if (v.isNotEmpty) kept.add('$k=$v');
+        }
+        final q = kept.isEmpty ? '' : '?${kept.join('&')}';
+        return 'url:$scheme://$host$port$path$q';
+      }
+      return 'url:$rawUrl';
+    }
+    return 'name:${episode.name.trim()}';
+  }
+
+  static String _formatEpisodeDisplayLabel(
+    int? seasonNumber,
+    int episodeNumber,
+    int? endEpisodeNumber,
+  ) {
+    if (seasonNumber != null && seasonNumber > 0) {
+      final s = seasonNumber.toString().padLeft(2, '0');
+      final e = episodeNumber.toString().padLeft(2, '0');
+      if (endEpisodeNumber != null && endEpisodeNumber > episodeNumber) {
+        final endStr = endEpisodeNumber.toString().padLeft(2, '0');
+        return 'S${s}E$e–E$endStr';
+      }
+      return 'S${s}E$e';
+    }
+    if (endEpisodeNumber != null && endEpisodeNumber > episodeNumber) {
+      return '第 $episodeNumber–$endEpisodeNumber 集';
+    }
+    return '第 $episodeNumber 集';
+  }
+
+  static String _extractOriginalFileName(CmsEpisode episode) {
+    if (episode.originalFileName.trim().isNotEmpty) {
+      return episode.originalFileName.trim();
+    }
+    if (episode.isLocalFile) {
+      final local =
+          ContainerMetadataReader.resolveLocalFilePath(episode.url) ??
+              episode.url.trim();
+      final norm = local.replaceAll('\\', '/');
+      final slash = norm.lastIndexOf('/');
+      final base = slash >= 0 ? norm.substring(slash + 1) : norm;
+      if (base.isNotEmpty) return base;
+    }
+    if (episode.name.trim().isNotEmpty) {
+      return episode.name.trim();
+    }
+    final uri = Uri.tryParse(episode.url.trim());
+    if (uri != null && uri.pathSegments.isNotEmpty) {
+      final last = uri.pathSegments.last.trim();
+      if (last.isNotEmpty) return last;
+    }
+    return '';
+  }
+
+  static String _extractDirectoryPath(CmsEpisode episode) {
+    if (episode.directoryPath.trim().isNotEmpty) {
+      return episode.directoryPath.trim();
+    }
+    if (episode.isLocalFile) {
+      final local =
+          ContainerMetadataReader.resolveLocalFilePath(episode.url) ??
+              episode.url.trim();
+      final norm = local.replaceAll('\\', '/');
+      final slash = norm.lastIndexOf('/');
+      return slash > 0 ? norm.substring(0, slash) : '';
+    }
+    final uri = Uri.tryParse(episode.url.trim());
+    if (uri != null && uri.pathSegments.length > 1) {
+      return uri.pathSegments
+          .sublist(0, uri.pathSegments.length - 1)
+          .join('/');
+    }
+    return '';
+  }
+
+  static int? _extractDirectorySeason(String dirPath) {
+    final raw = dirPath.trim();
+    if (raw.isEmpty) return null;
+    final segments = raw.replaceAll('\\', '/').split('/');
+    // Inspect deepest parent directories first so `/Shows/Season 2/` wins over root names.
+    for (int i = segments.length - 1; i >= 0; i--) {
+      final seg = segments[i].trim();
+      if (seg.isEmpty) continue;
+      final enMatch = RegExp(
+        r'(?:^|[\s._\-\[\(【（])(?:Season[\s._\-]*0*(\d{1,2})|[Ss]0*(\d{1,2}))(?=$|[\s._\-\]\)】）])',
+        caseSensitive: false,
+      ).firstMatch(seg);
+      if (enMatch != null) {
+        final n = int.tryParse(enMatch.group(1) ?? enMatch.group(2) ?? '');
+        if (n != null && n > 0 && n <= 99) return n;
+      }
+      final cnMatch = RegExp(
+        r'第\s*([0-9一二三四五六七八九十两]+)\s*[季部]',
+      ).firstMatch(seg);
+      if (cnMatch != null) {
+        final n = _parseChineseInt(cnMatch.group(1)!);
+        if (n != null && n > 0 && n <= 99) return n;
+      }
+    }
+    return null;
+  }
+
+  static ({
+    int? season,
+    int? ep,
+    int? endEp,
+    bool isSpecial,
+    String specialTag,
+    String cleanSpecialLabel,
+    double confidence,
+    bool hasExplicitMarker,
+    bool isVarietyDate,
+    String varietyLabel,
+  }) _parseNameSignals(
     String rawName, {
-    int originalIndex = 0,
     String seriesTitle = '',
-    int episodeOffset = 0,
-    int? manualEpisodeOverride,
     Set<int> constantNumbers = const {},
     String sharedPrefix = '',
   }) {
     final trimmed = rawName.trim();
-    final qualityTag = _extractQualityTag(trimmed);
-    var work = _stripFileExtension(trimmed);
-
-    // 1. Detect explicit manual override first.
-    if (manualEpisodeOverride != null && manualEpisodeOverride > 0) {
-      return ScrapedEpisodeInfo(
-        originalIndex: originalIndex,
-        rawName: rawName,
-        rawEpisodeNumber: manualEpisodeOverride,
-        effectiveEpisodeNumber: manualEpisodeOverride,
-        isSpecial: false,
-        qualityTag: qualityTag,
-        displayLabel: '第 $manualEpisodeOverride 集',
-        confidence: 1.0,
-        hasManualOverride: true,
-      );
-    }
-
-    // Remove series title prefix so sequel numbers (`斗罗大陆2`, `庆余年2`) or
-    // special-sounding words inside the series title don't cause false hits.
+    final work = _stripFileExtension(trimmed);
     var withoutSeries = _stripSeriesTitleFromEpisode(work, seriesTitle);
     if (sharedPrefix.length >= 2 &&
         withoutSeries.startsWith(sharedPrefix) &&
@@ -752,7 +1095,6 @@ class SeriesScraper {
       withoutSeries = withoutSeries.substring(sharedPrefix.length).trim();
     }
 
-    // 2. Detect explicit specials / trailers / previews / SP / OVA / extras.
     final specialMatch = _specialKeywordRe.firstMatch(withoutSeries);
     if (specialMatch != null) {
       final matchedToken = specialMatch.group(0)!.trim();
@@ -761,25 +1103,27 @@ class SeriesScraper {
         caseSensitive: false,
       ).firstMatch(withoutSeries);
       final spTag = spNumMatch != null
-          ? '${matchedToken.toUpperCase() == matchedToken ? matchedToken : matchedToken}${spNumMatch.group(1)}'
+          ? '$matchedToken${spNumMatch.group(1)}'
           : matchedToken;
       final cleanLabel = withoutSeries
           .replaceAll(_techNoiseRe, '')
           .replaceAll(RegExp(r'[\[\(【（]\s*[\]\)】）]'), '')
           .replaceAll(RegExp(r'\s+'), ' ')
           .trim();
-      return ScrapedEpisodeInfo(
-        originalIndex: originalIndex,
-        rawName: rawName,
+      return (
+        season: null,
+        ep: null,
+        endEp: null,
         isSpecial: true,
         specialTag: spTag,
-        qualityTag: qualityTag,
-        displayLabel: cleanLabel.isNotEmpty ? cleanLabel : spTag,
+        cleanSpecialLabel: cleanLabel.isNotEmpty ? cleanLabel : spTag,
         confidence: 0.95,
+        hasExplicitMarker: true,
+        isVarietyDate: false,
+        varietyLabel: '',
       );
     }
 
-    // 3. Extract explicit season number if present (`S02E05`, `第2季`).
     int? seasonNum;
     final cnSeason = RegExp(
       r'第\s*([0-9一二三四五六七八九十两]+)\s*[季部]',
@@ -788,10 +1132,21 @@ class SeriesScraper {
       final n = _parseChineseInt(cnSeason.group(1)!);
       if (n != null && n > 0 && n <= 99) seasonNum = n;
     }
+    if (seasonNum == null) {
+      final enSeason = RegExp(
+        r'(?:^|[^A-Za-z0-9])Season[\s._\-]*0*(\d{1,2})(?![0-9])',
+        caseSensitive: false,
+      ).firstMatch(withoutSeries);
+      if (enSeason != null) {
+        final n = int.tryParse(enSeason.group(1)!);
+        if (n != null && n > 0 && n <= 99) seasonNum = n;
+      }
+    }
 
     int? rawEp;
     int? endEp;
     double confidence = 0.0;
+    bool explicitMarker = false;
 
     // Pattern A: SxxExx / Sxx.Exx / Sxx-EPxx (highest precision)
     final seMatch = RegExp(
@@ -804,6 +1159,7 @@ class SeriesScraper {
         endEp = int.tryParse(seMatch.group(3)!);
       }
       confidence = 1.0;
+      explicitMarker = true;
     }
 
     // Pattern B: Chinese explicit `第180集` / `第01-02集` / `第12话` / `第一百八十集`
@@ -817,21 +1173,24 @@ class SeriesScraper {
           endEp = int.tryParse(cnEpMatch.group(2)!);
         }
         confidence = 0.98;
+        explicitMarker = true;
       }
     }
 
     // Strip technical noise & release years before looser numeric patterns.
     final denoised = withoutSeries
         .replaceAll(_techNoiseRe, ' ')
-        // Remove standalone 4-digit years (1950-2039) when bounded.
         .replaceAll(
           RegExp(r'(?<![0-9])(?:19[5-9]\d|20[0-3]\d)(?![0-9])'),
           ' ',
         )
-        // Remove season labels already extracted so `第2季` doesn't match `2`.
         .replaceAll(RegExp(r'第\s*[0-9一二三四五六七八九十两]+\s*[季部]'), ' ')
+        .replaceAll(
+          RegExp(r'(?<![A-Za-z0-9])Season[\s._\-]*0*\d{1,2}(?![A-Za-z0-9])',
+              caseSensitive: false),
+          ' ',
+        )
         .replaceAll(RegExp(r'(?<![A-Za-z0-9])[Ss]0*\d{1,2}(?![A-Za-z0-9])'), ' ')
-        // Remove resolution pixel dimensions like `1920x1080` or `3840x2160`.
         .replaceAll(RegExp(r'\b\d{3,4}\s*[xX×]\s*\d{3,4}\b'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
@@ -847,23 +1206,28 @@ class SeriesScraper {
           endEp = int.tryParse(epPrefixMatch.group(2)!);
         }
         confidence = 0.95;
+        explicitMarker = true;
       }
     }
 
-    // Pattern D: Explicit variety show date issue (`20260315期`) — keep label as-is.
+    // Pattern D: Explicit variety show date issue (`20260315期`)
     if (rawEp == null &&
         RegExp(r'(?:19|20)\d{6}\s*期|第\s*\d+\s*期').hasMatch(withoutSeries)) {
       final cleanVariety = withoutSeries
           .replaceAll(_techNoiseRe, ' ')
           .replaceAll(RegExp(r'\s+'), ' ')
           .trim();
-      return ScrapedEpisodeInfo(
-        originalIndex: originalIndex,
-        rawName: rawName,
-        seasonNumber: seasonNum,
-        qualityTag: qualityTag,
-        displayLabel: cleanVariety.isNotEmpty ? cleanVariety : trimmed,
+      return (
+        season: seasonNum,
+        ep: null,
+        endEp: null,
+        isSpecial: false,
+        specialTag: '',
+        cleanSpecialLabel: '',
         confidence: 0.7,
+        hasExplicitMarker: false,
+        isVarietyDate: true,
+        varietyLabel: cleanVariety.isNotEmpty ? cleanVariety : trimmed,
       );
     }
 
@@ -879,15 +1243,14 @@ class SeriesScraper {
           rawEp = n;
           if (m.group(2) != null) endEp = int.tryParse(m.group(2)!);
           confidence = 0.90;
+          explicitMarker = true;
           break;
         }
       }
     }
 
-    // Pattern F: Delimited or standalone episode number (`180 4K.mp4` -> `180`,
-    // `绝世唐门 - 180` -> `180`, `01.mp4` -> `1`, `180_HDR` -> `180`).
+    // Pattern F: Delimited or standalone episode number (`180 4K.mp4`, `01.mp4`)
     if (rawEp == null) {
-      // Collect all candidate numbers in denoised text.
       final numMatches = RegExp(
         r'(?<![0-9A-Za-z])0*(\d{1,4})(?:\s*[-~]\s*0*(\d{1,4}))?(?![0-9A-Za-z])',
       ).allMatches(denoised).toList();
@@ -900,9 +1263,6 @@ class SeriesScraper {
         filtered.add((n: n, end: e, pos: m.start));
       }
       if (filtered.isNotEmpty) {
-        // When the entire denoised string is just a number (e.g. `180 4K.mp4`),
-        // confidence is very high; otherwise prefer the rightmost non-constant
-        // episode token (common in `Title - 180` or `Title_01`).
         final picked = filtered.last;
         rawEp = picked.n;
         endEp = picked.end;
@@ -913,65 +1273,611 @@ class SeriesScraper {
       }
     }
 
-    // Treat Episode 0 (`00.mp4`, `E00`, `第0集`) as a prologue/special so it
-    // does not collide with Episode 1 or shift episode numbering.
     if (rawEp == 0) {
-      return ScrapedEpisodeInfo(
-        originalIndex: originalIndex,
-        rawName: rawName,
-        seasonNumber: seasonNum,
-        rawEpisodeNumber: 0,
+      return (
+        season: seasonNum,
+        ep: 0,
+        endEp: null,
         isSpecial: true,
         specialTag: '第0集',
-        qualityTag: qualityTag,
-        displayLabel: '第 0 集',
+        cleanSpecialLabel: '第 0 集',
         confidence: confidence,
+        hasExplicitMarker: true,
+        isVarietyDate: false,
+        varietyLabel: '',
       );
     }
 
-    if (rawEp != null && rawEp > 0) {
-      final effective = math.max(1, rawEp + episodeOffset);
-      final effectiveEnd =
-          (endEp != null && endEp > rawEp) ? (endEp + episodeOffset) : null;
-      final label = effectiveEnd != null
-          ? '第 $effective–$effectiveEnd 集'
-          : '第 $effective 集';
+    return (
+      season: seasonNum,
+      ep: rawEp,
+      endEp: endEp,
+      isSpecial: false,
+      specialTag: '',
+      cleanSpecialLabel: '',
+      confidence: confidence,
+      hasExplicitMarker: explicitMarker || seasonNum != null,
+      isVarietyDate: false,
+      varietyLabel: '',
+    );
+  }
+
+  static int? _parseTagPositiveInt(Map<String, String> tags, List<String> keys) {
+    for (final k in keys) {
+      final raw = tags[k]?.trim();
+      if (raw == null || raw.isEmpty) continue;
+      final m = RegExp(r'^0*(\d{1,4})(?:/\d+)?$').firstMatch(raw);
+      if (m != null) {
+        final v = int.tryParse(m.group(1)!);
+        if (v != null && v >= 0) return v;
+      }
+    }
+    return null;
+  }
+
+  static ({
+    int? season,
+    int? ep,
+    int? endEp,
+    bool isSpecial,
+    String specialTag,
+    String workTitle,
+    String summary,
+  }) _parseContainerTagEvidence(
+    Map<String, String> tags, {
+    String seriesTitle = '',
+  }) {
+    if (tags.isEmpty) {
+      return (
+        season: null,
+        ep: null,
+        endEp: null,
+        isSpecial: false,
+        specialTag: '',
+        workTitle: '',
+        summary: '',
+      );
+    }
+    final norm = <String, String>{
+      for (final e in tags.entries) e.key.trim().toLowerCase(): e.value.trim(),
+    };
+    int? season = _parseTagPositiveInt(
+      norm,
+      const ['season_number', 'season', 'tvsn', 'part_number'],
+    );
+    int? ep = _parseTagPositiveInt(
+      norm,
+      const ['episode_sort', 'episode_number', 'episode', 'tves', 'track'],
+    );
+    int? endEp;
+    bool isSpecial = false;
+    String specialTag = '';
+    final workTitle = (norm['show'] ?? norm['series'] ?? norm['tvsh'] ?? '').trim();
+
+    final textSources = <String>[
+      if ((norm['episode_id'] ?? '').isNotEmpty) norm['episode_id']!,
+      if ((norm['tven'] ?? '').isNotEmpty) norm['tven']!,
+      if ((norm['title'] ?? '').isNotEmpty) norm['title']!,
+      if ((norm['comment'] ?? '').isNotEmpty) norm['comment']!,
+    ];
+    String matchedText = '';
+    for (final txt in textSources) {
+      final parsed = _parseNameSignals(txt, seriesTitle: seriesTitle);
+      if (parsed.isSpecial && ep == null) {
+        isSpecial = true;
+        specialTag = parsed.specialTag;
+        matchedText = txt;
+        break;
+      }
+      if (parsed.season != null && season == null) {
+        season = parsed.season;
+        if (matchedText.isEmpty) matchedText = txt;
+      }
+      if (parsed.ep != null && parsed.ep! > 0 && ep == null) {
+        ep = parsed.ep;
+        endEp = parsed.endEp;
+        matchedText = txt;
+      }
+      if (season != null && ep != null) break;
+    }
+
+    if (season == 0) {
+      isSpecial = true;
+      specialTag = specialTag.isNotEmpty ? specialTag : 'SP';
+    }
+
+    final summaryParts = <String>[];
+    if (season != null && season > 0 && ep != null && ep > 0) {
+      summaryParts.add(_formatEpisodeDisplayLabel(season, ep, endEp));
+    } else if (ep != null && ep > 0) {
+      summaryParts.add('第 $ep 集');
+    } else if (season != null && season > 0) {
+      summaryParts.add('第 $season 季');
+    } else if (isSpecial) {
+      summaryParts.add(specialTag.isNotEmpty ? specialTag : '特别篇');
+    }
+    if (matchedText.isNotEmpty &&
+        (summaryParts.isEmpty || !summaryParts.first.contains(matchedText))) {
+      summaryParts.add('「$matchedText」');
+    }
+    return (
+      season: season != null && season > 0 ? season : null,
+      ep: ep != null && ep > 0 ? ep : null,
+      endEp: endEp,
+      isSpecial: isSpecial,
+      specialTag: specialTag,
+      workTitle: workTitle,
+      summary: summaryParts.join(' '),
+    );
+  }
+
+  /// Scrapes a single [CmsEpisode] using strict evidence priority:
+  /// 1. User-confirmed calibration (keyed by stable file/item ID, or legacy name override)
+  /// 2. Structured source metadata (e.g. Emby Season/Episode/ItemId) & internal file container tags
+  /// 3. Original filename & directory explicit season/episode markers
+  /// Conflicts or insufficient evidence (e.g. `1080p` / empty name) explicitly yield `待确认`.
+  static ScrapedEpisodeInfo scrapeEpisode(
+    CmsEpisode episode, {
+    int originalIndex = 0,
+    String seriesTitle = '',
+    int episodeOffset = 0,
+    EpisodeManualCalibration? manualCalibration,
+    int? legacyManualEpisodeOverride,
+    Map<String, String> runtimeContainerTags = const {},
+    Set<int> constantNumbers = const {},
+    String sharedPrefix = '',
+  }) {
+    final stableKey = stableEpisodeKey(episode);
+    final origFileName = _extractOriginalFileName(episode);
+    final dirPath = _extractDirectoryPath(episode);
+    final qualityTag = _extractQualityTag(
+      origFileName.isNotEmpty ? origFileName : episode.name,
+    );
+
+    // 1. Priority 1: User-confirmed calibration always wins.
+    if (manualCalibration != null && !manualCalibration.isEmpty) {
+      if (manualCalibration.isSpecial) {
+        return ScrapedEpisodeInfo(
+          originalIndex: originalIndex,
+          rawName: episode.name,
+          originalFileName: origFileName,
+          stableKey: stableKey,
+          seasonNumber: manualCalibration.seasonNumber,
+          isSpecial: true,
+          specialTag: '特别篇',
+          qualityTag: qualityTag,
+          displayLabel: '特别篇',
+          confidence: 1.0,
+          hasManualOverride: true,
+          status: EpisodeRecognitionStatus.special,
+          evidenceSource: '用户已确认',
+          evidenceDetails: <String>[
+            '用户已确认为特别篇/预告',
+            if (origFileName.isNotEmpty) '原文件名：$origFileName',
+          ],
+          recognizedWorkTitle: manualCalibration.workTitle.isNotEmpty
+              ? manualCalibration.workTitle
+              : seriesTitle,
+        );
+      }
+      if (manualCalibration.episodeNumber != null &&
+          manualCalibration.episodeNumber! > 0) {
+        final epNum = manualCalibration.episodeNumber!;
+        final season = manualCalibration.seasonNumber;
+        final label = _formatEpisodeDisplayLabel(season, epNum, null);
+        return ScrapedEpisodeInfo(
+          originalIndex: originalIndex,
+          rawName: episode.name,
+          originalFileName: origFileName,
+          stableKey: stableKey,
+          seasonNumber: season,
+          rawEpisodeNumber: epNum,
+          effectiveEpisodeNumber: epNum,
+          isSpecial: false,
+          qualityTag: qualityTag,
+          displayLabel: label,
+          confidence: 1.0,
+          hasManualOverride: true,
+          status: EpisodeRecognitionStatus.confirmed,
+          evidenceSource: '用户已确认',
+          evidenceDetails: <String>[
+            '用户已确认：$label',
+            if (origFileName.isNotEmpty) '原文件名：$origFileName',
+          ],
+          recognizedWorkTitle: manualCalibration.workTitle.isNotEmpty
+              ? manualCalibration.workTitle
+              : seriesTitle,
+        );
+      }
+    }
+    if (legacyManualEpisodeOverride != null &&
+        legacyManualEpisodeOverride > 0) {
       return ScrapedEpisodeInfo(
         originalIndex: originalIndex,
-        rawName: rawName,
-        seasonNumber: seasonNum,
-        rawEpisodeNumber: rawEp,
-        endEpisodeNumber: endEp,
+        rawName: episode.name,
+        originalFileName: origFileName,
+        stableKey: stableKey,
+        rawEpisodeNumber: legacyManualEpisodeOverride,
+        effectiveEpisodeNumber: legacyManualEpisodeOverride,
+        isSpecial: false,
+        qualityTag: qualityTag,
+        displayLabel: '第 $legacyManualEpisodeOverride 集',
+        confidence: 1.0,
+        hasManualOverride: true,
+        status: EpisodeRecognitionStatus.confirmed,
+        evidenceSource: '用户已确认',
+        evidenceDetails: <String>[
+          '用户已确认：第 $legacyManualEpisodeOverride 集',
+          if (origFileName.isNotEmpty) '原文件名：$origFileName',
+        ],
+        recognizedWorkTitle: seriesTitle,
+      );
+    }
+
+    // 2. Gather Priority 2A (source structured metadata) & Priority 2B (container tags).
+    final bool hasStructured = episode.sourceSeasonNumber != null ||
+        episode.sourceEpisodeNumber != null;
+    final bool structuredIsEmby = episode.url.startsWith('mmemby://') ||
+        episode.sourceItemId.isNotEmpty ||
+        episode.playbackSession.containsKey('ItemId');
+    final bool structuredSpecial = hasStructured &&
+        (episode.sourceSeasonNumber == 0 || episode.sourceEpisodeNumber == 0);
+    final int? structuredSeason = (episode.sourceSeasonNumber != null &&
+            episode.sourceSeasonNumber! > 0)
+        ? episode.sourceSeasonNumber
+        : null;
+    final int? structuredEp = (episode.sourceEpisodeNumber != null &&
+            episode.sourceEpisodeNumber! > 0)
+        ? episode.sourceEpisodeNumber
+        : null;
+
+    final mergedTags = <String, String>{};
+    if (episode.isLocalFile) {
+      mergedTags.addAll(ContainerMetadataCache.probeLocalFileSync(episode.url));
+    }
+    mergedTags.addAll(ContainerMetadataCache.getByStableKey(stableKey));
+    if (runtimeContainerTags.isNotEmpty) {
+      mergedTags.addAll(runtimeContainerTags);
+    }
+    if (episode.containerTags.isNotEmpty) {
+      mergedTags.addAll(episode.containerTags);
+    }
+    final tagEv = _parseContainerTagEvidence(
+      mergedTags,
+      seriesTitle: seriesTitle,
+    );
+    final bool hasTagEvidence =
+        tagEv.season != null || tagEv.ep != null || tagEv.isSpecial;
+
+    // 3. Gather Priority 3 (directory & original filename signals).
+    final int? dirSeason = _extractDirectorySeason(dirPath);
+    var fileSig = _parseNameSignals(
+      episode.name,
+      seriesTitle: seriesTitle,
+      constantNumbers: constantNumbers,
+      sharedPrefix: sharedPrefix,
+    );
+    if (!fileSig.isSpecial &&
+        fileSig.ep == null &&
+        fileSig.season == null &&
+        origFileName.isNotEmpty &&
+        origFileName != episode.name.trim()) {
+      fileSig = _parseNameSignals(
+        origFileName,
+        seriesTitle: seriesTitle,
+        constantNumbers: constantNumbers,
+        sharedPrefix: sharedPrefix,
+      );
+    }
+
+    final details = <String>[];
+    if (origFileName.isNotEmpty) {
+      details.add('原文件名：$origFileName');
+    } else {
+      details.add('片源未提供集名与文件名');
+    }
+    if (hasStructured) {
+      final srcLabel = structuredIsEmby ? 'Emby 结构化季集' : '片源结构化季集';
+      final itemPart = episode.sourceItemId.isNotEmpty
+          ? ' (ID: ${episode.sourceItemId})'
+          : '';
+      if (structuredSpecial) {
+        details.add('$srcLabel：特别篇$itemPart');
+      } else {
+        final sStr = structuredSeason != null ? 'S${structuredSeason.toString().padLeft(2, '0')}' : '';
+        final eStr = structuredEp != null ? 'E${structuredEp.toString().padLeft(2, '0')}' : '';
+        details.add('$srcLabel：$sStr$eStr$itemPart');
+      }
+    }
+    if (hasTagEvidence) {
+      details.add('文件内部标签：${tagEv.summary}');
+    }
+    if (dirSeason != null) {
+      details.add('目录标记：第 $dirSeason 季');
+    }
+    if (fileSig.isSpecial) {
+      details.add('文件名特别篇标记：${fileSig.specialTag}');
+    } else if (fileSig.ep != null && fileSig.ep! > 0) {
+      final fLabel = _formatEpisodeDisplayLabel(
+        fileSig.season,
+        fileSig.ep!,
+        fileSig.endEp,
+      );
+      details.add('文件名标记：$fLabel');
+    } else if (fileSig.season != null) {
+      details.add('文件名季标记：第 ${fileSig.season} 季');
+    }
+
+    // 4. Conflict detection across explicit independent evidences.
+    bool conflict = false;
+    final conflictReasons = <String>[];
+
+    // 4a. Structured source vs Container tags
+    if (hasStructured && hasTagEvidence) {
+      if (structuredSpecial != tagEv.isSpecial &&
+          (structuredEp != null || tagEv.ep != null)) {
+        conflict = true;
+        conflictReasons.add('片源结构化信息与文件内部标签的正片/特别篇属性冲突');
+      }
+      if (structuredSeason != null &&
+          tagEv.season != null &&
+          structuredSeason != tagEv.season) {
+        conflict = true;
+        conflictReasons.add(
+          '片源季号(S${structuredSeason.toString().padLeft(2, '0')})与文件内部标签季号(S${tagEv.season!.toString().padLeft(2, '0')})冲突',
+        );
+      }
+      if (structuredEp != null &&
+          tagEv.ep != null &&
+          structuredEp != tagEv.ep) {
+        conflict = true;
+        conflictReasons.add(
+          '片源集号(E${structuredEp.toString().padLeft(2, '0')})与文件内部标签集号(E${tagEv.ep!.toString().padLeft(2, '0')})冲突',
+        );
+      }
+    }
+
+    final int? p2Season = structuredSeason ?? tagEv.season;
+    final int? p2Ep = structuredEp ?? tagEv.ep;
+    final bool p2Special = structuredSpecial || (!hasStructured && tagEv.isSpecial);
+    final bool hasP2 = hasStructured || hasTagEvidence;
+
+    // 4b. Priority 2 (structured/tags) vs explicit Priority 3 (filename/directory)
+    if (hasP2) {
+      if (fileSig.hasExplicitMarker) {
+        if (fileSig.isSpecial != p2Special &&
+            (p2Ep != null || fileSig.ep != null)) {
+          conflict = true;
+          conflictReasons.add('文件内部/片源标注与原文件名的正片/预告标记冲突');
+        }
+        if (p2Season != null &&
+            fileSig.season != null &&
+            p2Season != fileSig.season) {
+          conflict = true;
+          conflictReasons.add(
+            '标注季号(S${p2Season.toString().padLeft(2, '0')})与原文件名季号(S${fileSig.season!.toString().padLeft(2, '0')})冲突',
+          );
+        }
+        if (p2Ep != null && fileSig.ep != null && p2Ep != fileSig.ep) {
+          conflict = true;
+          conflictReasons.add(
+            '标注集号(E${p2Ep.toString().padLeft(2, '0')})与原文件名集号(E${fileSig.ep!.toString().padLeft(2, '0')})冲突',
+          );
+        }
+      }
+      if (p2Season != null && dirSeason != null && p2Season != dirSeason) {
+        conflict = true;
+        conflictReasons.add(
+          '标注季号(S${p2Season.toString().padLeft(2, '0')})与目录季号(S${dirSeason.toString().padLeft(2, '0')})冲突',
+        );
+      }
+    } else if (dirSeason != null &&
+        fileSig.season != null &&
+        dirSeason != fileSig.season) {
+      // 4c. Directory season vs explicit filename season
+      conflict = true;
+      conflictReasons.add(
+        '目录季号(S${dirSeason.toString().padLeft(2, '0')})与原文件名季号(S${fileSig.season!.toString().padLeft(2, '0')})冲突',
+      );
+    }
+
+    final recognizedWork =
+        tagEv.workTitle.isNotEmpty ? tagEv.workTitle : seriesTitle;
+
+    if (conflict) {
+      return ScrapedEpisodeInfo(
+        originalIndex: originalIndex,
+        rawName: episode.name,
+        originalFileName: origFileName,
+        stableKey: stableKey,
+        seasonNumber: p2Season ?? fileSig.season ?? dirSeason,
+        qualityTag: qualityTag,
+        displayLabel: '待确认',
+        confidence: 0.0,
+        status: EpisodeRecognitionStatus.needsConfirmation,
+        evidenceSource: '多证据冲突 · 待确认',
+        evidenceDetails: <String>[...conflictReasons, ...details],
+        hasConflict: true,
+        recognizedWorkTitle: recognizedWork,
+      );
+    }
+
+    // 5. Commit Priority 2 (Structured source / Container tags).
+    if (hasP2) {
+      if (p2Special) {
+        final label = tagEv.specialTag.isNotEmpty ? tagEv.specialTag : '特别篇';
+        return ScrapedEpisodeInfo(
+          originalIndex: originalIndex,
+          rawName: episode.name,
+          originalFileName: origFileName,
+          stableKey: stableKey,
+          isSpecial: true,
+          specialTag: label,
+          qualityTag: qualityTag,
+          displayLabel: label,
+          confidence: 0.98,
+          status: EpisodeRecognitionStatus.special,
+          evidenceSource: hasStructured
+              ? (structuredIsEmby ? 'Emby 结构化季集' : '片源结构化季集')
+              : '文件内部标签',
+          evidenceDetails: details,
+          recognizedWorkTitle: recognizedWork,
+        );
+      }
+      final combinedSeason = p2Season ?? fileSig.season ?? dirSeason;
+      final combinedEp = p2Ep ?? fileSig.ep;
+      if (combinedEp != null && combinedEp > 0) {
+        final effective = math.max(1, combinedEp + episodeOffset);
+        final endRaw = tagEv.endEp ?? fileSig.endEp;
+        final effectiveEnd =
+            (endRaw != null && endRaw > combinedEp) ? (endRaw + episodeOffset) : null;
+        final label =
+            _formatEpisodeDisplayLabel(combinedSeason, effective, effectiveEnd);
+        final srcBasis = hasStructured
+            ? (structuredIsEmby ? 'Emby 结构化季集' : '片源结构化季集')
+            : (p2Season != null
+                ? '文件内部标签'
+                : (dirSeason != null ? '文件内部标签 + 目录标记' : '文件内部标签'));
+        return ScrapedEpisodeInfo(
+          originalIndex: originalIndex,
+          rawName: episode.name,
+          originalFileName: origFileName,
+          stableKey: stableKey,
+          seasonNumber: combinedSeason,
+          rawEpisodeNumber: combinedEp,
+          endEpisodeNumber: endRaw,
+          effectiveEpisodeNumber: effective,
+          isSpecial: false,
+          qualityTag: qualityTag,
+          displayLabel: label,
+          confidence: 0.99,
+          status: EpisodeRecognitionStatus.autoMatched,
+          evidenceSource: srcBasis,
+          evidenceDetails: details,
+          recognizedWorkTitle: recognizedWork,
+        );
+      }
+    }
+
+    // 6. Commit Priority 3 (Original filename & directory markers).
+    if (fileSig.isSpecial) {
+      return ScrapedEpisodeInfo(
+        originalIndex: originalIndex,
+        rawName: episode.name,
+        originalFileName: origFileName,
+        stableKey: stableKey,
+        seasonNumber: fileSig.season ?? dirSeason,
+        rawEpisodeNumber: fileSig.ep,
+        isSpecial: true,
+        specialTag: fileSig.specialTag,
+        qualityTag: qualityTag,
+        displayLabel: fileSig.cleanSpecialLabel,
+        confidence: fileSig.confidence,
+        status: EpisodeRecognitionStatus.special,
+        evidenceSource: '原文件名特别篇标记',
+        evidenceDetails: details,
+        recognizedWorkTitle: recognizedWork,
+      );
+    }
+
+    if (fileSig.isVarietyDate) {
+      return ScrapedEpisodeInfo(
+        originalIndex: originalIndex,
+        rawName: episode.name,
+        originalFileName: origFileName,
+        stableKey: stableKey,
+        seasonNumber: fileSig.season ?? dirSeason,
+        qualityTag: qualityTag,
+        displayLabel: fileSig.varietyLabel,
+        confidence: fileSig.confidence,
+        status: EpisodeRecognitionStatus.autoMatched,
+        evidenceSource: '原文件名期数标记',
+        evidenceDetails: details,
+        recognizedWorkTitle: recognizedWork,
+      );
+    }
+
+    if (fileSig.ep != null && fileSig.ep! > 0) {
+      final combinedSeason = fileSig.season ?? dirSeason;
+      final effective = math.max(1, fileSig.ep! + episodeOffset);
+      final effectiveEnd = (fileSig.endEp != null && fileSig.endEp! > fileSig.ep!)
+          ? (fileSig.endEp! + episodeOffset)
+          : null;
+      final label =
+          _formatEpisodeDisplayLabel(combinedSeason, effective, effectiveEnd);
+      final basis = (dirSeason != null && fileSig.season == null)
+          ? '目录与原文件名标记'
+          : '原文件名标记';
+      return ScrapedEpisodeInfo(
+        originalIndex: originalIndex,
+        rawName: episode.name,
+        originalFileName: origFileName,
+        stableKey: stableKey,
+        seasonNumber: combinedSeason,
+        rawEpisodeNumber: fileSig.ep,
+        endEpisodeNumber: fileSig.endEp,
         effectiveEpisodeNumber: effective,
         isSpecial: false,
         qualityTag: qualityTag,
         displayLabel: label,
-        confidence: confidence,
+        confidence: fileSig.confidence,
+        status: EpisodeRecognitionStatus.autoMatched,
+        evidenceSource: basis,
+        evidenceDetails: details,
+        recognizedWorkTitle: recognizedWork,
       );
     }
 
-    final fallbackLabel = work
-        .replaceAll(_techNoiseRe, ' ')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
+    // 7. Insufficient evidence (e.g. only `1080p`, empty name, opaque `clip-X.mkv` without tags).
     return ScrapedEpisodeInfo(
       originalIndex: originalIndex,
-      rawName: rawName,
-      seasonNumber: seasonNum,
+      rawName: episode.name,
+      originalFileName: origFileName,
+      stableKey: stableKey,
+      seasonNumber: fileSig.season ?? dirSeason,
       qualityTag: qualityTag,
-      displayLabel: fallbackLabel.isNotEmpty ? fallbackLabel : trimmed,
+      displayLabel: '待确认',
       confidence: 0.0,
+      status: EpisodeRecognitionStatus.needsConfirmation,
+      evidenceSource: '信息不足 · 待确认',
+      evidenceDetails: details,
+      recognizedWorkTitle: recognizedWork,
+    );
+  }
+
+  /// Scrapes a single episode filename/label into structured season, episode
+  /// number, special classification, and clean display label.
+  static ScrapedEpisodeInfo scrapeEpisodeName(
+    String rawName, {
+    int originalIndex = 0,
+    String seriesTitle = '',
+    int episodeOffset = 0,
+    int? manualEpisodeOverride,
+    Set<int> constantNumbers = const {},
+    String sharedPrefix = '',
+  }) {
+    return scrapeEpisode(
+      CmsEpisode(name: rawName, url: ''),
+      originalIndex: originalIndex,
+      seriesTitle: seriesTitle,
+      episodeOffset: episodeOffset,
+      legacyManualEpisodeOverride: manualEpisodeOverride,
+      constantNumbers: constantNumbers,
+      sharedPrefix: sharedPrefix,
     );
   }
 
   /// Scrapes every episode in [episodes] together, detecting shared prefixes,
   /// constant series/release numbers (so e.g. `2` in `斗罗大陆2` is never mistaken
-  /// for Episode 2), specials/trailers, and lexicographically scrambled order.
+  /// for Episode 2), specials/trailers, container tags, Emby/source structured
+  /// season/episode metadata, conflicts, and lexicographically scrambled order.
   static LineEpisodeScrapeResult scrapeLineEpisodes(
     List<CmsEpisode> episodes, {
     String seriesTitle = '',
     int episodeOffset = 0,
     Map<String, int> manualOverrides = const {},
+    Map<String, EpisodeManualCalibration> episodeCalibrations = const {},
+    Map<String, Map<String, String>> runtimeContainerTags = const {},
   }) {
     if (episodes.isEmpty) {
       return const LineEpisodeScrapeResult(
@@ -1035,7 +1941,7 @@ class SeriesScraper {
       }
     }
 
-    // 2. Scrape each episode.
+    // 2. Scrape each episode with strict evidence priority.
     final scraped = <ScrapedEpisodeInfo>[];
     final regularInfos = <ScrapedEpisodeInfo>[];
     final specialIndices = <int>[];
@@ -1043,30 +1949,75 @@ class SeriesScraper {
 
     for (int i = 0; i < episodes.length; i++) {
       final ep = episodes[i];
-      final manual = manualOverrides[ep.name];
-      final info = scrapeEpisodeName(
-        ep.name,
+      final stableKey = stableEpisodeKey(ep);
+      final cal = episodeCalibrations[stableKey];
+      final legacyManual = manualOverrides[ep.name];
+      final runtimeTags = runtimeContainerTags[stableKey] ?? const <String, String>{};
+      final info = scrapeEpisode(
+        ep,
         originalIndex: i,
         seriesTitle: seriesTitle,
         episodeOffset: episodeOffset,
-        manualEpisodeOverride: manual,
+        manualCalibration: cal,
+        legacyManualEpisodeOverride: legacyManual,
+        runtimeContainerTags: runtimeTags,
         constantNumbers: constantNumbers,
         sharedPrefix: sharedPrefix,
       );
       scraped.add(info);
       if (info.isSpecial) {
         specialIndices.add(i);
-      } else if (info.effectiveEpisodeNumber != null) {
+      } else if (info.resolvedEpisodeNumber != null) {
         regularInfos.add(info);
       } else {
         unparsedIndices.add(i);
       }
     }
 
+    // 2b. Attach auxiliary suggestions ONLY (list position / neighbor episodes)
+    // to `待确认` items for user-assisted selection; NEVER promote to resolved.
+    if (unparsedIndices.isNotEmpty) {
+      int? dominantSeason;
+      final seasonCounts = <int, int>{};
+      for (final r in regularInfos) {
+        if (r.seasonNumber != null && r.seasonNumber! > 0) {
+          seasonCounts[r.seasonNumber!] = (seasonCounts[r.seasonNumber!] ?? 0) + 1;
+        }
+      }
+      int bestSeasonCount = 0;
+      for (final e in seasonCounts.entries) {
+        if (e.value > bestSeasonCount) {
+          bestSeasonCount = e.value;
+          dominantSeason = e.key;
+        }
+      }
+      for (final idx in unparsedIndices) {
+        final cur = scraped[idx];
+        int? suggestedEp;
+        int? suggestedSeason = cur.seasonNumber ?? dominantSeason;
+        // Prefer neighbor-derived suggestion when immediate neighbor is resolved.
+        if (idx > 0 && scraped[idx - 1].resolvedEpisodeNumber != null) {
+          suggestedEp = scraped[idx - 1].resolvedEpisodeNumber! + 1;
+          suggestedSeason ??= scraped[idx - 1].seasonNumber;
+        } else if (idx + 1 < scraped.length &&
+            scraped[idx + 1].resolvedEpisodeNumber != null &&
+            scraped[idx + 1].resolvedEpisodeNumber! > 1) {
+          suggestedEp = scraped[idx + 1].resolvedEpisodeNumber! - 1;
+          suggestedSeason ??= scraped[idx + 1].seasonNumber;
+        } else {
+          suggestedEp = math.max(1, idx + 1 + episodeOffset);
+        }
+        scraped[idx] = cur.withSuggestions(
+          suggestedSeasonNumber: suggestedSeason,
+          suggestedEpisodeNumber: suggestedEp,
+        );
+      }
+    }
+
     // 3. Detect if the source order is scrambled (e.g. lexicographical
     // `1, 10, 100, 11, 2` or mixed specials in front of Episode 1).
     bool scrambled = false;
-    if (regularInfos.length >= 3) {
+    if (regularInfos.length >= 2) {
       int ascSteps = 0;
       int descSteps = 0;
       for (int i = 1; i < regularInfos.length; i++) {
@@ -1079,15 +2030,11 @@ class SeriesScraper {
         if (curKey > prevKey) ascSteps++;
         if (curKey < prevKey) descSteps++;
       }
-      // Scrambled if neither cleanly ascending nor cleanly descending, OR if
-      // specials were intermixed before regular episodes (causing index shift).
       final isCleanAsc = descSteps == 0;
       final isCleanDesc = ascSteps == 0;
       if (!isCleanAsc && !isCleanDesc) {
         scrambled = true;
       } else if (isCleanDesc && regularInfos.length >= 3) {
-        // Reverse-sorted shares (180..01) are also normalized to ascending so
-        // the user's 正序/倒序 toggle behaves predictably.
         scrambled = true;
       }
     }
@@ -1131,6 +2078,48 @@ class SeriesScraper {
       minEpisodeNumber: minEp,
       maxEpisodeNumber: maxEp,
     );
+  }
+
+  /// Matches the currently playing episode from [sourceInfo] onto [targetScrape]
+  /// when switching playback lines so scrambled lines keep the exact same
+  /// `(seasonNumber, resolvedEpisodeNumber)` or stable identity.
+  static int? matchEpisodeIndexInScrapedLine(
+    ScrapedEpisodeInfo sourceInfo,
+    LineEpisodeScrapeResult targetScrape,
+  ) {
+    if (targetScrape.byOriginalIndex.isEmpty) return null;
+    // 1. Exact stable key match (e.g., same Emby item / file ID across lines).
+    if (sourceInfo.stableKey.isNotEmpty) {
+      for (final cand in targetScrape.byOriginalIndex) {
+        if (cand.stableKey == sourceInfo.stableKey) return cand.originalIndex;
+      }
+    }
+    // 2. Exact (seasonNumber, resolvedEpisodeNumber) match.
+    final srcEp = sourceInfo.resolvedEpisodeNumber;
+    if (srcEp != null && srcEp > 0 && !sourceInfo.isSpecial) {
+      final srcSeason = sourceInfo.seasonNumber;
+      if (srcSeason != null && srcSeason > 0) {
+        for (final cand in targetScrape.byOriginalIndex) {
+          if (!cand.isSpecial &&
+              cand.seasonNumber == srcSeason &&
+              cand.resolvedEpisodeNumber == srcEp) {
+            return cand.originalIndex;
+          }
+        }
+      }
+      // Match by episode number when target line does not carry season tags
+      // (avoid cross-season mismatch if target explicitly specifies another season!).
+      for (final cand in targetScrape.byOriginalIndex) {
+        if (!cand.isSpecial &&
+            cand.resolvedEpisodeNumber == srcEp &&
+            (srcSeason == null ||
+                cand.seasonNumber == null ||
+                cand.seasonNumber == srcSeason)) {
+          return cand.originalIndex;
+        }
+      }
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------------------

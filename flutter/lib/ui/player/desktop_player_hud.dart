@@ -202,6 +202,7 @@ class DesktopPlayerHud extends StatefulWidget {
   final VoidCallback onToggleMore;
   final VoidCallback? onCloseMore;
   final VoidCallback onToggleExpand;
+  final ValueChanged<double>? onBottomControlsHeightChanged;
 
   const DesktopPlayerHud({
     super.key,
@@ -257,6 +258,7 @@ class DesktopPlayerHud extends StatefulWidget {
     required this.onToggleMore,
     this.onCloseMore,
     required this.onToggleExpand,
+    this.onBottomControlsHeightChanged,
   });
 
   @override
@@ -265,6 +267,33 @@ class DesktopPlayerHud extends StatefulWidget {
 
 class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
   _DesktopHudQuickMenu? _activeQuickMenu;
+  final GlobalKey _bottomControlsKey = GlobalKey();
+  double _lastReportedBottomHeight = -1.0;
+  bool _measureScheduled = false;
+
+  void _scheduleMeasureBottomControls() {
+    if (widget.onBottomControlsHeightChanged == null || _measureScheduled) {
+      return;
+    }
+    _measureScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _measureScheduled = false;
+      if (!mounted) return;
+      final ro = _bottomControlsKey.currentContext?.findRenderObject();
+      if (ro is! RenderBox || !ro.hasSize) return;
+      final measured = widget.embedded ? (ro.size.height + 12.0) : ro.size.height;
+      if (measured > 0 && (measured - _lastReportedBottomHeight).abs() >= 0.5) {
+        _lastReportedBottomHeight = measured;
+        widget.onBottomControlsHeightChanged?.call(measured);
+      }
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleMeasureBottomControls();
+  }
 
   @override
   void didUpdateWidget(covariant DesktopPlayerHud oldWidget) {
@@ -273,6 +302,7 @@ class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
         (widget.embedded && !oldWidget.embedded)) {
       _activeQuickMenu = null;
     }
+    _scheduleMeasureBottomControls();
   }
 
   void _toggleQuickMenu(_DesktopHudQuickMenu menu) {
@@ -286,6 +316,7 @@ class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
 
   @override
   Widget build(BuildContext context) {
+    _scheduleMeasureBottomControls();
     if (widget.embedded) {
       return ExcludeFocus(
         child: Stack(
@@ -326,75 +357,87 @@ class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
               left: 12,
               right: 12,
               bottom: 12,
-              child: Builder(
-                builder: (ctx) {
-                  final row = Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      IconButton(
-                        tooltip: widget.playing ? '暂停' : '播放',
-                        onPressed: widget.onPlayPause,
-                        icon: Icon(
-                          widget.playing
-                              ? CupertinoIcons.pause_fill
-                              : CupertinoIcons.play_fill,
-                          color: Colors.white,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: '音量',
-                        onPressed: widget.onVolumeTap,
-                        icon: const Icon(
-                          CupertinoIcons.volume_up,
-                          color: Colors.white,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: '线路',
-                        onPressed: widget.onEpisodesTap,
-                        icon: const Icon(
-                          CupertinoIcons.list_bullet,
-                          color: Colors.white,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: '更多',
-                        onPressed: widget.onToggleMore,
-                        icon: const Icon(
-                          CupertinoIcons.ellipsis,
-                          color: Colors.white,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: '展开播放',
-                        onPressed: widget.onToggleExpand,
-                        icon: const Icon(
-                          CupertinoIcons.arrow_up_left_arrow_down_right,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ],
-                  );
-                  if (WindowsAppearanceScope.maybeOf(ctx) != null) {
-                    return WinPanel(
-                      dark: true,
-                      padding: const EdgeInsets.all(6),
-                      child: row,
-                    );
-                  }
-                  return Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xD9161820),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: Colors.white.withValues(alpha: 0.14),
-                        width: 0.8,
-                      ),
-                    ),
-                    child: row,
-                  );
+              child: NotificationListener<SizeChangedLayoutNotification>(
+                onNotification: (_) {
+                  _scheduleMeasureBottomControls();
+                  return false;
                 },
+                child: SizeChangedLayoutNotifier(
+                  child: KeyedSubtree(
+                    key: _bottomControlsKey,
+                    child: Builder(
+                      key: const Key('desktop-player-bottom-controls'),
+                      builder: (ctx) {
+                        final row = Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            IconButton(
+                              tooltip: widget.playing ? '暂停' : '播放',
+                              onPressed: widget.onPlayPause,
+                              icon: Icon(
+                                widget.playing
+                                    ? CupertinoIcons.pause_fill
+                                    : CupertinoIcons.play_fill,
+                                color: Colors.white,
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: '音量',
+                              onPressed: widget.onVolumeTap,
+                              icon: const Icon(
+                                CupertinoIcons.volume_up,
+                                color: Colors.white,
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: '线路',
+                              onPressed: widget.onEpisodesTap,
+                              icon: const Icon(
+                                CupertinoIcons.list_bullet,
+                                color: Colors.white,
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: '更多',
+                              onPressed: widget.onToggleMore,
+                              icon: const Icon(
+                                CupertinoIcons.ellipsis,
+                                color: Colors.white,
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: '展开播放',
+                              onPressed: widget.onToggleExpand,
+                              icon: const Icon(
+                                CupertinoIcons.arrow_up_left_arrow_down_right,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ],
+                        );
+                        if (WindowsAppearanceScope.maybeOf(ctx) != null) {
+                          return WinPanel(
+                            dark: true,
+                            padding: const EdgeInsets.all(6),
+                            child: row,
+                          );
+                        }
+                        return Container(
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            color: const Color(0xD9161820),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.14),
+                              width: 0.8,
+                            ),
+                          ),
+                          child: row,
+                        );
+                      },
+                    ),
+                  ),
+                ),
               ),
             ),
           ],
@@ -615,6 +658,7 @@ class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
             right: 0,
             bottom: 0,
             child: DecoratedBox(
+              key: const Key('desktop-player-bottom-bar-scrim'),
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
                   begin: Alignment.topCenter,
@@ -627,18 +671,29 @@ class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
                   stops: [0.0, 0.42, 1.0],
                 ),
               ),
-              child: SafeArea(
-                top: false,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 26, 24, 14),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (!widget.isLive && widget.progressBar != null) ...[
-                        widget.progressBar!,
-                        const SizedBox(height: 6),
-                      ],
-                      Row(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 26),
+                child: NotificationListener<SizeChangedLayoutNotification>(
+                  onNotification: (_) {
+                    _scheduleMeasureBottomControls();
+                    return false;
+                  },
+                  child: SizeChangedLayoutNotifier(
+                    child: KeyedSubtree(
+                      key: _bottomControlsKey,
+                      child: SafeArea(
+                        key: const Key('desktop-player-bottom-controls'),
+                        top: false,
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(24, 0, 24, 14),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (!widget.isLive && widget.progressBar != null) ...[
+                                widget.progressBar!,
+                                const SizedBox(height: 6),
+                              ],
+                              Row(
                         children: [
                           if (widget.hasPrevEpisode &&
                               widget.onPrevEpisode != null)
@@ -763,6 +818,10 @@ class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
                         ],
                       ),
                     ],
+                  ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),

@@ -469,7 +469,9 @@ jobs:
           echo "=== ffprobe Availability ===" | tee -a "$REPORT"
           ffprobe -version | head -n 1 | tee -a "$REPORT"
           echo "=== Unmodified .app Direct Mpv.framework + Legacy 4429808 Runner Swiftc Verification ===" | tee -a "$REPORT"
-          python3 ../scripts/verify_macos_candidate.py --app "$UNZIPPED_APP" --flutter-dir "$PWD" 2>&1 | tee -a "$REPORT"
+          VERIFY_ARTIFACTS_DIR="$PWD/dist/macos-verification-artifacts"
+          mkdir -p "$VERIFY_ARTIFACTS_DIR"
+          python3 ../scripts/verify_macos_candidate.py --app "$UNZIPPED_APP" --flutter-dir "$PWD" --artifacts-dir "$VERIFY_ARTIFACTS_DIR" 2>&1 | tee -a "$REPORT"
           echo "=== Bundled Node CatPaw Smoke (--jitless, standalone temp copy without inherit) ===" | tee -a "$REPORT"
           MARCOMOVIE_NODE="$VERIFY_DIR/node-exec-smoke/node" MARCOMOVIE_NODE_FLAGS="--jitless" python3 ../scripts/test_catpaw_host.py 2>&1 | tee -a "$REPORT"
           echo "=== macOS Flutter Verification Suite ===" | tee -a "$REPORT"
@@ -489,6 +491,7 @@ jobs:
             test/macos_update_and_profile_test.dart
             test/live_snapshot_and_first_frame_test.dart
             test/macos_desktop_ux_and_player_test.dart
+            test/macos_round3_subtitle_episode_danmu_sync_test.dart
           )
           # Prefer running flutter test directly against the unmodified .app Mpv.framework via non-SIP dart.
           # Only fall back to a temp rpath copy if Flutter SDK's hardened flutter_tester strips DYLD_FRAMEWORK_PATH.
@@ -500,6 +503,8 @@ jobs:
             echo "FLUTTER_TEST_MPV_MODE=UNMODIFIED_APP_FRAMEWORK" | tee -a "$REPORT"
             DYLD_FRAMEWORK_PATH="$UNZIPPED_APP/Contents/Frameworks" \
               MARCOMOVIE_TEST_MPV="$MPV_LIB" \
+              MARCOMOVIE_VERIFY_ARTIFACTS_DIR="$VERIFY_ARTIFACTS_DIR" \
+              MARCOMOVIE_MPV_FRAMES_DIR="$VERIFY_ARTIFACTS_DIR/mpv_frames" \
               "$DART_BIN" --packages="$TOOLS_PKG" "$TOOLS_SNAP" test "${TEST_FILES[@]}" 2>&1 | tee -a "$REPORT"
           else
             echo "FLUTTER_TEST_MPV_MODE=TEMP_RPATH_COPY (flutter_tester hardened runtime strips DYLD_FRAMEWORK_PATH; unmodified .app Mpv.framework verified above via rpath C harness)" | tee -a "$REPORT"
@@ -508,8 +513,12 @@ jobs:
             install_name_tool -add_rpath "$UNZIPPED_APP/Contents/Frameworks" "$VERIFY_DIR/mpv-test-copy/Mpv" 2>&1 || true
             codesign --force --sign - "$VERIFY_DIR/mpv-test-copy/Mpv" 2>&1
             MARCOMOVIE_TEST_MPV="$VERIFY_DIR/mpv-test-copy/Mpv" \
+              MARCOMOVIE_VERIFY_ARTIFACTS_DIR="$VERIFY_ARTIFACTS_DIR" \
+              MARCOMOVIE_MPV_FRAMES_DIR="$VERIFY_ARTIFACTS_DIR/mpv_frames" \
               flutter test "${TEST_FILES[@]}" 2>&1 | tee -a "$REPORT"
           fi
+          echo "=== Exported Real-Mac Verification Artifacts ===" | tee -a "$REPORT"
+          ls -la "$VERIFY_ARTIFACTS_DIR" "$VERIFY_ARTIFACTS_DIR/mpv_frames" 2>&1 | tee -a "$REPORT"
           # Re-verify unmodified .app signature at the very end
           codesign --verify --deep --strict "$UNZIPPED_APP"
           echo "FINAL_UNMODIFIED_APP_CODESIGN=PASS" | tee -a "$REPORT"
@@ -521,6 +530,7 @@ jobs:
             flutter/dist/*.zip
             flutter/dist/*.sha256
             flutter/dist/macos-verification-report.txt
+            flutter/dist/macos-verification-artifacts/**
 
   build-ios:
     if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'ios'
