@@ -352,9 +352,12 @@ jobs:
           flutter build macos --release --build-name="$VERSION" --build-number="$BUILD_NUM"
           APP=$(find "$PWD/build/macos/Build/Products/Release" -maxdepth 1 -name '*.app' -print -quit)
           python3 ../scripts/prepare_catpaw_runtime.py --platform macos --destination "$APP/Contents/Frameworks/node"
-          # Re-sign only the outer .app bundle with Release.entitlements (no --deep, no --preserve-metadata=entitlements)
-          # so Xcode's ad-hoc injected com.apple.security.get-task-allow is stripped while nested frameworks
-          # and bundled node (app-sandbox + inherit) retain their exact signatures and entitlements.
+          # Sign ancillary files under Contents/Frameworks/node as subcomponents, keep node/bin/node signed
+          # with its app-sandbox + inherit entitlements, and re-sign only the outer .app bundle with
+          # Release.entitlements (no --deep, no --preserve-metadata=entitlements) so Xcode's ad-hoc injected
+          # com.apple.security.get-task-allow is stripped.
+          find "$APP/Contents/Frameworks/node" -type f ! -path "*/bin/node" -exec codesign --force --sign - {} \;
+          codesign --force --sign - --entitlements "$APP/Contents/Frameworks/node/node.entitlements" "$APP/Contents/Frameworks/node/bin/node"
           codesign --force --sign - --entitlements "$PWD/macos/Runner/Release.entitlements" "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p dist
