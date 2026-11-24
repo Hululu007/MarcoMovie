@@ -114,6 +114,8 @@ public final class LiteJvmChecks {
         int round1Checks = checks - baselineChecks;
         test059Round2Regressions();
         int round2Checks = checks - baselineChecks - round1Checks;
+        test059Round3Regressions();
+        int round3Checks = checks - baselineChecks - round1Checks - round2Checks;
         int addedChecks = checks - baselineChecks;
         System.out.println(
                 "PASS "
@@ -126,7 +128,9 @@ public final class LiteJvmChecks {
                         + round1Checks
                         + " R1-stage + "
                         + round2Checks
-                        + " R2-rework]; 0 failed, 0 skipped)");
+                        + " R2-rework + "
+                        + round3Checks
+                        + " R3-rework]; 0 failed, 0 skipped)");
     }
 
     private static void testResolveWebdavFileUrlMatrix() throws Exception {
@@ -4298,5 +4302,444 @@ public final class LiteJvmChecks {
                         && classOnlyRss.optJSONArray("class").length() == 1
                         && classOnlyRss.optJSONArray("list") == null,
                 "R8c: Valid empty RSS returns empty list (true zero-hit) while class-only XML does not fake empty list");
+    }
+
+    private static void test059Round3Regressions() throws Exception {
+        // === Item 1 (P1 · R1): Preserve unattributed legacy history/favorites when saved evidence proves A & B ===
+        String apiA = "http://a.r3.test/cms";
+        String apiB = "http://b.r3.test/cms";
+        LiteCatalog.Site siteA = new LiteCatalog.Site();
+        siteA.key = "k";
+        siteA.originalKey = "k";
+        siteA.name = "SiteA";
+        siteA.api = apiA;
+        siteA.type = 1;
+        siteA.supported = true;
+        LiteCatalog.Site siteB = new LiteCatalog.Site();
+        siteB.key = "k";
+        siteB.originalKey = "k";
+        siteB.name = "SiteB";
+        siteB.api = apiB;
+        siteB.type = 1;
+        siteB.supported = true;
+        List<LiteCatalog.Site> onlyA = Arrays.asList(siteA);
+        List<LiteCatalog.Site> bothAB = Arrays.asList(siteA, siteB);
+
+        String cloudAllThree =
+                new JSONObject()
+                        .put("schema", "marco-movie-sync")
+                        .put("version", 2)
+                        .put(
+                                "watch_history",
+                                new JSONArray()
+                                        .put(r2WireItem("k", apiA, "1", 11L))
+                                        .put(r2WireItem("k", apiB, "1", 12L))
+                                        .put(r2WireItem("k", "", "1", 10L)))
+                        .put(
+                                "favorites",
+                                new JSONArray()
+                                        .put(r2WireItem("k", apiA, "1", 11L))
+                                        .put(r2WireItem("k", apiB, "1", 12L))
+                                        .put(r2WireItem("k", "", "1", 10L)))
+                        .put("tombstones", new JSONObject())
+                        .toString();
+        LiteSync.MergeResult initialThree =
+                LiteSync.merge("[]", "[]", "{}", null, false, cloudAllThree, 20L, onlyA);
+        check(
+                !LiteSync.isSiteKeyUnambiguouslyUnique(
+                                "k", onlyA, initialThree.historyJson, initialThree.favoritesJson, "{}")
+                        && LiteSync.isSiteKeyUnambiguouslyUnique("k", onlyA, "[]", "[]", "{}"),
+                "R3-1a: Unified site uniqueness includes saved A/B history/favorites evidence even when only A is loaded");
+
+        LiteStore.HistoryEntry updA = new LiteStore.HistoryEntry();
+        updA.siteKey = "k";
+        updA.siteApi = apiA;
+        updA.vodId = "1";
+        updA.vodName = "A";
+        updA.positionMs = 50;
+        updA.updatedAt = 50L;
+        // Even if caller passes collapseLegacyEmptyApi=true, LiteStore itself protects unattributed "" when B exists!
+        String savedHist = LiteStore.recordHistoryJson(initialThree.historyJson, updA, true);
+        LiteStore.FavoriteEntry favA = new LiteStore.FavoriteEntry();
+        favA.siteKey = "k";
+        favA.siteApi = apiA;
+        favA.vodId = "1";
+        favA.vodName = "A";
+        String unfavA = LiteStore.toggleFavoriteJson(initialThree.favoritesJson, favA, true);
+        String scopedTombA =
+                new JSONObject().put("fav:" + LiteSync.itemKey("k", apiA, "1"), 60L).toString();
+        LiteSync.MergeResult rep1 =
+                LiteSync.merge(savedHist, unfavA, scopedTombA, null, false, cloudAllThree, 70L, bothAB);
+        LiteSync.MergeResult rep2 =
+                LiteSync.merge(
+                        rep1.historyJson,
+                        rep1.favoritesJson,
+                        rep1.tombstonesJson,
+                        null,
+                        false,
+                        cloudAllThree,
+                        80L,
+                        bothAB);
+        check(
+                LiteStore.parseHistoryJson(savedHist).size() == 3
+                        && LiteStore.parseFavoritesJson(unfavA).size() == 2
+                        && rep2.favoriteCount == 2
+                        && !LiteStore.containsFavorite(rep2.favoritesJson, "k", apiA, "1", false)
+                        && LiteStore.containsFavorite(rep2.favoritesJson, "k", apiB, "1", false)
+                        && LiteStore.containsFavorite(rep2.favoritesJson, "k", "", "1", false),
+                "R3-1b: Saving/unfavoriting A with B in saved data preserves B and unattributed legacy record across 2 replays");
+
+        String oldBareTomb =
+                new JSONObject().put("hist:k\n1", 20L).put("fav:k\n1", 20L).toString();
+        String cloudOnlyA = r2WirePayload(r2WireItem("k", apiA, "1", 10L), null);
+        LiteSync.MergeResult uniqDel1 =
+                LiteSync.merge("[]", "[]", oldBareTomb, null, false, cloudOnlyA, 25L, onlyA);
+        LiteSync.MergeResult uniqDel2 =
+                LiteSync.merge(
+                        uniqDel1.historyJson,
+                        uniqDel1.favoritesJson,
+                        uniqDel1.tombstonesJson,
+                        null,
+                        false,
+                        cloudOnlyA,
+                        30L,
+                        onlyA);
+        check(
+                uniqDel1.historyCount == 0
+                        && uniqDel1.favoriteCount == 0
+                        && uniqDel2.historyCount == 0
+                        && uniqDel2.favoriteCount == 0,
+                "R3-1c: Unique-source legacy 0.5.8 tombstones remain effective across repeated syncs");
+
+        // === Item 2 (P1 · R2): Bare URL numbering, lineFrom resume, cross-season & singleton switch ===
+        JSONObject bareArrVod =
+                new JSONObject()
+                        .put("vod_id", "bare_arr")
+                        .put("vod_name", "BareArr")
+                        .put(
+                                "vod_play_list",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("from", "plain")
+                                                                        .put("show", "HD"))
+                                                        .put(
+                                                                "urls",
+                                                                new JSONArray()
+                                                                        .put("http://cdn.test/1.mp4")
+                                                                        .put("http://cdn.test/2.mp4"))));
+        LiteActivity.PlayLine bareLine = LiteActivity.extractPlayLines(bareArrVod, "").get(0);
+        List<LiteActivity.EpisodeItem> dupNamedEps =
+                Arrays.asList(
+                        new LiteActivity.EpisodeItem("HD", "http://cdn.test/1.mp4", 0),
+                        new LiteActivity.EpisodeItem("HD", "http://cdn.test/2.mp4", 1));
+        LiteStore.HistoryEntry savedEp2 = new LiteStore.HistoryEntry();
+        savedEp2.epName = "HD";
+        savedEp2.epUrl = "http://cdn.test/2.mp4";
+        savedEp2.epIndex = 1;
+        LiteActivity.EpisodeItem resumedEp =
+                LiteActivity.findSavedEpisodeInLine(dupNamedEps, savedEp2);
+        check(
+                bareLine.episodes.size() == 2
+                        && "第1集".equals(bareLine.episodes.get(0).name)
+                        && "第2集".equals(bareLine.episodes.get(1).name)
+                        && resumedEp != null
+                        && "http://cdn.test/2.mp4".equals(resumedEp.url),
+                "R3-2a: Bare URL array numbers episodes sequentially and resume prioritizes exact epUrl over duplicate names");
+
+        JSONObject sharedUrlLinesVod =
+                new JSONObject()
+                        .put("vod_id", "shared_url")
+                        .put("vod_name", "Shared")
+                        .put(
+                                "vod_play_list",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("from", "A")
+                                                                        .put("show", "HD"))
+                                                        .put("url", "EP2$http://pages.test/shared"))
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("from", "B")
+                                                                        .put("show", "HD"))
+                                                        .put("url", "EP2$http://pages.test/shared")));
+        List<LiteActivity.PlayLine> sharedLines =
+                LiteActivity.extractPlayLines(sharedUrlLinesVod, "");
+        LiteActivity.PlaybackSession sessB =
+                LiteActivity.PlaybackSession.forVod(
+                        1,
+                        "http://cdn.test/b.mp4",
+                        "http://pages.test/shared",
+                        "EP2",
+                        null,
+                        siteA,
+                        sharedUrlLinesVod,
+                        "HD",
+                        "B",
+                        1,
+                        0,
+                        sharedLines.get(1).episodes);
+        LiteStore.HistoryEntry histB =
+                LiteActivity.buildHistoryEntryForSession(sessB, 15000, 120000, 100L);
+        LiteStore.HistoryEntry histBRoundTrip = LiteStore.HistoryEntry.fromJson(histB.toJson());
+        // Also test legacy entry without lineFrom (relying on lineName + lineIndex)
+        LiteStore.HistoryEntry legacyHistB = LiteStore.HistoryEntry.fromJson(histB.toJson());
+        legacyHistB.lineFrom = "";
+        check(
+                "B".equals(histBRoundTrip.lineFrom)
+                        && LiteActivity.resolveSavedLineIndex(sharedLines, histBRoundTrip) == 1
+                        && LiteActivity.resolveSavedLineIndex(sharedLines, legacyHistB) == 1,
+                "R3-2b: Persisted lineFrom and legacy lineIndex fallback both restore line B when A/B share name and URL");
+
+        List<LiteActivity.EpisodeItem> s1Line =
+                LiteActivity.parseLineEpisodes("S01E02$http://b.test/12.mp4#S01E03$http://b.test/13.mp4");
+        List<LiteActivity.EpisodeItem> s2Line =
+                LiteActivity.parseLineEpisodes("S02E01$http://b.test/21.mp4#S02E02$http://b.test/22.mp4");
+        check(
+                LiteActivity.matchEpisodeIndexForLineSwitch(s1Line, "http://a.test/22.mp4", "S02E02", 1, 3)
+                                == -1
+                        && LiteActivity.matchEpisodeIndexForLineSwitch(
+                                        s2Line, "http://a.test/22.mp4", "S02E02", 1, 3)
+                                == 1,
+                "R3-2c: Cross-season S02E02->S01E02 returns -1 while matching S02E02->S02E02 returns 1");
+
+        List<LiteActivity.EpisodeItem> onlyEp3 =
+                LiteActivity.parseLineEpisodes("EP3$http://b.test/3.mp4");
+        List<LiteActivity.EpisodeItem> singleMovie =
+                LiteActivity.parseLineEpisodes("4K蓝光$http://b.test/movie.mp4");
+        check(
+                LiteActivity.matchEpisodeIndexForLineSwitch(onlyEp3, "http://a.test/2.mp4", "EP2", 0, 1)
+                                == -1
+                        && LiteActivity.matchEpisodeIndexForLineSwitch(
+                                        singleMovie, "http://a.test/m.mp4", "正片", 0, 1)
+                                == 0,
+                "R3-2d: Singleton numbered conflict EP2->EP3 returns -1 while unnumbered movie 正片->4K蓝光 matches 0");
+
+        // === Item 3 (P1 · R3): Matching global parser headers, rename preserving inherited routing & type=0 ===
+        HttpServer r3Http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final java.util.List<String> r3Hits =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        try {
+            final String r3Base = "http://127.0.0.1:" + r3Http.getAddress().getPort();
+            r3Http.createContext(
+                    "/with-header",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            String ua = ex.getRequestHeaders().getFirst("User-Agent");
+                            r3Hits.add("/with-header:" + ua);
+                            if (!"ParserMobile/1".equals(ua)) {
+                                byte[] bad = "403".getBytes(StandardCharsets.UTF_8);
+                                ex.sendResponseHeaders(403, bad.length);
+                                ex.getResponseBody().write(bad);
+                                ex.close();
+                                return;
+                            }
+                            byte[] ok =
+                                    ("{\"url\":\"" + r3Base + "/clipB.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, ok.length);
+                            ex.getResponseBody().write(ok);
+                            ex.close();
+                        }
+                    });
+            r3Http.createContext(
+                    "/A",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            r3Hits.add("/A");
+                            byte[] ok =
+                                    ("{\"url\":\"" + r3Base + "/clipA.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, ok.length);
+                            ex.getResponseBody().write(ok);
+                            ex.close();
+                        }
+                    });
+            r3Http.createContext(
+                    "/B",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            r3Hits.add("/B");
+                            byte[] ok =
+                                    ("{\"url\":\"" + r3Base + "/clipB.mp4\"}")
+                                            .getBytes(StandardCharsets.UTF_8);
+                            ex.getResponseHeaders().set("Content-Type", "application/json");
+                            ex.sendResponseHeaders(200, ok.length);
+                            ex.getResponseBody().write(ok);
+                            ex.close();
+                        }
+                    });
+            r3Http.createContext(
+                    "/gateway",
+                    new HttpHandler() {
+                        public void handle(HttpExchange ex) throws java.io.IOException {
+                            String q = ex.getRequestURI().getRawQuery();
+                            r3Hits.add("/gateway?" + q);
+                            if (q != null && q.contains("ac=videolist")) {
+                                byte[] xml =
+                                        "<rss><list><video><id>1</id><name>GW</name></video></list></rss>"
+                                                .getBytes(StandardCharsets.UTF_8);
+                                ex.getResponseHeaders().set("Content-Type", "application/xml");
+                                ex.sendResponseHeaders(200, xml.length);
+                                ex.getResponseBody().write(xml);
+                                ex.close();
+                                return;
+                            }
+                            byte[] bad = "400".getBytes(StandardCharsets.UTF_8);
+                            ex.sendResponseHeaders(400, bad.length);
+                            ex.getResponseBody().write(bad);
+                            ex.close();
+                        }
+                    });
+            r3Http.start();
+
+            // R3-3a: Site playUrl same endpoint as global registered parser keeps global parser User-Agent
+            r3Hits.clear();
+            String sameEndpointCfg =
+                    "{\"parses\":[{\"name\":\"WH\",\"type\":1,\"url\":\""
+                            + r3Base
+                            + "/with-header?url=\",\"header\":{\"User-Agent\":\"ParserMobile/1\"},\"ext\":{\"flag\":[\"B\"]}}],"
+                            + "\"sites\":[{\"key\":\"s1\",\"name\":\"S1\",\"type\":1,\"api\":\""
+                            + r3Base
+                            + "/cms\",\"parse\":1,\"playUrl\":\""
+                            + r3Base
+                            + "/with-header?url=\"}]}";
+            LiteCatalog.Site sSame = LiteCatalog.parse(sameEndpointCfg, r3Base).get(0);
+            LiteCatalog.ResolvedPlay resSame =
+                    LiteCatalog.resolvePlayUrl(r3Base + "/watch?id=1", sSame, "B");
+            check(
+                    (r3Base + "/clipB.mp4").equals(resSame.url)
+                            && r3Hits.size() == 1
+                            && "/with-header:ParserMobile/1".equals(r3Hits.get(0)),
+                    "R3-3a: Site playUrl matching global parse inherits its User-Agent and succeeds without 403");
+
+            // R3-3b: Renaming site with unchanged playUrl keeps inherited global parser routing
+            r3Hits.clear();
+            String renameCfg =
+                    "{\"parses\":["
+                            + "{\"name\":\"PA\",\"type\":1,\"url\":\""
+                            + r3Base
+                            + "/A?url=\",\"ext\":{\"flag\":[\"A\"]}},"
+                            + "{\"name\":\"PB\",\"type\":1,\"url\":\""
+                            + r3Base
+                            + "/B?url=\",\"ext\":{\"flag\":[\"B\"]}}"
+                            + "],\"sites\":[{\"key\":\"s2\",\"name\":\"Old\",\"type\":1,\"api\":\""
+                            + r3Base
+                            + "/cms\",\"parse\":1}]}";
+            LiteCatalog.Site sRename = LiteCatalog.parse(renameCfg, r3Base).get(0);
+            LiteCatalog.applySiteOverride(
+                    sRename,
+                    new JSONObject()
+                            .put("name", "Renamed")
+                            .put("group", "G")
+                            .put("api", sRename.api)
+                            .put("playUrl", sRename.playUrl)
+                            .put("ext", "")
+                            .put("searchable", true));
+            LiteCatalog.ResolvedPlay resRename =
+                    LiteCatalog.resolvePlayUrl(r3Base + "/watch?id=2", sRename, "B\n高清");
+            check(
+                    (r3Base + "/clipB.mp4").equals(resRename.url)
+                            && r3Hits.contains("/B")
+                            && !r3Hits.contains("/A"),
+                    "R3-3b: Renaming site with unchanged playUrl preserves inherited rawFrom routing to /B");
+
+            // R3-3c: Renaming explicit type=0 /gateway site preserves type=0 and ac=videolist
+            r3Hits.clear();
+            String gwCfg =
+                    "{\"sites\":[{\"key\":\"gw\",\"name\":\"GW\",\"type\":0,\"api\":\""
+                            + r3Base
+                            + "/gateway\"}]}";
+            LiteCatalog.Site sGw = LiteCatalog.parse(gwCfg, r3Base).get(0);
+            LiteCatalog.applySiteOverride(
+                    sGw,
+                    new JSONObject()
+                            .put("name", "RenamedGW")
+                            .put("group", "G")
+                            .put("api", sGw.api)
+                            .put("playUrl", sGw.playUrl)
+                            .put("ext", "")
+                            .put("searchable", true));
+            String gwDetail = LiteCatalog.cmsDetailUrl(sGw, "1");
+            JSONArray gwItems = LiteCatalog.list(LiteCatalog.fetch(gwDetail, null));
+            check(
+                    sGw.type == 0
+                            && gwDetail.contains("ac=videolist")
+                            && gwItems.length() == 1,
+                    "R3-3c: Renaming explicit type=0 /gateway site preserves type=0 and sends ac=videolist");
+        } finally {
+            r3Http.stop(0);
+        }
+
+        // === Item 4 (P2 · R8): <!DOCTYPE rss> valid zero-hit; XML error root & JSON 403 w/ empty list fail ===
+        JSONObject doctypeRss =
+                LiteCatalog.parseCmsResponse("<!DOCTYPE rss><rss><list page='1'/></rss>");
+        JSONObject prologDoctypeRss =
+                LiteCatalog.parseCmsResponse(
+                        "<?xml version=\"1.0\" encoding=\"utf-8\"?><!DOCTYPE rss><rss><list page='1'/></rss>");
+        boolean doctypeHtmlRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("<!DOCTYPE html><html><body>Login</body></html>");
+        } catch (Exception expected) {
+            doctypeHtmlRejected = true;
+        }
+        check(
+                doctypeRss.optJSONArray("list") != null
+                        && doctypeRss.optJSONArray("list").length() == 0
+                        && prologDoctypeRss.optJSONArray("list") != null
+                        && prologDoctypeRss.optJSONArray("list").length() == 0
+                        && doctypeHtmlRejected,
+                "R3-4a: <!DOCTYPE rss> empty RSS counts as valid zero-hit while <!DOCTYPE html> is rejected");
+
+        boolean xmlErrWithListRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("<error><code>503</code><list/></error>");
+        } catch (Exception expected) {
+            xmlErrWithListRejected = true;
+        }
+        boolean rssErrChildWithListRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("<rss><error>denied</error><list/></rss>");
+        } catch (Exception expected) {
+            rssErrChildWithListRejected = true;
+        }
+        boolean json403WithListRejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("{\"code\":403,\"msg\":\"Forbidden\",\"list\":[]}");
+        } catch (Exception expected) {
+            json403WithListRejected = true;
+        }
+        boolean jsonNested500Rejected = false;
+        try {
+            LiteCatalog.parseCmsResponse("{\"data\":{\"code\":500,\"msg\":\"err\",\"list\":[]}}");
+        } catch (Exception expected) {
+            jsonNested500Rejected = true;
+        }
+        JSONObject validMacCmsEmpty =
+                LiteCatalog.parseCmsResponse("{\"code\":1,\"msg\":\"数据列表\",\"list\":[]}");
+        JSONObject validHttp200Empty =
+                LiteCatalog.parseCmsResponse("{\"code\":200,\"msg\":\"ok\",\"list\":[]}");
+        check(
+                xmlErrWithListRejected
+                        && rssErrChildWithListRejected
+                        && json403WithListRejected
+                        && jsonNested500Rejected
+                        && validMacCmsEmpty.optJSONArray("list") != null
+                        && validMacCmsEmpty.optJSONArray("list").length() == 0
+                        && validHttp200Empty.optJSONArray("list") != null
+                        && validHttp200Empty.optJSONArray("list").length() == 0,
+                "R3-4b: XML error root and JSON 403/500 with empty list fail while MacCMS code=1/200 empty list stay zero-hit");
     }
 }

@@ -347,6 +347,99 @@ def build_fixture_configs() -> dict:
                 {'key': 'r2_rss_empty', 'name': 'R2合法空RSS站', 'api': f'{base}/r2-rss-empty', 'type': 0, 'searchable': 1},
             ]
         },
+        '/config-r3-only-dup1': {
+            'sites': [
+                {'key': 'dup_cms', 'name': '同键甲站', 'api': f'{base}/cms-dup1', 'type': 1, 'searchable': 1},
+            ]
+        },
+        '/config-r3-cases': {
+            'parses': [
+                {
+                    'name': 'R3WithHeader',
+                    'type': 1,
+                    'url': f'{base}/r3-with-header?url=',
+                    'header': {'User-Agent': 'ParserMobile/1'},
+                    'ext': {'flag': ['WH']},
+                },
+                {
+                    'name': 'R3ParseA',
+                    'type': 1,
+                    'url': f'{base}/r3-parse-a?url=',
+                    'ext': {'flag': ['A']},
+                },
+                {
+                    'name': 'R3ParseB',
+                    'type': 1,
+                    'url': f'{base}/r3-parse-b?url=',
+                    'ext': {'flag': ['B']},
+                },
+            ],
+            'sites': [
+                {
+                    'key': 'r3_same_header',
+                    'name': 'R3同址解析头站',
+                    'api': f'{base}/r3-cms-same-header',
+                    'type': 1,
+                    'parse': 1,
+                    'playUrl': f'{base}/r3-with-header?url=',
+                    'searchable': 0,
+                },
+                {
+                    'key': 'r3_rename_route',
+                    'name': 'R3改名保路由站',
+                    'api': f'{base}/r3-cms-rename-route',
+                    'type': 1,
+                    'parse': 1,
+                    'searchable': 0,
+                },
+                {
+                    'key': 'r3_xml_gateway',
+                    'name': 'R3网关XML站',
+                    'api': f'{base}/r3-gateway',
+                    'type': 0,
+                    'searchable': 0,
+                },
+                {
+                    'key': 'r3_xml_err_list',
+                    'name': 'R3错误根带空表XML站',
+                    'api': f'{base}/r3-xml-err-with-list',
+                    'type': 0,
+                    'searchable': 1,
+                },
+                {
+                    'key': 'r3_json_403_list',
+                    'name': 'R3错误码403JSON站',
+                    'api': f'{base}/r3-json-403-with-list',
+                    'type': 1,
+                    'searchable': 1,
+                },
+                {
+                    'key': 'r3_doctype_rss',
+                    'name': 'R3标准DOCTYPE空RSS站',
+                    'api': f'{base}/r3-doctype-rss-empty',
+                    'type': 0,
+                    'searchable': 1,
+                },
+            ],
+        },
+        '/config-r3-search-all-fail': {
+            'sites': [
+                {'key': 'r3_xml_err_list', 'name': 'R3错误根带空表XML站', 'api': f'{base}/r3-xml-err-with-list', 'type': 0, 'searchable': 1},
+                {'key': 'r3_json_403_list', 'name': 'R3错误码403JSON站', 'api': f'{base}/r3-json-403-with-list', 'type': 1, 'searchable': 1},
+            ]
+        },
+        '/config-r3-search-partial-fail': {
+            'sites': [
+                {'key': 'r3_xml_err_list', 'name': 'R3错误根带空表XML站', 'api': f'{base}/r3-xml-err-with-list', 'type': 0, 'searchable': 1},
+                {'key': 'r3_json_403_list', 'name': 'R3错误码403JSON站', 'api': f'{base}/r3-json-403-with-list', 'type': 1, 'searchable': 1},
+                {'key': 'r3_doctype_rss', 'name': 'R3标准DOCTYPE空RSS站', 'api': f'{base}/r3-doctype-rss-empty', 'type': 0, 'searchable': 1},
+            ]
+        },
+        '/config-r3-search-doctype-zero': {
+            'sites': [
+                {'key': 'r3_doctype_rss', 'name': 'R3标准DOCTYPE空RSS站', 'api': f'{base}/r3-doctype-rss-empty', 'type': 0, 'searchable': 1},
+            ]
+        },
     }
 
 
@@ -952,6 +1045,77 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return
         if path == '/r2-rss-empty':
             self._send_bytes(200, 'application/xml; charset=utf-8', b'<?xml version="1.0" encoding="utf-8"?><rss><list page="1" pagecount="1"></list></rss>')
+            return
+
+        # === Round 3 (Items 1-4) E2E Fixture Endpoints ===
+        if path == '/r3-clip-a.mp4':
+            self._send_bytes(200, 'video/mp4', (self.media_dir / 'baseline.mp4').read_bytes())
+            return
+        if path == '/r3-clip-b.mp4':
+            self._send_bytes(200, 'video/mp4', (self.media_dir / 'video2.mp4').read_bytes())
+            return
+        if path == '/r3-with-header':
+            got_ua = self.headers.get('User-Agent', '')
+            if got_ua != 'ParserMobile/1':
+                self._send_bytes(403, 'text/plain; charset=utf-8', f'missing ParserMobile/1 UA: {got_ua}'.encode('utf-8'))
+                return
+            self._send_json(200, {'url': f'{base}/r3-clip-b.mp4'})
+            return
+        if path == '/r3-parse-a':
+            self._send_json(200, {'url': f'{base}/r3-clip-a.mp4'})
+            return
+        if path == '/r3-parse-b':
+            self._send_json(200, {'url': f'{base}/r3-clip-b.mp4'})
+            return
+        if path == '/r3-cms-same-header':
+            self._send_json(200, {
+                'pagecount': 1,
+                'list': [{
+                    'vod_id': 'r3_wh_1',
+                    'vod_name': 'R3同址头测试片',
+                    'vod_play_list': [
+                        {'player_info': {'show': 'WH', 'from': 'WH'}, 'url': f'正片${base}/watch-r3-wh?id=1'},
+                    ],
+                }],
+            })
+            return
+        if path == '/r3-cms-rename-route':
+            self._send_json(200, {
+                'pagecount': 1,
+                'list': [{
+                    'vod_id': 'r3_rr_1',
+                    'vod_name': 'R3同名共址双线片',
+                    'vod_play_list': [
+                        {'player_info': {'show': '高清', 'from': 'A'}, 'url': f'EP2${base}/watch-r3-shared?id=2'},
+                        {'player_info': {'show': '高清', 'from': 'B'}, 'url': f'EP2${base}/watch-r3-shared?id=2'},
+                    ],
+                }],
+            })
+            return
+        if path == '/r3-gateway':
+            ac = qs.get('ac', [''])[0]
+            if ac == 'videolist':
+                xml = (
+                    '<?xml version="1.0" encoding="utf-8"?><rss><list page="1" pagecount="1">'
+                    '<video><id>1</id><name><![CDATA[网关XML片]]></name>'
+                    f'<dl><dd flag="gw"><![CDATA[正片${base}/video.mp4]]></dd></dl></video></list></rss>'
+                )
+                self._send_bytes(200, 'application/xml; charset=utf-8', xml.encode('utf-8'))
+                return
+            if ac == 'list':
+                xml = '<?xml version="1.0" encoding="utf-8"?><rss><class><ty id="1">网关分类</ty></class><list page="1" pagecount="1"/></rss>'
+                self._send_bytes(200, 'application/xml; charset=utf-8', xml.encode('utf-8'))
+                return
+            self._send_bytes(400, 'text/plain; charset=utf-8', f'gateway rejects ac={ac}'.encode('utf-8'))
+            return
+        if path == '/r3-xml-err-with-list':
+            self._send_bytes(200, 'application/xml; charset=utf-8', b'<error><code>503</code><list/></error>')
+            return
+        if path == '/r3-json-403-with-list':
+            self._send_json(200, {'code': 403, 'msg': 'Forbidden', 'list': []})
+            return
+        if path == '/r3-doctype-rss-empty':
+            self._send_bytes(200, 'application/xml; charset=utf-8', b'<!DOCTYPE rss><rss><list page="1"/></rss>')
             return
 
         self._send_json(404, {'error': f'unknown path {path}'})

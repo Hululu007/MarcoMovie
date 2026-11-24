@@ -235,6 +235,7 @@ public final class LiteProbe extends Instrumentation {
             if (extended) {
                 runExtended059Checks();
                 runRound2ReworkChecks();
+                runRound3ReworkChecks();
                 newChecksCount = count - baselineCount;
             }
 
@@ -2463,5 +2464,621 @@ public final class LiteProbe extends Instrumentation {
                         a.onBackPressed();
                     }
                 });
+    }
+
+    private static View findChildContainingText(View root, String needle) {
+        if (root instanceof android.widget.TextView
+                && ((android.widget.TextView) root).getText().toString().contains(needle)) {
+            return root;
+        }
+        if (root instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) root;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View found = findChildContainingText(g.getChildAt(i), needle);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private void runRound3ReworkChecks() throws Exception {
+        final String base = "http://10.0.2.2:8773";
+
+        // === R3 Item 1 (P1): Preserve unattributed legacy history/favorites when only A is loaded but B exists in saved data ===
+        importConfigViaPairing(base + "/config-r3-only-dup1");
+        final String apiA = base + "/cms-dup1";
+        final String apiB = base + "/cms-dup2";
+        LiteStore.clearHistory(a);
+        LiteStore.clearFavorites(a);
+        LiteStore.setTombstonesRaw(a, "");
+        String cloudAllThree =
+                new JSONObject()
+                        .put("schema", "marco-movie-sync")
+                        .put("version", 2)
+                        .put(
+                                "watch_history",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "dup_cms")
+                                                        .put("siteApi", apiA)
+                                                        .put("id", "100")
+                                                        .put("title", "甲站电影")
+                                                        .put("episode", "第1集")
+                                                        .put("position", 11000)
+                                                        .put("updated", 11L))
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "dup_cms")
+                                                        .put("siteApi", apiB)
+                                                        .put("id", "100")
+                                                        .put("title", "乙站剧集")
+                                                        .put("episode", "第1集")
+                                                        .put("position", 12000)
+                                                        .put("updated", 12L))
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "dup_cms")
+                                                        .put("siteApi", "")
+                                                        .put("id", "100")
+                                                        .put("title", "旧未归属片")
+                                                        .put("episode", "第1集")
+                                                        .put("position", 10000)
+                                                        .put("updated", 10L)))
+                        .put(
+                                "favorites",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "dup_cms")
+                                                        .put("siteApi", apiA)
+                                                        .put("id", "100")
+                                                        .put("title", "甲站电影")
+                                                        .put("updated", 11L))
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "dup_cms")
+                                                        .put("siteApi", apiB)
+                                                        .put("id", "100")
+                                                        .put("title", "乙站剧集")
+                                                        .put("updated", 12L))
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "dup_cms")
+                                                        .put("siteApi", "")
+                                                        .put("id", "100")
+                                                        .put("title", "旧未归属片")
+                                                        .put("updated", 10L)))
+                        .put("tombstones", new JSONObject())
+                        .toString();
+        LiteSync.MergeResult seeded3 = a.mergeAndApplyOnAnyThread(cloudAllThree);
+        check(
+                seeded3.historyCount == 3
+                        && seeded3.favoriteCount == 3
+                        && !a.isUniqueSiteKey("dup_cms"),
+                "R3-1: only-A subscription with saved A/B records marks siteKey ambiguous and preserves all 3 entries");
+
+        // Save A progress + unfavorite A -> B and unattributed "" MUST survive; no bare tombstone written
+        LiteStore.HistoryEntry updHistA = new LiteStore.HistoryEntry();
+        updHistA.siteKey = "dup_cms";
+        updHistA.siteName = "同键甲站";
+        updHistA.siteApi = apiA;
+        updHistA.vodId = "100";
+        updHistA.vodName = "甲站电影";
+        updHistA.epName = "第1集";
+        updHistA.epUrl = base + "/video.mp4";
+        updHistA.positionMs = 15000;
+        updHistA.updatedAt = 50L;
+        boolean uiUnique = a.isUniqueSiteKey("dup_cms");
+        LiteStore.saveHistory(a, updHistA, uiUnique);
+        LiteStore.FavoriteEntry favEntryA = new LiteStore.FavoriteEntry();
+        favEntryA.siteKey = "dup_cms";
+        favEntryA.siteName = "同键甲站";
+        favEntryA.siteApi = apiA;
+        favEntryA.vodId = "100";
+        favEntryA.vodName = "甲站电影";
+        LiteStore.toggleFavorite(a, favEntryA, uiUnique);
+        a.recordFavoriteToggleTombstone("dup_cms", apiA, "100", false, uiUnique);
+        JSONObject tombsAfterUnfav = new JSONObject(LiteStore.getTombstonesRaw(a));
+        check(
+                LiteStore.getHistory(a).size() == 3
+                        && LiteStore.getFavorites(a).size() == 2
+                        && tombsAfterUnfav.has("fav:" + LiteSync.itemKey("dup_cms", apiA, "100"))
+                        && !tombsAfterUnfav.has("fav:" + LiteSync.itemKey("dup_cms", "", "100")),
+                "R3-1: saving A progress & unfavoriting A under only-A config preserves B and unattributed legacy record without bare tombstone");
+
+        // Restore A+B subscription and replay old cloud twice -> only A removed, B & unattributed "" survive
+        importConfigViaPairing(base + "/config-dup-key");
+        LiteSync.MergeResult repA = a.mergeAndApplyOnAnyThread(cloudAllThree);
+        LiteSync.MergeResult repB = a.mergeAndApplyOnAnyThread(cloudAllThree);
+        check(
+                repA.favoriteCount == 2
+                        && repB.favoriteCount == 2
+                        && !LiteStore.containsFavorite(repB.favoritesJson, "dup_cms", apiA, "100", false)
+                        && LiteStore.containsFavorite(repB.favoritesJson, "dup_cms", apiB, "100", false)
+                        && LiteStore.containsFavorite(repB.favoritesJson, "dup_cms", "", "100", false),
+                "R3-1: restoring A+B subscription and replaying old cloud twice keeps B and unattributed legacy favorite");
+
+        // === R3 Item 2 (P1): Bare URL sequential labels & resume ep2; same-name shared-URL line B resume; S02E02 & EP2->EP3 switch ===
+        importConfigViaPairing(base + "/config-r3-cases");
+        final LiteCatalog.Site r3RouteSite = findSiteByKey("r3_rename_route");
+        check(r3RouteSite != null && r3RouteSite.supported, "R3-2/3: loaded r3_rename_route site");
+
+        // 2a: Bare URL array labels 第1集 / 第2集 -> play 2nd (video2.mp4) -> resume button requests video2.mp4 & seeks
+        final JSONObject bareVod =
+                new JSONObject()
+                        .put("vod_id", "r3_bare_arr")
+                        .put("vod_name", "裸URL数组测试")
+                        .put(
+                                "vod_play_list",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put(
+                                                                "player_info",
+                                                                new JSONObject()
+                                                                        .put("show", "HD")
+                                                                        .put("from", "plain"))
+                                                        .put(
+                                                                "urls",
+                                                                new JSONArray()
+                                                                        .put(base + "/video.mp4")
+                                                                        .put(base + "/video2.mp4"))));
+        final List<LiteActivity.PlayLine> barePl = LiteActivity.extractPlayLines(bareVod, "");
+        check(
+                barePl.size() == 1
+                        && barePl.get(0).episodes.size() == 2
+                        && "第1集".equals(barePl.get(0).episodes.get(0).name)
+                        && "第2集".equals(barePl.get(0).episodes.get(1).name),
+                "R3-2a: bare URL array names episodes 第1集 / 第2集 sequentially on API14");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = r3RouteSite;
+                        a.activeDetailLine = 0;
+                        a.showDetail(bareVod);
+                        LiteActivity.EpisodeItem ep2 = barePl.get(0).episodes.get(1);
+                        a.playingEpisodeIndex = ep2.originalIndex;
+                        a.play(ep2.url, ep2.name);
+                    }
+                });
+        check(waitReady(25000), "R3-2a: bare URL episode 2 prepared");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.player.seekTo(12000);
+                    }
+                });
+        SystemClock.sleep(1600);
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                        a.activeDetailLine = -1;
+                        a.showDetail(bareVod);
+                    }
+                });
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        View resumeBtn = findChildContainingText(a.page, "续播");
+                        if (resumeBtn == null) throw new RuntimeException("missing resume button");
+                        resumeBtn.performClick();
+                    }
+                });
+        check(waitReady(25000), "R3-2a: clicking resume after bare URL ep2 prepared");
+        SystemClock.sleep(800);
+        final int[] bareResumedPos = new int[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        bareResumedPos[0] = a.player != null ? a.player.getCurrentPosition() : 0;
+                    }
+                });
+        JSONArray bareLogs = fetchServerLogs();
+        boolean sawVideo2 = false, sawVideo1 = false;
+        for (int i = 0; i < bareLogs.length(); i++) {
+            String p = bareLogs.getJSONObject(i).optString("path");
+            if ("/video2.mp4".equals(p)) sawVideo2 = true;
+            if ("/video.mp4".equals(p)) sawVideo1 = true;
+        }
+        check(
+                sawVideo2
+                        && !sawVideo1
+                        && (base + "/video2.mp4").equals(a.activeSession.streamUrl)
+                        && bareResumedPos[0] >= 9000,
+                "R3-2a: resume button requests /video2.mp4 (not /video.mp4) and restores progress ("
+                        + bareResumedPos[0]
+                        + "ms)");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // 2b: Same display name '高清' + same raw URL across lines A & B -> watch B -> reopen detail selects B & resumes /r3-clip-b.mp4
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = r3RouteSite;
+                        a.detail("r3_rr_1");
+                    }
+                });
+        check(waitDetailId("r3_rr_1", 10000), "R3-2b: loaded same-name shared-URL dual-line detail");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.activeDetailLine = 1;
+                        a.showDetail(a.currentDetail);
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000), "R3-2b: line B prepared");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.player.seekTo(11000);
+                    }
+                });
+        SystemClock.sleep(1600);
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                        a.activeDetailLine = -1;
+                        a.showDetail(a.currentDetail);
+                    }
+                });
+        LiteStore.HistoryEntry savedSharedLine =
+                LiteStore.findHistory(a, r3RouteSite.key, r3RouteSite.api, "r3_rr_1", true);
+        check(
+                savedSharedLine != null
+                        && "B".equals(savedSharedLine.lineFrom)
+                        && a.activeDetailLine == 1,
+                "R3-2b: history persisted lineFrom=B and reopening detail restored line B (idx="
+                        + a.activeDetailLine
+                        + ")");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        View resumeBtn = findChildContainingText(a.page, "续播");
+                        if (resumeBtn == null) throw new RuntimeException("missing resume button");
+                        resumeBtn.performClick();
+                    }
+                });
+        check(waitReady(25000), "R3-2b: clicking resume on restored line B prepared");
+        SystemClock.sleep(800);
+        final int[] sharedResumedPos = new int[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        sharedResumedPos[0] = a.player != null ? a.player.getCurrentPosition() : 0;
+                    }
+                });
+        JSONArray sharedLogs = fetchServerLogs();
+        boolean sawR3ParseB = false, sawR3ClipB = false, sawR3ParseA = false, sawR3ClipA = false;
+        for (int i = 0; i < sharedLogs.length(); i++) {
+            String p = sharedLogs.getJSONObject(i).optString("path");
+            if ("/r3-parse-b".equals(p)) sawR3ParseB = true;
+            if ("/r3-clip-b.mp4".equals(p)) sawR3ClipB = true;
+            if ("/r3-parse-a".equals(p)) sawR3ParseA = true;
+            if ("/r3-clip-a.mp4".equals(p)) sawR3ClipA = true;
+        }
+        check(
+                sawR3ParseB
+                        && sawR3ClipB
+                        && !sawR3ParseA
+                        && !sawR3ClipA
+                        && sharedResumedPos[0] >= 8000,
+                "R3-2b: resume hits /r3-parse-b + /r3-clip-b.mp4 (0 /r3-parse-a) with restored progress ("
+                        + sharedResumedPos[0]
+                        + "ms)");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // 2c: Cross-season S02E02->[S01E02,S01E03] and singleton [EP2]->[EP3] open episode picker without jumping
+        final JSONObject conflictVod =
+                new JSONObject()
+                        .put("vod_id", "r3_conflict")
+                        .put("vod_name", "R3换线冲突测试")
+                        .put("vod_play_from", "S2$$$S1$$$SingleA$$$SingleB")
+                        .put(
+                                "vod_play_url",
+                                "S02E01$"
+                                        + base
+                                        + "/video.mp4#S02E02$"
+                                        + base
+                                        + "/video2.mp4$$$S01E02$"
+                                        + base
+                                        + "/case15-a1.mp4#S01E03$"
+                                        + base
+                                        + "/case15-b1.mp4$$$EP2$"
+                                        + base
+                                        + "/video2.mp4$$$EP3$"
+                                        + base
+                                        + "/case15-b1.mp4");
+        final List<LiteActivity.PlayLine> confLines = LiteActivity.extractPlayLines(conflictVod, "");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = r3RouteSite;
+                        a.activeDetailLine = 0;
+                        a.showDetail(conflictVod);
+                        a.playingEpisodeIndex = 1;
+                        a.play(base + "/video2.mp4", "S02E02");
+                    }
+                });
+        check(waitReady(25000), "R3-2c: S02E02 prepared");
+        final boolean[] seasonPickerShown = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.switchToPlayLineInPlayer(confLines, 1);
+                        seasonPickerShown[0] =
+                                a.activeInPlayerDialog != null && a.activeInPlayerDialog.isShowing();
+                        a.dismissActiveInPlayerDialog();
+                    }
+                });
+        check(
+                seasonPickerShown[0] && (base + "/video2.mp4").equals(a.activeSession.streamUrl),
+                "R3-2c: switching S02E02 to [S01E02,S01E03] opens episode picker without jumping");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.activeDetailLine = 2;
+                        a.showDetail(conflictVod);
+                        a.playingEpisodeIndex = 0;
+                        a.play(base + "/video2.mp4", "EP2");
+                    }
+                });
+        check(waitReady(25000), "R3-2c: singleton EP2 prepared");
+        final boolean[] singletonPickerShown = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.switchToPlayLineInPlayer(confLines, 3);
+                        singletonPickerShown[0] =
+                                a.activeInPlayerDialog != null && a.activeInPlayerDialog.isShowing();
+                        a.dismissActiveInPlayerDialog();
+                    }
+                });
+        check(
+                singletonPickerShown[0] && (base + "/video2.mp4").equals(a.activeSession.streamUrl),
+                "R3-2c: switching singleton [EP2] to [EP3] opens episode picker without jumping");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // === R3 Item 3 (P1): Matching global parse UA, rename preserving inherited routing, rename preserving type=0 /gateway ===
+        final LiteCatalog.Site r3SameHeaderSite = findSiteByKey("r3_same_header");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = r3SameHeaderSite;
+                        a.detail("r3_wh_1");
+                    }
+                });
+        check(waitDetailId("r3_wh_1", 10000), "R3-3a: loaded r3_same_header detail");
+        main(
+                new Runnable() {
+                    public void run() {
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000) && waitClockAdvances(), "R3-3a: same-endpoint parse played with global UA");
+        JSONArray r3aLogs = fetchServerLogs();
+        boolean sawWh200 = false, sawWh403 = false, sawWhClipB = false;
+        for (int i = 0; i < r3aLogs.length(); i++) {
+            JSONObject row = r3aLogs.getJSONObject(i);
+            String p = row.optString("path");
+            int st = row.optInt("status");
+            if ("/r3-with-header".equals(p)) {
+                if (st == 200 && "ParserMobile/1".equals(row.optString("userAgent"))) sawWh200 = true;
+                if (st == 403) sawWh403 = true;
+            }
+            if ("/r3-clip-b.mp4".equals(p) && (st == 200 || st == 206)) sawWhClipB = true;
+        }
+        check(
+                sawWh200 && sawWhClipB && !sawWh403,
+                "R3-3a: server confirmed /r3-with-header received UA=ParserMobile/1 (0 403s) and played /r3-clip-b.mp4");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // 3b: Rename r3_rename_route (saving all unchanged fields including inherited playUrl) -> line B STILL hits /r3-parse-b & /r3-clip-b.mp4
+        final LiteCatalog.Site r3XmlGwBefore = findSiteByKey("r3_xml_gateway");
+        main(
+                new Runnable() {
+                    public void run() {
+                        try {
+                            JSONObject edits = a.readSiteEditsJson();
+                            JSONObject overrides = edits.optJSONObject("overrides");
+                            if (overrides == null) overrides = new JSONObject();
+                            overrides.put(
+                                    r3RouteSite.siteId(),
+                                    new JSONObject()
+                                            .put("name", "已改名路由站")
+                                            .put("group", r3RouteSite.group)
+                                            .put("api", r3RouteSite.api)
+                                            .put("playUrl", r3RouteSite.playUrl)
+                                            .put("ext", "")
+                                            .put("searchable", false));
+                            overrides.put(
+                                    r3XmlGwBefore.siteId(),
+                                    new JSONObject()
+                                            .put("name", "已改名网关XML站")
+                                            .put("group", r3XmlGwBefore.group)
+                                            .put("api", r3XmlGwBefore.api)
+                                            .put("playUrl", r3XmlGwBefore.playUrl)
+                                            .put("ext", "")
+                                            .put("searchable", false));
+                            edits.put("overrides", overrides);
+                            a.writeSiteEditsJson(edits);
+                            a.loadedConfigSignature = "";
+                            a.loadConfiguredSites();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                });
+        final LiteCatalog.Site r3RenamedRoute = findSiteByKey("r3_rename_route");
+        final LiteCatalog.Site r3RenamedGw = findSiteByKey("r3_xml_gateway");
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = r3RenamedRoute;
+                        a.detail("r3_rr_1");
+                    }
+                });
+        check(
+                waitDetailId("r3_rr_1", 10000) && "已改名路由站".equals(r3RenamedRoute.name),
+                "R3-3b: loaded renamed route site detail");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.activeDetailLine = 1;
+                        a.showDetail(a.currentDetail);
+                        LiteActivity.EpisodeItem ep = a.currentLineEpisodes.get(0);
+                        a.playingEpisodeIndex = ep.originalIndex;
+                        a.play(ep.url, ep.name);
+                    }
+                });
+        check(waitReady(25000) && waitClockAdvances(), "R3-3b: renamed site line B prepared & played");
+        JSONArray r3bLogs = fetchServerLogs();
+        boolean sawRenB = false, sawRenClipB = false, sawRenA = false, sawRenClipA = false;
+        for (int i = 0; i < r3bLogs.length(); i++) {
+            String p = r3bLogs.getJSONObject(i).optString("path");
+            if ("/r3-parse-b".equals(p)) sawRenB = true;
+            if ("/r3-clip-b.mp4".equals(p)) sawRenClipB = true;
+            if ("/r3-parse-a".equals(p)) sawRenA = true;
+            if ("/r3-clip-a.mp4".equals(p)) sawRenClipA = true;
+        }
+        check(
+                sawRenB && sawRenClipB && !sawRenA && !sawRenClipA,
+                "R3-3b: renaming site preserves inherited parser routing (/r3-parse-b -> /r3-clip-b.mp4, 0 /r3-parse-a)");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.onBackPressed();
+                    }
+                });
+
+        // 3c: Renamed explicit type=0 /r3-gateway still sends ac=videolist (0 ac=detail / 400)
+        clearServerLogs();
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = r3RenamedGw;
+                        a.detail("1");
+                    }
+                });
+        check(
+                waitDetailId("1", 10000)
+                        && r3RenamedGw.type == 0
+                        && "网关XML片".equals(a.currentDetail.optString("vod_name")),
+                "R3-3c: renamed explicit type=0 /r3-gateway loads detail");
+        JSONArray r3cLogs = fetchServerLogs();
+        boolean sawGwVideolist = false, sawGwDetailOr400 = false;
+        for (int i = 0; i < r3cLogs.length(); i++) {
+            JSONObject row = r3cLogs.getJSONObject(i);
+            if ("/r3-gateway".equals(row.optString("path"))) {
+                if (row.optString("query").contains("ac=videolist") && row.optInt("status") == 200) {
+                    sawGwVideolist = true;
+                }
+                if (row.optString("query").contains("ac=detail") || row.optInt("status") == 400) {
+                    sawGwDetailOr400 = true;
+                }
+            }
+        }
+        check(
+                sawGwVideolist && !sawGwDetailOr400,
+                "R3-3c: server confirmed renamed type=0 /r3-gateway sent ac=videolist (200, 0 ac=detail/400)");
+
+        // === R3 Item 4 (P2): Search distinguishes XML error root + JSON 403 w/ empty list from <!DOCTYPE rss> valid zero-hit ===
+        final LiteCatalog.Site sXmlErrList = findSiteByKey("r3_xml_err_list");
+        final LiteCatalog.Site sJson403List = findSiteByKey("r3_json_403_list");
+        final LiteCatalog.Site sDoctypeRss = findSiteByKey("r3_doctype_rss");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sXmlErrList;
+                        a.catalog("测试", "", 1);
+                    }
+                });
+        check(
+                waitStatusContains("加载失败", 10000) && !a.status.getText().toString().contains("零命中"),
+                "R3-4: single-source <error><code>503</code><list/></error> reports failure (not zero-hit)");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sJson403List;
+                        a.catalog("测试", "", 1);
+                    }
+                });
+        check(
+                waitStatusContains("加载失败", 10000) && !a.status.getText().toString().contains("零命中"),
+                "R3-4: single-source JSON 403 with empty list reports failure (not zero-hit)");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.selected = sDoctypeRss;
+                        a.catalog("测试", "", 1);
+                    }
+                });
+        check(
+                waitStatusContains("确实零命中", 10000),
+                "R3-4: single-source <!DOCTYPE rss> valid empty RSS reports true zero-hit on API14");
+
+        importConfigViaPairing(base + "/config-r3-search-all-fail");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.globalSearch("测试");
+                    }
+                });
+        check(
+                waitStatusContains("全部失败", 10000),
+                "R3-4: global search on XML error-with-list + JSON 403-with-list reports all-failed");
+
+        importConfigViaPairing(base + "/config-r3-search-partial-fail");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.globalSearch("测试");
+                    }
+                });
+        check(
+                waitStatusContains("1 个正常无命中", 10000) && waitStatusContains("2 个失败", 2000),
+                "R3-4: global search with <!DOCTYPE rss> empty + 2 error-with-list sites reports partial failure");
+
+        importConfigViaPairing(base + "/config-r3-search-doctype-zero");
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.globalSearch("测试");
+                    }
+                });
+        check(
+                waitStatusContains("确实零命中", 10000),
+                "R3-4: global search on <!DOCTYPE rss> valid empty RSS reports true zero-hit");
     }
 }

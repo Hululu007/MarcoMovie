@@ -257,8 +257,8 @@ def main():
         print(out.strip())
         # Pin the exact check count so accidentally skipped or deleted checks fail CI;
         # update this number in lockstep whenever checks are added to or removed from LiteJvmChecks.java.
-        assert 'PASS 256 TV Lite JVM checks (194 baseline + 62 new 0.5.9 regressions [37 R1-stage + 25 R2-rework]; 0 failed, 0 skipped)' in out, (
-            f'Expected 256 TV Lite JVM checks (194 baseline + 62 new), got: {out.strip()}'
+        assert 'PASS 268 TV Lite JVM checks (194 baseline + 74 new 0.5.9 regressions [37 R1-stage + 25 R2-rework + 12 R3-rework]; 0 failed, 0 skipped)' in out, (
+            f'Expected 268 TV Lite JVM checks (194 baseline + 74 new), got: {out.strip()}'
         )
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteCredentialProbe', capture=True).strip())
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteTlsChecks', capture=True).strip())
