@@ -433,16 +433,30 @@ final class CrashReportStore {
                                 + " (status="
                                 + info.getStatus()
                                 + (desc.isEmpty() ? ")" : ", " + desc + ")");
-                r.stackTrace =
-                        "ProcessExitReason: "
-                                + reason
-                                + "\nStatus/Signal: "
-                                + info.getStatus()
-                                + "\nPSS(KB): "
-                                + info.getPss()
-                                + " / RSS(KB): "
-                                + info.getRss()
-                                + (desc.isEmpty() ? "" : ("\nDescription: " + desc));
+                String traceSummary = readSanitizedExitTrace(info);
+                int configuredEngine = prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+                StringBuilder traceBuf = new StringBuilder();
+                traceBuf.append("ProcessExitReason: ")
+                        .append(reason)
+                        .append("\nStatus/Signal: ")
+                        .append(info.getStatus())
+                        .append("\nPSS(KB): ")
+                        .append(info.getPss())
+                        .append(" / RSS(KB): ")
+                        .append(info.getRss())
+                        .append("\nConfiguredEngine: ")
+                        .append(configuredEngine)
+                        .append(" (mpvAvailable=")
+                        .append(MpvPlayer.isAvailable())
+                        .append(")");
+                if (!desc.isEmpty()) {
+                    traceBuf.append("\nDescription: ").append(desc);
+                }
+                if (!traceSummary.isEmpty()) {
+                    traceBuf.append("\n--- Native/System Trace (sanitized) ---\n")
+                            .append(traceSummary);
+                }
+                r.stackTrace = traceBuf.toString();
                 r.fingerprint =
                         computeFingerprint(
                                 kind, "reason_" + reason + "_sig_" + info.getStatus(), desc);
@@ -453,6 +467,103 @@ final class CrashReportStore {
                 prefs.edit().putLong(Prefs.CRASH_LAST_EXIT_TS, newestTs).apply();
             }
         }
+
+        private static String readSanitizedExitTrace(ApplicationExitInfo info) {
+            if (info == null || Build.VERSION.SDK_INT < 30) return "";
+            try (java.io.InputStream in = info.getTraceInputStream()) {
+                if (in == null) return "";
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[4096];
+                int n;
+                int limit = 128 * 1024;
+                while ((n = in.read(buf)) > 0 && out.size() < limit) {
+                    int keep = Math.min(n, limit - out.size());
+                    out.write(buf, 0, keep);
+                }
+                return extractSanitizedNativeTrace(out.toByteArray());
+            } catch (Throwable ignored) {
+                return "";
+            }
+        }
+    }
+
+    /**
+     * Extracts bounded, sanitized diagnostic lines (signal, abort message, shared-library frames,
+     * and build-id tokens) from either plain-text ANR/tombstone traces or Android 12+ protobuf
+     * native tombstone streams returned by {@code ApplicationExitInfo.getTraceInputStream()}.
+     */
+    static String extractSanitizedNativeTrace(byte[] rawTrace) {
+        if (rawTrace == null || rawTrace.length == 0) return "";
+        int printable = 0;
+        int sampleLen = Math.min(rawTrace.length, 512);
+        for (int i = 0; i < sampleLen; i++) {
+            int b = rawTrace[i] & 0xff;
+            if (b == '\n' || b == '\r' || b == '\t' || (b >= 32 && b < 127)) printable++;
+        }
+        StringBuilder out = new StringBuilder();
+        if (printable >= sampleLen * 8 / 10) {
+            String text = new String(rawTrace, StandardCharsets.UTF_8);
+            String[] lines = text.split("\\r?\\n");
+            int kept = 0;
+            for (String line : lines) {
+                String clean = sanitize(line).trim();
+                if (clean.isEmpty()) continue;
+                out.append(clean).append('\n');
+                if (++kept >= 48 || out.length() >= 3500) break;
+            }
+            return out.toString().trim();
+        }
+        // Binary protobuf tombstone: extract printable ASCII tokens that identify signal, abort
+        // cause, library paths (.so), symbol names, or build IDs while redacting private paths.
+        java.util.LinkedHashSet<String> tokens = new java.util.LinkedHashSet<>();
+        StringBuilder run = new StringBuilder();
+        for (int i = 0; i <= rawTrace.length; i++) {
+            int b = i < rawTrace.length ? (rawTrace[i] & 0xff) : 0;
+            if (b >= 32 && b < 127) {
+                run.append((char) b);
+            } else {
+                if (run.length() >= 4) {
+                    String token = sanitize(run.toString()).trim();
+                    if (isUsefulNativeTraceToken(token)) {
+                        tokens.add(token);
+                        if (tokens.size() >= 64) break;
+                    }
+                }
+                run.setLength(0);
+            }
+        }
+        for (String token : tokens) {
+            if (out.length() + token.length() + 1 > 3500) break;
+            out.append(token).append('\n');
+        }
+        return out.toString().trim();
+    }
+
+    private static boolean isUsefulNativeTraceToken(String token) {
+        if (token == null || token.length() < 4 || token.length() > 240) return false;
+        String lower = token.toLowerCase(Locale.ROOT);
+        if (lower.contains(".so")
+                || lower.contains("libmpv")
+                || lower.contains("libplayer")
+                || lower.contains("libplacebo")
+                || lower.contains("libnode")
+                || lower.contains("libpython")
+                || lower.contains("libquickjs")
+                || lower.contains("libav")
+                || lower.contains("libc.so")
+                || lower.contains("sigabrt")
+                || lower.contains("sigsegv")
+                || lower.contains("abort")
+                || lower.contains("fatal")
+                || lower.contains("fortify")
+                || lower.contains("pthread")
+                || lower.contains("mpv_")
+                || lower.contains("java_dev_jdtech")
+                || lower.contains("buildid")
+                || lower.contains("build_id")) {
+            return true;
+        }
+        return token.matches("[0-9a-fA-F]{32,64}");
     }
 
     static synchronized void saveReport(File filesDir, CrashReport report) {

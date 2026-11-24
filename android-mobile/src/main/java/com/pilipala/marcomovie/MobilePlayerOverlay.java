@@ -34,8 +34,8 @@ final class MobilePlayerOverlay {
     private boolean closed;
     private long lastRxBytes = -1;
     private long lastRxTimeMs = 0;
-    private int autoIntroEndSec = -1;
-    private boolean autoIntroApplied;
+    private long episodeToken = 1L;
+    private final IntroSkipEvaluator skipEvaluator = new IntroSkipEvaluator();
     private final SimpleDateFormat clockFmt = new SimpleDateFormat("HH:mm", Locale.US);
 
     private final Runnable pulse =
@@ -98,34 +98,64 @@ final class MobilePlayerOverlay {
             a.playbackLayer.addView(miniBar, miniLp);
         }
 
-        // 4. Community Intro Skip via TMDB + TheIntroDB when manual SKIP_INTRO is 0
-        if (video != null
+        // 4. Community Intro / Credits Skip via TMDB + TheIntroDB v4 (independent of mini-bar)
+        int manualIntro = Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_INTRO, 0));
+        int manualOutro = Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_OUTRO, 0));
+        final long epTok = ++episodeToken;
+        // Fullscreen PlaybackControls already handles manual SKIP_INTRO / SKIP_OUTRO; pass
+        // positive sentinel values only when manual skip is configured so community intro/credits
+        // never override manual settings, while applying community segments when manual is 0.
+        skipEvaluator.resetForEpisode(
+                epTok,
+                manualIntro > 0 ? Integer.MAX_VALUE / 2000 : 0,
+                manualOutro > 0 ? Integer.MAX_VALUE / 2000 : 0);
+
+        String siteKey = site == null || site.key == null ? "" : site.key;
+        boolean offlineOrLive = "live".equals(siteKey) || "download".equals(siteKey);
+        if (!offlineOrLive
+                && video != null
                 && ep != null
-                && !"live".equals(site == null ? "" : site.key)
-                && a.prefs.getInt(Prefs.SKIP_INTRO, 0) <= 0
-                && a.mobilePrefs().getBoolean(Prefs.THEINTRODB_AUTO_SKIP, true)
-                && TmdbService.isConfigured(a)) {
-            final SeasonParser.SeasonMeta sm = SeasonParser.parseSeasonMeta(video.title);
-            final EpisodeNameCleaner.CleanedEpisode ce =
-                    EpisodeNameCleaner.clean(ep.name, video.title, 1);
-            TmdbService.enrichDetailAsync(
-                    a,
-                    video.title,
-                    sm.seasonNumber,
-                    meta -> {
-                        if (meta == null || closed) return;
-                        TmdbService.lookupIntroDbAsync(
-                                a,
-                                meta.tmdbId,
-                                meta.isTv,
-                                sm.seasonNumber,
-                                ce.episodeNumber,
-                                ts -> {
-                                    if (ts != null && ts.introEndSec > 0 && !closed) {
-                                        autoIntroEndSec = ts.introEndSec;
-                                    }
-                                });
-                    });
+                && (manualIntro <= 0 || manualOutro <= 0)
+                && a.mobilePrefs().getBoolean(Prefs.THEINTRODB_AUTO_SKIP, true)) {
+            int handedTmdbId = ep.media != null ? ep.media.optInt("_tmdbId", 0) : 0;
+            if (handedTmdbId > 0) {
+                boolean handedIsTv = ep.media.optBoolean("_isTv", true);
+                int handedSeason = Math.max(1, ep.media.optInt("_seasonNum", 1));
+                int handedEp = Math.max(1, ep.media.optInt("_epNum", 1));
+                TmdbService.lookupIntroDbAsync(
+                        a,
+                        handedTmdbId,
+                        handedIsTv,
+                        handedSeason,
+                        handedEp,
+                        ts -> {
+                            if (ts != null && !closed) {
+                                skipEvaluator.applyCommunityTimestamps(epTok, ts);
+                            }
+                        });
+            } else if (TmdbService.isConfigured(a)) {
+                final SeasonParser.SeasonMeta sm = SeasonParser.parseSeasonMeta(video.title);
+                final EpisodeNameCleaner.CleanedEpisode ce =
+                        EpisodeNameCleaner.clean(ep.name, video.title, 1);
+                TmdbService.enrichDetailAsync(
+                        a,
+                        video.title,
+                        sm.seasonNumber,
+                        meta -> {
+                            if (meta == null || closed) return;
+                            TmdbService.lookupIntroDbAsync(
+                                    a,
+                                    meta.tmdbId,
+                                    meta.isTv,
+                                    sm.seasonNumber,
+                                    ce.episodeNumber,
+                                    ts -> {
+                                        if (ts != null && !closed) {
+                                            skipEvaluator.applyCommunityTimestamps(epTok, ts);
+                                        }
+                                    });
+                        });
+            }
         }
 
         a.ui.post(pulse);
@@ -163,29 +193,42 @@ final class MobilePlayerOverlay {
             }
         }
 
+        int dur = 0;
+        int pos = 0;
+        if (!a.isLive() && a.prepared && a.player != null) {
+            dur = a.player.getDuration();
+            pos = a.player.getCurrentPosition();
+            // Community intro/credits skip runs regardless of MINI_PROGRESS_BAR visibility.
+            boolean hasNext =
+                    a.activeLine != null
+                            && a.activeEpisode != null
+                            && a.activeLine.episodes != null
+                            && a.activeLine.episodes.indexOf(a.activeEpisode) >= 0
+                            && a.activeLine.episodes.indexOf(a.activeEpisode) + 1
+                                    < a.activeLine.episodes.size();
+            boolean autoNext = a.prefs.getBoolean(Prefs.AUTO_NEXT, true);
+            IntroSkipEvaluator.Decision decision =
+                    skipEvaluator.evaluate(pos, dur, hasNext, autoNext);
+            if (decision.action == IntroSkipEvaluator.ACTION_SEEK && decision.targetMs >= 0L) {
+                a.player.seekTo((int) decision.targetMs);
+                if (!decision.toastMessage.isEmpty()) a.toast(decision.toastMessage);
+            } else if (decision.action == IntroSkipEvaluator.ACTION_NEXT_EPISODE
+                    && a.playbackControls != null) {
+                if (!decision.toastMessage.isEmpty()) a.toast(decision.toastMessage);
+                a.playbackControls.step(1);
+                return;
+            }
+        }
+
         boolean showMini =
                 !a.controlsVisible
                         && !a.isLive()
                         && a.prepared
                         && a.player != null
                         && a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true);
-        if (showMini) {
-            int dur = a.player.getDuration();
-            int pos = a.player.getCurrentPosition();
-            if (dur > 0) {
-                miniBar.setFraction(pos / (float) dur);
-                miniBar.setVisibility(View.VISIBLE);
-            } else {
-                miniBar.setVisibility(View.GONE);
-            }
-            if (!autoIntroApplied
-                    && autoIntroEndSec > 0
-                    && pos > 0
-                    && pos < autoIntroEndSec * 1000) {
-                autoIntroApplied = true;
-                a.player.seekTo(autoIntroEndSec * 1000);
-                a.toast("TheIntroDB 自动跳过片头 (" + autoIntroEndSec + "s)");
-            }
+        if (showMini && dur > 0) {
+            miniBar.setFraction(pos / (float) dur);
+            miniBar.setVisibility(View.VISIBLE);
         } else {
             miniBar.setVisibility(View.GONE);
         }

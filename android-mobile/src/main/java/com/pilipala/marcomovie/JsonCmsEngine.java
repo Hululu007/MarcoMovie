@@ -17,6 +17,11 @@ public final class JsonCmsEngine implements SourceEngine {
         return Cms.fetch(Cms.query(site.api, "ac", "list"), site.headers);
     }
 
+    @Override
+    public String homeVideos() throws Exception {
+        return Cms.fetch(Cms.query(site.api, "ac", detailAction(), "pg", "1"), site.headers);
+    }
+
     public String category(String id, int page) throws Exception {
         return category(id, page, java.util.Collections.emptyMap());
     }

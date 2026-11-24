@@ -621,7 +621,7 @@ final class CloudSync {
             if (currentEntries != null) {
                 for (WatchHistory.Entry e : currentEntries) {
                     if (e != null && e.site != null && e.id != null) {
-                        t.putMax("hist:" + e.key(), now);
+                        t.putMax("hist:" + e.key(), Math.max(now, e.updated));
                     }
                 }
             }
@@ -633,10 +633,14 @@ final class CloudSync {
             Tombstones t = read(raw);
             if (itemKey != null && !itemKey.isEmpty()) {
                 if (nowFavorited) {
-                    t.stamps.put("add:" + itemKey, now);
+                    long prevDel = t.get("fav:" + itemKey);
+                    long effAdd = Math.max(now, prevDel + 1L);
+                    t.stamps.put("add:" + itemKey, effAdd);
                     t.stamps.remove("fav:" + itemKey);
                 } else {
-                    t.stamps.put("fav:" + itemKey, now);
+                    long prevAdd = t.get("add:" + itemKey);
+                    long effDel = Math.max(now, prevAdd + 1L);
+                    t.stamps.put("fav:" + itemKey, effDel);
                     t.stamps.remove("add:" + itemKey);
                 }
             }

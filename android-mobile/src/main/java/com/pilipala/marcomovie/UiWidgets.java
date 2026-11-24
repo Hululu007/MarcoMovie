@@ -31,7 +31,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * Shared Liquid Glass surfaces, touch feedback helpers, vector setting icons, iOS switches, and
@@ -362,45 +365,131 @@ final class UiWidgets {
         importTextOrUrl(a, text);
     }
 
+    static byte[] fetchZipBytes(String address) throws Exception {
+        if (!Cms.isHttp(address)) {
+            throw new IOException("只支持 HTTP(S) 地址");
+        }
+        URL current = new URL(Cms.normalizeHttp(address));
+        Map<String, String> forwardedHeaders = new LinkedHashMap<>();
+        forwardedHeaders.put("User-Agent", Cms.USER_AGENT);
+        forwardedHeaders.put("Accept", "*/*");
+        Map<String, Cms.RedirectCookie> redirectCookies = new LinkedHashMap<>();
+
+        for (int hop = 0; hop < 5; hop++) {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new java.io.InterruptedIOException();
+            }
+            HttpURLConnection conn = ProxyAddress.openHttpConnection(current);
+            conn.setInstanceFollowRedirects(false);
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(25000);
+            for (Map.Entry<String, String> entry : forwardedHeaders.entrySet()) {
+                conn.setRequestProperty(entry.getKey(), entry.getValue());
+            }
+
+            try {
+                int status = conn.getResponseCode();
+                List<String> setCookies = conn.getHeaderFields().get("Set-Cookie");
+                if (setCookies == null) {
+                    for (Map.Entry<String, List<String>> entry :
+                            conn.getHeaderFields().entrySet()) {
+                        if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
+                            setCookies = entry.getValue();
+                            break;
+                        }
+                    }
+                }
+                List<Cms.RedirectCookie> newCookies = Cms.parseSetCookies(setCookies, current);
+                for (Cms.RedirectCookie cookie : newCookies) {
+                    redirectCookies.put(
+                            cookie.domain
+                                    + "|"
+                                    + cookie.hostOnly
+                                    + "|"
+                                    + cookie.path
+                                    + "|"
+                                    + cookie.name,
+                            cookie);
+                }
+
+                if (status == 301
+                        || status == 302
+                        || status == 303
+                        || status == 307
+                        || status == 308) {
+                    String loc = conn.getHeaderField("Location");
+                    if (loc == null || loc.trim().isEmpty()) {
+                        throw new IOException("重定向缺少地址");
+                    }
+                    URL target = new URL(current, loc.trim());
+                    if (!Cms.isHttp(target.toString())) {
+                        throw new IOException("不支持此重定向协议: " + target.getProtocol());
+                    }
+                    if (target.getUserInfo() != null) {
+                        throw new IOException("来源重定向不能注入登录凭据");
+                    }
+                    forwardedHeaders =
+                            Cms.inheritedHeaders(
+                                    current.toString(), target.toString(), forwardedHeaders);
+                    Cms.mergeRedirectCookies(forwardedHeaders, redirectCookies.values(), target);
+                    current = target;
+                    continue;
+                }
+
+                if (status < 200 || status >= 300) {
+                    throw new IOException("远程服务器返回 HTTP " + status);
+                }
+
+                try (InputStream in = conn.getInputStream();
+                        ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        if (bos.size() + n > 28 * 1024 * 1024) {
+                            throw new IOException("远程包超过 28 MB 限制");
+                        }
+                        bos.write(buf, 0, n);
+                    }
+                    return bos.toByteArray();
+                }
+            } finally {
+                conn.disconnect();
+            }
+        }
+        throw new IOException("来源重定向次数过多");
+    }
+
     static void importTextOrUrl(MainActivity a, String rawInput) {
         final String pasted = rawInput == null ? "" : rawInput.trim();
         if (pasted.isEmpty()) {
             a.toast("请输入有效的配置网址或源码内容");
             return;
         }
+        final long importSeq = SourceController.beginConfigImport(a);
+        final boolean snapshotPrivate = a.privateMode;
         a.toast("正在读取并解析配置…");
         a.worker.execute(
                 () -> {
                     try {
-                        String origin = a.configOrigin;
+                        String origin = "";
                         String rawJson = pasted;
                         if (Cms.isHttp(pasted)) {
                             origin = Cms.normalizeHttp(pasted);
                             String lowerOrigin = origin.toLowerCase(Locale.ROOT);
                             if (lowerOrigin.endsWith(".zip") || lowerOrigin.contains(".zip?")) {
-                                HttpURLConnection conn =
-                                        (HttpURLConnection) new URL(origin).openConnection();
-                                conn.setConnectTimeout(15000);
-                                conn.setReadTimeout(25000);
-                                conn.setRequestProperty("User-Agent", Cms.USER_AGENT);
-                                byte[] bytes;
-                                try (InputStream in = conn.getInputStream();
-                                        ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-                                    byte[] buf = new byte[8192];
-                                    int n;
-                                    while ((n = in.read(buf)) != -1) {
-                                        if (bos.size() + n > 28 * 1024 * 1024)
-                                            throw new IOException("远程包超过 28 MB 限制");
-                                        bos.write(buf, 0, n);
-                                    }
-                                    bytes = bos.toByteArray();
-                                } finally {
-                                    conn.disconnect();
-                                }
+                                byte[] bytes = fetchZipBytes(origin);
                                 LocalSourcePackage pkg =
                                         LocalSourcePackage.open(a.getFilesDir(), bytes);
                                 a.ui.post(
                                         () -> {
+                                            if (a.isFinishing()
+                                                    || a.isDestroyed()
+                                                    || a.switchingPrivacy
+                                                    || a.privateMode != snapshotPrivate
+                                                    || !SourceController.isCurrentConfigImport(
+                                                            a, importSeq)) {
+                                                return;
+                                            }
                                             try {
                                                 SourceController.applyLocalPackage(a, pkg);
                                             } catch (Exception ex) {
@@ -429,9 +518,16 @@ final class UiWidgets {
                             final String savedOrigin = origin;
                             a.ui.post(
                                     () -> {
+                                        if (a.isFinishing()
+                                                || a.isDestroyed()
+                                                || a.switchingPrivacy
+                                                || a.privateMode != snapshotPrivate
+                                                || !SourceController.isCurrentConfigImport(
+                                                        a, importSeq)) {
+                                            return;
+                                        }
                                         try {
                                             a.saveConfig(parsed, savedOrigin);
-                                            a.toast("配置导入成功（共 " + parsed.sites.size() + " 个片源）");
                                         } catch (Exception ex) {
                                             a.toast("保存配置失败：" + a.message(ex));
                                         }
@@ -449,8 +545,8 @@ final class UiWidgets {
                             }
                             throw parseEx;
                         }
-                    } catch (Exception e) {
-                        a.ui.post(() -> a.toast("配置读取失败：" + a.message(e)));
+                    } catch (Throwable e) {
+                        a.ui.post(() -> a.toast(SourceController.stageMessage("配置读取失败", e)));
                     }
                 });
     }

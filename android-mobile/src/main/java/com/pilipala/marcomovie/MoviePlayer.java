@@ -1268,8 +1268,25 @@ public class MoviePlayer {
                     if (!aCodec.isEmpty()) sb.append(" · ").append(aCodec);
                     String container = shortContainerFormat();
                     if (!container.isEmpty()) sb.append(" · ").append(container);
+                    boolean singleFallbackFromMpv =
+                            options != null
+                                    && options.optBoolean(
+                                            PlaybackController
+                                                    .MEDIA_KEY_SINGLE_PLAY_FALLBACK_FROM_MPV);
+                    if (ijkMode) {
+                        sb.append(" · IJK");
+                    } else if (singleFallbackFromMpv) {
+                        sb.append(" · Media3（单次回退）");
+                    } else {
+                        sb.append(" · Media3");
+                    }
                     return sb.toString();
                 });
+    }
+
+    /** Short display label for the actual active player kernel shown in player chrome & menus. */
+    public String activeEngineShortLabel() {
+        return ijkMode ? "IJK" : "Media3";
     }
 
     public java.util.List<String> mediaBadges() {
@@ -1430,7 +1447,18 @@ public class MoviePlayer {
 
     public String playbackInfo() {
         org.json.JSONObject d = decoderDiagnostics();
-        return (ijkMode ? "IJK 兼容模式 (Media3 + FFmpeg)\n视频：" : "Exo (Media3)\n视频：")
+        boolean singleFallbackFromMpv =
+                !ijkMode
+                        && options != null
+                        && options.optBoolean(
+                                PlaybackController.MEDIA_KEY_SINGLE_PLAY_FALLBACK_FROM_MPV);
+        String header =
+                ijkMode
+                        ? "IJK 兼容模式 (Media3 + FFmpeg)\n视频："
+                        : (singleFallbackFromMpv
+                                ? "Exo (Media3 · 本次回退，全局内核 MPV)\n视频："
+                                : "Exo (Media3)\n视频：");
+        return header
                 + d.optString("video_mime", "尚未识别")
                 + " · "
                 + d.optString("video_decoder", "尚未启动")

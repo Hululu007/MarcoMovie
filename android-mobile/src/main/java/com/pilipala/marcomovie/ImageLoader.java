@@ -26,8 +26,19 @@ import java.util.concurrent.ThreadPoolExecutor;
  * rendering extracted from {@link MainActivity}.
  */
 final class ImageLoader {
-    private static final java.util.Map<String, java.util.List<ImageView>> IN_FLIGHT =
-            new java.util.HashMap<>();
+    private static final class InFlightEntry {
+        final int ticket;
+        final java.util.List<ImageView> waiters = new java.util.ArrayList<>(2);
+
+        InFlightEntry(int ticket, ImageView first) {
+            this.ticket = ticket;
+            if (first != null) this.waiters.add(first);
+        }
+    }
+
+    private static final java.util.Map<String, InFlightEntry> IN_FLIGHT = new java.util.HashMap<>();
+    private static final java.util.WeakHashMap<ImageView, Boolean> DETAIL_FLAGS =
+            new java.util.WeakHashMap<>();
 
     private ImageLoader() {}
 
@@ -49,9 +60,45 @@ final class ImageLoader {
         }
     }
 
+    /**
+     * Reloads any attached {@link ImageView} whose in-flight poster fetch was cancelled while
+     * navigating to another screen (e.g. Home -> Detail -> Back to cached Home).
+     */
+    static void resumeMissingPosters(MainActivity a, View view) {
+        if (a == null || view == null || a.isFinishing()) return;
+        if (view instanceof ImageView) {
+            ImageView iv = (ImageView) view;
+            Object tag = iv.getTag();
+            if (iv.getDrawable() == null && tag instanceof String) {
+                String url = (String) tag;
+                if (Cms.isHttp(url) || url.startsWith("catpaw://")) {
+                    boolean detail;
+                    synchronized (DETAIL_FLAGS) {
+                        detail = Boolean.TRUE.equals(DETAIL_FLAGS.get(iv));
+                    }
+                    poster(a, url, iv, detail);
+                }
+            }
+            return;
+        }
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                resumeMissingPosters(a, group.getChildAt(i));
+            }
+        }
+    }
+
     static void poster(MainActivity a, String address, ImageView image, boolean detail) {
         String normalized = normalizeArtworkAddress(address);
+        Object previousTag = image.getTag();
         image.setTag(normalized);
+        synchronized (DETAIL_FLAGS) {
+            DETAIL_FLAGS.put(image, detail);
+        }
+        if (!normalized.equals(previousTag)) {
+            image.setImageDrawable(null);
+        }
         if (!Cms.isHttp(normalized) && !normalized.startsWith("catpaw://")) return;
         address = normalized;
         final int ticket = a.generation;
@@ -67,15 +114,25 @@ final class ImageLoader {
             return;
         }
         Bitmap preview = a.images.get(address);
-        if ((preview == null || preview.isRecycled()) && detail) {
+        if (preview == null || preview.isRecycled()) {
             String gridKey =
                     ImageDecodePolicy.cacheKey(
                             address,
                             ImageDecodePolicy.targetWidth(0, false),
                             ImageDecodePolicy.targetHeight(0, false),
-                            true,
+                            initialCrop,
                             false);
             preview = a.images.get(gridKey);
+        }
+        if ((preview == null || preview.isRecycled()) && !detail) {
+            String detailKey =
+                    ImageDecodePolicy.cacheKey(
+                            address,
+                            ImageDecodePolicy.targetWidth(0, true),
+                            ImageDecodePolicy.targetHeight(0, true),
+                            initialCrop,
+                            true);
+            preview = a.images.get(detailKey);
         }
         if (preview != null && !preview.isRecycled()) {
             image.setImageBitmap(preview);
@@ -94,21 +151,21 @@ final class ImageLoader {
         final int height = ImageDecodePolicy.targetHeight(image.getHeight(), detail);
         final boolean crop = image.getScaleType() == ImageView.ScaleType.CENTER_CROP;
         final String key = ImageDecodePolicy.cacheKey(address, width, height, crop, detail);
+        final String flightKey = ticket + "|" + key;
         Bitmap cached = a.images.get(key);
         if (cached != null && !cached.isRecycled()) {
             image.setImageBitmap(cached);
             if (!a.isTvDevice()) com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
             return;
         }
-        final java.util.List<ImageView> owned = new java.util.ArrayList<>(2);
+        final InFlightEntry owned = new InFlightEntry(ticket, image);
         synchronized (IN_FLIGHT) {
-            java.util.List<ImageView> waiters = IN_FLIGHT.get(key);
-            if (waiters != null) {
-                if (!waiters.contains(image)) waiters.add(image);
+            InFlightEntry existing = IN_FLIGHT.get(flightKey);
+            if (existing != null && existing.ticket == ticket) {
+                if (!existing.waiters.contains(image)) existing.waiters.add(image);
                 return;
             }
-            owned.add(image);
-            IN_FLIGHT.put(key, owned);
+            IN_FLIGHT.put(flightKey, owned);
         }
         Future<?> request =
                 RequestScope.submit(
@@ -116,7 +173,8 @@ final class ImageLoader {
                         () -> {
                             if (ticket != a.generation) {
                                 synchronized (IN_FLIGHT) {
-                                    if (IN_FLIGHT.get(key) == owned) IN_FLIGHT.remove(key);
+                                    if (IN_FLIGHT.get(flightKey) == owned)
+                                        IN_FLIGHT.remove(flightKey);
                                 }
                                 return;
                             }
@@ -163,14 +221,15 @@ final class ImageLoader {
                                     a.images.put(key, bitmap);
                                     final java.util.List<ImageView> targets;
                                     synchronized (IN_FLIGHT) {
-                                        java.util.List<ImageView> removed =
-                                                IN_FLIGHT.get(key) == owned
-                                                        ? IN_FLIGHT.remove(key)
+                                        InFlightEntry removed =
+                                                IN_FLIGHT.get(flightKey) == owned
+                                                        ? IN_FLIGHT.remove(flightKey)
                                                         : null;
                                         targets =
                                                 removed == null
                                                         ? java.util.Collections.singletonList(image)
-                                                        : new java.util.ArrayList<>(removed);
+                                                        : new java.util.ArrayList<>(
+                                                                removed.waiters);
                                     }
                                     a.ui.post(
                                             () -> {
@@ -189,10 +248,15 @@ final class ImageLoader {
                                                 }
                                             });
                                 }
-                            } catch (Throwable ignored) {
+                            } catch (Throwable error) {
+                                if (!(error instanceof java.io.InterruptedIOException)
+                                        && !Thread.currentThread().isInterrupted()) {
+                                    AppLog.w("ImageLoader", "poster load failed", error);
+                                }
                             } finally {
                                 synchronized (IN_FLIGHT) {
-                                    if (IN_FLIGHT.get(key) == owned) IN_FLIGHT.remove(key);
+                                    if (IN_FLIGHT.get(flightKey) == owned)
+                                        IN_FLIGHT.remove(flightKey);
                                 }
                                 if (connection != null) {
                                     RequestScope.detach(connection);

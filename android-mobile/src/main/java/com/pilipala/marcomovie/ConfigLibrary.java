@@ -105,6 +105,67 @@ final class ConfigLibrary {
         }
     }
 
+    /**
+     * Conditionally updates an existing saved subscription only if it still exists in the library
+     * and its stored digest still equals {@code expectedDigest} (when non-empty). Preserves the
+     * latest user-chosen name and selected site key. Returns {@code null} when the subscription was
+     * concurrently deleted or modified so a slow background refresh never resurrects or clobbers
+     * user changes.
+     */
+    Entry updateExistingIfUnchanged(
+            String origin,
+            String expectedDigest,
+            String fallbackName,
+            String newRaw,
+            long updatedAt)
+            throws Exception {
+        synchronized (LOCK) {
+            String source = origin == null ? "" : origin.trim();
+            if (source.isEmpty()) return null;
+            String id = identity(source, newRaw);
+            JSONArray items = index();
+            int position = -1;
+            Entry existing = null;
+            for (int i = 0; i < items.length(); i++) {
+                Entry cur = new Entry(items.getJSONObject(i));
+                if (id.equals(cur.id)) {
+                    position = i;
+                    existing = cur;
+                    break;
+                }
+            }
+            if (existing == null || position < 0) {
+                return null;
+            }
+            if (expectedDigest != null
+                    && !expectedDigest.isEmpty()
+                    && !expectedDigest.equals(existing.digest)) {
+                return null;
+            }
+            String digest = hash(newRaw);
+            long stamp = Math.max(1L, updatedAt);
+            String keptName =
+                    (existing.name != null && !existing.name.isEmpty())
+                            ? existing.name
+                            : (fallbackName == null ? "我的订阅" : fallbackName);
+            String keptSelected = existing.selected == null ? "" : existing.selected;
+            JSONObject value =
+                    new JSONObject()
+                            .put("id", id)
+                            .put("origin", source)
+                            .put("name", keptName)
+                            .put("selected", keptSelected)
+                            .put("digest", digest)
+                            .put("updated", stamp);
+            Entry saved = new Entry(value);
+            File content = content(saved);
+            if (!content.exists()) write(content, newRaw);
+            items.put(position, value);
+            write(new File(directory, "index.json"), items.toString());
+            return saved;
+        }
+    }
+
     boolean remove(String id) throws Exception {
         if (id == null || id.isEmpty()) return false;
         synchronized (LOCK) {

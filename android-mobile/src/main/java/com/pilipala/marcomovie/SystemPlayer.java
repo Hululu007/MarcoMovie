@@ -338,8 +338,14 @@ public final class SystemPlayer extends MoviePlayer {
                     if (!vTag.isEmpty()) sb.append(" · ").append(vTag);
                     String aTag = detectAudioLabel();
                     if (!aTag.isEmpty()) sb.append(" · ").append(aTag);
+                    sb.append(" · 系统");
                     return sb.toString();
                 });
+    }
+
+    @Override
+    public String activeEngineShortLabel() {
+        return "系统";
     }
 
     @Override

@@ -496,7 +496,7 @@ final class MobileSettingsScreen {
                                 a.mobilePrefs()
                                         .edit()
                                         .putInt(Prefs.MOBILE_UI_SCALE_PERCENT, vals[idx])
-                                        .commit();
+                                        .apply();
                                 a.recreate();
                             });
                 });
@@ -660,9 +660,12 @@ final class MobileSettingsScreen {
                 "默认播放器内核",
                 Prefs.PLAYER_ENGINE,
                 new String[] {
-                    "Media3 (ExoPlayer · 均衡稳定)", "Android 系统播放器", "MPV (高画质 / HDR / Anime4K)"
+                    "Media3 (ExoPlayer · 均衡稳定)",
+                    "Android 系统播放器",
+                    "IJK 兼容模式 (直播/旧格式)",
+                    "MPV (高画质 / HDR / Anime4K)"
                 },
-                new int[] {0, 1, 2},
+                new int[] {0, 1, 2, 3},
                 0);
         addMobileToggle(
                 a,
@@ -1045,7 +1048,7 @@ final class MobileSettingsScreen {
                         promptSingleSecret(
                                 shell,
                                 "配置 MDBList API Key",
-                                "前往 mdblist.com 免费获取个人 API Key（仅保存在本机加密偏好中）：",
+                                "前往 mdblist.com 免费获取个人 API Key（保存在本机应用私有偏好中，不加密，不随系统备份或云同步上传）：",
                                 Prefs.SECRET_MDBLIST_API_KEY));
 
         sectionHeader(a, body, "追剧日历与社区账号 (Bangumi / Trakt)");
@@ -1246,7 +1249,7 @@ final class MobileSettingsScreen {
                                 .setPositiveButton(
                                         "恢复默认",
                                         (d, w) -> {
-                                            a.mobilePrefs().edit().clear().commit();
+                                            a.mobilePrefs().edit().clear().apply();
                                             a.recreate();
                                         })
                                 .show());

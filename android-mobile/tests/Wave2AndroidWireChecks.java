@@ -1663,6 +1663,179 @@ public final class Wave2AndroidWireChecks {
         }
     }
 
+    private static final class MutablePlaybackClock implements DanmakuView.Clock {
+        int positionMs;
+        boolean playing;
+
+        MutablePlaybackClock(int positionMs, boolean playing) {
+            this.positionMs = positionMs;
+            this.playing = playing;
+        }
+
+        @Override
+        public int position() {
+            return positionMs;
+        }
+
+        @Override
+        public boolean playing() {
+            return playing;
+        }
+    }
+
+    private static final class RecordingDanmakuView extends DanmakuView {
+        int animationFrames;
+        int delayedRedraws;
+        long lastDelayMs = -1L;
+        int layoutRequests;
+
+        RecordingDanmakuView(Context context, Clock clock) {
+            super(context, clock);
+        }
+
+        @Override
+        public void postInvalidateOnAnimation() {
+            animationFrames++;
+        }
+
+        @Override
+        public void postInvalidateDelayed(long delayMilliseconds) {
+            delayedRedraws++;
+            lastDelayMs = delayMilliseconds;
+        }
+
+        @Override
+        public void requestLayout() {
+            layoutRequests++;
+        }
+    }
+
+    private static void testDanmakuResumesAfterBufferingSeek() {
+        Context ctx = new Context();
+        MutablePlaybackClock clock = new MutablePlaybackClock(4_000, false);
+        RecordingDanmakuView view = new RecordingDanmakuView(ctx, clock);
+        try {
+            view.layout(0, 0, 1920, 1080);
+            view.dispatchAttachedToWindow();
+            view.enabled(true);
+            List<DanmuItem> items = new ArrayList<>();
+            for (int sec = 1; sec <= 60; sec++) {
+                items.add(new DanmuItem("c_" + sec, sec * 1000L, 1, 0xFFFFFF, "弹幕@" + sec + "s"));
+            }
+            view.setLegacyItems(items);
+
+            // 1. Buffering / paused draw must schedule delayed redraw instead of terminating loop.
+            Canvas canvas = new Canvas();
+            view.draw(canvas);
+            checkEq(1, view.delayedRedraws, "danmaku.resume.paused.requestsDelayedRedraw");
+            checkEq(
+                    (int) DanmakuView.PAUSED_REDRAW_DELAY_MS,
+                    (int) view.lastDelayMs,
+                    "danmaku.resume.paused.delayIs250ms");
+            checkEq(0, view.animationFrames, "danmaku.resume.paused.noAnimationFrame");
+
+            // 2. Five consecutive forward/backward seeks with transient buffering -> auto resumes.
+            int[] seekTargets = {12_000, 35_000, 8_000, 48_000, 15_000, 22_000};
+            for (int i = 0; i < seekTargets.length; i++) {
+                int target = seekTargets[i];
+                view.onSeekInitiated();
+                clock.playing = false;
+                clock.positionMs = target;
+                view.onSeekSettled(target);
+
+                int prevDelayed = view.delayedRedraws;
+                view.draw(canvas);
+                checkEq(
+                        prevDelayed + 1,
+                        view.delayedRedraws,
+                        "danmaku.seek." + i + ".bufferingSchedulesDelayed");
+
+                clock.playing = true;
+                clock.positionMs = target + 250;
+                int prevAnim = view.animationFrames;
+                canvas.drawTextCount = 0;
+                view.draw(canvas);
+                check(canvas.drawTextCount > 0, "danmaku.seek." + i + ".rendersCommentsAtTarget");
+                checkEq(
+                        prevAnim + 1,
+                        view.animationFrames,
+                        "danmaku.seek." + i + ".resumesAnimationWithoutLayout");
+                checkEq(0, view.layoutRequests, "danmaku.seek." + i + ".noLayoutRequired");
+            }
+
+            // 3. Pause -> resume keeps loop alive and resumes animation cleanly.
+            clock.playing = false;
+            int prevDelayed = view.delayedRedraws;
+            view.draw(canvas);
+            checkEq(prevDelayed + 1, view.delayedRedraws, "danmaku.pauseResume.pausedPolls");
+            clock.playing = true;
+            clock.positionMs += 300;
+            int prevAnim = view.animationFrames;
+            view.draw(canvas);
+            checkEq(prevAnim + 1, view.animationFrames, "danmaku.pauseResume.resumesAnimation");
+
+            // 4. Hidden / disabled / detached stops scheduling further redraws.
+            int framesBeforeHide = view.animationFrames;
+            int delayedBeforeHide = view.delayedRedraws;
+            view.setVisibility(View.GONE);
+            view.draw(canvas);
+            checkEq(framesBeforeHide, view.animationFrames, "danmaku.hidden.noFurtherFrame");
+            checkEq(delayedBeforeHide, view.delayedRedraws, "danmaku.hidden.noFurtherDelay");
+
+            view.setVisibility(View.VISIBLE);
+            view.enabled(false);
+            view.draw(canvas);
+            checkEq(framesBeforeHide, view.animationFrames, "danmaku.disabled.noFurtherFrame");
+            checkEq(delayedBeforeHide, view.delayedRedraws, "danmaku.disabled.noFurtherDelay");
+
+            view.enabled(true);
+            view.dispatchDetachedFromWindow();
+            view.draw(canvas);
+            checkEq(framesBeforeHide, view.animationFrames, "danmaku.detached.noFurtherFrame");
+            checkEq(delayedBeforeHide, view.delayedRedraws, "danmaku.detached.noFurtherDelay");
+        } finally {
+            view.close();
+        }
+
+        // 5. Negative time offset keeps sampling while paused/early and resumes once >= 0.
+        MutablePlaybackClock early = new MutablePlaybackClock(0, false);
+        RecordingDanmakuView negative = new RecordingDanmakuView(ctx, early);
+        try {
+            negative.layout(0, 0, 1920, 1080);
+            negative.dispatchAttachedToWindow();
+            negative.enabled(true);
+            negative.setTimeOffsetMs(-2_000L);
+            negative.setLegacyItems(
+                    Collections.singletonList(
+                            new DanmuItem("early", 1_500L, 1, 0xFFFFFF, "not yet")));
+
+            Canvas canvas = new Canvas();
+            negative.draw(canvas);
+            checkEq(0, canvas.drawTextCount, "danmaku.negative.commentsNotEligible");
+            checkEq(1, negative.delayedRedraws, "danmaku.negative.requestsDelayedRedraw");
+            checkEq(0, negative.animationFrames, "danmaku.negative.noAnimationFrame");
+
+            negative.draw(canvas);
+            checkEq(2, negative.delayedRedraws, "danmaku.negative.keepsSampling");
+
+            early.positionMs = 4_000;
+            early.playing = true;
+            negative.draw(canvas);
+            check(canvas.drawTextCount > 0, "danmaku.negative.commentsEligibleAfterAdvance");
+            checkEq(1, negative.animationFrames, "danmaku.negative.resumesAnimation");
+            checkEq(0, negative.layoutRequests, "danmaku.negative.noLayoutRequest");
+
+            int frames = negative.animationFrames;
+            int delayed = negative.delayedRedraws;
+            negative.close();
+            negative.draw(canvas);
+            checkEq(frames, negative.animationFrames, "danmaku.closed.noFurtherFrame");
+            checkEq(delayed, negative.delayedRedraws, "danmaku.closed.noFurtherDelay");
+        } finally {
+            negative.close();
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         Path root = args.length > 0 ? Paths.get(args[0]) : Paths.get(".");
         testPlaybackControlsZOrder();
@@ -1671,6 +1844,7 @@ public final class Wave2AndroidWireChecks {
         testM02NestedHardwareLayerGuard();
         testL03GlassFreezePreservesCachedMaterialWithoutSolidSnap();
         testM01DanmakuViewLegacyZeroRepeatFilterPerFrame();
+        testDanmakuResumesAfterBufferingSeek();
         testFocusMotionReducedGuard();
         testTvV17EpisodeFileCaptionDecoding();
         testOnboardingFirstPlayAndDanmuPolicies();

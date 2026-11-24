@@ -759,21 +759,23 @@ final class SubscriptionManager {
         for (ConfigLibrary.Entry e : byOrigin.values()) {
             candidates.put(
                     e.origin.trim(),
-                    new RefreshCandidate(e.origin.trim(), e.name, e.selected, e.digest, e.updated));
+                    new RefreshCandidate(
+                            e.origin.trim(), e.name, e.selected, e.digest, e.updated, true));
         }
         for (MultiSourceMeta m : activeMembers) {
             if (!Cms.isHttp(m.url)) continue;
             if (!candidates.containsKey(m.url)) {
-                candidates.put(m.url, new RefreshCandidate(m.url, m.name, "", "", m.updated));
+                candidates.put(
+                        m.url, new RefreshCandidate(m.url, m.name, "", "", m.updated, false));
             }
         }
         String cleanActiveOrigin = activeOrigin == null ? "" : activeOrigin.trim();
+        String activeDigest =
+                activeRaw != null && !activeRaw.isEmpty() ? ConfigLibrary.hash(activeRaw) : "";
         if (Cms.isHttp(cleanActiveOrigin) && !candidates.containsKey(cleanActiveOrigin)) {
-            String activeDigest =
-                    activeRaw != null && !activeRaw.isEmpty() ? ConfigLibrary.hash(activeRaw) : "";
             candidates.put(
                     cleanActiveOrigin,
-                    new RefreshCandidate(cleanActiveOrigin, "", "", activeDigest, 0L));
+                    new RefreshCandidate(cleanActiveOrigin, "", "", activeDigest, 0L, false));
         }
 
         int checked = 0;
@@ -784,7 +786,12 @@ final class SubscriptionManager {
         Set<String> changedUrls = new HashSet<String>();
 
         for (RefreshCandidate c : candidates.values()) {
-            if (!force && !isDueForDailyUpdate(c.lastUpdated, nowMs)) {
+            boolean activeOutOfSync =
+                    !activeDigest.isEmpty()
+                            && c.url.equals(cleanActiveOrigin)
+                            && !c.previousDigest.isEmpty()
+                            && !c.previousDigest.equals(activeDigest);
+            if (!force && !activeOutOfSync && !isDueForDailyUpdate(c.lastUpdated, nowMs)) {
                 continue;
             }
             checked++;
@@ -795,7 +802,17 @@ final class SubscriptionManager {
                 String newDigest = ConfigLibrary.hash(validRaw);
                 String saveName =
                         (c.name != null && !c.name.isEmpty()) ? c.name : defaultConfigName(parsed);
-                library.remember(validRaw, c.url, saveName, c.selected, nowMs);
+                if (c.fromLibrary) {
+                    // Never resurrect a deleted subscription or undo a concurrent edit made while
+                    // this network refresh was in flight.
+                    ConfigLibrary.Entry saved =
+                            library.updateExistingIfUnchanged(
+                                    c.url, c.previousDigest, saveName, validRaw, nowMs);
+                    if (saved == null) {
+                        continue;
+                    }
+                    saveName = saved.name;
+                }
                 refreshedRawByUrl.put(c.url, validRaw);
                 if (!newDigest.equals(c.previousDigest)) {
                     updated++;
@@ -819,7 +836,13 @@ final class SubscriptionManager {
                     break;
                 }
             }
-            if (anyMemberChanged) {
+            ConfigLibrary.Entry mergedLibEntry = byOrigin.get(cleanActiveOrigin);
+            boolean mergedOutOfSync =
+                    !activeDigest.isEmpty()
+                            && mergedLibEntry != null
+                            && !mergedLibEntry.digest.isEmpty()
+                            && !mergedLibEntry.digest.equals(activeDigest);
+            if (anyMemberChanged || mergedOutOfSync) {
                 List<ConfigLibrary.Entry> refreshedEntries = library.entries();
                 Map<String, ConfigLibrary.Entry> latestByOrigin =
                         new HashMap<String, ConfigLibrary.Entry>();
@@ -851,20 +874,42 @@ final class SubscriptionManager {
                     activeChanged = true;
                     nextActiveRaw = rebuilt.rawJson;
                     nextActiveOrigin = rebuilt.origin;
-                    library.remember(
-                            rebuilt.rawJson,
+                    if (updated == 0) {
+                        updated++;
+                        updatedNames.add(
+                                cleanSubscriptionLabel(mergedSubscriptionName(rebuilt.groupNames)));
+                    }
+                    // Update existing merged entry in-place if still present and unchanged; do not
+                    // clobber user selection or resurrect a deleted merged entry.
+                    library.updateExistingIfUnchanged(
                             rebuilt.origin,
+                            activeDigest,
                             mergedSubscriptionName(rebuilt.groupNames),
-                            "",
+                            rebuilt.rawJson,
                             nowMs);
                 }
             }
-        } else if (Cms.isHttp(cleanActiveOrigin) && changedUrls.contains(cleanActiveOrigin)) {
+        } else if (Cms.isHttp(cleanActiveOrigin)) {
             String newRaw = refreshedRawByUrl.get(cleanActiveOrigin);
             if (newRaw != null && !newRaw.isEmpty()) {
-                activeChanged = true;
-                nextActiveRaw = newRaw;
-                nextActiveOrigin = cleanActiveOrigin;
+                boolean differsFromActive =
+                        changedUrls.contains(cleanActiveOrigin)
+                                || (!activeDigest.isEmpty()
+                                        && !ConfigLibrary.hash(newRaw).equals(activeDigest));
+                if (differsFromActive) {
+                    activeChanged = true;
+                    nextActiveRaw = newRaw;
+                    nextActiveOrigin = cleanActiveOrigin;
+                    if (!changedUrls.contains(cleanActiveOrigin)) {
+                        updated++;
+                        RefreshCandidate activeCandidate = candidates.get(cleanActiveOrigin);
+                        String label =
+                                activeCandidate != null && !activeCandidate.name.isEmpty()
+                                        ? activeCandidate.name
+                                        : cleanActiveOrigin;
+                        updatedNames.add(cleanSubscriptionLabel(label));
+                    }
+                }
             }
         }
 
@@ -905,14 +950,21 @@ final class SubscriptionManager {
         final String selected;
         final String previousDigest;
         final long lastUpdated;
+        final boolean fromLibrary;
 
         RefreshCandidate(
-                String url, String name, String selected, String previousDigest, long lastUpdated) {
+                String url,
+                String name,
+                String selected,
+                String previousDigest,
+                long lastUpdated,
+                boolean fromLibrary) {
             this.url = url;
             this.name = name == null ? "" : name;
             this.selected = selected == null ? "" : selected;
             this.previousDigest = previousDigest == null ? "" : previousDigest;
             this.lastUpdated = lastUpdated;
+            this.fromLibrary = fromLibrary;
         }
     }
 }

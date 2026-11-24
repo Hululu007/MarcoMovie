@@ -242,7 +242,7 @@ public final class LaneEChecks {
                                     "MainActivity.installPluginCrashGuard",
                                     "MainActivity.clearRecoveredCrashSite",
                                     "HomeScreen.commitLoadingSite",
-                                    "MobileShell.commitLoadingSite",
+                                    "MobileHomePage.commitLoadingSite",
                                     "SourcePicker.commitSelectedSiteForCrashGuard")));
 
     private static final Set<String> WHITELISTED_SECURE_STORAGE_METHODS =
@@ -812,7 +812,7 @@ public final class LaneEChecks {
 
         server.start();
         try {
-            byte[] downloaded = MobileShell.fetchZipBytes(baseUrl + "/hop1");
+            byte[] downloaded = UiWidgets.fetchZipBytes(baseUrl + "/hop1");
             check(
                     Arrays.equals(fakeZipBytes, downloaded),
                     "E3: fetchZipBytes follows multi-hop redirects and returns payload");
@@ -841,7 +841,7 @@ public final class LaneEChecks {
         try {
             boolean caught = false;
             try {
-                MobileShell.fetchZipBytes(baseUrl + "/infinite");
+                UiWidgets.fetchZipBytes(baseUrl + "/infinite");
             } catch (IOException e) {
                 if (e.getMessage() != null && e.getMessage().contains("来源重定向次数过多")) {
                     caught = true;
@@ -881,7 +881,7 @@ public final class LaneEChecks {
         try {
             boolean protoBlocked = false;
             try {
-                MobileShell.fetchZipBytes(baseUrl + "/proto_bad");
+                UiWidgets.fetchZipBytes(baseUrl + "/proto_bad");
             } catch (IOException e) {
                 protoBlocked = e.getMessage() != null && e.getMessage().contains("不支持此重定向协议");
             }
@@ -889,7 +889,7 @@ public final class LaneEChecks {
 
             boolean userinfoBlocked = false;
             try {
-                MobileShell.fetchZipBytes(baseUrl + "/userinfo_bad");
+                UiWidgets.fetchZipBytes(baseUrl + "/userinfo_bad");
             } catch (IOException e) {
                 userinfoBlocked =
                         e.getMessage() != null && e.getMessage().contains("来源重定向不能注入登录凭据");
@@ -930,7 +930,7 @@ public final class LaneEChecks {
         try {
             boolean limitEnforced = false;
             try {
-                MobileShell.fetchZipBytes(baseUrl + "/huge.zip");
+                UiWidgets.fetchZipBytes(baseUrl + "/huge.zip");
             } catch (IOException e) {
                 limitEnforced = e.getMessage() != null && e.getMessage().contains("超过 28 MB 限制");
             }

@@ -198,6 +198,7 @@ final class SourceController {
     static void closeEngines(MainActivity a) {
         if (a.markerHost != null) a.markerHost.abort();
         GlobalSearchScreen.invalidateContext(a);
+        MobileSearchPage.invalidateSession();
         a.liveSession = null;
         CspEngine.resetActiveProxy();
         if (a.detailPrefetch != null) a.detailPrefetch.cancel(true);
@@ -630,7 +631,13 @@ final class SourceController {
                 && s != null
                 && !s.isEmpty()) return s;
         if (e instanceof OutOfMemoryError) return "设备运行内存不足，已保护性中止加载。建议切换轻量片源。";
-        if (e instanceof LinkageError) return "此片源扩展与当前电视系统版本不兼容，请切换其他片源。";
+        if (e instanceof LinkageError) return "此片源扩展与当前系统版本不兼容，请切换其他片源。";
+        if (e instanceof SecurityException) {
+            if (s != null && !s.trim().isEmpty()) {
+                return "当前片源拒绝运行：" + s.trim() + "（请返回或切换其他片源）";
+            }
+            return "当前片源主动拒绝加载，请返回或切换其他片源。";
+        }
         if (e instanceof java.net.UnknownHostException) return "无法解析来源域名，请检查网络或切换其他来源。";
         if (e instanceof javax.net.ssl.SSLException) return "与来源建立安全连接失败，请检查设备时间或切换其他来源。";
         if (e instanceof java.net.SocketTimeoutException) return "来源响应超时，请重试或切换其他来源。";
@@ -645,8 +652,17 @@ final class SourceController {
                         || s.startsWith("响应超过")
                         || s.startsWith("剧集返回")
                         || s.startsWith("媒体地址返回")
-                        || s.startsWith("此剧集"))) return s;
+                        || s.startsWith("此剧集")
+                        || s.startsWith("当前片源")
+                        || s.startsWith("MPV "))) return s;
         return "连接超时、来源不可达或数据格式不受支持。请检查配置与网络后重试。";
+    }
+
+    static String stageMessage(String stage, Throwable e) {
+        String detail = message(e);
+        if (stage == null || stage.trim().isEmpty()) return detail;
+        if (detail.startsWith(stage)) return detail;
+        return stage + "：" + detail;
     }
 
     static void learnTitles(MainActivity a, List<Cms.Video> videos) {
@@ -1186,11 +1202,21 @@ final class SourceController {
                 new ArrayList<SubscriptionManager.SourceBundle>(ordered.values()));
     }
 
+    static long beginConfigImport(MainActivity a) {
+        return a == null ? 0L : a.configImportSeq.incrementAndGet();
+    }
+
+    static boolean isCurrentConfigImport(MainActivity a, long seq) {
+        return a != null && seq > 0L && a.configImportSeq.get() == seq;
+    }
+
     /** Merges user-selected saved subscriptions from {@link ConfigLibrary} into auto-grouped tabs. */
     static void mergeSavedSubscriptions(
             final MainActivity a, final List<ConfigLibrary.Entry> chosen) {
         if (a == null || chosen == null || chosen.isEmpty()) return;
         final ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
+        final long importSeq = beginConfigImport(a);
+        final boolean snapshotPrivate = a.privateMode;
         a.toast("正在合并 " + chosen.size() + " 个订阅并自动分组…");
         a.worker.execute(
                 () -> {
@@ -1208,7 +1234,13 @@ final class SourceController {
                                 SubscriptionManager.mergeSources(bundles);
                         a.ui.post(
                                 () -> {
-                                    if (a.isFinishing() || a.isDestroyed()) return;
+                                    if (a.isFinishing()
+                                            || a.isDestroyed()
+                                            || a.switchingPrivacy
+                                            || a.privateMode != snapshotPrivate
+                                            || !isCurrentConfigImport(a, importSeq)) {
+                                        return;
+                                    }
                                     try {
                                         saveConfig(a, merged.config, merged.origin);
                                         a.toast(
@@ -1225,7 +1257,7 @@ final class SourceController {
                     } catch (Exception err) {
                         a.ui.post(
                                 () -> {
-                                    if (!a.isFinishing()) {
+                                    if (!a.isFinishing() && isCurrentConfigImport(a, importSeq)) {
                                         a.notice("合并订阅失败：" + a.message(err));
                                     }
                                 });
@@ -1288,8 +1320,13 @@ final class SourceController {
         if (force) {
             a.toast("正在检查并更新全部订阅源…");
         }
-        final String snapshotOrigin = a.configOrigin == null ? "" : a.configOrigin;
+        final String snapshotOrigin = a.configOrigin == null ? "" : a.configOrigin.trim();
         final String snapshotRaw = a.config != null && a.config.raw != null ? a.config.raw : "";
+        final Cms.Config snapshotConfig = a.config;
+        final boolean snapshotPrivate = a.privateMode;
+        final int snapshotEpoch = a.engineEpoch;
+        final long snapshotWriteSeq = a.configStore.latestWriteSeq();
+        final long snapshotImportSeq = a.configImportSeq.get();
         final ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
         a.worker.execute(
                 () -> {
@@ -1319,61 +1356,213 @@ final class SourceController {
                         } else {
                             statusText = stamp + " · 已检查 " + summary.checkedCount + " 个订阅，均为最新";
                         }
-                        if (summary.checkedCount == 0
-                                || summary.failedCount < summary.checkedCount) {
-                            a.prefs
-                                    .edit()
-                                    .putLong(Prefs.SUBSCRIPTION_LAST_AUTO_UPDATE, now)
-                                    .putString(Prefs.SUBSCRIPTION_LAST_AUTO_STATUS, statusText)
-                                    .apply();
-                        } else {
-                            a.prefs
-                                    .edit()
-                                    .putString(Prefs.SUBSCRIPTION_LAST_AUTO_STATUS, statusText)
-                                    .apply();
-                        }
+                        final String finalStatusText = statusText;
+                        final boolean recordLastUpdate =
+                                summary.checkedCount == 0
+                                        || summary.failedCount < summary.checkedCount;
 
                         if (summary.activeChanged && !summary.updatedActiveRaw.isEmpty()) {
+                            final String targetOrigin =
+                                    summary.updatedActiveOrigin == null
+                                            ? ""
+                                            : summary.updatedActiveOrigin.trim();
                             final Cms.Config fresh =
-                                    Cms.parseConfig(
-                                            summary.updatedActiveRaw, summary.updatedActiveOrigin);
-                            a.configStore.write(fresh.raw);
+                                    Cms.parseConfig(summary.updatedActiveRaw, targetOrigin);
+                            final String failStatusText = stamp + " · 保存失败，原配置已保留";
                             a.ui.post(
                                     () -> {
-                                        if (a.isFinishing() || a.isDestroyed()) return;
-                                        boolean playingNow =
-                                                a.player != null
-                                                        || (a.current != null && a.current.player);
-                                        if (!playingNow) {
-                                            SourcePicker.applyEdits(
-                                                    a, fresh, summary.updatedActiveOrigin);
-                                            closeEngines(a);
-                                            a.config = fresh;
-                                            a.configOrigin = summary.updatedActiveOrigin;
-                                            if (a.current != null && a.current.home) {
-                                                a.refresh();
-                                            }
-                                            a.toast("已自动更新 " + summary.updatedCount + " 个订阅源");
-                                        } else {
+                                        if (a.isFinishing()
+                                                || a.isDestroyed()
+                                                || a.switchingPrivacy
+                                                || a.privateMode != snapshotPrivate) {
+                                            return;
+                                        }
+                                        String liveOrigin =
+                                                a.configOrigin == null ? "" : a.configOrigin.trim();
+                                        boolean stillSameActive =
+                                                a.configStore.latestWriteSeq() == snapshotWriteSeq
+                                                        && a.configImportSeq.get()
+                                                                == snapshotImportSeq
+                                                        && a.config == snapshotConfig
+                                                        && a.engineEpoch == snapshotEpoch
+                                                        && snapshotOrigin.equals(liveOrigin);
+                                        if (!stillSameActive) {
                                             AppLog.i(
                                                     "SourceController",
-                                                    "Daily subscription update saved; deferring live reload during playback");
+                                                    "Discarding stale subscription auto-update for "
+                                                            + snapshotOrigin);
+                                            return;
+                                        }
+                                        SourcePicker.applyEdits(a, fresh, targetOrigin);
+                                        String currentKey =
+                                                a.prefs.getString(Prefs.SELECTED_SITE, "");
+                                        boolean hasSelected = false;
+                                        Cms.Site firstAvailable = null;
+                                        for (Cms.Site s : fresh.sites) {
+                                            if (available(a, fresh, s)) {
+                                                if (firstAvailable == null) firstAvailable = s;
+                                                if (s.key.equals(currentKey)) hasSelected = true;
+                                            }
+                                        }
+                                        final String nextSelectedSite =
+                                                !hasSelected && firstAvailable != null
+                                                        ? firstAvailable.key
+                                                        : (hasSelected ? currentKey : null);
+                                        ConfigStore.PointerSnapshot nextPointers =
+                                                new ConfigStore.PointerSnapshot(
+                                                        targetOrigin,
+                                                        nextSelectedSite,
+                                                        new SavedState(fresh, targetOrigin));
+                                        ConfigStore.CommitResult commit =
+                                                a.configStore.saveIfExpectedSeq(
+                                                        snapshotWriteSeq,
+                                                        fresh.raw,
+                                                        nextPointers,
+                                                        pointerStoreFor(a),
+                                                        (seq, committed) ->
+                                                                a.ui.post(
+                                                                        () -> {
+                                                                            if (a.isFinishing()
+                                                                                    || a
+                                                                                            .isDestroyed()
+                                                                                    || a.switchingPrivacy
+                                                                                    || a.privateMode
+                                                                                            != snapshotPrivate
+                                                                                    || a.configStore
+                                                                                                    .latestWriteSeq()
+                                                                                            != seq) {
+                                                                                return;
+                                                                            }
+                                                                            if (recordLastUpdate) {
+                                                                                a.prefs
+                                                                                        .edit()
+                                                                                        .putLong(
+                                                                                                Prefs
+                                                                                                        .SUBSCRIPTION_LAST_AUTO_UPDATE,
+                                                                                                now)
+                                                                                        .putString(
+                                                                                                Prefs
+                                                                                                        .SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                                                                finalStatusText)
+                                                                                        .apply();
+                                                                            } else {
+                                                                                a.prefs
+                                                                                        .edit()
+                                                                                        .putString(
+                                                                                                Prefs
+                                                                                                        .SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                                                                finalStatusText)
+                                                                                        .apply();
+                                                                            }
+                                                                            boolean playingNow =
+                                                                                    a.player != null
+                                                                                            || a.inlinePlayer
+                                                                                                    != null
+                                                                                            || (a.current
+                                                                                                            != null
+                                                                                                    && a.current
+                                                                                                            .player);
+                                                                            if (!playingNow) {
+                                                                                closeEngines(a);
+                                                                                a.config = fresh;
+                                                                                a.configOrigin =
+                                                                                        targetOrigin;
+                                                                                if (a.current
+                                                                                                != null
+                                                                                        && a.current
+                                                                                                .home) {
+                                                                                    a.refresh();
+                                                                                }
+                                                                                a.toast(
+                                                                                        "已自动更新 "
+                                                                                                + summary.updatedCount
+                                                                                                + " 个订阅源");
+                                                                            } else {
+                                                                                AppLog.i(
+                                                                                        "SourceController",
+                                                                                        "Daily subscription update saved; deferring live reload during playback");
+                                                                            }
+                                                                        }),
+                                                        (seq, error, rolledBackTo) -> {
+                                                            AppLog.w(
+                                                                    "SourceController",
+                                                                    "Sequenced auto-update write failed",
+                                                                    error);
+                                                            a.ui.post(
+                                                                    () -> {
+                                                                        if (a.isFinishing()
+                                                                                || a.isDestroyed()
+                                                                                || a.switchingPrivacy
+                                                                                || a.privateMode
+                                                                                        != snapshotPrivate
+                                                                                || a.configStore
+                                                                                                .latestWriteSeq()
+                                                                                        != seq) {
+                                                                            return;
+                                                                        }
+                                                                        a.prefs
+                                                                                .edit()
+                                                                                .putString(
+                                                                                        Prefs
+                                                                                                .SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                                                        failStatusText)
+                                                                                .apply();
+                                                                        if (force) {
+                                                                            a.toast(
+                                                                                    "订阅保存失败，原配置已保留："
+                                                                                            + a
+                                                                                                    .message(
+                                                                                                            error));
+                                                                        }
+                                                                    });
+                                                        });
+                                        if (!commit.accepted) {
+                                            AppLog.i(
+                                                    "SourceController",
+                                                    "Skipped stale auto-update commit (writeSeq advanced)");
                                         }
                                     });
-                        } else if (force) {
-                            final String msg =
-                                    summary.checkedCount == 0
-                                            ? "当前没有可在线刷新的 HTTP 订阅源"
-                                            : summary.updatedCount > 0
-                                                    ? ("已更新 " + summary.updatedCount + " 个订阅源")
-                                                    : summary.failedCount == summary.checkedCount
-                                                            ? "订阅刷新失败，原配置已保留"
-                                                            : "全部订阅源已是最新（共检查 "
-                                                                    + summary.checkedCount
-                                                                    + " 个）";
+                        } else {
                             a.ui.post(
                                     () -> {
-                                        if (!a.isFinishing()) {
+                                        if (a.isFinishing()
+                                                || a.isDestroyed()
+                                                || a.switchingPrivacy
+                                                || a.privateMode != snapshotPrivate) {
+                                            return;
+                                        }
+                                        if (recordLastUpdate) {
+                                            a.prefs
+                                                    .edit()
+                                                    .putLong(
+                                                            Prefs.SUBSCRIPTION_LAST_AUTO_UPDATE,
+                                                            now)
+                                                    .putString(
+                                                            Prefs.SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                            finalStatusText)
+                                                    .apply();
+                                        } else {
+                                            a.prefs
+                                                    .edit()
+                                                    .putString(
+                                                            Prefs.SUBSCRIPTION_LAST_AUTO_STATUS,
+                                                            finalStatusText)
+                                                    .apply();
+                                        }
+                                        if (force) {
+                                            final String msg =
+                                                    summary.checkedCount == 0
+                                                            ? "当前没有可在线刷新的 HTTP 订阅源"
+                                                            : summary.updatedCount > 0
+                                                                    ? ("已更新 "
+                                                                            + summary.updatedCount
+                                                                            + " 个订阅源")
+                                                                    : summary.failedCount
+                                                                                    == summary.checkedCount
+                                                                            ? "订阅刷新失败，原配置已保留"
+                                                                            : "全部订阅源已是最新（共检查 "
+                                                                                    + summary.checkedCount
+                                                                                    + " 个）";
                                             a.toast(msg);
                                             if (a.current != null && !a.current.player) {
                                                 a.refresh();
@@ -2034,6 +2223,16 @@ final class SourceController {
 
     static void mergeOrSaveConfig(MainActivity a, Cms.Config incoming, String origin, boolean merge)
             throws Exception {
+        mergeOrSaveConfig(a, incoming, origin, merge, null);
+    }
+
+    static void mergeOrSaveConfig(
+            MainActivity a,
+            Cms.Config incoming,
+            String origin,
+            boolean merge,
+            String replaceLegacyKey)
+            throws Exception {
         if (!merge || a.config == null || a.config.sites.isEmpty()) {
             saveConfig(a, incoming, origin);
             return;
@@ -2050,13 +2249,25 @@ final class SourceController {
             sitesArr = new org.json.JSONArray();
             baseJson.put("sites", sitesArr);
         }
+        String preferredPref = a.prefs != null ? a.prefs.getString(Prefs.PREFERRED_SITE, "") : "";
+        String updatedPreferredPref = null;
+        String cleanLegacyKey =
+                replaceLegacyKey == null || replaceLegacyKey.trim().isEmpty()
+                        ? null
+                        : replaceLegacyKey.trim();
         for (Cms.Site ns : incoming.sites) {
+            boolean isDocScoped =
+                    ns.key != null
+                            && (ns.key.startsWith("py_doc_") || ns.key.startsWith("js_doc_"));
             for (int i = sitesArr.length() - 1; i >= 0; i--) {
                 org.json.JSONObject existing = sitesArr.optJSONObject(i);
-                if (existing != null
-                        && (ns.key.equals(existing.optString("key"))
-                                || ns.api.equals(existing.optString("api")))) {
-                    sitesArr.remove(i);
+                if (existing != null) {
+                    String existingKey = existing.optString("key");
+                    if (ns.key.equals(existingKey)
+                            || (cleanLegacyKey != null && cleanLegacyKey.equals(existingKey))
+                            || (!isDocScoped && ns.api.equals(existing.optString("api")))) {
+                        sitesArr.remove(i);
+                    }
                 }
             }
             org.json.JSONObject sObj =
@@ -2069,16 +2280,413 @@ final class SourceController {
             if (ns.jar != null && !ns.jar.isEmpty()) sObj.put("jar", ns.jar);
             if (ns.ext != null) sObj.put("ext", ns.ext);
             sitesArr.put(sObj);
+            if (preferredPref != null
+                    && (preferredPref.equals(ns.key)
+                            || preferredPref.startsWith(ns.key + "\n")
+                            || (cleanLegacyKey != null
+                                    && (preferredPref.equals(cleanLegacyKey)
+                                            || preferredPref.startsWith(cleanLegacyKey + "\n"))))) {
+                updatedPreferredPref = SourcePreferences.identity(ns);
+            }
         }
         String mergedRaw = baseJson.toString(2);
         Cms.Config merged = Cms.parseConfig(mergedRaw, a.configOrigin);
-        if (!incoming.sites.isEmpty()) {
-            a.prefs.edit().putString(Prefs.SELECTED_SITE, incoming.sites.get(0).key).apply();
+        final String explicitSelected =
+                !incoming.sites.isEmpty() ? incoming.sites.get(0).key : null;
+        final String newPreferred = updatedPreferredPref;
+        saveConfig(
+                a,
+                merged,
+                a.configOrigin,
+                explicitSelected,
+                newPreferred != null && a.prefs != null
+                        ? () -> a.prefs.edit().putString(Prefs.PREFERRED_SITE, newPreferred).apply()
+                        : null);
+    }
+
+    private static final class LegacyScriptCandidate {
+        final String key;
+        final String name;
+        final String api;
+
+        LegacyScriptCandidate(String key, String name, String api) {
+            this.key = key;
+            this.name = name;
+            this.api = api;
         }
-        saveConfig(a, merged, a.configOrigin);
+    }
+
+    static String sanitizeLocalScriptFileName(String displayName) {
+        String safeName =
+                (displayName == null ? "imported" : displayName)
+                        .replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
+        if (safeName.isEmpty() || ".".equals(safeName) || "..".equals(safeName)) {
+            safeName = "imported";
+        }
+        return safeName;
+    }
+
+    private static boolean isLegacyNonDocScriptKey(String key, String keyPrefix) {
+        if (key == null || keyPrefix == null || keyPrefix.isEmpty()) return false;
+        return key.startsWith(keyPrefix + "_") && !key.startsWith(keyPrefix + "_doc_");
+    }
+
+    private static boolean isLegacyFlatLocalScriptUri(
+            String api, java.io.File filesDir, java.io.File spiderDir, String safeName) {
+        if (api == null || api.isEmpty() || filesDir == null || safeName == null) return false;
+        String legacyDefaultUri =
+                Cms.fileUri(
+                        new java.io.File(new java.io.File(filesDir, "local_spiders"), safeName));
+        if (api.equals(legacyDefaultUri)) return true;
+        if (spiderDir != null) {
+            String legacySpaceUri = Cms.fileUri(new java.io.File(spiderDir, safeName));
+            if (api.equals(legacySpaceUri)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isAmbiguousLegacyHashedScriptUri(
+            String api, java.io.File filesDir, java.io.File spiderDir, String safeName) {
+        if (api == null || !api.startsWith("file://") || safeName == null) return false;
+        try {
+            java.io.File apiFile = new java.io.File(java.net.URI.create(api));
+            if (!safeName.equals(apiFile.getName())) return false;
+            java.io.File parent = apiFile.getParentFile();
+            if (parent == null) return false;
+            java.io.File grandParent = parent.getParentFile();
+            if (grandParent == null) return false;
+            java.io.File defaultSpiders = new java.io.File(filesDir, "local_spiders");
+            return (spiderDir != null && grandParent.equals(spiderDir))
+                    || grandParent.equals(defaultSpiders);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean canShowInteractiveDialog(MainActivity a) {
+        try {
+            return a != null && !a.isFinishing() && !a.isDestroyed() && a.getWindow() != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Merges a newly imported local script while preserving document identity isolation. When an
+     * exact document-scoped key ({@code py_doc_*} / {@code js_doc_*}) already exists, updates
+     * replace 1 -> 1 automatically. When only legacy non-document-scoped scripts exist (including
+     * 0.6.0 flat {@code local_spiders/<file>} entries or hashed entries without a recorded SAF
+     * URI), interactive UI prompts the user to explicitly choose between replacing a specific
+     * legacy site (migrating its {@link Prefs#PREFERRED_SITE}) or keeping both, and headless
+     * fallback preserves the legacy site rather than silently overwriting another document by
+     * filename.
+     */
+    static void mergeOrSaveLocalScriptConfig(
+            final MainActivity a,
+            final Cms.Config singleCfg,
+            java.io.File filesDir,
+            java.io.File spiderDir,
+            String safeName,
+            String keyPrefix,
+            final boolean snapshotPrivate,
+            final long importSeq)
+            throws Exception {
+        if (a.config == null || a.config.sites.isEmpty() || singleCfg.sites.isEmpty()) {
+            saveConfig(a, singleCfg, "");
+            a.toast("已导入扩展片源：" + singleCfg.sites.get(0).name);
+            return;
+        }
+        Cms.Site incomingSite = singleCfg.sites.get(0);
+        org.json.JSONArray sitesArr = null;
+        try {
+            org.json.JSONObject baseJson =
+                    new org.json.JSONObject(Cms.withoutComments(a.config.raw));
+            sitesArr = baseJson.optJSONArray("sites");
+        } catch (Exception ignored) {
+        }
+        if (sitesArr == null) {
+            mergeOrSaveConfig(a, singleCfg, "", true, null);
+            a.toast("已导入扩展片源：" + incomingSite.name);
+            return;
+        }
+        boolean exactDocKeyMatch = false;
+        final java.util.List<LegacyScriptCandidate> legacyFlatMatches = new java.util.ArrayList<>();
+        final java.util.List<LegacyScriptCandidate> ambiguousLegacyMatches =
+                new java.util.ArrayList<>();
+        for (int i = 0; i < sitesArr.length(); i++) {
+            org.json.JSONObject existing = sitesArr.optJSONObject(i);
+            if (existing == null) continue;
+            String existingKey = existing.optString("key", "");
+            String existingApi = existing.optString("api", "");
+            String existingName = existing.optString("name", existingKey);
+            if (incomingSite.key.equals(existingKey)) {
+                exactDocKeyMatch = true;
+                break;
+            }
+            if (isLegacyNonDocScriptKey(existingKey, keyPrefix)) {
+                if (isLegacyFlatLocalScriptUri(existingApi, filesDir, spiderDir, safeName)) {
+                    legacyFlatMatches.add(
+                            new LegacyScriptCandidate(existingKey, existingName, existingApi));
+                } else if (isAmbiguousLegacyHashedScriptUri(
+                        existingApi, filesDir, spiderDir, safeName)) {
+                    ambiguousLegacyMatches.add(
+                            new LegacyScriptCandidate(existingKey, existingName, existingApi));
+                }
+            }
+        }
+        if (exactDocKeyMatch) {
+            mergeOrSaveConfig(a, singleCfg, "", true, null);
+            a.toast("已导入扩展片源：" + incomingSite.name);
+            return;
+        }
+        final java.util.List<LegacyScriptCandidate> choices = new java.util.ArrayList<>();
+        choices.addAll(legacyFlatMatches);
+        choices.addAll(ambiguousLegacyMatches);
+        if (!choices.isEmpty() && canShowInteractiveDialog(a)) {
+            String[] labels = new String[choices.size() + 1];
+            for (int i = 0; i < choices.size(); i++) {
+                labels[i] = "替换旧版同名片源：" + choices.get(i).name + " (" + choices.get(i).key + ")";
+            }
+            labels[choices.size()] = "保留旧片源并新增为独立片源";
+            new AppDialog.Builder(a)
+                    .wrapChoices()
+                    .setTitle("发现未记录来源路径的同名旧脚本")
+                    .setItems(
+                            labels,
+                            (d, index) -> {
+                                if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                    return;
+                                }
+                                String targetLegacyKey =
+                                        index >= 0 && index < choices.size()
+                                                ? choices.get(index).key
+                                                : null;
+                                try {
+                                    mergeOrSaveConfig(a, singleCfg, "", true, targetLegacyKey);
+                                    a.toast(
+                                            (targetLegacyKey != null ? "已更新扩展片源：" : "已导入扩展片源：")
+                                                    + incomingSite.name);
+                                } catch (Exception ex) {
+                                    a.toast("保存扩展片源失败：" + a.message(ex));
+                                }
+                            })
+                    .show();
+            return;
+        }
+        // Ambiguous non-interactive fallback or distinct doc-scoped site: never silently merge by
+        // filename; preserve existing site(s) and add this document as an independent site.
+        mergeOrSaveConfig(a, singleCfg, "", true, null);
+        a.toast("已导入扩展片源：" + incomingSite.name);
+    }
+
+    static boolean canCommitConfigImport(
+            boolean finishing,
+            boolean destroyed,
+            boolean switchingPrivacy,
+            boolean currentPrivateMode,
+            boolean snapshotPrivateMode,
+            long currentImportSeq,
+            long expectedImportSeq) {
+        return !finishing
+                && !destroyed
+                && !switchingPrivacy
+                && currentPrivateMode == snapshotPrivateMode
+                && currentImportSeq == expectedImportSeq;
+    }
+
+    static boolean canCommitConfigImport(
+            MainActivity a, boolean snapshotPrivateMode, long expectedImportSeq) {
+        return a != null
+                && canCommitConfigImport(
+                        a.isFinishing(),
+                        a.isDestroyed(),
+                        a.switchingPrivacy,
+                        a.privateMode,
+                        snapshotPrivateMode,
+                        a.configImportSeq.get(),
+                        expectedImportSeq);
+    }
+
+    interface LocalImportProvider {
+        String displayName();
+
+        byte[] readBytes() throws Exception;
+
+        String scheme();
+
+        String uriString();
+    }
+
+    interface LocalImportGuardState {
+        long beginImport();
+
+        boolean isPrivateMode();
+
+        boolean canCommit(boolean snapshotPrivateMode, long importSeq);
+    }
+
+    interface LocalImportResultHandler {
+        void onConfigReady(Cms.Config config, String origin) throws Exception;
+
+        void onError(Exception error);
+    }
+
+    /**
+     * Pure guarded async file-import coordinator shared with regression tests to guarantee a slow
+     * file provider A can never overwrite a newer selection B, nor commit after Activity destroy or
+     * private-space transition.
+     */
+    static void executeGuardedConfigFileImport(
+            java.util.concurrent.ExecutorService worker,
+            PlaybackController.MainThreadDispatcher ui,
+            final LocalImportGuardState guard,
+            final LocalImportProvider provider,
+            final LocalImportResultHandler handler) {
+        final long importSeq = guard.beginImport();
+        final boolean snapshotPrivate = guard.isPrivateMode();
+        worker.execute(
+                () -> {
+                    try {
+                        byte[] rawBytes = provider.readBytes();
+                        if (!guard.canCommit(snapshotPrivate, importSeq)) {
+                            return;
+                        }
+                        String text = Cms.document(rawBytes);
+                        final String finalOrigin =
+                                Cms.localImportOrigin(provider.scheme(), provider.uriString());
+                        final Cms.Config parsed =
+                                Cms.parseConfig(text, finalOrigin.isEmpty() ? null : finalOrigin);
+                        ui.post(
+                                () -> {
+                                    if (!guard.canCommit(snapshotPrivate, importSeq)) {
+                                        return;
+                                    }
+                                    try {
+                                        handler.onConfigReady(parsed, finalOrigin);
+                                    } catch (Exception ex) {
+                                        handler.onError(ex);
+                                    }
+                                });
+                    } catch (Exception e) {
+                        ui.post(
+                                () -> {
+                                    if (!guard.canCommit(snapshotPrivate, importSeq)) {
+                                        return;
+                                    }
+                                    handler.onError(e);
+                                });
+                    }
+                });
+    }
+
+    /**
+     * Writes an imported local script or playlist to an immutable content-addressed directory
+     * ({@code <dir>/<sha256-16>/<safeName>}) using a request-exclusive temporary file ({@code
+     * fsync} + atomic rename). Preserving the original basename keeps script titles and module
+     * names clean while guaranteeing two concurrent imports of same-named files (e.g., {@code
+     * source.py} from different directories) with different contents never collide or overwrite
+     * each other's backing file.
+     */
+    static java.io.File writeContentAddressedLocalFile(
+            java.io.File dir, String displayName, byte[] utf8Bytes) throws IOException {
+        if (dir == null) throw new IOException("本地存储目录不可用");
+        if (!dir.exists() && !dir.mkdirs()) throw new IOException("无法创建本地存储目录");
+        byte[] data = utf8Bytes == null ? new byte[0] : utf8Bytes;
+        String safeName = sanitizeLocalScriptFileName(displayName);
+        String digest = sha256HexPrefix(data, 16);
+        java.io.File bucket = new java.io.File(dir, digest);
+        if (!bucket.exists() && !bucket.mkdirs() && !bucket.isDirectory()) {
+            throw new IOException("无法创建本地存储子目录");
+        }
+        java.io.File target = new java.io.File(bucket, safeName);
+        if (target.isFile() && target.length() == data.length) {
+            return target;
+        }
+        java.io.File tmp = java.io.File.createTempFile("import-", ".tmp", bucket);
+        try {
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(tmp)) {
+                out.write(data);
+                out.getFD().sync();
+            }
+            if (!tmp.renameTo(target)) {
+                // Another concurrent import of identical content may have atomically published the
+                // exact same immutable hash path first.
+                if (!target.isFile() || target.length() != data.length) {
+                    throw new IOException("无法保存导入文件");
+                }
+            }
+            return target;
+        } finally {
+            tmp.delete();
+        }
+    }
+
+    private static String sha256HexPrefix(byte[] data, int hexChars) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(data);
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(Character.forDigit((b >> 4) & 0xf, 16));
+                sb.append(Character.forDigit(b & 0xf, 16));
+            }
+            return sb.length() > hexChars ? sb.substring(0, hexChars) : sb.toString();
+        } catch (Exception e) {
+            return Integer.toHexString(java.util.Arrays.hashCode(data));
+        }
+    }
+
+    /**
+     * Derives a stable document-level site key from the imported script's SAF/file URI and space so
+     * updating the same local script document replaces the existing entry cleanly (1 -> 1) while
+     * distinct documents sharing the same filename (e.g. {@code dirA/source.py} vs {@code
+     * dirB/source.py}) or different spaces retain independent identities and immutable backing
+     * files.
+     */
+    static String stableLocalScriptSiteKey(
+            String prefix, Uri uri, boolean privateSpace, String fallbackOrigin) {
+        String cleanPrefix = prefix == null || prefix.isEmpty() ? "script" : prefix;
+        String uriStr = uri == null ? "" : uri.toString().trim();
+        if (!uriStr.isEmpty()) {
+            String docScope = (privateSpace ? "priv:" : "pub:") + uriStr;
+            try {
+                return cleanPrefix + "_doc_" + sha256HexPrefix(docScope.getBytes("UTF-8"), 16);
+            } catch (Exception ignored) {
+                return cleanPrefix + "_doc_" + Math.abs(docScope.hashCode());
+            }
+        }
+        String fb = fallbackOrigin == null ? "" : fallbackOrigin;
+        return cleanPrefix + "_" + Math.abs(fb.hashCode());
+    }
+
+    /**
+     * Rewrites the single synthesized script site's {@code key} inside both the parsed {@link
+     * Cms.Config} and its backing {@code raw} JSON so first-time saves and subsequent {@link
+     * #mergeOrSaveConfig} merges use the exact same document-scoped site identity.
+     */
+    static Cms.Config withStableScriptKey(Cms.Config singleCfg, String stableKey, String fileOrigin)
+            throws Exception {
+        if (singleCfg == null
+                || singleCfg.sites.isEmpty()
+                || stableKey == null
+                || stableKey.trim().isEmpty()) {
+            return singleCfg;
+        }
+        org.json.JSONObject root = new org.json.JSONObject(Cms.withoutComments(singleCfg.raw));
+        org.json.JSONArray sites = root.optJSONArray("sites");
+        if (sites != null && sites.length() > 0) {
+            org.json.JSONObject first = sites.optJSONObject(0);
+            if (first != null) {
+                first.put("key", stableKey);
+                return Cms.parseConfig(root.toString(), fileOrigin);
+            }
+        }
+        return singleCfg;
     }
 
     static void importLocalUri(MainActivity a, Uri uri, boolean preferLive) {
+        final long importSeq = beginConfigImport(a);
+        final boolean snapshotPrivate = a.privateMode;
         a.toast("正在读取本地文件…");
         a.worker.execute(
                 () -> {
@@ -2113,6 +2721,9 @@ final class SourceController {
                             }
                             rawBytes = bos.toByteArray();
                         }
+                        if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                            return;
+                        }
                         String lowerName = displayName.toLowerCase(java.util.Locale.ROOT);
                         boolean isZip =
                                 lowerName.endsWith(".zip")
@@ -2122,10 +2733,16 @@ final class SourceController {
                                                 && (rawBytes[2] & 0xff) == 0x03
                                                 && (rawBytes[3] & 0xff) == 0x04);
                         if (isZip && !lowerName.endsWith(".jar")) {
-                            LocalSourcePackage pkg =
-                                    LocalSourcePackage.open(a.getFilesDir(), rawBytes);
+                            java.io.File filesDir = a.getFilesDir();
+                            if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                return;
+                            }
+                            LocalSourcePackage pkg = LocalSourcePackage.open(filesDir, rawBytes);
                             a.ui.post(
                                     () -> {
+                                        if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                            return;
+                                        }
                                         try {
                                             applyLocalPackage(a, pkg);
                                         } catch (Exception ex) {
@@ -2141,20 +2758,28 @@ final class SourceController {
                                 || lowerName.endsWith(".txt")) {
                             try {
                                 LiveCatalog.Catalog cat = LiveCatalog.parse(text, "", null);
-                                String suffix = LiveQualityPolicy.metricKey(text);
-                                if (suffix.length() > 8) suffix = suffix.substring(0, 8);
-                                java.io.File liveFile =
-                                        new java.io.File(
-                                                a.getFilesDir(), "custom_live_" + suffix + ".txt");
-                                try (java.io.OutputStream out =
-                                        new java.io.FileOutputStream(liveFile)) {
-                                    out.write(text.getBytes("UTF-8"));
+                                java.io.File filesDir = a.getFilesDir();
+                                if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                    return;
                                 }
+                                java.io.File liveDir =
+                                        new java.io.File(
+                                                filesDir,
+                                                snapshotPrivate
+                                                        ? "local_live_private"
+                                                        : "local_live");
+                                java.io.File liveFile =
+                                        writeContentAddressedLocalFile(
+                                                liveDir, "custom_live.txt", text.getBytes("UTF-8"));
                                 final String liveUrl = Cms.fileUri(liveFile);
                                 final int count = cat.channelCount();
                                 final String liveName = displayName + " (" + count + "台)";
                                 a.ui.post(
                                         () -> {
+                                            if (!canCommitConfigImport(
+                                                    a, snapshotPrivate, importSeq)) {
+                                                return;
+                                            }
                                             upsertCustomLiveSource(a, liveName, liveUrl);
                                             a.toast("直播源添加成功（共 " + count + " 个频道）");
                                             if (!a.isTvDevice()) MobileShell.show(a);
@@ -2170,23 +2795,52 @@ final class SourceController {
                                 || lowerName.endsWith(".py")
                                 || Cms.looksLikeJsSpider(text, displayName)
                                 || Cms.looksLikePySpider(text, displayName)) {
-                            java.io.File spiderDir =
-                                    new java.io.File(a.getFilesDir(), "local_spiders");
-                            if (!spiderDir.exists()) spiderDir.mkdirs();
-                            String safeName =
-                                    displayName.replaceAll("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]", "_");
-                            java.io.File savedFile = new java.io.File(spiderDir, safeName);
-                            try (java.io.OutputStream out =
-                                    new java.io.FileOutputStream(savedFile)) {
-                                out.write(text.getBytes("UTF-8"));
+                            java.io.File filesDir = a.getFilesDir();
+                            // Re-verify ownership AFTER getFilesDir()/storage access and write into
+                            // an immutable content-addressed path isolated by space so an older
+                            // same-named import can never overwrite a newer selection's file.
+                            if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                return;
                             }
+                            java.io.File spiderDir =
+                                    new java.io.File(
+                                            filesDir,
+                                            snapshotPrivate
+                                                    ? "local_spiders_private"
+                                                    : "local_spiders");
+                            final java.io.File finalFilesDir = filesDir;
+                            final java.io.File finalSpiderDir = spiderDir;
+                            final String safeScriptName = sanitizeLocalScriptFileName(displayName);
+                            java.io.File savedFile =
+                                    writeContentAddressedLocalFile(
+                                            spiderDir, displayName, text.getBytes("UTF-8"));
                             String fileOrigin = Cms.fileUri(savedFile);
-                            Cms.Config singleCfg = Cms.parseConfig(text, fileOrigin);
+                            Cms.Config parsedSingle = Cms.parseConfig(text, fileOrigin);
+                            final String keyPrefix =
+                                    (lowerName.endsWith(".py")
+                                                    || Cms.looksLikePySpider(text, displayName))
+                                            ? "py"
+                                            : "js";
+                            String stableKey =
+                                    stableLocalScriptSiteKey(
+                                            keyPrefix, uri, snapshotPrivate, fileOrigin);
+                            final Cms.Config singleCfg =
+                                    withStableScriptKey(parsedSingle, stableKey, fileOrigin);
                             a.ui.post(
                                     () -> {
+                                        if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                            return;
+                                        }
                                         try {
-                                            mergeOrSaveConfig(a, singleCfg, "", true);
-                                            a.toast("已导入扩展片源：" + singleCfg.sites.get(0).name);
+                                            mergeOrSaveLocalScriptConfig(
+                                                    a,
+                                                    singleCfg,
+                                                    finalFilesDir,
+                                                    finalSpiderDir,
+                                                    safeScriptName,
+                                                    keyPrefix,
+                                                    snapshotPrivate,
+                                                    importSeq);
                                         } catch (Exception ex) {
                                             a.toast("保存扩展片源失败：" + a.message(ex));
                                         }
@@ -2203,6 +2857,9 @@ final class SourceController {
                                             text, finalOrigin.isEmpty() ? null : finalOrigin);
                             a.ui.post(
                                     () -> {
+                                        if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                            return;
+                                        }
                                         try {
                                             saveConfig(a, parsed, finalOrigin);
                                         } catch (Exception ex) {
@@ -2213,16 +2870,27 @@ final class SourceController {
                             // Fallback: check if the JSON/text file is actually a live channel list
                             try {
                                 LiveCatalog.Catalog cat = LiveCatalog.parse(text, "", null);
-                                java.io.File liveFile =
-                                        new java.io.File(a.getFilesDir(), "custom_live.txt");
-                                try (java.io.OutputStream out =
-                                        new java.io.FileOutputStream(liveFile)) {
-                                    out.write(text.getBytes("UTF-8"));
+                                java.io.File filesDir = a.getFilesDir();
+                                if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                    return;
                                 }
+                                java.io.File liveDir =
+                                        new java.io.File(
+                                                filesDir,
+                                                snapshotPrivate
+                                                        ? "local_live_private"
+                                                        : "local_live");
+                                java.io.File liveFile =
+                                        writeContentAddressedLocalFile(
+                                                liveDir, "custom_live.txt", text.getBytes("UTF-8"));
                                 final String liveUrl = Cms.fileUri(liveFile);
                                 final int count = cat.channelCount();
                                 a.ui.post(
                                         () -> {
+                                            if (!canCommitConfigImport(
+                                                    a, snapshotPrivate, importSeq)) {
+                                                return;
+                                            }
                                             upsertCustomLiveSource(
                                                     a, "本地直播 (" + count + "台)", liveUrl);
                                             a.toast("已识别并添加直播源（共 " + count + " 个频道）");
@@ -2234,7 +2902,13 @@ final class SourceController {
                             }
                         }
                     } catch (Exception e) {
-                        a.ui.post(() -> a.toast("文件读取失败：" + a.message(e)));
+                        a.ui.post(
+                                () -> {
+                                    if (!canCommitConfigImport(a, snapshotPrivate, importSeq)) {
+                                        return;
+                                    }
+                                    a.toast("文件读取失败：" + a.message(e));
+                                });
                     }
                 });
     }
@@ -2247,7 +2921,6 @@ final class SourceController {
             else a.refresh();
         } else {
             saveConfig(a, pkg.config, pkg.origin);
-            a.toast("本地包导入成功（共 " + pkg.config.sites.size() + " 个片源）");
         }
     }
 
@@ -2291,21 +2964,57 @@ final class SourceController {
                 } else {
                     editor.remove(Prefs.SELECTED_SITE);
                 }
+                editor.remove(Prefs.RECOVERED_SKIP_SITE);
+                if (snapshot.stateTag instanceof SavedState) {
+                    SavedState saved = (SavedState) snapshot.stateTag;
+                    String raw = saved.config != null ? saved.config.raw : null;
+                    if (raw != null && !raw.isEmpty()) {
+                        editor.putString(
+                                Prefs.ACTIVE_SUBSCRIPTION_ID,
+                                ConfigStore.subscriptionIdentity(snapshot.origin, raw));
+                    } else {
+                        editor.remove(Prefs.ACTIVE_SUBSCRIPTION_ID);
+                    }
+                }
                 editor.apply();
             }
         };
     }
 
     static void saveConfig(MainActivity a, Cms.Config c, String origin) throws Exception {
+        saveConfig(a, c, origin, null, null);
+    }
+
+    static void saveConfig(
+            final MainActivity a, Cms.Config c, String origin, final Runnable onCommitted)
+            throws Exception {
+        saveConfig(a, c, origin, null, onCommitted);
+    }
+
+    static void saveConfig(
+            final MainActivity a,
+            Cms.Config c,
+            String origin,
+            String explicitSelectedSite,
+            final Runnable onCommitted)
+            throws Exception {
+        a.configImportSeq.incrementAndGet();
         if (!c.warehouse.isEmpty()) origin = c.warehouse;
         else if (!c.origin.isEmpty()) origin = c.origin;
         if (origin == null) origin = "";
-        ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
+        final ConfigLibrary library =
+                a.configStore != null ? new ConfigLibrary(a.configStore.directory) : null;
         String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
-        boolean isLocalFile = ConfigLibrary.isLocalFileOrigin(origin);
-        if (a.isTvDevice() || !isLocalFile) {
+        final boolean isLocalFile = ConfigLibrary.isLocalFileOrigin(origin);
+        final boolean recordInLibrary = library != null && (a.isTvDevice() || !isLocalFile);
+        final Cms.Config previousConfig = a.config;
+        final String previousOrigin = a.configOrigin;
+        final String previousSelected = selected;
+        final boolean snapshotPrivate = a.privateMode;
+        if (explicitSelectedSite != null && !explicitSelectedSite.isEmpty()) {
+            selected = explicitSelectedSite;
+        } else if (recordInLibrary) {
             try {
-                rememberConfig(a, library);
                 String id = ConfigLibrary.identity(origin, c.raw);
                 String previousId =
                         a.config == null
@@ -2317,13 +3026,14 @@ final class SourceController {
                         if (id.equals(entry.id)) selected = entry.selected;
                     }
                 }
-                library.remember(c.raw, origin, configName(c), selected);
             } catch (Exception e) {
                 if (a.isTvDevice()) throw e;
             }
         }
         final String rawConfig = c.raw;
         final String targetOrigin = origin;
+        final String rememberedName = configName(c);
+        final String rememberedSelected = selected;
         SourcePicker.applyEdits(a, c, targetOrigin);
         String currentKey = selected;
         boolean hasSelected = false;
@@ -2343,11 +3053,60 @@ final class SourceController {
         final ConfigStore.PointerSnapshot nextPointers =
                 new ConfigStore.PointerSnapshot(
                         targetOrigin, nextSelectedSite, new SavedState(c, targetOrigin));
+        final Runnable applyCommittedUi =
+                () -> {
+                    a.closeEngines();
+                    a.config = c;
+                    a.configOrigin = targetOrigin;
+                    if (!isLocalFile) {
+                        CloudSyncDialog.onSubscriptionSaved(a, targetOrigin, c.raw);
+                    }
+                    a.back.clear();
+                    a.current = new MainActivity.Screen(a::home);
+                    a.current.render.run();
+                    a.restore(a.current);
+                    a.toast("已导入 " + c.sites.size() + " 个来源");
+                    if (onCommitted != null) {
+                        onCommitted.run();
+                    }
+                };
         if (store != null) {
             store.saveAsync(
                     rawConfig,
                     nextPointers,
                     pointerStore,
+                    (seq, committed) -> {
+                        if (recordInLibrary) {
+                            try {
+                                if (previousConfig != null
+                                        && previousConfig.raw != null
+                                        && !previousConfig.raw.isEmpty()) {
+                                    library.remember(
+                                            previousConfig.raw,
+                                            previousOrigin,
+                                            configName(previousConfig),
+                                            previousSelected);
+                                }
+                                library.remember(
+                                        rawConfig,
+                                        targetOrigin,
+                                        rememberedName,
+                                        rememberedSelected);
+                            } catch (Exception ignored) {
+                            }
+                        }
+                        a.ui.post(
+                                () -> {
+                                    if (store.latestWriteSeq() != seq
+                                            || a.isFinishing()
+                                            || a.isDestroyed()
+                                            || a.switchingPrivacy
+                                            || a.privateMode != snapshotPrivate) {
+                                        return;
+                                    }
+                                    applyCommittedUi.run();
+                                });
+                    },
                     (seq, error, rolledBackTo) ->
                             a.ui.post(
                                     () -> {
@@ -2373,18 +3132,8 @@ final class SourceController {
                                     }));
         } else {
             pointerStore.applyPointers(nextPointers);
+            applyCommittedUi.run();
         }
-        a.closeEngines();
-        a.config = c;
-        a.configOrigin = targetOrigin;
-        if (!isLocalFile) {
-            CloudSyncDialog.onSubscriptionSaved(a, targetOrigin, c.raw);
-        }
-        a.back.clear();
-        a.current = new MainActivity.Screen(a::home);
-        a.current.render.run();
-        a.restore(a.current);
-        a.toast("已导入 " + c.sites.size() + " 个来源");
     }
 
     static String configName(Cms.Config config) {

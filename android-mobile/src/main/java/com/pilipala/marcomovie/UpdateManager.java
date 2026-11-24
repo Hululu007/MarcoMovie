@@ -30,7 +30,7 @@ final class UpdateManager {
     final Context context;
     final SharedPreferences prefs;
     final ExecutorService worker = Executors.newSingleThreadExecutor();
-    final Handler main = new Handler(Looper.getMainLooper());
+    private volatile Handler main;
     volatile Release available;
     volatile String message = "尚未检查更新";
     volatile boolean busy;
@@ -52,16 +52,53 @@ final class UpdateManager {
         HttpURLConnection open(String address, long offset) throws Exception;
     }
 
+    interface SpaceProvider {
+        long usableSpace(File dir);
+    }
+
+    interface ApkVerifier {
+        void verify(Context c, File file, Release r) throws Exception;
+    }
+
+    static final class InsufficientSpaceException extends IOException {
+        final long usableBytes;
+        final long requiredBytes;
+
+        InsufficientSpaceException(long usableBytes, long requiredBytes) {
+            super("space");
+            this.usableBytes = usableBytes;
+            this.requiredBytes = requiredBytes;
+        }
+    }
+
     final Connector connector;
+    final SpaceProvider spaceProvider;
+    final ApkVerifier apkVerifier;
 
     private UpdateManager(Context c) {
-        this(c, c.getSharedPreferences("updates", 0), UpdateManager::open);
+        this(
+                c,
+                c.getSharedPreferences("updates", 0),
+                UpdateManager::open,
+                File::getUsableSpace,
+                UpdateManager::verifyApk);
     }
 
     UpdateManager(Context c, SharedPreferences preferences, Connector connection) {
+        this(c, preferences, connection, File::getUsableSpace, UpdateManager::verifyApk);
+    }
+
+    UpdateManager(
+            Context c,
+            SharedPreferences preferences,
+            Connector connection,
+            SpaceProvider space,
+            ApkVerifier verifier) {
         context = c;
         prefs = preferences;
         connector = connection;
+        spaceProvider = space != null ? space : File::getUsableSpace;
+        apkVerifier = verifier != null ? verifier : UpdateManager::verifyApk;
         int code = installedCode(c), old = prefs.getInt("installed_code", code);
         if (code > old) {
             prefs.edit()
@@ -142,7 +179,17 @@ final class UpdateManager {
     }
 
     private void changed() {
-        main.post(
+        Runnable snapshot;
+        synchronized (this) {
+            snapshot = listener;
+        }
+        if (snapshot == null) return;
+        Handler h = main;
+        if (h == null) {
+            h = new Handler(Looper.getMainLooper());
+            main = h;
+        }
+        h.post(
                 () -> {
                     Runnable callback;
                     synchronized (this) {
@@ -239,6 +286,9 @@ final class UpdateManager {
                             prefs.edit().putString("metadata", data.toString()).apply();
                             if ("download".equals(mode()) && !ready()) downloadFile(r);
                         }
+                    } catch (InsufficientSpaceException e) {
+                        message = "存储空间不足，无法下载或续传更新，请清理空间后重试";
+                        AppLog.w("UpdateManager", "Insufficient space for update", e);
                     } catch (InterruptedIOException e) {
                         message = cancel ? "已取消，当前版本不受影响" : "网络连接超时；若已有下载进度，再次下载可继续";
                     } catch (Exception e) {
@@ -262,6 +312,9 @@ final class UpdateManager {
                 () -> {
                     try {
                         downloadFile(r);
+                    } catch (InsufficientSpaceException e) {
+                        message = "存储空间不足，无法下载或续传更新，请清理空间后重试";
+                        AppLog.w("UpdateManager", "Insufficient space for update download", e);
                     } catch (InterruptedIOException e) {
                         message = cancel ? "下载已取消" : "下载超时，已保留进度，可再次下载继续";
                     } catch (Exception e) {
@@ -293,44 +346,86 @@ final class UpdateManager {
         new Thread(active::disconnect, "MarcoMovie-cancel-update").start();
     }
 
-    private void downloadFile(Release r) throws Exception {
-        if (folder().getUsableSpace() < r.size + 16 * 1024 * 1024L) throw new IOException("space");
-        File part = new File(folder(), "release.part");
-        if (!r.sha.equals(prefs.getString("partial_sha", "")) || part.length() > r.size) {
-            part.delete();
+    void downloadFile(Release r) throws Exception {
+        File dir = folder();
+        File part = new File(dir, "release.part");
+        File staleApk = apk();
+        if (staleApk.exists() && !r.sha.equals(prefs.getString("download_sha", ""))) {
+            staleApk.delete();
+        }
+        // Validate existing partial file first before calculating required remaining free space.
+        boolean validPartial =
+                part.isFile()
+                        && r.sha.equals(prefs.getString("partial_sha", ""))
+                        && part.length() > 0
+                        && part.length() <= r.size;
+        if (!validPartial) {
+            if (part.exists() && !part.delete()) {
+                throw new IOException("discard stale partial APK");
+            }
             prefs.edit().putString("partial_sha", r.sha).apply();
         }
         percent = (int) (part.length() * 100 / r.size);
         boolean verified = false;
+        boolean spaceFailed = false;
         try {
             Exception failure = null;
             boolean valid = false;
-            String[] sources = r.downloads;
-            for (int source = 0; source < sources.length && !valid; source++) {
-                for (int attempt = 0; attempt < 2 && part.length() < r.size; attempt++) {
-                    if (cancel) throw new InterruptedIOException();
-                    message =
-                            (sources[source].startsWith(UpdatePolicy.MIRROR)
-                                            ? "正在从镜像站下载 "
-                                            : "正在从 GitHub 下载 ")
-                                    + r.version;
-                    changed();
-                    try {
-                        transfer(r, part, sources[source]);
-                        failure = null;
-                    } catch (IOException e) {
-                        failure = e;
-                        if (cancel) throw new InterruptedIOException();
-                        if (e.getMessage() != null && e.getMessage().contains("404")) break;
-                    }
+
+            // If temp file is already complete, verify it first without requiring download space.
+            if (part.isFile() && part.length() == r.size) {
+                try {
+                    apkVerifier.verify(context, part, r);
+                    valid = true;
+                } catch (Exception e) {
+                    failure = e;
+                    if (!part.delete()) throw new IOException("discard invalid APK", e);
+                    percent = 0;
                 }
-                if (part.length() == r.size) {
-                    try {
-                        verifyApk(context, part, r);
-                        valid = true;
-                    } catch (Exception e) {
-                        failure = e;
-                        if (!part.delete()) throw new IOException("discard invalid APK", e);
+            }
+
+            if (!valid) {
+                ensureSpaceForResume(dir, r.size, part.isFile() ? part.length() : 0L);
+                String[] sources = r.downloads;
+                for (int source = 0; source < sources.length && !valid; source++) {
+                    for (int attempt = 0; attempt < 2 && part.length() < r.size; attempt++) {
+                        if (cancel) throw new InterruptedIOException();
+                        ensureSpaceForResume(dir, r.size, part.isFile() ? part.length() : 0L);
+                        message =
+                                (sources[source].startsWith(UpdatePolicy.MIRROR)
+                                                ? "正在从镜像站下载 "
+                                                : "正在从 GitHub 下载 ")
+                                        + r.version;
+                        changed();
+                        try {
+                            transfer(r, part, sources[source]);
+                            failure = null;
+                        } catch (InsufficientSpaceException ise) {
+                            spaceFailed = true;
+                            throw ise;
+                        } catch (IOException e) {
+                            failure = e;
+                            if (cancel) throw new InterruptedIOException();
+                            String msg = e.getMessage();
+                            if (msg != null && msg.contains("http 416")) {
+                                if (part.exists() && !part.delete()) {
+                                    throw new IOException("reset 416 partial APK", e);
+                                }
+                                percent = 0;
+                                continue;
+                            }
+                            if (msg != null && msg.contains("404")) break;
+                        }
+                    }
+                    if (part.isFile() && part.length() == r.size) {
+                        try {
+                            apkVerifier.verify(context, part, r);
+                            valid = true;
+                        } catch (Exception e) {
+                            failure = e;
+                            if (!part.delete()) throw new IOException("discard invalid APK", e);
+                            percent = 0;
+                        }
                     }
                 }
             }
@@ -344,17 +439,31 @@ final class UpdateManager {
             prefs.edit().putString("download_sha", r.sha).remove("partial_sha").apply();
             message = "新版已下载并校验，选择“安装已下载版本”继续";
             verified = true;
+        } catch (InsufficientSpaceException ise) {
+            spaceFailed = true;
+            throw ise;
         } finally {
             if (cancel) {
                 part.delete();
                 prefs.edit().remove("partial_sha").apply();
             }
-            if (!verified && !cancel && part.exists()) message = "下载中断，已保留进度，可再次下载继续";
+            if (!verified && !cancel && !spaceFailed && part.exists()) {
+                message = "下载中断，已保留进度，可再次下载继续";
+            }
+        }
+    }
+
+    private void ensureSpaceForResume(File dir, long totalSize, long existingValidBytes)
+            throws InsufficientSpaceException {
+        long usable = spaceProvider.usableSpace(dir);
+        long required = UpdatePolicy.requiredFreeBytes(totalSize, existingValidBytes);
+        if (!UpdatePolicy.hasEnoughSpace(usable, totalSize, existingValidBytes)) {
+            throw new InsufficientSpaceException(usable, required);
         }
     }
 
     private void transfer(Release r, File part, String address) throws Exception {
-        long offset = part.length();
+        long offset = part.isFile() ? part.length() : 0L;
         HttpURLConnection conn = connector.open(address, offset);
         activeConnection = conn;
         try {
@@ -364,7 +473,18 @@ final class UpdateManager {
                             conn.getResponseCode(),
                             conn.getHeaderField("Content-Range"),
                             r.size);
-            long declared = conn.getContentLength();
+            if (start == 0 && offset > 0) {
+                // Server returned 200 (full restart). Truncating part frees `offset` bytes,
+                // so usable + offset must still cover totalSize + reserve.
+                long effectiveUsable = spaceProvider.usableSpace(part.getParentFile()) + offset;
+                long fullRequired = UpdatePolicy.requiredFreeBytes(r.size, 0L);
+                if (effectiveUsable < fullRequired) {
+                    throw new InsufficientSpaceException(
+                            spaceProvider.usableSpace(part.getParentFile()), fullRequired);
+                }
+            }
+            long declared = parseContentLength(conn);
+            if (declared == 0 && r.size - start > 0) throw new IOException("size");
             if (declared > 0 && declared != r.size - start) throw new IOException("size");
             try (InputStream in = conn.getInputStream();
                     OutputStream out = new FileOutputStream(part, start > 0)) {
@@ -389,6 +509,17 @@ final class UpdateManager {
             activeConnection = null;
             conn.disconnect();
         }
+    }
+
+    private static long parseContentLength(HttpURLConnection conn) {
+        String header = conn.getHeaderField("Content-Length");
+        if (header != null && !header.trim().isEmpty()) {
+            try {
+                return Long.parseLong(header.trim());
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return conn.getContentLength();
     }
 
     static void verifyApk(Context c, File file, Release r) throws Exception {
@@ -478,7 +609,7 @@ final class UpdateManager {
                 c.disconnect();
                 throw e;
             }
-            if (status == 200 || (offset > 0 && status == 206)) return c;
+            if (status == 200 || (offset > 0 && (status == 206 || status == 416))) return c;
             if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
                 String next = c.getHeaderField("Location");
                 c.disconnect();

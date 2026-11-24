@@ -37,7 +37,7 @@ const javascript = `globalThis.__movieSpider={
   if(params.mode==='headers')return [200,'application/octet-stream',new Uint8Array(body),false];
   return [200,'application/octet-stream',body,{'X-Count':String(this.count),'X-Query-OK':String(params.name==='片 名+%&')}];}
 };`;
-function readAsset(folder, file) { return fs.readFileSync(path.join(root, 'android/src/main/assets', folder, file), 'utf8'); }
+function readAsset(folder, file) { return fs.readFileSync(path.join(root, 'android-mobile/src/main/assets', folder, file), 'utf8'); }
 async function dispatch(command) {
   if (command.op === 'init') {
     const context = vm.createContext({console, setTimeout, clearTimeout, __movieProxyBase:command.base, __proxyAddress:command.base});
