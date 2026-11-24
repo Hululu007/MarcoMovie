@@ -72,6 +72,7 @@ public final class LiteStore {
         public String vodName = "";
         public String vodPic = "";
         public String lineName = "";
+        public String lineFrom = "";
         public int lineIndex;
         public String epName = "";
         public String epUrl = "";
@@ -89,6 +90,7 @@ public final class LiteStore {
                     .put("vodName", vodName)
                     .put("vodPic", vodPic)
                     .put("lineName", lineName)
+                    .put("lineFrom", lineFrom)
                     .put("lineIndex", lineIndex)
                     .put("epName", epName)
                     .put("epUrl", epUrl)
@@ -108,6 +110,7 @@ public final class LiteStore {
             e.vodName = o.optString("vodName", "");
             e.vodPic = o.optString("vodPic", "");
             e.lineName = o.optString("lineName", "");
+            e.lineFrom = o.optString("lineFrom", "");
             e.lineIndex = o.optInt("lineIndex", 0);
             e.epName = o.optString("epName", "");
             e.epUrl = o.optString("epUrl", "");
@@ -242,6 +245,10 @@ public final class LiteStore {
         List<HistoryEntry> current = parseHistoryJson(existingRaw);
         JSONArray next = new JSONArray();
         String entryApi = normApi(entry.siteApi);
+        boolean safeCollapseLegacy =
+                collapseLegacyEmptyApi
+                        && entryApi.length() > 0
+                        && !hasConflictingApiInHistory(current, entry.siteKey, entryApi);
         try {
             if (entry.updatedAt <= 0L) entry.updatedAt = System.currentTimeMillis();
             next.put(entry.toJson());
@@ -256,8 +263,7 @@ public final class LiteStore {
                                 entryApi,
                                 entry.vodId);
                 boolean dupLegacy =
-                        collapseLegacyEmptyApi
-                                && entryApi.length() > 0
+                        safeCollapseLegacy
                                 && normApi(old.siteApi).length() == 0
                                 && sameVideoLegacy(old.siteKey, old.vodId, entry.siteKey, entry.vodId);
                 if (dupExact || dupLegacy) continue;
@@ -289,8 +295,16 @@ public final class LiteStore {
         if (isHistoryCorrupted(sp)) {
             return;
         }
-        String updated =
-                recordHistoryJson(sp.getString(KEY_HISTORY, "[]"), entry, collapseLegacyEmptyApi);
+        String histRaw = sp.getString(KEY_HISTORY, "[]");
+        boolean safeCollapse =
+                collapseLegacyEmptyApi
+                        && LiteSync.isSiteKeyUnambiguouslyUnique(
+                                entry.siteKey,
+                                null,
+                                histRaw,
+                                sp.getString(KEY_FAVORITES, "[]"),
+                                sp.getString(KEY_SYNC_TOMBSTONES, ""));
+        String updated = recordHistoryJson(histRaw, entry, safeCollapse);
         if (!isHistoryCorrupted()) {
             sp.edit().putString(KEY_HISTORY, updated).apply();
         }
@@ -329,7 +343,7 @@ public final class LiteStore {
                 HistoryEntry e = list.get(i);
                 if (sameVideoLegacy(e.siteKey, e.vodId, siteKey, vodId)) return e;
             }
-        } else if (allowLegacyEmptyApi) {
+        } else if (allowLegacyEmptyApi && !hasConflictingApiInHistory(list, siteKey, api)) {
             for (int i = 0; i < list.size(); i++) {
                 HistoryEntry e = list.get(i);
                 if (normApi(e.siteApi).length() == 0
@@ -486,7 +500,9 @@ public final class LiteStore {
             FavoriteEntry e = list.get(i);
             if (sameVideo(e.siteKey, e.siteApi, e.vodId, siteKey, api, vodId)) return true;
         }
-        if (allowLegacyEmptyApi && api.length() > 0) {
+        if (allowLegacyEmptyApi
+                && api.length() > 0
+                && !hasConflictingApiInFavorites(list, siteKey, api)) {
             for (int i = 0; i < list.size(); i++) {
                 FavoriteEntry e = list.get(i);
                 if (normApi(e.siteApi).length() == 0
@@ -508,6 +524,10 @@ public final class LiteStore {
         boolean removedExact = false;
         boolean removedLegacy = false;
         String entryApi = normApi(entry.siteApi);
+        boolean safeAllowLegacy =
+                allowLegacyEmptyApi
+                        && entryApi.length() > 0
+                        && !hasConflictingApiInFavorites(list, entry.siteKey, entryApi);
         for (int i = 0; i < list.size(); i++) {
             FavoriteEntry old = list.get(i);
             if (sameVideo(
@@ -520,7 +540,7 @@ public final class LiteStore {
                 removedExact = true;
             }
         }
-        if (!removedExact && allowLegacyEmptyApi && entryApi.length() > 0) {
+        if (!removedExact && safeAllowLegacy) {
             for (int i = 0; i < list.size(); i++) {
                 FavoriteEntry old = list.get(i);
                 if (normApi(old.siteApi).length() == 0
@@ -549,7 +569,7 @@ public final class LiteStore {
                                         entryApi,
                                         entry.vodId);
                 boolean skipLegacy =
-                        (removedLegacy || (removedExact && allowLegacyEmptyApi && entryApi.length() > 0))
+                        (removedLegacy || (removedExact && safeAllowLegacy))
                                 && normApi(old.siteApi).length() == 0
                                 && sameVideoLegacy(
                                         old.siteKey,
@@ -573,10 +593,18 @@ public final class LiteStore {
             Context context, FavoriteEntry entry, boolean allowLegacyEmptyApi) {
         SharedPreferences sp = prefs(context);
         String raw = sp.getString(KEY_FAVORITES, "[]");
-        String updated = toggleFavoriteJson(raw, entry, allowLegacyEmptyApi);
+        boolean safeAllowLegacy =
+                allowLegacyEmptyApi
+                        && LiteSync.isSiteKeyUnambiguouslyUnique(
+                                entry.siteKey,
+                                null,
+                                sp.getString(KEY_HISTORY, "[]"),
+                                raw,
+                                sp.getString(KEY_SYNC_TOMBSTONES, ""));
+        String updated = toggleFavoriteJson(raw, entry, safeAllowLegacy);
         sp.edit().putString(KEY_FAVORITES, updated).commit();
         return containsFavorite(
-                updated, entry.siteKey, entry.siteApi, entry.vodId, allowLegacyEmptyApi);
+                updated, entry.siteKey, entry.siteApi, entry.vodId, safeAllowLegacy);
     }
 
     public static void clearFavorites(Context context) {
@@ -655,6 +683,50 @@ public final class LiteStore {
 
     private static String normApi(String api) {
         return api == null ? "" : api.trim();
+    }
+
+    private static boolean hasConflictingApiInHistory(
+            List<HistoryEntry> list, String siteKey, String targetApi) {
+        if (list == null || list.isEmpty()) return false;
+        String sk = siteKey == null ? "" : siteKey.trim();
+        if (sk.length() == 0) return false;
+        String firstApi = normApi(targetApi);
+        for (int i = 0; i < list.size(); i++) {
+            HistoryEntry e = list.get(i);
+            if (e == null) continue;
+            String esk = e.siteKey == null ? "" : e.siteKey.trim();
+            if (!sk.equals(esk)) continue;
+            String ea = normApi(e.siteApi);
+            if (ea.length() == 0) continue;
+            if (firstApi.length() == 0) {
+                firstApi = ea;
+            } else if (!firstApi.equals(ea)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasConflictingApiInFavorites(
+            List<FavoriteEntry> list, String siteKey, String targetApi) {
+        if (list == null || list.isEmpty()) return false;
+        String sk = siteKey == null ? "" : siteKey.trim();
+        if (sk.length() == 0) return false;
+        String firstApi = normApi(targetApi);
+        for (int i = 0; i < list.size(); i++) {
+            FavoriteEntry e = list.get(i);
+            if (e == null) continue;
+            String esk = e.siteKey == null ? "" : e.siteKey.trim();
+            if (!sk.equals(esk)) continue;
+            String ea = normApi(e.siteApi);
+            if (ea.length() == 0) continue;
+            if (firstApi.length() == 0) {
+                firstApi = ea;
+            } else if (!firstApi.equals(ea)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static boolean sameVideoLegacy(String siteA, String vodA, String siteB, String vodB) {

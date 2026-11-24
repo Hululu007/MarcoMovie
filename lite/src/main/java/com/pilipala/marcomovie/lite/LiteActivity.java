@@ -534,6 +534,7 @@ public final class LiteActivity extends Activity {
         final String vodName;
         final String vodPic;
         final String lineName;
+        final String lineFrom;
         final int lineIndex;
         final String epName;
         final String epUrl;
@@ -562,6 +563,7 @@ public final class LiteActivity extends Activity {
                 String vodName,
                 String vodPic,
                 String lineName,
+                String lineFrom,
                 int lineIndex,
                 String epName,
                 String epUrl,
@@ -591,6 +593,7 @@ public final class LiteActivity extends Activity {
             this.vodName = vodName == null ? "" : vodName;
             this.vodPic = vodPic == null ? "" : vodPic;
             this.lineName = lineName == null ? "" : lineName;
+            this.lineFrom = lineFrom == null ? "" : lineFrom;
             this.lineIndex = Math.max(0, lineIndex);
             this.epName = epName == null ? "" : epName;
             this.epUrl = epUrl == null ? "" : epUrl;
@@ -625,6 +628,47 @@ public final class LiteActivity extends Activity {
                 int lineIndex,
                 int epIndex,
                 List<EpisodeItem> lineEpisodes) {
+            String derivedFrom = "";
+            if (detail != null && lineIndex >= 0) {
+                List<PlayLine> extracted = extractPlayLines(detail, "");
+                if (lineIndex < extracted.size()) {
+                    PlayLine pl = extracted.get(lineIndex);
+                    if (lineName == null
+                            || lineName.length() == 0
+                            || lineName.equals(pl.name)
+                            || lineName.equals(pl.rawFrom)) {
+                        derivedFrom = pl.rawFrom;
+                    }
+                }
+            }
+            return forVod(
+                    generation,
+                    streamUrl,
+                    identity,
+                    epName,
+                    headers,
+                    site,
+                    detail,
+                    lineName,
+                    derivedFrom,
+                    lineIndex,
+                    epIndex,
+                    lineEpisodes);
+        }
+
+        static PlaybackSession forVod(
+                int generation,
+                String streamUrl,
+                String identity,
+                String epName,
+                Map<String, String> headers,
+                LiteCatalog.Site site,
+                JSONObject detail,
+                String lineName,
+                String lineFrom,
+                int lineIndex,
+                int epIndex,
+                List<EpisodeItem> lineEpisodes) {
             String sKey = site != null && site.key != null ? site.key : "";
             String sName = site != null && site.name != null ? site.name : "";
             String sApi = site != null && site.api != null ? site.api : "";
@@ -646,6 +690,7 @@ public final class LiteActivity extends Activity {
                     vName,
                     vPic,
                     lineName,
+                    lineFrom,
                     lineIndex,
                     epName,
                     identity,
@@ -678,6 +723,7 @@ public final class LiteActivity extends Activity {
                     streamUrl,
                     title,
                     headers,
+                    "",
                     "",
                     "",
                     "",
@@ -718,6 +764,7 @@ public final class LiteActivity extends Activity {
                     "",
                     "",
                     "",
+                    "",
                     0,
                     "",
                     "",
@@ -751,6 +798,7 @@ public final class LiteActivity extends Activity {
         entry.vodName = session.vodName.length() > 0 ? session.vodName : session.epName;
         entry.vodPic = session.vodPic;
         entry.lineName = session.lineName;
+        entry.lineFrom = session.lineFrom;
         entry.lineIndex = session.lineIndex;
         entry.epName = session.epName;
         entry.epUrl = session.epUrl;
@@ -1536,15 +1584,16 @@ public final class LiteActivity extends Activity {
     boolean isUniqueSiteKey(String siteKey) {
         String sk = siteKey == null ? "" : siteKey.trim();
         if (sk.length() == 0) return true;
-        int count = 0;
-        for (int i = 0; i < sites.size(); i++) {
-            LiteCatalog.Site s = sites.get(i);
-            if (s != null && s.supported && sk.equals(s.key == null ? "" : s.key.trim())) {
-                count++;
-                if (count > 1) return false;
-            }
+        String histRaw = "[]";
+        String favRaw = "[]";
+        String tombRaw = "";
+        try {
+            histRaw = LiteStore.getHistoryRaw(this);
+            favRaw = LiteStore.getFavoritesRaw(this);
+            tombRaw = LiteStore.getTombstonesRaw(this);
+        } catch (Throwable ignored) {
         }
-        return true;
+        return LiteSync.isSiteKeyUnambiguouslyUnique(sk, sites, histRaw, favRaw, tombRaw);
     }
 
     static String shortHostTag(String api) {
@@ -2816,11 +2865,13 @@ public final class LiteActivity extends Activity {
         apiInput.setText(site.api == null ? "" : site.api);
         page.addView(apiInput);
 
-        page.addView(text("解析前缀 (playUrl，可选 http(s)://)", 13));
+        page.addView(text("解析前缀 (playUrl，可选 http(s)://，留空则沿用全局解析路由)", 13));
         final EditText playUrlInput = new EditText(this);
         playUrlInput.setSingleLine();
         playUrlInput.setTextColor(0xffffffff);
-        playUrlInput.setText(site.playUrl == null ? "" : site.playUrl);
+        final String initialDisplayedPlayUrl =
+                site.explicitSitePlayUrl && site.playUrl != null ? site.playUrl : "";
+        playUrlInput.setText(initialDisplayedPlayUrl);
         page.addView(playUrlInput);
 
         page.addView(text("扩展参数 (ext，可选)", 13));
@@ -2879,8 +2930,13 @@ public final class LiteActivity extends Activity {
                             JSONObject ov = new JSONObject();
                             ov.put("name", newName);
                             ov.put("group", newGroup);
-                            ov.put("api", newApi);
-                            ov.put("playUrl", newPlayUrl);
+                            String origApi = site.api == null ? "" : site.api.trim();
+                            if (!newApi.equals(origApi)) {
+                                ov.put("api", newApi);
+                            }
+                            if (!newPlayUrl.equals(initialDisplayedPlayUrl)) {
+                                ov.put("playUrl", newPlayUrl);
+                            }
                             ov.put("ext", newExt);
                             ov.put("searchable", searchableState[0]);
                             overrides.put(site.siteId(), ov);
@@ -3632,9 +3688,6 @@ public final class LiteActivity extends Activity {
         for (int i = 0; i < list.size(); i++) {
             LiteStore.HistoryEntry e = list.get(i);
             t.putMax("hist:" + LiteSync.itemKey(e.siteKey, e.siteApi, e.vodId), now);
-            if (e.siteApi != null && e.siteApi.trim().length() > 0 && isUniqueSiteKey(e.siteKey)) {
-                t.putMax("hist:" + LiteSync.itemKey(e.siteKey, "", e.vodId), now);
-            }
         }
         LiteStore.setTombstonesRaw(this, t.json());
     }
@@ -3648,11 +3701,6 @@ public final class LiteActivity extends Activity {
             String k = LiteSync.itemKey(f.siteKey, f.siteApi, f.vodId);
             t.putMax("fav:" + k, now);
             t.stamps.remove("add:" + k);
-            if (f.siteApi != null && f.siteApi.trim().length() > 0 && isUniqueSiteKey(f.siteKey)) {
-                String legacyK = LiteSync.itemKey(f.siteKey, "", f.vodId);
-                t.putMax("fav:" + legacyK, now);
-                t.stamps.remove("add:" + legacyK);
-            }
         }
         LiteStore.setTombstonesRaw(this, t.json());
     }
@@ -3669,17 +3717,18 @@ public final class LiteActivity extends Activity {
         if (nowFavorited) {
             t.stamps.put("add:" + k, Long.valueOf(now));
             t.stamps.remove("fav:" + k);
-            if (alsoTombstoneLegacyEmptyApi && siteApi != null && siteApi.trim().length() > 0) {
+            if (alsoTombstoneLegacyEmptyApi
+                    && siteApi != null
+                    && siteApi.trim().length() > 0
+                    && isUniqueSiteKey(siteKey)) {
                 t.stamps.remove("fav:" + LiteSync.itemKey(siteKey, "", vodId));
             }
         } else {
             t.stamps.put("fav:" + k, Long.valueOf(now));
             t.stamps.remove("add:" + k);
-            if (alsoTombstoneLegacyEmptyApi && siteApi != null && siteApi.trim().length() > 0) {
-                String legacyKey = LiteSync.itemKey(siteKey, "", vodId);
-                t.stamps.put("fav:" + legacyKey, Long.valueOf(now));
-                t.stamps.remove("add:" + legacyKey);
-            }
+            // Never emit an unscoped bare tombstone for an API-identified item: LiteSync.merge
+            // already suppresses old no-API cloud copies via canonicalization when siteKey is
+            // unique, while keeping unattributed legacy items safe whenever another API exists.
         }
         LiteStore.setTombstonesRaw(this, t.json());
     }
@@ -5245,7 +5294,7 @@ public final class LiteActivity extends Activity {
                     if (epName.length() == 0) epName = "第" + (out.size() + 1) + "集";
                     out.add(new EpisodeItem(epName, epUrl, out.size()));
                 } else if (val instanceof String) {
-                    List<EpisodeItem> parsed = parseLineEpisodes((String) val);
+                    List<EpisodeItem> parsed = parseLineEpisodes((String) val, out.size() + 1);
                     for (int j = 0; j < parsed.size(); j++) {
                         EpisodeItem p = parsed.get(j);
                         out.add(new EpisodeItem(p.name, p.url, out.size()));
@@ -5264,7 +5313,7 @@ public final class LiteActivity extends Activity {
                     if (epName.length() == 0) epName = "第" + (out.size() + 1) + "集";
                     out.add(new EpisodeItem(epName, epUrl, out.size()));
                 } else if (val instanceof String) {
-                    List<EpisodeItem> parsed = parseLineEpisodes((String) val);
+                    List<EpisodeItem> parsed = parseLineEpisodes((String) val, out.size() + 1);
                     for (int j = 0; j < parsed.size(); j++) {
                         EpisodeItem p = parsed.get(j);
                         out.add(new EpisodeItem(p.name, p.url, out.size()));
@@ -5559,6 +5608,33 @@ public final class LiteActivity extends Activity {
         return lower.matches(".*(?:^|[\\s_\\-.\\[\\(])(?:pv|cm|sp|ova|oad|tc)(?:\\d*|[\\s_\\-.\\]\\)]|$).*");
     }
 
+    private static int canonicalSeasonNumber(String name) {
+        if (name == null || isSpecialOrPreviewEpisode(name)) return -1;
+        String norm = normalizeEpisodeTitle(name);
+        if (norm.length() == 0) return -1;
+        java.util.regex.Matcher m =
+                java.util.regex.Pattern.compile(
+                                "(?:^|[\\s_\\-.\\[\\(])s0*([1-9]\\d{0,2})e0*[1-9]\\d{0,4}(?:$|[\\s_\\-.\\]\\)])")
+                        .matcher(norm);
+        if (m.find()) {
+            return parsePositiveIntSafe(m.group(1));
+        }
+        m =
+                java.util.regex.Pattern.compile("第\\s*0*([1-9]\\d{0,2})\\s*季")
+                        .matcher(norm);
+        if (m.find()) {
+            return parsePositiveIntSafe(m.group(1));
+        }
+        m =
+                java.util.regex.Pattern.compile(
+                                "(?:^|[\\s_\\-.\\[\\(])season\\s*0*([1-9]\\d{0,2})(?:$|[\\s_\\-.\\]\\)])")
+                        .matcher(norm);
+        if (m.find()) {
+            return parsePositiveIntSafe(m.group(1));
+        }
+        return -1;
+    }
+
     private static int canonicalEpisodeNumber(String name) {
         if (name == null || isSpecialOrPreviewEpisode(name)) return -1;
         String norm = normalizeEpisodeTitle(name);
@@ -5632,12 +5708,18 @@ public final class LiteActivity extends Activity {
             if (nameHits == 1) return nameMatch;
         }
 
+        int curSeason = canonicalSeasonNumber(currentEpName);
         int curNum = canonicalEpisodeNumber(currentEpName);
         if (curNum > 0) {
             int numMatch = -1;
             int numHits = 0;
             for (int i = 0; i < targetEpisodes.size(); i++) {
-                if (canonicalEpisodeNumber(targetEpisodes.get(i).name) == curNum) {
+                String candName = targetEpisodes.get(i).name;
+                int candSeason = canonicalSeasonNumber(candName);
+                if (curSeason != candSeason) {
+                    continue;
+                }
+                if (canonicalEpisodeNumber(candName) == curNum) {
                     numMatch = i;
                     numHits++;
                 }
@@ -5646,13 +5728,184 @@ public final class LiteActivity extends Activity {
         }
 
         if (sourceLineSize == 1 && targetEpisodes.size() == 1) {
+            String targetName = targetEpisodes.get(0).name;
+            int targetSeason = canonicalSeasonNumber(targetName);
+            int targetNum = canonicalEpisodeNumber(targetName);
             boolean curSpecial = isSpecialOrPreviewEpisode(currentEpName);
-            boolean targetSpecial = isSpecialOrPreviewEpisode(targetEpisodes.get(0).name);
-            if (curSpecial == targetSpecial) {
+            boolean targetSpecial = isSpecialOrPreviewEpisode(targetName);
+            if (curSeason < 0
+                    && targetSeason < 0
+                    && curNum < 0
+                    && targetNum < 0
+                    && curSpecial == targetSpecial) {
                 return 0;
             }
         }
         return -1;
+    }
+
+    static int resolveSavedLineIndex(
+            List<PlayLine> playLines, LiteStore.HistoryEntry savedHist) {
+        if (playLines == null || playLines.isEmpty() || savedHist == null) return 0;
+        String savedFrom = savedHist.lineFrom == null ? "" : savedHist.lineFrom.trim();
+        String savedName = savedHist.lineName == null ? "" : savedHist.lineName.trim();
+        String savedUrl = savedHist.epUrl == null ? "" : savedHist.epUrl.trim();
+        int savedIdx = savedHist.lineIndex;
+
+        // 1. Persisted lineFrom code (most reliable, distinguishes same-display-name lines sharing a URL)
+        if (savedFrom.length() > 0) {
+            List<Integer> fromMatches = new ArrayList<Integer>();
+            for (int n = 0; n < playLines.size(); n++) {
+                if (savedFrom.equals(playLines.get(n).rawFrom)) {
+                    fromMatches.add(Integer.valueOf(n));
+                }
+            }
+            if (fromMatches.size() == 1) return fromMatches.get(0).intValue();
+            if (fromMatches.size() > 1) {
+                return disambiguateLineCandidates(
+                        playLines, fromMatches, savedUrl, savedName, savedIdx);
+            }
+        }
+
+        // 2. Episode URL match: unambiguous when only one line contains the saved epUrl;
+        // when multiple lines share the same raw episode URL (legacy history without lineFrom),
+        // disambiguate via saved lineName and saved lineIndex instead of always picking index 0.
+        if (savedUrl.length() > 0) {
+            List<Integer> urlMatches = new ArrayList<Integer>();
+            for (int n = 0; n < playLines.size(); n++) {
+                if (lineContainsEpisodeUrl(playLines.get(n), savedUrl)) {
+                    urlMatches.add(Integer.valueOf(n));
+                }
+            }
+            if (urlMatches.size() == 1) return urlMatches.get(0).intValue();
+            if (urlMatches.size() > 1) {
+                return disambiguateLineCandidates(
+                        playLines, urlMatches, savedUrl, savedName, savedIdx);
+            }
+        }
+
+        // 3. Fallback to saved lineName (matching rawFrom first, then display name)
+        if (savedName.length() > 0) {
+            List<Integer> rawFromHits = new ArrayList<Integer>();
+            for (int n = 0; n < playLines.size(); n++) {
+                PlayLine pl = playLines.get(n);
+                if (pl.rawFrom.length() > 0 && savedName.equals(pl.rawFrom)) {
+                    rawFromHits.add(Integer.valueOf(n));
+                }
+            }
+            if (rawFromHits.size() == 1) return rawFromHits.get(0).intValue();
+            if (rawFromHits.size() > 1) {
+                return disambiguateLineCandidates(
+                        playLines, rawFromHits, savedUrl, savedName, savedIdx);
+            }
+            List<Integer> nameHits = new ArrayList<Integer>();
+            for (int n = 0; n < playLines.size(); n++) {
+                if (savedName.equals(playLines.get(n).name)) {
+                    nameHits.add(Integer.valueOf(n));
+                }
+            }
+            if (nameHits.size() == 1) return nameHits.get(0).intValue();
+            if (nameHits.size() > 1) {
+                return disambiguateLineCandidates(
+                        playLines, nameHits, savedUrl, savedName, savedIdx);
+            }
+        }
+        return 0;
+    }
+
+    private static boolean lineContainsEpisodeUrl(PlayLine pl, String url) {
+        if (pl == null || url == null || url.length() == 0) return false;
+        for (int k = 0; k < pl.episodes.size(); k++) {
+            if (url.equals(pl.episodes.get(k).url)) return true;
+        }
+        return false;
+    }
+
+    private static int disambiguateLineCandidates(
+            List<PlayLine> playLines,
+            List<Integer> candidates,
+            String savedUrl,
+            String savedName,
+            int savedIdx) {
+        List<Integer> pool = candidates;
+        if (savedUrl.length() > 0) {
+            List<Integer> withUrl = new ArrayList<Integer>();
+            for (int i = 0; i < pool.size(); i++) {
+                int idx = pool.get(i).intValue();
+                if (lineContainsEpisodeUrl(playLines.get(idx), savedUrl)) {
+                    withUrl.add(Integer.valueOf(idx));
+                }
+            }
+            if (withUrl.size() == 1) return withUrl.get(0).intValue();
+            if (!withUrl.isEmpty()) pool = withUrl;
+        }
+        if (savedName.length() > 0) {
+            List<Integer> withName = new ArrayList<Integer>();
+            for (int i = 0; i < pool.size(); i++) {
+                int idx = pool.get(i).intValue();
+                PlayLine pl = playLines.get(idx);
+                if (savedName.equals(pl.name) || savedName.equals(pl.rawFrom)) {
+                    withName.add(Integer.valueOf(idx));
+                }
+            }
+            if (withName.size() == 1) return withName.get(0).intValue();
+            if (!withName.isEmpty()) pool = withName;
+        }
+        if (savedIdx >= 0) {
+            for (int i = 0; i < pool.size(); i++) {
+                if (pool.get(i).intValue() == savedIdx) return savedIdx;
+            }
+        }
+        return pool.get(0).intValue();
+    }
+
+    static EpisodeItem findSavedEpisodeInLine(
+            List<EpisodeItem> episodes, LiteStore.HistoryEntry savedHist) {
+        if (episodes == null || episodes.isEmpty() || savedHist == null) return null;
+        String savedUrl = savedHist.epUrl == null ? "" : savedHist.epUrl.trim();
+        String savedName = savedHist.epName == null ? "" : savedHist.epName.trim();
+        int savedEpIdx = savedHist.epIndex;
+
+        // 1. Exact episode URL match ALWAYS takes precedence over episode display name
+        if (savedUrl.length() > 0) {
+            List<EpisodeItem> urlHits = new ArrayList<EpisodeItem>();
+            for (int i = 0; i < episodes.size(); i++) {
+                EpisodeItem cand = episodes.get(i);
+                if (savedUrl.equals(cand.url)) {
+                    urlHits.add(cand);
+                }
+            }
+            if (urlHits.size() == 1) return urlHits.get(0);
+            if (urlHits.size() > 1) {
+                for (int i = 0; i < urlHits.size(); i++) {
+                    if (urlHits.get(i).originalIndex == savedEpIdx) return urlHits.get(i);
+                }
+                if (savedName.length() > 0) {
+                    for (int i = 0; i < urlHits.size(); i++) {
+                        if (savedName.equals(urlHits.get(i).name)) return urlHits.get(i);
+                    }
+                }
+                return urlHits.get(0);
+            }
+        }
+
+        // 2. Fallback to exact episode name only when saved epUrl was not found in this line
+        if (savedName.length() > 0) {
+            List<EpisodeItem> nameHits = new ArrayList<EpisodeItem>();
+            for (int i = 0; i < episodes.size(); i++) {
+                EpisodeItem cand = episodes.get(i);
+                if (savedName.equals(cand.name)) {
+                    nameHits.add(cand);
+                }
+            }
+            if (nameHits.size() == 1) return nameHits.get(0);
+            if (nameHits.size() > 1) {
+                for (int i = 0; i < nameHits.size(); i++) {
+                    if (nameHits.get(i).originalIndex == savedEpIdx) return nameHits.get(i);
+                }
+            }
+        }
+        return null;
     }
 
     private static String serializeLineEpisodes(List<EpisodeItem> episodes) {
@@ -5711,34 +5964,7 @@ public final class LiteActivity extends Activity {
         final LiteStore.HistoryEntry savedHist =
                 LiteStore.findHistory(this, siteKey, siteApi, vodId, uniqueSite);
         if (activeDetailLine < 0) {
-            activeDetailLine = 0;
-            if (savedHist != null) {
-                boolean matchedLine = false;
-                if (savedHist.epUrl.length() > 0) {
-                    for (int n = 0; n < playLines.size() && !matchedLine; n++) {
-                        List<EpisodeItem> eps = playLines.get(n).episodes;
-                        for (int k = 0; k < eps.size(); k++) {
-                            if (savedHist.epUrl.equals(eps.get(k).url)) {
-                                activeDetailLine = n;
-                                matchedLine = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if (!matchedLine && savedHist.lineName.length() > 0) {
-                    for (int n = 0; n < playLines.size(); n++) {
-                        PlayLine pl = playLines.get(n);
-                        if (savedHist.lineName.equals(pl.name)
-                                || (pl.rawFrom.length() > 0
-                                        && savedHist.lineName.equals(pl.rawFrom))) {
-                            activeDetailLine = n;
-                            matchedLine = true;
-                            break;
-                        }
-                    }
-                }
-            }
+            activeDetailLine = LiteActivity.resolveSavedLineIndex(playLines, savedHist);
         }
         if (activeDetailLine < 0 || activeDetailLine >= playLines.size()) activeDetailLine = 0;
 
@@ -5788,13 +6014,10 @@ public final class LiteActivity extends Activity {
                         : "";
         EpisodeItem metaTargetEp =
                 currentLineEpisodes.isEmpty() ? null : currentLineEpisodes.get(0);
-        if (metaTargetEp != null && savedHist != null && savedHist.epUrl.length() > 0) {
-            for (int i = 0; i < currentLineEpisodes.size(); i++) {
-                EpisodeItem cand = currentLineEpisodes.get(i);
-                if (cand.url.equals(savedHist.epUrl) || cand.name.equals(savedHist.epName)) {
-                    metaTargetEp = cand;
-                    break;
-                }
+        if (metaTargetEp != null && savedHist != null) {
+            EpisodeItem matchedMetaEp = findSavedEpisodeInLine(currentLineEpisodes, savedHist);
+            if (matchedMetaEp != null) {
+                metaTargetEp = matchedMetaEp;
             }
         }
         String heroSpec =
@@ -5831,20 +6054,16 @@ public final class LiteActivity extends Activity {
         if (!currentLineEpisodes.isEmpty()) {
             EpisodeItem targetEp = currentLineEpisodes.get(0);
             String playLabel = "▶ 立即播放 · " + targetEp.name;
-            if (savedHist != null && savedHist.epUrl.length() > 0) {
-                for (int i = 0; i < currentLineEpisodes.size(); i++) {
-                    EpisodeItem cand = currentLineEpisodes.get(i);
-                    if (cand.url.equals(savedHist.epUrl) || cand.name.equals(savedHist.epName)) {
-                        targetEp = cand;
-                        playLabel =
-                                "▶ 续播 · "
-                                        + cand.name
-                                        + (savedHist.positionMs > 0
-                                                ? " (" + formatTime(savedHist.positionMs) + ")"
-                                                : "");
-                        break;
-                    }
-                }
+            EpisodeItem matchedResumeEp =
+                    LiteActivity.findSavedEpisodeInLine(currentLineEpisodes, savedHist);
+            if (matchedResumeEp != null) {
+                targetEp = matchedResumeEp;
+                playLabel =
+                        "▶ 续播 · "
+                                + matchedResumeEp.name
+                                + (savedHist.positionMs > 0
+                                        ? " (" + formatTime(savedHist.positionMs) + ")"
+                                        : "");
             }
             final EpisodeItem resumeEp = targetEp;
             detailActions.add(
@@ -6027,13 +6246,11 @@ public final class LiteActivity extends Activity {
         int endIdx = Math.min(totalEps, startIdx + EPISODE_GROUP_SIZE);
         List<EpisodeItem> visibleSlice =
                 totalEps > 0 ? ordered.subList(startIdx, endIdx) : Collections.<EpisodeItem>emptyList();
+        EpisodeItem watchedEp = findSavedEpisodeInLine(currentLineEpisodes, savedHist);
         List<View> epButtons = new ArrayList<View>();
         for (int i = 0; i < visibleSlice.size(); i++) {
             final EpisodeItem ep = visibleSlice.get(i);
-            boolean watched =
-                    savedHist != null
-                            && (ep.url.equals(savedHist.epUrl)
-                                    || ep.name.equals(savedHist.epName));
+            boolean watched = watchedEp != null && ep.originalIndex == watchedEp.originalIndex;
             String btnText = (watched ? "▶ " : "") + ep.name;
             epButtons.add(
                     makeActionButton(
@@ -6067,8 +6284,13 @@ public final class LiteActivity extends Activity {
     }
 
     public static List<EpisodeItem> parseLineEpisodes(String rawLine) {
+        return parseLineEpisodes(rawLine, 1);
+    }
+
+    public static List<EpisodeItem> parseLineEpisodes(String rawLine, int startingEpisodeNumber) {
         List<EpisodeItem> out = new ArrayList<EpisodeItem>();
         if (rawLine == null || rawLine.length() == 0) return out;
+        int baseNumber = Math.max(1, startingEpisodeNumber);
         String[] entries = rawLine.split("#");
         for (int i = 0; i < entries.length; i++) {
             String entry = entries[i].trim();
@@ -6076,7 +6298,9 @@ public final class LiteActivity extends Activity {
             int sep = entry.indexOf('$');
             if (sep < 0) {
                 if (entry.startsWith("http://") || entry.startsWith("https://")) {
-                    out.add(new EpisodeItem("第" + (out.size() + 1) + "集", entry, out.size()));
+                    out.add(
+                            new EpisodeItem(
+                                    "第" + (baseNumber + out.size()) + "集", entry, out.size()));
                 }
                 continue;
             }
@@ -6087,7 +6311,7 @@ public final class LiteActivity extends Activity {
             if (url.length() > 0) {
                 out.add(
                         new EpisodeItem(
-                                name.length() > 0 ? name : ("第" + (out.size() + 1) + "集"),
+                                name.length() > 0 ? name : ("第" + (baseNumber + out.size()) + "集"),
                                 url,
                                 out.size()));
             }
@@ -6100,6 +6324,13 @@ public final class LiteActivity extends Activity {
         List<PlayLine> playLines =
                 extractPlayLines(detailObj, getPreferences(0).getString("preferred_line", ""));
         return lineIdx >= 0 && lineIdx < playLines.size() ? playLines.get(lineIdx).name : "";
+    }
+
+    String resolveCurrentLineFrom(JSONObject detailObj, int lineIdx) {
+        if (detailObj == null) return "";
+        List<PlayLine> playLines =
+                extractPlayLines(detailObj, getPreferences(0).getString("preferred_line", ""));
+        return lineIdx >= 0 && lineIdx < playLines.size() ? playLines.get(lineIdx).rawFrom : "";
     }
 
     String resolveCurrentLineRoutingKey(JSONObject detailObj, int lineIdx) {
@@ -6131,6 +6362,7 @@ public final class LiteActivity extends Activity {
         final JSONObject detailSnap = currentDetail;
         final int lineIdxSnap = activeDetailLine;
         final String lineNameSnap = resolveCurrentLineName(detailSnap, lineIdxSnap);
+        final String lineFromSnap = resolveCurrentLineFrom(detailSnap, lineIdxSnap);
         final String lineRoutingKeySnap = resolveCurrentLineRoutingKey(detailSnap, lineIdxSnap);
         final int epIdxSnap = playingEpisodeIndex;
         final List<EpisodeItem> episodesSnap = new ArrayList<EpisodeItem>(currentLineEpisodes);
@@ -6169,6 +6401,7 @@ public final class LiteActivity extends Activity {
                                                             source,
                                                             detailSnap,
                                                             lineNameSnap,
+                                                            lineFromSnap,
                                                             lineIdxSnap,
                                                             epIdxSnap,
                                                             episodesSnap);
@@ -6192,6 +6425,7 @@ public final class LiteActivity extends Activity {
                             source,
                             detailSnap,
                             lineNameSnap,
+                            lineFromSnap,
                             lineIdxSnap,
                             epIdxSnap,
                             episodesSnap);
@@ -6209,6 +6443,7 @@ public final class LiteActivity extends Activity {
                         source,
                         detailSnap,
                         lineNameSnap,
+                        lineFromSnap,
                         lineIdxSnap,
                         epIdxSnap,
                         episodesSnap);
@@ -6313,6 +6548,7 @@ public final class LiteActivity extends Activity {
                             session.vodName,
                             session.vodPic,
                             session.lineName,
+                            session.lineFrom,
                             session.lineIndex,
                             session.epName,
                             session.epUrl,
@@ -6343,6 +6579,7 @@ public final class LiteActivity extends Activity {
                         session.vodName,
                         session.vodPic,
                         session.lineName,
+                        session.lineFrom,
                         session.lineIndex,
                         session.epName,
                         session.epUrl,
@@ -7007,10 +7244,30 @@ public final class LiteActivity extends Activity {
         if (sk.length() > 0 && vId.length() > 0) {
             LiteStore.HistoryEntry h =
                     LiteStore.findHistory(this, sk, sa, vId, isUniqueSiteKey(sk));
-            if (h != null
-                    && ((identity != null && identity.equals(h.epUrl))
-                            || (epTitle != null && epTitle.equals(h.epName)))) {
-                return Math.max(0, h.positionMs);
+            if (h != null) {
+                if (identity != null && identity.length() > 0 && identity.equals(h.epUrl)) {
+                    return Math.max(0, h.positionMs);
+                }
+                if (epTitle != null && epTitle.length() > 0 && epTitle.equals(h.epName)) {
+                    boolean safeNameResume = true;
+                    if (session != null && !session.lineEpisodes.isEmpty()) {
+                        int sameNameCount = 0;
+                        boolean historyUrlInSameLine = false;
+                        for (int i = 0; i < session.lineEpisodes.size(); i++) {
+                            EpisodeItem item = session.lineEpisodes.get(i);
+                            if (epTitle.equals(item.name)) sameNameCount++;
+                            if (h.epUrl != null && h.epUrl.length() > 0 && h.epUrl.equals(item.url)) {
+                                historyUrlInSameLine = true;
+                            }
+                        }
+                        if (sameNameCount > 1 || historyUrlInSameLine) {
+                            safeNameResume = false;
+                        }
+                    }
+                    if (safeNameResume) {
+                        return Math.max(0, h.positionMs);
+                    }
+                }
             }
         }
         String savedResumeAddr = getPreferences(0).getString("resume_address", "");

@@ -386,6 +386,8 @@ public final class LiteSync {
                                 .put("title", e.vodName)
                                 .put("poster", e.vodPic)
                                 .put("line", e.lineName)
+                                .put("lineFrom", e.lineFrom)
+                                .put("lineIndex", e.lineIndex)
                                 .put("episode", e.epName)
                                 .put("epUrl", e.epUrl)
                                 .put("index", e.epIndex)
@@ -495,6 +497,38 @@ public final class LiteSync {
             return apis.iterator().next();
         }
         return "";
+    }
+
+    public static boolean isSiteKeyUnambiguouslyUnique(
+            String siteKey,
+            List<LiteCatalog.Site> configuredSites,
+            String historyRaw,
+            String favoritesRaw,
+            String tombstonesRaw) {
+        String sk = siteKey == null ? "" : siteKey.trim();
+        if (sk.length() == 0) return true;
+        Map<String, Set<String>> knownApisByKey = new LinkedHashMap<String, Set<String>>();
+        if (configuredSites != null) {
+            for (int i = 0; i < configuredSites.size(); i++) {
+                LiteCatalog.Site s = configuredSites.get(i);
+                if (s != null && s.supported) {
+                    addKnownSiteApi(knownApisByKey, s.key, s.api);
+                }
+            }
+        }
+        List<LiteStore.HistoryEntry> hist = LiteStore.parseHistoryJson(historyRaw);
+        for (int i = 0; i < hist.size(); i++) {
+            addKnownSiteApi(knownApisByKey, hist.get(i).siteKey, hist.get(i).siteApi);
+        }
+        List<LiteStore.FavoriteEntry> favs = LiteStore.parseFavoritesJson(favoritesRaw);
+        for (int i = 0; i < favs.size(); i++) {
+            addKnownSiteApi(knownApisByKey, favs.get(i).siteKey, favs.get(i).siteApi);
+        }
+        if (tombstonesRaw != null && tombstonesRaw.trim().length() > 0) {
+            collectKnownApisFromTombstones(knownApisByKey, Tombstones.read(tombstonesRaw));
+        }
+        Set<String> apis = knownApisByKey.get(sk);
+        return apis == null || apis.size() <= 1;
     }
 
     public static MergeResult merge(
@@ -661,11 +695,13 @@ public final class LiteSync {
                 if (e.siteApi.length() == 0 && cur.siteApi.length() > 0) e.siteApi = cur.siteApi;
                 if (e.siteName.length() == 0 && cur.siteName.length() > 0) e.siteName = cur.siteName;
                 if (e.epUrl.length() == 0 && cur.epUrl.length() > 0) e.epUrl = cur.epUrl;
+                if (e.lineFrom.length() == 0 && cur.lineFrom.length() > 0) e.lineFrom = cur.lineFrom;
                 histMap.put(k, e);
             } else {
                 if (cur.siteApi.length() == 0 && e.siteApi.length() > 0) cur.siteApi = e.siteApi;
                 if (cur.siteName.length() == 0 && e.siteName.length() > 0) cur.siteName = e.siteName;
                 if (cur.epUrl.length() == 0 && e.epUrl.length() > 0) cur.epUrl = e.epUrl;
+                if (cur.lineFrom.length() == 0 && e.lineFrom.length() > 0) cur.lineFrom = e.lineFrom;
             }
         }
         List<LiteStore.HistoryEntry> mergedHist =
@@ -895,6 +931,8 @@ public final class LiteSync {
             e.vodName = title;
             e.vodPic = o.optString("poster", o.optString("vodPic", ""));
             e.lineName = o.optString("line", o.optString("lineName", ""));
+            e.lineFrom = o.optString("lineFrom", "");
+            e.lineIndex = Math.max(0, o.optInt("lineIndex", 0));
             e.epName =
                     o.optString(
                             "episode",
