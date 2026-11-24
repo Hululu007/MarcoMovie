@@ -111,6 +111,7 @@ public final class LiteActivity extends Activity {
     boolean playbackFailed;
     Runnable pendingSlowPrepareTask;
     AlertDialog activeInPlayerDialog;
+    AlertDialog activeRecordSourceDialog;
     PlaybackSession activeSession;
     PlaybackSession lastSuspendedSession;
     int playbackSessionSeq;
@@ -541,6 +542,7 @@ public final class LiteActivity extends Activity {
         final int epIndex;
         final List<EpisodeItem> lineEpisodes;
         final boolean embySource;
+        int carryResumeMs;
         // Immutable Live metadata snapshot
         final LiteCatalog.LiveGroup liveGroup;
         final int liveSourceIndex;
@@ -1039,12 +1041,25 @@ public final class LiteActivity extends Activity {
         }
     }
 
+    void dismissActiveRecordSourceDialog() {
+        if (activeRecordSourceDialog != null) {
+            try {
+                if (activeRecordSourceDialog.isShowing()) {
+                    activeRecordSourceDialog.dismiss();
+                }
+            } catch (Throwable ignored) {
+            }
+            activeRecordSourceDialog = null;
+        }
+    }
+
     void base(String title) {
         epoch++;
         ui.removeCallbacks(clockTick);
         ui.removeCallbacks(hideOsdTask);
         cancelSlowPrepareTimer();
         dismissActiveInPlayerDialog();
+        dismissActiveRecordSourceDialog();
         cancelWork();
         closePairing();
         release();
@@ -1966,41 +1981,77 @@ public final class LiteActivity extends Activity {
             final String vodId,
             final String vodName) {
         loadConfiguredSites();
+        final boolean uniqueSite = isUniqueSiteKey(siteKey);
         final LiteCatalog.RecordSiteResolution res =
-                LiteCatalog.resolveSiteForRecord(sites, siteKey, siteApi, siteName);
+                LiteCatalog.resolveSiteForRecord(sites, siteKey, siteApi, siteName, uniqueSite);
         if (res.matchedSite != null) {
             selected = res.matchedSite;
             detail(vodId);
         } else if (!res.ambiguousCandidates.isEmpty()) {
-            String[] labels = new String[res.ambiguousCandidates.size()];
-            for (int i = 0; i < res.ambiguousCandidates.size(); i++) {
-                LiteCatalog.Site cand = res.ambiguousCandidates.get(i);
-                labels[i] = cand.name + " (" + shortHostTag(cand.api) + ")";
+            dismissActiveRecordSourceDialog();
+            final boolean singleEnabledWithKnownAmbiguity =
+                    res.ambiguousCandidates.size() == 1 && !uniqueSite;
+            final String[] labels;
+            if (singleEnabledWithKnownAmbiguity) {
+                LiteCatalog.Site cand = res.ambiguousCandidates.get(0);
+                labels =
+                        new String[] {
+                            "仍尝试用当前片源打开："
+                                    + cand.name
+                                    + " ("
+                                    + shortHostTag(cand.api)
+                                    + ")",
+                            "导入 / 切换订阅以恢复原片源",
+                            "多端同步恢复订阅"
+                        };
+                if (status != null) {
+                    status.setText(
+                            "旧记录未保存接口地址，本地记录显示该源键曾对应多个片源（当前仅启用 1 个），请确认来源或先恢复原订阅（原记录已保留）。");
+                }
+            } else {
+                labels = new String[res.ambiguousCandidates.size()];
+                for (int i = 0; i < res.ambiguousCandidates.size(); i++) {
+                    LiteCatalog.Site cand = res.ambiguousCandidates.get(i);
+                    labels[i] = cand.name + " (" + shortHostTag(cand.api) + ")";
+                }
+                if (status != null) {
+                    status.setText(
+                            "旧记录未保存接口地址，当前有 "
+                                    + res.ambiguousCandidates.size()
+                                    + " 个同名片源，请选择要打开的来源（原记录已保留）。");
+                }
             }
-            if (status != null) {
-                status.setText(
-                        "旧记录未保存接口地址，当前有 "
-                                + res.ambiguousCandidates.size()
-                                + " 个同名片源，请选择要打开的来源（原记录已保留）。");
-            }
-            new AlertDialog.Builder(this)
-                    .setTitle(
-                            "选择来源"
-                                    + (vodName != null && vodName.trim().length() > 0
-                                            ? " · " + vodName.trim()
-                                            : ""))
-                    .setItems(
-                            labels,
-                            new DialogInterface.OnClickListener() {
-                                public void onClick(DialogInterface dialog, int which) {
-                                    if (which >= 0 && which < res.ambiguousCandidates.size()) {
-                                        selected = res.ambiguousCandidates.get(which);
-                                        detail(vodId);
-                                    }
-                                }
-                            })
-                    .setNegativeButton("取消", null)
-                    .show();
+            activeRecordSourceDialog =
+                    new AlertDialog.Builder(this)
+                            .setTitle(
+                                    (singleEnabledWithKnownAmbiguity
+                                                    ? "来源归属待确认"
+                                                    : "选择来源")
+                                            + (vodName != null && vodName.trim().length() > 0
+                                                    ? " · " + vodName.trim()
+                                                    : ""))
+                            .setItems(
+                                    labels,
+                                    new DialogInterface.OnClickListener() {
+                                        public void onClick(DialogInterface dialog, int which) {
+                                            if (singleEnabledWithKnownAmbiguity) {
+                                                if (which == 0) {
+                                                    selected = res.ambiguousCandidates.get(0);
+                                                    detail(vodId);
+                                                } else if (which == 1) {
+                                                    configure();
+                                                } else if (which == 2) {
+                                                    syncPage();
+                                                }
+                                            } else if (which >= 0
+                                                    && which < res.ambiguousCandidates.size()) {
+                                                selected = res.ambiguousCandidates.get(which);
+                                                detail(vodId);
+                                            }
+                                        }
+                                    })
+                            .setNegativeButton("取消", null)
+                            .show();
         } else if (!sites.isEmpty() && vodName != null && vodName.trim().length() > 0) {
             globalSearch(vodName.trim());
         } else {
@@ -2927,15 +2978,33 @@ public final class LiteActivity extends Activity {
                                 overrides = new JSONObject();
                                 data.put("overrides", overrides);
                             }
-                            JSONObject ov = new JSONObject();
+                            JSONObject prevOv = overrides.optJSONObject(site.siteId());
+                            if (prevOv == null && site.key != null && site.key.length() > 0) {
+                                prevOv = overrides.optJSONObject(site.key);
+                            }
+                            JSONObject ov =
+                                    prevOv != null
+                                            ? new JSONObject(prevOv.toString())
+                                            : new JSONObject();
                             ov.put("name", newName);
                             ov.put("group", newGroup);
                             String origApi = site.api == null ? "" : site.api.trim();
+                            String baseApi =
+                                    site.originalApi != null
+                                                    && site.originalApi.trim().length() > 0
+                                            ? site.originalApi.trim()
+                                            : origApi;
                             if (!newApi.equals(origApi)) {
-                                ov.put("api", newApi);
+                                ov.remove("type");
+                                if (newApi.length() == 0 || newApi.equals(baseApi)) {
+                                    ov.remove("api");
+                                } else {
+                                    ov.put("api", newApi);
+                                }
                             }
                             if (!newPlayUrl.equals(initialDisplayedPlayUrl)) {
                                 ov.put("playUrl", newPlayUrl);
+                                ov.put("playUrlExplicit", newPlayUrl.length() > 0);
                             }
                             ov.put("ext", newExt);
                             ov.put("searchable", searchableState[0]);
@@ -5608,6 +5677,49 @@ public final class LiteActivity extends Activity {
         return lower.matches(".*(?:^|[\\s_\\-.\\[\\(])(?:pv|cm|sp|ova|oad|tc)(?:\\d*|[\\s_\\-.\\]\\)]|$).*");
     }
 
+    private static int parseChineseOrArabicPositiveInt(String raw) {
+        if (raw == null) return -1;
+        String s = raw.trim();
+        if (s.length() == 0) return -1;
+        if (s.matches("^0*[1-9]\\d{0,4}$")) {
+            return parsePositiveIntSafe(s);
+        }
+        int total = 0;
+        int current = 0;
+        boolean sawTen = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            int digit = -1;
+            if (c == '一') digit = 1;
+            else if (c == '二' || c == '两' || c == '兩') digit = 2;
+            else if (c == '三') digit = 3;
+            else if (c == '四') digit = 4;
+            else if (c == '五') digit = 5;
+            else if (c == '六') digit = 6;
+            else if (c == '七') digit = 7;
+            else if (c == '八') digit = 8;
+            else if (c == '九') digit = 9;
+            else if (c == '零' || c == '〇') digit = 0;
+            if (digit >= 0) {
+                if (sawTen) {
+                    total += digit;
+                    current = 0;
+                } else {
+                    current = current * 10 + digit;
+                }
+            } else if (c == '十') {
+                if (sawTen) return -1;
+                total += (current == 0 ? 1 : current) * 10;
+                current = 0;
+                sawTen = true;
+            } else {
+                return -1;
+            }
+        }
+        int val = total + current;
+        return val > 0 ? val : -1;
+    }
+
     private static int canonicalSeasonNumber(String name) {
         if (name == null || isSpecialOrPreviewEpisode(name)) return -1;
         String norm = normalizeEpisodeTitle(name);
@@ -5620,10 +5732,18 @@ public final class LiteActivity extends Activity {
             return parsePositiveIntSafe(m.group(1));
         }
         m =
-                java.util.regex.Pattern.compile("第\\s*0*([1-9]\\d{0,2})\\s*季")
+                java.util.regex.Pattern.compile(
+                                "(?:^|[\\s_\\-.\\[\\(])s0*([1-9]\\d{0,2})(?:$|[\\s_\\-.\\]\\)])")
                         .matcher(norm);
         if (m.find()) {
             return parsePositiveIntSafe(m.group(1));
+        }
+        m =
+                java.util.regex.Pattern.compile("第\\s*([0-9一二三四五六七八九十两兩零〇]{1,4})\\s*季")
+                        .matcher(norm);
+        if (m.find()) {
+            int val = parseChineseOrArabicPositiveInt(m.group(1));
+            if (val > 0) return val;
         }
         m =
                 java.util.regex.Pattern.compile(
@@ -5646,6 +5766,13 @@ public final class LiteActivity extends Activity {
             return parsePositiveIntSafe(m.group(1));
         }
         m =
+                java.util.regex.Pattern.compile("第\\s*([一二三四五六七八九十两兩零〇]{1,4})\\s*[集话話期回]")
+                        .matcher(norm);
+        if (m.find()) {
+            int val = parseChineseOrArabicPositiveInt(m.group(1));
+            if (val > 0) return val;
+        }
+        m =
                 java.util.regex.Pattern.compile(
                                 "(?:^|[\\s_\\-.\\[\\(])s\\d{1,3}e0*([1-9]\\d{0,4})(?:$|[\\s_\\-.\\]\\)])")
                         .matcher(norm);
@@ -5665,6 +5792,35 @@ public final class LiteActivity extends Activity {
         return -1;
     }
 
+    private static boolean hasExplicitEpisodeConflict(String nameA, String nameB) {
+        if (nameA == null || nameB == null) return false;
+        String a = nameA.trim();
+        String b = nameB.trim();
+        if (a.length() == 0 || b.length() == 0) return false;
+        boolean specialA = isSpecialOrPreviewEpisode(a);
+        boolean specialB = isSpecialOrPreviewEpisode(b);
+        if (specialA != specialB) return true;
+        int seasonA = canonicalSeasonNumber(a);
+        int seasonB = canonicalSeasonNumber(b);
+        if (seasonA > 0 && seasonB > 0 && seasonA != seasonB) return true;
+        int numA = canonicalEpisodeNumber(a);
+        int numB = canonicalEpisodeNumber(b);
+        if (numA > 0 && numB > 0 && numA != numB) return true;
+        return false;
+    }
+
+    private static boolean sameCanonicalEpisode(String nameA, String nameB) {
+        if (nameA == null || nameB == null) return false;
+        if (isSpecialOrPreviewEpisode(nameA) || isSpecialOrPreviewEpisode(nameB)) {
+            String na = normalizeEpisodeTitle(nameA);
+            return na.length() > 0 && na.equals(normalizeEpisodeTitle(nameB));
+        }
+        int numA = canonicalEpisodeNumber(nameA);
+        int numB = canonicalEpisodeNumber(nameB);
+        if (numA <= 0 || numB <= 0 || numA != numB) return false;
+        return canonicalSeasonNumber(nameA) == canonicalSeasonNumber(nameB);
+    }
+
     private static int parsePositiveIntSafe(String digits) {
         try {
             int val = Integer.parseInt(digits.trim());
@@ -5682,15 +5838,21 @@ public final class LiteActivity extends Activity {
             int sourceLineSize) {
         if (targetEpisodes == null || targetEpisodes.isEmpty()) return -1;
 
+        int curSeason = canonicalSeasonNumber(currentEpName);
         String url = currentEpUrl == null ? "" : currentEpUrl.trim();
         if (url.length() > 0) {
+            boolean isHttpUrl =
+                    url.regionMatches(true, 0, "http://", 0, 7)
+                            || url.regionMatches(true, 0, "https://", 0, 8);
             int urlMatch = -1;
             int urlHits = 0;
             for (int i = 0; i < targetEpisodes.size(); i++) {
-                if (url.equals(targetEpisodes.get(i).url)) {
-                    urlMatch = i;
-                    urlHits++;
-                }
+                EpisodeItem cand = targetEpisodes.get(i);
+                if (!url.equals(cand.url)) continue;
+                if (hasExplicitEpisodeConflict(currentEpName, cand.name)) continue;
+                if (!isHttpUrl && curSeason != canonicalSeasonNumber(cand.name)) continue;
+                urlMatch = i;
+                urlHits++;
             }
             if (urlHits == 1) return urlMatch;
         }
@@ -5708,7 +5870,6 @@ public final class LiteActivity extends Activity {
             if (nameHits == 1) return nameMatch;
         }
 
-        int curSeason = canonicalSeasonNumber(currentEpName);
         int curNum = canonicalEpisodeNumber(currentEpName);
         if (curNum > 0) {
             int numMatch = -1;
@@ -6358,6 +6519,10 @@ public final class LiteActivity extends Activity {
     }
 
     void play(final String address, final String name) {
+        play(address, name, 0);
+    }
+
+    void play(final String address, final String name, final int carryResumeMs) {
         final LiteCatalog.Site source = selected;
         final JSONObject detailSnap = currentDetail;
         final int lineIdxSnap = activeDetailLine;
@@ -6366,6 +6531,7 @@ public final class LiteActivity extends Activity {
         final String lineRoutingKeySnap = resolveCurrentLineRoutingKey(detailSnap, lineIdxSnap);
         final int epIdxSnap = playingEpisodeIndex;
         final List<EpisodeItem> episodesSnap = new ArrayList<EpisodeItem>(currentLineEpisodes);
+        final int initialCarryMs = Math.max(0, carryResumeMs);
 
         if (source != null
                 && source.api != null
@@ -6405,6 +6571,7 @@ public final class LiteActivity extends Activity {
                                                             lineIdxSnap,
                                                             epIdxSnap,
                                                             episodesSnap);
+                                            session.carryResumeMs = initialCarryMs;
                                             playResolved(session, reporter);
                                         }
                                     });
@@ -6429,6 +6596,7 @@ public final class LiteActivity extends Activity {
                             lineIdxSnap,
                             epIdxSnap,
                             episodesSnap);
+            session.carryResumeMs = initialCarryMs;
             playResolved(session, null);
             return;
         }
@@ -6447,6 +6615,7 @@ public final class LiteActivity extends Activity {
                         lineIdxSnap,
                         epIdxSnap,
                         episodesSnap);
+        pendingSession.carryResumeMs = initialCarryMs;
         openPlaybackShell(pendingSession, null, null);
         final int ticket = epoch;
         if (status != null) {
@@ -6529,7 +6698,7 @@ public final class LiteActivity extends Activity {
             return;
         }
         if (session.embySource || session.streamUrl.length() == 0) {
-            play(session.epUrl, session.epName);
+            play(session.epUrl, session.epName, ready ? 0 : session.carryResumeMs);
             return;
         }
         if (pendingResolvedPlay != null && session == activeSession) {
@@ -6561,6 +6730,7 @@ public final class LiteActivity extends Activity {
                             session.liveChannelIndex,
                             session.liveUrlIndex,
                             session.liveSourceHeaders);
+            rebuilt.carryResumeMs = ready ? 0 : session.carryResumeMs;
             playResolved(rebuilt, null);
             return;
         }
@@ -6592,6 +6762,7 @@ public final class LiteActivity extends Activity {
                         session.liveChannelIndex,
                         session.liveUrlIndex,
                         session.liveSourceHeaders);
+        rebuilt.carryResumeMs = ready ? 0 : session.carryResumeMs;
         playResolved(rebuilt, null);
     }
 
@@ -6810,10 +6981,14 @@ public final class LiteActivity extends Activity {
                             ready = true;
                             playbackFailed = false;
                             if (session.kind == PlaybackSession.KIND_VOD) {
-                                int resumeMs = findSavedResumeMs(session, identity);
+                                int resumeMs =
+                                        session.carryResumeMs > 0
+                                                ? session.carryResumeMs
+                                                : findSavedResumeMs(session, identity);
+                                int duration = expected.getDuration();
                                 if (resumeMs > 0
-                                        && expected.getDuration() > 0
-                                        && resumeMs < expected.getDuration() - 2000) {
+                                        && duration > 0
+                                        && resumeMs < duration - 2000) {
                                     expected.seekTo(resumeMs);
                                 }
                             }
@@ -7245,22 +7420,38 @@ public final class LiteActivity extends Activity {
             LiteStore.HistoryEntry h =
                     LiteStore.findHistory(this, sk, sa, vId, isUniqueSiteKey(sk));
             if (h != null) {
-                if (identity != null && identity.length() > 0 && identity.equals(h.epUrl)) {
+                if (identity != null
+                        && identity.length() > 0
+                        && identity.equals(h.epUrl)
+                        && !hasExplicitEpisodeConflict(epTitle, h.epName)) {
                     return Math.max(0, h.positionMs);
                 }
-                if (epTitle != null && epTitle.length() > 0 && epTitle.equals(h.epName)) {
+                boolean exactNameMatch =
+                        epTitle != null && epTitle.length() > 0 && epTitle.equals(h.epName);
+                boolean canonicalMatch =
+                        !exactNameMatch
+                                && epTitle != null
+                                && epTitle.length() > 0
+                                && sameCanonicalEpisode(epTitle, h.epName);
+                if (exactNameMatch || canonicalMatch) {
                     boolean safeNameResume = true;
                     if (session != null && !session.lineEpisodes.isEmpty()) {
-                        int sameNameCount = 0;
+                        int sameMatchCount = 0;
                         boolean historyUrlInSameLine = false;
                         for (int i = 0; i < session.lineEpisodes.size(); i++) {
                             EpisodeItem item = session.lineEpisodes.get(i);
-                            if (epTitle.equals(item.name)) sameNameCount++;
-                            if (h.epUrl != null && h.epUrl.length() > 0 && h.epUrl.equals(item.url)) {
+                            if (exactNameMatch
+                                    ? epTitle.equals(item.name)
+                                    : sameCanonicalEpisode(epTitle, item.name)) {
+                                sameMatchCount++;
+                            }
+                            if (h.epUrl != null
+                                    && h.epUrl.length() > 0
+                                    && h.epUrl.equals(item.url)) {
                                 historyUrlInSameLine = true;
                             }
                         }
-                        if (sameNameCount > 1 || historyUrlInSameLine) {
+                        if (sameMatchCount > 1 || historyUrlInSameLine) {
                             safeNameResume = false;
                         }
                     }
@@ -7332,6 +7523,44 @@ public final class LiteActivity extends Activity {
                         .show();
     }
 
+    void showInPlayerEpisodeDialogForLine(
+            final List<PlayLine> playLines,
+            final int targetLineIndex,
+            final List<EpisodeItem> targetEpisodes) {
+        if (targetEpisodes == null || targetEpisodes.isEmpty()) return;
+        dismissActiveInPlayerDialog();
+        String[] labels = new String[targetEpisodes.size()];
+        for (int i = 0; i < targetEpisodes.size(); i++) {
+            labels[i] = targetEpisodes.get(i).name;
+        }
+        String lineTitle =
+                playLines != null && targetLineIndex >= 0 && targetLineIndex < playLines.size()
+                        ? formatPlayLineLabel(playLines, targetLineIndex)
+                        : "";
+        activeInPlayerDialog =
+                new AlertDialog.Builder(this)
+                        .setTitle(
+                                lineTitle != null && lineTitle.length() > 0
+                                        ? ("选择剧集 · " + lineTitle)
+                                        : "选择剧集")
+                        .setItems(
+                                labels,
+                                new DialogInterface.OnClickListener() {
+                                    public void onClick(DialogInterface dialog, int which) {
+                                        if (which >= 0 && which < targetEpisodes.size()) {
+                                            activeDetailLine = targetLineIndex;
+                                            currentLineEpisodes =
+                                                    new ArrayList<EpisodeItem>(targetEpisodes);
+                                            EpisodeItem ep = currentLineEpisodes.get(which);
+                                            playingEpisodeIndex = ep.originalIndex;
+                                            play(ep.url, ep.name);
+                                        }
+                                    }
+                                })
+                        .setNegativeButton("取消", null)
+                        .show();
+    }
+
     void showInPlayerLineDialog(final List<PlayLine> playLines) {
         if (playLines == null || playLines.isEmpty()) return;
         dismissActiveInPlayerDialog();
@@ -7376,27 +7605,40 @@ public final class LiteActivity extends Activity {
                 (activeSession != null && activeSession.kind == PlaybackSession.KIND_VOD)
                         ? activeSession.lineEpisodes.size()
                         : currentLineEpisodes.size();
+        int carryResumeMs = 0;
+        if (player != null
+                && ready
+                && activeSession != null
+                && activeSession.kind == PlaybackSession.KIND_VOD) {
+            try {
+                int pos = Math.max(0, player.getCurrentPosition());
+                int dur = player.getDuration();
+                if (pos > 0 && (dur <= 0 || pos < dur * 0.95)) {
+                    carryResumeMs = pos;
+                }
+            } catch (Exception ignored) {
+            }
+        }
         List<EpisodeItem> nextEpisodes = new ArrayList<EpisodeItem>(playLines.get(which).episodes);
         if (nextEpisodes.isEmpty()) return;
         int targetIdx =
                 matchEpisodeIndexForLineSwitch(
                         nextEpisodes, curEpUrl, curEpName, playingEpisodeIndex, sourceLineSize);
-        activeDetailLine = which;
-        currentLineEpisodes = nextEpisodes;
-        if (targetIdx >= 0 && targetIdx < currentLineEpisodes.size()) {
+        if (targetIdx >= 0 && targetIdx < nextEpisodes.size()) {
+            activeDetailLine = which;
+            currentLineEpisodes = nextEpisodes;
             EpisodeItem ep = currentLineEpisodes.get(targetIdx);
             playingEpisodeIndex = ep.originalIndex;
-            play(ep.url, ep.name);
+            play(ep.url, ep.name, carryResumeMs);
         } else {
-            playingEpisodeIndex = -1;
             setOsdVisibility(View.VISIBLE);
             if (status != null) {
                 status.setText(
-                        "已切换至线路「"
+                        "线路「"
                                 + formatPlayLineLabel(playLines, which)
-                                + "」，未能自动匹配当前剧集，请手动选集。");
+                                + "」未能自动匹配当前剧集，已保持当前播放，请手动选集。");
             }
-            showInPlayerEpisodeDialog();
+            showInPlayerEpisodeDialogForLine(playLines, which, nextEpisodes);
         }
     }
 
@@ -8341,6 +8583,7 @@ public final class LiteActivity extends Activity {
         ui.removeCallbacks(autoPushTask);
         cancelSlowPrepareTimer();
         dismissActiveInPlayerDialog();
+        dismissActiveRecordSourceDialog();
         cancelWork();
         closePairing();
         stopCastServer();

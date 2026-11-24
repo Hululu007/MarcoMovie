@@ -212,6 +212,15 @@ public final class LiteCatalog {
 
     public static RecordSiteResolution resolveSiteForRecord(
             List<Site> availableSites, String siteKey, String siteApi, String siteName) {
+        return resolveSiteForRecord(availableSites, siteKey, siteApi, siteName, true);
+    }
+
+    public static RecordSiteResolution resolveSiteForRecord(
+            List<Site> availableSites,
+            String siteKey,
+            String siteApi,
+            String siteName,
+            boolean siteKeyUnambiguouslyUnique) {
         String sk = siteKey == null ? "" : siteKey.trim();
         String sa = siteApi == null ? "" : siteApi.trim();
         String sn = siteName == null ? "" : siteName.trim();
@@ -269,7 +278,10 @@ public final class LiteCatalog {
             }
         }
         if (matches.size() == 1) {
-            return new RecordSiteResolution(matches.get(0), null, false);
+            if (siteKeyUnambiguouslyUnique) {
+                return new RecordSiteResolution(matches.get(0), null, false);
+            }
+            return new RecordSiteResolution(null, matches, false);
         }
         if (matches.size() > 1) {
             return new RecordSiteResolution(null, matches, false);
@@ -1141,6 +1153,19 @@ public final class LiteCatalog {
         }
     }
 
+    static boolean hasJsonInUrlPath(String httpUrl) {
+        try {
+            String urlPath = new URL(http(httpUrl)).getPath();
+            if (urlPath == null) return false;
+            String lowerPath = urlPath.toLowerCase(Locale.ROOT);
+            return lowerPath.endsWith(".json")
+                    || lowerPath.contains("/json")
+                    || lowerPath.contains("json/");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     static final class HttpStatusException extends IOException {
         final int status;
 
@@ -1892,7 +1917,7 @@ public final class LiteCatalog {
                         s.type = hasXmlInUrlPath(a) ? 0 : 1;
                     } else if (hasXmlInUrlPath(a)) {
                         s.type = 0;
-                    } else if (hasXmlInUrlPath(prevApi)) {
+                    } else if (hasJsonInUrlPath(a) || hasXmlInUrlPath(prevApi)) {
                         s.type = 1;
                     }
                 }
@@ -1904,9 +1929,32 @@ public final class LiteCatalog {
         if (ov.has("playUrl")) {
             String prevPlayUrl = s.playUrl == null ? "" : s.playUrl.trim();
             String nextPlayUrl = ov.optString("playUrl", "").trim();
-            if (!nextPlayUrl.equals(prevPlayUrl)) {
+            boolean hasExplicitFlag = ov.has("playUrlExplicit");
+            boolean explicitFlag = ov.optBoolean("playUrlExplicit", false);
+            if (nextPlayUrl.length() == 0) {
+                s.playUrl = "";
+                s.explicitSitePlayUrl = false;
+                s.playUrlHeaders.clear();
+                s.playUrlParseType = -1;
+            } else if (hasExplicitFlag) {
+                if (explicitFlag) {
+                    if (!nextPlayUrl.equals(prevPlayUrl) || !s.explicitSitePlayUrl) {
+                        s.playUrl = nextPlayUrl;
+                        s.explicitSitePlayUrl = true;
+                        s.playUrlHeaders.clear();
+                        s.playUrlParseType =
+                                nextPlayUrl.regionMatches(true, 0, "json:", 0, 5) ? 1 : -1;
+                    }
+                } else if (!nextPlayUrl.equals(prevPlayUrl)) {
+                    s.playUrl = nextPlayUrl;
+                    s.explicitSitePlayUrl = false;
+                    s.playUrlHeaders.clear();
+                    s.playUrlParseType =
+                            nextPlayUrl.regionMatches(true, 0, "json:", 0, 5) ? 1 : -1;
+                }
+            } else if (!nextPlayUrl.equals(prevPlayUrl)) {
                 s.playUrl = nextPlayUrl;
-                s.explicitSitePlayUrl = nextPlayUrl.length() > 0;
+                s.explicitSitePlayUrl = true;
                 s.playUrlHeaders.clear();
                 s.playUrlParseType =
                         nextPlayUrl.regionMatches(true, 0, "json:", 0, 5) ? 1 : -1;
