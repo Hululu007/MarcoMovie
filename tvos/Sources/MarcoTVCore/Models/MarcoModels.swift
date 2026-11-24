@@ -992,6 +992,9 @@ public struct CmsConfig: Codable, Hashable, Sendable {
     public var spider: String
     public var siteOwners: [SiteOwnershipRecord]
     public var privateSubscriptionIds: Set<String>
+    public var publicSubscriptionIds: Set<String>
+    public var knownPrivateSiteKeys: Set<String>
+    public var ambiguousLegacyRawKeys: Set<String>
 
     public init(
         sites: [CmsSite] = [],
@@ -1000,7 +1003,10 @@ public struct CmsConfig: Codable, Hashable, Sendable {
         parses: [CmsParse] = [],
         spider: String = "",
         siteOwners: [SiteOwnershipRecord] = [],
-        privateSubscriptionIds: Set<String> = []
+        privateSubscriptionIds: Set<String> = [],
+        publicSubscriptionIds: Set<String> = [],
+        knownPrivateSiteKeys: Set<String> = [],
+        ambiguousLegacyRawKeys: Set<String> = []
     ) {
         self.sites = sites
         self.lives = lives
@@ -1009,10 +1015,14 @@ public struct CmsConfig: Codable, Hashable, Sendable {
         self.spider = spider
         self.siteOwners = siteOwners
         self.privateSubscriptionIds = privateSubscriptionIds
+        self.publicSubscriptionIds = publicSubscriptionIds
+        self.knownPrivateSiteKeys = knownPrivateSiteKeys
+        self.ambiguousLegacyRawKeys = ambiguousLegacyRawKeys
     }
 
     private enum CodingKeys: String, CodingKey {
         case sites, lives, depots, parses, spider, siteOwners, privateSubscriptionIds
+        case publicSubscriptionIds, knownPrivateSiteKeys, ambiguousLegacyRawKeys
     }
 
     public init(from decoder: Decoder) throws {
@@ -1024,6 +1034,9 @@ public struct CmsConfig: Codable, Hashable, Sendable {
         self.spider = try c.decodeIfPresent(String.self, forKey: .spider) ?? ""
         self.siteOwners = try c.decodeIfPresent([SiteOwnershipRecord].self, forKey: .siteOwners) ?? []
         self.privateSubscriptionIds = try c.decodeIfPresent(Set<String>.self, forKey: .privateSubscriptionIds) ?? []
+        self.publicSubscriptionIds = try c.decodeIfPresent(Set<String>.self, forKey: .publicSubscriptionIds) ?? []
+        self.knownPrivateSiteKeys = try c.decodeIfPresent(Set<String>.self, forKey: .knownPrivateSiteKeys) ?? []
+        self.ambiguousLegacyRawKeys = try c.decodeIfPresent(Set<String>.self, forKey: .ambiguousLegacyRawKeys) ?? []
     }
 
     public var effectiveSiteOwners: [SiteOwnershipRecord] {
@@ -1045,10 +1058,15 @@ public struct CmsConfig: Codable, Hashable, Sendable {
         }
     }
 
-    /// Returns `true` when `recordSiteKey` belongs to (or conservatively could belong to) a private subscription/site.
+    /// Returns `true` when `recordSiteKey` belongs to (or conservatively could belong to) a private
+    /// subscription/site, including subscriptions that were later deleted locally.
     public func isPrivateSiteKey(_ recordSiteKey: String) -> Bool {
         let clean = recordSiteKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return false }
+
+        if knownPrivateSiteKeys.contains(clean) {
+            return true
+        }
 
         let owners = effectiveSiteOwners
         if let exact = owners.first(where: { $0.canonicalKey == clean }) {
@@ -1077,6 +1095,43 @@ public struct CmsConfig: Codable, Hashable, Sendable {
         if !byRaw.isEmpty && byRaw.contains(where: { $0.isPrivate }) {
             // Conservatively hide bare legacy keys that match any private owner (including ambiguous private/public pairs).
             return true
+        }
+        return false
+    }
+
+    /// Fail-closed display policy for ordinary public UI surfaces (Discover Continue Watching,
+    /// Library History/Favorites, Ambient Backdrop & poster fetching).
+    /// Only returns `true` when `recordSiteKey` is positively confirmed to belong to a public
+    /// subscription/site on this device — unknown/foreign or deleted-private origins stay hidden.
+    public func isPublicDisplayAllowed(_ recordSiteKey: String) -> Bool {
+        let clean = recordSiteKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return false }
+        if isPrivateSiteKey(clean) {
+            return false
+        }
+
+        let owners = effectiveSiteOwners
+        if let exact = owners.first(where: { $0.canonicalKey == clean }) {
+            return !exact.isPrivate
+        }
+        if let legacyDisambig = owners.first(where: {
+            !$0.subscriptionId.isEmpty && "\($0.rawKey)_\($0.subscriptionId)" == clean
+        }) {
+            return !legacyDisambig.isPrivate
+        }
+        if let parsed = CmsSite.parseScopedKey(clean) {
+            if let byPair = owners.first(where: {
+                $0.subscriptionId == parsed.subscriptionId && $0.rawKey == parsed.rawKey
+            }) {
+                return !byPair.isPrivate
+            }
+            // Allow URL-only Keychain-recovered public subscriptions waiting for startup refresh,
+            // but fail-closed on unknown/stranger subscription IDs (e.g. synced from another device's private source).
+            return publicSubscriptionIds.contains(parsed.subscriptionId)
+        }
+        let byRaw = owners.filter { $0.rawKey == clean }
+        if !byRaw.isEmpty {
+            return !byRaw.contains(where: { $0.isPrivate })
         }
         return false
     }

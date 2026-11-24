@@ -926,7 +926,10 @@ private struct TvPlayerContentView: View {
                     .buttonStyle(TvPillButtonStyle())
 
                     if info.availableEpisodeCount > 0 {
-                        Button("改播该线路第 \(info.availableEpisodeCount) 集") {
+                        let fallbackTitle = !info.fallbackEpisodeName.isEmpty
+                            ? "改播「\(info.fallbackEpisodeName)」"
+                            : "改播该线路第 \(info.availableEpisodeCount) 集"
+                        Button(fallbackTitle) {
                             let targetLine = info.targetLineIndex
                             let fallbackEp = info.availableEpisodeCount - 1
                             missingEpisodePrompt = nil

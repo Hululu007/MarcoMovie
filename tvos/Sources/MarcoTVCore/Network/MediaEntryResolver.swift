@@ -46,7 +46,9 @@ public enum MediaEntryResolver {
 
         // 3. Scoped key (`sub::<subId>::<rawKey>`) whose owning subscription is no longer present -> NEVER guess!
         if let parsed = CmsSite.parseScopedKey(cleanKey) {
-            if config.privateSubscriptionIds.contains(parsed.subscriptionId) {
+            if config.privateSubscriptionIds.contains(parsed.subscriptionId)
+                || config.knownPrivateSiteKeys.contains(cleanKey)
+            {
                 return .unavailable(
                     siteKey: cleanKey,
                     reason: "该内容属于私密订阅，当前普通模式下不可打开（记录已保留）"
@@ -59,6 +61,18 @@ public enum MediaEntryResolver {
         }
 
         // 4. Legacy bare key match (e.g. `cms` from v0.1.1 or cross-platform WebDAV sync)
+        if config.knownPrivateSiteKeys.contains(cleanKey) {
+            return .unavailable(
+                siteKey: cleanKey,
+                reason: "该内容属于私密订阅，当前普通模式下不可打开（记录已保留）"
+            )
+        }
+        if config.ambiguousLegacyRawKeys.contains(cleanKey) {
+            return .unavailable(
+                siteKey: cleanKey,
+                reason: "旧记录来源「\(cleanKey)」曾对应多个重名片源，无法自动判断原属来源，记录已保留"
+            )
+        }
         let rawMatches = owners.filter { $0.rawKey == cleanKey }
         if rawMatches.count == 1, let singleOwner = rawMatches.first {
             return resolveOwner(singleOwner, requestedKey: cleanKey, in: config)
@@ -144,6 +158,9 @@ public enum MediaEntryResolver {
             return "来源已停用 · \(parsed.rawKey)"
         }
 
+        if config.ambiguousLegacyRawKeys.contains(cleanKey) {
+            return "重名来源待确认 · \(cleanKey)"
+        }
         let rawMatches = owners.filter { $0.rawKey == cleanKey }
         if rawMatches.count == 1, let single = rawMatches.first {
             return single.isEnabled ? single.siteName : "来源已停用 · \(single.siteName)"
@@ -154,23 +171,23 @@ public enum MediaEntryResolver {
         return "来源已停用 · \(cleanKey)"
     }
 
-    // MARK: - Public Scope Filtering (Private Subscription Isolation)
+    // MARK: - Public Scope Filtering (Fail-Closed Private Subscription Isolation)
 
-    /// Filters watch history to entries safe to display in ordinary public surfaces
+    /// Filters watch history to entries positively confirmed to belong to a public source on this device
     /// (Discover Continue Watching, Library, ambient backdrop). Underlying records remain untouched in storage.
     public static func publicVisibleWatchHistory(
         _ items: [WatchHistoryItem],
         in config: CmsConfig
     ) -> [WatchHistoryItem] {
-        items.filter { !config.isPrivateSiteKey($0.site) }
+        items.filter { config.isPublicDisplayAllowed($0.site) }
     }
 
-    /// Filters favorites to entries safe to display in ordinary public surfaces.
+    /// Filters favorites to entries positively confirmed to belong to a public source on this device.
     public static func publicVisibleFavorites(
         _ items: [FavoriteItem],
         in config: CmsConfig
     ) -> [FavoriteItem] {
-        items.filter { !config.isPrivateSiteKey($0.site) }
+        items.filter { config.isPublicDisplayAllowed($0.site) }
     }
 
     /// Computes the ambient backdrop poster URL strictly from public-visible sources.
@@ -207,6 +224,9 @@ public enum MediaEntryResolver {
             return true
         }
         if clean == site.rawKey {
+            if config.ambiguousLegacyRawKeys.contains(clean) {
+                return false
+            }
             let owners = config.effectiveSiteOwners.filter { $0.rawKey == site.rawKey }
             return owners.count <= 1
         }
@@ -290,5 +310,118 @@ public enum MediaEntryResolver {
                 ?? matchingHistory(for: site, videoId: fav.id, in: watchHistory, config: config)
             return .ready(site: site, video: detailed, resumeHistory: resume)
         }
+    }
+}
+
+/// Shared public-scope reconciliation & in-flight request admission guard used by `AppViewModel`
+/// (and verified directly by unit tests) to ensure:
+/// 1. Live TV channels are cleared whenever the loaded live source turns private or is removed,
+///    even if another public live source shifts into the exact same list index (`selectedLiveSourceIndex`).
+/// 2. Slow in-flight Discover, Live TV, Search, and Detail requests whose source turned private
+///    before completion are dropped without polluting UI state or triggering poster/backdrop loads.
+public enum PublicCatalogScopeGuard {
+    public struct LiveSelectionReconciliation: Equatable, Sendable {
+        public let nextIndex: Int
+        public let shouldClearLoadedGroups: Bool
+        public let nextLoadedIdentity: String?
+
+        public init(nextIndex: Int, shouldClearLoadedGroups: Bool, nextLoadedIdentity: String?) {
+            self.nextIndex = nextIndex
+            self.shouldClearLoadedGroups = shouldClearLoadedGroups
+            self.nextLoadedIdentity = nextLoadedIdentity
+        }
+    }
+
+    public static func liveSourceIdentity(_ source: LiveSource) -> String {
+        let sub = source.subscriptionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = source.url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = source.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pluginApi = source.plugin?.api.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return "\(sub)::\(url)::\(pluginApi)::\(name)"
+    }
+
+    public static func reconcileLiveSourceSelection(
+        previousLoadedIdentity: String?,
+        currentSelectedIndex: Int,
+        publicLives: [LiveSource]
+    ) -> LiveSelectionReconciliation {
+        guard !publicLives.isEmpty else {
+            return LiveSelectionReconciliation(
+                nextIndex: 0,
+                shouldClearLoadedGroups: true,
+                nextLoadedIdentity: nil
+            )
+        }
+        if let loadedId = previousLoadedIdentity, !loadedId.isEmpty {
+            if let movedIdx = publicLives.firstIndex(where: { liveSourceIdentity($0) == loadedId }) {
+                return LiveSelectionReconciliation(
+                    nextIndex: movedIdx,
+                    shouldClearLoadedGroups: false,
+                    nextLoadedIdentity: loadedId
+                )
+            }
+            // Previously loaded live source became private or removed, even if another public
+            // live source now occupies the same index -> MUST purge stale channels!
+            return LiveSelectionReconciliation(
+                nextIndex: 0,
+                shouldClearLoadedGroups: true,
+                nextLoadedIdentity: nil
+            )
+        }
+        let clamped = publicLives.indices.contains(currentSelectedIndex) ? currentSelectedIndex : 0
+        return LiveSelectionReconciliation(
+            nextIndex: clamped,
+            shouldClearLoadedGroups: false,
+            nextLoadedIdentity: nil
+        )
+    }
+
+    public static func canAcceptDiscoverResponse(
+        siteKey: String,
+        requestEpoch: UInt64,
+        currentEpoch: UInt64,
+        activeSiteKey: String?,
+        config: CmsConfig
+    ) -> Bool {
+        guard requestEpoch == currentEpoch,
+              activeSiteKey == siteKey,
+              !config.isPrivateSiteKey(siteKey)
+        else {
+            return false
+        }
+        return config.publicAvailableSites.contains(where: { $0.key == siteKey })
+    }
+
+    public static func canAcceptLiveResponse(
+        sourceIdentity: String,
+        requestToken: UInt64,
+        currentToken: UInt64,
+        requestEpoch: UInt64,
+        currentEpoch: UInt64,
+        config: CmsConfig
+    ) -> Bool {
+        guard requestToken == currentToken,
+              requestEpoch == currentEpoch
+        else {
+            return false
+        }
+        return config.publicSupportedLives.contains(where: { liveSourceIdentity($0) == sourceIdentity })
+    }
+
+    public static func canAcceptSearchBatch(
+        siteKey: String,
+        requestToken: UInt64,
+        currentToken: UInt64,
+        requestEpoch: UInt64,
+        currentEpoch: UInt64,
+        config: CmsConfig
+    ) -> Bool {
+        guard requestToken == currentToken,
+              requestEpoch == currentEpoch,
+              !config.isPrivateSiteKey(siteKey)
+        else {
+            return false
+        }
+        return config.publicAvailableSites.contains(where: { $0.key == siteKey })
     }
 }

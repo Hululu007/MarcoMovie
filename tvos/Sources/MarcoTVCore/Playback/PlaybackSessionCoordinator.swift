@@ -100,6 +100,7 @@ public struct VodLineSwitchMissingEpisodeInfo: Equatable, Hashable, Sendable {
     public let requestedEpisodeName: String
     public let availableEpisodeCount: Int
     public let carrySeekMs: Int
+    public let fallbackEpisodeName: String
 
     public init(
         targetLineIndex: Int,
@@ -107,7 +108,8 @@ public struct VodLineSwitchMissingEpisodeInfo: Equatable, Hashable, Sendable {
         requestedEpisodeIndex: Int,
         requestedEpisodeName: String,
         availableEpisodeCount: Int,
-        carrySeekMs: Int
+        carrySeekMs: Int,
+        fallbackEpisodeName: String = ""
     ) {
         self.targetLineIndex = targetLineIndex
         self.targetLineName = targetLineName
@@ -115,6 +117,7 @@ public struct VodLineSwitchMissingEpisodeInfo: Equatable, Hashable, Sendable {
         self.requestedEpisodeName = requestedEpisodeName
         self.availableEpisodeCount = availableEpisodeCount
         self.carrySeekMs = carrySeekMs
+        self.fallbackEpisodeName = fallbackEpisodeName
     }
 }
 
@@ -276,7 +279,8 @@ public final class PlaybackSessionCoordinator: ObservableObject {
                     requestedEpisodeIndex: target.episodeIndex,
                     requestedEpisodeName: fallbackName,
                     availableEpisodeCount: targetLine.episodes.count,
-                    carrySeekMs: carrySeekMs
+                    carrySeekMs: carrySeekMs,
+                    fallbackEpisodeName: targetLine.episodes.last?.name ?? ""
                 )
             )
         }
@@ -477,53 +481,82 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         in targetEpisodes: [CmsEpisode]
     ) -> Int? {
         guard !targetEpisodes.isEmpty else { return nil }
-        if let cur = currentEpisode {
-            let curNorm = normalizeEpisodeTitle(cur.name)
-            if !curNorm.isEmpty {
-                if targetEpisodes.indices.contains(currentIndex),
-                   normalizeEpisodeTitle(targetEpisodes[currentIndex].name) == curNorm
-                {
-                    return currentIndex
-                }
-                if let exactIdx = targetEpisodes.firstIndex(where: { normalizeEpisodeTitle($0.name) == curNorm }) {
-                    return exactIdx
-                }
-                if let curNum = extractCanonicalEpisodeNumber(curNorm) {
-                    if targetEpisodes.indices.contains(currentIndex),
-                       extractCanonicalEpisodeNumber(normalizeEpisodeTitle(targetEpisodes[currentIndex].name)) == curNum
-                    {
-                        return currentIndex
-                    }
-                    if let numIdx = targetEpisodes.firstIndex(where: {
-                        extractCanonicalEpisodeNumber(normalizeEpisodeTitle($0.name)) == curNum
-                    }) {
-                        return numIdx
-                    }
-                    // If target line also uses numbered episodes and none matched `curNum`,
-                    // treat the requested episode as missing instead of jumping to a wrong episode.
-                    let targetHasNumberedEpisodes = targetEpisodes.contains {
-                        extractCanonicalEpisodeNumber(normalizeEpisodeTitle($0.name)) != nil
-                    }
-                    if targetHasNumberedEpisodes {
-                        return nil
-                    }
-                }
-            }
+        guard let cur = currentEpisode else {
+            return targetEpisodes.indices.contains(currentIndex) ? currentIndex : nil
         }
-        guard targetEpisodes.indices.contains(currentIndex) else {
+
+        let curNorm = normalizeEpisodeTitle(cur.name)
+        guard !curNorm.isEmpty else {
+            return targetEpisodes.indices.contains(currentIndex) ? currentIndex : nil
+        }
+
+        // 1. Exact normalized title match (prefer same index when duplicates exist).
+        if targetEpisodes.indices.contains(currentIndex),
+           normalizeEpisodeTitle(targetEpisodes[currentIndex].name) == curNorm
+        {
+            return currentIndex
+        }
+        if let exactIdx = targetEpisodes.firstIndex(where: { normalizeEpisodeTitle($0.name) == curNorm }) {
+            return exactIdx
+        }
+
+        // 2. Canonical episode number match (e.g. "第05集" <-> "EP5" <-> "05").
+        if let curNum = extractCanonicalEpisodeNumber(curNorm) {
+            if targetEpisodes.indices.contains(currentIndex),
+               extractCanonicalEpisodeNumber(normalizeEpisodeTitle(targetEpisodes[currentIndex].name)) == curNum
+            {
+                return currentIndex
+            }
+            if let numIdx = targetEpisodes.firstIndex(where: {
+                extractCanonicalEpisodeNumber(normalizeEpisodeTitle($0.name)) == curNum
+            }) {
+                return numIdx
+            }
             return nil
         }
-        return currentIndex
+
+        // 3. Single-feature movie equivalence: ONLY allow matching differing quality labels
+        //    (e.g. "正片" <-> "蓝光" / "HD中字") when BOTH lines are single-feature main movies
+        //    and NEITHER is a distinct bonus/special title (like "片尾访谈" vs "制作花絮").
+        if targetEpisodes.count == 1,
+           currentIndex == 0,
+           isGenericSingleFeatureLabel(curNorm),
+           isGenericSingleFeatureLabel(normalizeEpisodeTitle(targetEpisodes[0].name))
+        {
+            return 0
+        }
+
+        // 4. Non-numbered episodes whose titles do NOT match (e.g. "片尾访谈" vs "制作花絮"):
+        //    NEVER fall back blindly by array index! Prompt the user with explicit choices instead.
+        return nil
     }
 
     private static func normalizeEpisodeTitle(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
+    private static let nonEpisodeSpecialMarkers: [String] = [
+        "预告", "花絮", "彩蛋", "特辑", "番外", "访谈", "幕后", "删减", "解读",
+        "先导", "片花", "纪录", "剪辑", "pv", "cm", "sp", "ova", "oad", "mv",
+    ]
+
+    private static let genericMainFeatureTokens: [String] = [
+        "正片", "完整版", "全集", "电影", "高清", "超清", "蓝光", "原画",
+        "国语", "粤语", "中字", "双语", "抢先版", "hd", "bd", "4k", "1080p",
+        "720p", "ts", "tc", "cam", "uhd", "remux", "hdr",
+    ]
+
+    private static func isGenericSingleFeatureLabel(_ normalized: String) -> Bool {
+        guard !normalized.isEmpty else { return false }
+        if nonEpisodeSpecialMarkers.contains(where: { normalized.contains($0) }) {
+            return false
+        }
+        return genericMainFeatureTokens.contains(where: { normalized.contains($0) })
+    }
+
     private static func extractCanonicalEpisodeNumber(_ normalized: String) -> Int? {
         guard !normalized.isEmpty else { return nil }
-        let nonEpisodeMarkers = ["预告", "花絮", "彩蛋", "特辑", "番外", "pv", "cm", "sp", "ova", "oad"]
-        if nonEpisodeMarkers.contains(where: { normalized.contains($0) }) {
+        if nonEpisodeSpecialMarkers.contains(where: { normalized.contains($0) }) {
             return nil
         }
         let patterns = [

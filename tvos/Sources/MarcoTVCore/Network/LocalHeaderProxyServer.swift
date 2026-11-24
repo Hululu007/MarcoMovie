@@ -34,6 +34,32 @@ private final class LocalHeaderNoRedirectDelegate: NSObject, URLSessionTaskDeleg
     }
 }
 
+private final class CancellableDataTaskState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: URLSessionDataTask?
+    private var cancelled = false
+
+    func attach(_ dataTask: URLSessionDataTask) {
+        lock.lock()
+        let shouldCancel = cancelled
+        task = dataTask
+        lock.unlock()
+        if shouldCancel {
+            dataTask.cancel()
+        } else {
+            dataTask.resume()
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let current = task
+        lock.unlock()
+        current?.cancel()
+    }
+}
+
 /// Loopback-only (`127.0.0.1`) HTTP proxy for tvOS `AVPlayer` that evaluates per-target
 /// `NetdiskHeaderPolicy` isolation across HLS manifests, sub-playlists, segments, and redirects.
 public final class LocalHeaderProxyServer: @unchecked Sendable {
@@ -46,18 +72,26 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
         let createdAt: Date
     }
 
+    private struct ActiveRequestHandle {
+        let cancel: @Sendable () -> Void
+    }
+
     private let queue = DispatchQueue(label: "com.pilipala.marcoMovie.tv.header-proxy")
     private let lock = NSLock()
     private var sessions: [String: StreamSession] = [:]
+    private var activeRequestsBySession: [String: [UUID: ActiveRequestHandle]] = [:]
+    private var cancelledRequestsTotal: Int = 0
     private var listener: NWListener?
     private(set) public var port: UInt16 = 0
     private let redirectDelegate: LocalHeaderNoRedirectDelegate
+    private let urlSession: URLSession?
     private let upstreamFetcher: ProxyUpstreamFetcher
 
     public init(upstreamFetcher: ProxyUpstreamFetcher? = nil) {
         let delegate = LocalHeaderNoRedirectDelegate()
         self.redirectDelegate = delegate
         if let custom = upstreamFetcher {
+            self.urlSession = nil
             self.upstreamFetcher = custom
         } else {
             let config = URLSessionConfiguration.ephemeral
@@ -66,26 +100,48 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
             config.httpShouldSetCookies = false
             config.httpCookieAcceptPolicy = .never
             let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+            self.urlSession = session
             self.upstreamFetcher = { url, method, headers in
+                try Task.checkCancellation()
                 var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
                 request.httpMethod = method
                 request.httpShouldHandleCookies = false
                 for (k, v) in headers {
                     request.setValue(v, forHTTPHeaderField: k)
                 }
-                let (data, resp) = try await session.data(for: request)
-                let httpResp = resp as? HTTPURLResponse
-                var respHeaders: [String: String] = [:]
-                if let all = httpResp?.allHeaderFields {
-                    for (rk, rv) in all {
-                        respHeaders[String(describing: rk)] = String(describing: rv)
+                let state = CancellableDataTaskState()
+                return try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { continuation in
+                        let dataTask = session.dataTask(with: request) { data, resp, error in
+                            if let error {
+                                let nsErr = error as NSError
+                                if nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled {
+                                    continuation.resume(throwing: CancellationError())
+                                } else {
+                                    continuation.resume(throwing: error)
+                                }
+                                return
+                            }
+                            let httpResp = resp as? HTTPURLResponse
+                            var respHeaders: [String: String] = [:]
+                            if let all = httpResp?.allHeaderFields {
+                                for (rk, rv) in all {
+                                    respHeaders[String(describing: rk)] = String(describing: rv)
+                                }
+                            }
+                            continuation.resume(
+                                returning: ProxyUpstreamResponse(
+                                    statusCode: httpResp?.statusCode ?? 200,
+                                    headers: respHeaders,
+                                    body: data ?? Data()
+                                )
+                            )
+                        }
+                        state.attach(dataTask)
                     }
+                } onCancel: {
+                    state.cancel()
                 }
-                return ProxyUpstreamResponse(
-                    statusCode: httpResp?.statusCode ?? 200,
-                    headers: respHeaders,
-                    body: data
-                )
             }
         }
     }
@@ -156,19 +212,34 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
     }
 
     public func stop() {
-        let current = withLock { () -> NWListener? in
+        let (current, allHandles) = withLock { () -> (NWListener?, [ActiveRequestHandle]) in
             let existing = listener
             listener = nil
             port = 0
             sessions.removeAll()
-            return existing
+            let handles = activeRequestsBySession.values.flatMap(\.values)
+            activeRequestsBySession.removeAll()
+            return (existing, handles)
         }
         current?.cancel()
+        for h in allHandles {
+            h.cancel()
+        }
+        urlSession?.invalidateAndCancel()
     }
 
     public func revokeSession(_ sessionId: String) {
-        withLock {
+        let handles = withLock { () -> [ActiveRequestHandle] in
             _ = sessions.removeValue(forKey: sessionId)
+            let removed = activeRequestsBySession.removeValue(forKey: sessionId)
+            if let removed, !removed.isEmpty {
+                cancelledRequestsTotal += removed.count
+                return Array(removed.values)
+            }
+            return []
+        }
+        for h in handles {
+            h.cancel()
         }
     }
 
@@ -178,6 +249,19 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
 
     public func hasActiveSession(_ sessionId: String) -> Bool {
         withLock { sessions[sessionId] != nil }
+    }
+
+    public func activeRequestCount(for sessionId: String? = nil) -> Int {
+        withLock {
+            if let sid = sessionId {
+                return activeRequestsBySession[sid]?.count ?? 0
+            }
+            return activeRequestsBySession.values.reduce(0) { $0 + $1.count }
+        }
+    }
+
+    public func cancelledRequestCount() -> Int {
+        withLock { cancelledRequestsTotal }
     }
 
     /// Registers an upstream media URL + origin-bound `NetdiskHeaderPolicy` and returns both the
@@ -194,13 +278,21 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
         let sessionId = tokenBytes.map { String(format: "%02x", $0) }.joined()
         let session = StreamSession(id: sessionId, rootUrl: url, policy: policy, createdAt: Date())
 
-        withLock {
+        let evictedHandles = withLock { () -> [ActiveRequestHandle] in
+            var evicted: [ActiveRequestHandle] = []
             if sessions.count >= 64,
                let oldest = sessions.min(by: { $0.value.createdAt < $1.value.createdAt })?.key
             {
                 sessions.removeValue(forKey: oldest)
+                if let removed = activeRequestsBySession.removeValue(forKey: oldest) {
+                    evicted = Array(removed.values)
+                }
             }
             sessions[sessionId] = session
+            return evicted
+        }
+        for h in evictedHandles {
+            h.cancel()
         }
 
         let ext = url.pathExtension.lowercased()
@@ -400,19 +492,36 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
 
         let requestedRange = clientHeaders["range"]
         let fetcher = self.upstreamFetcher
-        Task {
+        let requestId = UUID()
+
+        let requestTask = Task { [weak self] in
+            guard let self = self else {
+                connection.cancel()
+                return
+            }
+            defer {
+                self.unregisterActiveRequest(sessionId: sessionId, requestId: requestId)
+            }
             do {
                 var currentUrl = targetUrl
                 var currentMethod = method
                 var resolvedUpstream: ProxyUpstreamResponse?
 
                 for _ in 0...Self.maxRedirects {
+                    try Task.checkCancellation()
+                    guard self.hasActiveSession(sessionId) else {
+                        throw CancellationError()
+                    }
                     guard let scheme = currentUrl.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
                         self.sendError(connection: connection, status: 502, message: "Unsupported redirect scheme")
                         return
                     }
                     let hopHeaders = streamSession.policy.headers(for: currentUrl, range: requestedRange)
                     let hopResponse = try await fetcher(currentUrl, currentMethod, hopHeaders)
+                    try Task.checkCancellation()
+                    guard self.hasActiveSession(sessionId) else {
+                        throw CancellationError()
+                    }
                     if [301, 302, 303, 307, 308].contains(hopResponse.statusCode),
                        let rawLoc = hopResponse.headers.first(where: { $0.key.lowercased() == "location" })?.value
                            .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -429,6 +538,10 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
                     break
                 }
 
+                try Task.checkCancellation()
+                guard self.hasActiveSession(sessionId) else {
+                    throw CancellationError()
+                }
                 guard let upstream = resolvedUpstream else {
                     self.sendError(connection: connection, status: 502, message: "Too many upstream redirects")
                     return
@@ -480,8 +593,65 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
                         body: method == "HEAD" ? Data() : upstream.body
                     )
                 }
+            } catch is CancellationError {
+                connection.cancel()
             } catch {
-                self.sendError(connection: connection, status: 502, message: "Upstream fetch failed")
+                if Task.isCancelled || !self.hasActiveSession(sessionId) {
+                    connection.cancel()
+                } else {
+                    self.sendError(connection: connection, status: 502, message: "Upstream fetch failed")
+                }
+            }
+        }
+
+        let registered = registerActiveRequest(sessionId: sessionId, requestId: requestId) {
+            requestTask.cancel()
+            connection.cancel()
+        }
+        if !registered {
+            requestTask.cancel()
+            connection.cancel()
+            return
+        }
+
+        // Cancel in-flight upstream download promptly if the client closes the socket early.
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .failed, .cancelled:
+                requestTask.cancel()
+            default:
+                break
+            }
+        }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { _, _, isComplete, error in
+            if isComplete || error != nil {
+                requestTask.cancel()
+            }
+        }
+    }
+
+    private func registerActiveRequest(
+        sessionId: String,
+        requestId: UUID,
+        onCancel: @escaping @Sendable () -> Void
+    ) -> Bool {
+        withLock {
+            guard sessions[sessionId] != nil else { return false }
+            var map = activeRequestsBySession[sessionId] ?? [:]
+            map[requestId] = ActiveRequestHandle(cancel: onCancel)
+            activeRequestsBySession[sessionId] = map
+            return true
+        }
+    }
+
+    private func unregisterActiveRequest(sessionId: String, requestId: UUID) {
+        withLock {
+            guard var map = activeRequestsBySession[sessionId] else { return }
+            map.removeValue(forKey: requestId)
+            if map.isEmpty {
+                activeRequestsBySession.removeValue(forKey: sessionId)
+            } else {
+                activeRequestsBySession[sessionId] = map
             }
         }
     }

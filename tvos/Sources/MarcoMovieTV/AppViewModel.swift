@@ -103,6 +103,15 @@ public final class AppViewModel: ObservableObject {
     @Published public private(set) var searchBatches: [SiteSearchBatch] = []
     @Published public private(set) var isSearching = false
 
+    // Privacy & in-flight request guards
+    private var stateReloadGeneration: UInt64 = 0
+    private var discoverRequestToken: UInt64 = 0
+    private var liveRequestToken: UInt64 = 0
+    private var searchRequestToken: UInt64 = 0
+    private var loadedLiveSourceIdentity: String?
+    private var activeLiveSourceIdentity: String?
+    private var liveLoadTask: Task<Void, Never>?
+
     // LAN QR, Netdisk & Modals
     @Published public var showSiteSwitcherSheet = false
     @Published public var showLanQrModal = false
@@ -141,6 +150,9 @@ public final class AppViewModel: ObservableObject {
 
     public func reloadLocalState() {
         let previousActiveKey = activeSite?.key
+        let previousPublicSiteKeys = Set(config.publicAvailableSites.map(\.key))
+        let previousPublicLiveIds = Set(config.publicSupportedLives.map(PublicCatalogScopeGuard.liveSourceIdentity))
+
         subscriptions = storage.subscriptions()
         preferences = storage.preferences()
         webdavConfig = storage.loadWebDavConfig()
@@ -150,6 +162,12 @@ public final class AppViewModel: ObservableObject {
         favorites = MediaEntryResolver.publicVisibleFavorites(storage.favorites(), in: config)
 
         let avail = config.publicAvailableSites
+        let publicSiteKeys = Set(avail.map(\.key))
+        let publicLiveIds = Set(config.publicSupportedLives.map(PublicCatalogScopeGuard.liveSourceIdentity))
+        if publicSiteKeys != previousPublicSiteKeys || publicLiveIds != previousPublicLiveIds {
+            stateReloadGeneration &+= 1
+        }
+
         let resolvedSelected: CmsSite? = {
             if let direct = avail.first(where: { $0.key == preferences.selectedSiteKey }) {
                 return direct
@@ -178,25 +196,57 @@ public final class AppViewModel: ObservableObject {
         }
 
         if activeSite?.key != previousActiveKey {
+            discoverRequestToken &+= 1
             categories = []
             discoverVideos = []
             selectedCategoryId = ""
             discoverError = nil
+            isLoadingDiscover = false
+            isLoadingMore = false
         }
 
-        // Purge any in-memory search results or live catalogs whose sources became private or disabled.
-        let publicSiteKeys = Set(avail.map(\.key))
+        // Purge any in-memory search results whose sources became private or disabled,
+        // and invalidate slow in-flight search batches for removed/private sources.
         searchBatches = searchBatches.filter { publicSiteKeys.contains($0.site.key) }
-        if !config.publicSupportedLives.indices.contains(selectedLiveSourceIndex) {
-            selectedLiveSourceIndex = 0
+        if !previousPublicSiteKeys.subtracting(publicSiteKeys).isEmpty {
+            searchTask?.cancel()
+            searchRequestToken &+= 1
+            isSearching = false
+        }
+
+        // Reconcile Live TV strictly by source identity (not list index!) so switching a live
+        // source to private clears its channels even when another public live source shifts into
+        // the exact same `selectedLiveSourceIndex`.
+        let liveReconciliation = PublicCatalogScopeGuard.reconcileLiveSourceSelection(
+            previousLoadedIdentity: loadedLiveSourceIdentity,
+            currentSelectedIndex: selectedLiveSourceIndex,
+            publicLives: config.publicSupportedLives
+        )
+        selectedLiveSourceIndex = liveReconciliation.nextIndex
+        loadedLiveSourceIdentity = liveReconciliation.nextLoadedIdentity
+        if liveReconciliation.shouldClearLoadedGroups {
+            liveLoadTask?.cancel()
+            liveLoadTask = nil
+            liveRequestToken &+= 1
             selectedLiveGroupIndex = 0
             liveGroups = []
-        } else if config.publicSupportedLives.isEmpty {
-            liveGroups = []
+            liveError = nil
+            isLoadingLive = false
         }
 
         if let openCtx = selectedDetailContext, !publicSiteKeys.contains(openCtx.site.key) {
             selectedDetailContext = nil
+        }
+
+        if let playing = activePlayback {
+            if playing.isLiveStream {
+                if let activeLiveId = activeLiveSourceIdentity, !publicLiveIds.contains(activeLiveId) {
+                    activePlayback = nil
+                    activeLiveSourceIdentity = nil
+                }
+            } else if !publicSiteKeys.contains(playing.site.key) || config.isPrivateSiteKey(playing.site.key) {
+                activePlayback = nil
+            }
         }
 
         backdropPosterUrl = MediaEntryResolver.resolvePublicBackdropPosterUrl(
@@ -321,24 +371,43 @@ public final class AppViewModel: ObservableObject {
             discoverVideos = []
             return
         }
+        discoverRequestToken &+= 1
+        let reqToken = discoverRequestToken
+        let reqEpoch = stateReloadGeneration
+        let reqSiteKey = site.key
         isLoadingDiscover = true
         discoverError = nil
         do {
             let payload = try await cmsClient.fetchHome(site: site)
+            guard !Task.isCancelled,
+                  reqToken == discoverRequestToken,
+                  PublicCatalogScopeGuard.canAcceptDiscoverResponse(
+                      siteKey: reqSiteKey,
+                      requestEpoch: reqEpoch,
+                      currentEpoch: stateReloadGeneration,
+                      activeSiteKey: activeSite?.key,
+                      config: config
+                  )
+            else {
+                return
+            }
             categories = payload.categories
             discoverVideos = payload.listing.videos
             currentPage = payload.listing.page
             totalPageCount = payload.listing.pageCount
-            if preferences.ambientPosterSync,
-               !site.isEffectivelyPrivate,
-               let firstPoster = discoverVideos.first(where: { !$0.poster.isEmpty })?.poster
-            {
-                backdropPosterUrl = firstPoster
-            }
+            backdropPosterUrl = MediaEntryResolver.resolvePublicBackdropPosterUrl(
+                ambientPosterSync: preferences.ambientPosterSync,
+                publicDiscoverVideos: discoverVideos,
+                publicWatchHistory: watchHistory,
+                config: config
+            )
         } catch {
+            guard reqToken == discoverRequestToken, reqEpoch == stateReloadGeneration else { return }
             discoverError = error.localizedDescription
         }
-        isLoadingDiscover = false
+        if reqToken == discoverRequestToken {
+            isLoadingDiscover = false
+        }
     }
 
     public func selectCategory(_ categoryId: String) async {
@@ -348,17 +417,37 @@ public final class AppViewModel: ObservableObject {
             await loadHomeForActiveSite()
             return
         }
+        discoverRequestToken &+= 1
+        let reqToken = discoverRequestToken
+        let reqEpoch = stateReloadGeneration
+        let reqSiteKey = site.key
         isLoadingDiscover = true
         discoverError = nil
         do {
             let listing = try await cmsClient.fetchCategory(site: site, categoryId: categoryId, page: 1)
+            guard !Task.isCancelled,
+                  reqToken == discoverRequestToken,
+                  selectedCategoryId == categoryId,
+                  PublicCatalogScopeGuard.canAcceptDiscoverResponse(
+                      siteKey: reqSiteKey,
+                      requestEpoch: reqEpoch,
+                      currentEpoch: stateReloadGeneration,
+                      activeSiteKey: activeSite?.key,
+                      config: config
+                  )
+            else {
+                return
+            }
             discoverVideos = listing.videos
             currentPage = listing.page
             totalPageCount = listing.pageCount
         } catch {
+            guard reqToken == discoverRequestToken, reqEpoch == stateReloadGeneration else { return }
             discoverError = error.localizedDescription
         }
-        isLoadingDiscover = false
+        if reqToken == discoverRequestToken {
+            isLoadingDiscover = false
+        }
     }
 
     public func loadMoreDiscoverIfNeeded(currentVideo: CmsVideo) async {
@@ -370,13 +459,31 @@ public final class AppViewModel: ObservableObject {
         else {
             return
         }
+        let reqToken = discoverRequestToken
+        let reqEpoch = stateReloadGeneration
+        let reqSiteKey = site.key
+        let reqCategoryId = selectedCategoryId
         isLoadingMore = true
         let nextPage = currentPage + 1
         if let nextListing = try? await cmsClient.fetchCategory(
             site: site,
-            categoryId: selectedCategoryId,
+            categoryId: reqCategoryId,
             page: nextPage
         ) {
+            guard !Task.isCancelled,
+                  reqToken == discoverRequestToken,
+                  selectedCategoryId == reqCategoryId,
+                  PublicCatalogScopeGuard.canAcceptDiscoverResponse(
+                      siteKey: reqSiteKey,
+                      requestEpoch: reqEpoch,
+                      currentEpoch: stateReloadGeneration,
+                      activeSiteKey: activeSite?.key,
+                      config: config
+                  )
+            else {
+                isLoadingMore = false
+                return
+            }
             let existingIds = Set(discoverVideos.map(\.id))
             let fresh = nextListing.videos.filter { !existingIds.contains($0.id) }
             discoverVideos.append(contentsOf: fresh)
@@ -389,21 +496,62 @@ public final class AppViewModel: ObservableObject {
     // MARK: - Live TV
 
     public func loadLiveCatalog(sourceIndex: Int) async {
+        liveLoadTask?.cancel()
+        liveLoadTask = nil
         let lives = config.publicSupportedLives
         guard lives.indices.contains(sourceIndex) else {
             liveGroups = []
+            loadedLiveSourceIdentity = nil
             return
         }
+        let targetSource = lives[sourceIndex]
+        let targetIdentity = PublicCatalogScopeGuard.liveSourceIdentity(targetSource)
+        liveRequestToken &+= 1
+        let reqToken = liveRequestToken
+        let reqEpoch = stateReloadGeneration
+
         selectedLiveSourceIndex = sourceIndex
         selectedLiveGroupIndex = 0
         isLoadingLive = true
         liveError = nil
-        do {
-            liveGroups = try await cmsClient.fetchLiveGroups(for: lives[sourceIndex])
-        } catch {
-            liveError = error.localizedDescription
+        let client = cmsClient
+        let task = Task { [weak self] in
+            do {
+                let groups = try await client.fetchLiveGroups(for: targetSource)
+                await MainActor.run { [weak self] in
+                    guard let strongSelf = self,
+                          !Task.isCancelled,
+                          PublicCatalogScopeGuard.canAcceptLiveResponse(
+                              sourceIdentity: targetIdentity,
+                              requestToken: reqToken,
+                              currentToken: strongSelf.liveRequestToken,
+                              requestEpoch: reqEpoch,
+                              currentEpoch: strongSelf.stateReloadGeneration,
+                              config: strongSelf.config
+                          )
+                    else {
+                        return
+                    }
+                    strongSelf.liveGroups = groups
+                    strongSelf.loadedLiveSourceIdentity = targetIdentity
+                    strongSelf.isLoadingLive = false
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    guard let strongSelf = self,
+                          !Task.isCancelled,
+                          reqToken == strongSelf.liveRequestToken,
+                          reqEpoch == strongSelf.stateReloadGeneration
+                    else {
+                        return
+                    }
+                    strongSelf.liveError = error.localizedDescription
+                    strongSelf.isLoadingLive = false
+                }
+            }
         }
-        isLoadingLive = false
+        liveLoadTask = task
+        await task.value
     }
 
     public func startLivePlayback(channel: LiveChannel) {
@@ -412,6 +560,7 @@ public final class AppViewModel: ObservableObject {
         let activeLiveSource = config.publicSupportedLives.indices.contains(selectedLiveSourceIndex)
             ? config.publicSupportedLives[selectedLiveSourceIndex]
             : nil
+        activeLiveSourceIdentity = activeLiveSource.map(PublicCatalogScopeGuard.liveSourceIdentity)
         let liveSite = CmsSite(
             key: "live_tv",
             name: activeLiveSource?.name ?? "电视直播",
@@ -488,6 +637,9 @@ public final class AppViewModel: ObservableObject {
         guard !kw.isEmpty else { return }
         storage.addSearchKeyword(kw)
         searchTask?.cancel()
+        searchRequestToken &+= 1
+        let reqToken = searchRequestToken
+        let reqEpoch = stateReloadGeneration
         searchBatches = []
         isSearching = true
 
@@ -496,12 +648,30 @@ public final class AppViewModel: ObservableObject {
             guard let client = self?.cmsClient else { return }
             _ = await client.searchAllSites(sites: sitesSnapshot, keyword: kw) { [weak self] batch in
                 await MainActor.run { [weak self] in
-                    guard let strongSelf = self, !Task.isCancelled else { return }
+                    guard let strongSelf = self,
+                          !Task.isCancelled,
+                          PublicCatalogScopeGuard.canAcceptSearchBatch(
+                              siteKey: batch.site.key,
+                              requestToken: reqToken,
+                              currentToken: strongSelf.searchRequestToken,
+                              requestEpoch: reqEpoch,
+                              currentEpoch: strongSelf.stateReloadGeneration,
+                              config: strongSelf.config
+                          )
+                    else {
+                        return
+                    }
                     strongSelf.searchBatches.append(batch)
                 }
             }
-            if !Task.isCancelled {
-                self?.isSearching = false
+            await MainActor.run { [weak self] in
+                guard let strongSelf = self,
+                      !Task.isCancelled,
+                      reqToken == strongSelf.searchRequestToken
+                else {
+                    return
+                }
+                strongSelf.isSearching = false
             }
         }
     }
@@ -694,7 +864,11 @@ public final class AppViewModel: ObservableObject {
             try storage.saveWebDavConfig(webdavConfig)
             let summary = try await webdavService.syncNow()
             reloadLocalState()
-            statusBannerMessage = "云同步完成：历史 \(summary.historyCount) · 收藏 \(summary.favoriteCount) · 订阅 \(summary.subscriptionCount)"
+            if summary.hasPendingLocalChanges {
+                statusBannerMessage = "本轮云同步完成，但仍有改动待同步，请稍后再次同步"
+            } else {
+                statusBannerMessage = "云同步完成：历史 \(summary.historyCount) · 收藏 \(summary.favoriteCount) · 订阅 \(summary.subscriptionCount)"
+            }
             if discoverVideos.isEmpty {
                 await loadHomeForActiveSite()
             }

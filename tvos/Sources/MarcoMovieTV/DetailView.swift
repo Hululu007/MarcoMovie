@@ -690,6 +690,12 @@ public struct DetailView: View {
         errorMessage = nil
         do {
             let loaded = try await appModel.cmsClient.fetchDetail(site: site, video: summaryVideo)
+            guard !Task.isCancelled,
+                  !appModel.config.isPrivateSiteKey(site.key),
+                  appModel.config.publicAvailableSites.contains(where: { $0.key == site.key })
+            else {
+                return
+            }
             detailVideo = loaded
             if appModel.preferences.ambientPosterSync && !site.isEffectivelyPrivate && !loaded.poster.isEmpty {
                 appModel.backdropPosterUrl = loaded.poster
