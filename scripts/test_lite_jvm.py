@@ -195,7 +195,7 @@ def main():
         probe_classes.mkdir()
         probe_dex.mkdir()
 
-        # 1. Verify LiteProbe.java compiles cleanly against API 14 + classes.jar and dexes for min-api 14
+        # 1. Verify LiteProbe.java & LiteUpgradeProbe.java compile cleanly against API 14 + classes.jar and dex for min-api 14
         run(
             exe(JDK / 'bin', 'javac'),
             '-encoding', 'UTF-8',
@@ -204,6 +204,7 @@ def main():
             '-classpath', BUILD / 'classes.jar',
             '-d', probe_classes,
             ROOT / 'lite/tests/LiteProbe.java',
+            ROOT / 'lite/tests/LiteUpgradeProbe.java',
         )
         probe_jar = tmp_dir / 'probe.jar'
         with zipfile.ZipFile(probe_jar, 'w') as zf:
@@ -256,7 +257,9 @@ def main():
         print(out.strip())
         # Pin the exact check count so accidentally skipped or deleted checks fail CI;
         # update this number in lockstep whenever checks are added to or removed from LiteJvmChecks.java.
-        assert 'PASS 194 TV Lite JVM checks' in out, f'Expected 194 TV Lite JVM checks, got: {out.strip()}'
+        assert 'PASS 231 TV Lite JVM checks (194 baseline + 37 new 0.5.9 regressions; 0 failed, 0 skipped)' in out, (
+            f'Expected 231 TV Lite JVM checks (194 baseline + 37 new), got: {out.strip()}'
+        )
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteCredentialProbe', capture=True).strip())
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteTlsChecks', capture=True).strip())
 
