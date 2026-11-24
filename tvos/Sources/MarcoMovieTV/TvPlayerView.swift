@@ -57,6 +57,8 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol, Pl
     private var trackLoadTask: Task<Void, Never>?
     private var pendingRate: Float = 1.0
     private var fallbackTokenCounter: UInt64 = 0
+    private var hasEnteredReadyStateForCurrentItem: Bool = false
+    private var initialSeekCompleted: Bool = true
 
     public var onProgressTick: ((_ token: UInt64, _ positionMs: Int, _ durationMs: Int) -> Void)?
     public var onPlaybackEnded: ((_ token: UInt64) -> Void)?
@@ -70,13 +72,19 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol, Pl
                       let token = strongSelf.activeItemToken,
                       let item = strongSelf.activeItem,
                       strongSelf.avPlayer.currentItem === item,
-                      item.status == .readyToPlay
+                      item.status == .readyToPlay,
+                      strongSelf.initialSeekCompleted
                 else {
                     return
                 }
                 strongSelf.onProgressTick?(token, strongSelf.currentTimeMs, strongSelf.durationMs)
             }
         }
+    }
+
+    public var hasReadyCurrentItem: Bool {
+        guard let item = activeItem, avPlayer.currentItem === item else { return false }
+        return hasEnteredReadyStateForCurrentItem && initialSeekCompleted
     }
 
     public var currentTimeMs: Int {
@@ -102,6 +110,8 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol, Pl
         stopCurrentItem()
 
         pendingRate = rate
+        hasEnteredReadyStateForCurrentItem = false
+        initialSeekCompleted = (initialSeekMs <= 0)
         let item = AVPlayerItem(url: url)
         activeItemToken = token
         activeItem = item
@@ -153,6 +163,7 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol, Pl
                 }
                 switch status {
                 case .readyToPlay:
+                    strongSelf.hasEnteredReadyStateForCurrentItem = true
                     strongSelf.updateNaturalSizeBadge(from: observedItem)
                     strongSelf.discoverMediaSelectionTracks(for: observedItem, token: token)
                 case .failed:
@@ -176,6 +187,7 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol, Pl
                     else {
                         return
                     }
+                    strongSelf.initialSeekCompleted = true
                     strongSelf.play()
                 }
             }
@@ -200,6 +212,8 @@ public final class AVKitPlayerEngine: ObservableObject, PlayerEngineProtocol, Pl
         }
         activeItemToken = nil
         activeItem = nil
+        hasEnteredReadyStateForCurrentItem = false
+        initialSeekCompleted = true
         audibleGroup = nil
         legibleGroup = nil
         audioTracks = []
@@ -582,6 +596,14 @@ public struct TvPlayerView: View {
                             durationMs: durMs
                         )
                     },
+                    resourceReleaser: { resolved in
+                        if let rangeId = resolved.rangeProxyResourceId {
+                            await rangeProxyServer.revokeResource(rangeId)
+                        }
+                        if let headerId = resolved.headerProxySessionId {
+                            proxyServer.revokeSession(headerId)
+                        }
+                    },
                     playbackSpeed: appModel.preferences.playSpeed,
                     skipIntroSec: appModel.preferences.skipIntroSec,
                     skipOutroSec: appModel.preferences.skipOutroSec,
@@ -617,6 +639,8 @@ private struct TvPlayerContentView: View {
     @State private var showEpisodeSelectionSheet = false
     @State private var pickerLineIndex: Int = 0
     @State private var pickerDescending: Bool = false
+    @State private var missingEpisodePrompt: VodLineSwitchMissingEpisodeInfo?
+    @FocusState private var missingPromptStayFocused: Bool
 
     private let speedChoices: [Double] = [0.75, 1.0, 1.25, 1.5, 2.0]
 
@@ -663,12 +687,7 @@ private struct TvPlayerContentView: View {
                     openEpisodeSelection()
                 },
                 onSelectVodLine: { lineIdx in
-                    guard currentSession.video.lines.indices.contains(lineIdx) else { return }
-                    let targetEps = currentSession.video.lines[lineIdx].episodes
-                    guard !targetEps.isEmpty else { return }
-                    let clampedEp = min(max(0, currentSession.episodeIndex), targetEps.count - 1)
-                    let carrySeek = max(engine.currentTimeMs, currentSession.initialSeekMs)
-                    coordinator.switchToEpisode(lineIndex: lineIdx, episodeIndex: clampedEp, seekMs: carrySeek)
+                    handleVodLineSwitch(coordinator.switchVodLine(to: lineIdx))
                 },
                 onSelectLiveLine: { lineIdx in
                     _ = coordinator.switchLiveLine(to: lineIdx)
@@ -716,6 +735,10 @@ private struct TvPlayerContentView: View {
                 .padding(24)
             }
             #endif
+
+            if let missingInfo = missingEpisodePrompt {
+                missingEpisodeOverlayView(info: missingInfo)
+            }
         }
         #if os(tvOS)
         .fullScreenCover(isPresented: $showNetdiskAuthSheet) {
@@ -757,7 +780,7 @@ private struct TvPlayerContentView: View {
         #endif
         #if os(tvOS)
         .onMoveCommand { direction in
-            guard currentSession.isLiveStream, !currentSession.liveFlatChannels.isEmpty else { return }
+            guard missingEpisodePrompt == nil, currentSession.isLiveStream, !currentSession.liveFlatChannels.isEmpty else { return }
             switch direction {
             case .up:
                 coordinator.switchLiveChannel(delta: -1)
@@ -769,7 +792,11 @@ private struct TvPlayerContentView: View {
         }
         #endif
         .tvExitHandler {
-            onDismissRequest()
+            if missingEpisodePrompt != nil {
+                missingEpisodePrompt = nil
+            } else {
+                onDismissRequest()
+            }
         }
         .onAppear {
             selectedSpeed = appModel.preferences.playSpeed
@@ -833,7 +860,7 @@ private struct TvPlayerContentView: View {
                 } else {
                     if currentSession.video.lines.count > 1 {
                         Button("切换下一线路") {
-                            _ = coordinator.switchToNextVodLine()
+                            handleVodLineSwitch(coordinator.switchToNextVodLineOutcome())
                         }
                         .buttonStyle(TvPillButtonStyle())
                     }
@@ -859,6 +886,95 @@ private struct TvPlayerContentView: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func missingEpisodeOverlayView(info: VodLineSwitchMissingEpisodeInfo) -> some View {
+        let countDesc = info.availableEpisodeCount > 0
+            ? "仅有 \(info.availableEpisodeCount) 集"
+            : "暂无可用剧集"
+        return ZStack {
+            Color.black.opacity(0.68)
+                .ignoresSafeArea()
+
+            VStack(spacing: 20) {
+                Image(systemName: "film.stack")
+                    .font(.system(size: 40))
+                    .foregroundColor(TvTheme.gold)
+
+                Text("目标线路缺少当前剧集")
+                    .font(TvFont.sectionTitle)
+                    .foregroundColor(.white)
+
+                Text("线路「\(info.targetLineName)」\(countDesc)，未找到「\(info.requestedEpisodeName)」（当前进度 \(formatPlaybackPosition(info.carrySeekMs))）。请选择操作：")
+                    .font(TvFont.body)
+                    .foregroundColor(TvTheme.secondaryText)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 780)
+
+                HStack(spacing: 16) {
+                    Button("继续留在当前线路") {
+                        missingEpisodePrompt = nil
+                    }
+                    .buttonStyle(TvPillButtonStyle(prominent: true))
+                    .focused($missingPromptStayFocused)
+
+                    Button("打开选集页挑选") {
+                        let targetLine = info.targetLineIndex
+                        missingEpisodePrompt = nil
+                        openEpisodeSelection(initialLineIndex: targetLine)
+                    }
+                    .buttonStyle(TvPillButtonStyle())
+
+                    if info.availableEpisodeCount > 0 {
+                        Button("改播该线路第 \(info.availableEpisodeCount) 集") {
+                            let targetLine = info.targetLineIndex
+                            let fallbackEp = info.availableEpisodeCount - 1
+                            missingEpisodePrompt = nil
+                            _ = coordinator.forceSwitchVodLine(
+                                to: targetLine,
+                                episodeIndex: fallbackEp,
+                                seekMs: 0
+                            )
+                        }
+                        .buttonStyle(TvPillButtonStyle())
+                    }
+                }
+            }
+            .padding(36)
+            .background(TvTheme.surface.opacity(0.96))
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(TvTheme.glassStroke, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .focusSection()
+            .onAppear {
+                missingPromptStayFocused = true
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func handleVodLineSwitch(_ outcome: VodLineSwitchOutcome) {
+        switch outcome {
+        case .switched:
+            missingEpisodePrompt = nil
+        case .missingEpisode(let info):
+            missingEpisodePrompt = info
+        case .unchanged, .unavailable:
+            break
+        }
+    }
+
+    private func formatPlaybackPosition(_ ms: Int) -> String {
+        let totalSec = max(0, ms / 1000)
+        let h = totalSec / 3600
+        let m = (totalSec % 3600) / 60
+        let s = totalSec % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "%02d:%02d", m, s)
     }
 
     private var hudBannerView: some View {
@@ -983,8 +1099,13 @@ private struct TvPlayerContentView: View {
         .padding(32)
     }
 
-    private func openEpisodeSelection() {
-        pickerLineIndex = currentSession.lineIndex
+    private func openEpisodeSelection(initialLineIndex: Int? = nil) {
+        let preferred = initialLineIndex ?? currentSession.lineIndex
+        if currentSession.video.lines.indices.contains(preferred) {
+            pickerLineIndex = preferred
+        } else {
+            pickerLineIndex = currentSession.lineIndex
+        }
         pickerDescending = appModel.preferences.episodesDescending
         showEpisodeSelectionSheet = true
     }

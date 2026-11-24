@@ -259,20 +259,33 @@ public final class CmsClient: @unchecked Sendable {
         }
         if site.hasQuickJsAdapter {
             let host = try await resolveJsHost(for: site)
-            if let detailed = try await host.detailContent(ids: [video.id]) {
+            let targetId = video.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let detailed = try await host.detailContent(ids: [targetId]) {
+                let returnedId = detailed.id.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !returnedId.isEmpty && returnedId != targetId {
+                    throw MarcoError.unsupportedSite(
+                        "原片源「\(site.name)」返回了不匹配的影片（期望 ID: \(targetId)，实际 ID: \(returnedId)），原片不可用，观看断点已保留"
+                    )
+                }
                 return mergeVideoDetail(summary: video, detail: detailed)
             }
-            return video
+            if !video.lines.isEmpty {
+                return video
+            }
+            throw MarcoError.unsupportedSite("原片源「\(site.name)」未返回目标影片（ID: \(targetId)），原片不可用，观看断点已保留")
         }
         if !video.lines.isEmpty && !video.description.isEmpty {
             return video
         }
-        let url = appendQuery(site.api, params: [("ac", "detail"), ("ids", video.id)])
+        let targetId = video.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = appendQuery(site.api, params: [("ac", "detail"), ("ids", targetId)])
         let bytes = try await fetchRawBytes(url: url, headers: site.headers)
         let text = try ConfigDecoder.decodeTextDocument(bytes)
         let listing = try CmsParser.parseListing(text)
-        guard let detail = listing.videos.first(where: { $0.id == video.id }) ?? listing.videos.first else {
-            return video
+        guard let detail = listing.videos.first(where: {
+            $0.id.trimmingCharacters(in: .whitespacesAndNewlines) == targetId
+        }) else {
+            throw MarcoError.unsupportedSite("原片源「\(site.name)」未返回目标影片（ID: \(targetId)），原片不可用，观看断点已保留")
         }
         return mergeVideoDetail(summary: video, detail: detail)
     }
@@ -441,33 +454,38 @@ public final class CmsClient: @unchecked Sendable {
         let preferredKernel = storage?.preferences().playerKernel ?? "range_proxy"
 
         if !isLiveStream, isDirectContainer, preferredKernel == "range_proxy", let rangeProxy = rangeProxyServer {
+            let host = (finalUrl.host ?? "").lowercased()
+            let isLoopback = (host == "127.0.0.1" || host == "localhost" || host == "::1")
             let policy = NetdiskHeaderPolicy(
                 originUrl: finalUrl,
                 baseHeaders: mergedHeaders,
-                cookieDomains: []
+                cookieDomains: [],
+                allowInsecureLoopbackCredentials: isLoopback
             )
-            let (_, loopbackUrl) = try await rangeProxy.registerStream(url: finalUrl, policy: policy)
+            let (resourceId, loopbackUrl) = try await rangeProxy.registerStream(url: finalUrl, policy: policy)
             return ResolvedPlayback(
                 originalUrl: finalUrl.absoluteString,
                 playableUrl: loopbackUrl,
                 headers: mergedHeaders,
                 isProxied: true,
                 kernelLabel: "\(rangeProxy.workers) 线程分片代理",
-                resolutionBadge: badge
+                resolutionBadge: badge,
+                rangeProxyResourceId: resourceId
             )
         }
 
         let needsHeaderProxy = !mergedHeaders.isEmpty
             && (finalUrl.scheme?.lowercased() == "http" || finalUrl.scheme?.lowercased() == "https")
         if needsHeaderProxy, let proxy = proxyServer {
-            let loopbackUrl = try await proxy.registerStream(url: finalUrl, headers: mergedHeaders)
+            let (sessionId, loopbackUrl) = try await proxy.registerStreamWithId(url: finalUrl, headers: mergedHeaders)
             return ResolvedPlayback(
                 originalUrl: finalUrl.absoluteString,
                 playableUrl: loopbackUrl,
                 headers: mergedHeaders,
                 isProxied: true,
                 kernelLabel: lowerExt == "m3u8" ? "HLS 代理硬解" : "AVKit 硬解",
-                resolutionBadge: badge
+                resolutionBadge: badge,
+                headerProxySessionId: sessionId
             )
         }
         return ResolvedPlayback(

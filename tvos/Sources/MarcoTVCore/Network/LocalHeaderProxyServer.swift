@@ -166,8 +166,26 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
         current?.cancel()
     }
 
-    /// Registers an upstream media URL + origin-bound `NetdiskHeaderPolicy` and returns a loopback URL playable by `AVPlayer`.
-    public func registerStream(url: URL, policy: NetdiskHeaderPolicy) async throws -> URL {
+    public func revokeSession(_ sessionId: String) {
+        withLock {
+            _ = sessions.removeValue(forKey: sessionId)
+        }
+    }
+
+    public func activeSessionCount() -> Int {
+        withLock { sessions.count }
+    }
+
+    public func hasActiveSession(_ sessionId: String) -> Bool {
+        withLock { sessions[sessionId] != nil }
+    }
+
+    /// Registers an upstream media URL + origin-bound `NetdiskHeaderPolicy` and returns both the
+    /// revocable `sessionId` and loopback URL playable by `AVPlayer`.
+    public func registerStreamWithId(
+        url: URL,
+        policy: NetdiskHeaderPolicy
+    ) async throws -> (sessionId: String, proxyUrl: URL) {
         let activePort = try await startIfNeeded()
         var tokenBytes = [UInt8](repeating: 0, count: 12)
         for i in 0..<tokenBytes.count {
@@ -190,11 +208,13 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
         guard let proxyUrl = URL(string: "http://127.0.0.1:\(activePort)/proxy/\(sessionId)/\(leaf)") else {
             throw MarcoError.networkFailure("无法构造本地代理播放地址")
         }
-        return proxyUrl
+        return (sessionId, proxyUrl)
     }
 
-    /// Registers an upstream media URL + custom headers under an origin-bound isolation policy.
-    public func registerStream(url: URL, headers: [String: String]) async throws -> URL {
+    public func registerStreamWithId(
+        url: URL,
+        headers: [String: String]
+    ) async throws -> (sessionId: String, proxyUrl: URL) {
         let host = (url.host ?? "").lowercased()
         let isLoopback = (host == "127.0.0.1" || host == "localhost" || host == "::1")
         let policy = NetdiskHeaderPolicy(
@@ -204,7 +224,17 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
             allowInsecureLoopbackCredentials: isLoopback,
             defaultUserAgent: CmsClient.defaultSafariUserAgent
         )
-        return try await registerStream(url: url, policy: policy)
+        return try await registerStreamWithId(url: url, policy: policy)
+    }
+
+    /// Registers an upstream media URL + origin-bound `NetdiskHeaderPolicy` and returns a loopback URL playable by `AVPlayer`.
+    public func registerStream(url: URL, policy: NetdiskHeaderPolicy) async throws -> URL {
+        try await registerStreamWithId(url: url, policy: policy).proxyUrl
+    }
+
+    /// Registers an upstream media URL + custom headers under an origin-bound isolation policy.
+    public func registerStream(url: URL, headers: [String: String]) async throws -> URL {
+        try await registerStreamWithId(url: url, headers: headers).proxyUrl
     }
 
     /// Rewrites an HLS `.m3u8` manifest so all variant playlists, media segments, and `#EXT-X-KEY` / `#EXT-X-MAP` URIs route through loopback.

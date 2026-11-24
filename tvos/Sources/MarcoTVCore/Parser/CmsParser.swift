@@ -264,6 +264,7 @@ public enum CmsParser {
         let groupLabel = defaultGroup.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "默认分组"
             : defaultGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parentPrivate = isPrivate || groupLabel.contains("隐私") || groupLabel.contains("私密")
         let unpacked = ConfigDecoder.unpackConfigText(rawJson)
         let trimmedUnpacked = unpacked.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedUnpacked.isEmpty {
@@ -294,7 +295,7 @@ public enum CmsParser {
                     api: apiName,
                     ext: extStr,
                     group: groupLabel,
-                    isPrivate: isPrivate,
+                    isPrivate: parentPrivate,
                     subscriptionId: subscriptionId
                 ),
             ])
@@ -319,7 +320,7 @@ public enum CmsParser {
                         api: apiUrl.isEmpty ? "m3u_vod://xml_inline" : apiUrl,
                         ext: apiUrl.isEmpty ? trimmedUnpacked : "",
                         group: groupLabel,
-                        isPrivate: isPrivate,
+                        isPrivate: parentPrivate,
                         subscriptionId: subscriptionId
                     ),
                 ])
@@ -342,7 +343,7 @@ public enum CmsParser {
                 trimmedUnpacked,
                 origin: origin,
                 groupLabel: groupLabel,
-                isPrivate: isPrivate,
+                isPrivate: parentPrivate,
                 subscriptionId: subscriptionId,
                 defaultName: defaultName
             ) {
@@ -358,7 +359,7 @@ public enum CmsParser {
                 trimmedUnpacked,
                 origin: origin,
                 groupLabel: groupLabel,
-                isPrivate: isPrivate,
+                isPrivate: parentPrivate,
                 subscriptionId: subscriptionId,
                 defaultName: defaultName
             ) {
@@ -399,7 +400,7 @@ public enum CmsParser {
                     api: apiUrl.isEmpty ? "m3u_vod://json_inline" : apiUrl,
                     ext: apiUrl.isEmpty ? cleaned : "",
                     group: groupLabel,
-                    isPrivate: isPrivate,
+                    isPrivate: parentPrivate,
                     subscriptionId: subscriptionId
                 ),
             ])
@@ -433,7 +434,7 @@ public enum CmsParser {
                 guard seenDepotUrls.insert(resolved).inserted else { continue }
                 let rawName = firstNonEmpty(item["name"], item["sourceName"])
                 let depotName = rawName.isEmpty ? "仓库 \(depots.count + 1)" : rawName
-                depots.append(CmsDepot(name: depotName, url: resolved, subscriptionId: subscriptionId, isPrivate: isPrivate))
+                depots.append(CmsDepot(name: depotName, url: resolved, subscriptionId: subscriptionId, isPrivate: parentPrivate))
             }
         }
 
@@ -519,7 +520,9 @@ public enum CmsParser {
 
                 let itemGroup = nonNullString(item["group"]).trimmingCharacters(in: .whitespacesAndNewlines)
                 let privFlag = item["isPrivate"] ?? item["private"] ?? item["hidden"]
-                let itemPrivate = asBool(privFlag, fallback: isPrivate)
+                // Parent subscription privacy strictly overrides any child flag (`isPrivate: false` cannot escape).
+                let itemPrivate = parentPrivate
+                    || asBool(privFlag, fallback: false)
                     || nonNullString(item["space"]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "private"
                 let itemPlayUrl = nonNullString(item["playUrl"]).trimmingCharacters(in: .whitespacesAndNewlines)
                 let itemParse = asInt(item["parse"], fallback: 0)
@@ -571,7 +574,9 @@ public enum CmsParser {
             let itemGroup = nonNullString(item["group"]).trimmingCharacters(in: .whitespacesAndNewlines)
             let group = itemGroup.isEmpty ? groupLabel : itemGroup
             let privFlag = item["isPrivate"] ?? item["private"] ?? item["hidden"]
-            let hidden = asBool(privFlag, fallback: isPrivate)
+            // Parent subscription privacy strictly overrides any child live flag.
+            let hidden = parentPrivate
+                || asBool(privFlag, fallback: false)
                 || nonNullString(item["space"]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "private"
             let headers = LiveCatalogParser.headers(from: item)
             let rawUrl = nonNullString(item["url"]).trimmingCharacters(in: .whitespacesAndNewlines)

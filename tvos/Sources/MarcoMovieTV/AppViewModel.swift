@@ -140,17 +140,35 @@ public final class AppViewModel: ObservableObject {
     }
 
     public func reloadLocalState() {
+        let previousActiveKey = activeSite?.key
         subscriptions = storage.subscriptions()
-        watchHistory = storage.watchHistory()
-        favorites = storage.favorites()
         preferences = storage.preferences()
         webdavConfig = storage.loadWebDavConfig()
         loggedInNetdiskDrives = Set(storage.loggedInNetdiskDrives())
         config = storage.mergedConfig()
+        watchHistory = MediaEntryResolver.publicVisibleWatchHistory(storage.watchHistory(), in: config)
+        favorites = MediaEntryResolver.publicVisibleFavorites(storage.favorites(), in: config)
 
         let avail = config.publicAvailableSites
-        if let match = avail.first(where: { $0.key == preferences.selectedSiteKey }) {
+        let resolvedSelected: CmsSite? = {
+            if let direct = avail.first(where: { $0.key == preferences.selectedSiteKey }) {
+                return direct
+            }
+            if case .available(let legacyMatched) = MediaEntryResolver.lookupOriginSite(
+                siteKey: preferences.selectedSiteKey,
+                in: config
+            ) {
+                return legacyMatched
+            }
+            return nil
+        }()
+
+        if let match = resolvedSelected {
             activeSite = match
+            if preferences.selectedSiteKey != match.key {
+                storage.updatePreferences { $0.selectedSiteKey = match.key }
+                preferences = storage.preferences()
+            }
         } else if let fallback = avail.first(where: { !$0.isBannerNoticeSite }) ?? avail.first {
             activeSite = fallback
             storage.updatePreferences { $0.selectedSiteKey = fallback.key }
@@ -159,9 +177,34 @@ public final class AppViewModel: ObservableObject {
             activeSite = nil
         }
 
-        if let firstPoster = watchHistory.first?.poster, !firstPoster.isEmpty {
-            backdropPosterUrl = firstPoster
+        if activeSite?.key != previousActiveKey {
+            categories = []
+            discoverVideos = []
+            selectedCategoryId = ""
+            discoverError = nil
         }
+
+        // Purge any in-memory search results or live catalogs whose sources became private or disabled.
+        let publicSiteKeys = Set(avail.map(\.key))
+        searchBatches = searchBatches.filter { publicSiteKeys.contains($0.site.key) }
+        if !config.publicSupportedLives.indices.contains(selectedLiveSourceIndex) {
+            selectedLiveSourceIndex = 0
+            selectedLiveGroupIndex = 0
+            liveGroups = []
+        } else if config.publicSupportedLives.isEmpty {
+            liveGroups = []
+        }
+
+        if let openCtx = selectedDetailContext, !publicSiteKeys.contains(openCtx.site.key) {
+            selectedDetailContext = nil
+        }
+
+        backdropPosterUrl = MediaEntryResolver.resolvePublicBackdropPosterUrl(
+            ambientPosterSync: preferences.ambientPosterSync,
+            publicDiscoverVideos: discoverVideos,
+            publicWatchHistory: watchHistory,
+            config: config
+        )
     }
 
     private func performSelfHealingStartupIfNeeded() async {
@@ -286,7 +329,10 @@ public final class AppViewModel: ObservableObject {
             discoverVideos = payload.listing.videos
             currentPage = payload.listing.page
             totalPageCount = payload.listing.pageCount
-            if let firstPoster = discoverVideos.first(where: { !$0.poster.isEmpty })?.poster {
+            if preferences.ambientPosterSync,
+               !site.isEffectivelyPrivate,
+               let firstPoster = discoverVideos.first(where: { !$0.poster.isEmpty })?.poster
+            {
                 backdropPosterUrl = firstPoster
             }
         } catch {
@@ -395,7 +441,7 @@ public final class AppViewModel: ObservableObject {
     // MARK: - Source-Bound Detail Opening (Continue Watching / History / Favorites)
 
     public func openDetail(site: CmsSite, video: CmsVideo) {
-        if !video.poster.isEmpty {
+        if preferences.ambientPosterSync && !site.isEffectivelyPrivate && !video.poster.isEmpty {
             backdropPosterUrl = video.poster
         }
         selectedDetailContext = DetailRouteContext(site: site, video: video)
@@ -498,37 +544,84 @@ public final class AppViewModel: ObservableObject {
             updated: Int64(Date().timeIntervalSince1970 * 1000)
         )
         storage.upsertWatchHistory(entry)
-        watchHistory = storage.watchHistory()
+        watchHistory = MediaEntryResolver.publicVisibleWatchHistory(storage.watchHistory(), in: config)
+        backdropPosterUrl = MediaEntryResolver.resolvePublicBackdropPosterUrl(
+            ambientPosterSync: preferences.ambientPosterSync,
+            publicDiscoverVideos: discoverVideos,
+            publicWatchHistory: watchHistory,
+            config: config
+        )
     }
 
     public func toggleFavorite(site: CmsSite, video: CmsVideo) {
-        _ = storage.toggleFavorite(site: site.key, video: video)
-        favorites = storage.favorites()
+        if let legacyMatch = MediaEntryResolver.matchingFavorite(
+            for: site,
+            videoId: video.id,
+            in: storage.favorites(),
+            config: config
+        ), legacyMatch.site != site.key {
+            storage.removeFavorite(site: legacyMatch.site, id: legacyMatch.id)
+        } else {
+            _ = storage.toggleFavorite(site: site.key, video: video)
+        }
+        favorites = MediaEntryResolver.publicVisibleFavorites(storage.favorites(), in: config)
     }
 
     public func removeHistoryItem(_ item: WatchHistoryItem) {
         storage.removeWatchHistory(site: item.site, id: item.id)
-        watchHistory = storage.watchHistory()
+        watchHistory = MediaEntryResolver.publicVisibleWatchHistory(storage.watchHistory(), in: config)
+        backdropPosterUrl = MediaEntryResolver.resolvePublicBackdropPosterUrl(
+            ambientPosterSync: preferences.ambientPosterSync,
+            publicDiscoverVideos: discoverVideos,
+            publicWatchHistory: watchHistory,
+            config: config
+        )
     }
 
     public func clearAllHistory() {
-        storage.clearWatchHistory()
-        watchHistory = []
+        let publicItems = MediaEntryResolver.publicVisibleWatchHistory(storage.watchHistory(), in: config)
+        if publicItems.count == storage.watchHistory().count {
+            storage.clearWatchHistory()
+        } else {
+            for item in publicItems {
+                storage.removeWatchHistory(site: item.site, id: item.id)
+            }
+        }
+        watchHistory = MediaEntryResolver.publicVisibleWatchHistory(storage.watchHistory(), in: config)
+        backdropPosterUrl = MediaEntryResolver.resolvePublicBackdropPosterUrl(
+            ambientPosterSync: preferences.ambientPosterSync,
+            publicDiscoverVideos: discoverVideos,
+            publicWatchHistory: watchHistory,
+            config: config
+        )
     }
 
     public func removeFavoriteItem(_ item: FavoriteItem) {
         storage.removeFavorite(site: item.site, id: item.id)
-        favorites = storage.favorites()
+        favorites = MediaEntryResolver.publicVisibleFavorites(storage.favorites(), in: config)
     }
 
     public func clearAllFavorites() {
-        storage.clearFavorites()
-        favorites = []
+        let publicItems = MediaEntryResolver.publicVisibleFavorites(storage.favorites(), in: config)
+        if publicItems.count == storage.favorites().count {
+            storage.clearFavorites()
+        } else {
+            for item in publicItems {
+                storage.removeFavorite(site: item.site, id: item.id)
+            }
+        }
+        favorites = MediaEntryResolver.publicVisibleFavorites(storage.favorites(), in: config)
     }
 
     public func updatePlaybackPreferences(_ mutate: (inout PlaybackPreferences) -> Void) {
         storage.updatePreferences(mutate)
         preferences = storage.preferences()
+        backdropPosterUrl = MediaEntryResolver.resolvePublicBackdropPosterUrl(
+            ambientPosterSync: preferences.ambientPosterSync,
+            publicDiscoverVideos: discoverVideos,
+            publicWatchHistory: watchHistory,
+            config: config
+        )
     }
 
     // MARK: - 4K Netdisk Accounts & LAN QR Server & WebDAV Sync

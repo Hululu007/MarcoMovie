@@ -751,7 +751,8 @@ final class MarcoTVCoreTests: XCTestCase {
         )
 
         let merged = storage.mergedConfig()
-        XCTAssertEqual(merged.publicAvailableSites.map(\.key), ["pub_site"])
+        XCTAssertEqual(merged.publicAvailableSites.map(\.rawKey), ["pub_site"])
+        XCTAssertEqual(merged.publicAvailableSites.map(\.key), ["sub::sub_pub_1::pub_site"])
         XCTAssertEqual(merged.publicSupportedLives.map(\.name), ["公开直播"])
         XCTAssertEqual(merged.supportedLives.map(\.name), ["公开直播"])
         XCTAssertEqual(merged.allSupportedLives.count, 2)

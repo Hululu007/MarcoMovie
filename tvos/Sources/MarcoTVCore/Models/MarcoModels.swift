@@ -233,8 +233,29 @@ public struct CmsSite: Codable, Hashable, Identifiable, Sendable {
     public static let statusCatPawNodeRequired = "catpaw-node-required"
     public static let maxExtSize = 128 * 1024
 
+    public static let scopedSiteKeyPrefix = "sub::"
+
+    public static func canonicalScopedKey(rawKey: String, subscriptionId: String) -> String {
+        let cleanRaw = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanSub = subscriptionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSub.isEmpty else { return cleanRaw }
+        if cleanRaw.hasPrefix(scopedSiteKeyPrefix) { return cleanRaw }
+        return "\(scopedSiteKeyPrefix)\(cleanSub)::\(cleanRaw)"
+    }
+
+    public static func parseScopedKey(_ siteKey: String) -> (subscriptionId: String, rawKey: String)? {
+        guard siteKey.hasPrefix(scopedSiteKeyPrefix) else { return nil }
+        let rest = siteKey.dropFirst(scopedSiteKeyPrefix.count)
+        guard let sep = rest.range(of: "::") else { return nil }
+        let subId = String(rest[..<sep.lowerBound])
+        let raw = String(rest[sep.upperBound...])
+        guard !subId.isEmpty, !raw.isEmpty else { return nil }
+        return (subId, raw)
+    }
+
     public var id: String { key }
     public var key: String
+    public var rawKey: String
     public var name: String
     public var type: Int
     public var api: String
@@ -253,6 +274,7 @@ public struct CmsSite: Codable, Hashable, Identifiable, Sendable {
 
     public init(
         key: String,
+        rawKey: String? = nil,
         name: String,
         type: Int,
         api: String,
@@ -270,6 +292,7 @@ public struct CmsSite: Codable, Hashable, Identifiable, Sendable {
         subscriptionId: String = ""
     ) {
         self.key = key
+        self.rawKey = rawKey ?? CmsSite.parseScopedKey(key)?.rawKey ?? key
         self.name = name
         self.type = type
         self.api = api
@@ -285,6 +308,35 @@ public struct CmsSite: Codable, Hashable, Identifiable, Sendable {
         self.group = group
         self.isPrivate = isPrivate
         self.subscriptionId = subscriptionId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key, rawKey, name, type, api, playUrl, searchable, ext, extTooLarge
+        case requiresParser, rawExtension, jar, spider, headers, group, isPrivate, subscriptionId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedKey = try c.decode(String.self, forKey: .key)
+        self.key = decodedKey
+        self.rawKey = try c.decodeIfPresent(String.self, forKey: .rawKey)
+            ?? CmsSite.parseScopedKey(decodedKey)?.rawKey
+            ?? decodedKey
+        self.name = try c.decode(String.self, forKey: .name)
+        self.type = try c.decode(Int.self, forKey: .type)
+        self.api = try c.decode(String.self, forKey: .api)
+        self.playUrl = try c.decodeIfPresent(String.self, forKey: .playUrl) ?? ""
+        self.searchable = try c.decodeIfPresent(Bool.self, forKey: .searchable) ?? true
+        self.ext = try c.decodeIfPresent(String.self, forKey: .ext) ?? ""
+        self.extTooLarge = try c.decodeIfPresent(Bool.self, forKey: .extTooLarge) ?? false
+        self.requiresParser = try c.decodeIfPresent(Bool.self, forKey: .requiresParser) ?? false
+        self.rawExtension = try c.decodeIfPresent(String.self, forKey: .rawExtension)
+        self.jar = try c.decodeIfPresent(String.self, forKey: .jar) ?? ""
+        self.spider = try c.decodeIfPresent(String.self, forKey: .spider) ?? ""
+        self.headers = try c.decodeIfPresent([String: String].self, forKey: .headers) ?? [:]
+        self.group = try c.decodeIfPresent(String.self, forKey: .group) ?? "默认分组"
+        self.isPrivate = try c.decodeIfPresent(Bool.self, forKey: .isPrivate) ?? false
+        self.subscriptionId = try c.decodeIfPresent(String.self, forKey: .subscriptionId) ?? ""
     }
 
     public var pluginReference: String {
@@ -896,25 +948,137 @@ public struct LiveGroup: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+/// Complete site-ownership metadata across ALL subscriptions (enabled, disabled, public, and private),
+/// enabling order-independent site identity resolution, legacy ambiguity detection, and strict private isolation.
+public struct SiteOwnershipRecord: Codable, Hashable, Sendable {
+    public var canonicalKey: String
+    public var rawKey: String
+    public var subscriptionId: String
+    public var subscriptionName: String
+    public var siteName: String
+    public var isEnabled: Bool
+    public var isPrivate: Bool
+    public var isSupported: Bool
+    public var unsupportedReason: String
+
+    public init(
+        canonicalKey: String,
+        rawKey: String,
+        subscriptionId: String,
+        subscriptionName: String = "",
+        siteName: String,
+        isEnabled: Bool,
+        isPrivate: Bool,
+        isSupported: Bool,
+        unsupportedReason: String = ""
+    ) {
+        self.canonicalKey = canonicalKey
+        self.rawKey = rawKey
+        self.subscriptionId = subscriptionId
+        self.subscriptionName = subscriptionName
+        self.siteName = siteName
+        self.isEnabled = isEnabled
+        self.isPrivate = isPrivate
+        self.isSupported = isSupported
+        self.unsupportedReason = unsupportedReason
+    }
+}
+
 public struct CmsConfig: Codable, Hashable, Sendable {
     public var sites: [CmsSite]
     public var lives: [LiveSource]
     public var depots: [CmsDepot]
     public var parses: [CmsParse]
     public var spider: String
+    public var siteOwners: [SiteOwnershipRecord]
+    public var privateSubscriptionIds: Set<String>
 
     public init(
         sites: [CmsSite] = [],
         lives: [LiveSource] = [],
         depots: [CmsDepot] = [],
         parses: [CmsParse] = [],
-        spider: String = ""
+        spider: String = "",
+        siteOwners: [SiteOwnershipRecord] = [],
+        privateSubscriptionIds: Set<String> = []
     ) {
         self.sites = sites
         self.lives = lives
         self.depots = depots
         self.parses = parses
         self.spider = spider
+        self.siteOwners = siteOwners
+        self.privateSubscriptionIds = privateSubscriptionIds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sites, lives, depots, parses, spider, siteOwners, privateSubscriptionIds
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.sites = try c.decodeIfPresent([CmsSite].self, forKey: .sites) ?? []
+        self.lives = try c.decodeIfPresent([LiveSource].self, forKey: .lives) ?? []
+        self.depots = try c.decodeIfPresent([CmsDepot].self, forKey: .depots) ?? []
+        self.parses = try c.decodeIfPresent([CmsParse].self, forKey: .parses) ?? []
+        self.spider = try c.decodeIfPresent(String.self, forKey: .spider) ?? ""
+        self.siteOwners = try c.decodeIfPresent([SiteOwnershipRecord].self, forKey: .siteOwners) ?? []
+        self.privateSubscriptionIds = try c.decodeIfPresent(Set<String>.self, forKey: .privateSubscriptionIds) ?? []
+    }
+
+    public var effectiveSiteOwners: [SiteOwnershipRecord] {
+        if !siteOwners.isEmpty {
+            return siteOwners
+        }
+        return sites.map { s in
+            SiteOwnershipRecord(
+                canonicalKey: s.key,
+                rawKey: s.rawKey,
+                subscriptionId: s.subscriptionId,
+                subscriptionName: "",
+                siteName: s.name,
+                isEnabled: true,
+                isPrivate: s.isEffectivelyPrivate,
+                isSupported: s.supported,
+                unsupportedReason: s.unsupportedReason
+            )
+        }
+    }
+
+    /// Returns `true` when `recordSiteKey` belongs to (or conservatively could belong to) a private subscription/site.
+    public func isPrivateSiteKey(_ recordSiteKey: String) -> Bool {
+        let clean = recordSiteKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return false }
+
+        let owners = effectiveSiteOwners
+        if let exact = owners.first(where: { $0.canonicalKey == clean }) {
+            return exact.isPrivate
+        }
+        if let legacyDisambig = owners.first(where: {
+            !$0.subscriptionId.isEmpty && "\($0.rawKey)_\($0.subscriptionId)" == clean
+        }) {
+            return legacyDisambig.isPrivate
+        }
+        if let parsed = CmsSite.parseScopedKey(clean) {
+            if privateSubscriptionIds.contains(parsed.subscriptionId) {
+                return true
+            }
+            if let byPair = owners.first(where: {
+                $0.subscriptionId == parsed.subscriptionId && $0.rawKey == parsed.rawKey
+            }) {
+                return byPair.isPrivate
+            }
+            return false
+        }
+        for privSubId in privateSubscriptionIds where !privSubId.isEmpty && clean.hasSuffix("_\(privSubId)") {
+            return true
+        }
+        let byRaw = owners.filter { $0.rawKey == clean }
+        if !byRaw.isEmpty && byRaw.contains(where: { $0.isPrivate }) {
+            // Conservatively hide bare legacy keys that match any private owner (including ambiguous private/public pairs).
+            return true
+        }
+        return false
     }
 
     public var availableSites: [CmsSite] {
@@ -1277,6 +1441,8 @@ public struct ResolvedPlayback: Hashable, Sendable {
     public var isProxied: Bool
     public var kernelLabel: String
     public var resolutionBadge: String
+    public var rangeProxyResourceId: String?
+    public var headerProxySessionId: String?
 
     public init(
         originalUrl: String,
@@ -1284,7 +1450,9 @@ public struct ResolvedPlayback: Hashable, Sendable {
         headers: [String: String] = [:],
         isProxied: Bool = false,
         kernelLabel: String = "AVKit 硬解",
-        resolutionBadge: String = ""
+        resolutionBadge: String = "",
+        rangeProxyResourceId: String? = nil,
+        headerProxySessionId: String? = nil
     ) {
         self.originalUrl = originalUrl
         self.playableUrl = playableUrl
@@ -1292,5 +1460,7 @@ public struct ResolvedPlayback: Hashable, Sendable {
         self.isProxied = isProxied
         self.kernelLabel = kernelLabel
         self.resolutionBadge = resolutionBadge
+        self.rangeProxyResourceId = rangeProxyResourceId
+        self.headerProxySessionId = headerProxySessionId
     }
 }

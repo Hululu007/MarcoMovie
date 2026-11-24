@@ -172,7 +172,12 @@ public struct EpisodeSelectionView: View {
     }
 
     private var savedHistory: WatchHistoryItem? {
-        appModel.watchHistory.first { $0.site == site.key && $0.id == video.id }
+        MediaEntryResolver.matchingHistory(
+            for: site,
+            videoId: video.id,
+            in: appModel.watchHistory,
+            config: appModel.config
+        )
     }
 
     private var lineEpisodeCounts: [Int] {

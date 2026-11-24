@@ -158,9 +158,11 @@ public struct NetdiskProxyMetrics: Equatable, Sendable {
     }
 }
 
-private struct UpstreamRangeNotSupportedSignal: Error {
+private struct UpstreamRangeNotSupportedSignal: Error, Sendable {
     let totalSizeHint: Int64?
 }
+
+private struct StreamAbortedAfterHeadersSent: Error, Sendable {}
 
 /// Header-first opened upstream HTTP response whose body is streamed on demand in bounded chunks.
 private struct OpenedUpstreamResponse: @unchecked Sendable {
@@ -698,11 +700,14 @@ private actor ResourceStreamCoordinator {
 
     private var cachedMetadata: UpstreamMediaMetadata?
     private var generation: UInt64 = 0
+    private var isRevoked: Bool = false
     private var activeWindowChunks: ClosedRange<Int>?
     private var inFlightTasks: [Int: (task: Task<Data, Error>, reservedBytes: Int)] = [:]
+    private var failedChunks: [Int: Error] = [:]
     private var readyChunks: [Int: BufferedChunkEntry] = [:]
     private var activeNonRangeTask: Task<Void, Never>?
     private var activeNonRangeSessionId: UUID?
+    private var activeServeCancels: [UUID: @Sendable () -> Void] = [:]
     private var preemptedWindows: Int = 0
     private var totalChunkRequests: Int = 0
 
@@ -728,20 +733,78 @@ private actor ResourceStreamCoordinator {
         (preemptedWindows, totalChunkRequests)
     }
 
+    func registerServeSession(id: UUID, onCancel: @escaping @Sendable () -> Void) {
+        if isRevoked {
+            onCancel()
+            return
+        }
+        activeServeCancels[id] = onCancel
+    }
+
+    func unregisterServeSession(id: UUID) {
+        activeServeCancels.removeValue(forKey: id)
+    }
+
     func cancelAndPurgeAll() async {
         generation &+= 1
         activeWindowChunks = nil
-        activeNonRangeTask?.cancel()
+        failedChunks.removeAll()
+        let nonRange = activeNonRangeTask
         activeNonRangeTask = nil
         activeNonRangeSessionId = nil
-        for (_, entry) in inFlightTasks {
-            entry.task.cancel()
-        }
+        nonRange?.cancel()
+
+        let tasks = Array(inFlightTasks.values.map(\.task))
         inFlightTasks.removeAll()
-        for (_, ready) in readyChunks {
-            await memoryBudget.release(bytes: ready.reservedBytes)
+        for t in tasks {
+            t.cancel()
         }
+
+        let ready = Array(readyChunks.values)
         readyChunks.removeAll()
+        for entry in ready {
+            await memoryBudget.release(bytes: entry.reservedBytes)
+        }
+    }
+
+    /// Permanently revokes this single resource (without disturbing other active resources),
+    /// aborts active socket streams and prefetch workers, and waits until all its in-flight tasks
+    /// have released their shared memory budget.
+    func revokeAndPurgeAll() async {
+        isRevoked = true
+        generation &+= 1
+        activeWindowChunks = nil
+        failedChunks.removeAll()
+
+        let serveCancels = Array(activeServeCancels.values)
+        activeServeCancels.removeAll()
+        for cancelServe in serveCancels {
+            cancelServe()
+        }
+
+        let nonRange = activeNonRangeTask
+        activeNonRangeTask = nil
+        activeNonRangeSessionId = nil
+        nonRange?.cancel()
+
+        let tasks = Array(inFlightTasks.values.map(\.task))
+        inFlightTasks.removeAll()
+        for t in tasks {
+            t.cancel()
+        }
+
+        let ready = Array(readyChunks.values)
+        readyChunks.removeAll()
+        for entry in ready {
+            await memoryBudget.release(bytes: entry.reservedBytes)
+        }
+
+        for t in tasks {
+            _ = await t.result
+        }
+        if let nonRange {
+            await nonRange.value
+        }
     }
 
     func cancelGenerationIfCurrent(_ expectedGen: UInt64) async {
@@ -750,6 +813,10 @@ private actor ResourceStreamCoordinator {
     }
 
     func registerNonRangeSession(sessionId: UUID, task: Task<Void, Never>) {
+        if isRevoked {
+            task.cancel()
+            return
+        }
         if let prev = activeNonRangeTask {
             preemptedWindows += 1
             prev.cancel()
@@ -779,19 +846,25 @@ private actor ResourceStreamCoordinator {
         range: String?,
         discardBodyImmediately: Bool = false
     ) async throws -> OpenedUpstreamResponse {
-        try await streamOpener(url, method, range, policy, discardBodyImmediately)
+        guard !isRevoked else { throw CancellationError() }
+        return try await streamOpener(url, method, range, policy, discardBodyImmediately)
     }
 
     func resolveMetadata() async throws -> UpstreamMediaMetadata {
+        guard !isRevoked else { throw CancellationError() }
         if let existing = cachedMetadata {
             return existing
         }
         // Probe with Range: bytes=0-0 and cancel body immediately in didReceive response so a
         // Range-ignoring 200 upstream NEVER downloads the full file into memory.
         let probe = try await streamOpener(url, "GET", "bytes=0-0", policy, true)
+        guard !isRevoked else { throw CancellationError() }
         if probe.statusCode == 206,
            let contentRange = headerValue(probe.headers, name: "content-range"),
-           let total = Self.parseTotalSizeFromContentRange(contentRange)
+           let parsedCR = Self.parseByteContentRange(contentRange),
+           parsedCR.start == 0,
+           let total = parsedCR.total,
+           total > 0
         {
             let ct = resolvedContentType(from: probe.headers)
             let meta = UpstreamMediaMetadata(totalSize: total, contentType: ct, supportsRange: true)
@@ -813,6 +886,7 @@ private actor ResourceStreamCoordinator {
 
         // Fallback to HEAD
         let headResp = try await streamOpener(url, "HEAD", nil, policy, true)
+        guard !isRevoked else { throw CancellationError() }
         guard (200...299).contains(headResp.statusCode) else {
             throw MarcoError.networkFailure("上游媒体探测失败 (HTTP \(headResp.statusCode))")
         }
@@ -830,10 +904,13 @@ private actor ResourceStreamCoordinator {
 
     /// Begins or advances a sliding prefetch window for `startByte...endByte`.
     /// Preempts and cancels stale in-flight chunk workers immediately if a non-contiguous seek occurs.
-    func beginStreamSession(startByte: Int64, endByte: Int64, totalSize: Int64) async -> UInt64 {
+    func beginStreamSession(startByte: Int64, endByte: Int64, totalSize: Int64) async throws -> UInt64 {
+        guard !isRevoked else { throw CancellationError() }
         let firstChunk = Int(startByte / Int64(chunkSize))
         let lastChunk = Int(endByte / Int64(chunkSize))
         let totalChunks = max(1, Int((totalSize + Int64(chunkSize) - 1) / Int64(chunkSize)))
+        // Clear any prior transient chunk errors so a new client request always retries cleanly.
+        failedChunks.removeAll()
 
         let isDisjointSeek: Bool = {
             guard let prev = activeWindowChunks else { return false }
@@ -860,6 +937,7 @@ private actor ResourceStreamCoordinator {
             }
         }
 
+        guard !isRevoked else { throw CancellationError() }
         let currentGen = generation
         let windowEnd = min(totalChunks - 1, max(lastChunk, firstChunk + workers - 1))
         activeWindowChunks = firstChunk...windowEnd
@@ -880,8 +958,12 @@ private actor ResourceStreamCoordinator {
         totalSize: Int64,
         expectedGen: UInt64
     ) async throws -> Data {
-        guard generation == expectedGen, !Task.isCancelled else {
+        guard !isRevoked, generation == expectedGen, !Task.isCancelled else {
             throw CancellationError()
+        }
+
+        if let failure = failedChunks.removeValue(forKey: chunkIndex) {
+            throw failure
         }
 
         let totalChunks = max(1, Int((totalSize + Int64(chunkSize) - 1) / Int64(chunkSize)))
@@ -904,10 +986,13 @@ private actor ResourceStreamCoordinator {
         }
 
         guard let inFlight = inFlightTasks[chunkIndex] else {
+            if let failure = failedChunks.removeValue(forKey: chunkIndex) {
+                throw failure
+            }
             throw CancellationError()
         }
         let data = try await inFlight.task.value
-        guard generation == expectedGen, !Task.isCancelled else {
+        guard !isRevoked, generation == expectedGen, !Task.isCancelled else {
             throw CancellationError()
         }
         if let stored = readyChunks.removeValue(forKey: chunkIndex) {
@@ -944,13 +1029,13 @@ private actor ResourceStreamCoordinator {
         totalSize: Int64,
         expectedGen: UInt64
     ) {
-        guard generation == expectedGen, cursorChunk <= maxTargetChunk else { return }
+        guard !isRevoked, generation == expectedGen, cursorChunk <= maxTargetChunk else { return }
         let upper = min(maxTargetChunk, cursorChunk + workers - 1)
         guard cursorChunk <= upper else { return }
         activeWindowChunks = cursorChunk...upper
 
         for cIdx in cursorChunk...upper {
-            if readyChunks[cIdx] != nil || inFlightTasks[cIdx] != nil {
+            if readyChunks[cIdx] != nil || inFlightTasks[cIdx] != nil || failedChunks[cIdx] != nil {
                 continue
             }
             if inFlightTasks.count >= workers {
@@ -971,6 +1056,14 @@ private actor ResourceStreamCoordinator {
             let task = Task.detached(priority: .userInitiated) { () throws -> Data in
                 let acquired = await budget.acquire(bytes: expectedLen)
                 guard acquired, !Task.isCancelled else {
+                    if acquired {
+                        await budget.release(bytes: expectedLen)
+                    }
+                    await coordinator.recordFailedInFlight(
+                        chunkIndex: cIdx,
+                        error: CancellationError(),
+                        expectedGen: expectedGen
+                    )
                     throw CancellationError()
                 }
                 do {
@@ -981,6 +1074,30 @@ private actor ResourceStreamCoordinator {
                     try Task.checkCancellation()
 
                     if opened.statusCode == 206 {
+                        guard let contentRangeRaw = opened.headers.first(where: { $0.key.lowercased() == "content-range" })?.value,
+                              let parsedCR = ResourceStreamCoordinator.parseByteContentRange(contentRangeRaw)
+                        else {
+                            bodyStream?.cancel()
+                            throw MarcoError.networkFailure("上游 206 响应缺少或包含非法 Content-Range")
+                        }
+                        guard parsedCR.start == cStart, parsedCR.end == cEnd else {
+                            bodyStream?.cancel()
+                            throw MarcoError.networkFailure("上游 206 区间不匹配：期望 \(cStart)-\(cEnd)，实际 \(parsedCR.start)-\(parsedCR.end)")
+                        }
+                        if let reportedTotal = parsedCR.total, reportedTotal != totalSize {
+                            bodyStream?.cancel()
+                            throw MarcoError.networkFailure("上游 206 文件总长度变化：期望 \(totalSize)，实际 \(reportedTotal)")
+                        }
+                        if let clRaw = opened.headers.first(where: { $0.key.lowercased() == "content-length" })?.value
+                            .trimmingCharacters(in: .whitespacesAndNewlines),
+                           !clRaw.isEmpty
+                        {
+                            guard let clVal = Int64(clRaw), clVal == Int64(expectedLen) else {
+                                bodyStream?.cancel()
+                                throw MarcoError.networkFailure("上游 206 Content-Length 与分片区间长度不匹配")
+                            }
+                        }
+
                         guard let stream = bodyStream else {
                             throw MarcoError.networkFailure("上游 206 响应缺少正文流")
                         }
@@ -989,16 +1106,18 @@ private actor ResourceStreamCoordinator {
                         while payload.count < expectedLen {
                             try Task.checkCancellation()
                             guard let piece = try await stream.nextChunk() else { break }
+                            if piece.isEmpty { continue }
                             let remaining = expectedLen - payload.count
-                            if piece.count <= remaining {
-                                payload.append(piece)
-                            } else {
-                                payload.append(piece.prefix(remaining))
+                            if piece.count > remaining {
                                 stream.cancel()
-                                break
+                                throw MarcoError.networkFailure("上游 206 分片正文超出声明区间长度")
                             }
+                            payload.append(piece)
                         }
                         try Task.checkCancellation()
+                        guard payload.count == expectedLen else {
+                            throw MarcoError.networkFailure("上游 206 分片正文提前结束 (\(payload.count)/\(expectedLen))")
+                        }
                         await coordinator.storeCompletedChunk(
                             chunkIndex: cIdx,
                             data: payload,
@@ -1020,7 +1139,11 @@ private actor ResourceStreamCoordinator {
                     }
                 } catch {
                     await budget.release(bytes: expectedLen)
-                    await coordinator.removeFailedInFlight(chunkIndex: cIdx, expectedGen: expectedGen)
+                    await coordinator.recordFailedInFlight(
+                        chunkIndex: cIdx,
+                        error: error,
+                        expectedGen: expectedGen
+                    )
                     throw error
                 }
             }
@@ -1034,7 +1157,7 @@ private actor ResourceStreamCoordinator {
         reservedBytes: Int,
         expectedGen: UInt64
     ) async {
-        guard generation == expectedGen, inFlightTasks[chunkIndex] != nil else {
+        guard !isRevoked, generation == expectedGen, inFlightTasks[chunkIndex] != nil else {
             await memoryBudget.release(bytes: reservedBytes)
             return
         }
@@ -1042,9 +1165,12 @@ private actor ResourceStreamCoordinator {
         readyChunks[chunkIndex] = BufferedChunkEntry(data: data, reservedBytes: reservedBytes)
     }
 
-    private func removeFailedInFlight(chunkIndex: Int, expectedGen: UInt64) {
-        guard generation == expectedGen else { return }
+    private func recordFailedInFlight(chunkIndex: Int, error: Error, expectedGen: UInt64) {
+        guard !isRevoked, generation == expectedGen else { return }
         inFlightTasks.removeValue(forKey: chunkIndex)
+        if !(error is CancellationError) {
+            failedChunks[chunkIndex] = error
+        }
     }
 
     private func headerValue(_ headers: [String: String], name: String) -> String? {
@@ -1068,11 +1194,36 @@ private actor ResourceStreamCoordinator {
         }
     }
 
+    static func parseByteContentRange(_ header: String) -> (start: Int64, end: Int64, total: Int64?)? {
+        let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("bytes ") else { return nil }
+        let body = String(trimmed.dropFirst("bytes ".count)).trimmingCharacters(in: .whitespaces)
+        let slashParts = body.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        guard slashParts.count == 2 else { return nil }
+        let rangePart = String(slashParts[0]).trimmingCharacters(in: .whitespaces)
+        let totalPart = String(slashParts[1]).trimmingCharacters(in: .whitespaces)
+        let dashParts = rangePart.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        guard dashParts.count == 2,
+              let start = Int64(dashParts[0].trimmingCharacters(in: .whitespaces)),
+              let end = Int64(dashParts[1].trimmingCharacters(in: .whitespaces)),
+              start >= 0,
+              end >= start
+        else {
+            return nil
+        }
+        let total: Int64?
+        if totalPart == "*" {
+            total = nil
+        } else if let parsedTotal = Int64(totalPart), parsedTotal > end {
+            total = parsedTotal
+        } else {
+            return nil
+        }
+        return (start: start, end: end, total: total)
+    }
+
     static func parseTotalSizeFromContentRange(_ header: String) -> Int64? {
-        guard let slash = header.lastIndex(of: "/") else { return nil }
-        let tail = header[header.index(after: slash)...].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard tail != "*", let size = Int64(tail), size >= 0 else { return nil }
-        return size
+        parseByteContentRange(header)?.total
     }
 }
 
@@ -1226,10 +1377,18 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         let budget = self.memoryBudget
         Task {
             for coord in oldResources {
-                await coord.cancelAndPurgeAll()
+                await coord.revokeAndPurgeAll()
             }
             await budget.resetAll()
         }
+    }
+
+    public func activeResourceCount() -> Int {
+        withStateLock { resources.count }
+    }
+
+    public func hasActiveResource(_ resourceId: String) -> Bool {
+        withStateLock { resources[resourceId] != nil }
     }
 
     /// Rotates the capability token and purges all active streams immediately.
@@ -1243,7 +1402,7 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         for coord in oldResources {
             let snap = await coord.metricsSnapshot()
             recordRetiredMetrics(preempted: snap.preempted, chunkRequests: snap.chunkRequests)
-            await coord.cancelAndPurgeAll()
+            await coord.revokeAndPurgeAll()
         }
         await memoryBudget.resetAll()
     }
@@ -1253,7 +1412,7 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         if let coord = removed {
             let snap = await coord.metricsSnapshot()
             recordRetiredMetrics(preempted: snap.preempted, chunkRequests: snap.chunkRequests)
-            await coord.cancelAndPurgeAll()
+            await coord.revokeAndPurgeAll()
         }
     }
 
@@ -1282,13 +1441,18 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
             streamOpener: streamOpener
         )
 
-        let tokenSnapshot = withStateLock { () -> String in
+        let (tokenSnapshot, evictedCoord) = withStateLock { () -> (String, ResourceStreamCoordinator?) in
+            var evicted: ResourceStreamCoordinator?
             if resources.count >= 32, let evictedKey = resources.keys.first {
-                let evicted = resources.removeValue(forKey: evictedKey)
-                Task { await evicted?.cancelAndPurgeAll() }
+                evicted = resources.removeValue(forKey: evictedKey)
             }
             resources[resourceId] = coordinator
-            return serverToken
+            return (serverToken, evicted)
+        }
+        if let evictedCoord {
+            let snap = await evictedCoord.metricsSnapshot()
+            recordRetiredMetrics(preempted: snap.preempted, chunkRequests: snap.chunkRequests)
+            await evictedCoord.revokeAndPurgeAll()
         }
 
         guard let proxyUrl = URL(string: "http://127.0.0.1:\(activePort)/\(tokenSnapshot)/\(resourceId)/media") else {
@@ -1575,10 +1739,14 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         }
         let rangeHeader = clientHeaders["range"]
 
+        let serveId = UUID()
         let serveTask = Task { [weak self] in
             guard let self = self else {
                 connection.cancel()
                 return
+            }
+            defer {
+                Task { await coordinator.unregisterServeSession(id: serveId) }
             }
             await self.serveMediaRequest(
                 method: method,
@@ -1586,6 +1754,12 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                 coordinator: coordinator,
                 connection: connection
             )
+        }
+        Task {
+            await coordinator.registerServeSession(id: serveId) {
+                serveTask.cancel()
+                connection.cancel()
+            }
         }
 
         // Watch for client socket close/abort so upstream streaming cancels promptly on seek/exit.
@@ -1707,6 +1881,11 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
             }
         } catch is CancellationError {
             connection.cancel()
+        } catch is StreamAbortedAfterHeadersSent {
+            // HTTP headers / partial body have already been written to this socket;
+            // streamRangeBody already closed the socket cleanly after flushing written bytes,
+            // so NEVER write a second HTTP response header here.
+            return
         } catch {
             sendSimpleResponse(
                 connection: connection,
@@ -1726,7 +1905,7 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         coordinator: ResourceStreamCoordinator,
         connection: NWConnection
     ) async throws {
-        let sessionGen = await coordinator.beginStreamSession(
+        let sessionGen = try await coordinator.beginStreamSession(
             startByte: startByte,
             endByte: endByte,
             totalSize: totalSize
@@ -1744,16 +1923,21 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                     totalSize: totalSize,
                     expectedGen: sessionGen
                 )
-                if !headersSent {
-                    let headerPacket = Data(Self.formatHttpHeaderBlock(status: status, headers: headers).utf8)
-                    try await Self.sendPacket(connection: connection, data: headerPacket)
-                    headersSent = true
-                }
                 let chunkGlobalStart = Int64(cIdx) * Int64(chunkSize)
+                let chunkGlobalEnd = min(totalSize - 1, chunkGlobalStart + Int64(chunkSize) - 1)
+                let expectedChunkLen = Int(chunkGlobalEnd - chunkGlobalStart + 1)
+                guard chunkData.count == expectedChunkLen else {
+                    throw MarcoError.networkFailure("分片数据长度与预期不匹配 (\(chunkData.count)/\(expectedChunkLen))")
+                }
                 let sliceStart = Int(max(0, startByte - chunkGlobalStart))
                 let sliceEnd = Int(min(Int64(chunkData.count), endByte - chunkGlobalStart + 1))
                 guard sliceStart < sliceEnd, sliceEnd <= chunkData.count else {
                     throw MarcoError.networkFailure("分片数据长度与请求范围不匹配")
+                }
+                if !headersSent {
+                    headersSent = true
+                    let headerPacket = Data(Self.formatHttpHeaderBlock(status: status, headers: headers).utf8)
+                    try await Self.sendPacket(connection: connection, data: headerPacket)
                 }
                 let slice = (sliceStart == 0 && sliceEnd == chunkData.count)
                     ? chunkData
@@ -1761,18 +1945,24 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                 try await Self.sendPacket(connection: connection, data: slice)
             }
 
-            connection.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
-                connection.cancel()
-            })
+            Self.closeConnectionAfterBody(connection)
         } catch is CancellationError {
             await coordinator.cancelGenerationIfCurrent(sessionGen)
+            if headersSent {
+                Self.closeConnectionAfterBody(connection)
+                throw StreamAbortedAfterHeadersSent()
+            }
             throw CancellationError()
         } catch {
-            if !headersSent, let fallback = error as? UpstreamRangeNotSupportedSignal {
-                await coordinator.cancelGenerationIfCurrent(sessionGen)
+            await coordinator.cancelGenerationIfCurrent(sessionGen)
+            if headersSent {
+                // Never emit a second HTTP status line/header (200/206/502) after headers or body started.
+                Self.closeConnectionAfterBody(connection)
+                throw StreamAbortedAfterHeadersSent()
+            }
+            if let fallback = error as? UpstreamRangeNotSupportedSignal {
                 throw fallback
             }
-            await coordinator.cancelGenerationIfCurrent(sessionGen)
             throw error
         }
     }
@@ -1832,6 +2022,7 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                 return
             }
 
+            var headersSent = false
             do {
                 let opened = try await coordinator.openUpstreamStream(
                     method: "GET",
@@ -1870,10 +2061,12 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                         "Content-Length": "\(contentLen)",
                         "Cache-Control": "no-store",
                     ]
+                    headersSent = true
                     let hdrPacket = Data(Self.formatHttpHeaderBlock(status: 206, headers: respHeaders).utf8)
                     try await Self.sendPacket(connection: connection, data: hdrPacket)
 
                     var cursor: Int64 = 0
+                    var bytesSent: Int64 = 0
                     while let chunk = try await bodyStream.nextChunk() {
                         try Task.checkCancellation()
                         guard !chunk.isEmpty else { continue }
@@ -1893,11 +2086,18 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                                 ? chunk
                                 : chunk.subdata(in: localStart..<localEnd)
                             try await Self.sendPacket(connection: connection, data: outSlice)
+                            bytesSent += Int64(outSlice.count)
                         }
                         if cursor > clampedEnd {
                             bodyStream.cancel()
                             break
                         }
+                    }
+                    if bytesSent < contentLen {
+                        connection.cancel()
+                        await self.memoryBudget.release(bytes: bufferReservation)
+                        await coordinator.clearNonRangeSession(sessionId: sessionId)
+                        return
                     }
                 } else {
                     var respHeaders: [String: String] = [
@@ -1908,21 +2108,41 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
                     if upstreamTotal >= 0 {
                         respHeaders["Content-Length"] = "\(upstreamTotal)"
                     }
+                    headersSent = true
                     let hdrPacket = Data(Self.formatHttpHeaderBlock(status: 200, headers: respHeaders).utf8)
                     try await Self.sendPacket(connection: connection, data: hdrPacket)
 
+                    var bytesSent: Int64 = 0
                     while let chunk = try await bodyStream.nextChunk() {
                         try Task.checkCancellation()
                         guard !chunk.isEmpty else { continue }
                         try await Self.sendPacket(connection: connection, data: chunk)
+                        bytesSent += Int64(chunk.count)
+                    }
+                    if upstreamTotal > 0 && bytesSent < upstreamTotal {
+                        connection.cancel()
+                        await self.memoryBudget.release(bytes: bufferReservation)
+                        await coordinator.clearNonRangeSession(sessionId: sessionId)
+                        return
                     }
                 }
 
                 connection.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
                     connection.cancel()
                 })
-            } catch {
+            } catch is CancellationError {
                 connection.cancel()
+            } catch {
+                if headersSent {
+                    connection.cancel()
+                } else {
+                    self.sendSimpleResponse(
+                        connection: connection,
+                        status: 502,
+                        headers: ["Content-Type": "text/plain; charset=utf-8"],
+                        body: Data("Upstream Stream Error".utf8)
+                    )
+                }
             }
 
             await self.memoryBudget.release(bytes: bufferReservation)
@@ -1978,6 +2198,12 @@ public final class NetdiskRangeProxyServer: @unchecked Sendable {
         var packet = Data(Self.formatHttpHeaderBlock(status: status, headers: merged).utf8)
         packet.append(body)
         connection.send(content: packet, isComplete: true, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+
+    private static func closeConnectionAfterBody(_ connection: NWConnection) {
+        connection.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
             connection.cancel()
         })
     }

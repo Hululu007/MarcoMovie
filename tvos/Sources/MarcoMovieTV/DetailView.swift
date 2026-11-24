@@ -38,11 +38,21 @@ public struct DetailView: View {
     }
 
     private var savedHistory: WatchHistoryItem? {
-        appModel.watchHistory.first { $0.site == site.key && $0.id == detailVideo.id }
+        MediaEntryResolver.matchingHistory(
+            for: site,
+            videoId: detailVideo.id,
+            in: appModel.watchHistory,
+            config: appModel.config
+        )
     }
 
     private var isFav: Bool {
-        appModel.favorites.contains { $0.site == site.key && $0.id == detailVideo.id }
+        MediaEntryResolver.matchingFavorite(
+            for: site,
+            videoId: detailVideo.id,
+            in: appModel.favorites,
+            config: appModel.config
+        ) != nil
     }
 
     private var safeLineIndex: Int {
@@ -681,7 +691,7 @@ public struct DetailView: View {
         do {
             let loaded = try await appModel.cmsClient.fetchDetail(site: site, video: summaryVideo)
             detailVideo = loaded
-            if !loaded.poster.isEmpty {
+            if appModel.preferences.ambientPosterSync && !site.isEffectivelyPrivate && !loaded.poster.isEmpty {
                 appModel.backdropPosterUrl = loaded.poster
             }
             if let hist = savedHistory,

@@ -61,6 +61,7 @@ public struct PlaybackTargetDescriptor: Equatable, Hashable, Sendable {
 @MainActor
 public protocol PlaybackEngineAdapterProtocol: AnyObject {
     var activeItemToken: UInt64? { get }
+    var hasReadyCurrentItem: Bool { get }
     var currentTimeMs: Int { get }
     var durationMs: Int { get }
     var onProgressTick: ((_ token: UInt64, _ positionMs: Int, _ durationMs: Int) -> Void)? { get set }
@@ -72,9 +73,19 @@ public protocol PlaybackEngineAdapterProtocol: AnyObject {
     func teardown()
 }
 
+public extension PlaybackEngineAdapterProtocol {
+    var hasReadyCurrentItem: Bool {
+        activeItemToken != nil
+    }
+}
+
 public typealias PlaybackStreamResolver = @Sendable (
     _ descriptor: PlaybackTargetDescriptor
 ) async throws -> ResolvedPlayback
+
+public typealias PlaybackResourceReleaser = @Sendable (
+    _ resolved: ResolvedPlayback
+) async -> Void
 
 public typealias PlaybackProgressRecorder = @MainActor (
     _ descriptor: PlaybackTargetDescriptor,
@@ -82,11 +93,45 @@ public typealias PlaybackProgressRecorder = @MainActor (
     _ durationMs: Int
 ) -> Void
 
+public struct VodLineSwitchMissingEpisodeInfo: Equatable, Hashable, Sendable {
+    public let targetLineIndex: Int
+    public let targetLineName: String
+    public let requestedEpisodeIndex: Int
+    public let requestedEpisodeName: String
+    public let availableEpisodeCount: Int
+    public let carrySeekMs: Int
+
+    public init(
+        targetLineIndex: Int,
+        targetLineName: String,
+        requestedEpisodeIndex: Int,
+        requestedEpisodeName: String,
+        availableEpisodeCount: Int,
+        carrySeekMs: Int
+    ) {
+        self.targetLineIndex = targetLineIndex
+        self.targetLineName = targetLineName
+        self.requestedEpisodeIndex = requestedEpisodeIndex
+        self.requestedEpisodeName = requestedEpisodeName
+        self.availableEpisodeCount = availableEpisodeCount
+        self.carrySeekMs = carrySeekMs
+    }
+}
+
+public enum VodLineSwitchOutcome: Equatable, Sendable {
+    case switched(lineIndex: Int, episodeIndex: Int, seekMs: Int)
+    case missingEpisode(VodLineSwitchMissingEpisodeInfo)
+    case unchanged
+    case unavailable(String)
+}
+
 /// Deterministic single-active-item playback coordinator for Apple TV VOD & Live TV.
 /// Guarantees:
 /// - Stream resolution, player status, progress ticks, end notifications, and item failures are bound to a monotonic item token.
 /// - Rapid episode / line / channel switches or player exit cancel previous resolve tasks and drop late responses & callbacks.
+/// - Per-session proxy resources (`rangeProxyResourceId` / `headerProxySessionId`) are released strictly for the replaced or exited playback session.
 /// - Watch progress is only ever persisted against the actually-playing item (never attributed to a newly selected or resolving item).
+/// - Manual & error-overlay VOD line switches share a single current-position policy and verify episode existence before switching.
 /// - Outro auto-skip and end-of-item auto-advance trigger at most once per playback item.
 /// - Same-channel live line switching keeps the active channel fixed while rotating stream URLs.
 @MainActor
@@ -107,13 +152,17 @@ public final class PlaybackSessionCoordinator: ObservableObject {
 
     private let engine: PlaybackEngineAdapterProtocol
     private let resolver: PlaybackStreamResolver
+    private let resourceReleaser: PlaybackResourceReleaser?
     private let progressRecorder: PlaybackProgressRecorder
 
     private var nextToken: UInt64 = 0
     private var pendingToken: UInt64?
     private var activeLoadedToken: UInt64?
+    private var activeResolvedPlayback: ResolvedPlayback?
+    private var lastObservedPositionMs: Int?
     private var autoAdvanceConsumedToken: UInt64?
     private var resolveTask: Task<Void, Never>?
+    private var pendingReleaseTasks: [UUID: Task<Void, Never>] = [:]
     private var isTornDown: Bool = false
 
     public init(
@@ -121,6 +170,7 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         engine: PlaybackEngineAdapterProtocol,
         resolver: @escaping PlaybackStreamResolver,
         progressRecorder: @escaping PlaybackProgressRecorder,
+        resourceReleaser: PlaybackResourceReleaser? = nil,
         playbackSpeed: Double = 1.0,
         skipIntroSec: Int = 0,
         skipOutroSec: Int = 0,
@@ -129,6 +179,7 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         self.target = initialTarget
         self.engine = engine
         self.resolver = resolver
+        self.resourceReleaser = resourceReleaser
         self.progressRecorder = progressRecorder
         self.playbackSpeed = playbackSpeed
         self.skipIntroSec = skipIntroSec
@@ -176,32 +227,129 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         beginResolveCurrentTarget()
     }
 
-    @discardableResult
-    public func switchToNextVodLine() -> Bool {
-        guard !isTornDown,
-              !target.isLiveStream,
-              target.video.lines.count > 1
-        else {
-            return false
+    /// Unified viewing-position policy shared by native system playback menu line switch
+    /// and error-overlay line switch:
+    /// - When the active item has reached ready playback, strictly uses the user's current position
+    ///   (never `max(currentTime, initialSeek)` so rewinding from 15:00 to 05:00 stays at 05:00).
+    /// - Otherwise falls back to the last observed playback position or initial resume target.
+    public func resolvedCarrySeekMsForLineSwitch() -> Int {
+        if activeLoaded != nil && engine.hasReadyCurrentItem {
+            return max(0, engine.currentTimeMs)
         }
-        let nextLineIdx = (target.lineIndex + 1) % target.video.lines.count
-        let nextLine = target.video.lines[nextLineIdx]
-        guard !nextLine.episodes.isEmpty else { return false }
-        let clampedEp = min(max(0, target.episodeIndex), nextLine.episodes.count - 1)
-        let carrySeekMs = (activeLoaded != nil && engine.currentTimeMs > 0)
-            ? engine.currentTimeMs
-            : target.initialSeekMs
+        if let observed = lastObservedPositionMs {
+            return max(0, observed)
+        }
+        return max(0, target.initialSeekMs)
+    }
+
+    /// Switches VOD line using the unified carry-seek policy and checks whether `targetLineIndex`
+    /// actually contains the corresponding episode before detaching current playback.
+    @discardableResult
+    public func switchVodLine(to targetLineIndex: Int) -> VodLineSwitchOutcome {
+        guard !isTornDown, !target.isLiveStream else {
+            return .unavailable("当前非点播会话")
+        }
+        guard target.video.lines.indices.contains(targetLineIndex) else {
+            return .unavailable("目标线路不存在")
+        }
+        if targetLineIndex == target.lineIndex && errorMessage == nil && (isResolving || activeLoaded != nil) {
+            return .unchanged
+        }
+
+        let targetLine = target.video.lines[targetLineIndex]
+        let carrySeekMs = resolvedCarrySeekMsForLineSwitch()
+        let currentEpisode = target.currentEpisode
+
+        guard let matchedEpIndex = Self.matchingEpisodeIndex(
+            for: currentEpisode,
+            currentIndex: target.episodeIndex,
+            in: targetLine.episodes
+        ) else {
+            let requestedName = currentEpisode?.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallbackName = (requestedName?.isEmpty == false)
+                ? requestedName!
+                : "第 \(target.episodeIndex + 1) 集"
+            return .missingEpisode(
+                VodLineSwitchMissingEpisodeInfo(
+                    targetLineIndex: targetLineIndex,
+                    targetLineName: targetLine.name,
+                    requestedEpisodeIndex: target.episodeIndex,
+                    requestedEpisodeName: fallbackName,
+                    availableEpisodeCount: targetLine.episodes.count,
+                    carrySeekMs: carrySeekMs
+                )
+            )
+        }
 
         persistActiveProgressIfBound()
         cancelPendingAndDetachActiveItem()
 
         var next = target
-        next.lineIndex = nextLineIdx
-        next.episodeIndex = clampedEp
+        next.lineIndex = targetLineIndex
+        next.episodeIndex = matchedEpIndex
         next.initialSeekMs = carrySeekMs
         target = next
         beginResolveCurrentTarget()
+        return .switched(lineIndex: targetLineIndex, episodeIndex: matchedEpIndex, seekMs: carrySeekMs)
+    }
+
+    /// Explicit user-confirmed switch to a specific episode on another VOD line
+    /// (used when the user confirms a fallback choice after `.missingEpisode`).
+    @discardableResult
+    public func forceSwitchVodLine(to targetLineIndex: Int, episodeIndex: Int, seekMs: Int = 0) -> Bool {
+        guard !isTornDown,
+              !target.isLiveStream,
+              target.video.lines.indices.contains(targetLineIndex),
+              target.video.lines[targetLineIndex].episodes.indices.contains(episodeIndex)
+        else {
+            return false
+        }
+        persistActiveProgressIfBound()
+        cancelPendingAndDetachActiveItem()
+
+        var next = target
+        next.lineIndex = targetLineIndex
+        next.episodeIndex = episodeIndex
+        next.initialSeekMs = max(0, seekMs)
+        target = next
+        beginResolveCurrentTarget()
         return true
+    }
+
+    /// Switches to the next VOD line sharing the unified carry-seek & episode-existence policy.
+    /// Searches cyclic candidate lines for one containing the current episode; if none contain it,
+    /// returns `.missingEpisode` for the immediate next line so UI can present an explicit user choice.
+    @discardableResult
+    public func switchToNextVodLineOutcome() -> VodLineSwitchOutcome {
+        guard !isTornDown,
+              !target.isLiveStream,
+              target.video.lines.count > 1
+        else {
+            return .unavailable("当前影片没有其他可用线路")
+        }
+        let lineCount = target.video.lines.count
+        let currentEpisode = target.currentEpisode
+        for offset in 1..<lineCount {
+            let candidateIdx = (target.lineIndex + offset) % lineCount
+            let candidateLine = target.video.lines[candidateIdx]
+            if Self.matchingEpisodeIndex(
+                for: currentEpisode,
+                currentIndex: target.episodeIndex,
+                in: candidateLine.episodes
+            ) != nil {
+                return switchVodLine(to: candidateIdx)
+            }
+        }
+        let immediateNextIdx = (target.lineIndex + 1) % lineCount
+        return switchVodLine(to: immediateNextIdx)
+    }
+
+    @discardableResult
+    public func switchToNextVodLine() -> Bool {
+        if case .switched = switchToNextVodLineOutcome() {
+            return true
+        }
+        return false
     }
 
     public func switchLiveChannel(delta: Int) {
@@ -282,7 +430,14 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         else {
             return
         }
-        let pos = explicitPosMs ?? engine.currentTimeMs
+        let pos: Int
+        if let explicitPosMs {
+            pos = explicitPosMs
+        } else if engine.hasReadyCurrentItem {
+            pos = engine.currentTimeMs
+        } else {
+            pos = lastObservedPositionMs ?? 0
+        }
         let dur = explicitDurMs ?? engine.durationMs
         guard pos > 0 else { return }
         progressRecorder(activeDesc, pos, dur)
@@ -297,8 +452,98 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         pendingToken = nil
         activeLoadedToken = nil
         activeLoaded = nil
+        lastObservedPositionMs = nil
         isResolving = false
         engine.teardown()
+        releaseActiveResolvedPlayback()
+    }
+
+    /// Waits until all asynchronous per-session proxy revocations triggered by switches, failures,
+    /// late cancelled resolves, or player exit have finished.
+    public func waitForPendingResourceReleases() async {
+        while !pendingReleaseTasks.isEmpty {
+            let batch = Array(pendingReleaseTasks.values)
+            for task in batch {
+                await task.value
+            }
+        }
+    }
+
+    // MARK: - Episode Matching Helper
+
+    public static func matchingEpisodeIndex(
+        for currentEpisode: CmsEpisode?,
+        currentIndex: Int,
+        in targetEpisodes: [CmsEpisode]
+    ) -> Int? {
+        guard !targetEpisodes.isEmpty else { return nil }
+        if let cur = currentEpisode {
+            let curNorm = normalizeEpisodeTitle(cur.name)
+            if !curNorm.isEmpty {
+                if targetEpisodes.indices.contains(currentIndex),
+                   normalizeEpisodeTitle(targetEpisodes[currentIndex].name) == curNorm
+                {
+                    return currentIndex
+                }
+                if let exactIdx = targetEpisodes.firstIndex(where: { normalizeEpisodeTitle($0.name) == curNorm }) {
+                    return exactIdx
+                }
+                if let curNum = extractCanonicalEpisodeNumber(curNorm) {
+                    if targetEpisodes.indices.contains(currentIndex),
+                       extractCanonicalEpisodeNumber(normalizeEpisodeTitle(targetEpisodes[currentIndex].name)) == curNum
+                    {
+                        return currentIndex
+                    }
+                    if let numIdx = targetEpisodes.firstIndex(where: {
+                        extractCanonicalEpisodeNumber(normalizeEpisodeTitle($0.name)) == curNum
+                    }) {
+                        return numIdx
+                    }
+                    // If target line also uses numbered episodes and none matched `curNum`,
+                    // treat the requested episode as missing instead of jumping to a wrong episode.
+                    let targetHasNumberedEpisodes = targetEpisodes.contains {
+                        extractCanonicalEpisodeNumber(normalizeEpisodeTitle($0.name)) != nil
+                    }
+                    if targetHasNumberedEpisodes {
+                        return nil
+                    }
+                }
+            }
+        }
+        guard targetEpisodes.indices.contains(currentIndex) else {
+            return nil
+        }
+        return currentIndex
+    }
+
+    private static func normalizeEpisodeTitle(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private static func extractCanonicalEpisodeNumber(_ normalized: String) -> Int? {
+        guard !normalized.isEmpty else { return nil }
+        let nonEpisodeMarkers = ["预告", "花絮", "彩蛋", "特辑", "番外", "pv", "cm", "sp", "ova", "oad"]
+        if nonEpisodeMarkers.contains(where: { normalized.contains($0) }) {
+            return nil
+        }
+        let patterns = [
+            #"^第\s*0*(\d+)\s*[集话話期回]$"#,
+            #"^(?:ep|e)\s*0*(\d+)$"#,
+            #"^0*(\d+)$"#,
+        ]
+        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                  let match = regex.firstMatch(in: normalized, options: [], range: range),
+                  match.numberOfRanges >= 2,
+                  let numRange = Range(match.range(at: 1), in: normalized),
+                  let num = Int(normalized[numRange])
+            else {
+                continue
+            }
+            return num
+        }
+        return nil
     }
 
     // MARK: - Internal Token-Bound State Transitions
@@ -315,14 +560,35 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         }
     }
 
+    private func scheduleRelease(_ resolved: ResolvedPlayback?) {
+        guard let resolved, let releaser = resourceReleaser else { return }
+        guard resolved.rangeProxyResourceId != nil || resolved.headerProxySessionId != nil else { return }
+        let releaseId = UUID()
+        let task = Task { [weak self] in
+            await releaser(resolved)
+            await MainActor.run { [weak self] in
+                self?.pendingReleaseTasks.removeValue(forKey: releaseId)
+            }
+        }
+        pendingReleaseTasks[releaseId] = task
+    }
+
+    private func releaseActiveResolvedPlayback() {
+        let old = activeResolvedPlayback
+        activeResolvedPlayback = nil
+        scheduleRelease(old)
+    }
+
     private func cancelPendingAndDetachActiveItem() {
         resolveTask?.cancel()
         resolveTask = nil
         pendingToken = nil
         activeLoadedToken = nil
         activeLoaded = nil
+        lastObservedPositionMs = nil
         autoAdvanceConsumedToken = nil
         engine.stopCurrentItem()
+        releaseActiveResolvedPlayback()
     }
 
     private func beginResolveCurrentTarget() {
@@ -346,6 +612,7 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         onTargetTransition?()
 
         let streamResolver = self.resolver
+        let streamReleaser = self.resourceReleaser
         resolveTask = Task { @MainActor [weak self] in
             do {
                 let resolved = try await streamResolver(descriptor)
@@ -354,11 +621,20 @@ public final class PlaybackSessionCoordinator: ObservableObject {
                       !self.isTornDown,
                       self.pendingToken == requestToken
                 else {
+                    if let strongSelf = self {
+                        strongSelf.scheduleRelease(resolved)
+                    } else if let streamReleaser,
+                              resolved.rangeProxyResourceId != nil || resolved.headerProxySessionId != nil
+                    {
+                        Task { await streamReleaser(resolved) }
+                    }
                     return
                 }
                 self.pendingToken = nil
                 self.activeLoadedToken = requestToken
                 self.activeLoaded = descriptor
+                self.activeResolvedPlayback = resolved
+                self.lastObservedPositionMs = nil
                 self.autoAdvanceConsumedToken = nil
                 self.activeKernelLabel = resolved.kernelLabel
                 self.activeResolutionBadge = resolved.resolutionBadge
@@ -385,6 +661,7 @@ public final class PlaybackSessionCoordinator: ObservableObject {
                 self.pendingToken = nil
                 self.activeLoadedToken = nil
                 self.activeLoaded = nil
+                self.lastObservedPositionMs = nil
                 self.errorIsPlaybackFailure = false
                 self.errorMessage = error.localizedDescription
                 self.isResolving = false
@@ -400,8 +677,11 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         else {
             return
         }
-        if !activeDesc.isLiveStream && posMs > 0 {
-            progressRecorder(activeDesc, posMs, durMs)
+        if !activeDesc.isLiveStream {
+            lastObservedPositionMs = max(0, posMs)
+            if posMs > 0 {
+                progressRecorder(activeDesc, posMs, durMs)
+            }
         }
 
         let outroMs = skipOutroSec * 1000
@@ -435,15 +715,21 @@ public final class PlaybackSessionCoordinator: ObservableObject {
         else {
             return
         }
-        // Preserve progress up to the failure point so Retry / Switch Line resumes smoothly.
-        let failedPosMs = engine.currentTimeMs
-        if !target.isLiveStream && failedPosMs > 0 {
-            target.initialSeekMs = failedPosMs
+        // Preserve the user's current position up to the failure point so Retry / Switch Line
+        // follows the exact same current-position policy as manual line switching.
+        if !target.isLiveStream {
+            if engine.hasReadyCurrentItem {
+                target.initialSeekMs = max(0, engine.currentTimeMs)
+            } else if let observed = lastObservedPositionMs {
+                target.initialSeekMs = max(0, observed)
+            }
         }
         persistActiveProgressIfBound()
         engine.stopCurrentItem()
+        releaseActiveResolvedPlayback()
         activeLoadedToken = nil
         activeLoaded = nil
+        lastObservedPositionMs = nil
         isResolving = false
         errorIsPlaybackFailure = true
         let clean = message.trimmingCharacters(in: .whitespacesAndNewlines)

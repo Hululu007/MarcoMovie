@@ -286,11 +286,25 @@ public final class WebDavSyncService: @unchecked Sendable {
         syncSubscriptions: Bool = true,
         syncHistory: Bool = true
     ) throws -> String {
-        let hist = syncHistory ? storage.watchHistory().map { $0.toDictionary() } : []
-        let localFavs = syncHistory ? storage.favorites() : []
+        try exportSyncPayload(
+            from: storage.captureSyncSnapshot(),
+            nowMs: nowMs,
+            syncSubscriptions: syncSubscriptions,
+            syncHistory: syncHistory
+        )
+    }
+
+    private func exportSyncPayload(
+        from snapshot: TvStorageManager.SyncStorageSnapshot,
+        nowMs: Int64,
+        syncSubscriptions: Bool,
+        syncHistory: Bool
+    ) throws -> String {
+        let hist = syncHistory ? snapshot.watchHistory.map { $0.toDictionary() } : []
+        let localFavs = syncHistory ? snapshot.favorites : []
         let favs = localFavs.map { $0.toDictionary() }
 
-        let rawTombs = storage.tombstones()
+        let rawTombs = snapshot.tombstones
         var tombs: [String: Int64] = [:]
         for (k, v) in rawTombs {
             if Self.isHistoryTombstone(k) {
@@ -310,7 +324,7 @@ public final class WebDavSyncService: @unchecked Sendable {
         }
 
         let subsPayload: [[String: Any]]? = syncSubscriptions
-            ? Self.serializePublicSubscriptions(storage.subscriptions())
+            ? Self.serializePublicSubscriptions(snapshot.subscriptions)
             : nil
 
         return try Self.encodeSyncPayloadObject(
@@ -328,38 +342,50 @@ public final class WebDavSyncService: @unchecked Sendable {
         syncSubscriptions: Bool = true,
         syncHistory: Bool = true
     ) throws -> SyncMergeSummary {
-        let computed = try computeMergedSyncState(
-            remotePayloadRaw,
-            nowMs: nowMs,
-            syncSubscriptions: syncSubscriptions,
-            syncHistory: syncHistory
-        )
-        if syncSubscriptions || syncHistory {
-            storage.applyMergedSyncState(
+        if !syncSubscriptions && !syncHistory {
+            return try computeMergedSyncState(
+                snapshot: storage.captureSyncSnapshot(),
+                remotePayloadRaw: remotePayloadRaw,
+                nowMs: nowMs,
+                syncSubscriptions: false,
+                syncHistory: false
+            ).summary
+        }
+        return try storage.commitSyncTransform { liveSnapshot in
+            let computed = try self.computeMergedSyncState(
+                snapshot: liveSnapshot,
+                remotePayloadRaw: remotePayloadRaw,
+                nowMs: nowMs,
+                syncSubscriptions: syncSubscriptions,
+                syncHistory: syncHistory
+            )
+            return (
                 subscriptions: computed.localSubscriptions,
                 watchHistory: computed.localWatchHistory,
                 favorites: computed.localFavorites,
-                tombstones: computed.localTombstones
+                tombstones: computed.localTombstones,
+                result: computed.summary
             )
         }
-        return computed.summary
     }
 
     private func computeMergedSyncState(
-        _ remotePayloadRaw: String?,
+        snapshot: TvStorageManager.SyncStorageSnapshot,
+        remotePayloadRaw: String?,
         nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000),
         syncSubscriptions: Bool = true,
         syncHistory: Bool = true
     ) throws -> ComputedSyncMerge {
-        let localSubsAll = storage.subscriptions()
-        let localHist = storage.watchHistory()
-        let localFavs = storage.favorites()
-        let localTombsRaw = storage.tombstones()
+        let localSubsAll = snapshot.subscriptions
+        let localHist = snapshot.watchHistory
+        let localFavs = snapshot.favorites
+        let localTombsRaw = snapshot.tombstones
 
         guard let remoteRaw = remotePayloadRaw?.trimmingCharacters(in: .whitespacesAndNewlines),
               !remoteRaw.isEmpty
         else {
             let payload = try exportSyncPayload(
+                from: snapshot,
                 nowMs: nowMs,
                 syncSubscriptions: syncSubscriptions,
                 syncHistory: syncHistory
@@ -491,7 +517,13 @@ public final class WebDavSyncService: @unchecked Sendable {
             var subByKey: [String: SubscriptionEntry] = [:]
             var reservedIds = Set(localPrivate.map(\.id))
 
-            for s in localPublic where !s.rawContent.isEmpty {
+            // Retain both hydrated subscriptions and URL-only Keychain-recovered stubs waiting for refresh
+            // (so a failed refresh after Caches eviction never wipes the user's subscription URL).
+            for s in localPublic {
+                let hasIdentity = !s.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !s.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !s.warehouseUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                guard hasIdentity else { continue }
                 let sk = Self.canonicalSubscriptionSyncKey(url: s.url, rawContent: s.rawContent, warehouseUrl: s.warehouseUrl)
                 let delTs = mergedSubTombs["sub:\(sk)"] ?? 0
                 if delTs > 0 {
@@ -530,12 +562,20 @@ public final class WebDavSyncService: @unchecked Sendable {
                 }
 
                 if let existing = subByKey[sk] {
-                    if incomingTs > existing.updatedAt {
+                    let existingIsStub = existing.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    if existingIsStub || incomingTs > existing.updatedAt {
                         var updated = candidate
                         updated.id = existing.id
+                        if existingIsStub {
+                            if !existing.group.isEmpty { updated.group = existing.group }
+                            updated.enabled = existing.enabled
+                        }
                         updated.siteCount = parsed.sites.count
                         updated.liveCount = parsed.lives.count
-                        updated.updatedAt = incomingTs
+                        updated.updatedAt = max(existing.updatedAt, incomingTs)
+                        if updated.depots.isEmpty {
+                            updated.depots = !existing.depots.isEmpty ? existing.depots : parsed.depots
+                        }
                         subByKey[sk] = updated
                     }
                 } else {
@@ -759,8 +799,10 @@ public final class WebDavSyncService: @unchecked Sendable {
                 }
 
                 let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                let preSnapshot = storage.captureSyncSnapshot()
                 let computed = try computeMergedSyncState(
-                    remoteBody,
+                    snapshot: preSnapshot,
+                    remotePayloadRaw: remoteBody,
                     nowMs: nowMs,
                     syncSubscriptions: config.syncSubscriptions,
                     syncHistory: config.syncHistory
@@ -796,28 +838,59 @@ public final class WebDavSyncService: @unchecked Sendable {
                     ifNoneMatch: ifNoneMatch
                 )
 
-                if ifNoneMatch != nil && [400, 405, 406, 417, 428, 500, 501].contains(putResp.statusCode) {
-                    let retry = try await putWithMkcolRetry(
-                        config: config,
-                        rawBaseUrl: rawBaseUrl,
-                        fileURL: fileURL,
-                        payload: payloadBytes,
-                        ifMatch: nil,
-                        ifNoneMatch: nil
-                    )
-                    if (200...299).contains(retry.statusCode) {
-                        disableConditionalWrite(for: hostKey)
+                // On first-time remote file creation (`If-None-Match: *`), NEVER blindly overwrite on error!
+                // First check via GET whether another device concurrently created the file; if it now exists,
+                // re-merge and retry within the bounded conflict budget. Only fall back to non-conditional
+                // create when the server explicitly rejects the header AND the file is still confirmed 404.
+                if ifNoneMatch != nil && !(200...299).contains(putResp.statusCode) {
+                    if putResp.statusCode == 412 || putResp.statusCode == 409 {
+                        if attempt < boundedRetries {
+                            attempt += 1
+                            continue
+                        }
+                        throw MarcoError.webdavError("WebDAV 首次创建冲突（HTTP \(putResp.statusCode)），已保留本机与远端数据，请稍后重试")
                     }
-                    putResp = retry
+                    if [400, 405, 406, 417, 428, 500, 501].contains(putResp.statusCode) {
+                        let probeResp = try await transport.send(
+                            method: "GET",
+                            url: fileURL,
+                            headers: buildHeaders(config: config),
+                            body: nil
+                        )
+                        if (200...299).contains(probeResp.statusCode) {
+                            // Another device created the remote file concurrently -> re-read, merge & retry.
+                            if attempt < boundedRetries {
+                                attempt += 1
+                                continue
+                            }
+                            throw MarcoError.webdavError("WebDAV 首次创建已被其他设备抢先完成，已保留本机与远端数据，请稍后重试")
+                        }
+                        if probeResp.statusCode == 404 && [400, 405, 406, 417, 501].contains(putResp.statusCode) {
+                            let retry = try await putWithMkcolRetry(
+                                config: config,
+                                rawBaseUrl: rawBaseUrl,
+                                fileURL: fileURL,
+                                payload: payloadBytes,
+                                ifMatch: nil,
+                                ifNoneMatch: nil
+                            )
+                            if (200...299).contains(retry.statusCode) {
+                                disableConditionalWrite(for: hostKey)
+                            }
+                            putResp = retry
+                        } else {
+                            throw MarcoError.webdavError("WebDAV 首次创建失败（HTTP \(putResp.statusCode)），为避免覆盖远端已中止写入")
+                        }
+                    }
                 }
 
-                if putResp.statusCode == 412 {
+                if putResp.statusCode == 412 || (ifMatch != nil && putResp.statusCode == 409) {
                     if attempt < boundedRetries {
                         attempt += 1
                         continue
                     }
                     // Exhausted bounded retries: NEVER force-overwrite remote; preserve both ends and report conflict.
-                    throw MarcoError.webdavError("WebDAV 远端持续冲突（HTTP 412），已保留本机与远端数据，请稍后重试")
+                    throw MarcoError.webdavError("WebDAV 远端持续冲突（HTTP \(putResp.statusCode)），已保留本机与远端数据，请稍后重试")
                 }
 
                 if putResp.statusCode == 401 || putResp.statusCode == 403 {
@@ -827,18 +900,39 @@ public final class WebDavSyncService: @unchecked Sendable {
                     throw MarcoError.webdavError("WebDAV 写入失败 (HTTP \(putResp.statusCode))")
                 }
 
-                // Persist merged state locally only after conditional PUT succeeds.
-                storage.applyMergedSyncState(
-                    subscriptions: computed.localSubscriptions,
-                    watchHistory: computed.localWatchHistory,
-                    favorites: computed.localFavorites,
-                    tombstones: computed.localTombstones
-                )
+                // Atomically re-merge against LIVE local storage under TvStorageManager's lock so any
+                // local mutations made while PUT was in flight (new favorites, playback progress updates,
+                // deleted subscriptions, or edits in sync-disabled categories) are NEVER overwritten.
+                let commitResult: (summary: SyncMergeSummary, needsFollowUpPush: Bool) = try storage.commitSyncTransform { liveSnapshot in
+                    let remerged = try self.computeMergedSyncState(
+                        snapshot: liveSnapshot,
+                        remotePayloadRaw: remoteBody,
+                        nowMs: nowMs,
+                        syncSubscriptions: config.syncSubscriptions,
+                        syncHistory: config.syncHistory
+                    )
+                    let mutatedDuringPut = (liveSnapshot.version != preSnapshot.version)
+                    let outboundDiverged = (remerged.summary.payloadJson != computed.summary.payloadJson)
+                    return (
+                        subscriptions: remerged.localSubscriptions,
+                        watchHistory: remerged.localWatchHistory,
+                        favorites: remerged.localFavorites,
+                        tombstones: remerged.localTombstones,
+                        result: (remerged.summary, mutatedDuringPut && outboundDiverged)
+                    )
+                }
+
+                // If enabled-category local mutations occurred during PUT, perform a bounded follow-up
+                // GET -> merge -> conditional PUT pass so the remote copy also converges immediately.
+                if commitResult.needsFollowUpPush && attempt < boundedRetries {
+                    attempt += 1
+                    continue
+                }
 
                 config.lastSyncTimeMs = nowMs
-                config.lastSyncStatus = "同步成功（历史 \(computed.summary.historyCount) · 收藏 \(computed.summary.favoriteCount) · 订阅 \(computed.summary.subscriptionCount)）"
+                config.lastSyncStatus = "同步成功（历史 \(commitResult.summary.historyCount) · 收藏 \(commitResult.summary.favoriteCount) · 订阅 \(commitResult.summary.subscriptionCount)）"
                 try? storage.saveWebDavConfig(config)
-                return computed.summary
+                return commitResult.summary
             }
         } catch {
             config.lastSyncStatus = "同步失败：\(error.localizedDescription)"

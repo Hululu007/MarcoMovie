@@ -643,7 +643,8 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
         guard case .ready(let siteAOut, let detailA, let resumeA) = resHistA else {
             return XCTFail("Expected site_a history to resolve cleanly")
         }
-        XCTAssertEqual(siteAOut.key, "site_a")
+        XCTAssertEqual(siteAOut.rawKey, "site_a")
+        XCTAssertEqual(siteAOut.key, "sub::sub_a::site_a")
         XCTAssertEqual(detailA.title, "星际穿越·A站")
         XCTAssertEqual(detailA.lines.first?.episodes.first?.url, "https://cdn.example/a42.m3u8")
         XCTAssertEqual(resumeA?.resumePosition, 90_000)
@@ -652,7 +653,8 @@ final class PlaybackAndMediaEntryTests: XCTestCase {
         guard case .ready(let siteBOut, let detailB, let resumeB) = resHistB else {
             return XCTFail("Expected site_b history to resolve cleanly")
         }
-        XCTAssertEqual(siteBOut.key, "site_b")
+        XCTAssertEqual(siteBOut.rawKey, "site_b")
+        XCTAssertEqual(siteBOut.key, "sub::sub_b::site_b")
         XCTAssertEqual(detailB.title, "盗梦空间·B站")
         XCTAssertEqual(detailB.lines.first?.episodes.first?.url, "https://cdn.example/b42.m3u8")
         XCTAssertEqual(resumeB?.resumePosition, 30_000)
