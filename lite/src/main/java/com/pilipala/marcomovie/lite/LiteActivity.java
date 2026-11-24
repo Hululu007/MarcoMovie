@@ -95,6 +95,8 @@ public final class LiteActivity extends Activity {
     String playbackTitle = "";
     String playbackAddress = "";
     SurfaceView surface;
+    SurfaceHolder activeSurfaceHolder;
+    LiteCatalog.ResolvedPlay pendingResolvedPlay;
     FrameLayout playback;
     LinearLayout playerTopBar, playerBottomPanel, playerControlRow;
     TextView aspectBtnView, pauseResumeBtnView, proxyBtnView, switchLineBtnView, retryBtnView;
@@ -148,6 +150,23 @@ public final class LiteActivity extends Activity {
                     if (!dead) runBackgroundWebdavSync(true);
                 }
             };
+
+    static final class PlayLine {
+        final String name;
+        final String rawFrom;
+        final List<EpisodeItem> episodes;
+        final boolean directStream;
+
+        PlayLine(String name, String rawFrom, List<EpisodeItem> episodes, boolean directStream) {
+            this.name = name;
+            this.rawFrom = rawFrom == null ? "" : rawFrom;
+            this.episodes =
+                    episodes == null
+                            ? Collections.<EpisodeItem>emptyList()
+                            : Collections.unmodifiableList(new ArrayList<EpisodeItem>(episodes));
+            this.directStream = directStream;
+        }
+    }
 
     static final class EpisodeItem {
         final String name;
@@ -629,6 +648,8 @@ public final class LiteActivity extends Activity {
         inPlayback = false;
         inCastPlayback = false;
         playbackFailed = false;
+        activeSurfaceHolder = null;
+        pendingResolvedPlay = null;
         castStatusView = null;
         currentSiteNavPill = null;
         switchLineBtnView = null;
@@ -1361,7 +1382,7 @@ public final class LiteActivity extends Activity {
             match.key = siteKey;
             match.name = siteName.length() > 0 ? siteName : "已存片源";
             match.api = siteApi;
-            match.type = 1;
+            match.type = LiteCatalog.hasXmlInUrlPath(siteApi) ? 0 : 1;
             match.supported = true;
         }
         if (match != null) {
@@ -1736,8 +1757,16 @@ public final class LiteActivity extends Activity {
                 sourceHeaders != null
                         ? new LinkedHashMap<String, String>(sourceHeaders)
                         : Collections.<String, String>emptyMap();
-        Map<String, String> mergedHeaders = new LinkedHashMap<String, String>(cleanSourceHeaders);
-        mergedHeaders.putAll(ch.headers);
+        Map<String, String> mergedHeaders = new LinkedHashMap<String, String>();
+        for (Map.Entry<String, String> e : cleanSourceHeaders.entrySet()) {
+            LiteCatalog.putSafeSingleHeader(mergedHeaders, e.getKey(), e.getValue());
+        }
+        Map<String, String> perLineHeaders = ch.headersForLine(safeUrl);
+        if (perLineHeaders != null) {
+            for (Map.Entry<String, String> e : perLineHeaders.entrySet()) {
+                LiteCatalog.putSafeSingleHeader(mergedHeaders, e.getKey(), e.getValue());
+            }
+        }
         String title =
                 ch.name
                         + (ch.urls.size() > 1
@@ -2912,6 +2941,11 @@ public final class LiteActivity extends Activity {
                 name =
                         parsed.get(0).name
                                 + (parsed.size() > 1 ? " · " + parsed.size() + " 个片源" : "");
+            } else {
+                List<LiteCatalog.LiveSource> parsedLives = LiteCatalog.parseLives(raw, addr);
+                if (!parsedLives.isEmpty()) {
+                    name = "TV Lite 直播 · " + parsedLives.size() + " 个入口";
+                }
             }
         } catch (Throwable parseFailure) {
             if (parseFailure instanceof Error) throw (Error) parseFailure;
@@ -3601,7 +3635,7 @@ public final class LiteActivity extends Activity {
                                         emby != null
                                                 ? emby.home().toString()
                                                 : LiteCatalog.fetch(
-                                                        LiteCatalog.query(site.api, "ac", "list"),
+                                                        LiteCatalog.cmsCategoriesUrl(site),
                                                         site.headers);
                                 List<LiteCatalog.Category> parsedCats =
                                         LiteCatalog.categories(homeRaw);
@@ -3612,23 +3646,11 @@ public final class LiteActivity extends Activity {
                         String url =
                                 emby != null
                                         ? ""
-                                        : effectiveCategoryId.length() > 0
-                                                ? LiteCatalog.query(
-                                                        site.api,
-                                                        "ac",
-                                                        "detail",
-                                                        "pg",
-                                                        "" + effectivePage,
-                                                        "t",
-                                                        effectiveCategoryId)
-                                                : LiteCatalog.query(
-                                                        site.api,
-                                                        "ac",
-                                                        "detail",
-                                                        "pg",
-                                                        "" + effectivePage,
-                                                        "wd",
-                                                        effectiveKeyword);
+                                        : LiteCatalog.cmsListUrl(
+                                                site,
+                                                effectiveCategoryId,
+                                                effectiveKeyword,
+                                                effectivePage);
                         final JSONObject response =
                                 emby != null
                                         ? emby.list(effectiveCategoryId, effectiveKeyword, effectivePage)
@@ -4122,10 +4144,8 @@ public final class LiteActivity extends Activity {
                                                         }
                                                         try {
                                                             String u =
-                                                                    LiteCatalog.query(
-                                                                            s.api, "ac", "detail",
-                                                                            "pg", "1", "wd",
-                                                                            keyword);
+                                                                    LiteCatalog.cmsListUrl(
+                                                                            s, "", keyword, 1);
                                                             JSONObject resp =
                                                                     LiteCatalog.parseCmsResponse(
                                                                             LiteCatalog.fetch(
@@ -4225,12 +4245,8 @@ public final class LiteActivity extends Activity {
                                                 .getJSONObject(0)
                                         : LiteCatalog.list(
                                                         LiteCatalog.fetch(
-                                                                LiteCatalog.query(
-                                                                        site.api,
-                                                                        "ac",
-                                                                        "detail",
-                                                                        "ids",
-                                                                        videoId),
+                                                                LiteCatalog.cmsDetailUrl(
+                                                                        site, videoId),
                                                                 site.headers))
                                                 .getJSONObject(0);
                         ui.post(
@@ -4248,29 +4264,274 @@ public final class LiteActivity extends Activity {
                 });
     }
 
-    public static String[][] orderedPlayLines(JSONObject video, String preferredLine) {
-        String[] rawLines = video.optString("vod_play_url").split("\\$\\$\\$");
-        String[] rawNames = video.optString("vod_play_from").split("\\$\\$\\$");
-        String[] lines = new String[rawLines.length];
-        String[] names = new String[rawLines.length];
-        for (int i = 0; i < rawLines.length; i++) {
-            lines[i] = rawLines[i];
-            names[i] =
-                    i < rawNames.length && rawNames[i].trim().length() > 0
-                            ? rawNames[i].trim()
-                            : ("线路 " + (i + 1));
+    private static String episodeUrlSignature(List<EpisodeItem> episodes) {
+        if (episodes == null || episodes.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < episodes.size(); i++) {
+            if (i > 0) sb.append('\n');
+            sb.append(episodes.get(i).url);
         }
-        if (preferredLine != null && preferredLine.length() > 0) {
-            for (int n = 1; n < lines.length; n++) {
-                if (names[n].equals(preferredLine)) {
-                    String preferName = names[n], preferLine = lines[n];
-                    System.arraycopy(names, 0, names, 1, n);
-                    System.arraycopy(lines, 0, lines, 1, n);
-                    names[0] = preferName;
-                    lines[0] = preferLine;
+        return sb.toString();
+    }
+
+    private static boolean lineHasDirectStream(List<EpisodeItem> episodes) {
+        if (episodes == null || episodes.isEmpty()) return false;
+        for (int i = 0; i < Math.min(episodes.size(), 3); i++) {
+            if (LiteCatalog.isDirectStreamUrl(episodes.get(i).url)) return true;
+        }
+        return false;
+    }
+
+    private static List<String> sortedJsonObjectKeys(JSONObject obj) {
+        List<String> keys = new ArrayList<String>();
+        if (obj == null) return keys;
+        java.util.Iterator<String> it = obj.keys();
+        while (it.hasNext()) keys.add(it.next());
+        boolean allNumeric = !keys.isEmpty();
+        for (int i = 0; i < keys.size(); i++) {
+            String k = keys.get(i).trim();
+            if (k.length() == 0) {
+                allNumeric = false;
+                break;
+            }
+            for (int c = 0; c < k.length(); c++) {
+                char ch = k.charAt(c);
+                if (ch < '0' || ch > '9') {
+                    allNumeric = false;
                     break;
                 }
             }
+            if (!allNumeric) break;
+        }
+        if (allNumeric) {
+            Collections.sort(
+                    keys,
+                    new java.util.Comparator<String>() {
+                        public int compare(String a, String b) {
+                            try {
+                                long la = Long.parseLong(a.trim());
+                                long lb = Long.parseLong(b.trim());
+                                return la < lb ? -1 : (la > lb ? 1 : 0);
+                            } catch (Exception ignored) {
+                                return a.compareTo(b);
+                            }
+                        }
+                    });
+        }
+        return keys;
+    }
+
+    private static List<EpisodeItem> parseStructuredPlayListEntryEpisodes(JSONObject entry) {
+        List<EpisodeItem> out = new ArrayList<EpisodeItem>();
+        if (entry == null) return out;
+        Object urlsField = entry.opt("urls");
+        if (urlsField instanceof JSONObject) {
+            JSONObject urlsObj = (JSONObject) urlsField;
+            List<String> keys = sortedJsonObjectKeys(urlsObj);
+            for (int i = 0; i < keys.size(); i++) {
+                String key = keys.get(i);
+                Object val = urlsObj.opt(key);
+                if (val instanceof JSONObject) {
+                    JSONObject epObj = (JSONObject) val;
+                    String epUrl = com.pilipala.source.Json.str(epObj, "url", "").trim();
+                    if (epUrl.length() == 0) continue;
+                    String epName = com.pilipala.source.Json.str(epObj, "name", "").trim();
+                    if (epName.length() == 0) epName = "第" + (out.size() + 1) + "集";
+                    out.add(new EpisodeItem(epName, epUrl, out.size()));
+                } else if (val instanceof String) {
+                    List<EpisodeItem> parsed = parseLineEpisodes((String) val);
+                    for (int j = 0; j < parsed.size(); j++) {
+                        EpisodeItem p = parsed.get(j);
+                        out.add(new EpisodeItem(p.name, p.url, out.size()));
+                    }
+                }
+            }
+        } else if (urlsField instanceof JSONArray) {
+            JSONArray urlsArr = (JSONArray) urlsField;
+            for (int i = 0; i < urlsArr.length(); i++) {
+                Object val = urlsArr.opt(i);
+                if (val instanceof JSONObject) {
+                    JSONObject epObj = (JSONObject) val;
+                    String epUrl = com.pilipala.source.Json.str(epObj, "url", "").trim();
+                    if (epUrl.length() == 0) continue;
+                    String epName = com.pilipala.source.Json.str(epObj, "name", "").trim();
+                    if (epName.length() == 0) epName = "第" + (out.size() + 1) + "集";
+                    out.add(new EpisodeItem(epName, epUrl, out.size()));
+                } else if (val instanceof String) {
+                    List<EpisodeItem> parsed = parseLineEpisodes((String) val);
+                    for (int j = 0; j < parsed.size(); j++) {
+                        EpisodeItem p = parsed.get(j);
+                        out.add(new EpisodeItem(p.name, p.url, out.size()));
+                    }
+                }
+            }
+        }
+        if (out.isEmpty()) {
+            String urlStr = com.pilipala.source.Json.str(entry, "url", "").trim();
+            if (urlStr.length() > 0) {
+                out.addAll(parseLineEpisodes(urlStr));
+            }
+        }
+        return out;
+    }
+
+    private static PlayLine parseStructuredPlayListEntry(JSONObject p, int fallbackIndex) {
+        if (p == null) return null;
+        List<EpisodeItem> eps = parseStructuredPlayListEntryEpisodes(p);
+        if (eps.isEmpty()) return null;
+        JSONObject pInfo = p.optJSONObject("player_info");
+        String showName =
+                pInfo != null ? com.pilipala.source.Json.str(pInfo, "show", "").trim() : "";
+        String fromCode =
+                pInfo != null ? com.pilipala.source.Json.str(pInfo, "from", "").trim() : "";
+        if (fromCode.length() == 0) fromCode = com.pilipala.source.Json.str(p, "from", "").trim();
+        if (showName.length() == 0) {
+            showName = com.pilipala.source.Json.str(p, "show", "").trim();
+        }
+        if (showName.length() == 0) {
+            showName = fromCode.length() > 0 ? fromCode : com.pilipala.source.Json.str(p, "name", "").trim();
+        }
+        if (showName.length() == 0) {
+            showName = "线路 " + fallbackIndex;
+        }
+        return new PlayLine(showName, fromCode, eps, lineHasDirectStream(eps));
+    }
+
+    public static List<PlayLine> extractPlayLines(JSONObject video, String preferredLine) {
+        List<PlayLine> result = new ArrayList<PlayLine>();
+        if (video == null) return result;
+
+        // 1. Traditional vod_play_from / vod_play_url
+        String rawPlayUrl = com.pilipala.source.Json.str(video, "vod_play_url", "").trim();
+        String rawPlayFrom = com.pilipala.source.Json.str(video, "vod_play_from", "").trim();
+        if (rawPlayUrl.length() > 0) {
+            String[] rawLines = rawPlayUrl.split("\\$\\$\\$", -1);
+            String[] rawNames =
+                    rawPlayFrom.length() > 0 ? rawPlayFrom.split("\\$\\$\\$", -1) : new String[0];
+            for (int i = 0; i < rawLines.length; i++) {
+                List<EpisodeItem> eps = parseLineEpisodes(rawLines[i]);
+                if (eps.isEmpty()) continue;
+                String fromCode = i < rawNames.length ? rawNames[i].trim() : "";
+                String name = fromCode.length() > 0 ? fromCode : ("线路 " + (result.size() + 1));
+                result.add(new PlayLine(name, fromCode, eps, lineHasDirectStream(eps)));
+            }
+        }
+
+        // 2. Structured vod_play_list (JSONArray or JSONObject)
+        Object playListField = video.opt("vod_play_list");
+        List<PlayLine> structured = new ArrayList<PlayLine>();
+        if (playListField instanceof JSONArray) {
+            JSONArray arr = (JSONArray) playListField;
+            for (int i = 0; i < arr.length(); i++) {
+                PlayLine pl = parseStructuredPlayListEntry(arr.optJSONObject(i), structured.size() + 1);
+                if (pl != null) structured.add(pl);
+            }
+        } else if (playListField instanceof JSONObject) {
+            JSONObject obj = (JSONObject) playListField;
+            List<String> keys = sortedJsonObjectKeys(obj);
+            for (int i = 0; i < keys.size(); i++) {
+                PlayLine pl =
+                        parseStructuredPlayListEntry(
+                                obj.optJSONObject(keys.get(i)), structured.size() + 1);
+                if (pl != null) structured.add(pl);
+            }
+        }
+
+        // 3. Merge structured lines with traditional lines without duplication
+        for (int i = 0; i < structured.size(); i++) {
+            PlayLine cand = structured.get(i);
+            String candSig = episodeUrlSignature(cand.episodes);
+            int matchIdx = -1;
+            for (int j = 0; j < result.size(); j++) {
+                PlayLine existing = result.get(j);
+                if (candSig.equals(episodeUrlSignature(existing.episodes))) {
+                    matchIdx = j;
+                    break;
+                }
+                boolean sameNameOrCode =
+                        cand.name.equals(existing.name)
+                                || (cand.rawFrom.length() > 0
+                                        && (cand.rawFrom.equals(existing.name)
+                                                || cand.rawFrom.equals(existing.rawFrom)));
+                if (sameNameOrCode) {
+                    matchIdx = j;
+                    break;
+                }
+            }
+            if (matchIdx >= 0) {
+                PlayLine existing = result.get(matchIdx);
+                String bestName =
+                        (cand.name.length() > 0
+                                        && (!cand.name.equals(existing.rawFrom)
+                                                || existing.name.startsWith("线路 ")))
+                                ? cand.name
+                                : existing.name;
+                List<EpisodeItem> bestEps =
+                        cand.episodes.size() >= existing.episodes.size()
+                                ? cand.episodes
+                                : existing.episodes;
+                String bestFrom =
+                        cand.rawFrom.length() > 0 ? cand.rawFrom : existing.rawFrom;
+                result.set(
+                        matchIdx,
+                        new PlayLine(bestName, bestFrom, bestEps, lineHasDirectStream(bestEps)));
+            } else {
+                result.add(cand);
+            }
+        }
+
+        if (result.size() <= 1) return result;
+
+        // 4. Respect explicit preferred line if matched; otherwise prioritize direct streams
+        if (preferredLine != null && preferredLine.trim().length() > 0) {
+            String pref = preferredLine.trim();
+            for (int n = 0; n < result.size(); n++) {
+                PlayLine pl = result.get(n);
+                if (pref.equals(pl.name) || (pl.rawFrom.length() > 0 && pref.equals(pl.rawFrom))) {
+                    if (n > 0) {
+                        result.remove(n);
+                        result.add(0, pl);
+                    }
+                    return result;
+                }
+            }
+        }
+
+        List<PlayLine> directLines = new ArrayList<PlayLine>();
+        List<PlayLine> otherLines = new ArrayList<PlayLine>();
+        for (int i = 0; i < result.size(); i++) {
+            PlayLine pl = result.get(i);
+            if (pl.directStream) directLines.add(pl);
+            else otherLines.add(pl);
+        }
+        if (!directLines.isEmpty() && !otherLines.isEmpty()) {
+            List<PlayLine> ordered = new ArrayList<PlayLine>(result.size());
+            ordered.addAll(directLines);
+            ordered.addAll(otherLines);
+            return ordered;
+        }
+        return result;
+    }
+
+    private static String serializeLineEpisodes(List<EpisodeItem> episodes) {
+        if (episodes == null || episodes.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < episodes.size(); i++) {
+            if (i > 0) sb.append('#');
+            EpisodeItem ep = episodes.get(i);
+            sb.append(ep.name).append('$').append(ep.url);
+        }
+        return sb.toString();
+    }
+
+    public static String[][] orderedPlayLines(JSONObject video, String preferredLine) {
+        List<PlayLine> playLines = extractPlayLines(video, preferredLine);
+        String[] lines = new String[playLines.size()];
+        String[] names = new String[playLines.size()];
+        for (int i = 0; i < playLines.size(); i++) {
+            PlayLine pl = playLines.get(i);
+            lines[i] = serializeLineEpisodes(pl.episodes);
+            names[i] = pl.name;
         }
         return new String[][] {lines, names};
     }
@@ -4297,25 +4558,49 @@ public final class LiteActivity extends Activity {
         status.setEllipsize(TextUtils.TruncateAt.END);
 
         String preferredLine = getPreferences(0).getString("preferred_line", "");
-        String[][] orderedLines = orderedPlayLines(video, preferredLine);
-        final String[] lines = orderedLines[0];
-        final String[] names = orderedLines[1];
+        final List<PlayLine> playLines = extractPlayLines(video, preferredLine);
+        final String[] names = new String[playLines.size()];
+        for (int i = 0; i < playLines.size(); i++) {
+            names[i] = playLines.get(i).name;
+        }
 
         final LiteStore.HistoryEntry savedHist = LiteStore.findHistory(this, siteKey, vodId);
         if (activeDetailLine < 0) {
             activeDetailLine = 0;
-            if (savedHist != null && savedHist.lineName.length() > 0) {
-                for (int n = 0; n < names.length; n++) {
-                    if (names[n].equals(savedHist.lineName)) {
-                        activeDetailLine = n;
-                        break;
+            if (savedHist != null) {
+                boolean matchedLine = false;
+                if (savedHist.lineName.length() > 0) {
+                    for (int n = 0; n < playLines.size(); n++) {
+                        PlayLine pl = playLines.get(n);
+                        if (savedHist.lineName.equals(pl.name)
+                                || (pl.rawFrom.length() > 0
+                                        && savedHist.lineName.equals(pl.rawFrom))) {
+                            activeDetailLine = n;
+                            matchedLine = true;
+                            break;
+                        }
+                    }
+                }
+                if (!matchedLine && savedHist.epUrl.length() > 0) {
+                    for (int n = 0; n < playLines.size() && !matchedLine; n++) {
+                        List<EpisodeItem> eps = playLines.get(n).episodes;
+                        for (int k = 0; k < eps.size(); k++) {
+                            if (savedHist.epUrl.equals(eps.get(k).url)) {
+                                activeDetailLine = n;
+                                matchedLine = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }
         }
-        if (activeDetailLine < 0 || activeDetailLine >= lines.length) activeDetailLine = 0;
+        if (activeDetailLine < 0 || activeDetailLine >= playLines.size()) activeDetailLine = 0;
 
-        currentLineEpisodes = parseLineEpisodes(lines.length > 0 ? lines[activeDetailLine] : "");
+        currentLineEpisodes =
+                playLines.isEmpty()
+                        ? new ArrayList<EpisodeItem>()
+                        : new ArrayList<EpisodeItem>(playLines.get(activeDetailLine).episodes);
 
         LinearLayout heroRow = new LinearLayout(this);
         heroRow.setOrientation(
@@ -4505,42 +4790,23 @@ public final class LiteActivity extends Activity {
         heroRow.addView(metaCol, new LinearLayout.LayoutParams(-1, -2));
         page.addView(heroRow, new LinearLayout.LayoutParams(-1, -2));
 
-        if (lines.length > 1) {
-            addSectionHeader("播放线路（共 " + lines.length + " 条）");
+        if (playLines.size() > 1) {
+            addSectionHeader("播放线路（共 " + playLines.size() + " 条）");
             HorizontalScrollView lineScroll = new HorizontalScrollView(this);
             lineScroll.setHorizontalScrollBarEnabled(false);
             LinearLayout lineRow = new LinearLayout(this);
             lineRow.setOrientation(LinearLayout.HORIZONTAL);
             lineScroll.addView(lineRow);
             page.addView(lineScroll);
-            for (int i = 0; i < lines.length; i++) {
+            for (int i = 0; i < playLines.size(); i++) {
                 final int lineIdx = i;
-                int epCount = countEpisodes(lines[i]);
-                String lineEpName = "";
-                String lineEpUrl = "";
-                String rawLine = lines[i] == null ? "" : lines[i];
-                int segStart = 0;
-                int rawLen = rawLine.length();
-                while (segStart <= rawLen) {
-                    int hash = rawLine.indexOf('#', segStart);
-                    int segEnd = hash < 0 ? rawLen : hash;
-                    String seg = rawLine.substring(segStart, segEnd).trim();
-                    if (seg.length() > 0) {
-                        int dollar = seg.indexOf('$');
-                        if (dollar >= 0) {
-                            lineEpName = seg.substring(0, dollar).trim();
-                            lineEpUrl = seg.substring(dollar + 1).trim();
-                        } else {
-                            lineEpUrl = seg;
-                        }
-                        break;
-                    }
-                    if (hash < 0) break;
-                    segStart = hash + 1;
-                }
-                String lineSpec = LiteBadges.formatFromSources(3, names[i], lineEpName, lineEpUrl);
+                PlayLine pl = playLines.get(i);
+                int epCount = pl.episodes.size();
+                String lineEpName = epCount > 0 ? pl.episodes.get(0).name : "";
+                String lineEpUrl = epCount > 0 ? pl.episodes.get(0).url : "";
+                String lineSpec = LiteBadges.formatFromSources(3, pl.name, lineEpName, lineEpUrl);
                 String chipLabel =
-                        names[i]
+                        pl.name
                                 + " ("
                                 + epCount
                                 + ")"
@@ -4557,8 +4823,10 @@ public final class LiteActivity extends Activity {
                             }
                         });
             }
-        } else if (lines.length == 1) {
-            addSectionHeader(names[0] + "（共 " + currentLineEpisodes.size() + " 集）");
+        } else if (playLines.size() == 1) {
+            addSectionHeader(playLines.get(0).name + "（共 " + currentLineEpisodes.size() + " 集）");
+        } else {
+            addSectionHeader("暂无可播选集");
         }
 
         List<EpisodeItem> ordered = new ArrayList<EpisodeItem>(currentLineEpisodes);
@@ -4672,10 +4940,21 @@ public final class LiteActivity extends Activity {
 
     String resolveCurrentLineName(JSONObject detailObj, int lineIdx) {
         if (detailObj == null) return "";
-        String[] orderedNames =
-                orderedPlayLines(
-                                detailObj, getPreferences(0).getString("preferred_line", ""))[1];
-        return lineIdx >= 0 && lineIdx < orderedNames.length ? orderedNames[lineIdx] : "";
+        List<PlayLine> playLines =
+                extractPlayLines(detailObj, getPreferences(0).getString("preferred_line", ""));
+        return lineIdx >= 0 && lineIdx < playLines.size() ? playLines.get(lineIdx).name : "";
+    }
+
+    static boolean needsAsyncPlayResolve(String address, LiteCatalog.Site source) {
+        if (address == null || address.trim().length() == 0) return true;
+        if (LiteCatalog.isDirectStreamUrl(address)) return false;
+        if (source == null) return false;
+        if (source.api != null && source.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)) {
+            return true;
+        }
+        return source.requiresParser
+                || (source.playUrl != null && source.playUrl.trim().length() > 0)
+                || !source.jsonParses.isEmpty();
     }
 
     void play(final String address, final String name) {
@@ -4685,23 +4964,61 @@ public final class LiteActivity extends Activity {
         final String lineNameSnap = resolveCurrentLineName(detailSnap, lineIdxSnap);
         final int epIdxSnap = playingEpisodeIndex;
         final List<EpisodeItem> episodesSnap = new ArrayList<EpisodeItem>(currentLineEpisodes);
-        String finalAddress = address;
+
         if (source != null
-                && source.playUrl != null
-                && (source.playUrl.startsWith("http://") || source.playUrl.startsWith("https://"))
-                && !address.startsWith(source.playUrl)) {
-            finalAddress = source.playUrl + address;
+                && source.api != null
+                && source.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)) {
+            base(name);
+            inDetail = true;
+            final int ticket = epoch;
+            work(
+                    new Job() {
+                        public void run() throws Exception {
+                            final com.pilipala.emby.EmbyLibrary library =
+                                    com.pilipala.emby.EmbyAccounts.open(
+                                            LiteActivity.this, source.api);
+                            final JSONObject resolved = library.resolve(address, true);
+                            final com.pilipala.emby.EmbyLibrary.Reporter reporter =
+                                    library.track(resolved.getJSONObject("embySession"));
+                            final String stream = resolved.getString("url");
+                            final Map<String, String> headers = library.headersFor(stream);
+                            ui.post(
+                                    new Runnable() {
+                                        public void run() {
+                                            if (dead || ticket != epoch || selected != source) {
+                                                reporter.stop(0);
+                                                return;
+                                            }
+                                            PlaybackSession session =
+                                                    PlaybackSession.forVod(
+                                                            ++playbackSessionSeq,
+                                                            stream,
+                                                            address,
+                                                            name,
+                                                            headers,
+                                                            source,
+                                                            detailSnap,
+                                                            lineNameSnap,
+                                                            lineIdxSnap,
+                                                            epIdxSnap,
+                                                            episodesSnap);
+                                            playResolved(session, reporter);
+                                        }
+                                    });
+                        }
+                    });
+            return;
         }
-        if (source == null || !source.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)) {
+
+        if (!needsAsyncPlayResolve(address, source)) {
+            Map<String, String> safeHeaders = LiteCatalog.safeSiteMediaHeaders(source, address);
             PlaybackSession session =
                     PlaybackSession.forVod(
                             ++playbackSessionSeq,
-                            finalAddress,
+                            address,
                             address,
                             name,
-                            source == null
-                                    ? Collections.<String, String>emptyMap()
-                                    : source.headers,
+                            safeHeaders,
                             source,
                             detailSnap,
                             lineNameSnap,
@@ -4711,44 +5028,85 @@ public final class LiteActivity extends Activity {
             playResolved(session, null);
             return;
         }
-        base(name);
-        inDetail = true;
+
+        final PlaybackSession pendingSession =
+                PlaybackSession.forVod(
+                        ++playbackSessionSeq,
+                        "",
+                        address,
+                        name,
+                        Collections.<String, String>emptyMap(),
+                        source,
+                        detailSnap,
+                        lineNameSnap,
+                        lineIdxSnap,
+                        epIdxSnap,
+                        episodesSnap);
+        openPlaybackShell(pendingSession, null, null);
         final int ticket = epoch;
-        work(
-                new Job() {
-                    public void run() throws Exception {
-                        final com.pilipala.emby.EmbyLibrary library =
-                                com.pilipala.emby.EmbyAccounts.open(LiteActivity.this, source.api);
-                        final JSONObject resolved = library.resolve(address, true);
-                        final com.pilipala.emby.EmbyLibrary.Reporter reporter =
-                                library.track(resolved.getJSONObject("embySession"));
-                        final String stream = resolved.getString("url");
-                        final Map<String, String> headers = library.headersFor(stream);
-                        ui.post(
-                                new Runnable() {
-                                    public void run() {
-                                        if (dead || ticket != epoch || selected != source) {
-                                            reporter.stop(0);
-                                            return;
-                                        }
-                                        PlaybackSession session =
-                                                PlaybackSession.forVod(
-                                                        ++playbackSessionSeq,
-                                                        stream,
-                                                        address,
-                                                        name,
-                                                        headers,
-                                                        source,
-                                                        detailSnap,
-                                                        lineNameSnap,
-                                                        lineIdxSnap,
-                                                        epIdxSnap,
-                                                        episodesSnap);
-                                        playResolved(session, reporter);
-                                    }
-                                });
-                    }
-                });
+        if (status != null) {
+            status.setText("正在解析播放地址… 可按方向键切换线路或按返回键退出");
+        }
+        enableToolbarFocusAndSelect(true);
+        activeWork =
+                io.submit(
+                        new Runnable() {
+                            public void run() {
+                                if (dead || ticket != epoch || activeSession != pendingSession) {
+                                    return;
+                                }
+                                try {
+                                    final LiteCatalog.ResolvedPlay resolved =
+                                            LiteCatalog.resolvePlayUrl(
+                                                    address, source, lineNameSnap);
+                                    ui.post(
+                                            new Runnable() {
+                                                public void run() {
+                                                    if (dead
+                                                            || ticket != epoch
+                                                            || activeSession != pendingSession) {
+                                                        return;
+                                                    }
+                                                    pendingResolvedPlay = resolved;
+                                                    if (status != null) {
+                                                        status.setText("解析完成，正在准备播放…");
+                                                    }
+                                                    if (activeSurfaceHolder != null
+                                                            && player == null) {
+                                                        startPlayerOnSurface(
+                                                                pendingSession,
+                                                                resolved,
+                                                                activeSurfaceHolder,
+                                                                ticket);
+                                                    }
+                                                }
+                                            });
+                                } catch (final Throwable ex) {
+                                    final String errMsg =
+                                            ex.getMessage() != null && ex.getMessage().trim().length() > 0
+                                                    ? ex.getMessage().trim()
+                                                    : "解析接口请求超时或返回无效内容";
+                                    ui.post(
+                                            new Runnable() {
+                                                public void run() {
+                                                    if (dead
+                                                            || ticket != epoch
+                                                            || activeSession != pendingSession) {
+                                                        return;
+                                                    }
+                                                    ready = false;
+                                                    playbackFailed = true;
+                                                    setOsdVisibility(View.VISIBLE);
+                                                    enableToolbarFocusAndSelect(true);
+                                                    if (status != null) {
+                                                        status.setText(
+                                                                errMsg + " · 可按方向键换线路/重试或按返回键退出");
+                                                    }
+                                                }
+                                            });
+                                }
+                            }
+                        });
     }
 
     void rebuildPlaybackSession(PlaybackSession session) {
@@ -4765,8 +5123,39 @@ public final class LiteActivity extends Activity {
             playCastStream(session.streamUrl, session.displayTitle, session.headers);
             return;
         }
-        if (session.embySource) {
+        if (session.embySource || session.streamUrl.length() == 0) {
             play(session.epUrl, session.epName);
+            return;
+        }
+        if (pendingResolvedPlay != null && session == activeSession) {
+            PlaybackSession rebuilt =
+                    new PlaybackSession(
+                            session.kind,
+                            ++playbackSessionSeq,
+                            pendingResolvedPlay.url,
+                            session.playbackIdentity,
+                            session.displayTitle,
+                            pendingResolvedPlay.headers,
+                            session.siteKey,
+                            session.siteName,
+                            session.siteApi,
+                            session.vodId,
+                            session.vodName,
+                            session.vodPic,
+                            session.lineName,
+                            session.lineIndex,
+                            session.epName,
+                            session.epUrl,
+                            session.epIndex,
+                            session.lineEpisodes,
+                            session.embySource,
+                            session.liveGroup,
+                            session.liveSourceIndex,
+                            session.liveGroupIndex,
+                            session.liveChannelIndex,
+                            session.liveUrlIndex,
+                            session.liveSourceHeaders);
+            playResolved(rebuilt, null);
             return;
         }
         PlaybackSession rebuilt =
@@ -4802,9 +5191,22 @@ public final class LiteActivity extends Activity {
     void playResolved(
             final PlaybackSession session, com.pilipala.emby.EmbyLibrary.Reporter reporter) {
         if (session == null) return;
+        LiteCatalog.ResolvedPlay immediate =
+                new LiteCatalog.ResolvedPlay(
+                        session.streamUrl, session.headers, "direct", "");
+        openPlaybackShell(session, reporter, immediate);
+    }
+
+    void openPlaybackShell(
+            final PlaybackSession session,
+            com.pilipala.emby.EmbyLibrary.Reporter reporter,
+            final LiteCatalog.ResolvedPlay initialPlay) {
+        if (session == null) return;
         base(session.displayTitle);
         activeSession = session;
         lastSuspendedSession = null;
+        pendingResolvedPlay = initialPlay;
+        activeSurfaceHolder = null;
         embyReporter = reporter;
         playbackTitle = session.displayTitle;
         playbackAddress = session.playbackIdentity;
@@ -4827,10 +5229,7 @@ public final class LiteActivity extends Activity {
         videoWidth = 0;
         videoHeight = 0;
         final int id = epoch;
-        final String address = session.streamUrl;
-        final String identity = session.playbackIdentity;
         final String name = session.displayTitle;
-        final Map<String, String> headers = session.headers;
 
         playback = new FrameLayout(this);
         playback.setBackgroundColor(0xff000000);
@@ -4947,163 +5346,9 @@ public final class LiteActivity extends Activity {
                         new SurfaceHolder.Callback() {
                             public void surfaceCreated(SurfaceHolder holder) {
                                 if (id != epoch || dead || session != activeSession) return;
-                                try {
-                                    LiteCatalog.http(address);
-                                    boolean useCandidate =
-                                            getPreferences(0)
-                                                    .getBoolean("experimental_decoder", false);
-                                    int proxyMode =
-                                            getPreferences(0)
-                                                    .getInt("proxy_mode", LiteMediaProxy.MODE_AUTO);
-                                    player = PlayerFactory.create(useCandidate);
-                                    final LitePlayer expected = player;
-                                    boolean isIjk = expected.name().contains("IJK");
-                                    String streamUrl =
-                                            LiteMediaProxy.wrapIfNeeded(
-                                                    address, headers, proxyMode, isIjk);
-                                    Map<String, String> openHeaders =
-                                            streamUrl.startsWith("http://127.0.0.1:")
-                                                    ? Collections.<String, String>emptyMap()
-                                                    : headers;
-                                    player.open(
-                                            LiteActivity.this,
-                                            streamUrl,
-                                            openHeaders,
-                                            holder,
-                                            new LitePlayer.Listener() {
-                                                public void prepared() {
-                                                    if (dead
-                                                            || id != epoch
-                                                            || session != activeSession
-                                                            || expected != player) {
-                                                        return;
-                                                    }
-                                                    ready = true;
-                                                    playbackFailed = false;
-                                                    if (session.kind == PlaybackSession.KIND_VOD) {
-                                                        int resumeMs =
-                                                                findSavedResumeMs(
-                                                                        session, identity);
-                                                        if (resumeMs > 0
-                                                                && expected.getDuration() > 0
-                                                                && resumeMs
-                                                                        < expected.getDuration()
-                                                                                - 2000) {
-                                                            expected.seekTo(resumeMs);
-                                                        }
-                                                    }
-                                                    expected.start();
-                                                    updateKeepScreenOn(true);
-                                                    updatePauseResumeLabel();
-                                                    status.setText(
-                                                            expected.name()
-                                                                    + " · 确认键暂停/播放 · 左右键快进快退(长按加速) · 上下/菜单键呼出工具栏");
-                                                    ui.removeCallbacks(clockTick);
-                                                    ui.post(clockTick);
-                                                    scheduleOsdHide();
-                                                }
-
-                                                public void error(int what, int extra) {
-                                                    if (dead
-                                                            || id != epoch
-                                                            || session != activeSession
-                                                            || expected != player) {
-                                                        return;
-                                                    }
-                                                    ready = false;
-                                                    playbackFailed = true;
-                                                    updateKeepScreenOn(false);
-                                                    stopEmbySession();
-                                                    setOsdVisibility(View.VISIBLE);
-                                                    enableToolbarFocusAndSelect(true);
-                                                    status.setText(
-                                                            expected.name()
-                                                                    + "无法播放（"
-                                                                    + what
-                                                                    + "/"
-                                                                    + extra
-                                                                    + "），可按方向键与确认键切换线路/重试或按返回键退出。");
-                                                }
-
-                                                public void size(final int w, final int h) {
-                                                    ui.post(
-                                                            new Runnable() {
-                                                                public void run() {
-                                                                    if (dead
-                                                                            || id != epoch
-                                                                            || session
-                                                                                    != activeSession
-                                                                            || expected != player
-                                                                            || w <= 0
-                                                                            || h <= 0) return;
-                                                                    videoWidth = w;
-                                                                    videoHeight = h;
-                                                                    applyVideoSize();
-                                                                }
-                                                            });
-                                                }
-
-                                                public void completed() {
-                                                    if (dead
-                                                            || id != epoch
-                                                            || session != activeSession
-                                                            || expected != player) {
-                                                        return;
-                                                    }
-                                                    updateKeepScreenOn(false);
-                                                    stopEmbySession();
-                                                    if (shouldAutoAdvanceNextEpisode(session)) {
-                                                        if (playNextEpisodeFromSession(session)) {
-                                                            return;
-                                                        }
-                                                    }
-                                                    setOsdVisibility(View.VISIBLE);
-                                                    enableToolbarFocusAndSelect(
-                                                            session.kind
-                                                                    != PlaybackSession.KIND_VOD);
-                                                    if (session.kind == PlaybackSession.KIND_LIVE) {
-                                                        status.setText(
-                                                                "当前直播流已结束，可切换线路/频道或按返回键回到频道列表。");
-                                                    } else if (session.kind
-                                                            == PlaybackSession.KIND_CAST) {
-                                                        status.setText("投屏播放结束 · 按返回键回到投屏页");
-                                                    } else {
-                                                        status.setText("播放结束 · 返回选集");
-                                                    }
-                                                }
-                                            });
-                                    ui.postDelayed(
-                                            new Runnable() {
-                                                public void run() {
-                                                    if (!dead
-                                                            && id == epoch
-                                                            && session == activeSession
-                                                            && player == expected
-                                                            && !ready) {
-                                                        setOsdVisibility(View.VISIBLE);
-                                                        enableToolbarFocusAndSelect(true);
-                                                        status.setText(
-                                                                "播放准备较慢，可按方向键与确认键切换线路/重试，或按返回选择其他资源。");
-                                                    }
-                                                }
-                                            },
-                                            15000);
-                                } catch (Exception failure) {
-                                    ready = false;
-                                    playbackFailed = true;
-                                    stopEmbySession();
-                                    releasePlayerInstanceOnly(false);
-                                    setOsdVisibility(View.VISIBLE);
-                                    enableToolbarFocusAndSelect(true);
-                                    status.setText("无法打开播放地址，可切换线路/重试或按返回选择其他资源。");
-                                } catch (LinkageError unavailable) {
-                                    ready = false;
-                                    playbackFailed = true;
-                                    stopEmbySession();
-                                    releasePlayerInstanceOnly(false);
-                                    setOsdVisibility(View.VISIBLE);
-                                    enableToolbarFocusAndSelect(true);
-                                    status.setText("此设备无法加载实验解码器，请使用系统解码。");
+                                activeSurfaceHolder = holder;
+                                if (pendingResolvedPlay != null && player == null) {
+                                    startPlayerOnSurface(session, pendingResolvedPlay, holder, id);
                                 }
                             }
 
@@ -5111,9 +5356,166 @@ public final class LiteActivity extends Activity {
                                     SurfaceHolder h, int f, int w, int height) {}
 
                             public void surfaceDestroyed(SurfaceHolder h) {
+                                if (activeSurfaceHolder == h) activeSurfaceHolder = null;
                                 if (id == epoch && session == activeSession) release();
                             }
                         });
+    }
+
+    void startPlayerOnSurface(
+            final PlaybackSession session,
+            final LiteCatalog.ResolvedPlay resolved,
+            final SurfaceHolder holder,
+            final int id) {
+        if (dead || id != epoch || session != activeSession || resolved == null || holder == null) {
+            return;
+        }
+        final String address = resolved.url;
+        final String identity = session.playbackIdentity;
+        final Map<String, String> headers = resolved.headers;
+        try {
+            LiteCatalog.http(address);
+            boolean useCandidate = getPreferences(0).getBoolean("experimental_decoder", false);
+            int proxyMode = getPreferences(0).getInt("proxy_mode", LiteMediaProxy.MODE_AUTO);
+            player = PlayerFactory.create(useCandidate);
+            final LitePlayer expected = player;
+            boolean isIjk = expected.name().contains("IJK");
+            String streamUrl = LiteMediaProxy.wrapIfNeeded(address, headers, proxyMode, isIjk);
+            Map<String, String> openHeaders =
+                    streamUrl.startsWith("http://127.0.0.1:")
+                            ? Collections.<String, String>emptyMap()
+                            : headers;
+            player.open(
+                    LiteActivity.this,
+                    streamUrl,
+                    openHeaders,
+                    holder,
+                    new LitePlayer.Listener() {
+                        public void prepared() {
+                            if (dead
+                                    || id != epoch
+                                    || session != activeSession
+                                    || expected != player) {
+                                return;
+                            }
+                            ready = true;
+                            playbackFailed = false;
+                            if (session.kind == PlaybackSession.KIND_VOD) {
+                                int resumeMs = findSavedResumeMs(session, identity);
+                                if (resumeMs > 0
+                                        && expected.getDuration() > 0
+                                        && resumeMs < expected.getDuration() - 2000) {
+                                    expected.seekTo(resumeMs);
+                                }
+                            }
+                            expected.start();
+                            updateKeepScreenOn(true);
+                            updatePauseResumeLabel();
+                            status.setText(
+                                    expected.name()
+                                            + " · 确认键暂停/播放 · 左右键快进快退(长按加速) · 上下/菜单键呼出工具栏");
+                            ui.removeCallbacks(clockTick);
+                            ui.post(clockTick);
+                            scheduleOsdHide();
+                        }
+
+                        public void error(int what, int extra) {
+                            if (dead
+                                    || id != epoch
+                                    || session != activeSession
+                                    || expected != player) {
+                                return;
+                            }
+                            ready = false;
+                            playbackFailed = true;
+                            updateKeepScreenOn(false);
+                            stopEmbySession();
+                            setOsdVisibility(View.VISIBLE);
+                            enableToolbarFocusAndSelect(true);
+                            status.setText(
+                                    expected.name()
+                                            + "无法播放（"
+                                            + what
+                                            + "/"
+                                            + extra
+                                            + "），可按方向键与确认键切换线路/重试或按返回键退出。");
+                        }
+
+                        public void size(final int w, final int h) {
+                            ui.post(
+                                    new Runnable() {
+                                        public void run() {
+                                            if (dead
+                                                    || id != epoch
+                                                    || session != activeSession
+                                                    || expected != player
+                                                    || w <= 0
+                                                    || h <= 0) return;
+                                            videoWidth = w;
+                                            videoHeight = h;
+                                            applyVideoSize();
+                                        }
+                                    });
+                        }
+
+                        public void completed() {
+                            if (dead
+                                    || id != epoch
+                                    || session != activeSession
+                                    || expected != player) {
+                                return;
+                            }
+                            updateKeepScreenOn(false);
+                            stopEmbySession();
+                            if (shouldAutoAdvanceNextEpisode(session)) {
+                                if (playNextEpisodeFromSession(session)) {
+                                    return;
+                                }
+                            }
+                            setOsdVisibility(View.VISIBLE);
+                            enableToolbarFocusAndSelect(session.kind != PlaybackSession.KIND_VOD);
+                            if (session.kind == PlaybackSession.KIND_LIVE) {
+                                status.setText("当前直播流已结束，可切换线路/频道或按返回键回到频道列表。");
+                            } else if (session.kind == PlaybackSession.KIND_CAST) {
+                                status.setText("投屏播放结束 · 按返回键回到投屏页");
+                            } else {
+                                status.setText("播放结束 · 返回选集");
+                            }
+                        }
+                    });
+            ui.postDelayed(
+                    new Runnable() {
+                        public void run() {
+                            if (!dead
+                                    && id == epoch
+                                    && session == activeSession
+                                    && player == expected
+                                    && !ready) {
+                                setOsdVisibility(View.VISIBLE);
+                                enableToolbarFocusAndSelect(true);
+                                status.setText(
+                                        "播放准备较慢，可按方向键与确认键切换线路/重试，或按返回选择其他资源。");
+                            }
+                        }
+                    },
+                    15000);
+        } catch (Exception failure) {
+            ready = false;
+            playbackFailed = true;
+            stopEmbySession();
+            releasePlayerInstanceOnly(false);
+            setOsdVisibility(View.VISIBLE);
+            enableToolbarFocusAndSelect(true);
+            status.setText("无法打开播放地址，可切换线路/重试或按返回选择其他资源。");
+        } catch (LinkageError unavailable) {
+            ready = false;
+            playbackFailed = true;
+            stopEmbySession();
+            releasePlayerInstanceOnly(false);
+            setOsdVisibility(View.VISIBLE);
+            enableToolbarFocusAndSelect(true);
+            status.setText("此设备无法加载实验解码器，请使用系统解码。");
+        }
     }
 
     void buildPlayerControlButtons(final PlaybackSession session) {
@@ -5188,18 +5590,16 @@ public final class LiteActivity extends Activity {
                             showInPlayerEpisodeDialog();
                         }
                     });
-            final String[][] orderedLines =
-                    orderedPlayLines(
+            final List<PlayLine> playLines =
+                    extractPlayLines(
                             currentDetail, getPreferences(0).getString("preferred_line", ""));
-            final String[] orderedUrls = orderedLines[0];
-            final String[] orderedNames = orderedLines[1];
-            if (orderedUrls.length > 1) {
+            if (playLines.size() > 1) {
                 switchLineBtnView =
                         addPlayerToolbarButton(
                                 "换线路",
                                 new Runnable() {
                                     public void run() {
-                                        showInPlayerLineDialog(orderedUrls, orderedNames);
+                                        showInPlayerLineDialog(playLines);
                                     }
                                 });
             }
@@ -5445,13 +5845,12 @@ public final class LiteActivity extends Activity {
                 .show();
     }
 
-    void showInPlayerLineDialog(final String[] rawLines, final String[] rawNames) {
-        String[] labels = new String[rawLines.length];
-        for (int i = 0; i < rawLines.length; i++) {
-            String n =
-                    i < rawNames.length && rawNames[i].trim().length() > 0
-                            ? rawNames[i].trim()
-                            : ("线路 " + (i + 1));
+    void showInPlayerLineDialog(final List<PlayLine> playLines) {
+        if (playLines == null || playLines.isEmpty()) return;
+        String[] labels = new String[playLines.size()];
+        for (int i = 0; i < playLines.size(); i++) {
+            String n = playLines.get(i).name;
+            if (n == null || n.trim().length() == 0) n = "线路 " + (i + 1);
             labels[i] = (i == activeDetailLine ? "★ " : "") + n;
         }
         new AlertDialog.Builder(this)
@@ -5460,9 +5859,11 @@ public final class LiteActivity extends Activity {
                         labels,
                         new DialogInterface.OnClickListener() {
                             public void onClick(DialogInterface dialog, int which) {
-                                if (which >= 0 && which < rawLines.length) {
+                                if (which >= 0 && which < playLines.size()) {
                                     activeDetailLine = which;
-                                    currentLineEpisodes = parseLineEpisodes(rawLines[which]);
+                                    currentLineEpisodes =
+                                            new ArrayList<EpisodeItem>(
+                                                    playLines.get(which).episodes);
                                     if (!currentLineEpisodes.isEmpty()) {
                                         int targetIdx =
                                                 Math.max(

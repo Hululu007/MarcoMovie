@@ -32,10 +32,5 @@
         }
       ]
     }
-  ],
-  "platformOverrides": {
-    "lite": {
-      "skip": true
-    }
-  }
+  ]
 }

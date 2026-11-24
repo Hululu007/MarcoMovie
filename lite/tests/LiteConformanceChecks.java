@@ -13,6 +13,7 @@ import org.json.*;
 public final class LiteConformanceChecks {
     private static int passCount = 0;
     private static int failCount = 0;
+    private static int skipCount = 0;
 
     private static Path resolveConformanceDir(Path root) {
         Path[] candidates = new Path[] {
@@ -159,17 +160,14 @@ public final class LiteConformanceChecks {
                 vObj.put("title", title);
 
                 JSONArray finalLines = new JSONArray();
-                String[][] ordered = LiteActivity.orderedPlayLines(item, "");
-                String[] rawLines = ordered[0];
-                String[] lineNames = ordered[1];
-                for (int j = 0; j < rawLines.length; j++) {
-                    List<LiteActivity.EpisodeItem> episodes =
-                            LiteActivity.parseLineEpisodes(rawLines[j]);
-                    if (episodes.isEmpty()) continue;
+                List<LiteActivity.PlayLine> playLines = LiteActivity.extractPlayLines(item, "");
+                for (int j = 0; j < playLines.size(); j++) {
+                    LiteActivity.PlayLine pl = playLines.get(j);
+                    if (pl.episodes.isEmpty()) continue;
                     JSONObject lObj = new JSONObject();
-                    lObj.put("name", lineNames[j]);
+                    lObj.put("name", pl.name);
                     JSONArray epsArr = new JSONArray();
-                    for (LiteActivity.EpisodeItem ep : episodes) {
+                    for (LiteActivity.EpisodeItem ep : pl.episodes) {
                         JSONObject eObj = new JSONObject();
                         eObj.put("name", ep.name);
                         eObj.put("url", ep.url);
@@ -380,25 +378,8 @@ public final class LiteConformanceChecks {
                 JSONObject expected = applyPlatformOverrides(rawExpected, "lite");
 
                 if (expected.optBoolean("skip", false)) {
-                    String skipEntry = meta.optString("entrypoint", meta.optString("type", "config")).toLowerCase(Locale.ROOT);
-                    if ("listing".equals(skipEntry) || "lines".equals(skipEntry)) {
-                        JSONObject probeActual = normalizeListing(LiteCatalog.parseCmsResponse(LiteCatalog.decodeText(inputBytes)));
-                        JSONArray pv = probeActual.optJSONArray("videos");
-                        if ("case_15_vod_play_list".equals(caseId)) {
-                            if (pv != null && pv.length() > 0 && pv.getJSONObject(0).getJSONArray("lines").length() > 0) {
-                                throw new AssertionError("[case_15_vod_play_list] Lite unexpectedly parsed vod_play_list; remove lite.skip");
-                            }
-                        } else if ("case_19_mixed_direct_and_parse_lines".equals(caseId)) {
-                            if (pv != null && pv.length() > 0) {
-                                JSONArray pl = pv.getJSONObject(0).getJSONArray("lines");
-                                if (pl.length() > 0 && "官方直链".equals(pl.getJSONObject(0).optString("name"))) {
-                                    throw new AssertionError("[case_19_mixed_direct_and_parse_lines] Lite now prioritizes direct streams; remove lite.skip");
-                                }
-                            }
-                        }
-                    }
                     System.out.println("SKIP " + caseId + " (platformOverrides.lite.skip=true)");
-                    passCount++;
+                    skipCount++;
                     continue;
                 }
 
@@ -446,7 +427,14 @@ public final class LiteConformanceChecks {
             }
         }
 
-        System.out.println("\nLite Conformance Summary: " + passCount + " PASSED, " + failCount + " FAILED");
+        System.out.println(
+                "\nLite Conformance Summary: "
+                        + passCount
+                        + " PASSED, "
+                        + failCount
+                        + " FAILED, "
+                        + skipCount
+                        + " SKIPPED");
         if (failCount > 0) {
             System.exit(1);
         }
