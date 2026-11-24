@@ -331,9 +331,14 @@ class PrepareOhosTests(unittest.TestCase):
             self.assertIn(f"'{method}'", dart_shim)
         self.assertIn("marco_movie_prefs", sys_plugin)
         self.assertIn("marco_movie_secure_fallback", sys_plugin)
+        self.assertIn("marco_movie_secure_state", sys_plugin)
         self.assertNotIn("writeSecureFallback", sys_plugin)
-        self.assertIn("writeToAssetStoreVerified", sys_plugin)
+        self.assertIn("OhosSecureCredentialEngine", sys_plugin)
         self.assertIn("DEVICE_FIRST_UNLOCKED", sys_plugin)
+        secure_engine = (ets_root / "plugins" / "OhosSecureCredentialEngine.ts").read_text(encoding="utf-8")
+        self.assertIn("writeToAssetStoreVerified", secure_engine)
+        self.assertIn("writePendingDeleteMarker", secure_engine)
+        self.assertIn("legacyValue === protectedValue", secure_engine)
         self.assertNotIn("fs.readSync", sys_plugin)
         self.assertNotIn("fs.writeSync", sys_plugin)
         self.assertIn("await fs.open(", sys_plugin)
@@ -492,6 +497,29 @@ class PrepareOhosTests(unittest.TestCase):
         self.assertIn("--no-codesign", workflow_text)
         self.assertIn("entry-default-unsigned.hap", workflow_text)
         self.assertIn("prepare_ohos.py --verify-hap", workflow_text)
+
+    def test_production_secure_credential_engine_migration_and_logout(self) -> None:
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required to execute production OhosSecureCredentialEngine.ts tests")
+        test_script = FLUTTER_DIR / "test_ohos_secure_credential_engine.mjs"
+        self.assertTrue(test_script.is_file(), f"Missing production TS test runner: {test_script}")
+        proc = subprocess.run(
+            [node, "--experimental-strip-types", str(test_script)],
+            cwd=str(FLUTTER_DIR),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"Production OhosSecureCredentialEngine test failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
+        )
+        self.assertIn("ALL PRODUCTION OhosSecureCredentialEngine TESTS PASSED", proc.stdout)
 
 
 if __name__ == "__main__":

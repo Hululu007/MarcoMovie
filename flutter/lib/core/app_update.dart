@@ -155,7 +155,10 @@ class AppUpdate {
       '2. 通过 hdc install -r <已签名.hap> 或 DevEco Studio 安装到手机、平板或智慧屏；\n'
       '3. 安装前请核对上方包大小与 SHA-256 摘要，避免安装损坏或来源不明的安装包。';
 
-  static bool isRemoteVersionNewer(String remote, String current) {
+  /// Compares two semantic-ish version strings.
+  /// Returns `> 0` when [remote] is newer than [current], `0` when equal,
+  /// and `< 0` when [remote] is older than [current].
+  static int compareVersions(String remote, String current) {
     List<int> parseParts(String v) => v
         .replaceAll(RegExp(r'^[vV]'), '')
         .split(RegExp(r'[^0-9]+'))
@@ -168,10 +171,13 @@ class AppUpdate {
     for (var i = 0; i < len; i++) {
       final rv = i < r.length ? r[i] : 0;
       final cv = i < c.length ? c[i] : 0;
-      if (rv != cv) return rv > cv;
+      if (rv != cv) return rv > cv ? 1 : -1;
     }
-    return false;
+    return 0;
   }
+
+  static bool isRemoteVersionNewer(String remote, String current) =>
+      compareVersions(remote, current) > 0;
 
   static bool isValidHarmonyosAssetName(String name, String version) {
     final trimmed = name.trim();

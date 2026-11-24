@@ -12032,6 +12032,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     String releaseNotes = '';
     String downloadUrl = '';
     bool hasNewer = false;
+    int versionCompare = 0;
     bool checkStarted = false;
     AppUpdate? release;
 
@@ -12059,6 +12060,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   releaseNotes = '';
                   downloadUrl = '';
                   hasNewer = false;
+                  versionCompare = 0;
                   statusText = isHarmony
                       ? '正在检查 HarmonyOS NEXT 独立更新源…'
                       : '正在连接镜像站检测最新版本…';
@@ -12082,21 +12084,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 if (isHarmony && downloadUrl.isEmpty) {
                   throw const FormatException('未获取到有效的鸿蒙 HAP 安装包或校验信息');
                 }
-                hasNewer = _isRemoteVersionNewer(latestVersion, _currentAppVersion);
-                statusText = hasNewer
-                    ? '发现新版本 v$latestVersion（当前 v$_currentAppVersion）'
-                    : '当前已是最新版本（v$_currentAppVersion）';
+                versionCompare = AppUpdate.compareVersions(
+                  latestVersion,
+                  _currentAppVersion,
+                );
+                hasNewer = versionCompare > 0;
+                statusText = isHarmony
+                    ? (versionCompare > 0
+                        ? '发现新版本 v$latestVersion（当前 v$_currentAppVersion）'
+                        : versionCompare == 0
+                            ? '当前已是最新版本（v$_currentAppVersion）'
+                            : '当前已装版本 v$_currentAppVersion 高于正式源版本 v$latestVersion（无需降级）')
+                    : (hasNewer
+                        ? '发现新版本 v$latestVersion（当前 v$_currentAppVersion）'
+                        : '当前已是最新版本（v$_currentAppVersion）');
               } on FormatException catch (e) {
                 checkFailed = true;
                 release = null;
                 downloadUrl = '';
                 hasNewer = false;
+                versionCompare = 0;
                 statusText = '检查更新失败：${e.message}';
               } catch (_) {
                 checkFailed = true;
                 release = null;
                 downloadUrl = '';
                 hasNewer = false;
+                versionCompare = 0;
                 statusText = '暂时无法检查更新，请稍后重试或打开官方下载站';
               }
               if (ctx.mounted) setSheetState(() => checking = false);
@@ -12317,15 +12331,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ),
                             ),
                           ],
-                          const SizedBox(height: 8),
-                          Text(
-                            AppUpdate.harmonyosUnsignedInstallGuide,
-                            style: TextStyle(
-                              color: ApplePalette.of(context).labelSecondary,
-                              fontSize: 12,
-                              height: 1.45,
+                          if (versionCompare >= 0) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              AppUpdate.harmonyosUnsignedInstallGuide,
+                              style: TextStyle(
+                                color: ApplePalette.of(context).labelSecondary,
+                                fontSize: 12,
+                                height: 1.45,
+                              ),
                             ),
-                          ),
+                          ],
                         ],
                       ),
                     ),
@@ -12335,7 +12351,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     if (isHarmony)
                       Row(
                         children: [
-                          if (downloadUrl.isNotEmpty) ...[
+                          if (downloadUrl.isNotEmpty && versionCompare >= 0) ...[
                             Expanded(
                               child: AppleCapsuleButton(
                                 key: const ValueKey('ohos-update-download-hap'),
@@ -12370,7 +12386,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                   ? '打开鸿蒙发布页'
                                   : '打开官方下载站',
                               icon: CupertinoIcons.globe,
-                              primary: downloadUrl.isEmpty && !checkFailed,
+                              primary: (downloadUrl.isEmpty || versionCompare < 0) &&
+                                  !checkFailed,
                               onPressed: () => openHarmonyOrCopyUrl(
                                 release?.releaseUrl?.toString() ??
                                     'https://marcotv.wlj9919.top/movie/',
@@ -15377,7 +15394,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
   Future<void> _showBackupRestoreDialog({String iosBackLabel = '返回'}) async {
-    final ctrl = TextEditingController(text: widget.storage.exportBackupJson());
+    const int inlineTextFieldCharLimit = 256 * 1024;
+    final initialBackup = widget.storage.exportBackupJson();
+    String? fullBackupPayload =
+        initialBackup.length > inlineTextFieldCharLimit ? initialBackup : null;
+    final ctrl = TextEditingController(
+      text: fullBackupPayload == null ? initialBackup : '',
+    );
+    String? loadedLargeSummary = fullBackupPayload == null
+        ? null
+        : '当前备份较大（${(utf8.encode(fullBackupPayload).length / (1024 * 1024)).toStringAsFixed(1)} MB），已就绪可直接导出或恢复';
+    String effectivePayload() => fullBackupPayload ?? ctrl.text;
     String? errorText;
     await _openIosOrModalPage<void>(
       title: defaultTargetPlatform == TargetPlatform.iOS
@@ -15388,7 +15415,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         padding: const EdgeInsets.symmetric(horizontal: 10),
         minimumSize: const Size(28, 28),
         onPressed: () {
-          Clipboard.setData(ClipboardData(text: ctrl.text));
+          Clipboard.setData(ClipboardData(text: effectivePayload()));
           _showAppleNotice('已复制备份', '备份 JSON 已复制到剪贴板，可发送至其他设备恢复。');
         },
         child: const Text(
@@ -15409,16 +15436,46 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                '与 Android 电视/手机端 MarcoMovie-1 备份格式双向兼容：',
+                '与 Android 电视/手机端 MarcoMovie-1 备份格式双向兼容（本地备份上限 ${StorageService.formatLocalBackupByteLimit()}）：',
                 style: TextStyle(
                   color: ApplePalette.of(context).labelSecondary,
                   fontSize: 12,
                 ),
               ),
+              if (loadedLargeSummary != null) ...[
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: AppleColors.systemBlue.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    loadedLargeSummary!,
+                    style: const TextStyle(
+                      color: AppleColors.systemBlue,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
               SizedBox(height: 10),
               TextSelectionMouseGuard(
                 child: CupertinoTextField(
                   controller: ctrl,
+                  onChanged: (_) {
+                    if (fullBackupPayload != null || loadedLargeSummary != null) {
+                      setModalState(() {
+                        fullBackupPayload = null;
+                        loadedLargeSummary = null;
+                      });
+                    }
+                  },
+                  placeholder: loadedLargeSummary != null
+                      ? '大体积备份已加载（可省略预览直接导出/恢复，或在此粘贴覆盖）'
+                      : null,
                   maxLines: 9,
                   minLines: 6,
                   autocorrect: false,
@@ -15460,17 +15517,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       icon: CupertinoIcons.square_arrow_down,
                       onPressed: () async {
                         try {
+                          final payload = effectivePayload();
+                          final bytes =
+                              StorageService.encodeValidatedLocalBackupUtf8(
+                                payload,
+                              );
                           if (OhosRuntime.isOhos) {
                             final savedUri = await OhosRuntime.saveTextFile(
                               fileName: 'marco-movie-backup.json',
-                              content: ctrl.text,
+                              content: payload,
+                              maxBytes: StorageService.maxLocalBackupBytes,
                             );
                             if (savedUri == null || !ctx.mounted) return;
                             setModalState(() => errorText = null);
                             _showAppleNotice('导出成功', '备份 JSON 文件已保存。');
                             return;
                           }
-                          final bytes = Uint8List.fromList(utf8.encode(ctrl.text));
                           final outputPath = await FilePicker.platform.saveFile(
                             dialogTitle: '导出 Marco Movie 备份 JSON',
                             fileName: 'marco-movie-backup.json',
@@ -15505,12 +15567,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       onPressed: () async {
                         try {
                           final String text;
+                          final int byteLength;
                           if (OhosRuntime.isOhos) {
                             final picked = await OhosRuntime.pickDocumentFile(
                               purpose: OhosDocumentPurpose.backup,
-                              maxBytes: StorageService.maxSyncPayloadBytes,
+                              maxBytes: StorageService.maxLocalBackupBytes,
                             );
                             if (picked == null || !ctx.mounted) return;
+                            StorageService.validateLocalBackupUtf8Bytes(
+                              picked.bytes,
+                            );
+                            byteLength = picked.bytes.length;
                             text = picked.decodeUtf8(allowMalformed: false);
                           } else {
                             final picked = await FilePicker.platform.pickFiles(
@@ -15521,22 +15588,41 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             if (entry == null || !ctx.mounted) return;
                             if (entry.path != null && entry.path!.isNotEmpty) {
                               final file = File(entry.path!);
-                              if (await file.length() > StorageService.maxSyncPayloadBytes) {
-                                throw const FormatException('备份文件超过 8 MB 限制');
+                              final len = await file.length();
+                              if (len > StorageService.maxLocalBackupBytes) {
+                                throw FormatException(
+                                  '本地备份文件超过 ${StorageService.formatLocalBackupByteLimit()} 限制',
+                                );
                               }
-                              text = await file.readAsString();
+                              final rawBytes = await file.readAsBytes();
+                              StorageService.validateLocalBackupUtf8Bytes(rawBytes);
+                              byteLength = rawBytes.length;
+                              text = utf8.decode(rawBytes, allowMalformed: false);
                             } else if (entry.bytes != null) {
-                              if (entry.bytes!.length > StorageService.maxSyncPayloadBytes) {
-                                throw const FormatException('备份文件超过 8 MB 限制');
-                              }
-                              text = utf8.decode(entry.bytes!);
+                              StorageService.validateLocalBackupUtf8Bytes(
+                                entry.bytes!,
+                              );
+                              byteLength = entry.bytes!.length;
+                              text = utf8.decode(
+                                entry.bytes!,
+                                allowMalformed: false,
+                              );
                             } else {
                               return;
                             }
                           }
                           if (!ctx.mounted) return;
                           setModalState(() {
-                            ctrl.text = text;
+                            if (text.length > inlineTextFieldCharLimit) {
+                              fullBackupPayload = text;
+                              ctrl.text = '';
+                              loadedLargeSummary =
+                                  '已载入备份文件（${(byteLength / (1024 * 1024)).toStringAsFixed(1)} MB），点击下方按钮恢复';
+                            } else {
+                              fullBackupPayload = null;
+                              loadedLargeSummary = null;
+                              ctrl.text = text;
+                            }
                             errorText = null;
                           });
                         } on FormatException catch (e) {
@@ -15557,12 +15643,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               SizedBox(
                 width: double.infinity,
                 child: AppleCapsuleButton(
+                  key: const ValueKey('backup-restore-confirm'),
                   label: '从此备份文本恢复',
                   icon: CupertinoIcons.arrow_counterclockwise,
                   primary: true,
                   onPressed: () async {
                     try {
-                      await widget.storage.importBackupJson(ctrl.text);
+                      await widget.storage.importBackupJson(effectivePayload());
                       if (ctx.mounted) Navigator.of(ctx).pop();
                       _reloadSavedConfig();
                     } catch (e) {

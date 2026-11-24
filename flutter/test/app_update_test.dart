@@ -594,5 +594,16 @@ void main() {
         throwsA(isA<HttpException>()),
       );
     });
+
+    test('compareVersions distinguishes remote newer, equal, and remote older', () {
+      expect(AppUpdate.compareVersions('0.1.3', '0.1.2'), greaterThan(0));
+      expect(AppUpdate.compareVersions('0.1.2', '0.1.2'), 0);
+      expect(AppUpdate.compareVersions('v0.1.2', '0.1.2'), 0);
+      expect(AppUpdate.compareVersions('0.1.1', '0.1.2'), lessThan(0));
+      expect(AppUpdate.compareVersions('v0.1.1', '0.1.2'), lessThan(0));
+      expect(AppUpdate.isRemoteVersionNewer('0.1.3', '0.1.2'), isTrue);
+      expect(AppUpdate.isRemoteVersionNewer('0.1.2', '0.1.2'), isFalse);
+      expect(AppUpdate.isRemoteVersionNewer('0.1.1', '0.1.2'), isFalse);
+    });
   });
 }

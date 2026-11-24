@@ -390,6 +390,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _wasAvPlaying = false;
   bool _wasAvBuffering = false;
   bool _wasAvCompleted = false;
+  bool _userPausedPlayback = false;
 
   static String _avGravityForFit(BoxFit fit) => switch (fit) {
     BoxFit.cover => 'resizeAspectFill',
@@ -410,17 +411,29 @@ class _PlayerScreenState extends State<PlayerScreen>
       ? ((_iosAvPlayerController?.volume ?? 1.0) * 100.0).clamp(0.0, 100.0)
       : _player.state.volume;
 
-  Future<void> _enginePlay() => _usingAvPlayer
-      ? (_iosAvPlayerController?.play() ?? Future<void>.value())
-      : _player.play();
+  Future<void> _enginePlay() {
+    _userPausedPlayback = false;
+    _startup.setUserPaused(false);
+    return _usingAvPlayer
+        ? (_iosAvPlayerController?.play() ?? Future<void>.value())
+        : _player.play();
+  }
 
-  Future<void> _enginePause() => _usingAvPlayer
-      ? (_iosAvPlayerController?.pause() ?? Future<void>.value())
-      : _player.pause();
+  Future<void> _enginePause() {
+    _userPausedPlayback = true;
+    _startup.setUserPaused(true);
+    return _usingAvPlayer
+        ? (_iosAvPlayerController?.pause() ?? Future<void>.value())
+        : _player.pause();
+  }
 
-  Future<void> _enginePlayOrPause() => _usingAvPlayer
-      ? (_iosAvPlayerController?.playOrPause() ?? Future<void>.value())
-      : _player.playOrPause();
+  Future<void> _enginePlayOrPause() {
+    final shouldPause = _playing ||
+        (!_userPausedPlayback &&
+            (_loading || _buffering) &&
+            _playbackError.isEmpty);
+    return shouldPause ? _enginePause() : _enginePlay();
+  }
 
   bool get _usesOhosAvPlayer =>
       _player.platform is OhosPlatformPlayer || OhosRuntime.isOhos;
@@ -1072,7 +1085,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       });
       if (_videoWidth > 0 && _videoHeight > 0) {
         if (_isLiveStream && _playing && !_buffering) {
-          _startup.cancel();
+          _startup.markLiveFrameReady();
         }
         _startSpecController.onFirstFrameReady(
           enabled: _hudPrefs.effectiveStartSpecHud,
@@ -1090,7 +1103,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       });
       if (_videoWidth > 0 && _videoHeight > 0) {
         if (_isLiveStream && _playing && !_buffering) {
-          _startup.cancel();
+          _startup.markLiveFrameReady();
         }
         _startSpecController.onFirstFrameReady(
           enabled: _hudPrefs.effectiveStartSpecHud,
@@ -1288,7 +1301,13 @@ class _PlayerScreenState extends State<PlayerScreen>
           _openCurrentEpisode(resumeMs: 0);
           return;
         }
-        _startup.updateState(playing: playing);
+        if (playing) {
+          _userPausedPlayback = false;
+        }
+        _startup.updateState(
+          playing: playing,
+          userPaused: _userPausedPlayback,
+        );
         setState(() {
           _playing = playing;
           if (playing) {
@@ -1331,12 +1350,15 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _playerSubscriptions.add(_player.stream.buffering.listen((buffering) {
       if (mounted && _allowEvents && _matchesActiveMedia) {
-        _startup.updateState(buffering: buffering);
+        _startup.updateState(
+          buffering: buffering,
+          userPaused: _userPausedPlayback,
+        );
         setState(() => _buffering = buffering);
         if (!buffering) {
           _midPlaybackStallTimer?.cancel();
           if (_isLiveStream && _playing && _videoWidth > 0 && _videoHeight > 0) {
-            _startup.cancel();
+            _startup.markLiveFrameReady();
           }
           if (_playing) _scheduleHide();
         } else if (!_isLiveStream &&
@@ -1423,6 +1445,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               lower.contains('mdk decoder.video') ||
               lower.contains('mdk failed'));
       final shouldHandleError = isFatalStartupError ||
+          isOhosAvPlayerError ||
           (!_isLiveStream &&
               !_playing &&
               _duration <= Duration.zero &&
@@ -1499,7 +1522,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _videoWidth = nextW;
       _videoHeight = nextH;
       if (_isLiveStream && nextPlaying && !nextBuffering) {
-        _startup.cancel();
+        _startup.markLiveFrameReady();
       }
       _startSpecController.onFirstFrameReady(
         enabled: _hudPrefs.effectiveStartSpecHud,
@@ -1558,7 +1581,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     _startup.position(nextPos);
-    _startup.updateState(playing: nextPlaying, buffering: nextBuffering);
+    if (nextPlaying) {
+      _userPausedPlayback = false;
+    }
+    _startup.updateState(
+      playing: nextPlaying,
+      buffering: nextBuffering,
+      userPaused: _userPausedPlayback,
+    );
     _playing = nextPlaying;
     _buffering = nextBuffering;
 
@@ -2205,6 +2235,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     bool forceLiveLocalProxy = false,
     bool useAlternateLiveUa = false,
   }) async {
+    _userPausedPlayback = false;
     _startup.reset();
     if (!bypassLocalProxy && !forceLiveLocalProxy && !useAlternateLiveUa) {
       _liveDirectFallbackTried = false;

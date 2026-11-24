@@ -47,6 +47,63 @@ class _StaticJsonHttpClient extends http.BaseClient {
   }
 }
 
+class _AbortTrackingHttpClient extends http.BaseClient {
+  final Future<http.Response> Function(
+    http.BaseRequest request,
+    Future<void>? abortTrigger,
+  ) handler;
+
+  int liveInFlight = 0;
+  int maxLiveInFlight = 0;
+  final List<String> startedUrls = <String>[];
+  final List<String> abortedUrls = <String>[];
+
+  _AbortTrackingHttpClient(this.handler);
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final urlStr = request.url.toString();
+    startedUrls.add(urlStr);
+    final Future<void>? abortTrigger =
+        request is http.AbortableRequest ? request.abortTrigger : null;
+    liveInFlight++;
+    if (liveInFlight > maxLiveInFlight) {
+      maxLiveInFlight = liveInFlight;
+    }
+    var settled = false;
+    void releaseSlot() {
+      if (!settled) {
+        settled = true;
+        liveInFlight--;
+      }
+    }
+
+    final abortCompleter = Completer<http.StreamedResponse>();
+    abortTrigger?.then((_) {
+      abortedUrls.add(urlStr);
+      releaseSlot();
+      if (!abortCompleter.isCompleted) {
+        abortCompleter.completeError(http.RequestAbortedException(request.url));
+      }
+    });
+
+    final work = handler(request, abortTrigger).then((resp) {
+      releaseSlot();
+      return http.StreamedResponse(
+        Stream<List<int>>.value(resp.bodyBytes),
+        resp.statusCode,
+        headers: resp.headers,
+        request: request,
+      );
+    }).catchError((Object err, StackTrace st) {
+      releaseSlot();
+      throw err;
+    });
+
+    return Future.any<http.StreamedResponse>([work, abortCompleter.future]);
+  }
+}
+
 class _FakeCmsHttpClient extends http.BaseClient {
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
@@ -2665,6 +2722,953 @@ http://127.0.0.1:18080/b1.m3u8
         // 3) Returned cleanly to search results still showing the matched card
         expect(find.byType(TvDetailScreen), findsNothing);
         expect(find.text('遥控器全流程剧'), findsOneWidget);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 5));
+      },
+    );
+  });
+
+  group('Round-2 HarmonyOS Review Rework Regressions', () {
+    tearDown(() {
+      const avChannel = MethodChannel('com.pilipala.marcomovie/ohos_avplayer');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(avChannel, null);
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(OhosRuntime.systemChannel, null);
+      AppUpdate.debugHttpClientOverride = null;
+      OhosRuntime.resetForTesting();
+    });
+
+    testWidgets(
+      'R2-2 distinguishes silent stall failover, 10s mid-playback terminal error, and explicit user pause',
+      (tester) async {
+        const avChannel = MethodChannel('com.pilipala.marcomovie/ohos_avplayer');
+        final chA = const LiveChannel(
+          name: '测试频道A',
+          group: '央视频道',
+          urls: [
+            'http://127.0.0.1:18080/a1.m3u8',
+            'http://127.0.0.1:18080/a2.m3u8',
+          ],
+        );
+        final chB = const LiveChannel(
+          name: '测试频道B',
+          group: '央视频道',
+          urls: ['http://127.0.0.1:18080/b1.m3u8'],
+        );
+        final liveGroups = [LiveGroup(name: '央视频道', channels: [chA, chB])];
+
+        // --- Case 1: Silent stall (playing=false, buffering=true) -> retry A1 -> switch A2 -> stay on A with Retry ---
+        SharedPreferences.setMockInitialValues({});
+        var storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+        final opens1 = <String>[];
+        late OhosPlatformPlayer player1;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(avChannel, (call) async {
+          if (call.method == 'create') {
+            return <String, dynamic>{'playerId': 71, 'textureId': 710};
+          }
+          if (call.method == 'open') {
+            opens1.add((call.arguments as Map)['url'] as String);
+            scheduleMicrotask(() {
+              player1.handleNativeEvent({
+                'type': 'state',
+                'playing': false,
+                'buffering': true,
+                'completed': false,
+              });
+            });
+          }
+          return true;
+        });
+        player1 = OhosPlatformPlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(key: 'live', name: '直播', type: 0, api: ''),
+              video: CmsVideo(
+                id: chA.name,
+                title: chA.name,
+                lines: [CmsLine(name: chA.group, episodes: chA.episodes)],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              isLive: true,
+              initialLiveChannel: chA,
+              liveGroups: liveGroups,
+              debugPlayer: Player(platformPlayer: player1),
+              debugVideoSurface: const SizedBox.expand(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(opens1, ['http://127.0.0.1:18080/a1.m3u8']);
+        // 7s -> retries A1; 15s -> switches to A2; 30s -> A2 exhausted -> stays on A with Retry UI
+        for (var s = 0; s < 32; s++) {
+          await tester.pump(const Duration(seconds: 1));
+        }
+        expect(opens1.contains('http://127.0.0.1:18080/a2.m3u8'), isTrue);
+        expect(opens1.contains('http://127.0.0.1:18080/b1.m3u8'), isFalse);
+        expect(find.text('重试播放'), findsOneWidget);
+        expect(find.textContaining('测试频道A'), findsWidgets);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // --- Case 2: Normal playback for 10s, then native reports terminal error ---
+        SharedPreferences.setMockInitialValues({});
+        storage = await StorageService.init();
+        final opens2 = <String>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(avChannel, (call) async {
+          if (call.method == 'create') {
+            return <String, dynamic>{'playerId': 72, 'textureId': 720};
+          }
+          if (call.method == 'open') {
+            opens2.add((call.arguments as Map)['url'] as String);
+          }
+          return true;
+        });
+        final player2 = OhosPlatformPlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(key: 'live', name: '直播', type: 0, api: ''),
+              video: CmsVideo(
+                id: chA.name,
+                title: chA.name,
+                lines: [CmsLine(name: chA.group, episodes: chA.episodes)],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              isLive: true,
+              initialLiveChannel: chA,
+              liveGroups: liveGroups,
+              debugPlayer: Player(platformPlayer: player2),
+              debugVideoSurface: const SizedBox.expand(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        player2.handleNativeEvent({
+          'type': 'state',
+          'playing': true,
+          'buffering': false,
+          'completed': false,
+        });
+        player2.handleNativeEvent({
+          'type': 'videoSize',
+          'width': 1920,
+          'height': 1080,
+        });
+        for (var sec = 1; sec <= 10; sec++) {
+          player2.handleNativeEvent({
+            'type': 'position',
+            'positionMs': sec * 1000,
+            'durationMs': 0,
+            'bufferedMs': sec * 1000,
+          });
+          await tester.pump(const Duration(seconds: 1));
+        }
+        // 10s of normal playback: no timeout retry, no error
+        expect(opens2, ['http://127.0.0.1:18080/a1.m3u8']);
+        expect(find.text('重试播放'), findsNothing);
+        // Terminal AVPlayer error at t=10s must surface Retry UI (NOT swallowed, NOT jumping to A2/B)
+        player2.handleNativeEvent({
+          'type': 'state',
+          'playing': false,
+          'buffering': false,
+          'completed': false,
+        });
+        player2.handleNativeEvent({
+          'type': 'error',
+          'code': 5400103,
+          'message': 'AVPlayer error (5400103): stream disconnected',
+        });
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(opens2, ['http://127.0.0.1:18080/a1.m3u8']);
+        expect(find.text('重试播放'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // --- Case 3: Explicit user pause cancels startup timeout (no retry, no failover, no error) ---
+        SharedPreferences.setMockInitialValues({});
+        storage = await StorageService.init();
+        final opens3 = <String>[];
+        var pauseCalls = 0;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(avChannel, (call) async {
+          if (call.method == 'create') {
+            return <String, dynamic>{'playerId': 73, 'textureId': 730};
+          }
+          if (call.method == 'open') {
+            opens3.add((call.arguments as Map)['url'] as String);
+          }
+          if (call.method == 'pause') {
+            pauseCalls++;
+          }
+          return true;
+        });
+        final player3 = OhosPlatformPlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(key: 'live', name: '直播', type: 0, api: ''),
+              video: CmsVideo(
+                id: chA.name,
+                title: chA.name,
+                lines: [CmsLine(name: chA.group, episodes: chA.episodes)],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              isLive: true,
+              initialLiveChannel: chA,
+              liveGroups: liveGroups,
+              debugPlayer: Player(platformPlayer: player3),
+              debugVideoSurface: const SizedBox.expand(),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        player3.handleNativeEvent({
+          'type': 'state',
+          'playing': false,
+          'buffering': true,
+          'completed': false,
+        });
+        await tester.pump(const Duration(milliseconds: 100));
+        // User explicitly pauses via Space key during initial wait
+        await tester.sendKeyEvent(LogicalKeyboardKey.space);
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(pauseCalls, greaterThanOrEqualTo(1));
+        for (var s = 0; s < 25; s++) {
+          await tester.pump(const Duration(seconds: 1));
+        }
+        expect(opens3, ['http://127.0.0.1:18080/a1.m3u8']);
+        expect(find.text('重试播放'), findsNothing);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 250));
+      },
+    );
+
+    testWidgets(
+      'R2-3 phone and Smart Screen update panels distinguish remote older, equal, and newer versions',
+      (tester) async {
+        http.Response buildFeed(String remoteVersion) {
+          final name = 'MarcoMovie-$remoteVersion-harmonyos-universal.hap';
+          return http.Response.bytes(
+            utf8.encode(
+              jsonEncode({
+                'schema': 1,
+                'platform': 'harmonyos',
+                'versionName': remoteVersion,
+                'notes': '- HarmonyOS v$remoteVersion release notes',
+                'packages': {
+                  name: {
+                    'size': 39546323,
+                    'sha256': 'e' * 64,
+                    'url':
+                        'https://github.com/Pilipala9919/MarcoMovie/releases/download/harmonyos-v$remoteVersion/$name',
+                  },
+                },
+                'release_url':
+                    'https://github.com/Pilipala9919/MarcoMovie/releases/tag/harmonyos-v$remoteVersion',
+              }),
+            ),
+            200,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
+          );
+        }
+
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(OhosRuntime.systemChannel, (call) async {
+          if (call.method == 'getPackageInfo') {
+            return <String, String>{
+              'appName': 'Marco Movie',
+              'packageName': 'com.pilipala.marcomovie',
+              'version': '0.1.2',
+              'buildNumber': '1000003',
+            };
+          }
+          return null;
+        });
+
+        // --- Part A: Smart Screen (TV) 3-way check ---
+        SharedPreferences.setMockInitialValues({});
+        final tvStorage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+        var feedVersion = '0.1.1';
+        AppUpdate.debugHttpClientOverride =
+            MockClient((_) async => buildFeed(feedVersion));
+
+        tester.view.physicalSize = const Size(1920, 1080);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TvLivingRoomShell(
+              storage: tvStorage,
+              client: CmsClient(client: _StaticJsonHttpClient('{}')),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.text('设置'));
+        await tester.pump(const Duration(milliseconds: 150));
+        await tester.tap(find.text('版本与更新'));
+        await tester.pump(const Duration(milliseconds: 150));
+
+        // 1) Remote older (0.1.1 < 0.1.2): show BOTH versions, HIDE download button
+        await tester.tap(find.byKey(const ValueKey('tv-check-update-btn')));
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.textContaining('0.1.2'), findsWidgets);
+        expect(find.textContaining('0.1.1'), findsWidgets);
+        expect(find.byKey(const ValueKey('tv-download-hap-btn')), findsNothing);
+        expect(find.text('重新下载 HAP v0.1.1'), findsNothing);
+
+        // 2) Remote equal (0.1.2 == 0.1.2): show re-download button
+        feedVersion = '0.1.2';
+        await tester.tap(find.byKey(const ValueKey('tv-check-update-btn')));
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.byKey(const ValueKey('tv-download-hap-btn')), findsOneWidget);
+        expect(find.text('重新下载 HAP v0.1.2'), findsOneWidget);
+
+        // 3) Remote newer (0.1.3 > 0.1.2): show upgrade download button
+        feedVersion = '0.1.3';
+        await tester.tap(find.byKey(const ValueKey('tv-check-update-btn')));
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.byKey(const ValueKey('tv-download-hap-btn')), findsOneWidget);
+        expect(find.text('下载未签名 HAP v0.1.3'), findsOneWidget);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // --- Part B: Phone / Touchscreen AdaptiveShell 3-way check ---
+        Future<void> verifyPhoneUpdateMode(
+          String remoteVer, {
+          required bool expectDownloadBtn,
+          String? expectedBtnLabel,
+        }) async {
+          SharedPreferences.setMockInitialValues({});
+          final phoneStorage = await StorageService.init();
+          OhosRuntime.debugIsOhosOverride = true;
+          OhosRuntime.debugDeviceTypeOverride = 'phone';
+          AppUpdate.debugHttpClientOverride =
+              MockClient((_) async => buildFeed(remoteVer));
+          tester.view.physicalSize = const Size(390, 844);
+          tester.view.devicePixelRatio = 1.0;
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: AdaptiveShell(
+                storage: phoneStorage,
+                client: CmsClient(client: _StaticJsonHttpClient('{}')),
+              ),
+            ),
+          );
+          await tester.pump(const Duration(milliseconds: 250));
+          await tester.tap(find.text('设置').last);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 250));
+          final updateTile = find.text('检查版本更新').evaluate().isNotEmpty
+              ? find.text('检查版本更新')
+              : find.text('软件更新与版本');
+          await tester.scrollUntilVisible(
+            updateTile,
+            250,
+            scrollable: find.byType(Scrollable).last,
+          );
+          await tester.drag(find.byType(Scrollable).last, const Offset(0, -180));
+          await tester.pump();
+          await tester.tap(updateTile);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 350));
+
+          expect(find.textContaining('0.1.2'), findsWidgets);
+          expect(find.textContaining(remoteVer), findsWidgets);
+          if (expectDownloadBtn) {
+            expect(
+              find.byKey(const ValueKey('ohos-update-download-hap')),
+              findsOneWidget,
+            );
+            expect(find.text(expectedBtnLabel!), findsOneWidget);
+          } else {
+            expect(
+              find.byKey(const ValueKey('ohos-update-download-hap')),
+              findsNothing,
+            );
+            expect(find.text('重新下载 HAP v$remoteVer'), findsNothing);
+          }
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump(const Duration(milliseconds: 250));
+        }
+
+        await verifyPhoneUpdateMode('0.1.1', expectDownloadBtn: false);
+        await verifyPhoneUpdateMode(
+          '0.1.2',
+          expectDownloadBtn: true,
+          expectedBtnLabel: '重新下载 HAP v0.1.2',
+        );
+        await verifyPhoneUpdateMode(
+          '0.1.3',
+          expectDownloadBtn: true,
+          expectedBtnLabel: '下载未签名 HAP v0.1.3',
+        );
+      },
+    );
+
+    testWidgets(
+      'R2-4 unifies local backup UTF-8 limits (>8 MiB 2-sub round-trip, exact boundary, corrupt preserves config, WebDAV stays 8 MiB)',
+      (tester) async {
+        // WebDAV sync limit stays untouched at 8 MiB; local backup limit is unified at 32 MiB
+        expect(StorageService.maxSyncPayloadBytes, 8 * 1024 * 1024);
+        expect(StorageService.maxLocalBackupBytes, 32 * 1024 * 1024);
+
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+        // 1) Two valid subscriptions totaling > 8 MiB (~4.6 MiB each -> > 9.2 MiB combined, exported backup > 13 MiB)
+        String buildLargeValidConfig(String prefix, int targetBytes) {
+          final sites = <Map<String, dynamic>>[];
+          final pad = 'x' * 4000;
+          var idx = 0;
+          while (idx * 4120 < targetBytes) {
+            idx++;
+            sites.add({
+              'key': '${prefix}_site_$idx',
+              'name': '$prefix 站点 $idx',
+              'type': 1,
+              'api': 'http://127.0.0.1:18080/$prefix/$idx',
+              'ext': pad,
+            });
+          }
+          return jsonEncode({'sites': sites});
+        }
+
+        final rawSub1 = buildLargeValidConfig('subA', 4600 * 1024);
+        final rawSub2 = buildLargeValidConfig('subB', 4600 * 1024);
+        expect(
+          utf8.encode(rawSub1).length + utf8.encode(rawSub2).length,
+          greaterThan(StorageService.maxSyncPayloadBytes),
+        );
+
+        await storage.saveSubscriptions([
+          SubscriptionEntry(
+            id: 'sub_large_1',
+            name: '大型订阅一',
+            url: 'http://127.0.0.1:18080/sub1.json',
+            rawContent: rawSub1,
+          ),
+          SubscriptionEntry(
+            id: 'sub_large_2',
+            name: '大型订阅二',
+            url: 'http://127.0.0.1:18080/sub2.json',
+            rawContent: rawSub2,
+          ),
+        ]);
+        await storage.toggleFavorite(
+          const CmsSite(key: 'subA_site_1', name: 'subA 站点 1', type: 1, api: 'http://127.0.0.1:18080/subA/1'),
+          const CmsVideo(id: 'fav_1', title: '大备份收藏片'),
+        );
+
+        String? capturedExportText;
+        Uint8List? mockPickedBytes;
+        String mockPickedName = 'marco-movie-backup.json';
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(OhosRuntime.systemChannel, (call) async {
+          final args = call.arguments is Map
+              ? Map<String, dynamic>.from(call.arguments as Map)
+              : const <String, dynamic>{};
+          if (call.method == 'saveTextFile') {
+            capturedExportText = args['content']?.toString() ?? '';
+            return 'file://docs/marco-movie-backup.json';
+          }
+          if (call.method == 'pickDocumentFile') {
+            final maxBytes = (args['maxBytes'] as num?)?.toInt() ?? 0;
+            final bytes = mockPickedBytes!;
+            if (maxBytes > 0 && bytes.length > maxBytes) {
+              throw PlatformException(
+                code: 'OHOS_ERR',
+                message: 'FILE_TOO_LARGE:所选文件超过 ${maxBytes ~/ (1024 * 1024)} MB 限制',
+              );
+            }
+            return <String, Object?>{
+              'name': mockPickedName,
+              'path': 'file://docs/$mockPickedName',
+              'bytes': bytes,
+              'size': bytes.length,
+            };
+          }
+          return null;
+        });
+
+        // Smart Screen export & restore > 8 MiB two-subscription backup
+        tester.view.physicalSize = const Size(1920, 1080);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TvLivingRoomShell(
+              storage: storage,
+              client: CmsClient(client: _StaticJsonHttpClient('{}')),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.text('设置'));
+        await tester.pump(const Duration(milliseconds: 150));
+        await tester.tap(find.text('备份与存储'));
+        await tester.pump(const Duration(milliseconds: 150));
+        await tester.tap(find.text('导出备份文件 / 复制 JSON'));
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text('已导出备份文件'), findsOneWidget);
+        expect(capturedExportText, isNotNull);
+        final exportedBytes = utf8.encode(capturedExportText!);
+        expect(exportedBytes.length, greaterThan(StorageService.maxSyncPayloadBytes));
+        expect(exportedBytes.length, lessThanOrEqualTo(StorageService.maxLocalBackupBytes));
+
+        // Reset into a fresh storage & restore via Smart Screen picker (fresh cold start)
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 100));
+        SharedPreferences.setMockInitialValues({});
+        final restoredTvStorage = await StorageService.init();
+        mockPickedBytes = Uint8List.fromList(exportedBytes);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TvLivingRoomShell(
+              storage: restoredTvStorage,
+              client: CmsClient(client: _StaticJsonHttpClient('{}')),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.text('设置'));
+        await tester.pump(const Duration(milliseconds: 150));
+        await tester.tap(find.text('备份与存储'));
+        await tester.pump(const Duration(milliseconds: 150));
+        await tester.tap(find.text('从本地备份文件恢复'));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('跨端备份已恢复'), findsOneWidget);
+        expect(restoredTvStorage.getSubscriptions().length, 2);
+        expect(restoredTvStorage.getFavorites().map((f) => f.title), contains('大备份收藏片'));
+
+        // Corrupt backup file on Smart Screen -> fails cleanly & preserves existing subscriptions/favorites
+        mockPickedBytes = Uint8List.fromList(utf8.encode('{corrupt json payload'));
+        await tester.tap(find.text('从本地备份文件恢复'));
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(restoredTvStorage.getSubscriptions().length, 2);
+        expect(restoredTvStorage.getFavorites().map((f) => f.title), contains('大备份收藏片'));
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // Phone AdaptiveShell export & restore of the same > 8 MiB two-subscription backup
+        OhosRuntime.debugDeviceTypeOverride = 'phone';
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1.0;
+        capturedExportText = null;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AdaptiveShell(
+              storage: restoredTvStorage,
+              client: CmsClient(client: _StaticJsonHttpClient('{}')),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.text('设置').last);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        final backupTile = find.text('跨平台备份与恢复').evaluate().isNotEmpty
+            ? find.text('跨平台备份与恢复')
+            : find.text('备份与恢复');
+        await tester.scrollUntilVisible(
+          backupTile,
+          250,
+          scrollable: find.byType(Scrollable).last,
+        );
+        await tester.tap(backupTile);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.byKey(const ValueKey('backup-save-json-file')));
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.text('导出成功'), findsOneWidget);
+        expect(
+          utf8.encode(capturedExportText!).length,
+          greaterThan(StorageService.maxSyncPayloadBytes),
+        );
+        // Dismiss notice & test phone file pick + restore
+        await tester.tap(find.text('好').last);
+        await tester.pump(const Duration(milliseconds: 150));
+        mockPickedBytes = Uint8List.fromList(utf8.encode(capturedExportText!));
+        await tester.tap(find.byKey(const ValueKey('backup-load-json-file')));
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.byKey(const ValueKey('backup-restore-confirm')));
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(restoredTvStorage.getSubscriptions().length, 2);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // 2) Exact UTF-8 boundary check: == maxLocalBackupBytes passes both export & import; +1 byte rejects BOTH!
+        const limit = StorageService.maxLocalBackupBytes;
+        final shellPrefix = '{"format":"MarcoMovie-1","origin":"","config":"{\\"sites\\":[{\\"key\\":\\"b\\",\\"name\\":\\"边界\\",\\"type\\":1,\\"api\\":\\"http://127.0.0.1:18080/b\\",\\"ext\\":\\"';
+        const shellSuffix = '\\"}]}","settings":{}}';
+        final overheadBytes = utf8.encode(shellPrefix).length + utf8.encode(shellSuffix).length;
+        final exactPayload = '$shellPrefix${'a' * (limit - overheadBytes)}$shellSuffix';
+        final exactBytes = utf8.encode(exactPayload);
+        expect(exactBytes.length, limit);
+
+        // Exact boundary passes validation, saveTextFile, pickDocumentFile, and importBackupJson
+        expect(StorageService.encodeValidatedLocalBackupUtf8(exactPayload).length, limit);
+        final savedExact = await OhosRuntime.saveTextFile(
+          fileName: 'exact.json',
+          content: exactPayload,
+          maxBytes: limit,
+        );
+        expect(savedExact, isNotNull);
+        mockPickedBytes = Uint8List.fromList(exactBytes);
+        final pickedExact = await OhosRuntime.pickDocumentFile(
+          purpose: OhosDocumentPurpose.backup,
+          maxBytes: limit,
+        );
+        expect(pickedExact?.size, limit);
+        SharedPreferences.setMockInitialValues({});
+        final boundaryStorage = await StorageService.init();
+        await boundaryStorage.importBackupJson(exactPayload);
+        expect(boundaryStorage.loadSavedConfig()?.sites.first.key, 'b');
+
+        // Over boundary by 1 UTF-8 byte (+1): rejected on BOTH export & import, existing config preserved!
+        final overByOnePayload = '$shellPrefix${'a' * (limit - overheadBytes + 1)}$shellSuffix';
+        expect(utf8.encode(overByOnePayload).length, limit + 1);
+        expect(
+          () => StorageService.encodeValidatedLocalBackupUtf8(overByOnePayload),
+          throwsFormatException,
+        );
+        await expectLater(
+          OhosRuntime.saveTextFile(
+            fileName: 'over.json',
+            content: overByOnePayload,
+            maxBytes: limit,
+          ),
+          throwsFormatException,
+        );
+        mockPickedBytes = Uint8List.fromList(utf8.encode(overByOnePayload));
+        await expectLater(
+          OhosRuntime.pickDocumentFile(
+            purpose: OhosDocumentPurpose.backup,
+            maxBytes: limit,
+          ),
+          throwsFormatException,
+        );
+        await expectLater(
+          boundaryStorage.importBackupJson(overByOnePayload),
+          throwsFormatException,
+        );
+        expect(boundaryStorage.loadSavedConfig()?.sites.first.key, 'b');
+      },
+    );
+
+    testWidgets(
+      'R2-5 Smart Screen depot switch cancels slow Repo A HTTP requests, clears stale results, and Repo B hits site #17 within concurrency 4',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final storage = await StorageService.init();
+        OhosRuntime.debugIsOhosOverride = true;
+        OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+        String buildRepoConfig(String prefix, int count) => jsonEncode({
+              'sites': [
+                for (var i = 1; i <= count; i++)
+                  {
+                    'key': '${prefix}_s$i',
+                    'name': '$prefix 站 $i',
+                    'type': 1,
+                    'api': 'http://127.0.0.1:18080/$prefix/site$i',
+                    'searchable': 1,
+                  },
+              ],
+            });
+
+        final repoAConfig = buildRepoConfig('repoA', 8);
+        final repoBConfig = buildRepoConfig('repoB', 18);
+
+        await storage.saveSubscriptions([
+          SubscriptionEntry(
+            id: 'multi_depot_sub',
+            name: '双仓测试订阅',
+            url: 'http://127.0.0.1:18080/multi.json',
+            rawContent: repoAConfig,
+            depots: const [
+              CmsDepot(name: 'A仓', url: 'http://127.0.0.1:18080/depots/a.json'),
+              CmsDepot(name: 'B仓', url: 'http://127.0.0.1:18080/depots/b.json'),
+            ],
+            activeDepotName: 'A仓',
+          ),
+        ]);
+
+        var repoASearchStarted = 0;
+        final repoABlockedCompleters = <Completer<void>>[];
+        var timeoutSiteStarted = false;
+        var keywordSwitchOldStarted = 0;
+
+        final trackingClient = _AbortTrackingHttpClient((request, abortTrigger) async {
+          final path = request.url.path;
+          final wd = request.url.queryParameters['wd'] ?? '';
+          if (path == '/depots/b.json') {
+            return http.Response.bytes(
+              utf8.encode(repoBConfig),
+              200,
+              headers: const {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          if (path == '/depots/a.json') {
+            return http.Response.bytes(
+              utf8.encode(repoAConfig),
+              200,
+              headers: const {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          if (wd.isEmpty) {
+            return http.Response.bytes(
+              utf8.encode(jsonEncode({'code': 1, 'page': 1, 'pagecount': 1, 'list': []})),
+              200,
+              headers: const {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          // Repo A slow responses: site 1 returns an old hit fast; sites 2..8 hang until cancelled
+          if (path.startsWith('/repoA/site')) {
+            repoASearchStarted++;
+            if (path == '/repoA/site1') {
+              return http.Response.bytes(
+                utf8.encode(jsonEncode({
+                  'code': 1,
+                  'list': [
+                    {
+                      'vod_id': 'a_old_1',
+                      'vod_name': 'A仓旧结果影片',
+                      'vod_play_from': '线1',
+                      'vod_play_url': '正片\$http://127.0.0.1:18080/a.m3u8',
+                    },
+                  ],
+                })),
+                200,
+                headers: const {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            final blocker = Completer<void>();
+            repoABlockedCompleters.add(blocker);
+            await blocker.future;
+            return http.Response.bytes(
+              utf8.encode(jsonEncode({
+                'code': 1,
+                'list': [
+                  {
+                    'vod_id': 'a_late',
+                    'vod_name': 'A仓迟到污染结果',
+                    'vod_play_from': '线1',
+                    'vod_play_url': '正片\$http://127.0.0.1:18080/alate.m3u8',
+                  },
+                ],
+              })),
+              200,
+              headers: const {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          // Repo B:
+          // - Keyword 'A': Site #17 is the unique hit (all 18 sites searched with concurrency <= 4)
+          // - Keyword 'AB': Site #1 hangs -> per-site timeout must abort underlying request
+          // - Keyword 'C': all sites hang -> switching keyword to 'D' must abort underlying requests
+          if (path.startsWith('/repoB/site')) {
+            final numStr = path.substring('/repoB/site'.length);
+            final siteNum = int.tryParse(numStr) ?? 0;
+            if (wd == 'A') {
+              await Future<void>.delayed(const Duration(milliseconds: 10));
+              if (siteNum == 17) {
+                return http.Response.bytes(
+                  utf8.encode(jsonEncode({
+                    'code': 1,
+                    'list': [
+                      {
+                        'vod_id': 'b_17',
+                        'vod_name': 'B仓第17站唯一命中',
+                        'vod_play_from': '线1',
+                        'vod_play_url': '正片\$http://127.0.0.1:18080/b17.m3u8',
+                      },
+                    ],
+                  })),
+                  200,
+                  headers: const {'content-type': 'application/json; charset=utf-8'},
+                );
+              }
+              return http.Response.bytes(
+                utf8.encode(jsonEncode({'code': 1, 'list': []})),
+                200,
+                headers: const {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            if (wd == 'AB') {
+              if (siteNum == 1) {
+                timeoutSiteStarted = true;
+                await Completer<void>().future;
+              }
+              return http.Response.bytes(
+                utf8.encode(jsonEncode({'code': 1, 'list': []})),
+                200,
+                headers: const {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            if (wd == 'C') {
+              keywordSwitchOldStarted++;
+              await Completer<void>().future;
+            }
+            if (wd == 'CD') {
+              if (siteNum == 1) {
+                return http.Response.bytes(
+                  utf8.encode(jsonEncode({
+                    'code': 1,
+                    'list': [
+                      {
+                        'vod_id': 'cd_hit',
+                        'vod_name': '换词后最新命中',
+                        'vod_play_from': '线1',
+                        'vod_play_url': '正片\$http://127.0.0.1:18080/cd.m3u8',
+                      },
+                    ],
+                  })),
+                  200,
+                  headers: const {'content-type': 'application/json; charset=utf-8'},
+                );
+              }
+              return http.Response.bytes(
+                utf8.encode(jsonEncode({'code': 1, 'list': []})),
+                200,
+                headers: const {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+          }
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({'code': 1, 'list': []})),
+            200,
+            headers: const {'content-type': 'application/json; charset=utf-8'},
+          );
+        });
+
+        tester.view.physicalSize = const Size(1920, 1080);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: TvLivingRoomShell(
+              storage: storage,
+              client: CmsClient(client: trackingClient),
+              searchSiteTimeout: const Duration(milliseconds: 120),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // 1) Start searching 'A' in Repo A
+        await tester.tap(find.text('搜索'));
+        await tester.pump(const Duration(milliseconds: 150));
+        await tester.tap(find.text('A'));
+        await tester.pump();
+        final submitSearch = find.descendant(
+          of: find.byType(TvRemoteGridKeyboard),
+          matching: find.text('搜索'),
+        );
+        await tester.tap(submitSearch);
+        await tester.pump(const Duration(milliseconds: 40));
+
+        expect(find.text('A仓旧结果影片'), findsOneWidget);
+        expect(repoASearchStarted, greaterThanOrEqualTo(4));
+        expect(trackingClient.maxLiveInFlight, lessThanOrEqualTo(4));
+
+        // 2) Switch to Repo B via 发现 -> Site Picker while Repo A requests are still pending!
+        await tester.tap(find.text('发现'));
+        await tester.pump(const Duration(milliseconds: 150));
+        await tester.tap(find.text('repoA 站 1'));
+        await tester.pump(const Duration(milliseconds: 150));
+        await tester.tap(find.text('仓库: B仓'));
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // All slow Repo A requests must have had their underlying abortTrigger completed!
+        final repoAAborted = trackingClient.abortedUrls
+            .where((u) => u.contains('/repoA/site'))
+            .length;
+        expect(repoAAborted, greaterThanOrEqualTo(repoABlockedCompleters.length));
+        expect(repoAAborted, greaterThanOrEqualTo(3));
+        // Even if slow Repo A completers resolve now, zero late results leak!
+        for (final c in repoABlockedCompleters) {
+          if (!c.isCompleted) c.complete();
+        }
+        await tester.pump(const Duration(milliseconds: 50));
+
+        // Return to Search tab -> old Repo A search results must be completely cleared!
+        await tester.tap(find.text('搜索'));
+        await tester.pump(const Duration(milliseconds: 150));
+        expect(find.text('A仓旧结果影片'), findsNothing);
+        expect(find.text('A仓迟到污染结果'), findsNothing);
+
+        // 3) Search the SAME keyword 'A' in Repo B -> Site #17 uniquely hits, real concurrency <= 4
+        trackingClient.maxLiveInFlight = 0;
+        final submitSearchB = find.descendant(
+          of: find.byType(TvRemoteGridKeyboard),
+          matching: find.text('搜索'),
+        );
+        await tester.tap(submitSearchB);
+        await tester.pump(const Duration(milliseconds: 350));
+        expect(find.text('B仓第17站唯一命中'), findsOneWidget);
+        expect(find.text('A仓旧结果影片'), findsNothing);
+        expect(find.text('A仓迟到污染结果'), findsNothing);
+        expect(trackingClient.maxLiveInFlight, lessThanOrEqualTo(4));
+        expect(trackingClient.maxLiveInFlight, greaterThanOrEqualTo(1));
+
+        // 4) Per-site timeout aborts underlying HTTP request
+        await tester.tap(find.text('B'));
+        await tester.pump();
+        await tester.tap(submitSearchB);
+        await tester.pump(const Duration(milliseconds: 350));
+        expect(timeoutSiteStarted, isTrue);
+        expect(
+          trackingClient.abortedUrls
+              .any((u) => u.contains('/repoB/site1') && u.contains('wd=AB')),
+          isTrue,
+        );
+
+        // 5) Rapid keyword change aborts underlying HTTP requests of superseded search
+        await tester.tap(find.text('清空'));
+        await tester.pump();
+        await tester.tap(find.text('C'));
+        await tester.pump();
+        await tester.tap(submitSearchB);
+        await tester.pump(const Duration(milliseconds: 40));
+        expect(keywordSwitchOldStarted, greaterThanOrEqualTo(4));
+        await tester.tap(find.text('D'));
+        await tester.pump();
+        await tester.tap(submitSearchB);
+        await tester.pump(const Duration(milliseconds: 350));
+        final oldKeywordAborted = trackingClient.abortedUrls
+            .where((u) => u.contains('/repoB/site') && u.contains('wd=C') && !u.contains('wd=CD'))
+            .length;
+        expect(oldKeywordAborted, greaterThanOrEqualTo(4));
+        expect(find.text('换词后最新命中'), findsOneWidget);
+        expect(trackingClient.maxLiveInFlight, lessThanOrEqualTo(4));
 
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(seconds: 5));

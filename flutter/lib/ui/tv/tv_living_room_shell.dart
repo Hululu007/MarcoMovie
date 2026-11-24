@@ -84,6 +84,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
   bool _searchPerformed = false;
   String _searchSelectedSiteKey = '__all__';
   final List<(CmsSite, CmsVideo)> _searchResults = <(CmsSite, CmsVideo)>[];
+  final Set<Completer<void>> _activeSearchCancels = <Completer<void>>{};
   int _searchEpoch = 0;
   int _searchTotalSites = 0;
   int _searchCompletedSites = 0;
@@ -103,6 +104,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
   bool _updateChecking = false;
   bool _updateFailed = false;
   bool _updateHasNewer = false;
+  int _updateVersionCompare = 0;
   String _updateStatus = '点击检查 HarmonyOS NEXT 独立更新源';
   AppUpdate? _latestUpdate;
 
@@ -171,6 +173,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
       _updateChecking = true;
       _updateFailed = false;
       _updateHasNewer = false;
+      _updateVersionCompare = 0;
       _latestUpdate = null;
       _updateStatus = '正在检查 HarmonyOS NEXT 独立更新源…';
     });
@@ -190,21 +193,26 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
       if (platform == 'harmonyos' && targetUrl == null) {
         throw const FormatException('未获取到有效的鸿蒙 HAP 安装包或校验信息');
       }
-      final newer = AppUpdate.isRemoteVersionNewer(release.version, installed);
+      final cmp = AppUpdate.compareVersions(release.version, installed);
+      final newer = cmp > 0;
       if (!mounted) return;
       setState(() {
         _latestUpdate = release;
+        _updateVersionCompare = cmp;
         _updateHasNewer = newer;
         _updateFailed = false;
         _updateChecking = false;
-        _updateStatus = newer
+        _updateStatus = cmp > 0
             ? '发现新版本 v${release.version}（当前 v$installed）'
-            : '当前已是最新版本（v$installed）';
+            : cmp == 0
+                ? '当前已是最新版本（v$installed）'
+                : '当前已装版本 v$installed 高于正式源版本 v${release.version}（无需降级）';
       });
     } on FormatException catch (e) {
       if (!mounted) return;
       setState(() {
         _latestUpdate = null;
+        _updateVersionCompare = 0;
         _updateHasNewer = false;
         _updateFailed = true;
         _updateChecking = false;
@@ -214,6 +222,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
       if (!mounted) return;
       setState(() {
         _latestUpdate = null;
+        _updateVersionCompare = 0;
         _updateHasNewer = false;
         _updateFailed = true;
         _updateChecking = false;
@@ -231,8 +240,41 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
     _showToast('已复制$label：$url');
   }
 
+  void _cancelActiveSearchRequests() {
+    if (_activeSearchCancels.isEmpty) {
+      return;
+    }
+    final pending = _activeSearchCancels.toList(growable: false);
+    _activeSearchCancels.clear();
+    for (final completer in pending) {
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+    }
+  }
+
+  void _cancelAndResetSearch({bool clearQuery = false}) {
+    _searchEpoch++;
+    _cancelActiveSearchRequests();
+    _searching = false;
+    _searchPerformed = false;
+    _searchActiveKeyword = '';
+    _searchSelectedSiteKey = '__all__';
+    _searchResults.clear();
+    _searchTotalSites = 0;
+    _searchCompletedSites = 0;
+    _searchSucceededSites = 0;
+    _searchFailedCount = 0;
+    _searchTimedOutCount = 0;
+    if (clearQuery) {
+      _searchQuery = '';
+    }
+  }
+
   @override
   void dispose() {
+    _searchEpoch++;
+    _cancelActiveSearchRequests();
     _homeScrollController.dispose();
     super.dispose();
   }
@@ -265,6 +307,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
       chosen ??= available.first;
     }
     setState(() {
+      _cancelAndResetSearch();
       _config = cfg;
       _activeSite = chosen;
       _categories = const [];
@@ -424,6 +467,8 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         .where((s) => s.searchable)
         .toList(growable: false);
     final epoch = ++_searchEpoch;
+    final hadInFlight = _activeSearchCancels.isNotEmpty;
+    _cancelActiveSearchRequests();
     setState(() {
       _searching = allSites.isNotEmpty;
       _searchPerformed = true;
@@ -440,6 +485,14 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
       return;
     }
     unawaited(widget.storage.addSearchKeyword(kw));
+    if (hadInFlight) {
+      // Drain the microtask queue so cancelled AbortableRequest triggers abort
+      // previous sockets before opening the next epoch's connections (<= 4 live).
+      await Future<void>.delayed(Duration.zero);
+      if (!mounted || epoch != _searchEpoch) {
+        return;
+      }
+    }
     const batchSize = 16;
     const concurrency = 4;
 
@@ -456,10 +509,20 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
       Future<void> worker() async {
         while (cursor < batch.length && mounted && epoch == _searchEpoch) {
           final site = batch[cursor++];
+          final siteCancel = Completer<void>();
+          _activeSearchCancels.add(siteCancel);
+          var timedOut = false;
+          final timeoutTimer = Timer(widget.searchSiteTimeout, () {
+            timedOut = true;
+            if (!siteCancel.isCompleted) {
+              siteCancel.complete();
+            }
+          });
           try {
-            final res = await widget.client
-                .fetchSearch(site, kw)
-                .timeout(widget.searchSiteTimeout);
+            final res = await widget.client.runSourceOperation(
+              () => widget.client.fetchSearch(site, kw),
+              cancellation: siteCancel,
+            );
             if (!mounted || epoch != _searchEpoch) {
               return;
             }
@@ -488,7 +551,13 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
             setState(() {
               _searchCompletedSites++;
               _searchFailedCount++;
+              if (timedOut) {
+                _searchTimedOutCount++;
+              }
             });
+          } finally {
+            timeoutTimer.cancel();
+            _activeSearchCancels.remove(siteCancel);
           }
         }
       }
@@ -747,7 +816,10 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
   }
 
   Future<void> _switchDepot(SubscriptionEntry sub, CmsDepot depot) async {
-    setState(() => _homeLoading = true);
+    setState(() {
+      _cancelAndResetSearch();
+      _homeLoading = true;
+    });
     try {
       final updated = await widget.client.switchSubscriptionDepot(sub, depot);
       final all = widget.storage.getSubscriptions().map((item) {
@@ -903,11 +975,14 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
               ? OhosDocumentPurpose.backup
               : OhosDocumentPurpose.subscription,
           maxBytes: isBackup
-              ? StorageService.maxSyncPayloadBytes
+              ? StorageService.maxLocalBackupBytes
               : CmsClient.maxResponseBytes,
         );
         if (picked == null) {
           return;
+        }
+        if (isBackup) {
+          StorageService.validateLocalBackupUtf8Bytes(picked.bytes);
         }
         content = isBackup
             ? picked.decodeUtf8(allowMalformed: false)
@@ -931,9 +1006,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
             return;
           }
           if (isBackup) {
-            if (rawBytes.length > StorageService.maxSyncPayloadBytes) {
-              throw const FormatException('备份文件超过 8 MB 限制');
-            }
+            StorageService.validateLocalBackupUtf8Bytes(rawBytes);
             content = utf8.decode(rawBytes, allowMalformed: false);
           } else {
             content = CmsClient.readSubscriptionFile(rawBytes, f.name);
@@ -969,12 +1042,13 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
 
   Future<void> _exportBackup() async {
     try {
-      final jsonText = widget.storage.exportBackupJson();
+      final jsonText = widget.storage.exportValidatedLocalBackupJson();
       const fileName = 'marco-movie-backup.json';
       if (OhosRuntime.isOhos) {
         final saved = await OhosRuntime.saveTextFile(
           fileName: fileName,
           content: jsonText,
+          maxBytes: StorageService.maxLocalBackupBytes,
         );
         if (saved != null) {
           _showToast('已导出备份文件');
@@ -983,6 +1057,8 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
       }
       await Clipboard.setData(ClipboardData(text: jsonText));
       _showToast('跨端备份 JSON 已复制到剪贴板');
+    } on FormatException catch (e) {
+      _showToast('备份导出失败：${e.message}');
     } catch (e) {
       _showToast('备份导出失败：$e');
     }
@@ -3205,32 +3281,34 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                   ],
                 ),
               ),
-              const SizedBox(height: 14),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: const Color(0x260A84FF),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: const Color(0x660A84FF),
+              if (_updateVersionCompare >= 0) ...[
+                const SizedBox(height: 14),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0x260A84FF),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: const Color(0x660A84FF),
+                    ),
+                  ),
+                  child: const Text(
+                    AppUpdate.harmonyosUnsignedInstallGuide,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13.5,
+                      height: 1.5,
+                    ),
                   ),
                 ),
-                child: const Text(
-                  AppUpdate.harmonyosUnsignedInstallGuide,
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 13.5,
-                    height: 1.5,
-                  ),
-                ),
-              ),
+              ],
               const SizedBox(height: 16),
               Wrap(
                 spacing: 12,
                 runSpacing: 12,
                 children: [
-                  if (hapUrl.isNotEmpty)
+                  if (hapUrl.isNotEmpty && _updateVersionCompare >= 0)
                     TvFocusPill(
                       key: const ValueKey('tv-download-hap-btn'),
                       prominent: true,
@@ -3256,7 +3334,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                         ],
                       ),
                     ),
-                  if (hapUrl.isNotEmpty)
+                  if (hapUrl.isNotEmpty && _updateVersionCompare >= 0)
                     TvFocusPill(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 20,

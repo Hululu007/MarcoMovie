@@ -255,15 +255,28 @@ class OhosRuntime {
   static Future<String?> saveTextFile({
     required String fileName,
     required String content,
+    int? maxBytes,
   }) async {
     if (!isOhos) return null;
+    if (maxBytes != null) {
+      final encoded = utf8.encode(content);
+      if (encoded.length > maxBytes) {
+        final rawMb = (maxBytes / (1024 * 1024)).round();
+        final limitMb = rawMb < 1 ? 1 : rawMb;
+        throw FormatException('导出文件超过 $limitMb MB 限制');
+      }
+    }
     try {
       return await systemChannel.invokeMethod<String>('saveTextFile', {
         'fileName': fileName,
         'content': content,
+        if (maxBytes != null) 'maxBytes': maxBytes,
       });
     } on PlatformException catch (e) {
       final msg = (e.message ?? '').trim();
+      if (msg.startsWith('FILE_TOO_LARGE:')) {
+        throw FormatException(msg.substring('FILE_TOO_LARGE:'.length));
+      }
       throw FormatException(msg.isNotEmpty ? msg : '保存本地文件失败，请重试');
     }
   }

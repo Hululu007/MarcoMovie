@@ -17,18 +17,15 @@ import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { window } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import {
-  ChunkedAssetManifest,
-  buildAssetAliasName,
-  buildChunkedAssetManifestJson,
-  computeFnv1aHex,
   concatByteChunks,
   extractMethodArg,
-  isChunkedManifestCandidate,
-  parseChunkedAssetManifest,
   recordFromDynamicObject,
-  splitBytesIntoChunks,
   stringArrayFromDynamicValue
 } from './OhosDynamicBridge';
+import {
+  OhosSecureCredentialEngine,
+  OhosSecureStorageDeps
+} from './OhosSecureCredentialEngine';
 
 const CHANNEL_NAME: string = 'com.pilipala.marcomovie/ohos_system';
 const REMOTE_KEY_CHANNEL_NAME: string = 'com.pilipala.marcomovie/ohos_remote';
@@ -39,14 +36,12 @@ const PACKAGE_INFO_CHANNEL: string = 'dev.fluttercommunity.plus/package_info';
 const URL_LAUNCHER_CHANNEL: string = 'plugins.flutter.io/url_launcher';
 const PREFS_STORE_NAME: string = 'marco_movie_prefs';
 const SECURE_FALLBACK_STORE_NAME: string = 'marco_movie_secure_fallback';
+const SECURE_STATE_STORE_NAME: string = 'marco_movie_secure_state';
 const ASSET_SERVICE_UNAVAILABLE_CODE: number = 24000001;
 const ASSET_NOT_FOUND_CODE: number = 24000002;
 const ASSET_DUPLICATE_CODE: number = 24000003;
 const ASSET_ACCESS_DENIED_CODE: number = 24000004;
 const ASSET_STATUS_MISMATCH_CODE: number = 24000005;
-const ASSET_SECRET_DIRECT_MAX_BYTES: number = 960;
-const ASSET_CHUNK_BYTES: number = 960;
-const ASSET_MAX_CHUNKS: number = 64;
 
 class PathProviderCompatHandler implements MethodCallHandler {
   private readonly host: OhosSystemPlugin;
@@ -103,12 +98,25 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
   private appContext: common.Context | null = null;
   private abilityContext: common.UIAbilityContext | null = null;
   private remoteBoundContext: common.UIAbilityContext | null = null;
-  private assetGenSeq: number = 0;
+  private readonly secureEngine: OhosSecureCredentialEngine;
 
   constructor(context?: common.UIAbilityContext) {
     if (context !== undefined) {
       this.abilityContext = context;
     }
+    const deps: OhosSecureStorageDeps = {
+      assetQueryBytes: (alias: string): Promise<Uint8Array | null> => this.assetQueryBytes(alias),
+      assetPutBytes: (alias: string, secretBytes: Uint8Array): Promise<void> => this.assetPutBytes(alias, secretBytes),
+      assetRemoveAlias: (alias: string): Promise<void> => this.assetRemoveAlias(alias),
+      readLegacyFallback: (key: string): Promise<string | null> => this.readSecureFallback(key),
+      deleteLegacyFallback: (key: string): Promise<void> => this.deleteSecureFallback(key),
+      readPendingDeleteMarker: (markerKey: string): Promise<boolean> => this.readPendingDeleteMarker(markerKey),
+      writePendingDeleteMarker: (markerKey: string): Promise<void> => this.writePendingDeleteMarker(markerKey),
+      clearPendingDeleteMarker: (markerKey: string): Promise<void> => this.clearPendingDeleteMarker(markerKey),
+      encodeUtf8: (text: string): Uint8Array => this.encodeUtf8(text),
+      decodeUtf8: (bytes: Uint8Array): string => this.decodeUtf8(bytes)
+    };
+    this.secureEngine = new OhosSecureCredentialEngine(deps);
   }
 
   getUniqueClassName(): string {
@@ -351,7 +359,11 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
         case 'saveTextFile': {
           const fileName: string = String(this.getArg(call, 'fileName') ?? 'marco_movie_export.json');
           const content: string = String(this.getArg(call, 'content') ?? '');
-          result.success(await this.handleSaveTextFile(fileName, content));
+          const rawMaxBytes: ESObject = this.getArg(call, 'maxBytes');
+          const maxBytes: number = rawMaxBytes === undefined || rawMaxBytes === null
+            ? 0
+            : Math.max(0, Math.trunc(Number(rawMaxBytes)));
+          result.success(await this.handleSaveTextFile(fileName, content, maxBytes));
           return;
         }
         case 'openExternalUrl': {
@@ -599,162 +611,41 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
     }
   }
 
-  private async bestEffortRemoveChunks(primaryAlias: string, gen: string, count: number): Promise<void> {
-    for (let i = 0; i < count; i++) {
-      try {
-        await this.assetRemoveAlias(primaryAlias + '#' + gen + '#' + String(i));
-      } catch (_err) {
-        // Best-effort orphan cleanup only; never mask primary outcome.
-      }
-    }
-  }
-
-  private async readFromAssetStore(key: string): Promise<string | null> {
-    const primaryAlias: string = buildAssetAliasName(key);
-    const rawPrimary: Uint8Array | null = await this.assetQueryBytes(primaryAlias);
-    if (rawPrimary === null) {
-      return null;
-    }
-    const decodedPrimary: string = this.decodeUtf8(rawPrimary);
-    const manifest: ChunkedAssetManifest | null = parseChunkedAssetManifest(decodedPrimary);
-    if (manifest === null) {
-      return decodedPrimary;
-    }
-    const chunks: Array<Uint8Array> = [];
-    for (let i = 0; i < manifest.count; i++) {
-      const chunkBytes: Uint8Array | null = await this.assetQueryBytes(
-        primaryAlias + '#' + manifest.gen + '#' + String(i)
-      );
-      if (chunkBytes === null) {
-        throw new Error('系统安全存储分段凭据不完整，请重新保存');
-      }
-      chunks.push(chunkBytes);
-    }
-    const merged: Uint8Array = concatByteChunks(chunks);
-    if (
-      merged.byteLength !== manifest.totalBytes ||
-      computeFnv1aHex(merged) !== manifest.checksum
-    ) {
-      throw new Error('系统安全存储分段凭据校验失败，请重新保存');
-    }
-    return this.decodeUtf8(merged);
-  }
-
-  private async writeToAssetStoreVerified(key: string, value: string): Promise<void> {
-    const primaryAlias: string = buildAssetAliasName(key);
-    const secretBytes: Uint8Array = this.encodeUtf8(value);
-    const existingRaw: Uint8Array | null = await this.assetQueryBytes(primaryAlias);
-    const oldManifest: ChunkedAssetManifest | null =
-      existingRaw !== null ? parseChunkedAssetManifest(this.decodeUtf8(existingRaw)) : null;
-
-    if (
-      secretBytes.byteLength <= ASSET_SECRET_DIRECT_MAX_BYTES &&
-      !isChunkedManifestCandidate(value)
-    ) {
-      await this.assetPutBytes(primaryAlias, secretBytes);
-    } else {
-      const chunks: Array<Uint8Array> = splitBytesIntoChunks(secretBytes, ASSET_CHUNK_BYTES);
-      if (chunks.length > ASSET_MAX_CHUNKS) {
-        throw new Error('凭据内容超出系统安全存储容量限制');
-      }
-      const gen: string = Date.now().toString(36) + '_' + String(++this.assetGenSeq);
-      let writtenCount: number = 0;
-      try {
-        for (let i = 0; i < chunks.length; i++) {
-          await this.assetPutBytes(primaryAlias + '#' + gen + '#' + String(i), chunks[i]);
-          writtenCount = i + 1;
-        }
-        const manifestJson: string = buildChunkedAssetManifestJson(
-          gen,
-          chunks.length,
-          secretBytes.byteLength,
-          computeFnv1aHex(secretBytes)
-        );
-        await this.assetPutBytes(primaryAlias, this.encodeUtf8(manifestJson));
-      } catch (writeErr) {
-        await this.bestEffortRemoveChunks(primaryAlias, gen, writtenCount);
-        if (writeErr instanceof Error) {
-          throw writeErr;
-        }
-        throw this.sanitizeAssetError('写入', writeErr);
-      }
-    }
-
-    const readBack: string | null = await this.readFromAssetStore(key);
-    if (readBack !== value) {
-      throw new Error('系统安全存储写入回读校验不一致，请重试');
-    }
-
-    if (oldManifest !== null) {
-      await this.bestEffortRemoveChunks(primaryAlias, oldManifest.gen, oldManifest.count);
-    }
-  }
-
   private async handleSecureRead(key: string): Promise<string | null> {
-    if (key.length === 0) {
-      return null;
-    }
-    const protectedValue: string | null = await this.readFromAssetStore(key);
-    if (protectedValue !== null) {
-      // Clean up any leftover legacy fallback entry if an earlier migration was interrupted after Asset Store write.
-      try {
-        await this.deleteSecureFallback(key);
-      } catch (_err) {
-        // Non-fatal on read; next read or write will retry cleanup.
-      }
-      return protectedValue;
-    }
-
-    const legacyValue: string | null = await this.readSecureFallback(key);
-    if (legacyValue === null) {
-      return null;
-    }
-    if (legacyValue.length === 0) {
-      await this.deleteSecureFallback(key);
-      return null;
-    }
-
-    // Per-key migration: persist to Asset Store and verify read-back match BEFORE deleting legacy fallback.
-    await this.writeToAssetStoreVerified(key, legacyValue);
-    await this.deleteSecureFallback(key);
-    return legacyValue;
+    return await this.secureEngine.read(key);
   }
 
   private async handleSecureWrite(key: string, value: string): Promise<boolean> {
-    if (key.length === 0) {
-      throw new Error('凭据键名不能为空');
-    }
-    if (value.length === 0) {
-      return await this.handleSecureDelete(key);
-    }
-    await this.writeToAssetStoreVerified(key, value);
-    await this.deleteSecureFallback(key);
-    return true;
+    return await this.secureEngine.write(key, value);
   }
 
   private async handleSecureDelete(key: string): Promise<boolean> {
-    if (key.length === 0) {
+    return await this.secureEngine.delete(key);
+  }
+
+  private async readPendingDeleteMarker(markerKey: string): Promise<boolean> {
+    const stateStore: dataPreferences.Preferences = await this.getPrefsStore(SECURE_STATE_STORE_NAME);
+    const exists: boolean = await stateStore.has(markerKey);
+    if (!exists) {
       return false;
     }
-    const primaryAlias: string = buildAssetAliasName(key);
-    const existingRaw: Uint8Array | null = await this.assetQueryBytes(primaryAlias);
-    const manifest: ChunkedAssetManifest | null =
-      existingRaw !== null ? parseChunkedAssetManifest(this.decodeUtf8(existingRaw)) : null;
+    const val: dataPreferences.ValueType = await stateStore.get(markerKey, '');
+    return String(val) === '1';
+  }
 
-    if (manifest !== null) {
-      for (let i = 0; i < manifest.count; i++) {
-        await this.assetRemoveAlias(primaryAlias + '#' + manifest.gen + '#' + String(i));
-      }
+  private async writePendingDeleteMarker(markerKey: string): Promise<void> {
+    const stateStore: dataPreferences.Preferences = await this.getPrefsStore(SECURE_STATE_STORE_NAME);
+    await stateStore.put(markerKey, '1');
+    await stateStore.flush();
+  }
+
+  private async clearPendingDeleteMarker(markerKey: string): Promise<void> {
+    const stateStore: dataPreferences.Preferences = await this.getPrefsStore(SECURE_STATE_STORE_NAME);
+    const exists: boolean = await stateStore.has(markerKey);
+    if (exists) {
+      await stateStore.delete(markerKey);
+      await stateStore.flush();
     }
-    await this.assetRemoveAlias(primaryAlias);
-
-    const remaining: Uint8Array | null = await this.assetQueryBytes(primaryAlias);
-    if (remaining !== null) {
-      throw new Error('系统安全存储凭据删除校验失败，请重试');
-    }
-
-    await this.deleteSecureFallback(key);
-    return true;
   }
 
   private async readSecureFallback(key: string): Promise<string | null> {
@@ -918,7 +809,15 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
     return payload;
   }
 
-  private async handleSaveTextFile(fileName: string, content: string): Promise<string | null> {
+  private async handleSaveTextFile(
+    fileName: string,
+    content: string,
+    maxBytes: number = 0
+  ): Promise<string | null> {
+    const encoded: Uint8Array = this.encodeUtf8(content);
+    if (maxBytes > 0 && encoded.byteLength > maxBytes) {
+      throw new Error('FILE_TOO_LARGE:导出文件超过 ' + this.formatByteLimitLabel(maxBytes) + ' 限制');
+    }
     const context: common.Context = this.requireContext();
     const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
     const saveOptions: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
@@ -933,7 +832,6 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
       fs.OpenMode.WRITE_ONLY | fs.OpenMode.CREATE | fs.OpenMode.TRUNC
     );
     try {
-      const encoded: Uint8Array = this.encodeUtf8(content);
       let writtenTotal: number = 0;
       while (writtenTotal < encoded.byteLength) {
         const remainingSlice: ArrayBuffer = encoded.buffer.slice(
