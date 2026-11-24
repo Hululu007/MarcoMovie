@@ -2131,6 +2131,126 @@ public final class ReworkR6ToR12Checks {
                                 new File(escapeDir, "master.m3u8").toURI().toASCIIString()),
                 "MPV offline HLS: ordinary MP4, MPEG-TS discontinuity HLS, remote HTTP, and .. traversal stay on MPV with zero network I/O");
 
+        // 3b. Long (>512 KiB) offline HLS bundles: streaming line-by-line scan detects late
+        //     discontinuity/second MAP past 512 KiB, while long single-MAP and long pure-TS stay on
+        //     MPV.
+        Method dmParseMedia =
+                DownloadManager.class.getDeclaredMethod("parseMedia", String.class, String.class);
+        dmParseMedia.setAccessible(true);
+        Method dmBuildMedia =
+                DownloadManager.class.getDeclaredMethod(
+                        "buildLocalMediaPlaylist",
+                        dmParseMedia.getReturnType(),
+                        String.class,
+                        String.class);
+        dmBuildMedia.setAccessible(true);
+        Method dmBuildSingleMaster =
+                DownloadManager.class.getDeclaredMethod(
+                        "buildLocalSingleTrackMasterPlaylist", dmParseMedia.getReturnType());
+        dmBuildSingleMaster.setAccessible(true);
+
+        final int longPrefixSegments = 21000;
+        StringBuilder longDualSrc =
+                new StringBuilder(
+                        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:1\n"
+                                + "#EXT-X-MAP:URI=\"init-A.mp4\"\n");
+        StringBuilder longSingleSrc =
+                new StringBuilder(
+                        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:1\n"
+                                + "#EXT-X-MAP:URI=\"init-A.mp4\"\n");
+        StringBuilder longTsSrc =
+                new StringBuilder("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n");
+        for (int i = 0; i < longPrefixSegments + 10; i++) {
+            if (i == longPrefixSegments) {
+                longDualSrc.append("#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"init-B.mp4\"\n");
+                longTsSrc.append("#EXT-X-DISCONTINUITY\n");
+            }
+            longDualSrc.append("#EXTINF:1.000,\n").append(i).append(".m4s\n");
+            longSingleSrc.append("#EXTINF:1.000,\n").append(i).append(".m4s\n");
+            longTsSrc.append("#EXTINF:1.000,\nseg_").append(i).append(".ts\n");
+        }
+        longDualSrc.append("#EXT-X-ENDLIST\n");
+        longSingleSrc.append("#EXT-X-ENDLIST\n");
+        longTsSrc.append("#EXT-X-ENDLIST\n");
+
+        Object parsedLongDual =
+                dmParseMedia.invoke(
+                        null, longDualSrc.toString(), "http://localhost/long-dual.m3u8");
+        String localLongDualChild =
+                (String) dmBuildMedia.invoke(null, parsedLongDual, "v", "v_init.mp4");
+        File longDualDir = new File(tmpRoot, "long-dual.hls");
+        longDualDir.mkdirs();
+        File longDualChildFile = new File(longDualDir, "video.m3u8");
+        Files.write(
+                longDualChildFile.toPath(), localLongDualChild.getBytes(StandardCharsets.UTF_8));
+        File longDualMaster = new File(longDualDir, "master.m3u8");
+        Files.write(
+                longDualMaster.toPath(),
+                ((String) dmBuildSingleMaster.invoke(null, parsedLongDual))
+                        .getBytes(StandardCharsets.UTF_8));
+        JSONObject longDualMedia = new JSONObject();
+        boolean longDualDetected =
+                PlaybackController.annotateLocalHlsMpvCompatibility(
+                        longDualMaster.toURI().toASCIIString(), longDualMedia);
+        boolean longDualDirectDetected =
+                PlaybackController.requiresMedia3ForMpvIncompatibleLocalHls(
+                        longDualChildFile.toURI().toASCIIString());
+        PlaybackController.EnginePlan longDualPlan =
+                PlaybackController.planEngine(PlaybackController.ENGINE_MPV, longDualMedia, true);
+        check(
+                localLongDualChild.length() > 512 * 1024
+                        && localLongDualChild.indexOf("#EXT-X-DISCONTINUITY") > 512 * 1024
+                        && longDualDetected
+                        && longDualDirectDetected
+                        && longDualPlan.engine == PlaybackController.ENGINE_MEDIA3
+                        && longDualPlan.fallbackReason.contains("Media3"),
+                "MPV offline HLS (long dual-MAP >512 KiB): late discontinuity/second MAP routes single playback to Media3");
+
+        Object parsedLongSingle =
+                dmParseMedia.invoke(
+                        null, longSingleSrc.toString(), "http://localhost/long-single.m3u8");
+        String localLongSingleChild =
+                (String) dmBuildMedia.invoke(null, parsedLongSingle, "v", "v_init.mp4");
+        File longSingleDir = new File(tmpRoot, "long-single.hls");
+        longSingleDir.mkdirs();
+        Files.write(
+                new File(longSingleDir, "video.m3u8").toPath(),
+                localLongSingleChild.getBytes(StandardCharsets.UTF_8));
+        File longSingleMaster = new File(longSingleDir, "master.m3u8");
+        Files.write(
+                longSingleMaster.toPath(),
+                ((String) dmBuildSingleMaster.invoke(null, parsedLongSingle))
+                        .getBytes(StandardCharsets.UTF_8));
+        JSONObject longSingleMedia = new JSONObject();
+        boolean longSingleDetected =
+                PlaybackController.annotateLocalHlsMpvCompatibility(
+                        longSingleMaster.toURI().toASCIIString(), longSingleMedia);
+        PlaybackController.EnginePlan longSinglePlan =
+                PlaybackController.planEngine(PlaybackController.ENGINE_MPV, longSingleMedia, true);
+        check(
+                localLongSingleChild.length() > 512 * 1024
+                        && !longSingleDetected
+                        && longSinglePlan.engine == PlaybackController.ENGINE_MPV
+                        && longSinglePlan.fallbackReason.isEmpty(),
+                "MPV offline HLS (long single-MAP >512 KiB): stays on user-selected MPV");
+
+        File longTsFile = new File(tmpRoot, "long-ts.m3u8");
+        byte[] longTsBytes = longTsSrc.toString().getBytes(StandardCharsets.UTF_8);
+        Files.write(longTsFile.toPath(), longTsBytes);
+        JSONObject longTsMedia = new JSONObject();
+        boolean longTsDetected =
+                PlaybackController.annotateLocalHlsMpvCompatibility(
+                        longTsFile.toURI().toASCIIString(), longTsMedia);
+        PlaybackController.EnginePlan longTsPlan =
+                PlaybackController.planEngine(PlaybackController.ENGINE_MPV, longTsMedia, true);
+        check(
+                longTsBytes.length > 512 * 1024
+                        && longTsSrc.indexOf("#EXT-X-DISCONTINUITY") > 512 * 1024
+                        && !longTsDetected
+                        && longTsPlan.engine == PlaybackController.ENGINE_MPV
+                        && longTsPlan.fallbackReason.isEmpty(),
+                "MPV offline HLS (long pure-TS >512 KiB with discontinuity): stays on user-selected MPV");
+
         // 4. UI kernel transparency wiring checks
         String movieSrc =
                 new String(
