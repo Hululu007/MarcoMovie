@@ -140,9 +140,16 @@ public enum BackupCodec {
             ? ""
             : payload.preferences.preferredSiteKey
 
-        let primaryOrigin = !payload.origin.isEmpty ? payload.origin : (publicSubs.first?.url ?? "")
         let rawPrimary = !payload.rawConfig.isEmpty ? payload.rawConfig : (publicSubs.first?.rawContent ?? "")
         let primaryRawConfig = CmsParser.sanitizePublicRawConfig(rawPrimary)
+        let primaryOrigin: String = {
+            if !rawPrimary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && primaryRawConfig.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                return publicSubs.first?.url ?? ""
+            }
+            return !payload.origin.isEmpty ? payload.origin : (publicSubs.first?.url ?? "")
+        }()
 
         let configField: Any = {
             let trimmed = primaryRawConfig.trimmingCharacters(in: .whitespacesAndNewlines)

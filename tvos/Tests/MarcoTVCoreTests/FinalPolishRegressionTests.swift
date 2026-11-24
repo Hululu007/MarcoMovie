@@ -1644,6 +1644,312 @@ final class FinalPolishRegressionTests: XCTestCase {
         singleCoord.teardownAndPersist()
     }
 
+    // MARK: - Pre-Release Fix 1: Legacy Different IDs with BOTH Sync Switches ON -> A Turns Private -> B Syncs Twice (Inspect Remote JSON)
+
+    func testPreReleaseItem1_LegacyDifferentIdsBothSwitchesOnPrivateScrubNoResurrection() async throws {
+        let dirA = FileManager.default.temporaryDirectory.appendingPathComponent("MarcoPreRel1A_\(UUID().uuidString)", isDirectory: true)
+        let dirB = FileManager.default.temporaryDirectory.appendingPathComponent("MarcoPreRel1B_\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: dirA)
+            try? FileManager.default.removeItem(at: dirB)
+        }
+
+        let sharedUrl = "https://both-switches-shared.example/sub.json"
+        let sharedRaw = #"{"sites":[{"key":"cms","name":"双开关共源站","type":1,"api":"https://both-switches-shared.example/vod"}]}"#
+        let secretTitle = "双开关私密大片"
+        let secretPoster = "https://both-on-secret.invalid/poster42.jpg"
+
+        let storageA = TvStorageManager(cachesDirectory: dirA, keychain: InMemoryKeychainStore())
+        let storageB = TvStorageManager(cachesDirectory: dirB, keychain: InMemoryKeychainStore())
+
+        // Both legacy devices independently imported the same URL with DIFFERENT legacy local subscription IDs
+        let (subA, _) = try storageA.upsertSubscription(id: "sub_both_on_old_a", name: "设备A旧源", url: sharedUrl, rawContent: sharedRaw, isPrivate: false, nowMs: 1_000)
+        let (subB, _) = try storageB.upsertSubscription(id: "sub_both_on_old_b", name: "设备B旧源", url: sharedUrl, rawContent: sharedRaw, isPrivate: false, nowMs: 1_100)
+        XCTAssertNotEqual(subA.id, subB.id)
+
+        // BOTH sync switches ON!
+        let bothOnCfg = WebDavConfig(
+            url: "https://dav.example/remote.php/dav/files/user",
+            username: "u",
+            password: "synthetic-test-password",
+            syncSubscriptions: true,
+            syncHistory: true
+        )
+        try storageA.saveWebDavConfig(bothOnCfg)
+        try storageB.saveWebDavConfig(bothOnCfg)
+
+        let server = FinalMockWebDavServer()
+        let davA = WebDavSyncService(storage: storageA, transport: FinalMockWebDavTransport(server: server))
+        let davB = WebDavSyncService(storage: storageB, transport: FinalMockWebDavTransport(server: server))
+
+        // Seed watch history & favorite while public and sync across BOTH devices
+        let siteA = try XCTUnwrap(storageA.mergedConfig().publicAvailableSites.first)
+        let movie = CmsVideo(id: "42", title: secretTitle, poster: secretPoster)
+        storageA.upsertWatchHistory(
+            WatchHistoryItem(site: siteA.key, id: "42", title: secretTitle, poster: secretPoster, line: "主线", episode: "第1集", index: 0, position: 195_000, duration: 3_600_000, updated: 2_000)
+        )
+        XCTAssertTrue(storageA.toggleFavorite(site: siteA.key, video: movie, nowMs: 2_100))
+
+        _ = try await davA.syncNow()
+        _ = try await davB.syncNow()
+        XCTAssertTrue(storageB.watchHistory().contains(where: { $0.title == secretTitle }))
+        XCTAssertTrue(storageB.favorites().contains(where: { $0.title == secretTitle }))
+
+        // Device A switches subscription to PRIVATE and syncs (emits sub: + canonical hist:/fav: scrub tombstones)
+        var subsA = storageA.subscriptions()
+        subsA[subsA.firstIndex(where: { $0.id == subA.id })!].isPrivate = true
+        storageA.saveSubscriptions(subsA)
+        _ = try await davA.syncNow()
+
+        let snapAfterA = await server.snapshot()
+        let remoteAfterA = try XCTUnwrap(snapAfterA.payload)
+        XCTAssertFalse(remoteAfterA.contains(secretTitle), "Remote JSON after A's private scrub must not contain title")
+        XCTAssertFalse(remoteAfterA.contains("both-on-secret.invalid"), "Remote JSON after A's private scrub must not contain poster")
+
+        // Device B syncs TWICE while BOTH sync switches are ON:
+        // Subscription deletion happens in the same batch as history/favorite merge; pre-merge ID mapping MUST
+        // stay active so B's old `sub_both_on_old_b` history/favorite are purged and NEVER re-uploaded!
+        _ = try await davB.syncNow()
+        let snapAfterB1 = await server.snapshot()
+        let remoteAfterB1 = try XCTUnwrap(snapAfterB1.payload)
+        let rootAfterB1 = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(remoteAfterB1.utf8)) as? [String: Any])
+        XCTAssertFalse(remoteAfterB1.contains(secretTitle), "Remote JSON after B's 1st sync must NOT re-upload private title")
+        XCTAssertFalse(remoteAfterB1.contains("both-on-secret.invalid"), "Remote JSON after B's 1st sync must NOT re-upload private poster")
+        XCTAssertTrue(((rootAfterB1["watch_history"] as? [[String: Any]]) ?? []).isEmpty, "Remote watch_history must be empty after B's 1st sync")
+        XCTAssertTrue(((rootAfterB1["favorites"] as? [[String: Any]]) ?? []).isEmpty, "Remote favorites must be empty after B's 1st sync")
+
+        _ = try await davB.syncNow()
+        let snapAfterB2 = await server.snapshot()
+        let remoteAfterB2 = try XCTUnwrap(snapAfterB2.payload)
+        let rootAfterB2 = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(remoteAfterB2.utf8)) as? [String: Any])
+        XCTAssertFalse(remoteAfterB2.contains(secretTitle), "Remote JSON after B's 2nd sync must NOT contain private title")
+        XCTAssertFalse(remoteAfterB2.contains("both-on-secret.invalid"), "Remote JSON after B's 2nd sync must NOT contain private poster")
+        XCTAssertTrue(((rootAfterB2["watch_history"] as? [[String: Any]]) ?? []).isEmpty, "Remote watch_history must remain empty after B's 2nd sync")
+        XCTAssertTrue(((rootAfterB2["favorites"] as? [[String: Any]]) ?? []).isEmpty, "Remote favorites must remain empty after B's 2nd sync")
+
+        // Device A's local private breakpoint & favorite MUST remain preserved!
+        XCTAssertEqual(storageA.watchHistory().first(where: { $0.id == "42" })?.position, 195_000)
+        XCTAssertTrue(storageA.favorites().contains(where: { $0.id == "42" }))
+    }
+
+    // MARK: - Pre-Release Fix 2: Top-Level Sites Array & Single-Site Root Object Private Filtering Across All 3 Export Outlets
+
+    func testPreReleaseItem2_TopLevelArrayAndSingleSiteObjectPrivateFilteringAcrossAllThreeExports() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("MarcoPreRel2_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let storage = TvStorageManager(cachesDirectory: dir, keychain: InMemoryKeychainStore())
+
+        // Shape 1: Top-level JSON array containing public A + private B (with secret ext)
+        let topLevelArrayRaw = """
+        [
+          {"key":"pub_arr_a","name":"数组公开A","type":1,"api":"https://arr-pub-a.example/vod"},
+          {"key":"priv_arr_b","name":"数组私密B","type":1,"api":"https://arr-priv-b.example/secret","ext":"arr-secret-ext-b","isPrivate":true}
+        ]
+        """
+        // Shape 2: Entire single-site root JSON object marked private (parent subscription itself not flagged private)
+        let singleSitePrivateRaw = """
+        {"key":"priv_single_b","name":"单站私密B","type":1,"api":"https://single-priv-b.example/secret","ext":"single-secret-ext-b","isPrivate":true}
+        """
+
+        let arrSubUrl = "https://arr-sub.example/list.json"
+        let singleSubUrl = "https://single-priv-sub.example/site.json"
+        _ = try storage.upsertSubscription(id: "sub_arr_mixed", name: "顶层数组订阅", url: arrSubUrl, rawContent: topLevelArrayRaw, isPrivate: false, nowMs: 1_000)
+        _ = try storage.upsertSubscription(id: "sub_single_priv", name: "单站私密订阅", url: singleSubUrl, rawContent: singleSitePrivateRaw, isPrivate: false, nowMs: 1_100)
+
+        // Verify both shapes parsed locally with public A public and private B/single-site preserved privately
+        let localCfg = storage.mergedConfig()
+        XCTAssertEqual(localCfg.publicAvailableSites.map(\.rawKey), ["pub_arr_a"])
+        XCTAssertTrue(localCfg.sites.contains(where: { $0.rawKey == "priv_arr_b" && $0.isEffectivelyPrivate }))
+        XCTAssertTrue(localCfg.sites.contains(where: { $0.rawKey == "priv_single_b" && $0.isEffectivelyPrivate }))
+
+        let forbidden = [
+            "数组私密B",
+            "priv_arr_b",
+            "arr-priv-b.example",
+            "arr-secret-ext-b",
+            "单站私密B",
+            "priv_single_b",
+            "single-priv-b.example",
+            "single-secret-ext-b",
+            "single-priv-sub.example",
+            "单站私密订阅",
+        ]
+
+        func unescapeSlashes(_ s: String) -> String {
+            s.replacingOccurrences(of: "\\\\/", with: "/").replacingOccurrences(of: "\\/", with: "/")
+        }
+
+        // Outlet 1: Ordinary Backup JSON
+        let backupJson = try storage.exportBackupJson()
+        let backupText = unescapeSlashes(backupJson)
+        for token in forbidden {
+            XCTAssertFalse(backupText.contains(token), "Backup MUST NOT leak private token '\(token)'")
+        }
+        let decodedBackup = try BackupCodec.decodeBackupJson(backupJson)
+        XCTAssertEqual(decodedBackup.subscriptions.count, 1)
+        let backupParsed = try CmsParser.parseConfig(try XCTUnwrap(decodedBackup.subscriptions.first?.rawContent), origin: arrSubUrl)
+        XCTAssertEqual(backupParsed.sites.map(\.rawKey), ["pub_arr_a"])
+        XCTAssertEqual(backupParsed.sites.first?.api, "https://arr-pub-a.example/vod")
+
+        // Outlet 2: WebDAV Sync JSON
+        try storage.saveWebDavConfig(
+            WebDavConfig(
+                url: "https://dav.example/remote.php/dav/files/user",
+                username: "u",
+                password: "synthetic-test-password",
+                syncSubscriptions: true,
+                syncHistory: true
+            )
+        )
+        let davServer = FinalMockWebDavServer()
+        let dav = WebDavSyncService(storage: storage, transport: FinalMockWebDavTransport(server: davServer))
+        _ = try await dav.syncNow()
+        let davSnap = await davServer.snapshot()
+        let davJson = try XCTUnwrap(davSnap.payload)
+        let davText = unescapeSlashes(davJson)
+        for token in forbidden {
+            XCTAssertFalse(davText.contains(token), "WebDAV sync MUST NOT leak private token '\(token)'")
+        }
+        let davRoot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(davJson.utf8)) as? [String: Any])
+        let davSubs = try XCTUnwrap(davRoot["subscriptions"] as? [[String: Any]])
+        XCTAssertEqual(davSubs.count, 1)
+        let davParsed = try CmsParser.parseConfig(try XCTUnwrap(davSubs.first?["rawContent"] as? String), origin: arrSubUrl)
+        XCTAssertEqual(davParsed.sites.map(\.rawKey), ["pub_arr_a"])
+        XCTAssertEqual(davParsed.sites.first?.api, "https://arr-pub-a.example/vod")
+
+        // Outlet 3: LAN QR `/configure/<token>/sync` JSON
+        let lan = LanConfigServer(storage: storage, syncService: dav)
+        defer { lan.stop() }
+        _ = try await lan.start(loopbackOnly: true)
+        let lanSyncUrl = URL(string: "\(lan.configureUrl(forHost: "127.0.0.1"))/sync")!
+        let (lanData, lanResp) = try await URLSession.shared.data(from: lanSyncUrl)
+        XCTAssertEqual((lanResp as? HTTPURLResponse)?.statusCode, 200)
+        let lanJson = String(decoding: lanData, as: UTF8.self)
+        let lanText = unescapeSlashes(lanJson)
+        for token in forbidden {
+            XCTAssertFalse(lanText.contains(token), "LAN QR sync MUST NOT leak private token '\(token)'")
+        }
+        let lanRoot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(lanJson.utf8)) as? [String: Any])
+        let lanSubs = try XCTUnwrap(lanRoot["subscriptions"] as? [[String: Any]])
+        XCTAssertEqual(lanSubs.count, 1)
+        let lanParsed = try CmsParser.parseConfig(try XCTUnwrap(lanSubs.first?["rawContent"] as? String), origin: arrSubUrl)
+        XCTAssertEqual(lanParsed.sites.map(\.rawKey), ["pub_arr_a"])
+        XCTAssertEqual(lanParsed.sites.first?.api, "https://arr-pub-a.example/vod")
+
+        // Local storage MUST still retain both private configurations untouched!
+        let cfgAfterExports = storage.mergedConfig()
+        XCTAssertTrue(cfgAfterExports.sites.contains(where: { $0.rawKey == "priv_arr_b" && $0.ext == "arr-secret-ext-b" }))
+        XCTAssertTrue(cfgAfterExports.sites.contains(where: { $0.rawKey == "priv_single_b" && $0.ext == "single-secret-ext-b" }))
+
+        // Also verify isolated storage containing ONLY the single-site private root object across all 3 outlets!
+        let soloDir = FileManager.default.temporaryDirectory.appendingPathComponent("MarcoPreRel2Solo_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: soloDir) }
+        let soloStorage = TvStorageManager(cachesDirectory: soloDir, keychain: InMemoryKeychainStore())
+        _ = try soloStorage.upsertSubscription(id: "sub_solo_priv_obj", name: "单站私密订阅", url: singleSubUrl, rawContent: singleSitePrivateRaw, isPrivate: false, nowMs: 1_200)
+        try soloStorage.saveWebDavConfig(
+            WebDavConfig(url: "https://dav.example/remote.php/dav/files/user", username: "u", password: "synthetic-test-password", syncSubscriptions: true, syncHistory: true)
+        )
+        let soloBackup = try soloStorage.exportBackupJson()
+        let soloDecoded = try BackupCodec.decodeBackupJson(soloBackup)
+        XCTAssertTrue(soloDecoded.subscriptions.isEmpty)
+        XCTAssertTrue(soloDecoded.rawConfig.isEmpty)
+        let soloDavServer = FinalMockWebDavServer()
+        let soloDav = WebDavSyncService(storage: soloStorage, transport: FinalMockWebDavTransport(server: soloDavServer))
+        _ = try await soloDav.syncNow()
+        let soloDavSnap = await soloDavServer.snapshot()
+        let soloDavJson = try XCTUnwrap(soloDavSnap.payload)
+        let soloLanJson = try soloDav.exportSyncPayload()
+        for out in [unescapeSlashes(soloBackup), unescapeSlashes(soloDavJson), unescapeSlashes(soloLanJson)] {
+            XCTAssertFalse(out.contains("单站私密B"))
+            XCTAssertFalse(out.contains("single-priv-b.example"))
+            XCTAssertFalse(out.contains("single-secret-ext-b"))
+            XCTAssertFalse(out.contains("single-priv-sub.example"))
+        }
+        XCTAssertTrue(soloStorage.mergedConfig().sites.contains(where: { $0.rawKey == "priv_single_b" && $0.ext == "single-secret-ext-b" }))
+    }
+
+    // MARK: - Pre-Release Fix 3: LAN QR Pasted Mixed Config Without Parent URL -> Sync Twice -> Single Local Entry & Public-Only Cloud
+
+    func testPreReleaseItem3_LanQrPastedMixedConfigWithoutParentUrlSyncsTwiceNoDuplicateAndCloudPublicOnly() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("MarcoPreRel3_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let storage = TvStorageManager(cachesDirectory: dir, keychain: InMemoryKeychainStore())
+
+        let pastedMixedRaw = """
+        {
+          "sites": [
+            {"key":"qr_pub_a","name":"扫码公开A","type":1,"api":"https://qr-pub-a.example/vod"},
+            {"key":"qr_priv_b","name":"扫码私密B","type":1,"api":"https://qr-priv-b.example/vod","ext":"qr-secret-ext","isPrivate":true}
+          ],
+          "lives": [
+            {"name":"扫码私密直播","url":"https://qr-priv-live.example/live.m3u","isPrivate":true}
+          ]
+        }
+        """
+
+        try storage.saveWebDavConfig(
+            WebDavConfig(
+                url: "https://dav.example/remote.php/dav/files/user",
+                username: "u",
+                password: "synthetic-test-password",
+                syncSubscriptions: true,
+                syncHistory: true
+            )
+        )
+        let davServer = FinalMockWebDavServer()
+        let dav = WebDavSyncService(storage: storage, transport: FinalMockWebDavTransport(server: davServer))
+        let lan = LanConfigServer(storage: storage, syncService: dav)
+        defer { lan.stop() }
+        _ = try await lan.start(loopbackOnly: true)
+
+        // Push pasted mixed subscription body via real LAN QR `/push` endpoint WITHOUT any parent URL!
+        let pushUrl = URL(string: "\(lan.configureUrl(forHost: "127.0.0.1"))/push")!
+        var req = URLRequest(url: pushUrl)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "name": "扫码混合正文",
+            "url": "",
+            "rawConfig": pastedMixedRaw,
+        ])
+        let (_, pushResp) = try await URLSession.shared.data(for: req)
+        XCTAssertEqual((pushResp as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(storage.subscriptions().count, 1)
+        XCTAssertEqual(storage.subscriptions().first?.url, "")
+
+        // Sync #1 to WebDAV
+        _ = try await dav.syncNow()
+        XCTAssertEqual(storage.subscriptions().count, 1, "Local device must keep exactly 1 subscription after 1st sync")
+
+        // Sync #2 to WebDAV — MUST NOT duplicate into 2 subscriptions when reading back sanitized remote copy!
+        _ = try await dav.syncNow()
+        XCTAssertEqual(storage.subscriptions().count, 1, "Local device must STILL have exactly 1 subscription after 2nd sync (no duplicate)")
+
+        // Local device retains full mixed config (public A + private B), while cloud holds ONLY public A!
+        let localCfg = storage.mergedConfig()
+        XCTAssertTrue(localCfg.sites.contains(where: { $0.rawKey == "qr_pub_a" && !$0.isEffectivelyPrivate }))
+        XCTAssertTrue(localCfg.sites.contains(where: { $0.rawKey == "qr_priv_b" && $0.isEffectivelyPrivate }))
+
+        let cloudSnap = await davServer.snapshot()
+        let cloudJson = try XCTUnwrap(cloudSnap.payload)
+        let cloudUnescaped = cloudJson.replacingOccurrences(of: "\\\\/", with: "/").replacingOccurrences(of: "\\/", with: "/")
+        XCTAssertTrue(cloudUnescaped.contains("扫码公开A"))
+        XCTAssertTrue(cloudUnescaped.contains("https://qr-pub-a.example/vod"))
+        XCTAssertFalse(cloudUnescaped.contains("扫码私密B"))
+        XCTAssertFalse(cloudUnescaped.contains("qr_priv_b"))
+        XCTAssertFalse(cloudUnescaped.contains("qr-priv-b.example"))
+        XCTAssertFalse(cloudUnescaped.contains("qr-secret-ext"))
+        XCTAssertFalse(cloudUnescaped.contains("扫码私密直播"))
+        XCTAssertFalse(cloudUnescaped.contains("qr-priv-live.example"))
+
+        let cloudRoot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(cloudJson.utf8)) as? [String: Any])
+        let cloudSubs = try XCTUnwrap(cloudRoot["subscriptions"] as? [[String: Any]])
+        XCTAssertEqual(cloudSubs.count, 1)
+        let cloudParsed = try CmsParser.parseConfig(try XCTUnwrap(cloudSubs.first?["rawContent"] as? String))
+        XCTAssertEqual(cloudParsed.sites.map(\.rawKey), ["qr_pub_a"])
+        XCTAssertTrue(cloudParsed.lives.isEmpty)
+    }
+
     // MARK: - Async Wait Helper
 
     @MainActor

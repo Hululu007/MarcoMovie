@@ -121,6 +121,14 @@ public struct SubscriptionEntry: Codable, Hashable, Identifiable, Sendable {
         copy.isPrivate = false
         copy.depots = depots.filter { !$0.isPrivate }
         let sanitizedRaw = CmsParser.sanitizePublicRawConfig(rawContent, defaultGroup: group)
+        if !rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && sanitizedRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && copy.depots.isEmpty
+        {
+            // All entries inside this subscription (e.g. a private single-site object or all-private array)
+            // were private -> omit the subscription completely from public export.
+            return nil
+        }
         if sanitizedRaw != rawContent {
             copy.rawContent = sanitizedRaw
             if let parsed = try? CmsParser.parseConfig(

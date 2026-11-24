@@ -160,8 +160,16 @@ public final class WebDavSyncService: @unchecked Sendable {
         let effectiveHttp = isHttp(warehouseUrl)
             ? warehouseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
             : (isHttp(url) ? url.trimmingCharacters(in: .whitespacesAndNewlines) : "")
-        let input = !effectiveHttp.isEmpty ? "url:\(effectiveHttp)" : "local:\(rawContent)"
-        return SHA256.hash(data: Data(input.utf8)).map { String(format: "%02x", $0) }.joined()
+        if !effectiveHttp.isEmpty {
+            return SHA256.hash(data: Data("url:\(effectiveHttp)".utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+        // For URL-less pasted subscription text, derive syncKey from its public-sanitized form so local
+        // mixed content (public + private children) and its sanitized remote copy share the exact same identity.
+        let sanitized = CmsParser.sanitizePublicRawConfig(rawContent)
+        let normalizedLocal = sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? rawContent
+            : sanitized
+        return SHA256.hash(data: Data("local:\(normalizedLocal)".utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Deterministic wire subscription ID (`sub_<12-hex-sha256>`) shared across fresh installs
@@ -649,6 +657,25 @@ public final class WebDavSyncService: @unchecked Sendable {
                 scrubPrivateSubIds.insert(wirePrivId)
             }
         }
+        // Seed canonical wire ID maps from PRE-MERGE local public subscriptions BEFORE subscription
+        // deletions are applied, so if a subscription is deleted by a peer's `sub:` tombstone in this
+        // batch (e.g. peer switched it to private while both sync switches are on), same-batch `hist:`
+        // and `fav:` scrub tombstones still map cleanly onto this device's old local subscription ID!
+        for s in localPublic where !s.id.isEmpty {
+            if let wireId = Self.canonicalWireSubscriptionId(
+                url: s.url,
+                rawContent: s.rawContent,
+                warehouseUrl: s.warehouseUrl
+            ) {
+                localIdToCanonicalWireId[s.id] = wireId
+                if wireId != s.id {
+                    if remoteIdToLocalId[wireId] == nil {
+                        remoteIdToLocalId[wireId] = s.id
+                    }
+                    localIdToOutboundId[s.id] = wireId
+                }
+            }
+        }
 
         for rawMap in (remoteSubsRaw ?? []) {
             let candidate = SubscriptionEntry.fromDictionary(rawMap)
@@ -751,15 +778,26 @@ public final class WebDavSyncService: @unchecked Sendable {
                         remoteIdToLocalId[candidate.id] = existing.id
                     }
                     let existingIsStub = existing.rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    if existingIsStub || incomingTs > existing.updatedAt {
+                    let existingEffectiveTs = max(1, existing.updatedAt)
+                    if existingIsStub || incomingTs > existingEffectiveTs {
                         var updated = candidate
                         updated.id = existing.id
                         if existingIsStub {
                             if !existing.group.isEmpty { updated.group = existing.group }
                             updated.enabled = existing.enabled
                         }
-                        updated.siteCount = parsed.sites.count
-                        updated.liveCount = parsed.lives.count
+                        let existingSanitized = CmsParser.sanitizePublicRawConfig(existing.rawContent, defaultGroup: existing.group)
+                        let incomingSanitized = CmsParser.sanitizePublicRawConfig(candidate.rawContent, defaultGroup: candidate.group)
+                        if !existingIsStub && !existingSanitized.isEmpty && existingSanitized == incomingSanitized {
+                            // Keep full local rawContent (including local private child sites) when remote
+                            // only echoes back the sanitized public subset of the exact same config.
+                            updated.rawContent = existing.rawContent
+                            updated.siteCount = existing.siteCount
+                            updated.liveCount = existing.liveCount
+                        } else {
+                            updated.siteCount = parsed.sites.count
+                            updated.liveCount = parsed.lives.count
+                        }
                         updated.updatedAt = max(existing.updatedAt, incomingTs)
                         if updated.depots.isEmpty {
                             updated.depots = !existing.depots.isEmpty ? existing.depots : parsed.depots
@@ -801,9 +839,8 @@ public final class WebDavSyncService: @unchecked Sendable {
             outboundSubTombs = remoteSubTombsRaw
         }
 
-        // Complete canonical wire ID maps (`sub_<12-hex-sha256>`) across final local subscriptions
-        // so history, favorites, and tombstones always map cleanly across devices with different
-        // legacy local IDs EVEN when `syncSubscriptions == false` and remote has no `subscriptions`.
+        // Augment canonical wire ID maps with any newly-imported subscriptions in `finalSubscriptions`
+        // while preserving all pre-merge local ID mappings for this batch's history/favorites/tombstones.
         for s in finalSubscriptions where !s.id.isEmpty {
             guard let wireId = Self.canonicalWireSubscriptionId(
                 url: s.url,
@@ -812,12 +849,18 @@ public final class WebDavSyncService: @unchecked Sendable {
             ) else {
                 continue
             }
-            localIdToCanonicalWireId[s.id] = wireId
+            if localIdToCanonicalWireId[s.id] == nil {
+                localIdToCanonicalWireId[s.id] = wireId
+            }
             if s.isEffectivelyPrivate {
                 scrubPrivateSubIds.insert(wireId)
             } else if wireId != s.id {
-                remoteIdToLocalId[wireId] = s.id
-                localIdToOutboundId[s.id] = wireId
+                if remoteIdToLocalId[wireId] == nil {
+                    remoteIdToLocalId[wireId] = s.id
+                }
+                if localIdToOutboundId[s.id] == nil {
+                    localIdToOutboundId[s.id] = wireId
+                }
             }
         }
 
