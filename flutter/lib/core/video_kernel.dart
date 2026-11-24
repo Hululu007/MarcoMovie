@@ -462,6 +462,22 @@ class OhosPlatformPlayer extends PlatformPlayer {
 /// Unified video kernel binding [PlayerScreen] to either `media_kit` (`libmpv`)
 /// on Windows / macOS / iOS or `OhosPlatformPlayer` (`AVPlayer` + GPU Texture) on HarmonyOS NEXT.
 class VideoKernel {
+  static bool _mediaKitInitialized = false;
+
+  /// Ensures `media_kit` (`libmpv`) is initialized once before creating a
+  /// native [Player]. Safe to invoke lazily on iOS so `Mpv.framework` does not
+  /// block cold launch before Flutter paints its first frame.
+  static void ensureMediaKitInitialized() {
+    if (_mediaKitInitialized || OhosRuntime.isOhos) return;
+    _mediaKitInitialized = true;
+    try {
+      MediaKit.ensureInitialized();
+    } catch (e) {
+      _mediaKitInitialized = false;
+      debugPrint('VideoKernel: MediaKit init warning: $e');
+    }
+  }
+
   final Player player;
   final VideoController? mediaKitController;
   final OhosPlatformPlayer? ohosPlatform;
@@ -513,6 +529,7 @@ class VideoKernel {
       );
     }
 
+    ensureMediaKitInitialized();
     final nativePlayer = Player();
     return VideoKernel._(
       player: nativePlayer,

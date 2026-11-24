@@ -845,6 +845,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       ? widget.storage.diskCacheMaxMb
       : widget.storage.mediaDiskCacheLimitMb;
 
+  VoidCallback? _releaseRootTabSuppression;
+
   void _onHideToTray() {
     if (!mounted) return;
     if (_playing) {
@@ -856,6 +858,12 @@ class _PlayerScreenState extends State<PlayerScreen>
   @override
   void initState() {
     super.initState();
+    if (!widget.embedded &&
+        !OhosRuntime.isOhos &&
+        defaultTargetPlatform == TargetPlatform.iOS) {
+      _releaseRootTabSuppression =
+          IosLiquidGlassBridge.acquireRootTabSuppression();
+    }
     WidgetsBinding.instance.addObserver(this);
     WindowsTrayService.hideToTrayRevision.addListener(_onHideToTray);
     _lines = List<CmsLine>.of(
@@ -3648,6 +3656,8 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    _releaseRootTabSuppression?.call();
+    _releaseRootTabSuppression = null;
     WindowsTrayService.hideToTrayRevision.removeListener(_onHideToTray);
     if (!widget.embedded) WindowsImmersiveFrame.interactionLocked.value = false;
     if (_windowsDarkSurfaceApplied) {

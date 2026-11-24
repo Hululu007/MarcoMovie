@@ -54,8 +54,13 @@ private enum MarcoLiquidGlassSupport {
   /// Keeps the root Liquid Glass Dock / Logo overlay above dynamically mounted
   /// Flutter `UiKitView`s inside `rootVC.view` while preserving `rootVC` in the
   /// responder chain so `logoButton.showsMenuAsPrimaryAction` presents natively.
+  /// Strictly a no-op on iOS < 26 or before `configureRootTabChrome` succeeds so
+  /// an unconfigured native overlay can never appear on iOS 14–25.
   static func bringRootChromeToFront() {
-    MarcoIos27RootTabChromeController.shared.bringToFrontIfNeeded()
+    guard isAvailable, let controller = MarcoIos27RootTabChromeController.existingInstance else {
+      return
+    }
+    controller.bringToFrontIfNeeded()
   }
 
   static var isEffectiveDark: Bool {
@@ -70,12 +75,12 @@ private enum MarcoLiquidGlassSupport {
       return false
     default:
       if let v = view, v.traitCollection.userInterfaceStyle != .unspecified {
-        return v.traitCollection.userInterfaceStyle != .light
+        return v.traitCollection.userInterfaceStyle == .dark
       }
-      if let win = activeWindow() {
-        return win.traitCollection.userInterfaceStyle != .light
+      if let win = activeWindow(), win.traitCollection.userInterfaceStyle != .unspecified {
+        return win.traitCollection.userInterfaceStyle == .dark
       }
-      return UITraitCollection.current.userInterfaceStyle != .light
+      return UITraitCollection.current.userInterfaceStyle == .dark
     }
   }
 
@@ -423,47 +428,74 @@ private enum MarcoLiquidGlassSupport {
           "sceneActive": isSceneActive,
         ])
       case "configureRootTabChrome":
-        guard let args = call.arguments as? [String: Any] else {
+        guard isAvailable,
+              let args = call.arguments as? [String: Any],
+              let items = args["items"] as? [[String: Any]],
+              !items.isEmpty else {
           result(false)
           return
         }
         DispatchQueue.main.async {
-          MarcoIos27RootTabChromeController.shared.configure(args: args)
-          result(true)
+          let ok = MarcoIos27RootTabChromeController.shared.configure(args: args)
+          result(ok)
         }
       case "setRootTabSelectedIndex":
+        guard isAvailable else {
+          result(nil)
+          return
+        }
         DispatchQueue.main.async {
+          guard let controller = MarcoIos27RootTabChromeController.existingInstance else {
+            result(nil)
+            return
+          }
           if let dict = call.arguments as? [String: Any], let idx = dict["index"] as? Int {
             let animated = (dict["animated"] as? Bool) ?? true
-            MarcoIos27RootTabChromeController.shared.setSelectedIndex(idx, animated: animated)
+            controller.setSelectedIndex(idx, animated: animated)
           } else if let idx = call.arguments as? Int {
-            MarcoIos27RootTabChromeController.shared.setSelectedIndex(idx, animated: true)
+            controller.setSelectedIndex(idx, animated: true)
           }
           result(nil)
         }
       case "setRootTabMinimized":
+        guard isAvailable else {
+          result(nil)
+          return
+        }
         DispatchQueue.main.async {
+          guard let controller = MarcoIos27RootTabChromeController.existingInstance else {
+            result(nil)
+            return
+          }
           if let dict = call.arguments as? [String: Any] {
             if let progress = (dict["progress"] as? NSNumber)?.doubleValue {
-              MarcoIos27RootTabChromeController.shared.updateScrollMinimizeProgress(CGFloat(progress))
+              controller.updateScrollMinimizeProgress(CGFloat(progress))
             } else {
               let minimized = (dict["minimized"] as? Bool) ?? false
               let animated = (dict["animated"] as? Bool) ?? true
-              MarcoIos27RootTabChromeController.shared.setMinimized(minimized, animated: animated)
+              controller.setMinimized(minimized, animated: animated)
             }
           } else if let minimized = call.arguments as? Bool {
-            MarcoIos27RootTabChromeController.shared.setMinimized(minimized, animated: true)
+            controller.setMinimized(minimized, animated: true)
           }
           result(nil)
         }
       case "setRootTabVisible":
+        guard isAvailable else {
+          result(nil)
+          return
+        }
         DispatchQueue.main.async {
+          guard let controller = MarcoIos27RootTabChromeController.existingInstance else {
+            result(nil)
+            return
+          }
           if let dict = call.arguments as? [String: Any] {
             let visible = (dict["visible"] as? Bool) ?? true
             let animated = (dict["animated"] as? Bool) ?? true
-            MarcoIos27RootTabChromeController.shared.setRootDockVisible(visible, animated: animated)
+            controller.setRootDockVisible(visible, animated: animated)
           } else if let visible = call.arguments as? Bool {
-            MarcoIos27RootTabChromeController.shared.setRootDockVisible(visible, animated: true)
+            controller.setRootDockVisible(visible, animated: true)
           }
           result(nil)
         }
@@ -3699,7 +3731,7 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       button.setImage(image, for: .normal)
       button.tintColor = fg
       button.backgroundColor = bg
-      button.layer.cornerRadius = 31.0
+      button.layer.cornerRadius = (button.bounds.height > 1.0 ? button.bounds.height : 62.0) * 0.5
       button.layer.masksToBounds = true
     }
   }
@@ -4006,6 +4038,12 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     let rightCenterX = rowX + maxRowWidth - outerMargin - dockSize * 0.5
     logoButton.bounds = CGRect(x: 0, y: 0, width: dockSize, height: dockSize)
     logoButton.center = CGPoint(x: rightCenterX, y: centerY)
+    if #available(iOS 15.0, *) {
+      // Capsule corner radius handled by UIButton.Configuration.
+    } else {
+      logoButton.layer.cornerRadius = dockSize * 0.5
+      searchButton.layer.cornerRadius = dockSize * 0.5
+    }
 
     if showSearchButton {
       searchButton.bounds = CGRect(x: 0, y: 0, width: dockSize, height: dockSize)
@@ -4035,12 +4073,24 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
 }
 
 private final class MarcoIos27RootTabChromeController: NSObject {
-  static let shared = MarcoIos27RootTabChromeController()
+  private static var _sharedInstance: MarcoIos27RootTabChromeController?
+  static var existingInstance: MarcoIos27RootTabChromeController? {
+    return _sharedInstance
+  }
+  static var shared: MarcoIos27RootTabChromeController {
+    if let existing = _sharedInstance {
+      return existing
+    }
+    let created = MarcoIos27RootTabChromeController()
+    _sharedInstance = created
+    return created
+  }
 
   private let overlayView = MarcoIos27PassthroughChromeView(frame: .zero)
   private let chromeView = MarcoIos27DockChromeView(isRootHost: true, frame: .zero)
   private var observers: [NSObjectProtocol] = []
   private weak var attachedHostView: UIView?
+  private var isConfigured: Bool = false
 
   private override init() {
     super.init()
@@ -4082,6 +4132,7 @@ private final class MarcoIos27RootTabChromeController: NSObject {
   }
 
   private func attachToRootIfNeeded() {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured else { return }
     guard let window = MarcoLiquidGlassSupport.activeWindow(),
           let rootVC = window.rootViewController,
           let rootView = rootVC.view else {
@@ -4108,6 +4159,7 @@ private final class MarcoIos27RootTabChromeController: NSObject {
   }
 
   func bringToFrontIfNeeded() {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured else { return }
     guard let rootView = attachedHostView ?? MarcoLiquidGlassSupport.activeWindow()?.rootViewController?.view else {
       return
     }
@@ -4119,6 +4171,7 @@ private final class MarcoIos27RootTabChromeController: NSObject {
   }
 
   private func syncOverlayFrame() {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured else { return }
     guard let window = MarcoLiquidGlassSupport.activeWindow(),
           let rootView = attachedHostView ?? window.rootViewController?.view else {
       return
@@ -4130,7 +4183,14 @@ private final class MarcoIos27RootTabChromeController: NSObject {
     bringToFrontIfNeeded()
   }
 
-  func configure(args: [String: Any]) {
+  @discardableResult
+  func configure(args: [String: Any]) -> Bool {
+    guard MarcoLiquidGlassSupport.isAvailable,
+          let items = args["items"] as? [[String: Any]],
+          !items.isEmpty else {
+      return false
+    }
+    isConfigured = true
     attachToRootIfNeeded()
     if let showSearch = args["showSearch"] as? Bool {
       chromeView.showSearchButton = showSearch
@@ -4138,9 +4198,7 @@ private final class MarcoIos27RootTabChromeController: NSObject {
     if let adaptiveTop = args["adaptiveTopOnWide"] as? Bool {
       chromeView.adaptiveTopOnWide = adaptiveTop
     }
-    if let items = args["items"] as? [[String: Any]], !items.isEmpty {
-      chromeView.setItems(items)
-    }
+    chromeView.setItems(items)
     if let selectedIndex = args["selectedIndex"] as? Int {
       chromeView.setSelectedIndex(selectedIndex, animated: false)
     }
@@ -4151,24 +4209,29 @@ private final class MarcoIos27RootTabChromeController: NSObject {
       chromeView.setRootDockVisible(visible, animated: false)
     }
     syncOverlayFrame()
+    return true
   }
 
   func setSelectedIndex(_ index: Int, animated: Bool) {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured else { return }
     attachToRootIfNeeded()
     chromeView.setSelectedIndex(index, animated: animated)
   }
 
   func setMinimized(_ minimized: Bool, animated: Bool) {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured else { return }
     attachToRootIfNeeded()
     chromeView.setMinimized(minimized, animated: animated)
   }
 
   func updateScrollMinimizeProgress(_ progress: CGFloat) {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured else { return }
     attachToRootIfNeeded()
     chromeView.updateScrollMinimizeProgress(progress)
   }
 
   func setRootDockVisible(_ visible: Bool, animated: Bool) {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured else { return }
     attachToRootIfNeeded()
     chromeView.setRootDockVisible(visible, animated: animated)
   }

@@ -1089,6 +1089,36 @@ def _write_windows_ico(ico_path: Path, source_png: Path) -> None:
     ico_path.write_bytes(directory + payload)
 
 
+def _patch_ios_storyboard_adaptive_bg(sb_text: str) -> str:
+    """Replace hardcoded white storyboard backgrounds with iOS 13+ adaptive systemBackgroundColor."""
+    updated = sb_text
+    for white_tag in (
+        '<color key="backgroundColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>',
+        '<color key="backgroundColor" white="1" alpha="1" colorSpace="custom" customColorSpace="calibratedWhite"/>',
+        '<color key="backgroundColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>',
+    ):
+        if white_tag in updated:
+            updated = updated.replace(
+                white_tag,
+                '<color key="backgroundColor" systemColor="systemBackgroundColor"/>',
+            )
+    if 'systemColor="systemBackgroundColor"' in updated and '<systemColor name="systemBackgroundColor">' not in updated:
+        sys_color_block = (
+            '        <systemColor name="systemBackgroundColor">\n'
+            '            <color white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>\n'
+            '        </systemColor>\n'
+        )
+        if "</resources>" in updated:
+            updated = updated.replace("</resources>", sys_color_block + "    </resources>", 1)
+        elif "</document>" in updated:
+            updated = updated.replace(
+                "</document>",
+                "    <resources>\n" + sys_color_block + "    </resources>\n</document>",
+                1,
+            )
+    return updated
+
+
 def main() -> None:
     subprocess.run([sys.executable, str(REPO_ROOT / 'scripts/prepare_python_html.py'), '--check'], check=True)
     subprocess.run([sys.executable, str(REPO_ROOT / 'scripts/prepare_python_modules.py'), '--check'], check=True)
@@ -1336,12 +1366,21 @@ def main() -> None:
         ios_storyboard = ios_runner / "Base.lproj" / "Main.storyboard"
         if ios_storyboard.exists():
             sb_text = ios_storyboard.read_text(encoding="utf-8")
+            orig_sb = sb_text
             if 'customClass="FlutterViewController"' in sb_text:
                 sb_text = sb_text.replace(
                     'customClass="FlutterViewController"',
                     'customClass="MarcoFlutterViewController" customModule="Runner" customModuleProvider="target"',
                 )
+            sb_text = _patch_ios_storyboard_adaptive_bg(sb_text)
+            if sb_text != orig_sb:
                 ios_storyboard.write_text(sb_text, encoding="utf-8")
+        ios_launch_storyboard = ios_runner / "Base.lproj" / "LaunchScreen.storyboard"
+        if ios_launch_storyboard.exists():
+            lsb_text = ios_launch_storyboard.read_text(encoding="utf-8")
+            patched_lsb = _patch_ios_storyboard_adaptive_bg(lsb_text)
+            if patched_lsb != lsb_text:
+                ios_launch_storyboard.write_text(patched_lsb, encoding="utf-8")
         ios_app_delegate = ios_runner / "AppDelegate.swift"
         if ios_app_delegate.exists():
             ad_text = ios_app_delegate.read_text(encoding="utf-8")
@@ -1370,7 +1409,10 @@ def main() -> None:
                 elif "GeneratedPluginRegistrant.register(with: self)" in ad_text:
                     ad_text = ad_text.replace(
                         "GeneratedPluginRegistrant.register(with: self)",
-                        "GeneratedPluginRegistrant.register(with: self)\n"
+                        "if #available(iOS 13.0, *) {\n"
+                        "      window?.backgroundColor = .systemBackground\n"
+                        "    }\n"
+                        "    GeneratedPluginRegistrant.register(with: self)\n"
                         "    if let messenger = (window?.rootViewController as? FlutterViewController)?.binaryMessenger\n"
                         "      ?? self.registrar(forPlugin: \"MarcoChannelBridge\")?.messenger() {\n"
                         "      MarcoNativeChannelRegistrar.register(messenger: messenger, pluginRegistry: self)\n"
@@ -1409,6 +1451,12 @@ def main() -> None:
                     "    if let obs = orientationObserver {\n"
                     "      NotificationCenter.default.removeObserver(obs)\n"
                     "      UIDevice.current.endGeneratingDeviceOrientationNotifications()\n"
+                    "    }\n"
+                    "  }\n\n"
+                    "  override func viewDidLoad() {\n"
+                    "    super.viewDidLoad()\n"
+                    "    if #available(iOS 13.0, *) {\n"
+                    "      view.backgroundColor = .systemBackground\n"
                     "    }\n"
                     "  }\n\n"
                     "  override var supportedInterfaceOrientations: UIInterfaceOrientationMask {\n"

@@ -32,12 +32,31 @@ class IosLiquidGlassBridge {
   static bool _sheetPresentationInFlight = false;
   static final ValueNotifier<bool> activeSheetNotifier =
       ValueNotifier<bool>(false);
+  static final ValueNotifier<int> rootTabSuppressionCount =
+      ValueNotifier<int>(0);
   static int _pinSessionCounter = 0;
   static ValueChanged<int>? _onRootTabSelected;
   static VoidCallback? _onRootTabSearch;
   static VoidCallback? _onRootTabScrollToTop;
 
   static bool get isSceneActive => sceneActiveNotifier.value;
+
+  /// Acquires a ref-counted suppression token that forces the root native iOS
+  /// tab chrome to stay hidden (e.g. while fullscreen video playback is active)
+  /// regardless of how the route was pushed. Returns an idempotent release fn.
+  static VoidCallback acquireRootTabSuppression() {
+    rootTabSuppressionCount.value = rootTabSuppressionCount.value + 1;
+    if (isAvailable) {
+      unawaited(setRootTabVisible(false, animated: true));
+    }
+    var released = false;
+    return () {
+      if (released) return;
+      released = true;
+      final next = rootTabSuppressionCount.value - 1;
+      rootTabSuppressionCount.value = next < 0 ? 0 : next;
+    };
+  }
 
   static void _setSheetPresentationInFlight(bool active) {
     _sheetPresentationInFlight = active;
@@ -131,8 +150,8 @@ class IosLiquidGlassBridge {
       return _testOverride!;
     }
     if (_initialized) return available.value;
-    _initialized = true;
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      _initialized = true;
       available.value = false;
       reduceTransparencyNotifier.value = false;
       return false;
@@ -141,6 +160,7 @@ class IosLiquidGlassBridge {
       final result = await channel.invokeMapMethod<String, dynamic>(
         'capabilities',
       );
+      _initialized = true;
       final supported = result?['available'] == true;
       available.value = supported;
       reduceTransparencyNotifier.value = result?['reduceTransparency'] == true;
@@ -149,6 +169,8 @@ class IosLiquidGlassBridge {
       }
       return supported;
     } on MissingPluginException {
+      // Do not permanently latch failure on a cold-start plugin registration
+      // race; a follow-up call after first frame can retry cleanly.
       available.value = false;
       reduceTransparencyNotifier.value = false;
       return false;
@@ -406,6 +428,8 @@ class IosLiquidGlassBridge {
       _testReduceTransparencyOverride = null;
       _sheetPresentationInFlight = false;
       activeSheetNotifier.value = false;
+      rootTabSuppressionCount.value = 0;
+      IosRootTabNavigatorObserver.resetForTest();
       reduceTransparencyNotifier.value = false;
       sceneActiveNotifier.value = true;
       _onRootTabSelected = null;
@@ -419,6 +443,63 @@ class IosLiquidGlassBridge {
   static void setReduceTransparencyForTest(bool? value) {
     _testReduceTransparencyOverride = value;
     reduceTransparencyNotifier.value = value ?? false;
+  }
+}
+
+/// Observes the root [Navigator] so any pushed non-root route (fullscreen video
+/// playback, detail page, onboarding, modal route, etc.) automatically hides
+/// the root native iOS tab chrome even if a caller pushes directly without
+/// `_trackSecondaryRoute`.
+class IosRootTabNavigatorObserver extends NavigatorObserver {
+  static final ValueNotifier<int> secondaryRouteDepth = ValueNotifier<int>(0);
+  final Set<Route<dynamic>> _trackedSecondaryRoutes = <Route<dynamic>>{};
+
+  @visibleForTesting
+  static void resetForTest() {
+    secondaryRouteDepth.value = 0;
+  }
+
+  void _syncDepth() {
+    final next = _trackedSecondaryRoutes.length;
+    if (secondaryRouteDepth.value != next) {
+      secondaryRouteDepth.value = next;
+    }
+  }
+
+  bool _isSecondaryRoute(Route<dynamic>? route) =>
+      route != null && !route.isFirst;
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (_isSecondaryRoute(route)) {
+      _trackedSecondaryRoutes.add(route);
+      _syncDepth();
+    }
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (_trackedSecondaryRoutes.remove(route)) {
+      _syncDepth();
+    }
+  }
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (_trackedSecondaryRoutes.remove(route)) {
+      _syncDepth();
+    }
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    if (oldRoute != null) {
+      _trackedSecondaryRoutes.remove(oldRoute);
+    }
+    if (_isSecondaryRoute(newRoute)) {
+      _trackedSecondaryRoutes.add(newRoute!);
+    }
+    _syncDepth();
   }
 }
 

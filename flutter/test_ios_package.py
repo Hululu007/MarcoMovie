@@ -4,6 +4,7 @@ import re
 import struct
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from unittest.mock import patch
 import prepare_platform
 from pathlib import Path
@@ -365,6 +366,104 @@ class DeploymentChecks(unittest.TestCase):
         self.assertIn('return selected ? "rectangle.stack.fill" : "rectangle.stack"', liquid_src)
         self.assertIn('return selected ? "gearshape.fill" : "gearshape"', liquid_src)
         self.assertNotIn('liveBeaconRed', liquid_src)
+
+        # 8. iOS 14-25 regression guard: bringRootChromeToFront must never lazily
+        #    instantiate MarcoIos27RootTabChromeController or mount an unconfigured
+        #    ghost dock overlay when isAvailable == false.
+        self.assertNotIn(
+            'static let shared = MarcoIos27RootTabChromeController()',
+            liquid_src,
+        )
+        self.assertIn(
+            'guard isAvailable, let controller = MarcoIos27RootTabChromeController.existingInstance else',
+            liquid_src,
+        )
+        self.assertIn('private var isConfigured: Bool = false', liquid_src)
+        self.assertGreaterEqual(
+            liquid_src.count('guard MarcoLiquidGlassSupport.isAvailable, isConfigured else'),
+            7,
+        )
+        # Circle buttons on iOS 14 must scale cornerRadius to dockSize instead of hardcoding 31.0.
+        self.assertNotIn('button.layer.cornerRadius = 31.0', liquid_src)
+        self.assertIn('logoButton.layer.cornerRadius = dockSize * 0.5', liquid_src)
+        self.assertIn('searchButton.layer.cornerRadius = dockSize * 0.5', liquid_src)
+        # .unspecified trait style must resolve via == .dark rather than != .light.
+        self.assertIn('v.traitCollection.userInterfaceStyle == .dark', liquid_src)
+        self.assertIn('win.traitCollection.userInterfaceStyle == .dark', liquid_src)
+
+    def test_ios_storyboards_and_controller_use_adaptive_system_background(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runner = root / 'ios/Runner'
+            lproj = runner / 'Base.lproj'
+            lproj.mkdir(parents=True)
+            (runner / 'Info.plist').write_bytes(plistlib.dumps({'MinimumOSVersion': '14.0'}))
+            main_sb = lproj / 'Main.storyboard'
+            main_sb.write_text(
+                '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+                '<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="10117" targetRuntime="iOS.CocoaTouch" initialViewController="BYZ-38-t0r">\n'
+                '    <scenes>\n'
+                '        <scene sceneID="tne-QT-ifu">\n'
+                '            <objects>\n'
+                '                <viewController id="BYZ-38-t0r" customClass="FlutterViewController" sceneMemberID="viewController">\n'
+                '                    <view key="view" contentMode="scaleToFill" id="8bC-Xf-vdC">\n'
+                '                        <color key="backgroundColor" white="1" alpha="1" colorSpace="custom" customColorSpace="calibratedWhite"/>\n'
+                '                    </view>\n'
+                '                </viewController>\n'
+                '            </objects>\n'
+                '        </scene>\n'
+                '    </scenes>\n'
+                '</document>\n',
+                encoding='utf-8',
+            )
+            launch_sb = lproj / 'LaunchScreen.storyboard'
+            launch_sb.write_text(
+                '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+                '<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="12121" targetRuntime="iOS.CocoaTouch" launchScreen="YES" initialViewController="01J-lp-oVM">\n'
+                '    <scenes>\n'
+                '        <scene sceneID="EHf-IW-A2E">\n'
+                '            <objects>\n'
+                '                <viewController id="01J-lp-oVM" sceneMemberID="viewController">\n'
+                '                    <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">\n'
+                '                        <color key="backgroundColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>\n'
+                '                    </view>\n'
+                '                </viewController>\n'
+                '            </objects>\n'
+                '        </scene>\n'
+                '    </scenes>\n'
+                '    <resources>\n'
+                '        <image name="LaunchImage" width="168" height="185"/>\n'
+                '    </resources>\n'
+                '</document>\n',
+                encoding='utf-8',
+            )
+            app_delegate = runner / 'AppDelegate.swift'
+            app_delegate.write_text(
+                'import Flutter\nimport UIKit\n\n'
+                '@main\n@objc class AppDelegate: FlutterAppDelegate {\n'
+                '  override func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {\n'
+                '    GeneratedPluginRegistrant.register(with: self)\n'
+                '    return super.application(application, didFinishLaunchingWithOptions: launchOptions)\n'
+                '  }\n'
+                '}\n',
+                encoding='utf-8',
+            )
+            with patch.object(prepare_platform, 'ROOT', root):
+                prepare_platform.main()
+                prepare_platform.main()
+            main_text = main_sb.read_text(encoding='utf-8')
+            launch_text = launch_sb.read_text(encoding='utf-8')
+            # Both storyboards remain valid XML and switch to adaptive systemBackgroundColor idempotently.
+            ET.fromstring(main_text)
+            ET.fromstring(launch_text)
+            self.assertIn('customClass="MarcoFlutterViewController"', main_text)
+            self.assertEqual(main_text.count('systemColor="systemBackgroundColor"'), 1)
+            self.assertEqual(main_text.count('<systemColor name="systemBackgroundColor">'), 1)
+            self.assertEqual(launch_text.count('systemColor="systemBackgroundColor"'), 1)
+            self.assertEqual(launch_text.count('<systemColor name="systemBackgroundColor">'), 1)
+            swift = app_delegate.read_text(encoding='utf-8')
+            self.assertIn('view.backgroundColor = .systemBackground', swift)
+            self.assertIn('window?.backgroundColor = .systemBackground', swift)
 
 
 if __name__ == '__main__':

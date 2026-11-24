@@ -311,6 +311,13 @@ class StorageService {
   @visibleForTesting
   StorageFileStore get fileStoreForTesting => _fileStore;
   Future<void> _mutationQueue = Future<void>.value();
+  Future<void> _credentialHydrationFuture = Future<void>.value();
+
+  /// Completes once Keychain / secure-store credential hydration has finished.
+  /// Immediately complete unless [StorageService.init] was invoked with
+  /// `deferSecureCredentialHydration: true` to keep cold launch non-blocking.
+  Future<void> waitForCredentialsReady() => _credentialHydrationFuture;
+
   CmsConfig? _cachedConfig;
   Set<String>? _cachedPrivateKeys;
   int _configRevision = 0;
@@ -513,14 +520,25 @@ class StorageService {
     Error.throwWithStackTrace(lastError!, lastStack!);
   }
 
-  Future<void> _initializeStorage() async {
+  Future<void> _initializeStorage({
+    bool deferSecureCredentialHydration = false,
+  }) async {
     try {
       await _fileStore.ensureInitialized();
     } on Object catch (e) {
       debugPrint('StorageService: ensureInitialized warning: $e');
     }
     await _cleanupLeftoverTempFiles();
-    await _migrateCredentialsIfNeeded();
+    if (deferSecureCredentialHydration) {
+      final hydration = _migrateCredentialsIfNeeded().catchError((Object e) {
+        debugPrint('StorageService: deferred credential hydration warning: $e');
+      });
+      _credentialHydrationFuture = hydration;
+      unawaited(hydration);
+    } else {
+      await _migrateCredentialsIfNeeded();
+      _credentialHydrationFuture = Future<void>.value();
+    }
     await _migrateFromPrefsIfNeeded();
     _hydrateSpiderExtensions();
     getSubscriptions();
@@ -547,10 +565,11 @@ class StorageService {
   }
 
   Future<void> _migrateCredentialsIfNeeded() async {
+    const secureOpTimeout = Duration(seconds: 2);
     final store = _secureStore;
     if (store is DefaultSecureCredentialStore) {
       try {
-        await store.ensureInitialized();
+        await store.ensureInitialized().timeout(secureOpTimeout);
       } on Object catch (e) {
         debugPrint('StorageService: ensureInitialized secure store failed: $e');
       }
@@ -568,7 +587,7 @@ class StorageService {
         _credentialCache[key] = plain;
         try {
           if (plain.isNotEmpty) {
-            await _secureStore.write(key, plain);
+            await _secureStore.write(key, plain).timeout(secureOpTimeout);
           }
           await _prefs.remove(key);
         } on Object catch (e) {
@@ -576,7 +595,7 @@ class StorageService {
         }
       } else {
         try {
-          final secVal = await _secureStore.read(key);
+          final secVal = await _secureStore.read(key).timeout(secureOpTimeout);
           if (secVal != null && secVal.isNotEmpty) {
             _credentialCache[key] = secVal;
           }
@@ -671,7 +690,8 @@ class StorageService {
       return dir;
     }
     try {
-      final support = await getApplicationSupportDirectory();
+      final support = await getApplicationSupportDirectory()
+          .timeout(const Duration(seconds: 2));
       final dir = Directory('${support.path}/data');
       _cachedProductionDataDir = dir;
       return dir;
@@ -684,13 +704,44 @@ class StorageService {
     }
   }
 
+  static Future<SharedPreferences> _loadSharedPreferencesWithRetry({
+    Future<SharedPreferences> Function()? loader,
+  }) async {
+    final fn = loader ?? SharedPreferences.getInstance;
+    const retryDelays = <Duration>[
+      Duration(milliseconds: 60),
+      Duration(milliseconds: 160),
+      Duration(milliseconds: 320),
+      Duration(milliseconds: 500),
+    ];
+    Object? lastError;
+    StackTrace? lastStack;
+    for (var attempt = 0; attempt <= retryDelays.length; attempt++) {
+      try {
+        return await fn().timeout(const Duration(seconds: 3));
+      } on Object catch (error, stackTrace) {
+        lastError = error;
+        lastStack = stackTrace;
+        debugPrint(
+          'StorageService: SharedPreferences init attempt ${attempt + 1} failed: $error',
+        );
+        if (attempt < retryDelays.length) {
+          await Future<void>.delayed(retryDelays[attempt]);
+        }
+      }
+    }
+    Error.throwWithStackTrace(lastError!, lastStack!);
+  }
+
   static Future<StorageService> init({
     Directory? dataDirectory,
     SecureCredentialStore? secureStore,
     StorageFileStore? fileStore,
     Pbkdf2ComputeRunner? pbkdf2Runner,
+    bool deferSecureCredentialHydration = false,
+    @visibleForTesting Future<SharedPreferences> Function()? prefsLoader,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await _loadSharedPreferencesWithRetry(loader: prefsLoader);
     final explicitDir = dataDirectory ?? debugOverrideDataDirectory;
     final isFlutterTest = Platform.environment.containsKey('FLUTTER_TEST');
 
@@ -710,7 +761,9 @@ class StorageService {
             ),
         pbkdf2Runner: pbkdf2Runner,
       );
-      await service._initializeStorage();
+      await service._initializeStorage(
+        deferSecureCredentialHydration: deferSecureCredentialHydration,
+      );
       return service;
     }
 
@@ -724,7 +777,9 @@ class StorageService {
       fileStore: fileStore,
       pbkdf2Runner: pbkdf2Runner,
     );
-    await service._initializeStorage();
+    await service._initializeStorage(
+      deferSecureCredentialHydration: deferSecureCredentialHydration,
+    );
     return service;
   }
   String get configOrigin => _prefs.getString(keyOrigin) ?? '';

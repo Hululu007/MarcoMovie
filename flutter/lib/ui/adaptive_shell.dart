@@ -418,6 +418,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     IosLiquidGlassBridge.activeSheetNotifier.addListener(
       _onRootOverlayVisibilityChanged,
     );
+    IosLiquidGlassBridge.rootTabSuppressionCount.addListener(
+      _onRootOverlayVisibilityChanged,
+    );
+    IosRootTabNavigatorObserver.secondaryRouteDepth.addListener(
+      _onRootOverlayVisibilityChanged,
+    );
     activeAppleModalSheetCount.addListener(_onRootOverlayVisibilityChanged);
     activeIosGlassPopoverCount.addListener(_onRootOverlayVisibilityChanged);
     if (!kIsWeb &&
@@ -529,6 +535,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     return !_privacyPortalAnimating &&
         _pushedRouteDepth == 0 &&
         !_settingsSecondaryRouteActive &&
+        IosLiquidGlassBridge.rootTabSuppressionCount.value == 0 &&
+        IosRootTabNavigatorObserver.secondaryRouteDepth.value == 0 &&
         activeAppleModalSheetCount.value == 0 &&
         activeIosGlassPopoverCount.value == 0 &&
         !IosLiquidGlassBridge.activeSheetNotifier.value;
@@ -692,6 +700,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
   Future<void> _runStartupWebdavSync() async {
+    await widget.storage.waitForCredentialsReady();
+    if (!mounted) return;
     if (!widget.storage.isWebdavConfigured || !widget.storage.webdavAuto) {
       return;
     }
@@ -963,6 +973,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _onSceneActivationChanged,
     );
     IosLiquidGlassBridge.activeSheetNotifier.removeListener(
+      _onRootOverlayVisibilityChanged,
+    );
+    IosLiquidGlassBridge.rootTabSuppressionCount.removeListener(
+      _onRootOverlayVisibilityChanged,
+    );
+    IosRootTabNavigatorObserver.secondaryRouteDepth.removeListener(
       _onRootOverlayVisibilityChanged,
     );
     activeAppleModalSheetCount.removeListener(_onRootOverlayVisibilityChanged);
