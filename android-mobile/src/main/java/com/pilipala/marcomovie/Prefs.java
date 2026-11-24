@@ -74,6 +74,7 @@ final class Prefs {
 
     // Runtime state & user data keys (excluded from settings-only reset/restore).
     static final String ORIGIN = "origin";
+    static final String ACTIVE_SUBSCRIPTION_ID = "active_subscription_id";
     static final String LIVE_URL = "live_url";
     static final String LIVE_NAME = "live_name";
     static final String LIVE_SOURCES_JSON = "live_sources_json";
@@ -87,6 +88,8 @@ final class Prefs {
     static final String PREFERRED_SITE = "preferred_site_identity";
     static final String PREFERRED_LINE = "preferred_line";
     static final String LOADING_SITE = "loading_site";
+    static final String CONFIRMED_CRASH_SITE = "confirmed_crash_site";
+    static final String RECOVERED_SKIP_SITE = "recovered_skip_site";
     static final String EXPERIMENTAL_CSP = "experimental_csp";
     static final String ONLY_ALLOW_HTTPS_PLUGINS = "only_allow_https_plugins";
     static final String FAVORITES = "favorites";

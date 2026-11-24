@@ -12,11 +12,13 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Redesigned Mobile Discovery Home:
@@ -31,7 +33,169 @@ final class MobileHomePage {
     private static String lastSiteKey = "";
     private static final Map<String, String> selectedFilters = new LinkedHashMap<>();
 
+    interface LoadingMarkerStore {
+        void writeMarker(String siteKey);
+    }
+
+    /**
+     * Request-owned loading-site crash guard: ensures an older slow request finishing after a newer
+     * request started can never clear the newer request's marker, and normal backgrounding clears
+     * the marker cleanly so OS process reclaim is never misclassified as a crash.
+     */
+    static final class LoadingSiteGuard {
+        private final AtomicLong seq = new AtomicLong(0L);
+        private final Object lock = new Object();
+        private long activeToken = 0L;
+        private String activeSite = "";
+        private Thread activeThread = null;
+
+        long acquire(LoadingMarkerStore store, String siteKey) {
+            String clean = siteKey == null ? "" : siteKey;
+            synchronized (lock) {
+                long token = seq.incrementAndGet();
+                activeToken = token;
+                activeSite = clean;
+                activeThread = Thread.currentThread();
+                MainActivity.registerActiveSourceLoadThread(activeThread, token, clean);
+                if (store != null) {
+                    store.writeMarker(clean);
+                }
+                return token;
+            }
+        }
+
+        boolean releaseIfOwner(LoadingMarkerStore store, long token) {
+            MainActivity.unregisterActiveSourceLoadThread(Thread.currentThread(), token);
+            synchronized (lock) {
+                if (token <= 0L || activeToken != token) {
+                    return false;
+                }
+                MainActivity.unregisterActiveSourceLoadThread(activeThread, token);
+                activeToken = 0L;
+                activeSite = "";
+                activeThread = null;
+                if (store != null) {
+                    store.writeMarker("");
+                }
+                return true;
+            }
+        }
+
+        void clearOnNormalStop(LoadingMarkerStore store) {
+            synchronized (lock) {
+                MainActivity.unregisterActiveSourceLoadThread(activeThread, activeToken);
+                activeToken = 0L;
+                activeSite = "";
+                activeThread = null;
+                if (store != null) {
+                    store.writeMarker("");
+                }
+            }
+        }
+
+        String activeSiteForTest() {
+            synchronized (lock) {
+                return activeSite;
+            }
+        }
+    }
+
+    private static final LoadingSiteGuard LOADING_GUARD = new LoadingSiteGuard();
+
     private MobileHomePage() {}
+
+    private static void commitLoadingSite(MainActivity a, String siteKey) {
+        if (a == null || a.prefs == null) return;
+        a.prefs.edit().putString(Prefs.LOADING_SITE, siteKey == null ? "" : siteKey).commit();
+    }
+
+    private static void applyClearLoadingSite(MainActivity a) {
+        if (a == null || a.prefs == null) return;
+        a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+    }
+
+    static void clearLoadingSiteOnNormalStop(MainActivity a) {
+        LOADING_GUARD.clearOnNormalStop(key -> applyClearLoadingSite(a));
+    }
+
+    static boolean hasAnyPoster(List<Cms.Video> videos) {
+        if (videos == null || videos.isEmpty()) return false;
+        for (Cms.Video v : videos) {
+            if (v != null && v.poster != null && !v.poster.trim().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Resolves initial home listings for both XML/JSON CMS and script sources. Standard Apple CMS
+     * v10 {@code ?ac=list} omits {@code vod_pic}; when the home response contains videos without
+     * any poster URL, enriches via {@link SourceEngine#homeVideos()} ({@code ?ac=detail&pg=1}) or
+     * the first category before falling back to the posterless list.
+     *
+     * <p>An empty response from optional {@link SourceEngine#homeVideos()} (which defaults to
+     * {@code {"list":[]}} for engines such as {@link HttpT4Engine}) never masks a subsequent
+     * failure of the required first-category request:
+     *
+     * <ul>
+     *   <li>Home 200 categories + optional {@code homeVideos()} empty + {@code category()} fails
+     *       (e.g. HTTP 503): rethrows the category failure so UI shows an error with switch-source
+     *       recovery.
+     *   <li>Home 200 categories + {@code category()} 200 genuinely empty: returns empty listing.
+     *   <li>Displayable recommended videos already returned by home / {@code homeVideos()}: returns
+     *       those videos even if category enrichment fails.
+     * </ul>
+     */
+    static Cms.Listing resolveHomeListing(
+            SourceEngine eng, String homeRaw, List<Cms.Category> parsedCats) throws Exception {
+        Cms.Listing cand = HomeScreen.parseHomeListing(homeRaw);
+        boolean hasPosters = hasAnyPoster(cand.videos);
+        Throwable homeVideosError = null;
+        boolean categoryAttempted = false;
+        boolean categorySucceeded = false;
+        Throwable categoryError = null;
+        if (cand.videos.isEmpty() || !hasPosters) {
+            try {
+                Cms.Listing enriched = Cms.listing(eng.homeVideos());
+                if (!enriched.videos.isEmpty()
+                        && (cand.videos.isEmpty() || hasAnyPoster(enriched.videos))) {
+                    cand = enriched;
+                    hasPosters = hasAnyPoster(cand.videos);
+                }
+            } catch (Throwable err) {
+                homeVideosError = err;
+            }
+        }
+        if ((cand.videos.isEmpty() || !hasPosters) && parsedCats != null && !parsedCats.isEmpty()) {
+            categoryAttempted = true;
+            try {
+                Cms.Listing byCat = Cms.listing(eng.category(parsedCats.get(0).id, 1));
+                categorySucceeded = true;
+                if (!byCat.videos.isEmpty()
+                        && (cand.videos.isEmpty() || hasAnyPoster(byCat.videos))) {
+                    cand = byCat;
+                }
+            } catch (Throwable err) {
+                categoryError = err;
+            }
+        }
+        if (cand.videos.isEmpty()) {
+            Throwable primaryError =
+                    categoryAttempted
+                            ? (!categorySucceeded ? categoryError : null)
+                            : homeVideosError;
+            if (primaryError != null) {
+                if (primaryError instanceof Exception) {
+                    throw (Exception) primaryError;
+                }
+                throw new IOException(
+                        primaryError.getMessage() != null ? primaryError.getMessage() : "列表读取失败",
+                        primaryError);
+            }
+        }
+        return cand;
+    }
 
     static void render(final MobileRootShell shell, final FrameLayout container) {
         final MainActivity a = shell.a;
@@ -41,10 +205,94 @@ final class MobileHomePage {
             return;
         }
         if (a.config == null || shell.activeSite == null) {
+            String skipped =
+                    a.prefs != null ? a.prefs.getString(Prefs.RECOVERED_SKIP_SITE, "") : "";
+            if (a.config != null && skipped != null && !skipped.trim().isEmpty()) {
+                renderCrashRecoveryEmpty(shell, container, skipped.trim());
+                return;
+            }
             renderEmptyWelcome(shell, container);
             return;
         }
         renderSourceHome(shell, container, shell.activeSite);
+    }
+
+    private static void renderCrashRecoveryEmpty(
+            final MobileRootShell shell, final FrameLayout container, final String skippedSiteKey) {
+        final MainActivity a = shell.a;
+        ScrollView sv = new ScrollView(a);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.setFillViewport(true);
+        LinearLayout box = a.vertical();
+        box.setGravity(Gravity.CENTER_HORIZONTAL);
+        box.setPadding(a.dp(24), a.statusBarHeight() + a.dp(48), a.dp(24), a.dp(110));
+
+        TextView badge = a.text("崩溃保护已生效", 12, 0xfffbbf24);
+        badge.setTypeface(null, Typeface.BOLD);
+        box.addView(badge);
+        a.gap(box, 10);
+
+        String skippedName = skippedSiteKey;
+        if (a.config != null) {
+            for (Cms.Site s : a.config.sites) {
+                if (s != null
+                        && skippedSiteKey.equals(s.key)
+                        && s.name != null
+                        && !s.name.isEmpty()) {
+                    skippedName = s.name;
+                    break;
+                }
+            }
+        }
+        TextView headline = a.text("已暂停自动加载异常片源", 22, Color.WHITE);
+        headline.setTypeface(null, Typeface.BOLD);
+        headline.setGravity(Gravity.CENTER);
+        box.addView(headline);
+        a.gap(box, 10);
+
+        TextView desc =
+                a.text(
+                        "上次加载「" + skippedName + "」时发生异常退出，当前配置内暂无其他可用站。请切换或导入其他片源，也可手动重试。",
+                        13.5f,
+                        MainActivity.MUTED);
+        desc.setGravity(Gravity.CENTER);
+        desc.setLineSpacing(0, 1.35f);
+        box.addView(desc);
+        a.gap(box, 24);
+
+        addPillAction(
+                a,
+                box,
+                "切换片源 / 管理线路",
+                a.mobileAccentColor(),
+                0xff08120e,
+                () -> shell.showQuickSourceAndModeSheet());
+        a.gap(box, 10);
+        addPillAction(
+                a,
+                box,
+                "手动重试该片源",
+                0xff1e2824,
+                Color.WHITE,
+                () -> {
+                    a.prefs
+                            .edit()
+                            .putString(Prefs.RECOVERED_SKIP_SITE, "")
+                            .putString(Prefs.SELECTED_SITE, skippedSiteKey)
+                            .apply();
+                    shell.switchTab(MobileRootShell.TAB_HOME);
+                });
+        a.gap(box, 10);
+        addPillAction(
+                a,
+                box,
+                "导入其他配置网址 / 本地包",
+                0xff1a222d,
+                0xff93c5fd,
+                () -> UiWidgets.showMobileImportDialog(a));
+
+        sv.addView(box, new ScrollView.LayoutParams(-1, -2));
+        container.addView(sv, new FrameLayout.LayoutParams(-1, -1));
     }
 
     private static void renderEmptyWelcome(MobileRootShell shell, FrameLayout container) {
@@ -209,8 +457,29 @@ final class MobileHomePage {
 
         final TextView statusView = a.text("正在连接片源…", 13, MainActivity.MUTED);
         statusView.setGravity(Gravity.CENTER);
-        statusView.setPadding(a.dp(16), a.dp(28), a.dp(16), a.dp(28));
+        statusView.setPadding(a.dp(16), a.dp(28), a.dp(16), a.dp(12));
         body.addView(statusView, new LinearLayout.LayoutParams(-1, -2));
+
+        final TextView recoverSwitchBtn = a.text("切换其他片源", 13, Color.WHITE);
+        recoverSwitchBtn.setTypeface(null, Typeface.BOLD);
+        recoverSwitchBtn.setGravity(Gravity.CENTER);
+        recoverSwitchBtn.setPadding(a.dp(18), a.dp(9), a.dp(18), a.dp(9));
+        recoverSwitchBtn.setBackground(
+                UiWidgets.glassBg(0xcc242d2a, 0xb8181f1d, a.dp(999), a.dp(0.8f), 0x40ffffff));
+        recoverSwitchBtn.setVisibility(View.GONE);
+        UiWidgets.bindTouchFeedback(recoverSwitchBtn);
+        recoverSwitchBtn.setOnClickListener(v -> shell.showQuickSourceAndModeSheet());
+        LinearLayout.LayoutParams recLp = new LinearLayout.LayoutParams(-2, -2);
+        recLp.gravity = Gravity.CENTER_HORIZONTAL;
+        recLp.bottomMargin = a.dp(14);
+        body.addView(recoverSwitchBtn, recLp);
+
+        shell.onSourceRejected =
+                reason -> {
+                    statusView.setVisibility(View.VISIBLE);
+                    statusView.setText(reason);
+                    recoverSwitchBtn.setVisibility(View.VISIBLE);
+                };
 
         final LinearLayout gridWrap = a.vertical();
         gridWrap.setPadding(a.dp(16), a.dp(4), a.dp(16), 0);
@@ -312,16 +581,20 @@ final class MobileHomePage {
                         gridWrap.removeAllViews();
                         heroHolder.removeAllViews();
                         moreBtn.setVisibility(View.GONE);
+                        recoverSwitchBtn.setVisibility(View.GONE);
                         statusView.setVisibility(View.VISIBLE);
                         statusView.setText("正在加载片单…");
                     } else {
                         moreBtn.setText("正在加载第 " + pageToLoad + " 页…");
                     }
 
-                    // Instant snapshot hit for page 1 home
+                    // Instant snapshot hit for page 1 home (only reuse if posters exist or site has
+                    // none)
                     if (catId.isEmpty() && pageToLoad == 1) {
                         HomeScreen.Snapshot cached = a.homeData.get(site.key);
-                        if (cached != null && !cached.videos.isEmpty()) {
+                        if (cached != null
+                                && !cached.videos.isEmpty()
+                                && hasAnyPoster(cached.videos)) {
                             categories.clear();
                             categories.addAll(cached.categories);
                             currentVideos.clear();
@@ -330,6 +603,7 @@ final class MobileHomePage {
                             totalPages[0] = Math.max(1, cached.pages);
                             rebuildChips.run();
                             statusView.setVisibility(View.GONE);
+                            recoverSwitchBtn.setVisibility(View.GONE);
                             presentVideos(shell, site, cached.videos, heroHolder, gridWrap, true);
                             return;
                         }
@@ -343,6 +617,9 @@ final class MobileHomePage {
                                     filterSchemaHolder[0], targetCatForDefs, currentVideos);
                     a.submitPage(
                             () -> {
+                                final long loadingGuardToken =
+                                        LOADING_GUARD.acquire(
+                                                key -> commitLoadingSite(a, key), site.key);
                                 try {
                                     SourceEngine eng = a.engine(site);
                                     final List<Cms.Category> parsedCats;
@@ -351,22 +628,7 @@ final class MobileHomePage {
                                     if (catId.isEmpty() && pageToLoad == 1) {
                                         homeRaw = eng.home();
                                         parsedCats = Cms.categories(homeRaw);
-                                        Cms.Listing cand =
-                                                new org.json.JSONObject(homeRaw).has("list")
-                                                        ? Cms.listing(homeRaw)
-                                                        : new Cms.Listing();
-                                        if (cand.videos.isEmpty()) {
-                                            try {
-                                                cand = Cms.listing(eng.homeVideos());
-                                            } catch (Throwable ignored) {
-                                            }
-                                        }
-                                        if (cand.videos.isEmpty() && !parsedCats.isEmpty()) {
-                                            cand =
-                                                    Cms.listing(
-                                                            eng.category(parsedCats.get(0).id, 1));
-                                        }
-                                        listing = cand;
+                                        listing = resolveHomeListing(eng, homeRaw, parsedCats);
                                     } else {
                                         homeRaw = null;
                                         parsedCats = null;
@@ -411,6 +673,7 @@ final class MobileHomePage {
                                                         displayList.isEmpty() && pageToLoad == 1
                                                                 ? View.VISIBLE
                                                                 : View.GONE);
+                                                recoverSwitchBtn.setVisibility(View.GONE);
                                                 if (displayList.isEmpty() && pageToLoad == 1) {
                                                     statusView.setText("当前分类暂无内容");
                                                 }
@@ -433,7 +696,8 @@ final class MobileHomePage {
                                                                     + ")");
                                                 }
                                             });
-                                } catch (Exception e) {
+                                } catch (Throwable e) {
+                                    AppLog.w("MobileHomePage", "home/category load failed", e);
                                     a.ui.post(
                                             () -> {
                                                 if (a.isFinishing()
@@ -441,10 +705,15 @@ final class MobileHomePage {
                                                         || myReq != reqId[0]) return;
                                                 statusView.setVisibility(View.VISIBLE);
                                                 statusView.setText(
-                                                        "加载失败：" + a.message(e) + "（点击重试）");
+                                                        SourceController.stageMessage("列表读取失败", e)
+                                                                + "（点击重试）");
                                                 statusView.setOnClickListener(
                                                         v -> fetchListing[0].run());
+                                                recoverSwitchBtn.setVisibility(View.VISIBLE);
                                             });
+                                } finally {
+                                    LOADING_GUARD.releaseIfOwner(
+                                            key -> applyClearLoadingSite(a), loadingGuardToken);
                                 }
                             });
                 };
@@ -525,19 +794,13 @@ final class MobileHomePage {
                                 .setNegativeButton("取消", null)
                                 .setPositiveButton(
                                         "移除",
-                                        (d, w) -> {
-                                            a.prefs
-                                                    .edit()
-                                                    .putString(
-                                                            Prefs.WATCH_HISTORY,
-                                                            WatchHistory.remove(
-                                                                    a.prefs.getString(
-                                                                            Prefs.WATCH_HISTORY,
-                                                                            "[]"),
-                                                                    e.key()))
-                                                    .apply();
-                                            renderContinueWatchingStrip(a, parent);
-                                        })
+                                        (d, w) ->
+                                                CloudSyncDialog.removeHistoryWithTombstone(
+                                                        a,
+                                                        e.key(),
+                                                        () ->
+                                                                renderContinueWatchingStrip(
+                                                                        a, parent)))
                                 .show();
                         return true;
                     });

@@ -224,6 +224,8 @@ public final class MpvPlayer extends MoviePlayer {
     private boolean initialized;
     private boolean surfaceAttached;
     private Surface attachedSurface;
+    private int lastSurfaceWidth;
+    private int lastSurfaceHeight;
     private boolean focusHeld;
     private boolean repeatOne;
     private boolean wantPlay;
@@ -385,30 +387,32 @@ public final class MpvPlayer extends MoviePlayer {
     }
 
     private void initNativeMpv() {
+        int decoderMode = prefs.getInt(Prefs.DECODER_MODE, 0);
+        anime4kActive = prefs.getBoolean(Prefs.ANIME4K_ENABLED, false);
+        hdrToneMappingActive = prefs.getBoolean(Prefs.HDR_TONE_MAPPING, true);
+        boolean displayHdr = DecoderRenderersFactory.hasDisplayHdrSupport(context);
+        boolean is64Bit = is64BitProcess();
+        String unsafeCsv = prefs.getString(Prefs.MPV_UNSAFE_DIRECT_CODECS, "");
+        configuredVo = selectVo(hdrToneMappingActive, anime4kActive);
+        configuredHwdec =
+                selectHwdecMode(
+                        decoderMode,
+                        anime4kActive,
+                        hdrToneMappingActive,
+                        displayHdr,
+                        unsafeCsv,
+                        "");
+        int bufferSeconds = Math.max(15, Math.min(60, prefs.getInt(Prefs.BUFFER_SECONDS, 30)));
+        int maxBytes = mpvBufferBytes(Runtime.getRuntime().maxMemory(), is64Bit);
+        int backBytes = Math.min(16 * 1024 * 1024, maxBytes / 4);
+        File shader = anime4kActive ? extractAnime4kShader(context) : null;
+
         MPVLib.create(context);
         nativeCreated = true;
         try {
-            int decoderMode = prefs.getInt(Prefs.DECODER_MODE, 0);
-            anime4kActive = prefs.getBoolean(Prefs.ANIME4K_ENABLED, false);
-            hdrToneMappingActive = prefs.getBoolean(Prefs.HDR_TONE_MAPPING, true);
-            boolean displayHdr = DecoderRenderersFactory.hasDisplayHdrSupport(context);
-            boolean is64Bit = is64BitProcess();
-            String unsafeCsv = prefs.getString(Prefs.MPV_UNSAFE_DIRECT_CODECS, "");
-            configuredVo = selectVo(hdrToneMappingActive, anime4kActive);
-            configuredHwdec =
-                    selectHwdecMode(
-                            decoderMode,
-                            anime4kActive,
-                            hdrToneMappingActive,
-                            displayHdr,
-                            unsafeCsv,
-                            "");
-            int bufferSeconds = Math.max(15, Math.min(60, prefs.getInt(Prefs.BUFFER_SECONDS, 30)));
-            int maxBytes = mpvBufferBytes(Runtime.getRuntime().maxMemory(), is64Bit);
-            int backBytes = Math.min(16 * 1024 * 1024, maxBytes / 4);
-
             // Start with vo=null until an Android Surface is attached; enabling gpu/gpu-next with
-            // wid=0 before attachSurface() can trigger EGL/libplacebo aborts on TV Mali drivers.
+            // wid=0 before attachSurface() can trigger EGL/libplacebo aborts on Mali/Adreno
+            // drivers.
             MPVLib.setOptionString("vo", "null");
             MPVLib.setOptionString("gpu-context", "android");
             MPVLib.setOptionString("opengl-es", "yes");
@@ -445,14 +449,11 @@ public final class MpvPlayer extends MoviePlayer {
                 MPVLib.setOptionString("gamut-mapping-mode", "auto");
                 MPVLib.setOptionString("target-colorspace-hint", displayHdr ? "yes" : "no");
             }
-            if (anime4kActive) {
-                File shader = extractAnime4kShader(context);
-                if (shader != null && shader.isFile()) {
-                    MPVLib.setOptionString("glsl-shaders", shader.getAbsolutePath());
-                    MPVLib.setOptionString("scale", "bilinear");
-                    MPVLib.setOptionString("cscale", "bilinear");
-                    MPVLib.setOptionString("dscale", "mitchell");
-                }
+            if (anime4kActive && shader != null && shader.isFile()) {
+                MPVLib.setOptionString("glsl-shaders", shader.getAbsolutePath());
+                MPVLib.setOptionString("scale", "bilinear");
+                MPVLib.setOptionString("cscale", "bilinear");
+                MPVLib.setOptionString("dscale", "mitchell");
             }
             MPVLib.init();
             initialized = true;
@@ -627,6 +628,11 @@ public final class MpvPlayer extends MoviePlayer {
                         MPVLib.attachSurface(surface);
                         attachedSurface = surface;
                         surfaceAttached = true;
+                        if (lastSurfaceWidth > 0 && lastSurfaceHeight > 0) {
+                            MPVLib.setPropertyString(
+                                    "android-surface-size",
+                                    lastSurfaceWidth + "x" + lastSurfaceHeight);
+                        }
                         MPVLib.setPropertyString("vo", configuredVo);
                     } else if (surfaceAttached) {
                         MPVLib.setPropertyString("vo", "null");
@@ -643,6 +649,8 @@ public final class MpvPlayer extends MoviePlayer {
         if (width <= 0 || height <= 0) return;
         onMain(
                 () -> {
+                    lastSurfaceWidth = width;
+                    lastSurfaceHeight = height;
                     if (!released && initialized) {
                         MPVLib.setPropertyString("android-surface-size", width + "x" + height);
                     }
@@ -928,6 +936,11 @@ public final class MpvPlayer extends MoviePlayer {
     }
 
     @Override
+    public String activeEngineShortLabel() {
+        return "MPV";
+    }
+
+    @Override
     public List<String> mediaBadges() {
         if (released) return Collections.emptyList();
         return buildMediaBadges(
@@ -1117,14 +1130,20 @@ public final class MpvPlayer extends MoviePlayer {
             audio.abandonAudioFocus(focusChange);
             focusHeld = false;
         }
+        boolean shouldDestroyNative = false;
         if (initialized) {
             initialized = false;
+            shouldDestroyNative = true;
             try {
                 MPVLib.removeObserver(observer);
             } catch (Throwable ignored) {
             }
             try {
                 MPVLib.setPropertyBoolean("pause", Boolean.TRUE);
+            } catch (Throwable ignored) {
+            }
+            try {
+                MPVLib.command(new String[] {"stop"});
             } catch (Throwable ignored) {
             }
             if (surfaceAttached) {
@@ -1140,11 +1159,16 @@ public final class MpvPlayer extends MoviePlayer {
                 }
             }
         }
+        // Only invoke MPVLib.destroy() if MPVLib.init() actually started the native event thread;
+        // calling destroy() before init() passes an uninitialized pthread_t to pthread_join() in
+        // libplayer.so, which aborts the process with SIGABRT (signal 6) on Bionic.
         if (nativeCreated) {
             nativeCreated = false;
-            try {
-                MPVLib.destroy();
-            } catch (Throwable ignored) {
+            if (shouldDestroyNative) {
+                try {
+                    MPVLib.destroy();
+                } catch (Throwable ignored) {
+                }
             }
         }
         if (activeInstance == this) {

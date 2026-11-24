@@ -2618,6 +2618,8 @@ public final class Cms {
         String vTitle = optSafeString(j, "vod_name", "");
         v.title = vTitle.isEmpty() ? "未命名影片" : vTitle;
         v.poster = optSafeString(j, "vod_pic", "");
+        if (v.poster.isEmpty()) v.poster = optSafeString(j, "vod_pic_thumb", "");
+        if (v.poster.isEmpty()) v.poster = optSafeString(j, "vod_pic_slide", "");
         v.remarks = optSafeString(j, "vod_remarks", "");
         Object action = j.opt("action");
         v.action =

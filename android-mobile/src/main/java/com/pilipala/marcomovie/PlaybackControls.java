@@ -2505,7 +2505,12 @@ final class PlaybackControls {
         int outMode = a.prefs.getInt(Prefs.VIDEO_OUTPUT, 0);
         boolean anime4k = a.prefs.getBoolean(Prefs.ANIME4K_ENABLED, false);
         String engLabel =
-                engMode == 3 ? "MPV" : (engMode == 2 ? "IJK" : (engMode == 1 ? "系统" : "Exo"));
+                engMode == 3 ? "MPV" : (engMode == 2 ? "IJK" : (engMode == 1 ? "系统" : "Media3"));
+        String activeLabel = a.player != null ? a.player.activeEngineShortLabel() : engLabel;
+        String menuTitle =
+                activeLabel.equals(engLabel)
+                        ? ("播放器与解码 (" + engLabel + ")")
+                        : ("播放器与解码 (全局: " + engLabel + " · 本次: " + activeLabel + ")");
         String[] items = {
             (engMode == 0 ? "✓ " : "") + "播放器内核 · Exo (Media3)",
             (engMode == 3 ? "✓ " : "") + "播放器内核 · MPV 高画质 (HDR / Anime4K / ASS)",
@@ -2519,7 +2524,7 @@ final class PlaybackControls {
         };
         int curIdx = engMode == 3 ? 1 : (engMode == 2 ? 2 : (engMode == 1 ? 3 : 0));
         choose(
-                "播放器与解码 (" + engLabel + ")",
+                menuTitle,
                 items,
                 curIdx,
                 i -> {
@@ -4987,8 +4992,13 @@ final class PlaybackControls {
         }
         Button decBtn = buttons.get("decoder");
         if (decBtn != null) {
-            int eng = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
-            decBtn.setText(eng == 3 ? "MPV" : (eng == 2 ? "IJK" : (eng == 1 ? "系统" : "Exo")));
+            if (a.player != null) {
+                decBtn.setText(a.player.activeEngineShortLabel());
+            } else {
+                int eng = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+                decBtn.setText(
+                        eng == 3 ? "MPV" : (eng == 2 ? "IJK" : (eng == 1 ? "系统" : "Media3")));
+            }
         }
         if (a.isTvDevice() && activeTooltipButton != null && activeTooltipButton.hasFocus()) {
             refreshTooltipForCurrentFocus();
@@ -5293,6 +5303,7 @@ final class PlaybackControls {
                     });
         }
         if (a.player == null) return;
+        updateLabels();
         if (resolved.media.optString("danmaku").isEmpty()) {
             String recentDm = CspEngine.consumeRecentPluginDanmaku(25000L);
             if (!recentDm.isEmpty()) {

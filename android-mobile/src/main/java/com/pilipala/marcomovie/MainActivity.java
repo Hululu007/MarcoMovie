@@ -552,6 +552,9 @@ public final class MainActivity extends Activity {
 
     boolean reduced, prepared, playing, foreground;
     int generation;
+    int fullscreenPlaybackSession;
+    final java.util.concurrent.atomic.AtomicLong configImportSeq =
+            new java.util.concurrent.atomic.AtomicLong();
     static final int MAX_HOME_SNAPSHOTS = 8;
     final Map<String, SourceEngine> engines = new HashMap<>();
     final SingleFlight<SourceEngine> engineInitializations = new SingleFlight<>();
@@ -748,16 +751,138 @@ public final class MainActivity extends Activity {
                     MainActivity activity = activeActivity;
                     CrashReportStore.recordUncaughtCrash(activity, thread, error);
                     if (activity != null && activity.prefs != null) {
-                        String currentSite = activity.prefs.getString(Prefs.SELECTED_SITE, "");
-                        if (currentSite != null && !currentSite.isEmpty()) {
-                            activity.prefs
-                                    .edit()
-                                    .putString(Prefs.LOADING_SITE, currentSite)
-                                    .commit();
+                        // Only attribute a fatal uncaught exception to a site when the crashing
+                        // thread itself owns an active source load, OR the crash stack originates
+                        // in a plugin DEX / source engine call chain. An unrelated UI exception
+                        // (e.g. SettingsScreen on the main thread) overlapping a healthy background
+                        // HTTP request must NEVER blame that healthy site.
+                        String faultSite =
+                                attributeUncaughtCrashSite(thread, error, activity.prefs);
+                        String staleLoading = activity.prefs.getString(Prefs.LOADING_SITE, "");
+                        boolean clearStaleLoading =
+                                faultSite.isEmpty()
+                                        && staleLoading != null
+                                        && !staleLoading.trim().isEmpty();
+                        if (!faultSite.isEmpty() || clearStaleLoading) {
+                            SharedPreferences.Editor ed =
+                                    activity.prefs
+                                            .edit()
+                                            .putString(
+                                                    Prefs.LOADING_SITE,
+                                                    clearStaleLoading ? "" : faultSite);
+                            if (!faultSite.isEmpty()) {
+                                ed.putString(Prefs.CONFIRMED_CRASH_SITE, faultSite);
+                            }
+                            ed.commit();
                         }
                     }
                     if (previous != null) previous.uncaughtException(thread, error);
                 });
+    }
+
+    private static final class ActiveSourceLoad {
+        final long token;
+        final String siteKey;
+
+        ActiveSourceLoad(long token, String siteKey) {
+            this.token = token;
+            this.siteKey = siteKey;
+        }
+    }
+
+    private static final java.util.concurrent.ConcurrentHashMap<Long, ActiveSourceLoad>
+            ACTIVE_SOURCE_LOAD_THREADS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    static void registerActiveSourceLoadThread(Thread thread, long token, String siteKey) {
+        if (thread == null) return;
+        String clean = siteKey == null ? "" : siteKey.trim();
+        if (clean.isEmpty()) {
+            ACTIVE_SOURCE_LOAD_THREADS.remove(thread.getId());
+        } else {
+            ACTIVE_SOURCE_LOAD_THREADS.put(thread.getId(), new ActiveSourceLoad(token, clean));
+        }
+    }
+
+    static void unregisterActiveSourceLoadThread(Thread thread, long token) {
+        if (thread == null) return;
+        ActiveSourceLoad cur = ACTIVE_SOURCE_LOAD_THREADS.get(thread.getId());
+        if (cur != null && (token <= 0L || cur.token == token)) {
+            ACTIVE_SOURCE_LOAD_THREADS.remove(thread.getId(), cur);
+        }
+    }
+
+    static String activeSourceLoadSiteForThread(Thread thread) {
+        if (thread == null) return "";
+        ActiveSourceLoad cur = ACTIVE_SOURCE_LOAD_THREADS.get(thread.getId());
+        return cur == null ? "" : cur.siteKey;
+    }
+
+    private static boolean isSourceEngineClassName(String cls) {
+        if (cls == null || cls.isEmpty()) return false;
+        if (cls.startsWith("com.github.catvod.")
+                || cls.startsWith("com.fongmi.")
+                || cls.startsWith("com.whl.quickjs.")
+                || cls.startsWith("app.cash.quickjs.")) {
+            return true;
+        }
+        final String pkg = "com.pilipala.marcomovie.";
+        if (!cls.startsWith(pkg)) return false;
+        String simple = cls.substring(pkg.length());
+        int dollar = simple.indexOf('$');
+        if (dollar >= 0) simple = simple.substring(0, dollar);
+        return "CspEngine".equals(simple)
+                || "JsEngine".equals(simple)
+                || "WebViewJsEngine".equals(simple)
+                || "DrpyEngine".equals(simple)
+                || "NativePythonEngine".equals(simple)
+                || "HttpT4Engine".equals(simple)
+                || "JsonCmsEngine".equals(simple)
+                || "CatPawEngine".equals(simple)
+                || "AlistEngine".equals(simple)
+                || "EmbyEngine".equals(simple)
+                || "GuardEngine".equals(simple)
+                || "QueuedSourceEngine".equals(simple)
+                || "SourceEngine".equals(simple)
+                || "QuickJsDeadline".equals(simple)
+                || "SpiderGatewayServer".equals(simple)
+                || "LocalSourcePackage".equals(simple)
+                || "Cms".equals(simple);
+    }
+
+    static boolean hasSourceEngineStackFrame(Throwable error) {
+        if (error == null) return false;
+        int depth = 0;
+        for (Throwable t = error; t != null && depth < 12; t = t.getCause(), depth++) {
+            for (StackTraceElement e : t.getStackTrace()) {
+                if (e != null && isSourceEngineClassName(e.getClassName())) {
+                    return true;
+                }
+            }
+            if (t.getCause() == t) break;
+        }
+        return false;
+    }
+
+    static String attributeUncaughtCrashSite(
+            Thread thread, Throwable error, SharedPreferences prefs) {
+        if (prefs == null) return "";
+        String threadSite = activeSourceLoadSiteForThread(thread);
+        if (!threadSite.isEmpty()) {
+            // Authoritative thread-level ownership: this crashing thread belongs strictly to
+            // threadSite and must NEVER fall through to blame a newer disk LOADING_SITE or
+            // SELECTED_SITE (e.g. healthy B) when a superseded worker A throws late.
+            return threadSite;
+        }
+        String loadingSite = prefs.getString(Prefs.LOADING_SITE, "");
+        String cleanLoading = loadingSite == null ? "" : loadingSite.trim();
+        String selectedSite = prefs.getString(Prefs.SELECTED_SITE, "");
+        String cleanSelected = selectedSite == null ? "" : selectedSite.trim();
+        if (ListingRoute.hasPluginFrame(error)
+                || hasDexClassLoaderFrame(error)
+                || hasSourceEngineStackFrame(error)) {
+            return !cleanLoading.isEmpty() ? cleanLoading : cleanSelected;
+        }
+        return "";
     }
 
     static boolean hasDexClassLoaderFrame(Throwable error) {
@@ -1034,14 +1159,40 @@ public final class MainActivity extends Activity {
             applyMobileSystemBars(false);
         }
         prefs = getSharedPreferences(privateMode ? "movie-private" : Prefs.FILE, MODE_PRIVATE);
+        cleanupLegacyPrivateHistory(getSharedPreferences("movie-private", MODE_PRIVATE));
         final int priorBootCrashes = recordStartupBootGuard(getCacheDir());
-        final boolean priorLoadingCrash = !prefs.getString(Prefs.LOADING_SITE, "").isEmpty();
+        final int[] priorExitInfo = queryLastProcessExitInfo();
+        final int priorExitReason = priorExitInfo[0];
+        final int priorExitStatus = priorExitInfo[1];
+        final String pendingLoadingSite = prefs.getString(Prefs.LOADING_SITE, "");
+        final String confirmedCrashSite = prefs.getString(Prefs.CONFIRMED_CRASH_SITE, "");
+        final String priorCrashSiteKey =
+                confirmedCrashSite != null && !confirmedCrashSite.trim().isEmpty()
+                        ? confirmedCrashSite.trim()
+                        : (pendingLoadingSite != null ? pendingLoadingSite.trim() : "");
+        final boolean priorLoadingCrash =
+                shouldTreatLoadingSiteAsCrash(
+                        pendingLoadingSite, confirmedCrashSite, priorExitReason, priorExitStatus);
+        if (!pendingLoadingSite.isEmpty() && !priorLoadingCrash) {
+            // Previous process exited cleanly, via OS memory/freezer/SIGKILL reclaim, or on
+            // API 23-29 without crash evidence while a slow home request was in flight; clear only
+            // the transient loading marker and keep user's selected/preferred site intact.
+            prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+        }
+        boolean bootResetSelected = false;
         if (priorBootCrashes >= 1 || priorLoadingCrash) {
             purgeVolatileCrashCaches(getCacheDir());
-            if (priorBootCrashes >= 2) {
+            if (priorBootCrashes >= 2 && priorLoadingCrash) {
+                String beforeBootSel = prefs.getString(Prefs.SELECTED_SITE, "");
                 clearRecoveredCrashSite(prefs);
+                String afterBootSel = prefs.getString(Prefs.SELECTED_SITE, "");
+                bootResetSelected =
+                        beforeBootSel != null
+                                && !beforeBootSel.isEmpty()
+                                && (afterBootSel == null || afterBootSel.isEmpty());
             }
         }
+        final boolean bootGuardResetSite = bootResetSelected;
         if (isTvDevice() && !prefs.getBoolean("tv_top_nav_default_v1", false)) {
             prefs.edit()
                     .putInt(Prefs.TV_NAVIGATION_MODE, 0)
@@ -1049,9 +1200,13 @@ public final class MainActivity extends Activity {
                     .putBoolean("tv_top_nav_default_v1", true)
                     .apply();
         }
-        WatchHistory.historyCorrupted = prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
-        if (WatchHistory.historyCorrupted) {
-            ui.post(() -> toast("检测到观看历史数据损坏，已自动备份至本地。为保护数据，已暂停历史更新与云端覆盖。"));
+        if (privateMode) {
+            WatchHistory.historyCorrupted = false;
+        } else {
+            WatchHistory.historyCorrupted = prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
+            if (WatchHistory.historyCorrupted) {
+                ui.post(() -> toast("检测到观看历史数据损坏，已自动备份至本地。为保护数据，已暂停历史更新与云端覆盖。"));
+            }
         }
         reduced = prefs.getBoolean(Prefs.REDUCED, false);
         configOrigin = prefs.getString("origin", "");
@@ -1065,15 +1220,69 @@ public final class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         try {
-            File f = new File(getFilesDir(), "config.json");
-            if (f.exists())
-                try (InputStream i = new FileInputStream(f)) {
-                    config = Cms.parseConfig(Cms.read(i, Cms.MAX_JSON), configOrigin);
-                    SourcePicker.applyEdits(this, config, configOrigin);
-                    if (priorBootCrashes == 0 && !priorLoadingCrash) {
-                        SourcePreferences.restoreDefault(this);
+            String prefOrigin =
+                    prefs.contains(Prefs.ORIGIN) ? prefs.getString(Prefs.ORIGIN, null) : null;
+            String prefSelected =
+                    prefs.contains(Prefs.SELECTED_SITE)
+                            ? prefs.getString(Prefs.SELECTED_SITE, null)
+                            : null;
+            String prefSubId =
+                    prefs.contains(Prefs.ACTIVE_SUBSCRIPTION_ID)
+                            ? prefs.getString(Prefs.ACTIVE_SUBSCRIPTION_ID, null)
+                            : null;
+            ConfigStore.RecoveredState recovered =
+                    configStore.loadRecoveredState(prefOrigin, prefSelected, prefSubId);
+            if (recovered != null && recovered.raw != null && !recovered.raw.isEmpty()) {
+                configOrigin = recovered.origin == null ? "" : recovered.origin;
+                // Keep crash-recovery decisions intact across snapshot healing: once a confirmed
+                // faulty site has been cleared on boot, never let config-state.json re-select that
+                // same faulty site back into Prefs.SELECTED_SITE.
+                String recoveredSkip = prefs.getString(Prefs.RECOVERED_SKIP_SITE, "");
+                String cleanRecoveredSkip = recoveredSkip == null ? "" : recoveredSkip.trim();
+                boolean suppressCrashedSelectedHeal =
+                        bootGuardResetSite
+                                || (priorLoadingCrash
+                                        && !priorCrashSiteKey.isEmpty()
+                                        && priorCrashSiteKey.equals(recovered.selectedSite))
+                                || (!cleanRecoveredSkip.isEmpty()
+                                        && cleanRecoveredSkip.equals(recovered.selectedSite));
+                boolean needHealOrigin =
+                        recovered.fromAtomicBundle && !Objects.equals(recovered.origin, prefOrigin);
+                boolean needHealSelected =
+                        recovered.fromAtomicBundle
+                                && !suppressCrashedSelectedHeal
+                                && !Objects.equals(recovered.selectedSite, prefSelected);
+                boolean needHealSubId =
+                        recovered.subscriptionId != null
+                                && !recovered.subscriptionId.isEmpty()
+                                && !Objects.equals(recovered.subscriptionId, prefSubId);
+                if (needHealOrigin || needHealSelected || needHealSubId) {
+                    SharedPreferences.Editor heal = prefs.edit();
+                    if (needHealOrigin) {
+                        if (recovered.origin != null) {
+                            heal.putString(Prefs.ORIGIN, recovered.origin);
+                        } else {
+                            heal.remove(Prefs.ORIGIN);
+                        }
                     }
+                    if (needHealSelected) {
+                        if (recovered.selectedSite != null) {
+                            heal.putString(Prefs.SELECTED_SITE, recovered.selectedSite);
+                        } else {
+                            heal.remove(Prefs.SELECTED_SITE);
+                        }
+                    }
+                    if (needHealSubId) {
+                        heal.putString(Prefs.ACTIVE_SUBSCRIPTION_ID, recovered.subscriptionId);
+                    }
+                    heal.apply();
                 }
+                config = Cms.parseConfig(recovered.raw, configOrigin);
+                SourcePicker.applyEdits(this, config, configOrigin);
+                if (priorBootCrashes == 0 && !priorLoadingCrash) {
+                    SourcePreferences.restoreDefault(this);
+                }
+            }
         } catch (Exception e) {
             AppLog.w("MainActivity", "load saved config failed", e);
             config = null;
@@ -1126,11 +1335,28 @@ public final class MainActivity extends Activity {
                         ui.post(
                                 () -> {
                                     if (isFinishing() || isDestroyed()) return;
-                                    String crashedSite = prefs.getString(Prefs.LOADING_SITE, "");
+                                    final String confirmedCrashed =
+                                            prefs.getString(Prefs.CONFIRMED_CRASH_SITE, "");
+                                    final String crashedSite =
+                                            confirmedCrashed != null && !confirmedCrashed.isEmpty()
+                                                    ? confirmedCrashed
+                                                    : prefs.getString(Prefs.LOADING_SITE, "");
                                     boolean recoveredFromCrash =
-                                            crashedSite != null && !crashedSite.isEmpty();
+                                            priorLoadingCrash
+                                                    && crashedSite != null
+                                                    && !crashedSite.isEmpty();
+                                    boolean resetSelectedOnCrash = false;
                                     if (recoveredFromCrash) {
+                                        String beforeSelected =
+                                                prefs.getString(Prefs.SELECTED_SITE, "");
                                         clearRecoveredCrashSite(prefs);
+                                        String afterSelected =
+                                                prefs.getString(Prefs.SELECTED_SITE, "");
+                                        resetSelectedOnCrash =
+                                                beforeSelected != null
+                                                        && !beforeSelected.isEmpty()
+                                                        && (afterSelected == null
+                                                                || afterSelected.isEmpty());
                                     }
                                     worker.execute(
                                             () ->
@@ -1177,10 +1403,11 @@ public final class MainActivity extends Activity {
                                                     3800);
                                         }
                                     }
-                                    if (recoveredFromCrash) {
+                                    if ((recoveredFromCrash && resetSelectedOnCrash)
+                                            || bootGuardResetSite) {
                                         toast("上次加载该片源时异常退出，已自动重置片源选择");
                                     } else if (priorBootCrashes >= 2) {
-                                        toast("检测到连续异常退出，已清理临时缓存并重置片源");
+                                        toast("检测到连续异常退出，已自动清理临时缓存");
                                     } else if (priorBootCrashes == 1) {
                                         toast("检测到上次异常退出，已自动清理临时缓存");
                                     } else if (!privateMode
@@ -2260,12 +2487,19 @@ public final class MainActivity extends Activity {
         // Never disrupt an active playback session when a background spider/netdisk extension
         // unexpectedly calls Activity.finish().
         if (current != null && current.player) {
+            ui.post(
+                    () -> {
+                        if (!isDestroyed() && !allowSystemFinish) {
+                            toast("当前片源扩展触发退出请求，已拦截保护播放");
+                        }
+                    });
             return;
         }
         generation++;
         ui.post(
                 () -> {
                     if (isDestroyed() || allowSystemFinish) return;
+                    final String recoveryMsg = "当前片源主动拒绝运行，已拦截退出请求；请返回或切换其他片源";
                     if (current != null
                             && shouldPopScreenOnPluginFinish(
                                     current.home, current.player, !back.isEmpty())) {
@@ -2274,6 +2508,13 @@ public final class MainActivity extends Activity {
                         current = back.pop();
                         renderReturn(current);
                         restore(current);
+                        toast(recoveryMsg);
+                    } else {
+                        cancelPageRequests();
+                        if (mobileShell != null) {
+                            mobileShell.showSourceRejectedRecovery(recoveryMsg);
+                        }
+                        toast(recoveryMsg);
                     }
                 });
     }
@@ -2982,17 +3223,132 @@ public final class MainActivity extends Activity {
         }
     }
 
+    static final int EXIT_REASON_UNKNOWN = 0;
+    static final int EXIT_REASON_SIGNALED = 2;
+    static final int EXIT_STATUS_UNKNOWN = 0;
+
+    /**
+     * Fatal POSIX crash signals (SIGILL=4, SIGTRAP=5, SIGABRT=6, SIGBUS=7, SIGFPE=8, SIGSEGV=11,
+     * SIGSYS=31). Explicitly excludes SIGKILL(9) and SIGTERM(15), because Android 11+ devices often
+     * report low-memory kills as {@code REASON_SIGNALED(2)} with {@code status=SIGKILL(9)}.
+     */
+    static boolean isFatalCrashSignal(int signalStatus) {
+        return signalStatus == 4
+                || signalStatus == 5
+                || signalStatus == 6
+                || signalStatus == 7
+                || signalStatus == 8
+                || signalStatus == 11
+                || signalStatus == 31;
+    }
+
+    static boolean isAttributableCrashExitReason(int reason) {
+        return isAttributableCrashExitReason(reason, EXIT_STATUS_UNKNOWN);
+    }
+
+    static boolean isAttributableCrashExitReason(int reason, int status) {
+        // ApplicationExitInfo: REASON_CRASH(4), REASON_CRASH_NATIVE(5), REASON_ANR(6) are always
+        // attributable. REASON_SIGNALED(2) is ONLY attributable when accompanied by a fatal crash
+        // signal (never bare REASON_SIGNALED or SIGKILL=9, which Android reports for LMK kills).
+        if (reason == 4 || reason == 5 || reason == 6) {
+            return true;
+        }
+        return reason == EXIT_REASON_SIGNALED && isFatalCrashSignal(status);
+    }
+
+    static boolean isKnownBenignExitReason(int reason) {
+        // ApplicationExitInfo: REASON_EXIT_SELF(1), REASON_LOW_MEMORY(3),
+        // REASON_PERMISSION_CHANGE(8), REASON_USER_REQUESTED(10), REASON_USER_STOPPED(11),
+        // REASON_FREEZER(14), REASON_PACKAGE_STATE_CHANGE(15), REASON_PACKAGE_UPDATED(16)
+        return reason == 1
+                || reason == 3
+                || reason == 8
+                || reason == 10
+                || reason == 11
+                || reason == 14
+                || reason == 15
+                || reason == 16;
+    }
+
+    /**
+     * Determines whether a leftover {@link Prefs#LOADING_SITE} marker has explicit crash evidence
+     * from {@code ApplicationExitInfo} (API 30+ {@code REASON_CRASH / CRASH_NATIVE / ANR}, or
+     * {@code REASON_SIGNALED} with a fatal crash signal). Bare {@code REASON_SIGNALED(2)},
+     * {@code SIGKILL(9)}, benign OS reclaims, and API 23–29 {@link #EXIT_REASON_UNKNOWN} return
+     * {@code false} so healthy sites are preserved unless explicit crash evidence was recorded via
+     * {@link Prefs#CONFIRMED_CRASH_SITE}.
+     */
+    static boolean shouldTreatLoadingSiteAsCrash(String loadingSite, int lastExitReason) {
+        return shouldTreatLoadingSiteAsCrash(loadingSite, "", lastExitReason, EXIT_STATUS_UNKNOWN);
+    }
+
+    /**
+     * Evaluates crash attribution using both explicit uncaught-crash evidence ({@link
+     * Prefs#CONFIRMED_CRASH_SITE}, available on all Android versions including API 23–29) and API
+     * 30+ {@code ApplicationExitInfo} crash exit reasons.
+     */
+    static boolean shouldTreatLoadingSiteAsCrash(
+            String loadingSite, String confirmedCrashSite, int lastExitReason) {
+        return shouldTreatLoadingSiteAsCrash(
+                loadingSite, confirmedCrashSite, lastExitReason, EXIT_STATUS_UNKNOWN);
+    }
+
+    static boolean shouldTreatLoadingSiteAsCrash(
+            String loadingSite, String confirmedCrashSite, int lastExitReason, int lastExitStatus) {
+        if (confirmedCrashSite != null && !confirmedCrashSite.trim().isEmpty()) {
+            return true;
+        }
+        if (loadingSite == null || loadingSite.trim().isEmpty()) {
+            return false;
+        }
+        return isAttributableCrashExitReason(lastExitReason, lastExitStatus);
+    }
+
+    private int[] queryLastProcessExitInfo() {
+        if (android.os.Build.VERSION.SDK_INT < 30) {
+            return new int[] {EXIT_REASON_UNKNOWN, EXIT_STATUS_UNKNOWN};
+        }
+        try {
+            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) return new int[] {EXIT_REASON_UNKNOWN, EXIT_STATUS_UNKNOWN};
+            List<android.app.ApplicationExitInfo> reasons =
+                    am.getHistoricalProcessExitReasons(getPackageName(), 0, 1);
+            if (reasons != null && !reasons.isEmpty() && reasons.get(0) != null) {
+                android.app.ApplicationExitInfo info = reasons.get(0);
+                return new int[] {info.getReason(), info.getStatus()};
+            }
+        } catch (Throwable ignored) {
+        }
+        return new int[] {EXIT_REASON_UNKNOWN, EXIT_STATUS_UNKNOWN};
+    }
+
+    /**
+     * Clears crash markers and removes ONLY the specific site that matches the attributed fault
+     * evidence ({@link Prefs#CONFIRMED_CRASH_SITE} or {@link Prefs#LOADING_SITE}). Separately
+     * checks {@link Prefs#SELECTED_SITE} and {@link Prefs#PREFERRED_SITE} so a fault on site A (or
+     * an unattributed boot interruption with empty fault markers) NEVER wipes a healthy site B.
+     */
     static void clearRecoveredCrashSite(SharedPreferences prefs) {
         if (prefs == null) return;
-        String crashed = prefs.getString(Prefs.LOADING_SITE, "");
+        String confirmed = prefs.getString(Prefs.CONFIRMED_CRASH_SITE, "");
+        String loading = prefs.getString(Prefs.LOADING_SITE, "");
+        String badKey =
+                confirmed != null && !confirmed.trim().isEmpty()
+                        ? confirmed.trim()
+                        : (loading != null ? loading.trim() : "");
         String selected = prefs.getString(Prefs.SELECTED_SITE, "");
         String preferred = prefs.getString(Prefs.PREFERRED_SITE, "");
         SharedPreferences.Editor editor =
-                prefs.edit().putString(Prefs.LOADING_SITE, "").putString(Prefs.SELECTED_SITE, "");
-        if (preferred != null && !preferred.isEmpty()) {
-            String badKey = crashed != null && !crashed.isEmpty() ? crashed : selected;
-            if (badKey != null
-                    && !badKey.isEmpty()
+                prefs.edit()
+                        .putString(Prefs.LOADING_SITE, "")
+                        .putString(Prefs.CONFIRMED_CRASH_SITE, "");
+        if (!badKey.isEmpty()) {
+            if (selected == null || selected.isEmpty() || badKey.equals(selected)) {
+                editor.putString(Prefs.SELECTED_SITE, "");
+                editor.putString(Prefs.RECOVERED_SKIP_SITE, badKey);
+            }
+            if (preferred != null
+                    && !preferred.isEmpty()
                     && (preferred.equals(badKey) || preferred.startsWith(badKey + "\n"))) {
                 editor.putString(Prefs.PREFERRED_SITE, "");
             }
@@ -3000,7 +3356,46 @@ public final class MainActivity extends Activity {
         editor.commit();
     }
 
+    /**
+     * Targeted cleanup for legacy private search & watch-history entries written by earlier
+     * mobile candidates. Preserves private subscriptions, selected site, favorites, and all public
+     * preferences untouched.
+     */
+    static boolean cleanupLegacyPrivateHistory(SharedPreferences privatePrefs) {
+        if (privatePrefs == null) return false;
+        boolean hasLegacy =
+                privatePrefs.contains(Prefs.GLOBAL_SEARCH_HISTORY)
+                        || privatePrefs.contains(Prefs.WATCH_HISTORY)
+                        || privatePrefs.contains(WatchHistory.CORRUPTED_PREF);
+        if (!hasLegacy) return false;
+        privatePrefs
+                .edit()
+                .remove(Prefs.GLOBAL_SEARCH_HISTORY)
+                .remove(Prefs.WATCH_HISTORY)
+                .remove(WatchHistory.CORRUPTED_PREF)
+                .apply();
+        return true;
+    }
+
     WatchHistory.Persistence historyPersistence() {
+        if (privateMode) {
+            return new WatchHistory.Persistence() {
+                @Override
+                public String readRaw() {
+                    return "[]";
+                }
+
+                @Override
+                public boolean readCorruptedPref() {
+                    return false;
+                }
+
+                @Override
+                public void writeState(String historyJson, boolean corrupted) {
+                    // Private mode never persists watch history to disk.
+                }
+            };
+        }
         final SharedPreferences targetPrefs = prefs;
         return new WatchHistory.Persistence() {
             @Override
@@ -3235,6 +3630,7 @@ public final class MainActivity extends Activity {
         super.onStart();
         activeActivity = this;
         foreground = true;
+        if (inlinePlayer != null) inlinePlayer.onActivityStart();
         CspEngine.syncAllPluginActivities(this);
         syncCastService();
         syncSpiderGateway();
@@ -3258,6 +3654,7 @@ public final class MainActivity extends Activity {
         super.onResume();
         activeActivity = this;
         foreground = true;
+        if (inlinePlayer != null) inlinePlayer.onActivityStart();
         CspEngine.syncAllPluginActivities(this);
         syncCastService();
         syncSpiderGateway();
@@ -3272,7 +3669,7 @@ public final class MainActivity extends Activity {
         if (playing
                 && current != null
                 && current.player
-                && mobilePrefs().getBoolean(Prefs.AUTO_PIP, false)) {
+                && mobilePrefs().getBoolean(Prefs.AUTO_PIP, true)) {
             enterAppPip();
         }
     }
@@ -3284,6 +3681,7 @@ public final class MainActivity extends Activity {
         if (markerHost != null) markerHost.abort();
         if (playerChrome != null) playerChrome.cancelEpisodeHoldSwitch();
         savePlaybackHistory(true);
+        if (inlinePlayer != null) inlinePlayer.flushHistoryProgress();
         super.onPause();
     }
 
@@ -3323,10 +3721,16 @@ public final class MainActivity extends Activity {
             CloudSyncDialog.pushOnExit(this);
         }
         foreground = false;
+        if (!isTvDevice()) {
+            MobileHomePage.clearLoadingSiteOnNormalStop(this);
+        }
         super.onStop();
         boolean keepBgPlay =
                 (android.os.Build.VERSION.SDK_INT >= 24 && isInPictureInPictureMode())
                         || mobilePrefs().getBoolean(Prefs.BACKGROUND_PLAY, false);
+        if (inlinePlayer != null) {
+            inlinePlayer.onActivityStop(keepBgPlay);
+        }
         if (player != null && !keepBgPlay)
             try {
                 player.pause();

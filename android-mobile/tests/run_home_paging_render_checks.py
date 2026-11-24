@@ -3,6 +3,7 @@ from pathlib import Path
 import os, subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[2]
 HOME = 'android-mobile/src/main/java/com/pilipala/marcomovie/HomeScreen.java'
+OLD_HOME = 'android/src/main/java/com/pilipala/marcomovie/HomeScreen.java'
 JAVA = Path(os.environ['MARCOMOVIE_JDK'])/'bin'
 SUFFIX = '.exe' if os.name == 'nt' else ''
 def method(text, name):
@@ -10,7 +11,7 @@ def method(text, name):
     while depth:
         depth+=(text[end]=='{')-(text[end]=='}');end+=1
     return text[start:end]
-old=subprocess.check_output(['git','show','daffd3eb58a7dcef917a2a97de6d20d59bebdf04:'+HOME],cwd=ROOT).decode('utf8')
+old=subprocess.check_output(['git','show','daffd3eb58a7dcef917a2a97de6d20d59bebdf04:'+OLD_HOME],cwd=ROOT).decode('utf8')
 fixed=(ROOT/HOME).read_text(encoding='utf8')
 with tempfile.TemporaryDirectory(prefix='home-render-gate-') as folder:
     work=Path(folder)

@@ -154,13 +154,9 @@ final class MobileLibraryPage {
                                 .setNegativeButton("取消", null)
                                 .setPositiveButton(
                                         "清空",
-                                        (d, w) -> {
-                                            a.prefs
-                                                    .edit()
-                                                    .putString(Prefs.WATCH_HISTORY, "[]")
-                                                    .apply();
-                                            reload.run();
-                                        })
+                                        (d, w) ->
+                                                CloudSyncDialog.clearHistoryWithTombstone(
+                                                        a, reload))
                                 .show());
         bar.addView(clearAll);
         parent.addView(bar);
@@ -199,17 +195,7 @@ final class MobileLibraryPage {
             del.setPadding(a.dp(10), a.dp(6), a.dp(6), a.dp(6));
             UiWidgets.bindTouchFeedback(del);
             del.setOnClickListener(
-                    v -> {
-                        a.prefs
-                                .edit()
-                                .putString(
-                                        Prefs.WATCH_HISTORY,
-                                        WatchHistory.remove(
-                                                a.prefs.getString(Prefs.WATCH_HISTORY, "[]"),
-                                                e.key()))
-                                .apply();
-                        reload.run();
-                    });
+                    v -> CloudSyncDialog.removeHistoryWithTombstone(a, e.key(), reload));
             row.addView(del);
 
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
@@ -289,18 +275,7 @@ final class MobileLibraryPage {
             del.setPadding(a.dp(8), a.dp(6), a.dp(6), a.dp(6));
             UiWidgets.bindTouchFeedback(del);
             del.setOnClickListener(
-                    v -> {
-                        a.prefs
-                                .edit()
-                                .putString(
-                                        Prefs.FAVORITES,
-                                        Favorites.toggle(
-                                                a.prefs.getString(Prefs.FAVORITES, "[]"),
-                                                f.site,
-                                                f.video()))
-                                .apply();
-                        reload.run();
-                    });
+                    v -> CloudSyncDialog.removeFavoriteWithTombstone(a, f.site, f.id, reload));
             row.addView(del);
 
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);

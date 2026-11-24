@@ -23,6 +23,9 @@ def find_android_jar() -> Path:
     env_jar = os.environ.get("MARCOMOVIE_ANDROID_JAR")
     if env_jar and Path(env_jar).is_file():
         return Path(env_jar)
+    repo_jar = ROOT / "tools" / "android-35" / "android.jar"
+    if repo_jar.is_file():
+        return repo_jar
     for base_env in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
         base = os.environ.get(base_env)
         if base:
