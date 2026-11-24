@@ -474,13 +474,36 @@ def verify_legacy_runner_upgrade_swiftc(app_path: Path, flutter_dir: Path, work:
         encoding="utf-8",
     )
     sdk_path = subprocess.check_output(["xcrun", "--show-sdk-path"], text=True).strip()
-    run_cmd([
-        "swiftc", "-typecheck",
-        "-sdk", sdk_path,
-        "-F", str(app_path / "Contents/Frameworks"),
-        str(runner / "MainFlutterWindow.swift"),
-        str(stub_swift),
-    ])
+    flutter_exe = shutil.which("flutter")
+    flutter_root = Path(flutter_exe).resolve().parents[1] if flutter_exe else None
+    fw_candidates = [
+        flutter_dir / "macos/Flutter/ephemeral",
+        flutter_dir / "build/macos/Build/Products/Release",
+    ]
+    if flutter_root is not None:
+        fw_candidates.extend([
+            flutter_root / "bin/cache/artifacts/engine/darwin-x64-release/FlutterMacOS.xcframework/macos-arm64_x86_64",
+            flutter_root / "bin/cache/artifacts/engine/darwin-x64-release",
+            flutter_root / "bin/cache/artifacts/engine/darwin-x64/FlutterMacOS.xcframework/macos-arm64_x86_64",
+            flutter_root / "bin/cache/artifacts/engine/darwin-x64",
+        ])
+    fw_dirs: list[Path] = []
+    for cand in fw_candidates:
+        fw = cand / "FlutterMacOS.framework"
+        if fw.exists() and (
+            (fw / "Modules").exists()
+            or (fw / "Versions/A/Modules").exists()
+            or (fw / "Headers").exists()
+            or (fw / "Versions/A/Headers").exists()
+        ):
+            fw_dirs.append(cand)
+    if not fw_dirs:
+        fw_dirs.append(app_path / "Contents/Frameworks")
+    swift_cmd = ["swiftc", "-typecheck", "-sdk", sdk_path]
+    for d in fw_dirs:
+        swift_cmd.extend(["-F", str(d)])
+    swift_cmd.extend([str(runner / "MainFlutterWindow.swift"), str(stub_swift)])
+    run_cmd(swift_cmd)
     print("LEGACY_RUNNER_DOUBLE_UPGRADE_SWIFTC=PASS", flush=True)
 
 
