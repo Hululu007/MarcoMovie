@@ -119,6 +119,108 @@ class PrepareMacosRunnerTests(unittest.TestCase):
             self.assertIn("MACOSX_DEPLOYMENT_TARGET = 11.0;", pbx.read_text(encoding="utf-8"))
             self.assertTrue((fake_root / "assets" / "logo_mark.png").is_file())
 
+    def test_legacy_4429808_runner_double_upgrade_and_release_entitlements_strip(self):
+        legacy_swift = """import Cocoa
+import FlutterMacOS
+import WebKit
+
+class MainFlutterWindow: NSWindow {
+  private var playbackActivity: NSObjectProtocol?
+
+  override func awakeFromNib() {
+    let flutterViewController = FlutterViewController()
+    let windowFrame = self.frame
+    self.contentViewController = flutterViewController
+    self.setFrame(windowFrame, display: true)
+
+    RegisterGeneratedPlugins(registry: flutterViewController)
+    let wakelockChannel = FlutterMethodChannel(name: "marco_movie/wakelock", binaryMessenger: flutterViewController.engine.binaryMessenger)
+    wakelockChannel.setMethodCallHandler { [weak self] call, result in
+      if call.method == "setEnabled", let enabled = call.arguments as? Bool {
+        if enabled {
+          if self?.playbackActivity == nil {
+            self?.playbackActivity = ProcessInfo.processInfo.beginActivity(options: .idleDisplaySleepDisabled, reason: "Marco Movie Video Playback")
+          }
+        } else if let token = self?.playbackActivity {
+          ProcessInfo.processInfo.endActivity(token)
+          self?.playbackActivity = nil
+        }
+        result(nil)
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    self.titleVisibility = .hidden
+    self.titlebarAppearsTransparent = true
+    self.styleMask.insert(.fullSizeContentView)
+    self.appearance = NSAppearance(named: .darkAqua)
+    self.minSize = NSSize(width: 900, height: 600)
+    super.awakeFromNib()
+  }
+}
+"""
+        release_with_debug = """<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.app-sandbox</key>
+  <true/>
+  <key>com.apple.security.get-task-allow</key>
+  <true/>
+</dict>
+</plist>
+"""
+        with tempfile.TemporaryDirectory(prefix="marco-macos-legacy-runner-") as tmp:
+            fake_root = Path(tmp) / "flutter"
+            runner = fake_root / "macos" / "Runner"
+            runner.mkdir(parents=True)
+            window_swift = runner / "MainFlutterWindow.swift"
+            window_swift.write_text(legacy_swift, encoding="utf-8")
+            (runner / "Release.entitlements").write_text(release_with_debug, encoding="utf-8")
+            (runner / "DebugProfile.entitlements").write_text(release_with_debug, encoding="utf-8")
+            (runner / "Info.plist").write_text(SAMPLE_INFO_PLIST, encoding="utf-8")
+
+            orig_root = prepare_platform.ROOT
+            try:
+                prepare_platform.ROOT = fake_root
+                prepare_platform.main()
+                first_pass = window_swift.read_text(encoding="utf-8")
+                prepare_platform.main()
+                second_pass = window_swift.read_text(encoding="utf-8")
+            finally:
+                prepare_platform.ROOT = orig_root
+
+            self.assertEqual(first_pass, second_pass, "Double upgrade of 4429808 Runner must be idempotent")
+            for field in (
+                "private var playbackActivity: NSObjectProtocol?",
+                "private var marcoWindowObservers: [NSObjectProtocol] = []",
+                "private var marcoInFullscreenTransition = false",
+                "private var marcoIsMiniaturizing = false",
+                "private var marcoIsClosing = false",
+                "private var marcoRestoredFromSaved = false",
+                "private var marcoLastNormalFrame: NSRect?",
+                "deinit {",
+            ):
+                self.assertEqual(
+                    second_pass.count(field),
+                    1,
+                    f"Expected {field!r} exactly once after upgrading 4429808 Runner",
+                )
+            self.assertNotIn("NSSize(width: 900, height: 600)", second_pass)
+            self.assertIn("NSSize(width: 720, height: 520)", second_pass)
+            awake_block = second_pass.split("extension MainFlutterWindow {", 1)[0]
+            self.assertNotIn("NSAppearance(named: .darkAqua)", awake_block)
+            # Cold start without saved record must not leak centered default frame as savedFrame
+            self.assertIn("self.marcoLastNormalFrame = (saved != nil) ? resolved : nil", second_pass)
+            self.assertIn(
+                "Self.marcoLoadSavedFrame() ?? (self.marcoRestoredFromSaved ? self.marcoLastNormalFrame : nil)",
+                second_pass,
+            )
+            rel_ent = (runner / "Release.entitlements").read_text(encoding="utf-8")
+            dbg_ent = (runner / "DebugProfile.entitlements").read_text(encoding="utf-8")
+            self.assertNotIn("com.apple.security.get-task-allow", rel_ent)
+            self.assertIn("com.apple.security.get-task-allow", dbg_ent)
+
 
 if __name__ == "__main__":
     unittest.main()

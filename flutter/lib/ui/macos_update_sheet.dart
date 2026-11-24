@@ -13,6 +13,12 @@ import '../core/download_service.dart';
 import 'apple_theme.dart';
 import 'release_notes_view.dart';
 
+enum MacosVersionRelation {
+  remoteNewer,
+  sameVersion,
+  localNewer,
+}
+
 /// macOS in-app update sheet opened from Settings -> 检查版本更新.
 ///
 /// Reuses [AppUpdate.check] / [AppUpdate.downloadMacos] (platform, version,
@@ -49,12 +55,14 @@ class MacosUpdateSheet extends StatefulWidget {
     this.openWebsite,
   });
 
-  static bool isRemoteVersionNewer(String remote, String local) {
+  static MacosVersionRelation compareVersions(String remote, String local) {
+    final trimmedLocal = local.trim();
+    if (trimmedLocal.isEmpty) return MacosVersionRelation.remoteNewer;
     final r = remote
         .split('.')
         .map((e) => int.tryParse(e.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0)
         .toList();
-    final l = local
+    final l = trimmedLocal
         .split('.')
         .map((e) => int.tryParse(e.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0)
         .toList();
@@ -62,11 +70,14 @@ class MacosUpdateSheet extends StatefulWidget {
     for (var i = 0; i < len; i++) {
       final rv = i < r.length ? r[i] : 0;
       final lv = i < l.length ? l[i] : 0;
-      if (rv > lv) return true;
-      if (rv < lv) return false;
+      if (rv > lv) return MacosVersionRelation.remoteNewer;
+      if (rv < lv) return MacosVersionRelation.localNewer;
     }
-    return false;
+    return MacosVersionRelation.sameVersion;
   }
+
+  static bool isRemoteVersionNewer(String remote, String local) =>
+      compareVersions(remote, local) == MacosVersionRelation.remoteNewer;
 
   @override
   State<MacosUpdateSheet> createState() => _MacosUpdateSheetState();
@@ -80,7 +91,7 @@ class _MacosUpdateSheetState extends State<MacosUpdateSheet> {
   int _totalBytes = 0;
   String _currentVersion = '';
   String _statusText = '正在连接镜像更新源…';
-  bool _hasNewer = false;
+  MacosVersionRelation _versionRelation = MacosVersionRelation.sameVersion;
   bool _checkFailed = false;
   AppUpdate? _release;
   File? _downloadedFile;
@@ -134,21 +145,23 @@ class _MacosUpdateSheetState extends State<MacosUpdateSheet> {
               onStage: _onStage,
             );
       if (!mounted || cancellation.isCancelled) return;
-      final newer = _currentVersion.isEmpty ||
-          MacosUpdateSheet.isRemoteVersionNewer(
-            release.version,
-            _currentVersion,
-          );
+      final relation = MacosUpdateSheet.compareVersions(
+        release.version,
+        _currentVersion,
+      );
       setState(() {
         _release = release;
-        _hasNewer = newer;
+        _versionRelation = relation;
         _checking = false;
         _checkFailed = false;
-        _statusText = _currentVersion.isEmpty
-            ? '可用版本 v${release.version}'
-            : (newer
-                ? '发现新版本 v${release.version}（当前 v$_currentVersion）'
-                : '当前已是最新版本（v$_currentVersion）');
+        _statusText = switch (relation) {
+          MacosVersionRelation.remoteNewer => _currentVersion.isEmpty
+              ? '可用版本 v${release.version}'
+              : '发现新版本 v${release.version}（当前 v$_currentVersion）',
+          MacosVersionRelation.sameVersion => '当前已是最新版本（v$_currentVersion）',
+          MacosVersionRelation.localNewer =>
+            '本机版本 v$_currentVersion 高于当前正式通道（v${release.version}），无需更新',
+        };
       });
     } on UpdateCancelled {
       if (!mounted) return;
@@ -298,8 +311,11 @@ class _MacosUpdateSheetState extends State<MacosUpdateSheet> {
   Widget build(BuildContext context) {
     final palette = ApplePalette.of(context);
     final release = _release;
-    final canDownload = release != null && release.macosUrl != null;
-    final notesRaw = release?.notes.trim() ?? '';
+    final hasRemoteNewer = _versionRelation == MacosVersionRelation.remoteNewer;
+    final isLocalNewer = _versionRelation == MacosVersionRelation.localNewer;
+    final canDownload =
+        release != null && release.macosUrl != null && !isLocalNewer;
+    final notesRaw = isLocalNewer ? '' : (release?.notes.trim() ?? '');
 
     return Padding(
       key: const ValueKey('macos-update-sheet'),
@@ -319,14 +335,14 @@ class _MacosUpdateSheetState extends State<MacosUpdateSheet> {
                       ? CupertinoIcons.exclamationmark_triangle_fill
                       : (_downloadedFile != null
                           ? CupertinoIcons.checkmark_seal_fill
-                          : (_hasNewer
+                          : (hasRemoteNewer
                               ? CupertinoIcons.arrow_down_circle_fill
                               : CupertinoIcons.checkmark_seal_fill)),
                   color: _checkFailed
                       ? AppleColors.systemOrange
                       : (_downloadedFile != null
                           ? AppleColors.systemGreen
-                          : (_hasNewer
+                          : (hasRemoteNewer
                               ? AppleColors.systemBlue
                               : AppleColors.systemGreen)),
                   size: 22,
@@ -422,11 +438,11 @@ class _MacosUpdateSheetState extends State<MacosUpdateSheet> {
                 else if (canDownload)
                   AppleCapsuleButton(
                     key: const ValueKey('macos-update-download-button'),
-                    label: _hasNewer
+                    label: hasRemoteNewer
                         ? '下载更新包 v${release.version}'
-                        : '重新下载 v${release.version}',
+                        : '重新下载当前版本 v${release.version}',
                     icon: CupertinoIcons.arrow_down_to_line,
-                    primary: true,
+                    primary: hasRemoteNewer,
                     onPressed: _downloadMacosPackage,
                   )
                 else if (_checkFailed)

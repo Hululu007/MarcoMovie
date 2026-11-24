@@ -5291,92 +5291,124 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         builder: (ctx) {
                           final resolvedPoster = _resolveHistoryPoster(entry);
                           final cwCardId = 'mac_side_cw_${entry.site}_${entry.id}';
-                          return GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: () => _openSyncedMediaEntry(
-                              siteKey: entry.site,
-                              videoId: entry.id,
-                              title: entry.title,
-                              poster: resolvedPoster,
-                              sourceContext: ctx,
-                              sourceRadius: 10.0,
-                              sourceCardId: cwCardId,
-                            ),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 5,
-                              ),
-                              decoration: BoxDecoration(
-                                color: isDark
-                                    ? Colors.white.withValues(alpha: 0.05)
-                                    : const Color(0x0A0F172A),
+                          final hasKnownDuration = entry.duration > 0;
+                          final realProgress = hasKnownDuration
+                              ? entry.progressFraction.clamp(0.0, 1.0)
+                              : null;
+                          return Semantics(
+                            button: true,
+                            label: entry.episode.isNotEmpty
+                                ? '继续观看 ${entry.title} ${entry.episode}'
+                                : '继续观看 ${entry.title}',
+                            child: Material(
+                              color: Colors.transparent,
+                              borderRadius: BorderRadius.circular(12),
+                              child: InkWell(
+                                key: ValueKey(
+                                  'mac-side-history-item-${entry.site}-${entry.id}',
+                                ),
                                 borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Row(
-                                children: [
-                                  PosterExpandSourceCard(
-                                    cardId: cwCardId,
-                                    child: ClipRRect(
-                                      borderRadius: BorderRadius.circular(8),
-                                      child: SizedBox(
-                                        width: 36,
-                                        height: 50,
-                                        child: PosterImage(
-                                          url: resolvedPoster,
-                                          title: entry.title,
-                                          placeholder: _buildPosterPlaceholder(),
-                                        ),
-                                      ),
-                                    ),
+                                focusColor:
+                                    AppleColors.systemBlue.withValues(alpha: 0.24),
+                                hoverColor: isDark
+                                    ? Colors.white.withValues(alpha: 0.08)
+                                    : const Color(0x140F172A),
+                                onTap: () => _openSyncedMediaEntry(
+                                  siteKey: entry.site,
+                                  videoId: entry.id,
+                                  title: entry.title,
+                                  poster: resolvedPoster,
+                                  sourceContext: ctx,
+                                  sourceRadius: 10.0,
+                                  sourceCardId: cwCardId,
+                                ),
+                                child: Ink(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 5,
                                   ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          entry.title,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                            color: palette.labelPrimary,
-                                            fontSize: 12.5,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 2),
-                                        Text(
-                                          entry.episode.isNotEmpty
-                                              ? entry.episode
-                                              : '继续观看',
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                            color: palette.labelSecondary,
-                                            fontSize: 11,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        ClipRRect(
-                                          borderRadius: BorderRadius.circular(999),
-                                          child: LinearProgressIndicator(
-                                            value: entry.progressFraction > 0
-                                                ? entry.progressFraction
-                                                : 0.15,
-                                            minHeight: 3,
-                                            backgroundColor: palette.groupedTertiary,
-                                            valueColor:
-                                                const AlwaysStoppedAnimation<Color>(
-                                              AppleColors.systemBlue,
+                                  decoration: BoxDecoration(
+                                    color: isDark
+                                        ? Colors.white.withValues(alpha: 0.05)
+                                        : const Color(0x0A0F172A),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      PosterExpandSourceCard(
+                                        cardId: cwCardId,
+                                        child: ClipRRect(
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          child: SizedBox(
+                                            width: 36,
+                                            height: 50,
+                                            child: PosterImage(
+                                              url: resolvedPoster,
+                                              title: entry.title,
+                                              placeholder:
+                                                  _buildPosterPlaceholder(),
                                             ),
                                           ),
                                         ),
-                                      ],
-                                    ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              entry.title,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: palette.labelPrimary,
+                                                fontSize: 12.5,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              entry.episode.isNotEmpty
+                                                  ? entry.episode
+                                                  : '继续观看',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: palette.labelSecondary,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                            if (realProgress != null) ...[
+                                              const SizedBox(height: 4),
+                                              ClipRRect(
+                                                borderRadius:
+                                                    BorderRadius.circular(999),
+                                                child: LinearProgressIndicator(
+                                                  key: ValueKey(
+                                                    'mac-side-history-progress-${entry.site}-${entry.id}',
+                                                  ),
+                                                  value: realProgress,
+                                                  minHeight: 3,
+                                                  backgroundColor:
+                                                      palette.groupedTertiary,
+                                                  valueColor:
+                                                      const AlwaysStoppedAnimation<
+                                                          Color>(
+                                                    AppleColors.systemBlue,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                ],
+                                ),
                               ),
                             ),
                           );

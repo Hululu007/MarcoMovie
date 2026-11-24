@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/anime4k_controller.dart';
 import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/core/danmu/danmu_prefs.dart';
+import 'package:marco_movie/core/danmu/provider.dart';
 import 'package:marco_movie/core/models.dart';
 import 'package:marco_movie/core/series_scraper.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
@@ -286,6 +287,66 @@ class _ObserverRouteSpy extends NavigatorObserver {
   }
 }
 
+class _RecordingDanmuProvider implements DanmuProvider {
+  final List<DanmuMatchQuery> queries = <DanmuMatchQuery>[];
+
+  @override
+  Future<List<DanmuCandidate>> matchOrSearch(
+    DanmuMatchQuery query, {
+    DanmuCancelToken? cancelToken,
+  }) async {
+    queries.add(query);
+    return const <DanmuCandidate>[];
+  }
+
+  @override
+  Future<List<DanmuCandidate>> listEpisodes(
+    String sourceOrigin,
+    String animeId, {
+    DanmuCancelToken? cancelToken,
+  }) async =>
+      const <DanmuCandidate>[];
+
+  @override
+  Future<DanmuEpisodeSession> openSession(
+    String boundEpisodeId, {
+    DanmuCancelToken? cancelToken,
+  }) async =>
+      DanmuEpisodeSession(boundEpisodeId: boundEpisodeId, segmented: false);
+
+  @override
+  Future<List<DanmuItem>> fetchWindow(
+    DanmuEpisodeSession session,
+    int windowIndex, {
+    DanmuCancelToken? cancelToken,
+  }) async =>
+      const <DanmuItem>[];
+}
+
+Future<void> _tabUntilFocused(
+  WidgetTester tester,
+  Finder target, {
+  int maxTabs = 80,
+}) async {
+  for (var i = 0; i < maxTabs; i++) {
+    final primary = FocusManager.instance.primaryFocus;
+    if (primary != null && primary.context != null) {
+      final hit = find.descendant(
+        of: target,
+        matching: find.byElementPredicate((e) => e == primary.context),
+        matchRoot: true,
+      );
+      if (hit.evaluate().isNotEmpty) {
+        return;
+      }
+    }
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.tab);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+  }
+  fail('Could not move keyboard focus to $target within $maxTabs Tab presses');
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -484,6 +545,117 @@ void main() {
         await tester.pump(const Duration(milliseconds: 500));
       },
     );
+
+    testWidgets(
+      'Continue Watching displays real zero/unknown progress (never 15%) and activates via Tab + Enter',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        PosterLoader.clearCache();
+        final videos = buildSampleVideos();
+        final storage = await initTestStorage();
+        await storage.saveConfig(
+          jsonEncode({
+            'sites': [
+              {
+                'key': sampleSite.key,
+                'name': sampleSite.name,
+                'type': sampleSite.type,
+                'api': sampleSite.api,
+              },
+            ],
+          }),
+          origin: 'https://vod.example/config.json',
+        );
+        final now = DateTime.now().millisecondsSinceEpoch;
+        await storage.upsertWatchHistory(
+          WatchHistoryEntry(
+            site: sampleSite.key,
+            id: videos[0].id,
+            title: videos[0].title,
+            poster: videos[0].poster,
+            line: '主线 4K',
+            episode: '第01集',
+            index: 0,
+            position: 0,
+            duration: 2700000,
+            updated: now + 2000,
+          ),
+        );
+        await storage.upsertWatchHistory(
+          WatchHistoryEntry(
+            site: sampleSite.key,
+            id: videos[1].id,
+            title: videos[1].title,
+            poster: videos[1].poster,
+            line: '主线 4K',
+            episode: '第02集',
+            index: 1,
+            position: 0,
+            duration: 0,
+            updated: now + 1000,
+          ),
+        );
+
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1560, 920);
+        await tester.binding.setSurfaceSize(const Size(1560, 920));
+        addTearDown(() async {
+          await tester.binding.setSurfaceSize(null);
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final navSpy = _ObserverRouteSpy();
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: _macTheme(Brightness.dark),
+            navigatorObservers: [navSpy],
+            home: AdaptiveShell(
+              storage: storage,
+              client: _MacTestClient(videos),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+
+        final zeroItem = find.byKey(
+          ValueKey('mac-side-history-item-${sampleSite.key}-${videos[0].id}'),
+        );
+        final unknownItem = find.byKey(
+          ValueKey('mac-side-history-item-${sampleSite.key}-${videos[1].id}'),
+        );
+        expect(zeroItem, findsOneWidget);
+        expect(unknownItem, findsOneWidget);
+
+        // Zero progress with known duration renders 0.0 (never fabricated 0.15).
+        final zeroBar = find.descendant(
+          of: zeroItem,
+          matching: find.byType(LinearProgressIndicator),
+        );
+        expect(zeroBar, findsOneWidget);
+        expect(tester.widget<LinearProgressIndicator>(zeroBar).value, 0.0);
+
+        // Unknown duration omits the progress bar completely (never fabricated 0.15).
+        final unknownBar = find.descendant(
+          of: unknownItem,
+          matching: find.byType(LinearProgressIndicator),
+        );
+        expect(unknownBar, findsNothing);
+
+        // Keyboard Tab focuses Continue Watching item and Enter navigates into DetailScreen.
+        final pushedBefore = navSpy.pushed.length;
+        await _tabUntilFocused(tester, zeroItem, maxTabs: 120);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(navSpy.pushed.length, greaterThan(pushedBefore));
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 500));
+      },
+    );
   });
 
   group('Item 5: macOS Wide & Narrow Detail, Landscape vs Portrait Poster & SeriesScrapeSheet', () {
@@ -675,6 +847,183 @@ void main() {
           find.byKey(const ValueKey('mac-episodes-calibrate-btn')),
           findsNothing,
         );
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 500));
+      },
+    );
+
+    testWidgets(
+      'full page-driven keyboard Tab/Enter calibration: open, adjust offset + hide specials, save, restart, verify PlayerScreen danmu episode number, and undo',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        PosterLoader.clearCache();
+        final video = buildSampleVideos().first;
+        PosterLoader.seedMemoryForTest(video.poster, portraitPng);
+        final storage = await initTestStorage();
+
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1280, 820);
+        await tester.binding.setSurfaceSize(const Size(1280, 820));
+        addTearDown(() async {
+          await tester.binding.setSurfaceSize(null);
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        Future<void> mountDetailFresh() async {
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: _macTheme(Brightness.dark),
+              home: DetailScreen(
+                key: UniqueKey(),
+                site: sampleSite,
+                initialVideo: video,
+                client: _MacTestClient([video]),
+                storage: storage,
+                debugScrapeSearchFn: (q, form) async => const [],
+                debugScrapeHydrateFn: (c) async => c,
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 150));
+        }
+
+        await mountDetailFresh();
+        expect(find.text('E01'), findsWidgets);
+        expect(find.text('OVA 特别篇'), findsWidgets);
+
+        // 1. Tab to the Mac Detail calibration button and press Enter to open SeriesScrapeSheet.
+        final calibrateBtn = find.byKey(const ValueKey('mac-detail-calibrate-btn'));
+        expect(calibrateBtn, findsOneWidget);
+        await _tabUntilFocused(tester, calibrateBtn);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.byType(SeriesScrapeSheet), findsOneWidget);
+
+        // 2. Inside SeriesScrapeSheet, Tab to "隐藏预告 / 特别篇" and activate with Enter.
+        final hideSpecialsChip =
+            find.byKey(const ValueKey('scrape-toggle-hide-specials'));
+        await _tabUntilFocused(tester, hideSpecialsChip);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+
+        // 3. Tab to "+1" offset button and press Enter twice (+2).
+        final plusOneBtn = find.widgetWithText(OutlinedButton, '+1');
+        expect(plusOneBtn, findsOneWidget);
+        await _tabUntilFocused(tester, plusOneBtn);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(
+          tester.widget<Text>(find.byKey(const ValueKey('scrape-offset-value'))).data,
+          '+2',
+        );
+
+        // 4. Tab to "保存集数校准" and press Enter to save & close sheet.
+        final saveBtn = find.byKey(const ValueKey('scrape-save-episodes-btn'));
+        await _tabUntilFocused(tester, saveBtn);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.byType(SeriesScrapeSheet), findsNothing);
+
+        // 5. Simulate app restart by remounting a fresh DetailScreen from StorageService.
+        await mountDetailFresh();
+        expect(find.textContaining('偏移 +2'), findsOneWidget);
+        expect(find.text('E03'), findsWidgets);
+        expect(find.text('OVA 特别篇'), findsNothing);
+
+        // 6. Launch real PlayerScreen for episode 0 ("第01集") after restart and verify
+        //    DanmuProvider actually receives calibrated episodeIndex == 3!
+        final danmuSpy = _RecordingDanmuProvider();
+        final fakePlayer = _MacFakePlayer();
+        addTearDown(fakePlayer.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: _macTheme(Brightness.dark),
+            home: PlayerScreen(
+              site: sampleSite,
+              video: video,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: fakePlayer,
+              debugHudPrefs: PlayerHudPrefs.inMemory(isDesktop: true),
+              debugDanmuProvider: danmuSpy,
+              debugDanmuSettings: const DanmuSettings(enabled: true),
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(danmuSpy.queries, isNotEmpty);
+        expect(
+          danmuSpy.queries.last.episodeIndex,
+          3,
+          reason: 'Danmu match query after restart must use calibrated episode number 3',
+        );
+
+        // 7. Re-open DetailScreen, Tab/Enter calibrate button -> Tab/Enter "恢复自动匹配" to undo!
+        await mountDetailFresh();
+        await _tabUntilFocused(
+          tester,
+          find.byKey(const ValueKey('mac-detail-calibrate-btn')),
+        );
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(find.byType(SeriesScrapeSheet), findsOneWidget);
+
+        final resetBtn = find.byKey(const ValueKey('scrape-reset-auto'));
+        expect(resetBtn, findsOneWidget);
+        await _tabUntilFocused(tester, resetBtn);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.byType(SeriesScrapeSheet), findsNothing);
+
+        // 8. Verify undo persisted across restart and DanmuProvider reverts to episodeIndex == 1.
+        expect(storage.getSeriesScrapeOverride(sampleSite.key, video.id), isNull);
+        await mountDetailFresh();
+        expect(find.text('E01'), findsWidgets);
+        expect(find.text('OVA 特别篇'), findsWidgets);
+
+        final danmuSpyAfterUndo = _RecordingDanmuProvider();
+        final fakePlayer2 = _MacFakePlayer();
+        addTearDown(fakePlayer2.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: _macTheme(Brightness.dark),
+            home: PlayerScreen(
+              site: sampleSite,
+              video: video,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: fakePlayer2,
+              debugHudPrefs: PlayerHudPrefs.inMemory(isDesktop: true),
+              debugDanmuProvider: danmuSpyAfterUndo,
+              debugDanmuSettings: const DanmuSettings(enabled: true),
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(danmuSpyAfterUndo.queries, isNotEmpty);
+        expect(danmuSpyAfterUndo.queries.last.episodeIndex, 1);
 
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(milliseconds: 500));

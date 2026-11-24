@@ -258,10 +258,128 @@ void main() {
       await aborted;
       unawaited(body.close());
       expect(await cancelDir.list().toList(), isEmpty);
+
+      // 4. Pre-existing namesake file with different bytes MUST NEVER be deleted on 503,
+      //    checksum mismatch, or cancellation, and a successful download picks a fresh name.
+      final protectDir = await Directory.systemTemp.createTemp('marco-mac-keep-');
+      addTearDown(() => protectDir.delete(recursive: true));
+      final existing = File(
+        '${protectDir.path}${Platform.pathSeparator}MarcoMovie-0.5.21-macos-desktop.zip',
+      );
+      final existingBytes = utf8.encode('user-existing-archive-must-survive');
+      await existing.writeAsBytes(existingBytes);
+
+      final fail503Client = MockClient((_) async => http.Response('unavailable', 503));
+      await expectLater(
+        rel.downloadMacos(
+          directory: protectDir,
+          cancellation: UpdateCancellation(),
+          client: fail503Client,
+        ),
+        throwsA(isA<HttpException>()),
+      );
+      expect(await existing.exists(), isTrue);
+      expect(await existing.readAsBytes(), existingBytes);
+
+      final badHashClient = _StreamClient(
+        (_) async => http.StreamedResponse(
+          Stream.value(List<int>.filled(zipBytes.length, 0x33)),
+          200,
+        ),
+      );
+      await expectLater(
+        rel.downloadMacos(
+          directory: protectDir,
+          cancellation: UpdateCancellation(),
+          client: badHashClient,
+        ),
+        throwsFormatException,
+      );
+      expect(await existing.exists(), isTrue);
+      expect(await existing.readAsBytes(), existingBytes);
+
+      // Succeeding download preserves the original namesake and picks a non-colliding name.
+      final freshClient = MockClient((_) async => http.Response.bytes(zipBytes, 200));
+      final savedFresh = await rel.downloadMacos(
+        directory: protectDir,
+        cancellation: UpdateCancellation(),
+        client: freshClient,
+      );
+      expect(await existing.exists(), isTrue);
+      expect(await existing.readAsBytes(), existingBytes);
+      expect(savedFresh.path, isNot(existing.path));
+      expect(
+        savedFresh.path,
+        endsWith('MarcoMovie-0.5.21-macos-desktop (1).zip'),
+      );
+      expect(await savedFresh.readAsBytes(), zipBytes);
     });
   });
 
   group('MacosUpdateSheet UI integration', () {
+    testWidgets('distinguishes remoteNewer, sameVersion, and localNewer without offering downgrade', (tester) async {
+      expect(
+        MacosUpdateSheet.compareVersions('0.5.21', '0.5.20'),
+        MacosVersionRelation.remoteNewer,
+      );
+      expect(
+        MacosUpdateSheet.compareVersions('0.6.0', '0.6.0'),
+        MacosVersionRelation.sameVersion,
+      );
+      expect(
+        MacosUpdateSheet.compareVersions('0.5.20', '0.6.0'),
+        MacosVersionRelation.localNewer,
+      );
+
+      final olderRel = sampleMacUpdate(
+        version: '0.5.20',
+        assetName: 'MarcoMovie-0.5.20-macos-desktop.zip',
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MacosUpdateSheet(
+              installedVersion: '0.6.0',
+              readVersion: () async => '0.6.0',
+              check: (_, __) async => olderRel,
+              openWebsite: (_) async {},
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.textContaining('高于当前正式通道'), findsOneWidget);
+      expect(find.byKey(const ValueKey('macos-update-download-button')), findsNothing);
+      expect(find.textContaining('重新下载'), findsNothing);
+      expect(find.byKey(const ValueKey('macos-update-website-button')), findsOneWidget);
+
+      // Same version keeps non-downgrade re-download option cleanly labeled.
+      final sameRel = sampleMacUpdate(
+        version: '0.6.0',
+        assetName: 'MarcoMovie-0.6.0-macos-desktop.zip',
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MacosUpdateSheet(
+              key: UniqueKey(),
+              installedVersion: '0.6.0',
+              readVersion: () async => '0.6.0',
+              check: (_, __) async => sameRel,
+              openWebsite: (_) async {},
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.textContaining('当前已是最新版本（v0.6.0）'), findsOneWidget);
+      expect(find.byKey(const ValueKey('macos-update-download-button')), findsOneWidget);
+      expect(find.text('重新下载当前版本 v0.6.0'), findsOneWidget);
+    });
     testWidgets('downloads verified package, reveals in Finder, and keeps official website available', (tester) async {
       final dir = Directory.systemTemp.createTempSync('marco-mac-sheet-');
       addTearDown(() {

@@ -462,7 +462,7 @@ class MacosWindowBoundsController with WindowListener {
     if (nativeState != null) {
       _inFullscreen = nativeState.isFullScreen;
       _minimized = nativeState.isMiniaturized;
-      if (nativeState.savedFrame != null) {
+      if (nativeState.restoredFromSaved && nativeState.savedFrame != null) {
         _lastNormalBounds = nativeState.savedFrame;
         await _storage.saveMacosWindowBounds(nativeState.savedFrame!);
       } else if (!nativeState.restoredFromSaved &&
@@ -471,6 +471,9 @@ class MacosWindowBoundsController with WindowListener {
           _lastNormalBounds != null &&
           _lastNormalBounds!.isValid) {
         await _adapter.applyNormalBounds(_lastNormalBounds!);
+      } else if (nativeState.savedFrame != null) {
+        _lastNormalBounds = nativeState.savedFrame;
+        await _storage.saveMacosWindowBounds(nativeState.savedFrame!);
       } else if (!_inFullscreen &&
           !_minimized &&
           nativeState.currentFrame != null &&

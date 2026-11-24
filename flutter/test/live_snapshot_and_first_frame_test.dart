@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,6 +11,14 @@ import 'package:marco_movie/ui/player_screen.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'test_storage_helper.dart';
+
+bool _hasFfmpegTool() {
+  try {
+    return Process.runSync('ffmpeg', const ['-version']).exitCode == 0;
+  } catch (_) {
+    return false;
+  }
+}
 
 class _ControlledLiveState extends Fake implements PlayerState {
   Playlist playlistValue = const Playlist([]);
@@ -228,9 +237,11 @@ void main() {
       ],
     );
 
-    Future<_ControlledLivePlayer> mountLive(WidgetTester tester) async {
+    Future<({_ControlledLivePlayer player, StreamController<bool> videoOutput})>
+        mountLive(WidgetTester tester) async {
       final storage = await initTestStorage();
       final player = _ControlledLivePlayer();
+      final videoOutput = StreamController<bool>.broadcast(sync: true);
       await tester.pumpWidget(
         MaterialApp(
           home: PlayerScreen(
@@ -243,6 +254,7 @@ void main() {
             debugPlayer: player,
             debugHudPrefs: PlayerHudPrefs(isDesktop: true),
             debugVideoSurface: const ColoredBox(color: Colors.black),
+            debugLiveVideoOutputStream: videoOutput.stream,
             loadingIndicator: const SizedBox(
               key: Key('live-loading-indicator'),
               width: 24,
@@ -253,124 +265,405 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 80));
-      return player;
+      return (player: player, videoOutput: videoOutput);
     }
 
-    testWidgets('known resolution (1920x1080) without rendered progress does NOT clear loading indicator prematurely', (tester) async {
-      final player = await mountLive(tester);
-      addTearDown(player.dispose);
+    testWidgets(
+      'known resolution (1920x1080) without video output does NOT clear loading; real video output clears cleanly',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final harness = await mountLive(tester);
+        final player = harness.player;
+        addTearDown(() async {
+          await harness.videoOutput.close();
+          await player.dispose();
+        });
 
-      expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
 
-      // Emit dimensions, duration, playing=true, buffering=false while position stays 0.
-      player.streamImpl.widthCtrl.add(1920);
-      player.streamImpl.heightCtrl.add(1080);
-      player.streamImpl.durationCtrl.add(const Duration(seconds: 12));
-      player.streamImpl.playingCtrl.add(true);
-      player.streamImpl.bufferingCtrl.add(false);
-      await tester.pump();
+        // Emit dimensions, duration, playing=true, buffering=false while no video frame is displayed.
+        player.streamImpl.trackCtrl.add(
+          Track(
+            video: VideoTrack('1', 'H264', 'und', codec: 'h264'),
+            audio: AudioTrack('1', 'AAC', 'zh', codec: 'aac'),
+          ),
+        );
+        player.streamImpl.widthCtrl.add(1920);
+        player.streamImpl.heightCtrl.add(1080);
+        player.streamImpl.durationCtrl.add(const Duration(seconds: 12));
+        player.streamImpl.playingCtrl.add(true);
+        player.streamImpl.bufferingCtrl.add(false);
+        await tester.pump();
 
-      // Still no playback progress -> loading indicator MUST remain visible!
-      expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        // Still no displayed video frame -> loading indicator MUST remain visible!
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
 
-      // Once actual playback advances (> 0), loading clears cleanly.
-      player.streamImpl.positionCtrl.add(const Duration(milliseconds: 350));
-      await tester.pump();
-      expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+        // Once actual video output is confirmed alongside playback progress, loading clears cleanly.
+        player.streamImpl.positionCtrl.add(const Duration(milliseconds: 350));
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
 
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump();
-    });
+        harness.videoOutput.add(true);
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
 
-    testWidgets('stale width/height from previous channel during rapid channel switch cannot clear new channel loading', (tester) async {
-      final player = await mountLive(tester);
-      addTearDown(player.dispose);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
 
-      // Channel A finishes starting.
-      player.streamImpl.widthCtrl.add(1280);
-      player.streamImpl.heightCtrl.add(720);
-      player.streamImpl.positionCtrl.add(const Duration(seconds: 1));
-      await tester.pump();
-      expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+    testWidgets(
+      'audio clock advancing with selected video track but NO video output keeps loading and triggers startup timeout recovery',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final harness = await mountLive(tester);
+        final player = harness.player;
+        addTearDown(() async {
+          await harness.videoOutput.close();
+          await player.dispose();
+        });
 
-      // Rapidly switch to Channel B (next source) while open() is still pending.
-      player.delayNextOpen = true;
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyN);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyN);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 50));
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        expect(player.opened, hasLength(1));
 
-      expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        // Simulate black-screen live stream: video track selected & 1920x1080 metadata known,
+        // audio clock advances every second for 12s, but NO actual video output signal ever arrives.
+        player.streamImpl.trackCtrl.add(
+          Track(
+            video: VideoTrack('1', 'HEVC', 'und', codec: 'hevc'),
+            audio: AudioTrack('1', 'AAC', 'zh', codec: 'aac'),
+          ),
+        );
+        player.streamImpl.widthCtrl.add(1920);
+        player.streamImpl.heightCtrl.add(1080);
+        player.streamImpl.playingCtrl.add(true);
+        player.streamImpl.bufferingCtrl.add(false);
+        await tester.pump();
 
-      // Stale Channel A emits width/height while playlist still holds Channel A!
-      player.streamImpl.widthCtrl.add(1920);
-      player.streamImpl.heightCtrl.add(1080);
-      await tester.pump();
+        for (var sec = 1; sec <= 12; sec++) {
+          player.streamImpl.positionCtrl.add(Duration(seconds: sec));
+          await tester.pump(const Duration(seconds: 1));
+        }
 
-      // New Channel B MUST still show loading indicator!
-      expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        // Loading indicator MUST remain visible and startup watchdog MUST have triggered recovery!
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        expect(
+          player.opened.length,
+          greaterThan(1),
+          reason:
+              'Advancing audio clock alone must not cancel live startup timeout recovery when video output is absent',
+        );
 
-      // Complete Channel B open + emit Channel B real progress.
-      player.openGate?.complete();
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 50));
-      expect(player.opened, hasLength(2));
-      expect(player.opened.last.uri, 'http://live.example/b.m3u8');
-      player.streamImpl.positionCtrl.add(const Duration(milliseconds: 400));
-      await tester.pump();
-      expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
 
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump();
-    });
+    testWidgets(
+      'stale width/height from previous channel during rapid channel switch cannot clear new channel loading',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final harness = await mountLive(tester);
+        final player = harness.player;
+        addTearDown(() async {
+          await harness.videoOutput.close();
+          await player.dispose();
+        });
 
-    testWidgets('audio-only radio stream (0x0 video) clears loading and plays cleanly when position advances', (tester) async {
-      final player = await mountLive(tester);
-      addTearDown(player.dispose);
+        // Channel A finishes starting with real video output.
+        player.streamImpl.trackCtrl.add(
+          Track(video: VideoTrack('1', 'H264', 'und', codec: 'h264')),
+        );
+        player.streamImpl.widthCtrl.add(1280);
+        player.streamImpl.heightCtrl.add(720);
+        player.streamImpl.positionCtrl.add(const Duration(seconds: 1));
+        harness.videoOutput.add(true);
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
 
-      expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        // Rapidly switch to Channel B (next source) while open() is still pending.
+        player.delayNextOpen = true;
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.keyN);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.keyN);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
 
-      // Audio-only: no width/height ever emitted, only audio track + position progress.
-      player.streamImpl.trackCtrl.add(
-        Track(audio: AudioTrack('1', 'Radio AAC', 'zh', codec: 'aac')),
-      );
-      player.streamImpl.bufferingCtrl.add(false);
-      player.streamImpl.positionCtrl.add(const Duration(milliseconds: 450));
-      await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
 
-      expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+        // Stale Channel A emits width/height and video output while playlist still holds Channel A!
+        player.streamImpl.widthCtrl.add(1920);
+        player.streamImpl.heightCtrl.add(1080);
+        harness.videoOutput.add(true);
+        await tester.pump();
 
-      // Advance past startup window (8s+) -> zero timeout errors.
-      player.streamImpl.positionCtrl.add(const Duration(seconds: 4));
-      await tester.pump(const Duration(seconds: 9));
-      expect(find.textContaining('超时'), findsNothing);
+        // New Channel B MUST still show loading indicator!
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
 
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump();
-    });
+        // Complete Channel B open + emit Channel B video track, dimensions, progress & real video output.
+        player.openGate?.complete();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(player.opened, hasLength(2));
+        expect(player.opened.last.uri, 'http://live.example/b.m3u8');
+        player.streamImpl.trackCtrl.add(
+          Track(video: VideoTrack('1', 'H264', 'und', codec: 'h264')),
+        );
+        player.streamImpl.widthCtrl.add(1280);
+        player.streamImpl.heightCtrl.add(720);
+        player.streamImpl.positionCtrl.add(const Duration(milliseconds: 400));
+        await tester.pump();
+        // Still waiting for Channel B's actual video output!
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
 
-    testWidgets('user pausing during live startup suspends timeout watchdog without spurious failure', (tester) async {
-      final player = await mountLive(tester);
-      addTearDown(player.dispose);
+        harness.videoOutput.add(true);
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
 
-      // User actively pauses before first frame arrives.
-      await player.pause();
-      await tester.pump();
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
 
-      // Wait longer than the 7s live startup timeout -> MUST NOT fail!
-      await tester.pump(const Duration(seconds: 10));
-      expect(find.textContaining('超时'), findsNothing);
-      expect(find.textContaining('失败'), findsNothing);
+    testWidgets(
+      'audio-only radio stream (0x0 video) clears loading and plays cleanly when position advances',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final harness = await mountLive(tester);
+        final player = harness.player;
+        addTearDown(() async {
+          await harness.videoOutput.close();
+          await player.dispose();
+        });
 
-      // User resumes and stream delivers progress -> clears loading cleanly.
-      await player.play();
-      await tester.pump();
-      player.streamImpl.positionCtrl.add(const Duration(milliseconds: 500));
-      await tester.pump();
-      expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
 
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump();
-    });
+        // Audio-only: no video track, only audio track + position progress.
+        player.streamImpl.trackCtrl.add(
+          Track(
+            video: VideoTrack.no(),
+            audio: AudioTrack('1', 'Radio AAC', 'zh', codec: 'aac'),
+          ),
+        );
+        player.streamImpl.bufferingCtrl.add(false);
+        player.streamImpl.positionCtrl.add(const Duration(milliseconds: 450));
+        await tester.pump();
+
+        expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+
+        // Advance past startup window (8s+) -> zero timeout errors or spurious retries.
+        player.streamImpl.positionCtrl.add(const Duration(seconds: 4));
+        await tester.pump(const Duration(seconds: 9));
+        expect(find.textContaining('超时'), findsNothing);
+        expect(player.opened, hasLength(1));
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+
+    testWidgets(
+      'user pausing during live startup suspends timeout watchdog without spurious failure',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final harness = await mountLive(tester);
+        final player = harness.player;
+        addTearDown(() async {
+          await harness.videoOutput.close();
+          await player.dispose();
+        });
+
+        // User actively pauses before first frame arrives.
+        await player.pause();
+        await tester.pump();
+
+        // Wait longer than the 7s live startup timeout -> MUST NOT fail or retry!
+        await tester.pump(const Duration(seconds: 10));
+        expect(find.textContaining('超时'), findsNothing);
+        expect(find.textContaining('失败'), findsNothing);
+        expect(player.opened, hasLength(1));
+
+        // User resumes and stream delivers real video output -> clears loading cleanly.
+        await player.play();
+        await tester.pump();
+        player.streamImpl.trackCtrl.add(
+          Track(video: VideoTrack('1', 'H264', 'und', codec: 'h264')),
+        );
+        player.streamImpl.widthCtrl.add(1280);
+        player.streamImpl.heightCtrl.add(720);
+        player.streamImpl.positionCtrl.add(const Duration(milliseconds: 500));
+        harness.videoOutput.add(true);
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+
+    test(
+      'real libmpv live playback observes native video output on H.264+AAC, switches across identical-resolution channels, and plays audio-only radio',
+      () async {
+        final mpvLib = Platform.environment['MARCOMOVIE_TEST_MPV'];
+        if (mpvLib == null || mpvLib.isEmpty || !_hasFfmpegTool()) {
+          return;
+        }
+        MediaKit.ensureInitialized(libmpv: mpvLib);
+
+        final work = await Directory.systemTemp.createTemp('marco-live-mpv-');
+        addTearDown(() async {
+          if (work.existsSync()) {
+            work.deleteSync(recursive: true);
+          }
+        });
+
+        final ch1 = File('${work.path}/ch1.ts');
+        final ch2 = File('${work.path}/ch2.ts');
+        final radio = File('${work.path}/radio.m4a');
+
+        for (final spec in [
+          (ch1, '0x1565c0', 440),
+          (ch2, '0x2e7d32', 660),
+        ]) {
+          final res = Process.runSync('ffmpeg', [
+            '-y',
+            '-v',
+            'error',
+            '-f',
+            'lavfi',
+            '-i',
+            'color=c=${spec.$2}:s=320x180:r=25:d=3',
+            '-f',
+            'lavfi',
+            '-i',
+            'sine=frequency=${spec.$3}:sample_rate=48000:duration=3',
+            '-c:v',
+            'libx264',
+            '-pix_fmt',
+            'yuv420p',
+            '-g',
+            '25',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '64k',
+            '-f',
+            'mpegts',
+            spec.$1.path,
+          ]);
+          expect(res.exitCode, 0, reason: '${res.stderr}');
+        }
+        final rRes = Process.runSync('ffmpeg', [
+          '-y',
+          '-v',
+          'error',
+          '-f',
+          'lavfi',
+          '-i',
+          'sine=frequency=523:sample_rate=48000:duration=3',
+          '-vn',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '64k',
+          radio.path,
+        ]);
+        expect(rRes.exitCode, 0, reason: '${rRes.stderr}');
+
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() async => server.close(force: true));
+        server.listen((req) async {
+          final f = switch (req.uri.path) {
+            '/ch1.ts' => ch1,
+            '/ch2.ts' => ch2,
+            '/radio.m4a' => radio,
+            _ => null,
+          };
+          if (f == null) {
+            req.response.statusCode = 404;
+            await req.response.close();
+            return;
+          }
+          final bytes = await f.readAsBytes();
+          req.response.statusCode = 200;
+          req.response.contentLength = bytes.length;
+          req.response.add(bytes);
+          await req.response.close();
+        });
+
+        final player = Player(
+          configuration: const PlayerConfiguration(
+            vo: 'null',
+            muted: true,
+          ),
+        );
+        addTearDown(() async => player.dispose());
+        final native = player.platform as NativePlayer;
+        await native.setProperty('ao', 'null');
+        await native.setProperty('vid', 'auto');
+
+        var voConfigured = false;
+        var vfFpsPositive = false;
+        var pictureTypeSeen = false;
+        final signalCtrl = StreamController<String>.broadcast();
+        addTearDown(signalCtrl.close);
+
+        await native.observeProperty('vo-configured', (val) async {
+          voConfigured = val.trim().toLowerCase() == 'yes';
+          if (voConfigured) signalCtrl.add('vo-configured=yes');
+        });
+        await native.observeProperty('estimated-vf-fps', (val) async {
+          if ((double.tryParse(val.trim()) ?? 0) > 0.1) {
+            vfFpsPositive = true;
+            signalCtrl.add('vf-fps=$val');
+          }
+        });
+        await native.observeProperty('video-frame-info/picture-type', (val) async {
+          if (val.trim().isNotEmpty) {
+            pictureTypeSeen = true;
+            signalCtrl.add('pic=$val');
+          }
+        });
+
+        // 1. Channel 1 (real H.264+AAC) emits real video output signal and advances.
+        await player.open(Media('http://127.0.0.1:${server.port}/ch1.ts'));
+        await player.stream.position
+            .firstWhere((p) => p.inMilliseconds >= 300)
+            .timeout(const Duration(seconds: 10));
+        expect(
+          voConfigured || vfFpsPositive || pictureTypeSeen,
+          isTrue,
+          reason: 'Real H.264+AAC stream must confirm native video output',
+        );
+
+        // 2. Switch to Channel 2 (identical 320x180 resolution) -> fresh video output observed.
+        voConfigured = false;
+        vfFpsPositive = false;
+        pictureTypeSeen = false;
+        final ch2Signal = signalCtrl.stream.first.timeout(const Duration(seconds: 10));
+        await player.open(Media('http://127.0.0.1:${server.port}/ch2.ts'));
+        await ch2Signal;
+        await player.stream.position
+            .firstWhere((p) => p.inMilliseconds >= 300)
+            .timeout(const Duration(seconds: 10));
+        expect(
+          voConfigured || vfFpsPositive || pictureTypeSeen,
+          isTrue,
+          reason: 'Identical-resolution channel switch must re-confirm native video output',
+        );
+
+        // 3. Switch to Channel 3 (audio-only AAC radio) -> advances cleanly with no video track.
+        await player.open(Media('http://127.0.0.1:${server.port}/radio.m4a'));
+        await player.stream.position
+            .firstWhere((p) => p.inMilliseconds >= 300)
+            .timeout(const Duration(seconds: 10));
+        expect(
+          player.state.tracks.video.any((t) => t.id != 'auto' && t.id != 'no'),
+          isFalse,
+        );
+        expect(player.state.track.video.id, anyOf('no', 'auto'));
+        expect(player.state.track.audio.id, isNot('no'));
+      },
+      timeout: const Timeout(Duration(seconds: 45)),
+    );
   });
 }

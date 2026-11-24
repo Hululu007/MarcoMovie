@@ -117,6 +117,8 @@ class PlayerScreen extends StatefulWidget {
   final OnboardingPrefs? debugOnboardingPrefs;
   @visibleForTesting
   final Anime4kController? debugAnime4kController;
+  @visibleForTesting
+  final Stream<bool>? debugLiveVideoOutputStream;
 
   const PlayerScreen({
     super.key,
@@ -147,6 +149,7 @@ class PlayerScreen extends StatefulWidget {
     this.debugDanmuSettings,
     this.debugOnboardingPrefs,
     this.debugAnime4kController,
+    this.debugLiveVideoOutputStream,
   });
 
   /// The resolver already applies origin rules and explicit playback headers.
@@ -791,8 +794,22 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _liveDirectFallbackTried = false;
   bool _activeEpisodeUsedLocalProxy = false;
   bool _liveSessionHasProgress = false;
+  bool _liveHasVideoTrack = false;
+  bool _liveSessionVideoOutputReady = false;
+  bool _liveVoConfigured = false;
   bool _liveStartSpecTriggered = false;
+  final Set<String> _observedMpvVideoProps = <String>{};
+  VoidCallback? _videoRectListener;
+  VoidCallback? _mdkTextureListener;
+  VoidCallback? _ohosTextureListener;
   LiveChannel? _activeLiveChannel;
+
+  bool get _liveNeedsVideoOutput => _isLiveStream && _liveHasVideoTrack;
+  bool get _liveSessionReadyForDisplay =>
+      !_isLiveStream ||
+      (_liveNeedsVideoOutput
+          ? _liveSessionVideoOutputReady
+          : _liveSessionHasProgress);
 
   String get _displayTitle => _activeLiveChannel?.name ?? widget.video.title;
   bool get _hasLiveChannelCatalog =>
@@ -1021,20 +1038,192 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  void _detachLiveVideoOutputObservers() {
+    if (_videoRectListener != null) {
+      _videoKernel.mediaKitController?.rect.removeListener(_videoRectListener!);
+      _videoRectListener = null;
+    }
+    if (_mdkTextureListener != null) {
+      _videoKernel.mdkPlatform?.textureIdListenable
+          .removeListener(_mdkTextureListener!);
+      _mdkTextureListener = null;
+    }
+    if (_ohosTextureListener != null) {
+      _videoKernel.ohosPlatform?.textureIdListenable
+          .removeListener(_ohosTextureListener!);
+      _ohosTextureListener = null;
+    }
+    if (_observedMpvVideoProps.isNotEmpty) {
+      final platform = _player.platform;
+      final props = List<String>.of(_observedMpvVideoProps);
+      _observedMpvVideoProps.clear();
+      if (platform != null) {
+        for (final prop in props) {
+          try {
+            unawaited((platform as dynamic).unobserveProperty(prop));
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
+  void _confirmLiveVideoOutput() {
+    if (!mounted || !_allowEvents || !_matchesActiveMedia || !_isLiveStream) {
+      return;
+    }
+    final alreadyReady = _liveSessionVideoOutputReady;
+    _liveSessionVideoOutputReady = true;
+    if (_position > Duration.zero) {
+      _startup.position(_position);
+    }
+    if (!alreadyReady) {
+      final clearStaleBuffering =
+          _buffering && _position.inMilliseconds >= 250;
+      if (_loading || clearStaleBuffering) {
+        setState(() {
+          _loading = false;
+          if (clearStaleBuffering) {
+            _buffering = false;
+          }
+        });
+        if (_playing &&
+            !_buffering &&
+            _controlsVisible &&
+            (_hideTimer == null || !_hideTimer!.isActive)) {
+          _scheduleHide();
+        }
+      }
+      if (_videoWidth > 0 && _videoHeight > 0 && !_liveStartSpecTriggered) {
+        _liveStartSpecTriggered = true;
+        _startSpecController.onFirstFrameReady(
+          enabled: _hudPrefs.effectiveStartSpecHud,
+          isLive: true,
+        );
+      }
+    }
+  }
+
+  void _attachLiveVideoOutputObservers() {
+    _detachLiveVideoOutputObservers();
+    if (widget.debugLiveVideoOutputStream != null) {
+      _playerSubscriptions.add(
+        widget.debugLiveVideoOutputStream!.listen((hasOutput) {
+          if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+          if (hasOutput) {
+            _confirmLiveVideoOutput();
+          }
+        }),
+      );
+    }
+    final mkCtrl = _videoKernel.mediaKitController;
+    if (mkCtrl != null) {
+      void onRectChanged() {
+        if (!mounted || !_allowEvents || !_matchesActiveMedia || !_isLiveStream) {
+          return;
+        }
+        final r = mkCtrl.rect.value;
+        if (r != null && r.width > 0 && r.height > 0) {
+          _confirmLiveVideoOutput();
+        }
+      }
+
+      _videoRectListener = onRectChanged;
+      mkCtrl.rect.addListener(onRectChanged);
+    }
+    final mdk = _videoKernel.mdkPlatform;
+    if (mdk != null) {
+      void onMdkTexture() {
+        if (!mounted || !_allowEvents || !_matchesActiveMedia || !_isLiveStream) {
+          return;
+        }
+        final tid = mdk.textureIdListenable.value;
+        if (tid != null && tid >= 0 && _videoWidth > 0 && _videoHeight > 0) {
+          _confirmLiveVideoOutput();
+        }
+      }
+
+      _mdkTextureListener = onMdkTexture;
+      mdk.textureIdListenable.addListener(onMdkTexture);
+    }
+    final ohos = _videoKernel.ohosPlatform;
+    if (ohos != null) {
+      void onOhosTexture() {
+        if (!mounted || !_allowEvents || !_matchesActiveMedia || !_isLiveStream) {
+          return;
+        }
+        final tid = ohos.textureIdListenable.value;
+        if (tid != null && tid >= 0 && _videoWidth > 0 && _videoHeight > 0) {
+          _confirmLiveVideoOutput();
+        }
+      }
+
+      _ohosTextureListener = onOhosTexture;
+      ohos.textureIdListenable.addListener(onOhosTexture);
+    }
+    if (_isLiveStream) {
+      final platform = _player.platform;
+      if (platform is NativePlayer) {
+        Future<void> observe(
+          String prop,
+          void Function(String val) handler,
+        ) async {
+          if (!mounted || _playerDisposed) return;
+          try {
+            await platform.observeProperty(prop, (String val) async {
+              if (!mounted || _playerDisposed) return;
+              handler(val);
+            });
+            if (mounted && !_playerDisposed) {
+              _observedMpvVideoProps.add(prop);
+            }
+          } catch (_) {}
+        }
+
+        unawaited(observe('vo-configured', (val) {
+          if (!_allowEvents || !_matchesActiveMedia) return;
+          final configured = val.trim().toLowerCase() == 'yes';
+          _liveVoConfigured = configured;
+          if (configured && _videoWidth > 0 && _videoHeight > 0) {
+            _confirmLiveVideoOutput();
+          }
+        }));
+        unawaited(observe('estimated-vf-fps', (val) {
+          if (!_allowEvents || !_matchesActiveMedia) return;
+          final fps = double.tryParse(val.trim()) ?? 0;
+          if (fps > 0.1) {
+            _confirmLiveVideoOutput();
+          }
+        }));
+        unawaited(observe('video-frame-info/picture-type', (val) {
+          if (!_allowEvents || !_matchesActiveMedia) return;
+          if (val.trim().isNotEmpty) {
+            _confirmLiveVideoOutput();
+          }
+        }));
+      }
+    }
+  }
+
   void _attachPlayerStreams() {
+    _detachLiveVideoOutputObservers();
     for (final sub in _playerSubscriptions) {
       unawaited(sub.cancel());
     }
     _playerSubscriptions.clear();
+    _attachLiveVideoOutputObservers();
     _playerSubscriptions.add(_player.stream.width.listen((w) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       if (w == null || w <= 0 || w == _videoWidth) return;
       setState(() {
         _videoWidth = w;
+        if (_isLiveStream) _liveHasVideoTrack = true;
       });
+      if (_liveVoConfigured && _videoWidth > 0 && _videoHeight > 0) {
+        _confirmLiveVideoOutput();
+      }
       if (_videoWidth > 0 &&
           _videoHeight > 0 &&
-          (!_isLiveStream || _liveSessionHasProgress) &&
+          _liveSessionReadyForDisplay &&
           !_liveStartSpecTriggered) {
         _liveStartSpecTriggered = true;
         _startSpecController.onFirstFrameReady(
@@ -1048,10 +1237,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (h == null || h <= 0 || h == _videoHeight) return;
       setState(() {
         _videoHeight = h;
+        if (_isLiveStream) _liveHasVideoTrack = true;
       });
+      if (_liveVoConfigured && _videoWidth > 0 && _videoHeight > 0) {
+        _confirmLiveVideoOutput();
+      }
       if (_videoWidth > 0 &&
           _videoHeight > 0 &&
-          (!_isLiveStream || _liveSessionHasProgress) &&
+          _liveSessionReadyForDisplay &&
           !_liveStartSpecTriggered) {
         _liveStartSpecTriggered = true;
         _startSpecController.onFirstFrameReady(
@@ -1062,6 +1255,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     }));
     _playerSubscriptions.add(_player.stream.track.listen((track) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      if (_isLiveStream) {
+        final vid = track.video.id.trim();
+        if (vid == 'no') {
+          _liveHasVideoTrack = false;
+        } else if (vid.isNotEmpty && vid != 'auto') {
+          _liveHasVideoTrack = true;
+        }
+      }
       final vCodec = (track.video.codec ?? track.video.decoder ?? '').trim();
       final aCodec = (track.audio.codec ?? track.audio.decoder ?? '').trim();
       final extraParts = <String>[
@@ -1085,6 +1286,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     }));
     _playerSubscriptions.add(_player.stream.tracks.listen((tracks) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      if (_isLiveStream &&
+          _player.state.track.video.id.trim() != 'no' &&
+          tracks.video.any(
+            (t) => t.id.trim().isNotEmpty && t.id != 'auto' && t.id != 'no',
+          )) {
+        _liveHasVideoTrack = true;
+      }
       String pickCodec(Iterable<({String id, String? codec, String? decoder})> list) {
         for (final item in list) {
           if (item.id == 'auto' || item.id == 'no') continue;
@@ -1110,7 +1318,9 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _playerSubscriptions.add(_player.stream.position.listen((pos) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
-      _startup.position(pos);
+      if (!_liveNeedsVideoOutput || _liveSessionVideoOutputReady) {
+        _startup.position(pos);
+      }
       final nextPos = (!_isDraggingSeek && !_isSliderDragging)
           ? ((_pendingResumeMs > 0 && pos.inMilliseconds < 2000)
                 ? Duration(milliseconds: _pendingResumeMs)
@@ -1123,19 +1333,25 @@ class _PlayerScreenState extends State<PlayerScreen>
           unawaited(_saveProgress());
         }
       }
-      final shouldClearLoading = pos > Duration.zero && _loading;
       if (_isLiveStream && pos > Duration.zero && !_liveSessionHasProgress) {
         _liveSessionHasProgress = true;
-        if (_videoWidth > 0 && _videoHeight > 0 && !_liveStartSpecTriggered) {
-          _liveStartSpecTriggered = true;
-          _startSpecController.onFirstFrameReady(
-            enabled: _hudPrefs.effectiveStartSpecHud,
-            isLive: true,
-          );
-        }
+      }
+      final liveReady = _liveSessionReadyForDisplay;
+      final shouldClearLoading = pos > Duration.zero && _loading && liveReady;
+      if (_isLiveStream &&
+          liveReady &&
+          _videoWidth > 0 &&
+          _videoHeight > 0 &&
+          !_liveStartSpecTriggered) {
+        _liveStartSpecTriggered = true;
+        _startSpecController.onFirstFrameReady(
+          enabled: _hudPrefs.effectiveStartSpecHud,
+          isLive: true,
+        );
       }
       final shouldClearStaleLiveBuffering =
           _isLiveStream &&
+          liveReady &&
           _buffering &&
           pos > _position &&
           pos.inMilliseconds >= 250;
@@ -1263,7 +1479,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _startup.updateState(playing: playing);
         setState(() {
           _playing = playing;
-          if (playing && (!_isLiveStream || _liveSessionHasProgress)) {
+          if (playing && _liveSessionReadyForDisplay) {
             _loading = false;
             if (!OhosRuntime.isOhos && !_isLiveStream && !widget.embedded) {
               _hasStartedVodPlayback = true;
@@ -1307,7 +1523,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         setState(() => _buffering = buffering);
         if (!buffering) {
           _midPlaybackStallTimer?.cancel();
-          if (_playing && (!_isLiveStream || _liveSessionHasProgress)) {
+          if (_playing && _liveSessionReadyForDisplay) {
             _scheduleHide();
           }
         } else if (!_isLiveStream &&
@@ -2137,7 +2353,16 @@ class _PlayerScreenState extends State<PlayerScreen>
   }) async {
     _startup.reset();
     _liveSessionHasProgress = false;
+    final isSameEpisodeRetry =
+        bypassLocalProxy || forceLiveLocalProxy || useAlternateLiveUa;
+    if (!isSameEpisodeRetry) {
+      _liveHasVideoTrack = false;
+    }
+    _liveSessionVideoOutputReady = false;
+    _liveVoConfigured = false;
     _liveStartSpecTriggered = false;
+    _videoWidth = 0;
+    _videoHeight = 0;
     if (!bypassLocalProxy && !forceLiveLocalProxy && !useAlternateLiveUa) {
       _liveDirectFallbackTried = false;
       _lastLiveUpstreamStatus = null;
@@ -3661,6 +3886,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     iosAvPlayerController?.removeListener(_onIosAvPlayerChanged);
     _winQualityController.removeListener(_onHudSubstateChanged);
     _winQualityController.dispose();
+    _detachLiveVideoOutputObservers();
     for (final sub in _playerSubscriptions) {
       unawaited(sub.cancel());
     }

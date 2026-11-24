@@ -864,7 +864,7 @@ extension MainFlutterWindow {
       primaryVisibleFrame: primary
     )
     self.marcoRestoredFromSaved = (saved != nil)
-    self.marcoLastNormalFrame = resolved
+    self.marcoLastNormalFrame = (saved != nil) ? resolved : nil
     self.setFrame(resolved, display: true)
   }
 
@@ -994,7 +994,7 @@ extension MainFlutterWindow {
         "minHeight": Double(self.minSize.height),
         "currentFrame": Self.marcoEncodeFrame(self.frame),
       ]
-      if let saved = Self.marcoLoadSavedFrame() ?? self.marcoLastNormalFrame {
+      if let saved = Self.marcoLoadSavedFrame() ?? (self.marcoRestoredFromSaved ? self.marcoLastNormalFrame : nil) {
         payload["savedFrame"] = Self.marcoEncodeFrame(saved)
       }
       result(payload)
@@ -1495,6 +1495,13 @@ def main() -> None:
                     "</dict>",
                     "  <key>com.apple.security.files.user-selected.read-write</key>\n  <true/>\n</dict>",
                 )
+            # Release distributions must never carry the debug get-task-allow entitlement.
+            if ent.name == "Release.entitlements":
+                text = re.sub(
+                    r"\s*<key>com\.apple\.security\.get-task-allow</key>\s*<(?:true|false)\s*/>\s*",
+                    "\n",
+                    text,
+                )
             ent.write_text(text, encoding="utf-8")
         info_plist = macos_runner / "Info.plist"
         if info_plist.exists():
@@ -1520,7 +1527,18 @@ def main() -> None:
                 swift_text = swift_text.replace(
                     "class MainFlutterWindow: NSWindow {",
                     "class MainFlutterWindow: NSWindow {\n"
-                    "  private var playbackActivity: NSObjectProtocol?\n"
+                    "  private var playbackActivity: NSObjectProtocol?",
+                    1,
+                )
+            if "private var marcoWindowObservers:" not in swift_text:
+                anchor = (
+                    "  private var playbackActivity: NSObjectProtocol?"
+                    if "  private var playbackActivity: NSObjectProtocol?" in swift_text
+                    else "class MainFlutterWindow: NSWindow {"
+                )
+                swift_text = swift_text.replace(
+                    anchor,
+                    anchor + "\n"
                     "  private var marcoWindowObservers: [NSObjectProtocol] = []\n"
                     "  private var marcoInFullscreenTransition = false\n"
                     "  private var marcoIsMiniaturizing = false\n"

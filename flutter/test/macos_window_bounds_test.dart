@@ -386,6 +386,35 @@ void main() {
 
       await ctrl.syncOnStartup();
       expect(adapter.appliedBounds, [saved]);
+      expect(storage.loadMacosWindowBounds(), saved);
+    });
+
+    test('does not let un-restored native default frame overwrite Dart backup bounds', () async {
+      final storage = await initTestStorage();
+      const dartBackup = MacosWindowBounds(x: 240, y: 150, width: 1020, height: 660);
+      const defaultCentered = MacosWindowBounds(x: 80, y: 70, width: 1280, height: 760);
+      await storage.saveMacosWindowBounds(dartBackup);
+
+      final adapter = _FakeMacosWindowAdapter()
+        ..nativeState = const MacosWindowNativeState(
+          restoredFromSaved: false,
+          isFullScreen: false,
+          isMiniaturized: false,
+          // Even if an older native side mistakenly returned a centered frame in savedFrame,
+          // restoredFromSaved=false must still restore Dart's persisted backup.
+          savedFrame: defaultCentered,
+          currentFrame: defaultCentered,
+        );
+      final ctrl = MacosWindowBoundsController(
+        storage: storage,
+        adapter: adapter,
+        attachWindowManager: false,
+      );
+      addTearDown(ctrl.dispose);
+
+      await ctrl.syncOnStartup();
+      expect(adapter.appliedBounds, [dartBackup]);
+      expect(storage.loadMacosWindowBounds(), dartBackup);
     });
   });
 

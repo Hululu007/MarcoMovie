@@ -597,7 +597,9 @@ class AppUpdate {
         cancellation.check();
         return installedFile;
       } on FormatException {
-        await installedFile.delete();
+        // Never delete a pre-existing local file with different content;
+        // download and verify in an isolated temporary directory first, then
+        // pick a non-colliding filename if the namesake still exists.
       }
     }
     final transport = client ?? http.Client();
@@ -610,11 +612,12 @@ class AppUpdate {
     });
     Directory? staging;
     IOSink? sink;
+    File? publishTemp;
     try {
       cancellation.check();
-      await directory.create(recursive: true);
-      staging = await directory.createTemp('.marco-macos-update-');
-      final partial = File('${staging.path}${Platform.pathSeparator}package.part');
+      staging = await Directory.systemTemp.createTemp('marco-macos-update-');
+      final partial =
+          File('${staging.path}${Platform.pathSeparator}package.part');
       final request =
           http.AbortableRequest('GET', target, abortTrigger: abort.future);
       final response = await cancellation
@@ -648,19 +651,83 @@ class AppUpdate {
       cancellation.check();
       await verifyFile(partial);
       cancellation.check();
-      if (await installedFile.exists()) {
-        await installedFile.delete();
+
+      await directory.create(recursive: true);
+      final destination = await _resolveUniqueMacosDestination(
+        directory,
+        expectedFileName,
+      );
+      if (await destination.exists()) {
+        // Exact SHA-256 verified file already present at canonical path.
+        return destination;
       }
-      return await partial.rename(installedFile.path);
+      publishTemp = File(
+        '${directory.path}${Platform.pathSeparator}'
+        '.$expectedFileName.tmp.${DateTime.now().microsecondsSinceEpoch}',
+      );
+      await partial.copy(publishTemp.path);
+      await verifyFile(publishTemp);
+      cancellation.check();
+      final finalDestination = await _resolveUniqueMacosDestination(
+        directory,
+        expectedFileName,
+      );
+      if (await finalDestination.exists()) {
+        return finalDestination;
+      }
+      final published = await publishTemp.rename(finalDestination.path);
+      publishTemp = null;
+      return published;
     } finally {
       deadline.cancel();
       if (!abort.isCompleted) abort.complete();
       if (client == null) transport.close();
       await sink?.close();
+      if (publishTemp != null && await publishTemp.exists()) {
+        try {
+          await publishTemp.delete();
+        } catch (_) {}
+      }
       if (staging != null && await staging.exists()) {
-        await staging.delete(recursive: true);
+        try {
+          await staging.delete(recursive: true);
+        } catch (_) {}
       }
     }
+  }
+
+  Future<File> _resolveUniqueMacosDestination(
+    Directory directory,
+    String expectedFileName,
+  ) async {
+    final primary =
+        File('${directory.path}${Platform.pathSeparator}$expectedFileName');
+    if (!await primary.exists()) return primary;
+    try {
+      await verifyFile(primary);
+      return primary;
+    } on FormatException {
+      // Preserve pre-existing different file; pick a fresh non-colliding name.
+    }
+    final dot = expectedFileName.lastIndexOf('.');
+    final stem = dot > 0 ? expectedFileName.substring(0, dot) : expectedFileName;
+    final ext = dot > 0 ? expectedFileName.substring(dot) : '';
+    for (var i = 1; i <= 99; i++) {
+      final candidate = File(
+        '${directory.path}${Platform.pathSeparator}$stem ($i)$ext',
+      );
+      if (!await candidate.exists()) return candidate;
+      try {
+        await verifyFile(candidate);
+        return candidate;
+      } on FormatException {
+        // Occupied by another file; keep trying.
+      }
+    }
+    return File(
+      '${directory.path}${Platform.pathSeparator}'
+      '$stem-${DateTime.now().millisecondsSinceEpoch}$ext',
+    );
   }
 
   static Future<bool> revealMacosPackageInFinder(File file) =>

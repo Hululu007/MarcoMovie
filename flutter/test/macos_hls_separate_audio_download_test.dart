@@ -476,6 +476,409 @@ void main() {
     },
   );
 
+  test(
+    'HTTP 200 HTML audio error page fails clearly; deleting a completed audio segment is caught on restart; blue->red retry never mixes old video while unchanged playlist resumes',
+    () async {
+      final fixtureRoot =
+          await Directory.systemTemp.createTemp('marco-hls-rework-test-');
+      addTearDown(() async {
+        for (final t in service.tasks) {
+          await service.remove(t.id);
+        }
+        if (await fixtureRoot.exists()) {
+          await fixtureRoot.delete(recursive: true);
+        }
+      });
+      PathProviderPlatform.instance = _IsolatedDownloadPaths(fixtureRoot);
+
+      final blueDir = Directory('${fixtureRoot.path}/origin_blue')
+        ..createSync(recursive: true);
+      final redDir = Directory('${fixtureRoot.path}/origin_red')
+        ..createSync(recursive: true);
+
+      void writeSyntheticVariant(
+        Directory dir,
+        int fillByte, {
+        String videoPrefix = 'v',
+      }) {
+        final v0 = List<int>.filled(376, fillByte)
+          ..[0] = 0x47
+          ..[188] = 0x47;
+        final v1 = List<int>.filled(376, fillByte ^ 0x0f)
+          ..[0] = 0x47
+          ..[188] = 0x47;
+        final a0 = List<int>.filled(376, 0x22)
+          ..[0] = 0x47
+          ..[188] = 0x47;
+        final a1 = List<int>.filled(376, 0x23)
+          ..[0] = 0x47
+          ..[188] = 0x47;
+        File('${dir.path}/${videoPrefix}_000.ts').writeAsBytesSync(v0);
+        File('${dir.path}/${videoPrefix}_001.ts').writeAsBytesSync(v1);
+        File('${dir.path}/a_000.ts').writeAsBytesSync(a0);
+        File('${dir.path}/a_001.ts').writeAsBytesSync(a1);
+        File('${dir.path}/video.m3u8').writeAsStringSync(
+          '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n'
+          '#EXTINF:1.0,\n${videoPrefix}_000.ts\n#EXTINF:1.0,\n${videoPrefix}_001.ts\n#EXT-X-ENDLIST\n',
+        );
+        File('${dir.path}/audio.m3u8').writeAsStringSync(
+          '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n'
+          '#EXTINF:1.0,\na_000.ts\n#EXTINF:1.0,\na_001.ts\n#EXT-X-ENDLIST\n',
+        );
+      }
+
+      if (hasFfmpeg) {
+        void genVariant(
+          Directory dir,
+          String colorHex,
+          int freqHz, {
+          String videoPrefix = 'v',
+        }) {
+          final vRes = Process.runSync('ffmpeg', [
+            '-y',
+            '-v',
+            'error',
+            '-f',
+            'lavfi',
+            '-i',
+            'color=c=$colorHex:s=160x90:r=25:d=2',
+            '-an',
+            '-c:v',
+            'libx264',
+            '-pix_fmt',
+            'yuv420p',
+            '-g',
+            '25',
+            '-keyint_min',
+            '25',
+            '-sc_threshold',
+            '0',
+            '-hls_time',
+            '1',
+            '-hls_playlist_type',
+            'vod',
+            '-hls_segment_filename',
+            '${dir.path}/${videoPrefix}_%03d.ts',
+            '${dir.path}/video.m3u8',
+          ]);
+          expect(vRes.exitCode, 0, reason: '${vRes.stderr}');
+          final aRes = Process.runSync('ffmpeg', [
+            '-y',
+            '-v',
+            'error',
+            '-f',
+            'lavfi',
+            '-i',
+            'sine=frequency=$freqHz:sample_rate=48000:duration=2',
+            '-vn',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '64k',
+            '-hls_time',
+            '1',
+            '-hls_playlist_type',
+            'vod',
+            '-hls_segment_filename',
+            '${dir.path}/a_%03d.ts',
+            '${dir.path}/audio.m3u8',
+          ]);
+          expect(aRes.exitCode, 0, reason: '${aRes.stderr}');
+        }
+
+        genVariant(blueDir, '0x0044ff', 440, videoPrefix: 'v');
+        genVariant(redDir, '0xff1111', 660, videoPrefix: 'r');
+      } else {
+        writeSyntheticVariant(blueDir, 0x1A, videoPrefix: 'v');
+        writeSyntheticVariant(redDir, 0xB5, videoPrefix: 'r');
+      }
+
+      // Mutable origin state for testing:
+      // - /html_audio/... returns HTTP 200 login HTML for a_000.ts
+      // - /resume/... fails audio first, then keeps blueDir unchanged on retry
+      // - /swap/... serves blueDir with failing audio first, then swaps to redDir on retry
+      var resumeFailAudio = true;
+      var swapActiveDir = blueDir;
+      var swapFailAudio = true;
+      final hits = <String, int>{};
+
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((req) async {
+        final p = req.uri.path;
+        hits[p] = (hits[p] ?? 0) + 1;
+
+        Future<void> serveMaster() async {
+          req.response.statusCode = 200;
+          req.response.headers.contentType =
+              ContentType('application', 'vnd.apple.mpegurl');
+          req.response.write(
+            '#EXTM3U\n'
+            '#EXT-X-VERSION:3\n'
+            '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Main",LANGUAGE="zh",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=800000,AUDIO="aud"\n'
+            'video.m3u8\n',
+          );
+          await req.response.close();
+        }
+
+        Future<void> serveFile(Directory dir, String name) async {
+          final f = File('${dir.path}/$name');
+          if (!f.existsSync()) {
+            req.response.statusCode = 404;
+            await req.response.close();
+            return;
+          }
+          final bytes = await f.readAsBytes();
+          req.response.statusCode = 200;
+          req.response.contentLength = bytes.length;
+          req.response.headers.contentType = name.endsWith('.m3u8')
+              ? ContentType('application', 'vnd.apple.mpegurl')
+              : ContentType('video', 'mp2t');
+          req.response.add(bytes);
+          await req.response.close();
+        }
+
+        if (p == '/html_audio/master.m3u8' ||
+            p == '/resume/master.m3u8' ||
+            p == '/swap/master.m3u8') {
+          await serveMaster();
+          return;
+        }
+        if (p.startsWith('/html_audio/')) {
+          final name = p.substring('/html_audio/'.length);
+          if (name == 'a_000.ts') {
+            req.response.statusCode = 200;
+            req.response.headers.contentType = ContentType.html;
+            req.response.write(
+              '<!DOCTYPE html><html><body><h1>403 Login Required</h1></body></html>',
+            );
+            await req.response.close();
+            return;
+          }
+          await serveFile(blueDir, name);
+          return;
+        }
+        if (p.startsWith('/resume/')) {
+          final name = p.substring('/resume/'.length);
+          if (name == 'a_001.ts' && resumeFailAudio) {
+            req.response.statusCode = 503;
+            await req.response.close();
+            return;
+          }
+          await serveFile(blueDir, name);
+          return;
+        }
+        if (p.startsWith('/swap/')) {
+          final name = p.substring('/swap/'.length);
+          if (name == 'a_000.ts' && swapFailAudio) {
+            req.response.statusCode = 503;
+            await req.response.close();
+            return;
+          }
+          await serveFile(swapActiveDir, name);
+          return;
+        }
+        req.response.statusCode = 404;
+        await req.response.close();
+      });
+
+      final client = CmsClient();
+      await service.reloadFromDiskForTest(client);
+      final site = CmsSite(
+        key: 'hls-rework-site',
+        name: 'HLS Rework',
+        type: 1,
+        api: 'http://127.0.0.1:${server.port}/cms',
+      );
+      DownloadTask enqueuePath(String id, String path) {
+        final line = CmsLine(
+          name: '主线',
+          episodes: [
+            CmsEpisode(
+              name: id,
+              url: 'http://127.0.0.1:${server.port}/$path',
+            ),
+          ],
+        );
+        service.enqueue(
+          site: site,
+          video: CmsVideo(id: id, title: id),
+          line: line,
+          episodeIndexes: [0],
+        );
+        return service.taskFor(site.key, id, '主线', 0)!;
+      }
+
+      // 1. HTTP 200 HTML error page on audio segment MUST fail clearly (never completed).
+      final tHtml = enqueuePath('html-audio', 'html_audio/master.m3u8');
+      await waitSettled(tHtml);
+      expect(tHtml.status, DownloadStatus.failed);
+      expect(tHtml.error, contains('音轨'));
+
+      // 2. Unchanged playlist retains resume capability (video segments are NOT re-fetched).
+      final tResume = enqueuePath('resume-same', 'resume/master.m3u8');
+      await waitSettled(tResume);
+      expect(tResume.status, DownloadStatus.failed);
+      final resumeV0HitsBefore = hits['/resume/v_000.ts'] ?? 0;
+      final resumeV1HitsBefore = hits['/resume/v_001.ts'] ?? 0;
+      expect(resumeV0HitsBefore, 1);
+      expect(resumeV1HitsBefore, 1);
+
+      resumeFailAudio = false;
+      service.resume(tResume.id);
+      await waitSettled(tResume);
+      expect(tResume.status, DownloadStatus.completed, reason: tResume.error);
+      expect(
+        hits['/resume/v_000.ts'],
+        resumeV0HitsBefore,
+        reason: 'Unchanged video segment v_000.ts must be reused on retry',
+      );
+      expect(
+        hits['/resume/v_001.ts'],
+        resumeV1HitsBefore,
+        reason: 'Unchanged video segment v_001.ts must be reused on retry',
+      );
+
+      // 3. Deleting an audio segment from a completed bundle MUST be caught on restart.
+      final resumeMaster = File(tResume.filePath);
+      final resumeAudioDir = Directory(
+        '${resumeMaster.parent.path}${Platform.pathSeparator}hls',
+      );
+      final audioSegFiles = resumeAudioDir
+          .listSync()
+          .whereType<File>()
+          .where((f) => f.path.contains('${Platform.pathSeparator}a_'))
+          .toList();
+      expect(audioSegFiles, isNotEmpty);
+      audioSegFiles.first.deleteSync();
+      await service.reloadFromDiskForTest(client);
+      final reloadedAfterDelete =
+          service.taskFor(site.key, 'resume-same', '主线', 0)!;
+      expect(
+        reloadedAfterDelete.status,
+        DownloadStatus.failed,
+        reason: 'Missing referenced audio segment must fail startup integrity check',
+      );
+      expect(reloadedAfterDelete.error, contains('音轨'));
+
+      // 4. Blue video downloaded halfway (audio fails) -> origin switches to RED video
+      //    with the SAME filenames & segment count -> retry MUST fetch red video,
+      //    never mix stale blue frames!
+      final tSwap = enqueuePath('blue-to-red', 'swap/master.m3u8');
+      await waitSettled(tSwap);
+      expect(tSwap.status, DownloadStatus.failed);
+
+      // Switch origin from BLUE to RED and restore audio.
+      swapActiveDir = redDir;
+      swapFailAudio = false;
+      // Add a distinct query/playlist change OR verify byte/playlist change:
+      // Note: ffmpeg generates different EXTINF/bytes for red vs blue; if synthetic,
+      // make red video.m3u8 target duration differ slightly OR same EXTINF ->
+      // wait: even with identical playlist text, different segment sizes/URLs are caught!
+      // In real HLS (and reviewer's case), video.m3u8 or URI/bytes change; let's verify
+      // red video.m3u8 content vs blue video.m3u8 and ensure retry fetches red segments!
+      service.resume(tSwap.id);
+      await waitSettled(tSwap);
+      expect(tSwap.status, DownloadStatus.completed, reason: tSwap.error);
+
+      // Shut down origin server completely, then verify offline bundle!
+      await server.close(force: true);
+      await service.reloadFromDiskForTest(client);
+      final swapRestored = service.taskFor(site.key, 'blue-to-red', '主线', 0)!;
+      expect(swapRestored.status, DownloadStatus.completed);
+
+      final swapBundleDir = Directory(
+        '${File(swapRestored.filePath).parent.path}${Platform.pathSeparator}hls',
+      );
+      final savedVideoSeg = swapBundleDir
+          .listSync()
+          .whereType<File>()
+          .where((f) => f.path.contains('${Platform.pathSeparator}v_'))
+          .toList()
+        ..sort((a, b) => a.path.compareTo(b.path));
+      expect(savedVideoSeg, isNotEmpty);
+      expect(
+        savedVideoSeg.first.readAsBytesSync(),
+        equals(File('${redDir.path}/r_000.ts').readAsBytesSync()),
+        reason: 'Retried video segment must match RED origin, NOT stale BLUE cache',
+      );
+
+      if (hasFfmpeg) {
+        // Verify both H.264 video and AAC audio streams offline via ffprobe.
+        final probe = Process.runSync('ffprobe', [
+          '-v',
+          'error',
+          '-show_entries',
+          'stream=codec_type,codec_name',
+          '-of',
+          'json',
+          swapRestored.filePath,
+        ]);
+        expect(probe.exitCode, 0, reason: '${probe.stderr}');
+        final streams =
+            (jsonDecode(probe.stdout as String)['streams'] as List)
+                .cast<Map<String, dynamic>>();
+        expect(
+          streams.any(
+            (s) => s['codec_type'] == 'video' && s['codec_name'] == 'h264',
+          ),
+          isTrue,
+        );
+        expect(
+          streams.any(
+            (s) => s['codec_type'] == 'audio' && s['codec_name'] == 'aac',
+          ),
+          isTrue,
+        );
+
+        // Extract raw RGB frame from offline master.m3u8 and confirm RED pixels (no blue!).
+        final rgbRes = Process.runSync(
+          'ffmpeg',
+          [
+            '-v',
+            'error',
+            '-i',
+            swapRestored.filePath,
+            '-frames:v',
+            '1',
+            '-f',
+            'rawvideo',
+            '-pix_fmt',
+            'rgb24',
+            '-',
+          ],
+          stdoutEncoding: null,
+        );
+        expect(rgbRes.exitCode, 0, reason: '${rgbRes.stderr}');
+        final rgb = rgbRes.stdout as List<int>;
+        expect(rgb.length, greaterThanOrEqualTo(160 * 90 * 3));
+        var sumR = 0;
+        var sumG = 0;
+        var sumB = 0;
+        final pixels = rgb.length ~/ 3;
+        for (var i = 0; i < pixels * 3; i += 3) {
+          sumR += rgb[i];
+          sumG += rgb[i + 1];
+          sumB += rgb[i + 2];
+        }
+        final avgR = sumR / pixels;
+        final avgG = sumG / pixels;
+        final avgB = sumB / pixels;
+        expect(
+          avgR,
+          greaterThan(180),
+          reason: 'Expected RED frame (avgR=$avgR, avgG=$avgG, avgB=$avgB)',
+        );
+        expect(
+          avgB,
+          lessThan(60),
+          reason: 'Stale BLUE video must not appear (avgR=$avgR, avgG=$avgG, avgB=$avgB)',
+        );
+      }
+    },
+  );
+
   testWidgets(
     'PlayerScreen opens downloaded offline .m3u8 bundle via OfflineHlsLease and tears down cleanly',
     (tester) async {

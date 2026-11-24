@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'cms_client.dart';
@@ -181,9 +182,16 @@ class _StopSignal implements Exception {
 
 class _DownloadError implements Exception {
   final String message;
-  const _DownloadError(this.message);
+  final bool retryable;
+  const _DownloadError(this.message, {this.retryable = false});
   @override
   String toString() => message;
+}
+
+class _FetchedBytes {
+  final Uint8List bytes;
+  final String contentType;
+  const _FetchedBytes(this.bytes, this.contentType);
 }
 
 class _Meter {
@@ -290,16 +298,169 @@ class _HlsDownloadWorkItem {
   final int sequence;
   final File stageFile;
   final bool isAudio;
+  final bool isMap;
+  final String trackName;
+  final String playlistUrl;
+  final String playlistHash;
+  final String mapIdentity;
+  final bool hasMap;
   const _HlsDownloadWorkItem({
     required this.uri,
     required this.stageFile,
     required this.isAudio,
+    required this.trackName,
+    required this.playlistUrl,
+    required this.playlistHash,
+    this.isMap = false,
+    this.mapIdentity = '',
+    this.hasMap = false,
     this.byteRange,
     this.keyMethod,
     this.keyUri,
     this.iv,
     this.sequence = 0,
   });
+
+  String get stageFileName =>
+      stageFile.uri.pathSegments.isNotEmpty ? stageFile.uri.pathSegments.last : '';
+
+  String get resumeIdentity {
+    final rangeStr =
+        byteRange == null ? '' : '${byteRange!.offset}:${byteRange!.length}';
+    final ivHex = iv == null
+        ? ''
+        : iv!.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    final keySig = '${keyMethod ?? ''}|${keyUri ?? ''}|$ivHex';
+    final raw =
+        'v2|$trackName|${isMap ? 'map' : 'seg'}|$playlistUrl|$playlistHash|$uri|$sequence|$rangeStr|$mapIdentity|$keySig';
+    return sha256.convert(utf8.encode(raw)).toString();
+  }
+}
+
+class _HlsStageManifest {
+  static const int currentVersion = 2;
+  final File file;
+  final Map<String, Map<String, dynamic>> _entries;
+  Future<void> _writeChain = Future<void>.value();
+
+  _HlsStageManifest._(this.file, this._entries);
+
+  static Future<_HlsStageManifest> load(Directory stageDir) async {
+    final manifestFile = File(
+      '${stageDir.path}${Platform.pathSeparator}stage_manifest.json',
+    );
+    final entries = <String, Map<String, dynamic>>{};
+    try {
+      if (await manifestFile.exists()) {
+        final decoded = jsonDecode(await manifestFile.readAsString());
+        if (decoded is Map &&
+            decoded['version'] == currentVersion &&
+            decoded['entries'] is Map) {
+          (decoded['entries'] as Map).forEach((k, v) {
+            if (k is String && v is Map) {
+              entries[k] = Map<String, dynamic>.from(v);
+            }
+          });
+        }
+      }
+    } catch (_) {}
+    return _HlsStageManifest._(manifestFile, entries);
+  }
+
+  bool isReusableSync(
+    _HlsDownloadWorkItem item, {
+    required bool requirePositiveMedia,
+  }) {
+    final entry = _entries[item.stageFileName];
+    if (entry == null) return false;
+    if (entry['identity'] != item.resumeIdentity) return false;
+    final expectedSize = entry['size'];
+    if (expectedSize is! int || expectedSize <= 0) return false;
+    if (!item.stageFile.existsSync()) return false;
+    final actualSize = item.stageFile.lengthSync();
+    if (actualSize != expectedSize) return false;
+    try {
+      final head = DownloadService._readHeadBytesSync(item.stageFile, 512);
+      DownloadService._validateMediaPayload(
+        head,
+        contentType: '',
+        isAudio: item.isAudio,
+        isMap: item.isMap,
+        hasMap: item.hasMap,
+        requirePositiveMedia: requirePositiveMedia,
+      );
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> pruneStale(
+    Directory stageDir,
+    List<_HlsDownloadWorkItem> items, {
+    required bool requirePositiveMedia,
+  }) async {
+    final activeByName = <String, _HlsDownloadWorkItem>{
+      for (final item in items) item.stageFileName: item,
+    };
+    var dirty = false;
+    final manifestName =
+        file.uri.pathSegments.isNotEmpty ? file.uri.pathSegments.last : 'stage_manifest.json';
+    try {
+      for (final entity in stageDir.listSync()) {
+        if (entity is! File) continue;
+        final name =
+            entity.uri.pathSegments.isNotEmpty ? entity.uri.pathSegments.last : '';
+        if (name == manifestName || name == '$manifestName.tmp') continue;
+        final active = activeByName[name];
+        if (active == null ||
+            !isReusableSync(active, requirePositiveMedia: requirePositiveMedia)) {
+          try {
+            await entity.delete();
+          } catch (_) {}
+          if (_entries.remove(name) != null) {
+            dirty = true;
+          }
+        }
+      }
+    } catch (_) {}
+    final staleKeys = _entries.keys
+        .where((k) => !activeByName.containsKey(k))
+        .toList();
+    for (final k in staleKeys) {
+      _entries.remove(k);
+      dirty = true;
+    }
+    if (dirty) {
+      await _persist();
+    }
+  }
+
+  Future<void> record(_HlsDownloadWorkItem item, int size) {
+    _entries[item.stageFileName] = <String, dynamic>{
+      'identity': item.resumeIdentity,
+      'size': size,
+      'track': item.trackName,
+      'uri': item.uri,
+      'sequence': item.sequence,
+    };
+    return _persist();
+  }
+
+  Future<void> _persist() {
+    final snapshot = jsonEncode(<String, dynamic>{
+      'version': currentVersion,
+      'entries': Map<String, dynamic>.from(_entries),
+    });
+    _writeChain = _writeChain.then((_) async {
+      try {
+        final tmp = File('${file.path}.tmp');
+        await tmp.writeAsString(snapshot);
+        await tmp.rename(file.path);
+      } catch (_) {}
+    });
+    return _writeChain;
+  }
 }
 
 /// Offline download manager for iPhone / iPad / Mac / Windows.
@@ -368,11 +529,13 @@ class DownloadService extends ChangeNotifier {
             if (task.status == DownloadStatus.downloading) {
               task.status = DownloadStatus.queued;
             }
-            if (task.status == DownloadStatus.completed &&
-                !_verifyCompletedFilesExist(task)) {
-              task.status = DownloadStatus.failed;
-              task.error = '本地文件已被移动或删除';
-              task.progress = 0;
+            if (task.status == DownloadStatus.completed) {
+              final issue = _diagnoseCompletedFilesIssue(task);
+              if (issue != null) {
+                task.status = DownloadStatus.failed;
+                task.error = issue;
+                task.progress = 0;
+              }
             }
             _tasks.add(task);
           }
@@ -401,35 +564,153 @@ class DownloadService extends ChangeNotifier {
     await init(client);
   }
 
-  static bool _verifyCompletedFilesExist(DownloadTask task) {
-    if (task.filePath.isEmpty) return false;
+  static bool _verifyCompletedFilesExist(DownloadTask task) =>
+      _diagnoseCompletedFilesIssue(task) == null;
+
+  static String? _diagnoseCompletedFilesIssue(DownloadTask task) {
+    if (task.filePath.isEmpty) return '本地文件已被移动或删除';
     final master = File(task.filePath);
-    if (!master.existsSync()) return false;
-    if (!task.filePath.toLowerCase().endsWith('.m3u8')) return true;
+    if (!master.existsSync() || master.lengthSync() <= 0) {
+      return '本地文件已被移动或删除';
+    }
+    if (!task.filePath.toLowerCase().endsWith('.m3u8')) return null;
+    final rootNorm = _normalizedPath(master.parent.path);
+    return _diagnoseLocalPlaylistTreeSync(
+      playlistFile: master,
+      rootNorm: rootNorm,
+      visited: <String>{},
+      depth: 0,
+      isAudioHint: false,
+    );
+  }
+
+  static File? _resolveLocalPlaylistRef(
+    Directory baseDir,
+    String rawRef,
+    String rootNorm,
+  ) {
+    final clean = rawRef.trim().split('?').first.split('#').first;
+    if (clean.isEmpty) return null;
+    if (clean.contains('://')) return null;
+    final rel = clean.replaceAll('/', Platform.pathSeparator);
+    final candidate = File(_join(baseDir.path, rel));
+    final norm = _normalizedPath(candidate.path);
+    if (norm != rootNorm && !norm.startsWith('$rootNorm/')) {
+      return null;
+    }
+    return candidate;
+  }
+
+  static String? _diagnoseLocalPlaylistTreeSync({
+    required File playlistFile,
+    required String rootNorm,
+    required Set<String> visited,
+    required int depth,
+    required bool isAudioHint,
+  }) {
+    final trackLabel = isAudioHint ? '音轨' : '视频轨';
+    if (depth > 4) return '离线$trackLabel清单层级异常，请重新下载';
+    final playlistNorm = _normalizedPath(playlistFile.path);
+    if (!visited.add(playlistNorm)) return '离线$trackLabel清单引用异常，请重新下载';
     try {
-      final parent = master.parent;
-      final content = master.readAsStringSync();
+      if (!playlistFile.existsSync() || playlistFile.lengthSync() <= 0) {
+        return '离线$trackLabel清单缺失或损坏，请重新下载';
+      }
+      final content = playlistFile.readAsStringSync();
+      if (!content.trimLeft().replaceFirst('\uFEFF', '').startsWith('#EXTM3U')) {
+        return '离线$trackLabel清单内容损坏，请重新下载';
+      }
+      final lines = const LineSplitter().convert(content);
+      final isMaster = lines.any((l) {
+        final t = l.trim();
+        return t.startsWith('#EXT-X-STREAM-INF:') ||
+            t.startsWith('#EXT-X-MEDIA:');
+      });
+      final baseDir = playlistFile.parent;
+      var hasMapTag = false;
       var referencedCount = 0;
-      for (final raw in const LineSplitter().convert(content)) {
+      for (final raw in lines) {
         final line = raw.trim();
         if (line.isEmpty) continue;
         if (line.startsWith('#EXT-X-MEDIA:')) {
           final attrs = _parseAttributes(line.substring(line.indexOf(':') + 1));
           final uri = attrs['URI'];
           if (uri != null && uri.isNotEmpty) {
+            final sub = _resolveLocalPlaylistRef(baseDir, uri, rootNorm);
+            final mediaType = (attrs['TYPE'] ?? '').toUpperCase();
+            final subIsAudio = mediaType == 'AUDIO';
+            if (sub == null) {
+              return '离线${subIsAudio ? "音轨" : "媒体"}清单路径无效，请重新下载';
+            }
             referencedCount++;
-            final subFile = File(_join(parent.path, uri.replaceAll('/', Platform.pathSeparator)));
-            if (!subFile.existsSync()) return false;
+            final subIssue = _diagnoseLocalPlaylistTreeSync(
+              playlistFile: sub,
+              rootNorm: rootNorm,
+              visited: visited,
+              depth: depth + 1,
+              isAudioHint: subIsAudio,
+            );
+            if (subIssue != null) return subIssue;
           }
-        } else if (!line.startsWith('#')) {
-          referencedCount++;
-          final subFile = File(_join(parent.path, line.replaceAll('/', Platform.pathSeparator)));
-          if (!subFile.existsSync()) return false;
+          continue;
+        }
+        if (line.startsWith('#EXT-X-MAP:')) {
+          hasMapTag = true;
+          final attrs = _parseAttributes(line.substring(line.indexOf(':') + 1));
+          final uri = attrs['URI'];
+          if (uri == null || uri.isEmpty) {
+            return '离线$trackLabel初始化段缺失，请重新下载';
+          }
+          final mapFile = _resolveLocalPlaylistRef(baseDir, uri, rootNorm);
+          if (mapFile == null ||
+              !mapFile.existsSync() ||
+              mapFile.lengthSync() <= 0) {
+            return '离线$trackLabel初始化段缺失或损坏，请重新下载';
+          }
+          final head = _readHeadBytesSync(mapFile, 512);
+          _validateMediaPayload(
+            head,
+            contentType: '',
+            isAudio: isAudioHint,
+            isMap: true,
+            hasMap: true,
+            requirePositiveMedia: true,
+          );
+          continue;
+        }
+        if (line.startsWith('#')) continue;
+        final refFile = _resolveLocalPlaylistRef(baseDir, line, rootNorm);
+        if (refFile == null) return '离线$trackLabel分片路径无效，请重新下载';
+        referencedCount++;
+        if (isMaster || line.toLowerCase().endsWith('.m3u8')) {
+          final subIssue = _diagnoseLocalPlaylistTreeSync(
+            playlistFile: refFile,
+            rootNorm: rootNorm,
+            visited: visited,
+            depth: depth + 1,
+            isAudioHint: isAudioHint,
+          );
+          if (subIssue != null) return subIssue;
+        } else {
+          if (!refFile.existsSync() || refFile.lengthSync() <= 0) {
+            return '离线$trackLabel分片缺失或损坏，请重新下载';
+          }
+          final head = _readHeadBytesSync(refFile, 512);
+          _validateMediaPayload(
+            head,
+            contentType: '',
+            isAudio: isAudioHint,
+            isMap: false,
+            hasMap: hasMapTag,
+            requirePositiveMedia: true,
+          );
         }
       }
-      return referencedCount > 0;
+      return referencedCount > 0 ? null : '离线$trackLabel分片列表为空，请重新下载';
+    } on _DownloadError catch (e) {
+      return e.message;
     } catch (_) {
-      return false;
+      return '离线$trackLabel分片缺失或损坏，请重新下载';
     }
   }
 
@@ -936,10 +1217,13 @@ class DownloadService extends ChangeNotifier {
         throw const _DownloadError('该视频使用 SAMPLE-AES 等专有加密，暂不支持下载');
       }
     }
+    final videoPlaylistHash = sha256.convert(utf8.encode(text)).toString();
     if (selectedAudioUri != null && selectedAudioUri.isNotEmpty) {
       await _downloadSeparateAudioHls(
         t: t,
         videoPlaylist: playlist,
+        videoPlaylistUrl: playlistUrl,
+        videoPlaylistHash: videoPlaylistHash,
         audioPlaylistUrl: selectedAudioUri,
         audioName: selectedAudioName,
         audioLanguage: selectedAudioLanguage,
@@ -958,12 +1242,36 @@ class DownloadService extends ChangeNotifier {
       total,
       (i) => File(_join(segDir.path, '${i.toString().padLeft(6, '0')}.seg')),
     );
+    final workItems = List<_HlsDownloadWorkItem>.generate(total, (i) {
+      final seg = playlist.segments[i];
+      return _HlsDownloadWorkItem(
+        uri: seg.uri,
+        byteRange: seg.byteRange,
+        keyMethod: seg.keyMethod,
+        keyUri: seg.keyUri,
+        iv: seg.iv,
+        sequence: seg.sequence,
+        stageFile: segFiles[i],
+        isAudio: false,
+        trackName: 'muxed',
+        playlistUrl: playlistUrl,
+        playlistHash: videoPlaylistHash,
+        mapIdentity: seg.map?.identity ?? '',
+        hasMap: playlist.hasMap,
+      );
+    });
+    final manifest = await _HlsStageManifest.load(segDir);
+    await manifest.pruneStale(
+      segDir,
+      workItems,
+      requirePositiveMedia: false,
+    );
     var done = 0;
     var bytes = 0;
-    for (final f in segFiles) {
-      if (await f.exists()) {
+    for (final item in workItems) {
+      if (manifest.isReusableSync(item, requirePositiveMedia: false)) {
         done++;
-        bytes += await f.length();
+        bytes += await item.stageFile.length();
       }
     }
     t.receivedBytes = bytes;
@@ -978,16 +1286,19 @@ class DownloadService extends ChangeNotifier {
         if (_shouldStop(t)) throw const _StopSignal();
         final i = next++;
         if (i >= total) return;
-        final file = segFiles[i];
-        if (await file.exists()) continue;
+        final item = workItems[i];
+        if (manifest.isReusableSync(item, requirePositiveMedia: false)) {
+          continue;
+        }
         final seg = playlist.segments[i];
         try {
-          var data = await _getBytesRetry(
+          final fetched = await _getBytesRetryWithMeta(
             seg.uri,
             headers,
             t,
             byteRange: seg.byteRange,
           );
+          var data = fetched.bytes;
           if (seg.keyMethod == 'AES-128' && seg.keyUri != null) {
             final keyUri = seg.keyUri!;
             var key = keyCache[keyUri];
@@ -1000,9 +1311,18 @@ class DownloadService extends ChangeNotifier {
             }
             data = _Aes128Cbc(key).decrypt(data, seg.iv ?? _ivFromSequence(seg.sequence));
           }
-          final tmp = File('${file.path}.tmp');
+          _validateMediaPayload(
+            data,
+            contentType: fetched.contentType,
+            isAudio: false,
+            isMap: false,
+            hasMap: playlist.hasMap,
+            requirePositiveMedia: false,
+          );
+          final tmp = File('${item.stageFile.path}.tmp');
           await tmp.writeAsBytes(data);
-          await tmp.rename(file.path);
+          await tmp.rename(item.stageFile.path);
+          await manifest.record(item, data.length);
           done++;
           bytes += data.length;
           t.receivedBytes = bytes;
@@ -1027,14 +1347,36 @@ class DownloadService extends ChangeNotifier {
     try {
       final firstMap = playlist.firstMap;
       if (firstMap != null) {
-        sink.add(await _getBytesRetry(
+        final mapFetched = await _getBytesRetryWithMeta(
           firstMap.uri,
           headers,
           t,
           byteRange: firstMap.byteRange,
-        ));
+        );
+        _validateMediaPayload(
+          mapFetched.bytes,
+          contentType: mapFetched.contentType,
+          isAudio: false,
+          isMap: true,
+          hasMap: true,
+          requirePositiveMedia: true,
+        );
+        sink.add(mapFetched.bytes);
       } else if (playlist.mapUri != null) {
-        sink.add(await _getBytesRetry(playlist.mapUri!, headers, t));
+        final mapFetched = await _getBytesRetryWithMeta(
+          playlist.mapUri!,
+          headers,
+          t,
+        );
+        _validateMediaPayload(
+          mapFetched.bytes,
+          contentType: mapFetched.contentType,
+          isAudio: false,
+          isMap: true,
+          hasMap: true,
+          requirePositiveMedia: true,
+        );
+        sink.add(mapFetched.bytes);
       }
       for (final f in segFiles) {
         if (_shouldStop(t)) throw const _StopSignal();
@@ -1057,6 +1399,8 @@ class DownloadService extends ChangeNotifier {
   Future<void> _downloadSeparateAudioHls({
     required DownloadTask t,
     required _HlsPlaylist videoPlaylist,
+    required String videoPlaylistUrl,
+    required String videoPlaylistHash,
     required String audioPlaylistUrl,
     required String audioName,
     required String audioLanguage,
@@ -1087,6 +1431,7 @@ class DownloadService extends ChangeNotifier {
         throw const _DownloadError('独立音轨使用 SAMPLE-AES 等专有加密，暂不支持下载');
       }
     }
+    final audioPlaylistHash = sha256.convert(utf8.encode(audioText)).toString();
 
     final stageDir = Directory('$baseName.hls.part');
     await stageDir.create(recursive: true);
@@ -1095,7 +1440,12 @@ class DownloadService extends ChangeNotifier {
     final videoMapFiles = <String, ({String name, File stageFile})>{};
     final audioMapFiles = <String, ({String name, File stageFile})>{};
 
-    void registerMaps(_HlsPlaylist pl, bool isAudio) {
+    void registerMaps(
+      _HlsPlaylist pl,
+      bool isAudio,
+      String playlistUrl,
+      String playlistHash,
+    ) {
       final mapTable = isAudio ? audioMapFiles : videoMapFiles;
       final prefix = isAudio ? 'a_map' : 'v_map';
       for (final seg in pl.segments) {
@@ -1111,13 +1461,19 @@ class DownloadService extends ChangeNotifier {
             byteRange: map.byteRange,
             stageFile: stageFile,
             isAudio: isAudio,
+            isMap: true,
+            trackName: isAudio ? 'audio' : 'video',
+            playlistUrl: playlistUrl,
+            playlistHash: playlistHash,
+            mapIdentity: map.identity,
+            hasMap: true,
           ),
         );
       }
     }
 
-    registerMaps(videoPlaylist, false);
-    registerMaps(audioPlaylist, true);
+    registerMaps(videoPlaylist, false, videoPlaylistUrl, videoPlaylistHash);
+    registerMaps(audioPlaylist, true, resolvedAudioUrl, audioPlaylistHash);
 
     final videoStageFiles = List<File>.generate(
       videoPlaylist.segments.length,
@@ -1139,6 +1495,11 @@ class DownloadService extends ChangeNotifier {
           sequence: seg.sequence,
           stageFile: videoStageFiles[i],
           isAudio: false,
+          trackName: 'video',
+          playlistUrl: videoPlaylistUrl,
+          playlistHash: videoPlaylistHash,
+          mapIdentity: seg.map?.identity ?? '',
+          hasMap: videoPlaylist.hasMap,
         ),
       );
     }
@@ -1154,15 +1515,27 @@ class DownloadService extends ChangeNotifier {
           sequence: seg.sequence,
           stageFile: audioStageFiles[i],
           isAudio: true,
+          trackName: 'audio',
+          playlistUrl: resolvedAudioUrl,
+          playlistHash: audioPlaylistHash,
+          mapIdentity: seg.map?.identity ?? '',
+          hasMap: audioPlaylist.hasMap,
         ),
       );
     }
+
+    final manifest = await _HlsStageManifest.load(stageDir);
+    await manifest.pruneStale(
+      stageDir,
+      workItems,
+      requirePositiveMedia: true,
+    );
 
     final total = workItems.length;
     var done = 0;
     var bytes = 0;
     for (final item in workItems) {
-      if (await item.stageFile.exists()) {
+      if (manifest.isReusableSync(item, requirePositiveMedia: true)) {
         done++;
         bytes += await item.stageFile.length();
       }
@@ -1181,14 +1554,17 @@ class DownloadService extends ChangeNotifier {
         final idx = next++;
         if (idx >= total) return;
         final item = workItems[idx];
-        if (await item.stageFile.exists()) continue;
+        if (manifest.isReusableSync(item, requirePositiveMedia: true)) {
+          continue;
+        }
         try {
-          var data = await _getBytesRetry(
+          final fetched = await _getBytesRetryWithMeta(
             item.uri,
             headers,
             t,
             byteRange: item.byteRange,
           );
+          var data = fetched.bytes;
           if (item.keyMethod == 'AES-128' && item.keyUri != null) {
             final keyUri = item.keyUri!;
             var key = keyCache[keyUri];
@@ -1202,14 +1578,18 @@ class DownloadService extends ChangeNotifier {
             data = _Aes128Cbc(key)
                 .decrypt(data, item.iv ?? _ivFromSequence(item.sequence));
           }
-          if (data.isEmpty) {
-            throw _DownloadError(
-              item.isAudio ? '独立音轨分片为空，无法保存完整音画' : '视频分片为空',
-            );
-          }
+          _validateMediaPayload(
+            data,
+            contentType: fetched.contentType,
+            isAudio: item.isAudio,
+            isMap: item.isMap,
+            hasMap: item.hasMap,
+            requirePositiveMedia: true,
+          );
           final tmp = File('${item.stageFile.path}.tmp');
           await tmp.writeAsBytes(data);
           await tmp.rename(item.stageFile.path);
+          await manifest.record(item, data.length);
           done++;
           bytes += data.length;
           t.receivedBytes = bytes;
@@ -1355,11 +1735,15 @@ class DownloadService extends ChangeNotifier {
         await masterFile.delete();
       }
       await masterPart.rename(masterFile.path);
+      t.filePath = masterFile.path;
+      if (!_verifyCompletedFilesExist(t)) {
+        t.filePath = '';
+        throw const _DownloadError('离线音视频分片校验未通过，无法完成下载');
+      }
       try {
         await stageDir.delete(recursive: true);
       } catch (_) {}
 
-      t.filePath = masterFile.path;
       t.totalBytes = bundleTotalBytes;
       t.receivedBytes = bundleTotalBytes;
     } catch (_) {
@@ -1379,6 +1763,211 @@ class DownloadService extends ChangeNotifier {
     } finally {
       await raf.close();
     }
+  }
+
+  static Uint8List _readHeadBytesSync(File file, int maxBytes) {
+    final raf = file.openSync();
+    try {
+      return raf.readSync(maxBytes);
+    } finally {
+      raf.closeSync();
+    }
+  }
+
+  static String _trackLabel({required bool isAudio, required bool isMap}) {
+    if (isAudio) return isMap ? '独立音轨初始化段' : '独立音轨分片';
+    return isMap ? '视频初始化段' : '视频分片';
+  }
+
+  static void _validateMediaPayload(
+    Uint8List data, {
+    required String contentType,
+    required bool isAudio,
+    required bool isMap,
+    required bool hasMap,
+    required bool requirePositiveMedia,
+  }) {
+    final label = _trackLabel(isAudio: isAudio, isMap: isMap);
+    final suffix = isAudio ? '，无法保存完整音画' : '';
+    if (data.isEmpty) {
+      throw _DownloadError('$label为空$suffix');
+    }
+    final mime = contentType.toLowerCase().trim();
+    if (mime == 'text/html' ||
+        mime == 'application/xhtml+xml' ||
+        mime == 'text/xml' ||
+        mime == 'application/xml' ||
+        mime == 'application/json') {
+      throw _DownloadError('$label返回网页或错误内容（$mime）$suffix');
+    }
+
+    var start = 0;
+    if (data.length >= 3 &&
+        data[0] == 0xEF &&
+        data[1] == 0xBB &&
+        data[2] == 0xBF) {
+      start = 3;
+    }
+    while (start < data.length &&
+        (data[start] == 0x20 ||
+            data[start] == 0x09 ||
+            data[start] == 0x0A ||
+            data[start] == 0x0D)) {
+      start++;
+    }
+    if (start < data.length) {
+      final probeEnd = math.min(data.length, start + 512);
+      final headText = utf8
+          .decode(Uint8List.sublistView(data, start, probeEnd),
+              allowMalformed: true)
+          .toLowerCase();
+      for (final prefix in const [
+        '<!doctype',
+        '<html',
+        '<head',
+        '<body',
+        '<title',
+        '<script',
+        '<div',
+        '<h1',
+        '<center',
+        '<?xml',
+        '<error',
+        '<message',
+        '<response',
+        '#extm3u',
+      ]) {
+        if (headText.startsWith(prefix)) {
+          throw _DownloadError('$label返回非媒体错误页面，无法解析$suffix');
+        }
+      }
+      if (headText.startsWith('{') &&
+          (headText.contains('"error"') ||
+              headText.contains('"message"') ||
+              headText.contains('"msg"') ||
+              headText.contains('"code"') ||
+              headText.contains('"status"'))) {
+        throw _DownloadError('$label返回错误响应（JSON）$suffix');
+      }
+    }
+
+    final mustMatchMedia = requirePositiveMedia || mime == 'text/plain';
+    if (mustMatchMedia &&
+        !_hasRecognizedMediaSignature(
+          data,
+          isAudio: isAudio,
+          isMap: isMap,
+          hasMap: hasMap,
+        )) {
+      throw _DownloadError('$label内容不是有效的音视频媒体数据$suffix');
+    }
+  }
+
+  static bool _isIsoBmffBox(Uint8List data, int offset) {
+    if (offset + 8 > data.length) return false;
+    final size = (data[offset] << 24) |
+        (data[offset + 1] << 16) |
+        (data[offset + 2] << 8) |
+        data[offset + 3];
+    if (size != 0 && size != 1 && size < 8) return false;
+    final box = String.fromCharCodes(data.sublist(offset + 4, offset + 8));
+    return const {
+      'ftyp',
+      'styp',
+      'moof',
+      'moov',
+      'sidx',
+      'mdat',
+      'emsg',
+      'prft',
+      'free',
+      'skip',
+      'pdin',
+      'meta',
+      'uuid',
+    }.contains(box);
+  }
+
+  static bool _hasRecognizedMediaSignature(
+    Uint8List data, {
+    required bool isAudio,
+    required bool isMap,
+    required bool hasMap,
+  }) {
+    if (data.length < 4) return false;
+    if (isMap) {
+      return _isIsoBmffBox(data, 0);
+    }
+    if (_isIsoBmffBox(data, 0)) return true;
+
+    // MPEG-TS (direct or after a small disguised image header)
+    if (data[0] == 0x47 && (data.length < 189 || data[188] == 0x47)) {
+      return true;
+    }
+    if (data.length >= 192) {
+      final limit = math.min(data.length - 189, 256);
+      for (var i = 1; i <= limit; i++) {
+        if (data[i] == 0x47 && data[i + 188] == 0x47) {
+          return true;
+        }
+      }
+    }
+
+    // ID3v2 wrapped audio (HLS elementary AAC / MP3 / AC-3 / TS)
+    var offset = 0;
+    if (data.length >= 10 &&
+        data[0] == 0x49 &&
+        data[1] == 0x44 &&
+        data[2] == 0x33 &&
+        (data[6] & 0x80) == 0 &&
+        (data[7] & 0x80) == 0 &&
+        (data[8] & 0x80) == 0 &&
+        (data[9] & 0x80) == 0) {
+      final id3Size = ((data[6] & 0x7F) << 21) |
+          ((data[7] & 0x7F) << 14) |
+          ((data[8] & 0x7F) << 7) |
+          (data[9] & 0x7F);
+      offset = 10 + id3Size;
+      if (offset >= data.length) {
+        // Large ID3 header exceeding head probe window; treat as valid ID3 audio.
+        return isAudio || id3Size > 0;
+      }
+    }
+
+    if (offset + 4 <= data.length) {
+      final b0 = data[offset];
+      final b1 = data[offset + 1];
+      final b2 = data[offset + 2];
+      final b3 = data[offset + 3];
+      if (b0 == 0x47 &&
+          (offset + 188 >= data.length || data[offset + 188] == 0x47)) {
+        return true;
+      }
+      // ADTS AAC syncword (12 bits of 1s + layer == 00)
+      if (b0 == 0xFF && (b1 & 0xF6) == 0xF0) return true;
+      // MPEG audio (MP3/MP2)
+      if (b0 == 0xFF && (b1 & 0xE0) == 0xE0 && (b1 & 0x06) != 0) return true;
+      // AC-3 / E-AC-3
+      if (b0 == 0x0B && b1 == 0x77) return true;
+      // FLAC ("fLaC")
+      if (b0 == 0x66 && b1 == 0x4C && b2 == 0x61 && b3 == 0x43) return true;
+      // Ogg ("OggS")
+      if (b0 == 0x4F && b1 == 0x67 && b2 == 0x67 && b3 == 0x53) return true;
+      // WebM / Matroska EBML
+      if (b0 == 0x1A && b1 == 0x45 && b2 == 0xDF && b3 == 0xA3) return true;
+      // RIFF / WAV
+      if (b0 == 0x52 && b1 == 0x49 && b2 == 0x46 && b3 == 0x46) return true;
+    }
+
+    // H.264 / H.265 Annex-B NAL start code (rare raw elementary video)
+    if (!isAudio &&
+        data[0] == 0x00 &&
+        data[1] == 0x00 &&
+        ((data[2] == 0x00 && data[3] == 0x01) || data[2] == 0x01)) {
+      return true;
+    }
+
+    return false;
   }
 
   static String _sniffMediaExtension(
@@ -1755,7 +2344,7 @@ class DownloadService extends ChangeNotifier {
     if (!hasUa) request.headers.set(HttpHeaders.userAgentHeader, _defaultUa);
   }
 
-  Future<Uint8List> _getBytesOnce(
+  Future<_FetchedBytes> _getBytesOnceWithMeta(
     String url,
     Map<String, String> headers,
     DownloadTask t, {
@@ -1769,8 +2358,13 @@ class DownloadService extends ChangeNotifier {
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       await response.drain<void>();
-      throw _DownloadError('服务器返回 HTTP ${response.statusCode}');
+      final retryable = response.statusCode >= 500 || response.statusCode == 429;
+      throw _DownloadError(
+        '服务器返回 HTTP ${response.statusCode}',
+        retryable: retryable,
+      );
     }
+    final contentType = response.headers.contentType?.mimeType.toLowerCase() ?? '';
     final builder = BytesBuilder(copy: false);
     await for (final chunk in response.timeout(const Duration(seconds: 45))) {
       if (_shouldStop(t)) throw const _StopSignal();
@@ -1783,14 +2377,17 @@ class DownloadService extends ChangeNotifier {
     if (byteRange != null && response.statusCode == 200) {
       final end = byteRange.offset + byteRange.length;
       if (byteRange.offset >= 0 && end <= bytes.length) {
-        return Uint8List.sublistView(bytes, byteRange.offset, end);
+        return _FetchedBytes(
+          Uint8List.sublistView(bytes, byteRange.offset, end),
+          contentType,
+        );
       }
       throw const _DownloadError('分片字节范围越界');
     }
-    return bytes;
+    return _FetchedBytes(bytes, contentType);
   }
 
-  Future<Uint8List> _getBytesRetry(
+  Future<_FetchedBytes> _getBytesRetryWithMeta(
     String url,
     Map<String, String> headers,
     DownloadTask t, {
@@ -1800,15 +2397,39 @@ class DownloadService extends ChangeNotifier {
     for (var attempt = 0; attempt < 3; attempt++) {
       if (_shouldStop(t)) throw const _StopSignal();
       try {
-        return await _getBytesOnce(url, headers, t, byteRange: byteRange);
+        return await _getBytesOnceWithMeta(
+          url,
+          headers,
+          t,
+          byteRange: byteRange,
+        );
       } on _StopSignal {
         rethrow;
+      } on _DownloadError catch (e) {
+        lastError = e;
+        if (!e.retryable) rethrow;
+        await Future<void>.delayed(Duration(milliseconds: 600 * (attempt + 1)));
       } catch (e) {
         lastError = e;
         await Future<void>.delayed(Duration(milliseconds: 600 * (attempt + 1)));
       }
     }
     throw lastError ?? const _DownloadError('网络请求失败');
+  }
+
+  Future<Uint8List> _getBytesRetry(
+    String url,
+    Map<String, String> headers,
+    DownloadTask t, {
+    _HlsByteRange? byteRange,
+  }) async {
+    final res = await _getBytesRetryWithMeta(
+      url,
+      headers,
+      t,
+      byteRange: byteRange,
+    );
+    return res.bytes;
   }
 
   Future<String> _getText(String url, Map<String, String> headers, DownloadTask t) async {

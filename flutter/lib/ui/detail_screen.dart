@@ -3795,51 +3795,66 @@ class _DetailScreenState extends State<DetailScreen> {
             ),
             if (_isMacosDetail && !_activeSite.isEffectivelyPrivate) ...[
               const SizedBox(width: 8),
-              GestureDetector(
-                key: const ValueKey('mac-episodes-calibrate-btn'),
-                onTap: () => _openSeriesScrapeSheet(initialTab: 1),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: (_scrapeOverride?.hasEpisodeCalibration ?? false)
-                        ? const Color(0x474C9AFF)
-                        : const Color(0x24FFFFFF),
+              Semantics(
+                button: true,
+                label: (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                    ? '集数已校准'
+                    : '集数校准',
+                child: Material(
+                  color: Colors.transparent,
+                  borderRadius: BorderRadius.circular(999),
+                  child: InkWell(
+                    key: const ValueKey('mac-episodes-calibrate-btn'),
                     borderRadius: BorderRadius.circular(999),
-                    border: Border.all(
-                      color: (_scrapeOverride?.hasEpisodeCalibration ?? false)
-                          ? const Color(0x994C9AFF)
-                          : const Color(0x30FFFFFF),
-                      width: 0.6,
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        CupertinoIcons.slider_horizontal_3,
-                        color: (_scrapeOverride?.hasEpisodeCalibration ?? false)
-                            ? const Color(0xFF93C5FD)
-                            : const Color(0xE6FFFFFF),
-                        size: 12,
+                    focusColor: const Color(0x664C9AFF),
+                    hoverColor: const Color(0x33FFFFFF),
+                    onTap: () => _openSeriesScrapeSheet(initialTab: 1),
+                    child: Ink(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
                       ),
-                      const SizedBox(width: 4),
-                      Text(
-                        (_scrapeOverride?.hasEpisodeCalibration ?? false)
-                            ? '集数已校准'
-                            : '集数校准',
-                        style: TextStyle(
-                          color: (_scrapeOverride?.hasEpisodeCalibration ??
-                                  false)
-                              ? Colors.white
-                              : const Color(0xE6FFFFFF),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
+                      decoration: BoxDecoration(
+                        color: (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                            ? const Color(0x474C9AFF)
+                            : const Color(0x24FFFFFF),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color:
+                              (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                                  ? const Color(0x994C9AFF)
+                                  : const Color(0x30FFFFFF),
+                          width: 0.6,
                         ),
                       ),
-                    ],
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            CupertinoIcons.slider_horizontal_3,
+                            color: (_scrapeOverride?.hasEpisodeCalibration ??
+                                    false)
+                                ? const Color(0xFF93C5FD)
+                                : const Color(0xE6FFFFFF),
+                            size: 12,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                                ? '集数已校准'
+                                : '集数校准',
+                            style: TextStyle(
+                              color: (_scrapeOverride?.hasEpisodeCalibration ??
+                                      false)
+                                  ? Colors.white
+                                  : const Color(0xE6FFFFFF),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -5025,41 +5040,53 @@ class _DetailScreenState extends State<DetailScreen> {
       required bool selected,
       required VoidCallback onTap,
     }) {
-      return GestureDetector(
-        key: key,
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5.5),
-          decoration: BoxDecoration(
-            color: selected
-                ? const Color(0x524C9AFF)
-                : const Color(0x2BFFFFFF),
+      return Semantics(
+        button: true,
+        label: label,
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(999),
+          child: InkWell(
+            key: key,
             borderRadius: BorderRadius.circular(999),
-            border: Border.all(
-              color: selected
-                  ? const Color(0xB37BB4FF)
-                  : const Color(0x3DFFFFFF),
-              width: 0.7,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                icon,
-                size: 13,
-                color: selected ? const Color(0xFFBFE0FF) : Colors.white,
-              ),
-              const SizedBox(width: 5),
-              Text(
-                label,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+            focusColor: const Color(0x664C9AFF),
+            hoverColor: const Color(0x33FFFFFF),
+            onTap: onTap,
+            child: Ink(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 11, vertical: 5.5),
+              decoration: BoxDecoration(
+                color: selected
+                    ? const Color(0x524C9AFF)
+                    : const Color(0x2BFFFFFF),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: selected
+                      ? const Color(0xB37BB4FF)
+                      : const Color(0x3DFFFFFF),
+                  width: 0.7,
                 ),
               ),
-            ],
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    icon,
+                    size: 13,
+                    color: selected ? const Color(0xFFBFE0FF) : Colors.white,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       );
