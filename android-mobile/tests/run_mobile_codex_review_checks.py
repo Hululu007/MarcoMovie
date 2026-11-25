@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import io
+import json
 import os
 import struct
 import subprocess
@@ -388,11 +389,16 @@ def verify_apk_dex_no_put_if_absent(apk: Path):
     print('PASS #1 final APK DEX contains zero putIfAbsent calls in Cms (API 23 safe)')
 
 
+def _mobile_version() -> str:
+    data = json.loads((ROOT / 'android-mobile/edition-versions.json').read_text(encoding='utf-8'))
+    return data['android-mobile']['versionName']
+
+
 def verify_apk_idsig_delivery_checks(apk: Path):
     """Test P2-1: delivery verifier passes matching .idsig (v4=true) and rejects old/missing .idsig."""
     from android_build_common import ENV, JDK as BUILD_JDK, SDK, exe
 
-    alias_apk = apk.with_name('MarcoMovie-0.7.0-mobile.apk')
+    alias_apk = apk.with_name(f'MarcoMovie-{_mobile_version()}-mobile.apk')
     idsig = apk.with_name(apk.name + '.idsig')
 
     # Case 1: Matching bundle (.apk + alias + .sha256 + matching .idsig) -> PASS with v4=true
@@ -519,7 +525,7 @@ def main():
             check=True,
         )
 
-    apk = ROOT / 'dist/MarcoMovie-0.7.0-android-mobile.apk'
+    apk = ROOT / f'dist/MarcoMovie-{_mobile_version()}-android-mobile.apk'
     if '--verify-apk' in sys.argv:
         if not apk.is_file():
             raise FileNotFoundError(f'Missing built Mobile APK: {apk}')
