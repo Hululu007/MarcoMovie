@@ -22,14 +22,258 @@ from android_build_common import (
     run,
 )
 from android_package_names import compatibility_alias, package_name
-from build_catpaw_android import assets_for_package, build as build_catpaw
-from build_python_android import build_for_module as build_python_module
+from build_catpaw_android import assets_for_package, build as build_catpaw, toolchain
+import build_python_android
+from build_python_android import TARGETS as PYTHON_TARGETS, build_for_module as build_python_module
 from build_quickjs_deadline import build as build_quickjs_deadline
+from native_elf import inspect_elf
+import io
 
 MODULE = ROOT / 'android-mobile'
 SRC = MODULE / 'src/main'
 BUILD = MODULE / 'build'
 ABIS = ('armeabi-v7a', 'arm64-v8a')
+
+REQUIRED_PYTHON_DYNLOAD_MODULES = (
+    '_ssl.cpython-311.so',
+    '_hashlib.cpython-311.so',
+    '_json.cpython-311.so',
+    '_sqlite3.cpython-311.so',
+    '_ctypes.cpython-311.so',
+    'zlib.cpython-311.so',
+)
+
+
+URLLIB3_DEP_ARCHIVE = 'urllib3-2.2.3.zip'
+URLLIB3_DEP_URL = 'https://github.com/urllib3/urllib3/archive/refs/tags/2.2.3.zip'
+URLLIB3_DEP_SHA256 = 'c487db502a4a09b98621714e47bddd96e6ccffbeb38e544375f43eacfea34022'
+
+
+def normalize_mobile_python_pure_deps():
+    """Repair baseline 6e173b7's urllib3 tag URL (v2.2.3 -> 2.2.3) in-process.
+
+    Preserves the exact pinned SHA-256 verification without touching shared
+    scripts/build_python_android.py (which may hold unrelated TV edits).
+    """
+    updated = []
+    for entry in build_python_android.PURE_DEPS:
+        filename, url, digest, src_prefix, dst_prefix = entry
+        if (
+            filename == URLLIB3_DEP_ARCHIVE
+            and digest == URLLIB3_DEP_SHA256
+            and url.endswith('/refs/tags/v2.2.3.zip')
+        ):
+            url = URLLIB3_DEP_URL
+        updated.append((filename, url, digest, src_prefix, dst_prefix))
+    build_python_android.PURE_DEPS[:] = updated
+
+
+def build_mobile_python_runtime(module_dir: Path, abis=ABIS):
+    """Build CPython runtime assets and link mobile libmarco_python.so by bare SONAME.
+
+    Works identically against baseline 6e173b7's build_python_android.build_for_module (which does
+    not accept link_python_by_name and points urllib3 to the 404 v2.2.3 tag) by normalizing the
+    urllib3 URL in-process with its pinned SHA-256 and compiling the mobile JNI bridge cleanly
+    in-module with -L<lib_dir> -l:libpython3.11.so so DT_NEEDED never embeds host filesystem paths.
+    """
+    normalize_mobile_python_pure_deps()
+    native_libs, assets_root = build_python_module(module_dir, abis=abis)
+    ndk = toolchain()
+    clang = ndk / 'bin' / ('clang.exe' if os.name == 'nt' else 'clang')
+    if not clang.exists():
+        raise RuntimeError(f'NDK clang missing: {clang}')
+    build_dir = Path(module_dir) / 'build/python'
+    bridge_src = Path(module_dir) / 'src/main/cpp/python_bridge.c'
+
+    for abi in abis:
+        _, _, triple = PYTHON_TARGETS[abi]
+        unpack = build_dir / 'unpack' / abi
+        inc_dir = unpack / 'include/python3.11'
+        lib_dir = unpack / 'jniLibs' / abi
+        libpython = lib_dir / 'libpython3.11.so'
+        if not inc_dir.is_dir() or not libpython.is_file():
+            raise RuntimeError(f'Incomplete unpacked CPython target for mobile {abi}')
+        out_so = build_dir / 'so' / abi / 'libmarco_python.so'
+        out_so.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            list(
+                map(
+                    str,
+                    [
+                        clang,
+                        '--target=' + triple,
+                        '--sysroot=' + str(ndk / 'sysroot'),
+                        '-shared',
+                        '-fPIC',
+                        '-O2',
+                        '-I' + str(inc_dir),
+                        '-Wl,--no-undefined',
+                        '-Wl,-z,max-page-size=16384',
+                        '-Wl,-soname,libmarco_python.so',
+                        bridge_src,
+                        '-L' + str(lib_dir),
+                        '-l:' + libpython.name,
+                        '-llog',
+                        '-o',
+                        out_so,
+                    ],
+                )
+            ),
+            check=True,
+        )
+        bridge_bytes = out_so.read_bytes()
+        if abi == 'arm64-v8a':
+            elf = inspect_elf(bridge_bytes)
+            if elf['bits'] != 64 or not elf['compatible_16kb']:
+                raise RuntimeError('Mobile ARM64 libmarco_python.so is not 16 KB page-aligned')
+        native_libs[f'lib/{abi}/libmarco_python.so'] = bridge_bytes
+    return native_libs, assets_root
+
+
+def verify_mobile_python_apk(apk: Path):
+    """Verify both ABI CPython bridges (bare DT_NEEDED) and all lib-dynload extension assets."""
+    expected_specs = {
+        'armeabi-v7a': (32, 40, False),  # ELF32, EM_ARM
+        'arm64-v8a': (64, 183, True),    # ELF64, EM_AARCH64, 16 KB aligned
+    }
+    readelf = toolchain() / 'bin' / ('llvm-readelf.exe' if os.name == 'nt' else 'llvm-readelf')
+    with zipfile.ZipFile(apk) as archive:
+        members = archive.namelist()
+        for required_asset in (
+            'assets/python-native/stdlib-pyc.zip',
+            'assets/python-native/site-packages.zip',
+            'assets/python-native/runtime-version.txt',
+            'assets/python-native/android_runner.py',
+            'assets/python-native/base/spider.py',
+        ):
+            if members.count(required_asset) != 1:
+                raise ValueError(f'Expected one {required_asset} in Mobile APK')
+
+        for abi, (bits, machine, check_16kb) in expected_specs.items():
+            for library in ('libpython3.11.so', 'libmarco_python.so'):
+                member = f'lib/{abi}/{library}'
+                if members.count(member) != 1:
+                    raise ValueError(f'Expected one {member} in Mobile APK')
+                data = archive.read(member)
+                elf = inspect_elf(data)
+                if (elf['bits'], elf['machine']) != (bits, machine):
+                    raise ValueError(f'Unexpected ELF architecture in {member}: {elf}')
+                if check_16kb and not elf['compatible_16kb']:
+                    raise ValueError(f'ARM64 Python library is not 16 KB page-aligned: {member}')
+                if library == 'libmarco_python.so':
+                    dynamic = subprocess.check_output([readelf, '--dynamic', '-'], input=data)
+                    needed = re.findall(rb'\(NEEDED\)[^\n]*?\[([^\]\r\n]+)\]', dynamic)
+                    if b'libpython3.11.so' not in needed or any(
+                        not re.fullmatch(rb'[A-Za-z0-9_.+-]+', name) for name in needed
+                    ):
+                        raise ValueError(
+                            f'Mobile Python bridge ({member}) must link to libpython3.11.so by bare name, got {needed}'
+                        )
+
+            dynload_member = f'assets/python-native/lib-dynload-{abi}.zip'
+            if members.count(dynload_member) != 1:
+                raise ValueError(f'Expected one {dynload_member} in Mobile APK')
+            dynload_bytes = archive.read(dynload_member)
+            with zipfile.ZipFile(io.BytesIO(dynload_bytes)) as dyn_zip:
+                dyn_names = [n for n in dyn_zip.namelist() if not n.endswith('/')]
+                so_names = [n for n in dyn_names if n.endswith('.so')]
+                if not so_names:
+                    raise ValueError(f'Empty Python dynload archive: {dynload_member}')
+                for req_mod in REQUIRED_PYTHON_DYNLOAD_MODULES:
+                    if req_mod not in so_names:
+                        raise ValueError(
+                            f'Missing required Python extension {req_mod} in {dynload_member}'
+                        )
+                for so_name in so_names:
+                    ext_data = dyn_zip.read(so_name)
+                    ext_elf = inspect_elf(ext_data)
+                    if (ext_elf['bits'], ext_elf['machine']) != (bits, machine):
+                        raise ValueError(
+                            f'Mismatched ELF arch for {so_name} in {dynload_member}: {ext_elf}'
+                        )
+                    if check_16kb and not ext_elf['compatible_16kb']:
+                        raise ValueError(
+                            f'ARM64 Python extension is not 16 KB page-aligned: {dynload_member}!{so_name}'
+                        )
+
+
+def verify_mobile_apk_signature(apk: Path, idsig: Path | None = None, *, expected_signer: str = ''):
+    """Verify APK v1/v2/v3 and explicit v4 (.idsig) signatures; fail on missing or mismatched .idsig."""
+    apk = Path(apk)
+    idsig_file = Path(idsig) if idsig is not None else apk.with_name(apk.name + '.idsig')
+    if not idsig_file.is_file():
+        raise RuntimeError(f'Missing required APK v4 signature file (.idsig): {idsig_file}')
+    signature = run(
+        exe(JDK / 'bin', 'java'),
+        '-jar',
+        SDK / 'lib/apksigner.jar',
+        'verify',
+        '--verbose',
+        '--print-certs',
+        '--v4-signature-file',
+        idsig_file,
+        apk,
+        capture=True,
+    )
+    required_schemes = (
+        'Verified using v1 scheme (JAR signing): true',
+        'Verified using v2 scheme (APK Signature Scheme v2): true',
+        'Verified using v3 scheme (APK Signature Scheme v3): true',
+        'Verified using v4 scheme (APK Signature Scheme v4): true',
+    )
+    for scheme_line in required_schemes:
+        if scheme_line not in signature:
+            raise RuntimeError(
+                f'APK signature check missing "{scheme_line}" for {apk.name} with {idsig_file.name}'
+            )
+    cert_match = re.search(r'certificate SHA-256 digest:\s*([0-9a-fA-F]{64})', signature)
+    signer_sha256 = cert_match.group(1).lower() if cert_match else ''
+    if not signer_sha256:
+        raise RuntimeError(f'Could not extract signer SHA-256 from apksigner output for {apk.name}')
+    if expected_signer and signer_sha256 != expected_signer.strip().lower():
+        raise RuntimeError(
+            f'APK signer certificate mismatch: got {signer_sha256}, expected {expected_signer}'
+        )
+    return signature, signer_sha256
+
+
+def verify_mobile_delivery_bundle(
+    mobile_apk: Path,
+    alias_apk: Path,
+    *,
+    idsig: Path | None = None,
+    expected_signer: str = '',
+):
+    """Read back and verify single-build coherence for primary APK, alias, .sha256 files, and .idsig."""
+    mobile_apk = Path(mobile_apk)
+    alias_apk = Path(alias_apk)
+    mobile_sha_file = mobile_apk.with_name(mobile_apk.name + '.sha256')
+    alias_sha_file = alias_apk.with_name(alias_apk.name + '.sha256')
+    if not mobile_apk.is_file():
+        raise RuntimeError(f'Missing primary APK: {mobile_apk}')
+    if not alias_apk.is_file():
+        raise RuntimeError(f'Missing compatibility alias APK: {alias_apk}')
+    if not mobile_sha_file.is_file():
+        raise RuntimeError(f'Missing primary .sha256 file: {mobile_sha_file}')
+    if not alias_sha_file.is_file():
+        raise RuntimeError(f'Missing alias .sha256 file: {alias_sha_file}')
+
+    main_disk_bytes = mobile_apk.read_bytes()
+    alias_disk_bytes = alias_apk.read_bytes()
+    if main_disk_bytes != alias_disk_bytes:
+        raise RuntimeError('Primary APK and compatibility alias differ on disk')
+    mobile_digest = hashlib.sha256(main_disk_bytes).hexdigest()
+    if mobile_sha_file.read_text(encoding='ascii').strip() != f'{mobile_digest}  {mobile_apk.name}':
+        raise RuntimeError('Primary .sha256 mismatch on disk')
+    if alias_sha_file.read_text(encoding='ascii').strip() != f'{mobile_digest}  {alias_apk.name}':
+        raise RuntimeError('Alias .sha256 mismatch on disk')
+
+    run(exe(SDK, 'zipalign'), '-c', '-P', '16', '4', mobile_apk, capture=True)
+    run(exe(SDK, 'zipalign'), '-c', '-P', '16', '4', alias_apk, capture=True)
+    signature, signer_sha256 = verify_mobile_apk_signature(
+        mobile_apk, idsig=idsig, expected_signer=expected_signer
+    )
+    return signature, signer_sha256, mobile_digest
 
 
 def main():
@@ -101,7 +345,7 @@ def main():
     native_files.update(catpaw_files)
     catpaw_mobile_assets = assets_for_package(catpaw_assets, native_files, BUILD / 'catpaw/assets-mobile')
 
-    python_mobile_libs, python_mobile_assets = build_python_module(MODULE, abis=ABIS)
+    python_mobile_libs, python_mobile_assets = build_mobile_python_runtime(MODULE, abis=ABIS)
     native_files.update(python_mobile_libs)
 
     ui_spec_assets = BUILD / 'ui-spec-assets'
@@ -209,17 +453,12 @@ def main():
         '--ks', key, '--ks-key-alias', 'marcomovie', '--ks-pass', 'env:MARCOMOVIE_KEY_PASSWORD',
         '--out', mobile_apk, BUILD / 'aligned-mobile.apk',
     )
-    signature = run(exe(JDK / 'bin', 'java'), '-jar', SDK / 'lib/apksigner.jar', 'verify', '--verbose', '--print-certs', mobile_apk, capture=True)
-    cert_match = re.search(r'certificate SHA-256 digest:\s*([0-9a-fA-F]{64})', signature)
-    signer_sha256 = cert_match.group(1).lower() if cert_match else ''
     expected_signer = os.environ.get(
         'MARCOMOVIE_EXPECTED_SIGNER_SHA256',
         RELEASE_SIGNER_SHA256 if os.environ.get('MARCOMOVIE_RELEASE', '') == '1' else '',
     ).strip().lower()
-    if expected_signer and signer_sha256 != expected_signer:
-        raise RuntimeError(f'APK signer certificate mismatch: got {signer_sha256}, expected {expected_signer}')
 
-    run(exe(SDK, 'zipalign'), '-c', '4', mobile_apk, capture=True)
+    verify_mobile_python_apk(mobile_apk)
     badging = run(exe(SDK, 'aapt'), 'dump', 'badging', mobile_apk, capture=True)
     mobile_digest = hashlib.sha256(mobile_apk.read_bytes()).hexdigest()
 
@@ -232,8 +471,15 @@ def main():
         except Exception:
             pass
 
-    (DIST / (mobile_apk.name + '.sha256')).write_text(mobile_digest + '  ' + mobile_apk.name + '\n', encoding='ascii')
-    compatibility_alias(mobile_apk, mobile_version, 'mobile')
+    mobile_sha_file = DIST / (mobile_apk.name + '.sha256')
+    mobile_sha_file.write_text(mobile_digest + '  ' + mobile_apk.name + '\n', encoding='ascii')
+    alias_apk = compatibility_alias(mobile_apk, mobile_version, 'mobile')
+
+    # Read back all emitted artifacts and require explicit v1/v2/v3/v4 (.idsig) verification.
+    signature, signer_sha256, mobile_digest = verify_mobile_delivery_bundle(
+        mobile_apk, alias_apk, expected_signer=expected_signer
+    )
+
     (BUILD / 'apk-signature.txt').write_text(signature, encoding='utf-8')
     (BUILD / 'apk-badging.txt').write_text(badging, encoding='utf-8')
 
@@ -244,6 +490,7 @@ def main():
         'mobile_sha256': mobile_digest,
         'mobile_bytes': mobile_apk.stat().st_size,
         'signature_verified': True,
+        'python_bridge_dependency_verified': True,
         'signer_sha256': signer_sha256,
         'zipalign_verified': True,
         'package': 'com.pilipala.marcomovie',
