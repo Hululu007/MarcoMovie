@@ -379,6 +379,15 @@ class _HlsStageManifest {
     if (!item.stageFile.existsSync()) return false;
     final actualSize = item.stageFile.lengthSync();
     if (actualSize != expectedSize) return false;
+    if (item.byteRange != null) {
+      final wantLen = item.byteRange!.length;
+      if (wantLen <= 0) return false;
+      if (item.keyMethod == 'AES-128') {
+        if (actualSize > wantLen || wantLen - actualSize > 16) return false;
+      } else if (actualSize != wantLen) {
+        return false;
+      }
+    }
     try {
       final head = DownloadService._readHeadBytesSync(item.stageFile, 512);
       DownloadService._validateMediaPayload(
@@ -1611,7 +1620,14 @@ class DownloadService extends ChangeNotifier {
     await Future.wait(List.generate(segmentConcurrency, (_) => worker()));
     if (_shouldStop(t)) throw const _StopSignal();
     if (failure != null) {
-      if (audioFailed && failure is! _DownloadError) {
+      if (audioFailed) {
+        if (failure is _DownloadError) {
+          final msg = (failure! as _DownloadError).message;
+          if (!msg.contains('独立音轨')) {
+            throw _DownloadError('独立音轨：$msg');
+          }
+          throw failure!;
+        }
         throw _DownloadError('独立音轨分片下载失败，无法保存完整音画：${_friendlyError(failure!)}');
       }
       throw failure!;
@@ -2365,6 +2381,84 @@ class DownloadService extends ChangeNotifier {
       );
     }
     final contentType = response.headers.contentType?.mimeType.toLowerCase() ?? '';
+    final contentEncoding =
+        (response.headers.value(HttpHeaders.contentEncodingHeader) ?? '')
+            .trim()
+            .toLowerCase();
+    final isIdentityEncoding =
+        contentEncoding.isEmpty || contentEncoding == 'identity';
+    final declaredLength = response.contentLength;
+
+    if (byteRange != null) {
+      if (byteRange.offset < 0 || byteRange.length <= 0) {
+        await response.drain<void>();
+        throw const _DownloadError('分片字节范围参数无效');
+      }
+      final expectedStart = byteRange.offset;
+      final expectedEnd = byteRange.offset + byteRange.length - 1;
+      if (response.statusCode == 206) {
+        final rawRange =
+            (response.headers.value(HttpHeaders.contentRangeHeader) ?? '')
+                .trim();
+        final match = RegExp(
+          r'^bytes\s+(\d+)-(\d+)/(\d+|\*)$',
+          caseSensitive: false,
+        ).firstMatch(rawRange);
+        if (match == null) {
+          await response.drain<void>();
+          throw const _DownloadError('分片 206 响应缺少有效的 Content-Range 头');
+        }
+        final respStart = int.tryParse(match.group(1)!);
+        final respEnd = int.tryParse(match.group(2)!);
+        final respTotal =
+            match.group(3) == '*' ? null : int.tryParse(match.group(3)!);
+        if (respStart == null ||
+            respEnd == null ||
+            respEnd < respStart ||
+            (respTotal != null && respEnd >= respTotal)) {
+          await response.drain<void>();
+          throw _DownloadError('分片 206 响应的 Content-Range 非法（$rawRange）');
+        }
+        if (respStart != expectedStart || respEnd != expectedEnd) {
+          await response.drain<void>();
+          throw _DownloadError(
+            '分片字节范围不匹配（请求 bytes=$expectedStart-$expectedEnd，返回 bytes $respStart-$respEnd）',
+          );
+        }
+        if (isIdentityEncoding &&
+            declaredLength >= 0 &&
+            declaredLength != byteRange.length) {
+          await response.drain<void>();
+          throw _DownloadError(
+            '分片 206 响应长度异常（期望 ${byteRange.length} 字节，声明 $declaredLength 字节）',
+          );
+        }
+      } else if (response.statusCode != 200) {
+        await response.drain<void>();
+        throw _DownloadError('分片范围请求返回异常状态码 HTTP ${response.statusCode}');
+      }
+    } else if (response.statusCode == 206) {
+      final rawRange =
+          (response.headers.value(HttpHeaders.contentRangeHeader) ?? '').trim();
+      final match = RegExp(
+        r'^bytes\s+(\d+)-(\d+)/(\d+|\*)$',
+        caseSensitive: false,
+      ).firstMatch(rawRange);
+      final respStart = match == null ? null : int.tryParse(match.group(1)!);
+      final respEnd = match == null ? null : int.tryParse(match.group(2)!);
+      final respTotal = (match == null || match.group(3) == '*')
+          ? null
+          : int.tryParse(match.group(3)!);
+      if (respStart == null ||
+          respEnd == null ||
+          respStart != 0 ||
+          respTotal == null ||
+          respEnd != respTotal - 1) {
+        await response.drain<void>();
+        throw _DownloadError('分片未请求范围却返回不完整 206 响应（$rawRange）');
+      }
+    }
+
     final builder = BytesBuilder(copy: false);
     await for (final chunk in response.timeout(const Duration(seconds: 45))) {
       if (_shouldStop(t)) throw const _StopSignal();
@@ -2374,7 +2468,23 @@ class DownloadService extends ChangeNotifier {
       }
     }
     final bytes = builder.takeBytes();
-    if (byteRange != null && response.statusCode == 200) {
+    if (isIdentityEncoding &&
+        declaredLength >= 0 &&
+        bytes.length != declaredLength) {
+      throw _DownloadError(
+        '分片传输不完整（期望 $declaredLength 字节，实收 ${bytes.length} 字节）',
+        retryable: true,
+      );
+    }
+    if (byteRange != null) {
+      if (response.statusCode == 206) {
+        if (bytes.length != byteRange.length) {
+          throw _DownloadError(
+            '分片 206 实收字节数不完整（期望 ${byteRange.length} 字节，实收 ${bytes.length} 字节）',
+          );
+        }
+        return _FetchedBytes(bytes, contentType);
+      }
       final end = byteRange.offset + byteRange.length;
       if (byteRange.offset >= 0 && end <= bytes.length) {
         return _FetchedBytes(
@@ -2382,7 +2492,9 @@ class DownloadService extends ChangeNotifier {
           contentType,
         );
       }
-      throw const _DownloadError('分片字节范围越界');
+      throw _DownloadError(
+        '分片字节范围越界（期望 ${byteRange.offset}-${end - 1}，资源长度 ${bytes.length}）',
+      );
     }
     return _FetchedBytes(bytes, contentType);
   }

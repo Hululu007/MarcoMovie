@@ -656,6 +656,131 @@ void main() {
         await tester.pump(const Duration(milliseconds: 500));
       },
     );
+
+    testWidgets(
+      'Narrow macOS window (760x680) Continue Watching displays real 0%, omits unknown-duration bar, and preserves positive progress (never 15%)',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        PosterLoader.clearCache();
+        final videos = buildSampleVideos();
+        final storage = await initTestStorage();
+        await storage.saveConfig(
+          jsonEncode({
+            'sites': [
+              {
+                'key': sampleSite.key,
+                'name': sampleSite.name,
+                'type': sampleSite.type,
+                'api': sampleSite.api,
+              },
+            ],
+          }),
+          origin: 'https://vod.example/config.json',
+        );
+        final now = DateTime.now().millisecondsSinceEpoch;
+        await storage.upsertWatchHistory(
+          WatchHistoryEntry(
+            site: sampleSite.key,
+            id: videos[0].id,
+            title: videos[0].title,
+            poster: videos[0].poster,
+            line: '主线 4K',
+            episode: '第01集',
+            index: 0,
+            position: 0,
+            duration: 2700000,
+            updated: now + 3000,
+          ),
+        );
+        await storage.upsertWatchHistory(
+          WatchHistoryEntry(
+            site: sampleSite.key,
+            id: videos[1].id,
+            title: videos[1].title,
+            poster: videos[1].poster,
+            line: '主线 4K',
+            episode: '第02集',
+            index: 1,
+            position: 0,
+            duration: 0,
+            updated: now + 2000,
+          ),
+        );
+        await storage.upsertWatchHistory(
+          WatchHistoryEntry(
+            site: sampleSite.key,
+            id: videos[2].id,
+            title: videos[2].title,
+            poster: videos[2].poster,
+            line: '主线 4K',
+            episode: '第03集',
+            index: 2,
+            position: 1080000,
+            duration: 2700000,
+            updated: now + 1000,
+          ),
+        );
+
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(760, 680);
+        await tester.binding.setSurfaceSize(const Size(760, 680));
+        addTearDown(() async {
+          await tester.binding.setSurfaceSize(null);
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: _macTheme(Brightness.dark),
+            home: AdaptiveShell(
+              storage: storage,
+              client: _MacTestClient(videos),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 250));
+
+        // Narrow layout uses horizontal Continue Watching shelf, not side history dock.
+        expect(find.byKey(const ValueKey('mac-home-side-history')), findsNothing);
+
+        final allBars = tester
+            .widgetList<LinearProgressIndicator>(
+              find.byType(LinearProgressIndicator),
+            )
+            .map((w) => w.value)
+            .toList();
+        expect(
+          allBars,
+          isNot(contains(0.15)),
+          reason:
+              'Narrow Continue Watching must never fabricate 15% progress for zero or unknown duration',
+        );
+
+        final zeroBar = find.byKey(
+          ValueKey('cw-progress-${sampleSite.key}-${videos[0].id}'),
+        );
+        final unknownBar = find.byKey(
+          ValueKey('cw-progress-${sampleSite.key}-${videos[1].id}'),
+        );
+        final positiveBar = find.byKey(
+          ValueKey('cw-progress-${sampleSite.key}-${videos[2].id}'),
+        );
+
+        expect(zeroBar, findsOneWidget);
+        expect(tester.widget<LinearProgressIndicator>(zeroBar).value, 0.0);
+        expect(unknownBar, findsNothing);
+        expect(positiveBar, findsOneWidget);
+        expect(
+          tester.widget<LinearProgressIndicator>(positiveBar).value,
+          closeTo(0.4, 0.001),
+        );
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 500));
+      },
+    );
   });
 
   group('Item 5: macOS Wide & Narrow Detail, Landscape vs Portrait Poster & SeriesScrapeSheet', () {

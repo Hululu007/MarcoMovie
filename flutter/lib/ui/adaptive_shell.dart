@@ -6111,20 +6111,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     fontSize: 12,
                   ),
                 ),
-                const SizedBox(height: 8),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(999),
-                  child: LinearProgressIndicator(
-                    value: entry.progressFraction > 0
-                        ? entry.progressFraction
-                        : 0.15,
-                    minHeight: 3.5,
-                    backgroundColor: palette.groupedTertiary,
-                    valueColor: const AlwaysStoppedAnimation<Color>(
-                      AppleColors.systemBlue,
+                if (entry.duration > 0) ...[
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: LinearProgressIndicator(
+                      key: ValueKey('cw-progress-${entry.site}-${entry.id}'),
+                      value: entry.progressFraction.clamp(0.0, 1.0),
+                      minHeight: 3.5,
+                      backgroundColor: palette.groupedTertiary,
+                      valueColor: const AlwaysStoppedAnimation<Color>(
+                        AppleColors.systemBlue,
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -16355,7 +16356,9 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                               ),
                               SizedBox(height: 4),
                               Text(
-                                '$epLabel · 已看 $pct%',
+                                h.duration > 0
+                                    ? '$epLabel · 已看 $pct%'
+                                    : epLabel,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
@@ -16363,21 +16366,21 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                                   fontSize: 12.5,
                                 ),
                               ),
-                              SizedBox(height: 8),
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(999),
-                                child: LinearProgressIndicator(
-                                  value: h.progressFraction > 0
-                                      ? h.progressFraction
-                                      : 0.12,
-                                  minHeight: 3.5,
-                                  backgroundColor: ApplePalette.of(context).groupedTertiary,
-                                  valueColor:
-                                      const AlwaysStoppedAnimation<Color>(
-                                    AppleColors.systemBlue,
+                              if (h.duration > 0) ...[
+                                SizedBox(height: 8),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(999),
+                                  child: LinearProgressIndicator(
+                                    value: h.progressFraction.clamp(0.0, 1.0),
+                                    minHeight: 3.5,
+                                    backgroundColor: ApplePalette.of(context).groupedTertiary,
+                                    valueColor:
+                                        const AlwaysStoppedAnimation<Color>(
+                                      AppleColors.systemBlue,
+                                    ),
                                   ),
                                 ),
-                              ),
+                              ],
                             ],
                           ),
                         ),

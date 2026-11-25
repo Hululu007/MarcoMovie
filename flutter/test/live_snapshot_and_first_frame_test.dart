@@ -500,6 +500,139 @@ void main() {
       },
     );
 
+    testWidgets(
+      'early audio progress before track discovery keeps loading; late video track with no video output triggers startup timeout recovery',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final harness = await mountLive(tester);
+        final player = harness.player;
+        addTearDown(() async {
+          await harness.videoOutput.close();
+          await player.dispose();
+        });
+
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        expect(player.opened, hasLength(1));
+
+        // 400ms audio/position tick arrives BEFORE tracks are discovered (tracksUnknown).
+        player.streamImpl.playingCtrl.add(true);
+        player.streamImpl.bufferingCtrl.add(false);
+        player.streamImpl.positionCtrl.add(const Duration(milliseconds: 400));
+        await tester.pump();
+        expect(
+          find.byKey(const Key('live-loading-indicator')),
+          findsOneWidget,
+          reason:
+              'Tracks are still unknown; early 400ms progress must not clear loading as audio-only',
+        );
+
+        // Late H.264 video track + 1920x1080 dimensions arrive, followed by 12s audio clock with NO video output.
+        player.streamImpl.trackCtrl.add(
+          Track(
+            video: VideoTrack('1', 'selected video', 'en', codec: 'h264'),
+            audio: AudioTrack('2', 'sound', 'en', codec: 'aac'),
+          ),
+        );
+        player.streamImpl.widthCtrl.add(1920);
+        player.streamImpl.heightCtrl.add(1080);
+        for (var sec = 1; sec <= 12; sec++) {
+          player.streamImpl.positionCtrl.add(Duration(seconds: sec));
+          await tester.pump(const Duration(seconds: 1));
+        }
+
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        expect(
+          player.opened.length,
+          greaterThan(1),
+          reason:
+              'Startup watchdog must stay armed across tracksUnknown -> awaitingVideoFrame and trigger recovery',
+        );
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+
+    testWidgets(
+      'clockless live video with sustained rendered video output clears loading and stays on active source across 12s',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final harness = await mountLive(tester);
+        final player = harness.player;
+        addTearDown(() async {
+          await harness.videoOutput.close();
+          await player.dispose();
+        });
+
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        expect(player.opened, hasLength(1));
+
+        player.streamImpl.trackCtrl.add(
+          Track(video: VideoTrack('1', 'video', 'en', codec: 'h264')),
+        );
+        player.streamImpl.widthCtrl.add(1920);
+        player.streamImpl.heightCtrl.add(1080);
+        player.streamImpl.playingCtrl.add(true);
+        player.streamImpl.bufferingCtrl.add(false);
+
+        // Position clock stays at Duration.zero while rendered frames keep arriving every second.
+        for (var sec = 0; sec < 12; sec++) {
+          harness.videoOutput.add(true);
+          await tester.pump(const Duration(seconds: 1));
+          expect(
+            find.byKey(const Key('live-loading-indicator')),
+            findsNothing,
+            reason: 'Rendered video output must clear loading at sec ${sec + 1}',
+          );
+          expect(
+            player.opened.length,
+            1,
+            reason:
+                'Clockless live video with sustained rendered frames must never spuriously switch sources at sec ${sec + 1}',
+          );
+        }
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+
+    testWidgets(
+      'early audio progress before track discovery clears loading once audio-only radio track is confirmed',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final harness = await mountLive(tester);
+        final player = harness.player;
+        addTearDown(() async {
+          await harness.videoOutput.close();
+          await player.dispose();
+        });
+
+        player.streamImpl.playingCtrl.add(true);
+        player.streamImpl.bufferingCtrl.add(false);
+        player.streamImpl.positionCtrl.add(const Duration(milliseconds: 400));
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+
+        // Confirm audio-only radio track -> loading clears cleanly and stays open without failover.
+        player.streamImpl.trackCtrl.add(
+          Track(
+            video: VideoTrack.no(),
+            audio: AudioTrack('1', 'Radio AAC', 'zh', codec: 'aac'),
+          ),
+        );
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+
+        player.streamImpl.positionCtrl.add(const Duration(seconds: 4));
+        await tester.pump(const Duration(seconds: 9));
+        expect(player.opened, hasLength(1));
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+
     test(
       'real libmpv live playback observes native video output on H.264+AAC, switches across identical-resolution channels, and plays audio-only radio',
       () async {

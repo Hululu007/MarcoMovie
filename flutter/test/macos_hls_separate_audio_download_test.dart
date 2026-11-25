@@ -40,6 +40,20 @@ bool _hasTool(String name) {
   }
 }
 
+Future<void> _safeDeleteDir(Directory dir) async {
+  for (var attempt = 0; attempt < 4; attempt++) {
+    try {
+      if (await dir.exists()) {
+        await dir.delete(recursive: true);
+      }
+      return;
+    } on FileSystemException {
+      if (attempt == 3) return;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+  }
+}
+
 void main() {
   final service = DownloadService.instance;
   final hasFfmpeg = _hasTool('ffmpeg') && _hasTool('ffprobe');
@@ -63,9 +77,7 @@ void main() {
         for (final t in service.tasks) {
           await service.remove(t.id);
         }
-        if (await fixtureRoot.exists()) {
-          await fixtureRoot.delete(recursive: true);
-        }
+        await _safeDeleteDir(fixtureRoot);
       });
       PathProviderPlatform.instance = _IsolatedDownloadPaths(fixtureRoot);
 
@@ -485,9 +497,7 @@ void main() {
         for (final t in service.tasks) {
           await service.remove(t.id);
         }
-        if (await fixtureRoot.exists()) {
-          await fixtureRoot.delete(recursive: true);
-        }
+        await _safeDeleteDir(fixtureRoot);
       });
       PathProviderPlatform.instance = _IsolatedDownloadPaths(fixtureRoot);
 
@@ -959,6 +969,362 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 650));
     },
+  );
+
+  test(
+    'HLS BYTERANGE validates HTTP 206 Content-Range and byte count: valid 206 succeeds, wrong-start or short 206 fails without staging as resumable and recovers on resume, and legal HTTP 200 fallback slices cleanly',
+    () async {
+      final fixtureRoot =
+          await Directory.systemTemp.createTemp('marco-hls-range206-test-');
+      addTearDown(() async {
+        for (final t in service.tasks) {
+          await service.remove(t.id);
+        }
+        await _safeDeleteDir(fixtureRoot);
+      });
+      PathProviderPlatform.instance = _IsolatedDownloadPaths(fixtureRoot);
+
+      final originDir = Directory('${fixtureRoot.path}/origin')
+        ..createSync(recursive: true);
+
+      if (hasFfmpeg) {
+        final vRes = Process.runSync('ffmpeg', [
+          '-y',
+          '-v',
+          'error',
+          '-f',
+          'lavfi',
+          '-i',
+          'color=c=0x1e88e5:s=160x90:r=25:d=2',
+          '-an',
+          '-c:v',
+          'libx264',
+          '-pix_fmt',
+          'yuv420p',
+          '-g',
+          '25',
+          '-keyint_min',
+          '25',
+          '-sc_threshold',
+          '0',
+          '-hls_time',
+          '1',
+          '-hls_playlist_type',
+          'vod',
+          '-hls_segment_filename',
+          '${originDir.path}/v_%03d.ts',
+          '${originDir.path}/video.m3u8',
+        ]);
+        expect(vRes.exitCode, 0, reason: '${vRes.stderr}');
+        final aRes = Process.runSync('ffmpeg', [
+          '-y',
+          '-v',
+          'error',
+          '-f',
+          'lavfi',
+          '-i',
+          'sine=frequency=440:sample_rate=48000:duration=2',
+          '-vn',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '64k',
+          '-hls_time',
+          '1',
+          '-hls_playlist_type',
+          'vod',
+          '-hls_segment_filename',
+          '${originDir.path}/a_%03d.ts',
+          '${originDir.path}/audio.m3u8',
+        ]);
+        expect(aRes.exitCode, 0, reason: '${aRes.stderr}');
+      } else {
+        List<int> makeTs(int packets, int fill) {
+          final out = List<int>.filled(packets * 188, fill);
+          for (var i = 0; i < packets; i++) {
+            out[i * 188] = 0x47;
+          }
+          return out;
+        }
+
+        File('${originDir.path}/v_000.ts').writeAsBytesSync(makeTs(6, 0x11));
+        File('${originDir.path}/v_001.ts').writeAsBytesSync(makeTs(6, 0x12));
+        File('${originDir.path}/a_000.ts').writeAsBytesSync(makeTs(8, 0x21));
+        File('${originDir.path}/a_001.ts').writeAsBytesSync(makeTs(8, 0x22));
+        File('${originDir.path}/video.m3u8').writeAsStringSync(
+          '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n'
+          '#EXTINF:1.0,\nv_000.ts\n#EXTINF:1.0,\nv_001.ts\n#EXT-X-ENDLIST\n',
+        );
+      }
+
+      final aSegFiles = originDir
+          .listSync()
+          .whereType<File>()
+          .where((f) {
+            final base = f.path.split(Platform.pathSeparator).last;
+            return base.startsWith('a_') && base.endsWith('.ts');
+          })
+          .toList()
+        ..sort((a, b) => a.path.compareTo(b.path));
+      expect(aSegFiles.length, greaterThanOrEqualTo(2));
+
+      final joinedAudioBytes = <int>[];
+      final audioPlaylistBuf = StringBuffer(
+        '#EXTM3U\n#EXT-X-VERSION:4\n#EXT-X-TARGETDURATION:2\n',
+      );
+      var byteOffset = 0;
+      for (final seg in aSegFiles) {
+        final segBytes = seg.readAsBytesSync();
+        expect(segBytes.length, greaterThan(188));
+        audioPlaylistBuf.writeln('#EXTINF:1.0,');
+        audioPlaylistBuf.writeln(
+          '#EXT-X-BYTERANGE:${segBytes.length}@$byteOffset',
+        );
+        audioPlaylistBuf.writeln('joined_audio.ts');
+        joinedAudioBytes.addAll(segBytes);
+        byteOffset += segBytes.length;
+      }
+      audioPlaylistBuf.writeln('#EXT-X-ENDLIST');
+      final audioByterangePlaylist = audioPlaylistBuf.toString();
+
+      var shortModeFixed = false;
+      final joinedRequestsByMode = <String, List<String>>{};
+
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((req) async {
+        final parts = req.uri.pathSegments;
+        if (parts.length < 2) {
+          req.response.statusCode = 404;
+          await req.response.close();
+          return;
+        }
+        final mode = parts.first;
+        final name = parts.last;
+        final res = req.response;
+
+        if (name == 'master.m3u8') {
+          res.statusCode = 200;
+          res.headers.contentType =
+              ContentType('application', 'vnd.apple.mpegurl');
+          res.write(
+            '#EXTM3U\n'
+            '#EXT-X-VERSION:4\n'
+            '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Main",LANGUAGE="zh",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=800000,AUDIO="aud"\n'
+            'video.m3u8\n',
+          );
+          await res.close();
+          return;
+        }
+        if (name == 'audio.m3u8') {
+          res.statusCode = 200;
+          res.headers.contentType =
+              ContentType('application', 'vnd.apple.mpegurl');
+          res.write(audioByterangePlaylist);
+          await res.close();
+          return;
+        }
+        if (name == 'joined_audio.ts') {
+          final rangeHeader = req.headers.value('range') ?? '';
+          joinedRequestsByMode.putIfAbsent(mode, () => <String>[]).add(rangeHeader);
+          final m = RegExp(r'^bytes=(\d+)-(\d+)$').firstMatch(rangeHeader);
+          if (m == null) {
+            res.statusCode = 400;
+            await res.close();
+            return;
+          }
+          final lo = int.parse(m.group(1)!);
+          final hi = int.parse(m.group(2)!);
+          final reqLen = hi - lo + 1;
+
+          if (mode == 'valid206' || (mode == 'short206' && shortModeFixed)) {
+            res.statusCode = 206;
+            res.headers.contentType = ContentType('video', 'mp2t');
+            res.headers.set(
+              'content-range',
+              'bytes $lo-$hi/${joinedAudioBytes.length}',
+            );
+            res.contentLength = reqLen;
+            res.add(joinedAudioBytes.sublist(lo, hi + 1));
+            await res.close();
+            return;
+          }
+          if (mode == 'wrongStart206') {
+            // Equal byte length to the requested range, but shifted start offset!
+            final wrongLo = lo + 188 <= joinedAudioBytes.length - reqLen
+                ? lo + 188
+                : (lo >= 188 ? lo - 188 : 188);
+            final wrongHi = wrongLo + reqLen - 1;
+            res.statusCode = 206;
+            res.headers.contentType = ContentType('video', 'mp2t');
+            res.headers.set(
+              'content-range',
+              'bytes $wrongLo-$wrongHi/${joinedAudioBytes.length}',
+            );
+            res.contentLength = reqLen;
+            res.add(joinedAudioBytes.sublist(wrongLo, wrongHi + 1));
+            await res.close();
+            return;
+          }
+          if (mode == 'short206') {
+            // Correct start offset (0), but truncated 188-byte 206 response!
+            res.statusCode = 206;
+            res.headers.contentType = ContentType('video', 'mp2t');
+            res.headers.set(
+              'content-range',
+              'bytes 0-187/${joinedAudioBytes.length}',
+            );
+            res.contentLength = 188;
+            res.add(joinedAudioBytes.sublist(0, 188));
+            await res.close();
+            return;
+          }
+          if (mode == 'full200') {
+            // Legal HTTP 200 full-resource fallback; client slices requested range.
+            res.statusCode = 200;
+            res.headers.contentType = ContentType('video', 'mp2t');
+            res.contentLength = joinedAudioBytes.length;
+            res.add(joinedAudioBytes);
+            await res.close();
+            return;
+          }
+        }
+
+        final f = File('${originDir.path}/$name');
+        if (!f.existsSync()) {
+          res.statusCode = 404;
+          await res.close();
+          return;
+        }
+        final bytes = await f.readAsBytes();
+        res.statusCode = 200;
+        res.contentLength = bytes.length;
+        res.headers.contentType = name.endsWith('.m3u8')
+            ? ContentType('application', 'vnd.apple.mpegurl')
+            : ContentType('video', 'mp2t');
+        res.add(bytes);
+        await res.close();
+      });
+
+      final client = CmsClient();
+      await service.reloadFromDiskForTest(client);
+      final baseUrl = 'http://127.0.0.1:${server.port}';
+      final site = CmsSite(
+        key: 'range-site',
+        name: 'Range验证站',
+        type: 1,
+        api: '$baseUrl/cms',
+      );
+
+      DownloadTask startMode(String mode) {
+        final video = CmsVideo(id: mode, title: mode);
+        final line = CmsLine(
+          name: '主线',
+          episodes: [
+            CmsEpisode(name: '第1集', url: '$baseUrl/$mode/master.m3u8'),
+          ],
+        );
+        service.enqueue(
+          site: site,
+          video: video,
+          line: line,
+          episodeIndexes: const [0],
+        );
+        return service.taskFor(site.key, mode, '主线', 0)!;
+      }
+
+      Future<void> verifyPlayableOffline(DownloadTask task) async {
+        expect(task.status, DownloadStatus.completed, reason: task.error);
+        expect(File(task.filePath).existsSync(), isTrue);
+        if (!hasFfmpeg) return;
+        final lease = await OfflineHlsLease.open(task.filePath);
+        try {
+          final probe = await Process.run('ffprobe', [
+            '-v',
+            'error',
+            '-show_entries',
+            'stream=codec_name,codec_type',
+            '-of',
+            'json',
+            lease.url.toString(),
+          ]);
+          expect(probe.exitCode, 0, reason: '${probe.stderr}');
+          final decoded = jsonDecode(probe.stdout as String) as Map;
+          final streams = (decoded['streams'] as List)
+              .cast<Map<String, dynamic>>();
+          expect(
+            streams.any(
+              (s) => s['codec_type'] == 'video' && s['codec_name'] == 'h264',
+            ),
+            isTrue,
+          );
+          expect(
+            streams.any(
+              (s) => s['codec_type'] == 'audio' && s['codec_name'] == 'aac',
+            ),
+            isTrue,
+          );
+        } finally {
+          await lease.close();
+        }
+      }
+
+      await HttpOverrides.runWithHttpOverrides(() async {
+        // 1. Valid HTTP 206 exact range succeeds and passes ffprobe.
+        final validTask = startMode('valid206');
+        await waitSettled(validTask);
+        await verifyPlayableOffline(validTask);
+
+        // 2. Wrong start offset with identical byte length MUST fail.
+        final wrongStartTask = startMode('wrongStart206');
+        await waitSettled(wrongStartTask);
+        expect(wrongStartTask.status, DownloadStatus.failed);
+        expect(wrongStartTask.error, contains('独立音轨'));
+
+        // 3. Correct start offset with short 188-byte 206 MUST fail and NOT stage a reusable audio segment.
+        final shortTask = startMode('short206');
+        await waitSettled(shortTask);
+        expect(shortTask.status, DownloadStatus.failed);
+        expect(shortTask.error, contains('独立音轨'));
+        final dlDir = Directory('${fixtureRoot.path}/downloads');
+        final stagedBadAudio = dlDir
+            .listSync(recursive: true)
+            .whereType<File>()
+            .where((f) {
+              final name = f.path.split(Platform.pathSeparator).last;
+              return f.path.contains(shortTask.id) &&
+                  name.startsWith('a_') &&
+                  name.endsWith('.ts') &&
+                  f.lengthSync() == 188;
+            })
+            .toList();
+        expect(
+          stagedBadAudio,
+          isEmpty,
+          reason: 'Truncated 206 body must never be cached as a resumable fragment',
+        );
+
+        // Fix origin server and resume -> must re-fetch full ranges and complete cleanly.
+        final reqCountBeforeResume =
+            joinedRequestsByMode['short206']?.length ?? 0;
+        shortModeFixed = true;
+        service.resume(shortTask.id);
+        await waitSettled(shortTask);
+        expect(
+          (joinedRequestsByMode['short206']?.length ?? 0) - reqCountBeforeResume,
+          greaterThanOrEqualTo(aSegFiles.length),
+          reason: 'Resume must re-download all audio ranges cleanly after fixing server',
+        );
+        await verifyPlayableOffline(shortTask);
+
+        // 4. Legal HTTP 200 full-resource fallback slices exact ranges cleanly.
+        final full200Task = startMode('full200');
+        await waitSettled(full200Task);
+        await verifyPlayableOffline(full200Task);
+      }, _DirectLoopbackHttpOverrides());
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
   );
 }
 

@@ -73,6 +73,17 @@ import 'source_verification_dialog.dart';
 import 'tv/tv_player_overlay.dart';
 import 'windows_title_bar.dart';
 
+/// Explicit live playback startup phases so early audio/position events cannot
+/// masquerade as audio-only radio before track discovery completes, and
+/// clockless video streams that render real frames do not trigger spurious
+/// startup failover.
+enum _LiveStartupPhase {
+  tracksUnknown,
+  confirmedAudioOnly,
+  awaitingVideoFrame,
+  videoFrameRendered,
+}
+
 /// Apple AVPlayerViewController / iOS 26 Concentric Spatial Cinema video player:
 /// - Unified iOS/iPadOS 26 Liquid Glass HUD (`IosPlayerChrome`) with zero
 ///   scattered `UiKitView` overlays over the active video surface
@@ -816,8 +827,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _liveDirectFallbackTried = false;
   bool _activeEpisodeUsedLocalProxy = false;
   bool _liveSessionHasProgress = false;
-  bool _liveHasVideoTrack = false;
-  bool _liveSessionVideoOutputReady = false;
+  _LiveStartupPhase _liveStartupPhase = _LiveStartupPhase.tracksUnknown;
+  int _liveSessionVideoOutputCount = 0;
   bool _liveVoConfigured = false;
   bool _liveStartSpecTriggered = false;
   final Set<String> _observedMpvVideoProps = <String>{};
@@ -826,12 +837,16 @@ class _PlayerScreenState extends State<PlayerScreen>
   VoidCallback? _ohosTextureListener;
   LiveChannel? _activeLiveChannel;
 
-  bool get _liveNeedsVideoOutput => _isLiveStream && _liveHasVideoTrack;
+  static bool _isRealTrackId(String id) {
+    final trimmed = id.trim();
+    return trimmed.isNotEmpty && trimmed != 'auto' && trimmed != 'no';
+  }
+
   bool get _liveSessionReadyForDisplay =>
       !_isLiveStream ||
-      (_liveNeedsVideoOutput
-          ? _liveSessionVideoOutputReady
-          : _liveSessionHasProgress);
+      _liveStartupPhase == _LiveStartupPhase.videoFrameRendered ||
+      (_liveStartupPhase == _LiveStartupPhase.confirmedAudioOnly &&
+          _liveSessionHasProgress);
 
   String get _displayTitle => _activeLiveChannel?.name ?? widget.video.title;
   bool get _hasLiveChannelCatalog =>
@@ -1097,12 +1112,50 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  void _markLiveVideoTrackDiscovered() {
+    if (!_isLiveStream) return;
+    if (_liveStartupPhase != _LiveStartupPhase.videoFrameRendered) {
+      _liveStartupPhase = _LiveStartupPhase.awaitingVideoFrame;
+    }
+  }
+
+  void _markLiveTracksConfirmedAudioOnly() {
+    if (!_isLiveStream ||
+        _videoWidth > 0 ||
+        _videoHeight > 0 ||
+        _liveStartupPhase == _LiveStartupPhase.videoFrameRendered ||
+        _liveStartupPhase == _LiveStartupPhase.awaitingVideoFrame) {
+      return;
+    }
+    final changed = _liveStartupPhase != _LiveStartupPhase.confirmedAudioOnly;
+    _liveStartupPhase = _LiveStartupPhase.confirmedAudioOnly;
+    if (changed && _liveSessionHasProgress) {
+      if (_position > Duration.zero) {
+        _startup.position(_position);
+      }
+      if (_loading) {
+        setState(() {
+          _loading = false;
+        });
+        if (_playing &&
+            !_buffering &&
+            _controlsVisible &&
+            (_hideTimer == null || !_hideTimer!.isActive)) {
+          _scheduleHide();
+        }
+      }
+    }
+  }
+
   void _confirmLiveVideoOutput() {
     if (!mounted || !_allowEvents || !_matchesActiveMedia || !_isLiveStream) {
       return;
     }
-    final alreadyReady = _liveSessionVideoOutputReady;
-    _liveSessionVideoOutputReady = true;
+    final alreadyReady =
+        _liveStartupPhase == _LiveStartupPhase.videoFrameRendered;
+    _liveStartupPhase = _LiveStartupPhase.videoFrameRendered;
+    _liveSessionVideoOutputCount++;
+    _startup.confirmVideoOutput(sustained: _liveSessionVideoOutputCount >= 2);
     if (_position > Duration.zero) {
       _startup.position(_position);
     }
@@ -1246,7 +1299,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (w == null || w <= 0 || w == _videoWidth) return;
       setState(() {
         _videoWidth = w;
-        if (_isLiveStream) _liveHasVideoTrack = true;
+        if (_isLiveStream) _markLiveVideoTrackDiscovered();
       });
       if (_liveVoConfigured && _videoWidth > 0 && _videoHeight > 0) {
         _confirmLiveVideoOutput();
@@ -1267,7 +1320,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (h == null || h <= 0 || h == _videoHeight) return;
       setState(() {
         _videoHeight = h;
-        if (_isLiveStream) _liveHasVideoTrack = true;
+        if (_isLiveStream) _markLiveVideoTrackDiscovered();
       });
       if (_liveVoConfigured && _videoWidth > 0 && _videoHeight > 0) {
         _confirmLiveVideoOutput();
@@ -1287,10 +1340,17 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       if (_isLiveStream) {
         final vid = track.video.id.trim();
-        if (vid == 'no') {
-          _liveHasVideoTrack = false;
-        } else if (vid.isNotEmpty && vid != 'auto') {
-          _liveHasVideoTrack = true;
+        final aid = track.audio.id.trim();
+        if (_isRealTrackId(vid)) {
+          _markLiveVideoTrackDiscovered();
+        } else if (vid == 'no') {
+          _markLiveTracksConfirmedAudioOnly();
+        } else if (_isRealTrackId(aid)) {
+          final knownVideos = _player.state.tracks.video;
+          if (knownVideos.isNotEmpty &&
+              !knownVideos.any((t) => _isRealTrackId(t.id))) {
+            _markLiveTracksConfirmedAudioOnly();
+          }
         }
       }
       final vCodec = (track.video.codec ?? track.video.decoder ?? '').trim();
@@ -1320,12 +1380,14 @@ class _PlayerScreenState extends State<PlayerScreen>
     }));
     _playerSubscriptions.add(_player.stream.tracks.listen((tracks) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
-      if (_isLiveStream &&
-          _player.state.track.video.id.trim() != 'no' &&
-          tracks.video.any(
-            (t) => t.id.trim().isNotEmpty && t.id != 'auto' && t.id != 'no',
-          )) {
-        _liveHasVideoTrack = true;
+      if (_isLiveStream) {
+        final hasRealVideo = tracks.video.any((t) => _isRealTrackId(t.id));
+        final hasRealAudio = tracks.audio.any((t) => _isRealTrackId(t.id));
+        if (hasRealVideo && _player.state.track.video.id.trim() != 'no') {
+          _markLiveVideoTrackDiscovered();
+        } else if (!hasRealVideo && hasRealAudio) {
+          _markLiveTracksConfirmedAudioOnly();
+        }
       }
       String pickCodec(Iterable<({String id, String? codec, String? decoder})> list) {
         for (final item in list) {
@@ -1357,7 +1419,9 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _playerSubscriptions.add(_player.stream.position.listen((pos) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
-      if (!_liveNeedsVideoOutput || _liveSessionVideoOutputReady) {
+      if (!_isLiveStream ||
+          _liveStartupPhase == _LiveStartupPhase.confirmedAudioOnly ||
+          _liveStartupPhase == _LiveStartupPhase.videoFrameRendered) {
         _startup.position(pos);
       }
       final nextPos = (!_isDraggingSeek && !_isSliderDragging)
@@ -2395,12 +2459,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   }) async {
     _startup.reset();
     _liveSessionHasProgress = false;
-    final isSameEpisodeRetry =
-        bypassLocalProxy || forceLiveLocalProxy || useAlternateLiveUa;
-    if (!isSameEpisodeRetry) {
-      _liveHasVideoTrack = false;
-    }
-    _liveSessionVideoOutputReady = false;
+    _liveStartupPhase = _LiveStartupPhase.tracksUnknown;
+    _liveSessionVideoOutputCount = 0;
     _liveVoConfigured = false;
     _liveStartSpecTriggered = false;
     _videoWidth = 0;
