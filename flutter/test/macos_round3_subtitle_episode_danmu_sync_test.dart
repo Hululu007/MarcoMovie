@@ -4701,4 +4701,655 @@ void main() {
       },
     );
   });
+
+  // =========================================================================
+  // POST-745b690 REWORK REGRESSIONS (Spinoff/Main Work Disambiguation,
+  // Positional Head-Insert 3-Way Merge, and Manual-Hide 3-Frame Transition)
+  // =========================================================================
+  group('Post-745b690 Rework: Spinoff Guard, Head-Insert Sync Order & Manual HUD Hide Transition', () {
+    testWidgets(
+      'P1 Spinoff Guard: spinoff-only backup/danmu stays on main work & pending; mixed main+spinoff opens main file and binds 210 in BOTH candidate orders',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        const origin = 'https://comments.example';
+        const site = CmsSite(key: 'rev3', name: 'Rev3', type: 1, api: 'https://cdn.example/api');
+        final tmp = Directory.systemTemp.createTempSync('marco_745b690_spinoff_');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+
+        CmsEpisode mkMkv(String stem, String show) {
+          final f = File('${tmp.path}/$stem.mkv')
+            ..writeAsBytesSync(
+              _buildMkvWithContainerTags(
+                infoTitle: 'S02E10',
+                simpleTags: {'SHOW': show, 'SEASON': '2', 'EPISODE': '10'},
+              ),
+            );
+          return CmsEpisode(name: '$stem.mkv', url: f.path);
+        }
+
+        Future<void> pickLine(String target) async {
+          await tester.tap(find.byKey(const Key('desktop-more-button')));
+          await tester.pump(const Duration(milliseconds: 250));
+          await tester.tap(find.text('切换线路'));
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.tap(find.textContaining(target).first);
+          await tester.pump(const Duration(milliseconds: 500));
+          await tester.pump();
+        }
+
+        tester.view.physicalSize = const Size(1280, 800);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final mainEp = mkMkv('main-s02e10', '山中之花');
+        final onlySpinoffEp = mkMkv('only-spinoff', '山中之花外传');
+        final mainBackupEp = mkMkv('main-backup', '山中之花');
+
+        // 1. Spinoff-only danmu (ID 910, both isMatched:false AND isMatched:true)
+        //    AND spinoff-only backup line (`only-spinoff.mkv`):
+        //    - Danmu MUST stay unbound (null / pending user selection), NOT 910.
+        //    - Switching to spinoff-only backup MUST stay on main-s02e10.mkv & open picker.
+        for (final serverIsMatched in const [false, true]) {
+          final storage = await initTestStorage();
+          final player = _Round3FakePlayer();
+          final spinoffOnlyProvider = DandanplayProvider(
+            multilineServerUrls: origin,
+            minRequestIntervalMs: 0,
+            client: MockClient((req) async {
+              if (req.url.path.contains('/comment/')) {
+                return http.Response('{"count":0,"comments":[]}', 200);
+              }
+              if (req.url.path.contains('/search/')) {
+                return http.Response.bytes(
+                  utf8.encode(
+                    jsonEncode({
+                      'animes': [
+                        {
+                          'animeId': 90,
+                          'animeTitle': '山中之花外传',
+                          'episodes': [
+                            {'episodeId': 910, 'episodeTitle': 'S02E10'},
+                          ],
+                        },
+                      ],
+                    }),
+                  ),
+                  200,
+                );
+              }
+              return http.Response.bytes(
+                utf8.encode(
+                  jsonEncode({
+                    'isMatched': serverIsMatched,
+                    'matches': [
+                      {
+                        'episodeId': 910,
+                        'animeId': 90,
+                        'animeTitle': '山中之花外传',
+                        'episodeTitle': 'S02E10',
+                      },
+                    ],
+                  }),
+                ),
+                200,
+              );
+            }),
+          );
+          addTearDown(spinoffOnlyProvider.close);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: ThemeData(brightness: Brightness.dark, platform: TargetPlatform.macOS),
+              home: PlayerScreen(
+                site: site,
+                video: CmsVideo(
+                  id: 'movie_spinoff_only',
+                  title: '山中之花',
+                  lines: [
+                    CmsLine(name: '主线', episodes: [mainEp]),
+                    CmsLine(name: '仅外传备线', episodes: [onlySpinoffEp]),
+                  ],
+                ),
+                initialLineIndex: 0,
+                initialEpisodeIndex: 0,
+                storage: storage,
+                debugPlayer: player,
+                debugVideoSurface: const SizedBox.shrink(),
+                debugDanmuProvider: spinoffOnlyProvider,
+                debugDanmuSettings: const DanmuSettings(enabled: true, serverUrls: origin),
+              ),
+            ),
+          );
+          await tester.pump(const Duration(milliseconds: 500));
+
+          final boundBefore = tester
+              .widget<DanmuLayer>(find.byType(DanmuLayer))
+              .segmentCache
+              ?.currentSession
+              ?.boundEpisodeId;
+          expect(
+            boundBefore,
+            isNull,
+            reason: 'isMatched=$serverIsMatched: spinoff ID 910 must NOT auto-bind for main work',
+          );
+
+          await pickLine('仅外传备线');
+          expect(
+            player.openedUris.last,
+            endsWith('main-s02e10.mkv'),
+            reason: 'isMatched=$serverIsMatched: spinoff-only backup must keep main-s02e10.mkv playing',
+          );
+          expect(find.byType(PlayerEpisodePickerSheet), findsOneWidget);
+          debugPrint(
+            'P1_SPINOFF_ONLY(isMatched=$serverIsMatched): opened=${player.openedUris.last} bound=$boundBefore picker=true',
+          );
+
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump(const Duration(milliseconds: 450));
+        }
+
+        // 2. Mixed main + spinoff in BOTH orders ([spinoff, main] AND [main, spinoff]):
+        //    Both runs MUST open `main-backup.mkv` AND bind main danmu ID `210`!
+        for (final reversed in const [false, true]) {
+          final backupEps = reversed
+              ? [mainBackupEp, onlySpinoffEp]
+              : [onlySpinoffEp, mainBackupEp];
+          final matchList = reversed
+              ? [
+                  {'episodeId': 210, 'animeId': 20, 'animeTitle': '山中之花', 'episodeTitle': 'S02E10'},
+                  {'episodeId': 910, 'animeId': 90, 'animeTitle': '山中之花外传', 'episodeTitle': 'S02E10'},
+                ]
+              : [
+                  {'episodeId': 910, 'animeId': 90, 'animeTitle': '山中之花外传', 'episodeTitle': 'S02E10'},
+                  {'episodeId': 210, 'animeId': 20, 'animeTitle': '山中之花', 'episodeTitle': 'S02E10'},
+                ];
+          final storage = await initTestStorage();
+          final player = _Round3FakePlayer();
+          final mixedProvider = DandanplayProvider(
+            multilineServerUrls: origin,
+            minRequestIntervalMs: 0,
+            client: MockClient((req) async {
+              if (req.url.path.contains('/comment/')) {
+                return http.Response('{"count":0,"comments":[]}', 200);
+              }
+              if (req.url.path.contains('/search/')) {
+                return http.Response('{"animes":[]}', 200);
+              }
+              return http.Response.bytes(
+                utf8.encode(
+                  jsonEncode({'isMatched': false, 'matches': matchList}),
+                ),
+                200,
+              );
+            }),
+          );
+          addTearDown(mixedProvider.close);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: ThemeData(brightness: Brightness.dark, platform: TargetPlatform.macOS),
+              home: PlayerScreen(
+                site: site,
+                video: CmsVideo(
+                  id: 'movie_mixed',
+                  title: '山中之花',
+                  lines: [
+                    CmsLine(name: '主线', episodes: [mainEp]),
+                    CmsLine(name: '混排备线', episodes: backupEps),
+                  ],
+                ),
+                initialLineIndex: 0,
+                initialEpisodeIndex: 0,
+                storage: storage,
+                debugPlayer: player,
+                debugVideoSurface: const SizedBox.shrink(),
+                debugDanmuProvider: mixedProvider,
+                debugDanmuSettings: const DanmuSettings(enabled: true, serverUrls: origin),
+              ),
+            ),
+          );
+          await tester.pump(const Duration(milliseconds: 500));
+
+          final expectedBound = DandanplayProvider.encodeBoundEpisodeId(origin, '210');
+          final boundInitial = tester
+              .widget<DanmuLayer>(find.byType(DanmuLayer))
+              .segmentCache
+              ?.currentSession
+              ?.boundEpisodeId;
+          expect(boundInitial, expectedBound);
+
+          await pickLine('混排备线');
+          await tester.pump(const Duration(milliseconds: 450));
+          final boundAfterSwitch = tester
+              .widget<DanmuLayer>(find.byType(DanmuLayer))
+              .segmentCache
+              ?.currentSession
+              ?.boundEpisodeId;
+          expect(
+            player.openedUris.last,
+            endsWith('main-backup.mkv'),
+            reason: 'reversed=$reversed must open main-backup.mkv instead of only-spinoff.mkv',
+          );
+          expect(
+            boundAfterSwitch,
+            expectedBound,
+            reason: 'reversed=$reversed must bind main danmu ID 210 instead of 910',
+          );
+          debugPrint(
+            'P1_MIXED(reversed=$reversed): opened=${player.openedUris.last} bound=$boundAfterSwitch',
+          );
+
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump(const Duration(milliseconds: 450));
+        }
+      },
+    );
+
+    testWidgets(
+      'P2 Head-Insert Sync Order: local [M,A,B] + peer [A,B,R] converges to [M,A,B,R] on both ends and stays stable after re-pull',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        const a = 'https://a.example';
+        const b = 'https://b.example';
+        const m = 'https://m-primary.example';
+        const r = 'https://r-tail.example';
+
+        DanmuSourceSyncDocument mkDoc(List<String> urls, int rev, int ts) =>
+            DanmuSourceSyncDocument(
+              initialized: true,
+              revision: rev,
+              updatedAt: ts,
+              sources: [for (final u in urls) DanmuSyncSourceEntry(url: u)],
+            );
+
+        // 1. Direct 3-way merge symmetry check (both timestamp orders yield [M,A,B,R]).
+        final baseDoc = mkDoc([a, b], 1, 100);
+        for (final localNewer in const [false, true]) {
+          final merged = DanmuSourceSyncMerger.merge(
+            base: baseDoc,
+            local: mkDoc([m, a, b], 2, localNewer ? 300 : 150),
+            remote: mkDoc([a, b, r], 2, localNewer ? 150 : 300),
+            hasLocalCredentials: false,
+            nowMs: 400,
+          );
+          expect(
+            merged.merged.urls,
+            [m, a, b, r],
+            reason: 'localNewer=$localNewer must keep M at head and R at tail',
+          );
+        }
+
+        // 2. End-to-end UI dirty-editor + two-profile WebDAV sync + re-pull.
+        tester.view.physicalSize = const Size(1000, 1800);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final sLocal = await initTestStorage();
+        final peerPrefs = _IsolatedSharedPreferences();
+        final sPeer = StorageService(peerPrefs);
+        for (final s in [sLocal, sPeer]) {
+          await s.saveWebdavConfig(
+            url: 'https://dav.example/dav/family/profile.json',
+            user: '',
+            pass: '',
+            auto: false,
+            syncSubs: false,
+            syncHistory: false,
+            syncDanmu: true,
+          );
+        }
+        final localPrefs = await SharedPreferences.getInstance();
+        await DanmuPrefs.applySyncedDocument(
+          mkDoc([a, b], 1, 100),
+          prefs: localPrefs,
+          pendingAuthOrigins: const <String>[],
+        );
+        await DanmuPrefs.applySyncedDocument(
+          mkDoc([a, b], 1, 100),
+          prefs: peerPrefs,
+          pendingAuthOrigins: const <String>[],
+        );
+
+        var cloudDoc = mkDoc([a, b], 1, 100);
+        final client = MockClient((req) async {
+          if (req.method == 'GET') {
+            return http.Response(
+              cloudDoc.toPayloadJson(),
+              200,
+              headers: {'etag': '"r${cloudDoc.revision}"'},
+            );
+          }
+          if (req.method == 'PUT') {
+            cloudDoc = DanmuSourceSyncDocument.tryParseJson(req.body)!;
+            return http.Response('', 204);
+          }
+          return http.Response('', 201);
+        });
+
+        // Open DanmuSettingsSheet on local device with [A,B] and insert M at row 1 -> draft [M,A,B].
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: DanmuSettingsSheet(
+                key: const ValueKey('head-insert-merge-sheet'),
+                initialSettings: await DanmuPrefs.load(),
+                onChanged: (_) {},
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final field = find.byKey(const Key('danmu-server-urls-field'));
+        await tester.ensureVisible(field);
+        await tester.enterText(field, '$m\n$a\n$b');
+
+        // Peer appends R ([A,B,R]) and syncs to cloud; local pulls [A,B,R] while draft is unsaved.
+        await DanmuPrefs.save(
+          const DanmuSettings(serverUrls: '$a\n$b\n$r'),
+          prefs: peerPrefs,
+          nowMs: 200,
+        );
+        await sPeer.syncWithWebdav(client: client);
+        expect(cloudDoc.urls, [a, b, r]);
+
+        await sLocal.syncWithWebdav(client: client);
+        await tester.pumpAndSettle();
+        expect((await DanmuPrefs.load()).normalizedOrigins, [a, b, r]);
+
+        // Local now clicks Save and syncs -> BOTH local and cloud MUST become [M,A,B,R]!
+        final saveBtn = find.byKey(const Key('danmu-save-server-btn'));
+        await tester.ensureVisible(saveBtn);
+        await tester.tap(saveBtn);
+        await tester.pumpAndSettle();
+        await sLocal.syncWithWebdav(client: client);
+        await tester.pumpAndSettle();
+
+        expect((await DanmuPrefs.load()).normalizedOrigins, [m, a, b, r]);
+        expect(cloudDoc.urls, [m, a, b, r]);
+
+        // Peer pulls from cloud -> [M,A,B,R], and re-pulling on BOTH ends stays [M,A,B,R]!
+        await sPeer.syncWithWebdav(client: client);
+        expect((await DanmuPrefs.load(prefs: peerPrefs)).normalizedOrigins, [m, a, b, r]);
+
+        await sLocal.syncWithWebdav(client: client);
+        await sPeer.syncWithWebdav(client: client);
+        final localFinal = (await DanmuPrefs.load()).normalizedOrigins;
+        final peerFinal = (await DanmuPrefs.load(prefs: peerPrefs)).normalizedOrigins;
+        expect(localFinal, [m, a, b, r]);
+        expect(peerFinal, [m, a, b, r]);
+        expect(cloudDoc.urls, [m, a, b, r]);
+        debugPrint(
+          'P2_HEAD_INSERT: local=$localFinal peer=$peerFinal cloud=${cloudDoc.urls}',
+        );
+      },
+    );
+
+    testWidgets(
+      'P3 Manual Hide vs Auto-Hide on 900x600 ASS: start, mid, and end frames stay lifted until fade-out completes with zero bar overlap',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      timeout: const Timeout(Duration(seconds: 25)),
+      (tester) async {
+        final hasRealFont = artifactsDirPath.isNotEmpty
+            ? (await tester.runAsync(_tryLoadVerificationSystemFont) ?? false)
+            : false;
+        tester.view.physicalSize = const Size(900, 600);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        const winChannel = MethodChannel('window_manager');
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(winChannel, (call) async {
+          if (call.method == 'isFullScreen') return false;
+          return null;
+        });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(winChannel, null);
+        });
+
+        final storage = await initTestStorage(
+          initialPrefs: const <String, Object>{
+            OnboardingPrefs.playHintDismissedKey: true,
+            OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+            StorageService.keyDefaultAspectMode: 'contain',
+          },
+        );
+        final player = _Round3FakePlayer();
+        player.stateImpl.durationValue = const Duration(seconds: 5);
+        addTearDown(player.dispose);
+
+        final assTrack = SubtitleTrack(
+          '2',
+          '特效 ASS 字幕（顶部标识+底部双行）',
+          'zh',
+          codec: 'ass',
+        );
+        player.setActiveSubtitleTrack(
+          assTrack,
+          available: [SubtitleTrack.auto(), SubtitleTrack.no(), assTrack],
+        );
+
+        final videoFrameNotifier = ValueNotifier<ui.Image?>(null);
+        addTearDown(() {
+          videoFrameNotifier.value?.dispose();
+          videoFrameNotifier.dispose();
+        });
+
+        String? loadedFrameName;
+        Future<void> syncMpvFrameToCurrentSubPos() async {
+          if (mpvFramesDirPath.isEmpty) return;
+          final subPos = int.tryParse(player.platformImpl.properties['sub-pos'] ?? '100') ?? 100;
+          final target = subPos < 100 ? 'mpv_ass_lifted_narrow.png' : 'mpv_ass_pos100.png';
+          if (loadedFrameName == target) return;
+          final f = File('$mpvFramesDirPath/$target');
+          if (!f.existsSync()) return;
+          final bytes = f.readAsBytesSync();
+          final decoded = await tester.runAsync(() => decodeImageFromList(bytes));
+          final prev = videoFrameNotifier.value;
+          videoFrameNotifier.value = decoded;
+          loadedFrameName = target;
+          await tester.pump();
+          prev?.dispose();
+        }
+
+        final boundaryKey = GlobalKey();
+        final subDir = Directory.systemTemp.createTempSync('marco_p3_manual_');
+        addTearDown(() => subDir.deleteSync(recursive: true));
+        final dummyMkv = File('${subDir.path}/subtitle_verify.mkv')
+          ..writeAsBytesSync(const [0, 1, 2, 3]);
+
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: boundaryKey,
+            child: MaterialApp(
+              debugShowCheckedModeBanner: false,
+              theme: ThemeData(
+                brightness: Brightness.dark,
+                platform: TargetPlatform.macOS,
+                fontFamily: hasRealFont ? 'VerifyFont' : null,
+                useMaterial3: true,
+              ),
+              home: PlayerScreen(
+                site: const CmsSite(
+                  key: 'local_mkv',
+                  name: '本地片源',
+                  type: 1,
+                  api: 'https://local.invalid/api',
+                ),
+                video: CmsVideo(
+                  id: 'p3_manual_hide',
+                  title: 'MKV 字幕手动收起对照',
+                  lines: [
+                    CmsLine(
+                      name: 'MKV主线',
+                      episodes: [
+                        CmsEpisode(
+                          name: 'S02E10 字幕实测',
+                          url: Uri.file(dummyMkv.path).toString(),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                initialLineIndex: 0,
+                initialEpisodeIndex: 0,
+                storage: storage,
+                debugPlayer: player,
+                debugHudPrefs: PlayerHudPrefs.inMemory(isDesktop: true),
+                debugOnboardingPrefs: OnboardingPrefs(
+                  _IsolatedSharedPreferences(const <String, Object>{
+                    OnboardingPrefs.playHintDismissedKey: true,
+                    OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+                  }),
+                ),
+                debugDanmuSettings: const DanmuSettings(enabled: false),
+                debugVideoSurface: ValueListenableBuilder<ui.Image?>(
+                  valueListenable: videoFrameNotifier,
+                  builder: (_, image, __) {
+                    if (image != null) {
+                      return ColoredBox(
+                        color: Colors.black,
+                        child: SizedBox.expand(
+                          child: ClipRect(
+                            child: FittedBox(
+                              fit: BoxFit.contain,
+                              child: RawImage(image: image),
+                            ),
+                          ),
+                        ),
+                      );
+                    }
+                    return const ColoredBox(color: Color(0xFF102030));
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+        await syncMpvFrameToCurrentSubPos();
+
+        double? readHudOpacity() {
+          final hudFinder = find.byKey(const Key('player-hud-animated-visibility'));
+          if (hudFinder.evaluate().isEmpty) return null;
+          final fadeFinder = find.descendant(
+            of: hudFinder,
+            matching: find.byType(FadeTransition),
+          );
+          if (fadeFinder.evaluate().isEmpty) return null;
+          return tester.widget<FadeTransition>(fadeFinder.first).opacity.value;
+        }
+
+        int readSubPos() =>
+            int.tryParse(player.platformImpl.properties['sub-pos'] ?? '100') ?? 100;
+
+        Future<void> captureFrame(String fileName) async {
+          if (artifactsDirPath.isEmpty) return;
+          await syncMpvFrameToCurrentSubPos();
+          await _captureRepaintBoundaryPng(
+            tester,
+            boundaryKey,
+            File('$artifactsDirPath/$fileName'),
+          );
+        }
+
+        Future<Map<String, ({int subPos, double? opacity, bool hudMounted})>>
+            sampleFadeOut(String label) async {
+          ({int subPos, double? opacity, bool hudMounted})? startSnap;
+          ({int subPos, double? opacity, bool hudMounted})? midSnap;
+          ({int subPos, double? opacity, bool hudMounted})? endSnap;
+
+          // Sample start (t=0ms) immediately when fade-out begins.
+          final startOpacity = readHudOpacity();
+          final startSubPos = readSubPos();
+          final startMounted =
+              find.byKey(const Key('desktop-player-hud')).evaluate().isNotEmpty;
+          startSnap = (
+            subPos: startSubPos,
+            opacity: startOpacity,
+            hudMounted: startMounted,
+          );
+          await captureFrame('subtitle_ass_narrow_900x600_${label}_1_start.png');
+
+          expect(startMounted, isTrue, reason: '$label start: bottom HUD still visible');
+          expect(startOpacity, closeTo(1.0, 0.05), reason: '$label start: HUD opacity ~1.0');
+          expect(startSubPos, 89, reason: '$label start: ASS must stay lifted (sub-pos=89), not dropped!');
+
+          var elapsed = 0;
+          var overlapFrames = 0;
+          while (elapsed < 320) {
+            await tester.pump(const Duration(milliseconds: 16));
+            elapsed += 16;
+            final mounted =
+                find.byKey(const Key('desktop-player-hud')).evaluate().isNotEmpty;
+            final op = readHudOpacity();
+            final sp = readSubPos();
+            if (mounted && (op ?? 0.0) > 0.01 && sp >= 100) {
+              overlapFrames++;
+            }
+            if (elapsed == 96) {
+              midSnap = (subPos: sp, opacity: op, hudMounted: mounted);
+              await captureFrame('subtitle_ass_narrow_900x600_${label}_2_mid.png');
+              expect(mounted, isTrue, reason: '$label mid (96ms): HUD still fading');
+              expect(op, isNotNull);
+              expect(op!, greaterThan(0.05), reason: '$label mid (96ms): opacity > 0');
+              expect(op, lessThan(0.95), reason: '$label mid (96ms): opacity < 1');
+              expect(sp, 89, reason: '$label mid (96ms): ASS must stay lifted (sub-pos=89)');
+            }
+            if (elapsed == 240) {
+              endSnap = (subPos: sp, opacity: op, hudMounted: mounted);
+              await captureFrame('subtitle_ass_narrow_900x600_${label}_3_end.png');
+              expect(mounted, isFalse, reason: '$label end (240ms): HUD unmounted');
+              expect(sp, 100, reason: '$label end (240ms): ASS restored to baseline (100)');
+            }
+          }
+          expect(overlapFrames, 0, reason: '$label must have 0 overlap frames across fade-out');
+          return {'start': startSnap, 'mid': midSnap!, 'end': endSnap!};
+        }
+
+        // --- A. Manual Hide: click blank center of 900x600 window ---
+        expect(find.byKey(const Key('desktop-player-hud')), findsOneWidget);
+        expect(readSubPos(), 89);
+        await tester.tapAt(const Offset(450, 260));
+        // Advance exactly past the 260ms single-tap settlement window so
+        // ToggleControlsEvent fires and starts manual fade-out on frame 1.
+        await tester.pump(const Duration(milliseconds: 265));
+        final manualTrace = await sampleFadeOut('manual');
+
+        // Wake controls again with another blank tap, wait for full reveal.
+        await tester.tapAt(const Offset(450, 260));
+        await tester.pump(const Duration(milliseconds: 265));
+        await tester.pump(const Duration(milliseconds: 240));
+        expect(find.byKey(const Key('desktop-player-hud')), findsOneWidget);
+        expect(readSubPos(), 89);
+
+        // --- B. Auto-Hide comparison: wait for 2200ms idle hide trigger ---
+        // (240ms already elapsed since _scheduleHide(), so 1965ms triggers fade-out!)
+        await tester.pump(const Duration(milliseconds: 1965));
+        final autoTrace = await sampleFadeOut('auto');
+
+        expect(manualTrace['start']!.subPos, autoTrace['start']!.subPos);
+        expect(manualTrace['mid']!.subPos, autoTrace['mid']!.subPos);
+        expect(manualTrace['end']!.subPos, autoTrace['end']!.subPos);
+        debugPrint(
+          'P3_TRANSITION_COMPARE: '
+          'manual(start=${manualTrace['start']!.subPos}/${manualTrace['start']!.opacity?.toStringAsFixed(2)}, '
+          'mid=${manualTrace['mid']!.subPos}/${manualTrace['mid']!.opacity?.toStringAsFixed(2)}, '
+          'end=${manualTrace['end']!.subPos}/mounted=${manualTrace['end']!.hudMounted}) '
+          'vs auto(start=${autoTrace['start']!.subPos}/${autoTrace['start']!.opacity?.toStringAsFixed(2)}, '
+          'mid=${autoTrace['mid']!.subPos}/${autoTrace['mid']!.opacity?.toStringAsFixed(2)}, '
+          'end=${autoTrace['end']!.subPos}/mounted=${autoTrace['end']!.hudMounted})',
+        );
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 450));
+      },
+    );
+  });
 }

@@ -497,23 +497,45 @@ class DanmuSourceSyncMerger {
     final mergedEntries = <DanmuSyncSourceEntry>[];
     final seen = <String>{};
 
-    void addUrl(String url) {
+    void addUrl(String url, {int? insertAt}) {
       if (mergedEntries.length >= DandanplayProvider.maxServers) return;
       if (!seen.add(url)) return;
       final reqAuth = (localByUrl[url]?.requiresAuth ?? false) ||
           (remoteByUrl[url]?.requiresAuth ?? false);
-      mergedEntries.add(DanmuSyncSourceEntry(url: url, requiresAuth: reqAuth));
+      final entry = DanmuSyncSourceEntry(url: url, requiresAuth: reqAuth);
+      if (insertAt != null &&
+          insertAt >= 0 &&
+          insertAt <= mergedEntries.length) {
+        mergedEntries.insert(insertAt, entry);
+      } else {
+        mergedEntries.add(entry);
+      }
     }
 
     for (final entry in primary.sources) {
       if (deletedBySecondary.contains(entry.url)) continue;
       addUrl(entry.url);
     }
-    for (final entry in secondary.sources) {
-      if (addedBySecondary.contains(entry.url) ||
-          !baseUrls.contains(entry.url)) {
-        addUrl(entry.url);
+    for (int i = 0; i < secondary.sources.length; i++) {
+      final url = secondary.sources[i].url;
+      if (seen.contains(url)) continue;
+      if (!addedBySecondary.contains(url) && baseUrls.contains(url)) continue;
+      // Preserve positional intent of secondary additions (e.g. inserting a
+      // primary source `M` at index 0 before `A` -> `[M, A, B, R]` rather than
+      // blindly appending `[A, B, R, M]`) by anchoring before the earliest
+      // surviving `base` entry that follows `url` in `secondary`.
+      int? insertAt;
+      if (baseUrls.isNotEmpty) {
+        for (int j = i + 1; j < secondary.sources.length; j++) {
+          final anchorUrl = secondary.sources[j].url;
+          if (!baseUrls.contains(anchorUrl)) continue;
+          final idx = mergedEntries.indexWhere((e) => e.url == anchorUrl);
+          if (idx >= 0 && (insertAt == null || idx < insertAt)) {
+            insertAt = idx;
+          }
+        }
       }
+      addUrl(url, insertAt: insertAt);
     }
 
     final mergedDoc = DanmuSourceSyncDocument(

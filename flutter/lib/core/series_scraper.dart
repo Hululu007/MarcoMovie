@@ -747,6 +747,13 @@ class SeriesScraper {
         )
         .replaceAll(
           RegExp(
+            r'(?:^|[\s·\-—:：_]+)(?:Season[\s._\-]*0*\d{1,2}|[Ss]0*\d{1,2})(?=$|[\s·\-—:：_\(（\[【])',
+            caseSensitive: false,
+          ),
+          '',
+        )
+        .replaceAll(
+          RegExp(
             r'(?<![A-Za-z0-9])(?:4K|2160[pP]|1080[pP]|720[pP]|HD|BD|HDR|SDR|TC|TS)(?![A-Za-z0-9])',
             caseSensitive: false,
           ),
@@ -2343,17 +2350,58 @@ class SeriesScraper {
     );
   }
 
+  static final RegExp _derivativeWorkMarkerRe = RegExp(
+    r'外传|番外|前传|后传|后篇|剧场版|特别篇|总集篇|电影版|'
+    r'(?<![A-Za-z])(?:OVA|OAD|SP|Movie|Spin-?off|Side\s*Story|Gaiden|Another\s*Story|Extra)(?![A-Za-z])',
+    caseSensitive: false,
+  );
+
+  /// Returns true ONLY when [titleA] and [titleB] identify the same work
+  /// (after normalizing season/year/quality clutter and Roman sequel numerals).
+  ///
+  /// Substring containment (e.g. `山中之花` vs `山中之花外传`) is NEVER treated as
+  /// equivalent, even when season and episode numbers match.
+  static bool areWorkTitlesEquivalent(
+    String titleA,
+    String titleB, {
+    int? seasonNumber,
+  }) {
+    final derivA = _derivativeWorkMarkerRe.hasMatch(titleA);
+    final derivB = _derivativeWorkMarkerRe.hasMatch(titleB);
+    if (derivA != derivB) return false;
+    final coreA = normalizeWorkCoreTitle(titleA);
+    final coreB = normalizeWorkCoreTitle(titleB);
+    if (coreA.isEmpty || coreB.isEmpty) return false;
+    if (coreA == coreB) return true;
+    // Allow ONLY an exact trailing sequel numeral matching the SAME confirmed
+    // season > 1 (e.g. `山中之花` + S02 vs `山中之花2` / `山中之花Ⅱ`).
+    if (seasonNumber != null && seasonNumber > 1) {
+      final s = seasonNumber.toString();
+      if (coreA == '$coreB$s' || coreB == '$coreA$s') {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// Returns true if [a] and [b] agree on work identity (or at least one side
   /// lacks a recognized work title). Prevents line switches from jumping into
-  /// a different series that happens to share the same `S02E10` marker.
+  /// a different series or spin-off that happens to share the same `S02E10`.
   static bool areWorkTitlesCompatible(
     ScrapedEpisodeInfo a,
     ScrapedEpisodeInfo b,
   ) {
-    final coreA = normalizeWorkCoreTitle(a.recognizedWorkTitle);
-    final coreB = normalizeWorkCoreTitle(b.recognizedWorkTitle);
+    final rawA = a.recognizedWorkTitle.trim();
+    final rawB = b.recognizedWorkTitle.trim();
+    final coreA = normalizeWorkCoreTitle(rawA);
+    final coreB = normalizeWorkCoreTitle(rawB);
     if (coreA.isEmpty || coreB.isEmpty) return true;
-    return coreA == coreB || coreA.contains(coreB) || coreB.contains(coreA);
+    final commonSeason = (a.seasonNumber != null &&
+            b.seasonNumber != null &&
+            a.seasonNumber == b.seasonNumber)
+        ? a.seasonNumber
+        : (a.seasonNumber ?? b.seasonNumber);
+    return areWorkTitlesEquivalent(rawA, rawB, seasonNumber: commonSeason);
   }
 
   /// Matches the currently playing episode from [sourceInfo] onto [targetScrape]

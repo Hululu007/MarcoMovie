@@ -3114,7 +3114,56 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!_playerFocusNode.hasFocus) {
       _playerFocusNode.requestFocus();
     }
+    _hideTimer?.cancel();
     _hudUnmountTimer?.cancel();
+    if (_usesDesktopSubtitleHudLayout) {
+      if (_controlsVisible && !_hudFadingOut) {
+        final reduceMotion = MediaQuery.disableAnimationsOf(context);
+        if (reduceMotion) {
+          setState(() {
+            _hudFadingOut = false;
+            _hudAutoHidden = true;
+            _controlsVisible = false;
+          });
+          _syncMobileSystemBars();
+          if (_desktop) _restorePlayerFocusIfCurrent();
+          return;
+        }
+        // Match the auto-hide fade-out state machine so bottom subtitles stay
+        // lifted throughout the 180ms fade-out and only return to the bottom
+        // baseline after the bottom controls have completely faded & unmounted.
+        setState(() {
+          _hudFadingOut = true;
+          _hudAutoHidden = false;
+        });
+        _hudUnmountTimer = Timer(const Duration(milliseconds: 190), () {
+          if (mounted &&
+              _hudFadingOut &&
+              !_screenLocked &&
+              !_isSliderDragging &&
+              !_hasActivePlayerOverlay) {
+            setState(() {
+              _hudFadingOut = false;
+              _hudAutoHidden = true;
+              _controlsVisible = false;
+            });
+            _syncMobileSystemBars();
+            if (_desktop) {
+              _restorePlayerFocusIfCurrent();
+            }
+          }
+        });
+        return;
+      }
+      setState(() {
+        _hudFadingOut = false;
+        _hudAutoHidden = false;
+        _controlsVisible = true;
+      });
+      _syncMobileSystemBars();
+      _scheduleHide();
+      return;
+    }
     setState(() {
       _hudFadingOut = false;
       _hudAutoHidden = false;
@@ -3128,7 +3177,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final dist = delta.distance;
     if (!_desktop || dist <= 0.001) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final hidden = _screenLocked ? !_lockButtonVisible : !_controlsVisible;
+    final hidden = _screenLocked
+        ? !_lockButtonVisible
+        : (!_controlsVisible || _hudFadingOut);
     if (hidden) {
       if (_pointerWakeWindowStartMs == 0 ||
           now - _pointerWakeLastEventMs > 350 ||
@@ -3161,8 +3212,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       return;
     }
-    if (!_controlsVisible) {
-      setState(() => _controlsVisible = true);
+    if (!_controlsVisible || _hudFadingOut) {
+      _hudUnmountTimer?.cancel();
+      setState(() {
+        _hudFadingOut = false;
+        _hudAutoHidden = false;
+        _controlsVisible = true;
+      });
       _lastPointerScheduleMs = now;
       _restorePlayerFocusIfCurrent();
       _scheduleHide();

@@ -201,9 +201,13 @@ class DandanplayProvider implements DanmuProvider {
     final normA = SeriesScraper.normalizeWorkCoreTitle(candidate.animeTitle);
     if (normQ.isNotEmpty) {
       if (normA.isEmpty) return false;
-      final titleMatches =
-          normA == normQ || normA.contains(normQ) || normQ.contains(normA);
-      if (!titleMatches) return false;
+      if (!SeriesScraper.areWorkTitlesEquivalent(
+        query.title,
+        candidate.animeTitle,
+        seasonNumber: query.seasonNumber,
+      )) {
+        return false;
+      }
     }
     if (query.episodeIndex > 0) {
       final epText = candidate.episodeTitle.trim();
@@ -819,6 +823,7 @@ class DandanplayProvider implements DanmuProvider {
     }
 
     bool titleUnrelated = false;
+    bool titleNotExactWork = false;
     bool missingIdentityEvidence = false;
     final normQ = SeriesScraper.normalizeWorkCoreTitle(query.title);
     final normA = SeriesScraper.normalizeWorkCoreTitle(animeTitle);
@@ -829,18 +834,23 @@ class DandanplayProvider implements DanmuProvider {
         missingIdentityEvidence = true;
       }
     } else if (normQ.isNotEmpty && normA.isNotEmpty) {
-      if (normA == normQ) {
+      if (SeriesScraper.areWorkTitlesEquivalent(
+        query.title,
+        animeTitle,
+        seasonNumber: query.seasonNumber,
+      )) {
         score += 0.14;
       } else if (normA.contains(normQ) || normQ.contains(normA)) {
-        final bareRootHijack = normQ.length >= 6 &&
-            normA.length <= 4 &&
-            RegExp(r'\d').hasMatch(normQ) &&
-            !RegExp(r'\d').hasMatch(normA);
-        score += bareRootHijack ? -0.22 : 0.06;
+        // Substring/prefix containment (e.g. `山中之花` vs `山中之花外传`) is
+        // NOT sufficient to auto-identify the same work even with identical
+        // season & episode: keep as a candidate for explicit user choice only.
+        titleNotExactWork = true;
+        score -= 0.18;
       } else {
         final overlap = _titleOverlapRatio(normQ, normA);
         if (overlap >= 0.35) {
-          score -= 0.10;
+          titleNotExactWork = true;
+          score -= 0.22;
         } else {
           titleUnrelated = true;
           score -= 0.45;
@@ -924,6 +934,13 @@ class DandanplayProvider implements DanmuProvider {
       // Non-exact candidates missing positive work or episode-number identity
       // stay candidate-only (strictly below autoBindMinConfidence).
       return math.min(score, 0.36).clamp(0.05, 0.36);
+    }
+    if (titleNotExactWork) {
+      // Substring-contained or partially overlapping titles (e.g. spin-off
+      // `山中之花外传` when playing main work `山中之花`) must never auto-bind
+      // even when season & episode match; leave strictly below
+      // autoBindMinConfidence (0.55) for explicit user choice.
+      return math.min(score, 0.44).clamp(0.05, 0.44);
     }
     if (titleUnrelated) {
       // Unrelated work returning the same season/episode must stay candidate-only
