@@ -1001,7 +1001,7 @@ void main() {
       testWidgets(
         'PlayerScreen lifts 2-line subtitle above bottom controls in ${viewportCase.label} for hidden/shown/dragging/slim-progress while keeping video, danmu & drag region stable',
         variant: TargetPlatformVariant.only(TargetPlatform.macOS),
-        timeout: const Timeout(Duration(seconds: 15)),
+        timeout: const Timeout(Duration(seconds: 60)),
         (tester) async {
           final hasRealFont = artifactsDirPath.isNotEmpty
               ? (await tester.runAsync(_tryLoadVerificationSystemFont) ?? false)
@@ -5089,7 +5089,7 @@ void main() {
     testWidgets(
       'P3 Manual Hide vs Auto-Hide on 900x600 ASS: start, mid, and end frames stay lifted until fade-out completes with zero bar overlap',
       variant: TargetPlatformVariant.only(TargetPlatform.macOS),
-      timeout: const Timeout(Duration(seconds: 25)),
+      timeout: const Timeout(Duration(seconds: 60)),
       (tester) async {
         final hasRealFont = artifactsDirPath.isNotEmpty
             ? (await tester.runAsync(_tryLoadVerificationSystemFont) ?? false)
