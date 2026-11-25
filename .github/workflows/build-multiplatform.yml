@@ -354,7 +354,7 @@ jobs:
           flutter analyze --no-fatal-infos --no-fatal-warnings
           cmake -S packages/quickjs_engine/native -B packages/quickjs_engine/native/build -DCMAKE_BUILD_TYPE=Release
           cmake --build packages/quickjs_engine/native/build --parallel 4
-          flutter test
+          flutter test -j 2
           VERSION=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['macos']['versionName'])")
           BUILD_NUM=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['macos']['buildNumber'])")
           flutter build macos --release --build-name="$VERSION" --build-number="$BUILD_NUM"
