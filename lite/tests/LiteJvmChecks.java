@@ -118,6 +118,9 @@ public final class LiteJvmChecks {
         int round3Checks = checks - baselineChecks - round1Checks - round2Checks;
         test059Round4Regressions();
         int round4Checks = checks - baselineChecks - round1Checks - round2Checks - round3Checks;
+        test0510OfficialNoticeAndContactRegressions();
+        int v0510Checks =
+                checks - baselineChecks - round1Checks - round2Checks - round3Checks - round4Checks;
         int addedChecks = checks - baselineChecks;
         System.out.println(
                 "PASS "
@@ -126,7 +129,7 @@ public final class LiteJvmChecks {
                         + baselineChecks
                         + " baseline + "
                         + addedChecks
-                        + " new 0.5.9 regressions ["
+                        + " new regressions ["
                         + round1Checks
                         + " R1-stage + "
                         + round2Checks
@@ -134,7 +137,9 @@ public final class LiteJvmChecks {
                         + round3Checks
                         + " R3-rework + "
                         + round4Checks
-                        + " R4-rework]; 0 failed, 0 skipped)");
+                        + " R4-rework + "
+                        + v0510Checks
+                        + " v0.5.10]; 0 failed, 0 skipped)");
     }
 
     private static void testResolveWebdavFileUrlMatrix() throws Exception {
@@ -5138,5 +5143,25 @@ public final class LiteJvmChecks {
                         && legacyBareShortTokenNoMeta == 0
                         && globalConflictWithMeta == 0,
                 "R4-2e: Legacy 0.5.8 global HTTP resume still works (14500ms) while ambiguous/conflicting short token global resume returns 0");
+    }
+
+    private static void test0510OfficialNoticeAndContactRegressions() {
+        check(
+                "PILIPALA来信（小红书、B站、抖音、公众号、视频号）".equals(LiteActivity.AUTHOR_SOCIAL_DISPLAY)
+                        && "marcotv.wlj9919.top".equals(LiteActivity.OFFICIAL_SITE_DISPLAY)
+                        && "https://marcotv.wlj9919.top".equals(LiteActivity.OFFICIAL_SITE_URL)
+                        && "https://marcotv.wlj9919.top/movie/#group"
+                                .equals(LiteActivity.OFFICIAL_GROUP_URL)
+                        && LiteActivity.OFFICIAL_NOTICE_MESSAGE.contains(
+                                "PILIPALA来信（小红书、B站、抖音、公众号、视频号）")
+                        && LiteActivity.OFFICIAL_NOTICE_MESSAGE.contains("Marco官网：marcotv.wlj9919.top")
+                        && LiteActivity.OFFICIAL_NOTICE_MESSAGE.contains(
+                                "下载软件请认准官网地址，以防不明渠道软件添加病毒等不良内容。"),
+                "0.5.10-1: Official notice copy and author/website/group links match exact requirements");
+        check(
+                LiteActivity.shouldShowFirstLaunchOfficialNotice(false)
+                        && !LiteActivity.shouldShowFirstLaunchOfficialNotice(true)
+                        && LiteActivity.PREF_OFFICIAL_NOTICE_SEEN.length() > 0,
+                "0.5.10-2: First-launch official notice shows only before user acknowledgment");
     }
 }
