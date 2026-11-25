@@ -4459,6 +4459,38 @@ class PosterLoader {
     }
   }
 
+  @visibleForTesting
+  static void seedLandscapeMemoryForTest(
+    String rawTitle,
+    Uint8List bytes, {
+    String year = '',
+    bool? wantMotionComic,
+    String preferredBackdropUrl = '',
+    String preferredDoubanId = '',
+  }) {
+    final pref = upgradeUrlToHd(preferredBackdropUrl);
+    if (pref.isNotEmpty) {
+      _remember('landscape_url:$pref', bytes);
+    }
+    final prefDouban = preferredDoubanId.trim();
+    if (prefDouban.isNotEmpty) {
+      _remember('landscape_douban:$prefDouban', bytes);
+    }
+    final clean = _cleanTitle(rawTitle);
+    if (clean.isNotEmpty) {
+      final wantMc = wantMotionComic ?? _isMotionComicTitle(rawTitle);
+      final scoped = _scopedTitleToken(
+        clean,
+        _extractTargetYear(rawTitle, year),
+        isMotionComic: wantMc,
+      );
+      if (scoped.isNotEmpty) {
+        _remember('landscape:$scoped', bytes);
+      }
+      _remember('landscape:$clean', bytes);
+    }
+  }
+
   static void _remember(String key, Uint8List bytes) {
     if (key.isEmpty) return;
     final old = _memory.remove(key);

@@ -41,6 +41,12 @@ class DandanplayProvider implements DanmuProvider {
   static const int maxTextLength = 180;
   static const String boundUriPrefix = 'mmdanmu://v1?';
 
+  /// Minimum candidate confidence required for automatic episode binding.
+  /// Mismatched episodes (including neighbor episodes like E09/E11 for E10)
+  /// and mismatched seasons (e.g. S01E10 for S02E10) are capped strictly below
+  /// this threshold so they stay available for explicit user choice.
+  static const double autoBindMinConfidence = 0.55;
+
   final List<String> configuredOrigins;
   final Set<String> _originWhitelist;
   final String appId;
@@ -52,10 +58,42 @@ class DandanplayProvider implements DanmuProvider {
   final bool _ownsClient;
   final Map<String, int> _domainNextAllowedMs = <String, int>{};
 
+  /// Origins restored from cloud sync that have NOT yet been explicitly
+  /// authorized on this device to receive local `appId`/`appSecret`.
+  /// Kept in sync by [DanmuPrefs] so even providers instantiated directly with
+  /// saved global credentials never leak `X-AppId`/`X-Signature` to unapproved
+  /// cloud-restored endpoints.
+  static final Set<String> _locallyUnauthorizedCredentialOrigins = <String>{};
+
+  static void setLocallyUnauthorizedCredentialOrigins(
+    Iterable<String> origins,
+  ) {
+    _locallyUnauthorizedCredentialOrigins
+      ..clear()
+      ..addAll(origins.map(normalizeOriginOrNull).whereType<String>());
+  }
+
+  static void markOriginAuthorizedForLocalCredentials(String origin) {
+    final norm = normalizeOriginOrNull(origin);
+    if (norm != null) {
+      _locallyUnauthorizedCredentialOrigins.remove(norm);
+    }
+  }
+
+  static void markOriginUnauthorizedForLocalCredentials(String origin) {
+    final norm = normalizeOriginOrNull(origin);
+    if (norm != null) {
+      _locallyUnauthorizedCredentialOrigins.add(norm);
+    }
+  }
+
+  final Set<String>? authorizedCredentialOrigins;
+
   factory DandanplayProvider({
     String multilineServerUrls = defaultServerUrls,
     String appId = '',
     String appSecret = '',
+    Set<String>? authorizedCredentialOrigins,
     int maxConcurrency = defaultMaxConcurrency,
     int minRequestIntervalMs = defaultMinRequestIntervalMs,
     http.Client? client,
@@ -72,6 +110,13 @@ class DandanplayProvider implements DanmuProvider {
       multilineServerUrls: multilineServerUrls,
       appId: appId,
       appSecret: appSecret,
+      authorizedCredentialOrigins: authorizedCredentialOrigins == null
+          ? null
+          : Set<String>.unmodifiable(
+              authorizedCredentialOrigins
+                  .map(normalizeOriginOrNull)
+                  .whereType<String>(),
+            ),
       maxConcurrency: maxConcurrency,
       minRequestIntervalMs: minRequestIntervalMs,
       client: resolvedClient,
@@ -84,6 +129,7 @@ class DandanplayProvider implements DanmuProvider {
     required String multilineServerUrls,
     required String appId,
     required String appSecret,
+    required this.authorizedCredentialOrigins,
     required int maxConcurrency,
     required int minRequestIntervalMs,
     required http.Client client,
@@ -99,6 +145,186 @@ class DandanplayProvider implements DanmuProvider {
         _client = client,
         _ownedIoHttpClient = ownedIoHttpClient,
         _ownsClient = ownsClient;
+
+  bool _shouldSignOrigin(String originKey) {
+    if (appId.isEmpty || appSecret.isEmpty) return false;
+    final explicit = authorizedCredentialOrigins;
+    if (explicit != null) {
+      return explicit.contains(originKey);
+    }
+    return !_locallyUnauthorizedCredentialOrigins.contains(originKey);
+  }
+
+  String? _resolveMatchingConfiguredOrigin(
+    Uri targetUri,
+    String fallbackOriginKey,
+  ) {
+    if (targetUri.host.isEmpty) return null;
+    final scheme = targetUri.scheme.toLowerCase();
+    final host = targetUri.host.toLowerCase();
+    final port = _effectivePort(scheme, targetUri.hasPort ? targetUri.port : -1);
+    final path = targetUri.path;
+    final candidates = <String>{
+      ..._originWhitelist,
+      if (fallbackOriginKey.isNotEmpty) fallbackOriginKey,
+    };
+    String? bestMatch;
+    int bestPathLen = -1;
+    for (final origin in candidates) {
+      if (!_matchesOrigin(origin, scheme, host, port)) continue;
+      final oPath = Uri.parse(origin).path;
+      final pathMatches = oPath.isEmpty ||
+          path == oPath ||
+          path.startsWith('$oPath/');
+      if (!pathMatches) continue;
+      if (oPath.length > bestPathLen) {
+        bestPathLen = oPath.length;
+        bestMatch = origin;
+      }
+    }
+    return bestMatch;
+  }
+
+  bool _shouldSignRequestUri(Uri targetUri, String fallbackOriginKey) {
+    if (appId.isEmpty || appSecret.isEmpty) return false;
+    final effectiveOrigin =
+        _resolveMatchingConfiguredOrigin(targetUri, fallbackOriginKey);
+    if (effectiveOrigin == null) return false;
+    return _shouldSignOrigin(effectiveOrigin);
+  }
+
+  static bool _hasConfirmedFullIdentity(
+    DanmuCandidate candidate,
+    DanmuMatchQuery query,
+  ) {
+    final normQ = SeriesScraper.normalizeWorkCoreTitle(query.title);
+    final normA = SeriesScraper.normalizeWorkCoreTitle(candidate.animeTitle);
+    if (normQ.isNotEmpty) {
+      if (normA.isEmpty) return false;
+      if (!SeriesScraper.areWorkTitlesEquivalent(
+        query.title,
+        candidate.animeTitle,
+        seasonNumber: query.seasonNumber,
+      )) {
+        return false;
+      }
+    }
+    if (query.episodeIndex > 0) {
+      final epText = candidate.episodeTitle.trim();
+      if (epText.isEmpty) return false;
+      final scraped = SeriesScraper.scrapeEpisodeName(
+        epText,
+        seriesTitle: candidate.animeTitle,
+      );
+      if (scraped.isSpecial ||
+          scraped.resolvedEpisodeNumber != query.episodeIndex) {
+        return false;
+      }
+    }
+    final reqSeason = query.seasonNumber;
+    if (reqSeason != null && reqSeason > 0) {
+      final candSeason =
+          _extractCandidateSeason(candidate.animeTitle, candidate.episodeTitle);
+      if (candSeason == reqSeason) return true;
+      if (candSeason == null && reqSeason > 1) {
+        final normalizedAnime =
+            SeriesScraper.normalizeSequelNumerals(candidate.animeTitle);
+        if (RegExp('(?<=[\\u4e00-\\u9fff])$reqSeason\\b')
+            .hasMatch(normalizedAnime)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return true;
+  }
+
+  /// Selects a unique, order-independent auto-bind candidate from [candidates].
+  ///
+  /// Returns `null` (leaving candidates in pending user selection) when:
+  /// - No candidate meets [autoBindMinConfidence], OR
+  /// - Multiple distinct candidates near the top score are ambiguous (e.g.
+  ///   both `S01E10` and `S02E10` returned by an origin when season is unknown,
+  ///   or conflicting seasons/works across top candidates).
+  ///
+  /// When [query] has a confirmed season and exactly one qualifying candidate
+  /// positively confirms the full `(work, season, episode)` identity while
+  /// another candidate omits season info (e.g. `S02E10` vs unseasoned `第10集`),
+  /// the unique fully-confirmed candidate wins cleanly.
+  static DanmuCandidate? selectUniqueAutoBindCandidate(
+    List<DanmuCandidate> candidates, {
+    required DanmuMatchQuery query,
+    List<String> preferredOrigins = const <String>[],
+  }) {
+    final qualifying = candidates
+        .where(
+          (c) =>
+              c.boundEpisodeId.trim().isNotEmpty &&
+              c.confidence >= autoBindMinConfidence,
+        )
+        .toList();
+    if (qualifying.isEmpty) return null;
+
+    var pool = qualifying;
+    if (query.seasonNumber != null && query.seasonNumber! > 0) {
+      final fullyConfirmed = qualifying
+          .where((c) => _hasConfirmedFullIdentity(c, query))
+          .toList();
+      if (fullyConfirmed.isNotEmpty) {
+        pool = fullyConfirmed;
+      }
+    }
+
+    int originRank(String origin) {
+      final idx = preferredOrigins.indexOf(origin);
+      return idx >= 0 ? idx : preferredOrigins.length + 1;
+    }
+
+    pool.sort((a, b) {
+      final confDiff = b.confidence.compareTo(a.confidence);
+      if (confDiff != 0 && (b.confidence - a.confidence).abs() >= 0.001) {
+        return confDiff;
+      }
+      final oDiff = originRank(a.sourceOrigin).compareTo(originRank(b.sourceOrigin));
+      if (oDiff != 0) return oDiff;
+      return a.boundEpisodeId.compareTo(b.boundEpisodeId);
+    });
+
+    final best = pool.first;
+    final bestSeason = _extractCandidateSeason(best.animeTitle, best.episodeTitle);
+    final bestCoreTitle = SeriesScraper.normalizeWorkCoreTitle(best.animeTitle);
+
+    const double ambiguityMargin = 0.08;
+    for (final other in pool.skip(1)) {
+      if ((best.confidence - other.confidence).abs() >= ambiguityMargin) {
+        continue;
+      }
+      if (other.boundEpisodeId == best.boundEpisodeId) {
+        continue;
+      }
+      // Multiple distinct episodes from the SAME origin tied near top score:
+      // refuse to guess based on server response ordering.
+      if (other.sourceOrigin == best.sourceOrigin) {
+        return null;
+      }
+      // Conflicting explicit seasons across top candidates (e.g. S01 vs S02):
+      final otherSeason =
+          _extractCandidateSeason(other.animeTitle, other.episodeTitle);
+      if (bestSeason != null &&
+          otherSeason != null &&
+          bestSeason != otherSeason) {
+        return null;
+      }
+      // Conflicting work titles across top candidates:
+      final otherCoreTitle = SeriesScraper.normalizeWorkCoreTitle(other.animeTitle);
+      if (bestCoreTitle.isNotEmpty &&
+          otherCoreTitle.isNotEmpty &&
+          bestCoreTitle != otherCoreTitle) {
+        return null;
+      }
+    }
+    return best;
+  }
 
   bool _closed = false;
 
@@ -417,6 +643,46 @@ class DandanplayProvider implements DanmuProvider {
     return merged;
   }
 
+  static int? _extractCandidateSeason(String animeTitle, String episodeTitle) {
+    final epScraped = SeriesScraper.scrapeEpisodeName(
+      episodeTitle,
+      seriesTitle: animeTitle,
+    );
+    if (epScraped.seasonNumber != null && epScraped.seasonNumber! > 0) {
+      return epScraped.seasonNumber;
+    }
+    final normalizedAnime = SeriesScraper.normalizeSequelNumerals(animeTitle);
+    final cnMatch = RegExp(r'第\s*([0-9一二三四五六七八九十两]+)\s*[季部]')
+        .firstMatch(normalizedAnime);
+    if (cnMatch != null) {
+      final token = cnMatch.group(1)!;
+      final parsed = int.tryParse(token) ??
+          const <String, int>{
+            '一': 1,
+            '二': 2,
+            '两': 2,
+            '三': 3,
+            '四': 4,
+            '五': 5,
+            '六': 6,
+            '七': 7,
+            '八': 8,
+            '九': 9,
+            '十': 10,
+          }[token];
+      if (parsed != null && parsed > 0 && parsed <= 99) return parsed;
+    }
+    final enMatch = RegExp(
+      r'(?:^|[^A-Za-z0-9])(?:Season[\s._\-]*0*(\d{1,2})|[Ss]0*(\d{1,2}))(?![0-9A-Za-z])',
+      caseSensitive: false,
+    ).firstMatch(normalizedAnime);
+    if (enMatch != null) {
+      final parsed = int.tryParse(enMatch.group(1) ?? enMatch.group(2) ?? '');
+      if (parsed != null && parsed > 0 && parsed <= 99) return parsed;
+    }
+    return null;
+  }
+
   List<DanmuCandidate> _rankBoundAnimeEpisodes(
     List<DanmuCandidate> eps,
     DanmuMatchQuery query,
@@ -425,7 +691,6 @@ class DandanplayProvider implements DanmuProvider {
     final targetEp = query.episodeIndex;
     if (targetEp <= 0) return eps;
     final scored = <DanmuCandidate>[];
-    int parsedCount = 0;
     for (int i = 0; i < eps.length; i++) {
       final c = eps[i];
       final scraped = SeriesScraper.scrapeEpisodeName(
@@ -433,13 +698,27 @@ class DandanplayProvider implements DanmuProvider {
         seriesTitle: c.animeTitle,
       );
       final epNum = scraped.resolvedEpisodeNumber;
-      if (epNum != null) parsedCount++;
+      final candSeason = _extractCandidateSeason(c.animeTitle, c.episodeTitle);
+      final seasonMismatch = query.seasonNumber != null &&
+          query.seasonNumber! > 0 &&
+          candSeason != null &&
+          candSeason != query.seasonNumber;
       double conf;
-      if (epNum != null && !scraped.isSpecial) {
-        conf = epNum == targetEp ? 1.0 : (epNum == targetEp - 1 || epNum == targetEp + 1 ? 0.55 : 0.25);
-      } else if (i + 1 == targetEp && parsedCount == 0) {
-        conf = 0.88;
+      if (seasonMismatch) {
+        conf = 0.22;
+      } else if (scraped.isSpecial) {
+        // Trailers / previews / SP must never auto-bind for regular episodes.
+        conf = 0.15;
+      } else if (epNum != null) {
+        // Neighbor episodes stay strictly below autoBindMinConfidence (0.55)
+        // so the player leaves selection to the user instead of silently
+        // loading the wrong episode's danmu.
+        conf = epNum == targetEp
+            ? 1.0
+            : (epNum == targetEp - 1 || epNum == targetEp + 1 ? 0.34 : 0.20);
       } else {
+        // Never auto-bind by list position when episode titles have no
+        // parseable episode number; leave as a low-confidence candidate.
         conf = 0.20;
       }
       scored.add(
@@ -454,24 +733,6 @@ class DandanplayProvider implements DanmuProvider {
       );
     }
     scored.sort((a, b) => b.confidence.compareTo(a.confidence));
-    if (scored.first.confidence >= 0.85) {
-      return scored;
-    }
-    // Positional fallback if episode titles carry no parseable numbers
-    if (parsedCount == 0 && targetEp >= 1 && targetEp <= eps.length) {
-      final exact = eps[targetEp - 1];
-      return <DanmuCandidate>[
-        DanmuCandidate(
-          sourceOrigin: exact.sourceOrigin,
-          animeId: exact.animeId,
-          animeTitle: exact.animeTitle,
-          boundEpisodeId: exact.boundEpisodeId,
-          episodeTitle: exact.episodeTitle,
-          confidence: 0.92,
-        ),
-        ...eps.where((e) => e.boundEpisodeId != exact.boundEpisodeId),
-      ];
-    }
     return scored;
   }
 
@@ -480,18 +741,29 @@ class DandanplayProvider implements DanmuProvider {
     DanmuMatchQuery query, {
     DanmuCancelToken? cancelToken,
   }) async {
-    final matched = await _tryMatchEndpoint(
-      origin,
-      query,
-      cancelToken: cancelToken,
-    );
-    final hasStrongMatch = matched.any((c) => c.confidence >= 0.55);
+    List<DanmuCandidate> matched = const <DanmuCandidate>[];
+    try {
+      matched = await _tryMatchEndpoint(
+        origin,
+        query,
+        cancelToken: cancelToken,
+      );
+    } on DanmuCancelledException {
+      rethrow;
+    } catch (_) {}
+    final hasStrongMatch =
+        matched.any((c) => c.confidence >= autoBindMinConfidence);
     if (hasStrongMatch) return matched;
-    final searched = await _trySearchEpisodesEndpoint(
-      origin,
-      query,
-      cancelToken: cancelToken,
-    );
+    List<DanmuCandidate> searched = const <DanmuCandidate>[];
+    try {
+      searched = await _trySearchEpisodesEndpoint(
+        origin,
+        query,
+        cancelToken: cancelToken,
+      );
+    } on DanmuCancelledException {
+      rethrow;
+    } catch (_) {}
     if (matched.isEmpty) return searched;
     if (searched.isEmpty) return matched;
     final seen = <String>{};
@@ -505,11 +777,41 @@ class DandanplayProvider implements DanmuProvider {
     return combined;
   }
 
+  static Set<String> _titleOverlapTokens(String normalized) {
+    final out = <String>{};
+    if (normalized.isEmpty) return out;
+    final cjk = normalized.replaceAll(RegExp(r'[^\u4e00-\u9fff]'), '');
+    if (cjk.length >= 2) {
+      for (int i = 0; i < cjk.length - 1; i++) {
+        out.add(cjk.substring(i, i + 2));
+      }
+    } else if (cjk.length == 1) {
+      out.add(cjk);
+    }
+    for (final m in RegExp(r'[a-z0-9]{2,}').allMatches(normalized)) {
+      out.add(m.group(0)!);
+    }
+    return out;
+  }
+
+  static double _titleOverlapRatio(String normQ, String normA) {
+    final qTokens = _titleOverlapTokens(normQ);
+    final aTokens = _titleOverlapTokens(normA);
+    if (qTokens.isEmpty || aTokens.isEmpty) return 0.0;
+    int overlap = 0;
+    for (final t in qTokens) {
+      if (aTokens.contains(t)) overlap++;
+    }
+    final denom = math.min(qTokens.length, aTokens.length);
+    return denom > 0 ? overlap / denom : 0.0;
+  }
+
   static double _scoreCandidate(
     DanmuMatchQuery query, {
     required String animeTitle,
     required String episodeTitle,
     required double baseConfidence,
+    bool isExactMatch = false,
   }) {
     var score = baseConfidence;
     final candIsMc = SeriesScraper.isMotionComicText(
@@ -520,34 +822,72 @@ class DandanplayProvider implements DanmuProvider {
       score += 0.08;
     }
 
+    bool titleUnrelated = false;
+    bool titleNotExactWork = false;
+    bool missingIdentityEvidence = false;
     final normQ = SeriesScraper.normalizeWorkCoreTitle(query.title);
     final normA = SeriesScraper.normalizeWorkCoreTitle(animeTitle);
-    if (normQ.isNotEmpty && normA.isNotEmpty) {
-      if (normA == normQ) {
+    if (normQ.isNotEmpty && normA.isEmpty) {
+      if (!isExactMatch) {
+        // Non-exact match supplied no work title (e.g. ID-only candidate):
+        // must never auto-bind by backfilling query metadata.
+        missingIdentityEvidence = true;
+      }
+    } else if (normQ.isNotEmpty && normA.isNotEmpty) {
+      if (SeriesScraper.areWorkTitlesEquivalent(
+        query.title,
+        animeTitle,
+        seasonNumber: query.seasonNumber,
+      )) {
         score += 0.14;
       } else if (normA.contains(normQ) || normQ.contains(normA)) {
-        final bareRootHijack = normQ.length >= 6 &&
-            normA.length <= 4 &&
-            RegExp(r'\d').hasMatch(normQ) &&
-            !RegExp(r'\d').hasMatch(normA);
-        score += bareRootHijack ? -0.22 : 0.06;
+        // Substring/prefix containment (e.g. `山中之花` vs `山中之花外传`) is
+        // NOT sufficient to auto-identify the same work even with identical
+        // season & episode: keep as a candidate for explicit user choice only.
+        titleNotExactWork = true;
+        score -= 0.18;
       } else {
-        score -= 0.14;
+        final overlap = _titleOverlapRatio(normQ, normA);
+        if (overlap >= 0.35) {
+          titleNotExactWork = true;
+          score -= 0.22;
+        } else {
+          titleUnrelated = true;
+          score -= 0.45;
+        }
       }
     }
 
-    if (query.episodeIndex > 0 && episodeTitle.trim().isNotEmpty) {
-      final scrapedEp = SeriesScraper.scrapeEpisodeName(
-        episodeTitle,
-        seriesTitle: animeTitle,
-      );
-      final epNum = scrapedEp.resolvedEpisodeNumber;
-      if (epNum != null && !scrapedEp.isSpecial) {
-        if (epNum == query.episodeIndex) {
-          score += 0.15;
-        } else {
-          score -= 0.28;
+    bool episodeMismatched = false;
+    bool seasonMismatched = false;
+
+    final scrapedEp = episodeTitle.trim().isNotEmpty
+        ? SeriesScraper.scrapeEpisodeName(
+            episodeTitle,
+            seriesTitle: animeTitle,
+          )
+        : null;
+    if (query.episodeIndex > 0) {
+      if (scrapedEp != null) {
+        final epNum = scrapedEp.resolvedEpisodeNumber;
+        if (epNum != null && !scrapedEp.isSpecial) {
+          if (epNum == query.episodeIndex) {
+            score += 0.18;
+          } else {
+            episodeMismatched = true;
+            score -= 0.35;
+          }
+        } else if (scrapedEp.isSpecial) {
+          episodeMismatched = true;
+          score -= 0.40;
+        } else if (!isExactMatch) {
+          // Non-exact candidate supplied an episode title with no parseable
+          // episode number (e.g. "重逢"): cannot prove episode identity.
+          missingIdentityEvidence = true;
         }
+      } else if (!isExactMatch) {
+        // Non-exact candidate supplied no episodeTitle at all.
+        missingIdentityEvidence = true;
       }
     }
 
@@ -555,12 +895,24 @@ class DandanplayProvider implements DanmuProvider {
     if (year.length == 4 && animeTitle.contains(year)) {
       score += 0.05;
     }
-    if (query.seasonNumber != null && query.seasonNumber! > 1) {
+    if (query.seasonNumber != null && query.seasonNumber! > 0) {
       final s = query.seasonNumber!;
-      final normalizedAnime = SeriesScraper.normalizeSequelNumerals(animeTitle);
-      if (RegExp('(?:第\\s*$s\\s*[季部]|[Ss]0?$s\\b|(?<=[\\u4e00-\\u9fff])$s\\b)')
-          .hasMatch(normalizedAnime)) {
-        score += 0.06;
+      final candSeason = _extractCandidateSeason(animeTitle, episodeTitle);
+      if (candSeason != null) {
+        if (candSeason == s) {
+          score += 0.16;
+        } else {
+          seasonMismatched = true;
+          score -= 0.45;
+        }
+      } else if (s > 1) {
+        final normalizedAnime = SeriesScraper.normalizeSequelNumerals(animeTitle);
+        if (RegExp('(?<=[\\u4e00-\\u9fff])$s\\b').hasMatch(normalizedAnime)) {
+          score += 0.10;
+        } else {
+          // Candidate has no Season N marker when Season N > 1 was requested.
+          score -= 0.14;
+        }
       }
     }
 
@@ -568,6 +920,32 @@ class DandanplayProvider implements DanmuProvider {
       // Strictly separate 动态漫画 from standard 动漫/剧集 so wrong-medium danmu
       // never beats or auto-binds over the true work (even with exact title+ep).
       return math.min(score - 0.65, 0.24).clamp(0.05, 0.24);
+    }
+    if (seasonMismatched) {
+      // Wrong-season candidates (e.g. S01E10 for S02E10) never auto-bind.
+      return math.min(score, 0.30).clamp(0.05, 0.30);
+    }
+    if (episodeMismatched) {
+      // Neighbor / wrong-episode candidates (e.g. E09/E11 for E10) never
+      // auto-bind and are surfaced for explicit user choice.
+      return math.min(score, 0.34).clamp(0.05, 0.34);
+    }
+    if (missingIdentityEvidence) {
+      // Non-exact candidates missing positive work or episode-number identity
+      // stay candidate-only (strictly below autoBindMinConfidence).
+      return math.min(score, 0.36).clamp(0.05, 0.36);
+    }
+    if (titleNotExactWork) {
+      // Substring-contained or partially overlapping titles (e.g. spin-off
+      // `山中之花外传` when playing main work `山中之花`) must never auto-bind
+      // even when season & episode match; leave strictly below
+      // autoBindMinConfidence (0.55) for explicit user choice.
+      return math.min(score, 0.44).clamp(0.05, 0.44);
+    }
+    if (titleUnrelated) {
+      // Unrelated work returning the same season/episode must stay candidate-only
+      // (strictly below autoBindMinConfidence) so the user decides explicitly.
+      return math.min(score, 0.38).clamp(0.05, 0.38);
     }
     return score.clamp(0.05, 1.0);
   }
@@ -604,9 +982,10 @@ class DandanplayProvider implements DanmuProvider {
       final epId = _stringifyId(raw['episodeId']);
       if (epId.isEmpty) continue;
       final animeId = _stringifyId(raw['animeId']);
-      final animeTitle = (raw['animeTitle']?.toString() ?? query.title).trim();
-      final epTitle =
-          (raw['episodeTitle']?.toString() ?? query.episodeTitle).trim();
+      // NEVER backfill missing animeTitle / episodeTitle from the request query:
+      // candidate identity must come strictly from the server response itself.
+      final animeTitle = (raw['animeTitle']?.toString() ?? '').trim();
+      final epTitle = (raw['episodeTitle']?.toString() ?? '').trim();
       final rawConf = raw['confidence'] is num
           ? (raw['confidence'] as num).toDouble()
           : (exact ? 0.90 : 0.78);
@@ -615,6 +994,7 @@ class DandanplayProvider implements DanmuProvider {
         animeTitle: animeTitle,
         episodeTitle: epTitle,
         baseConfidence: rawConf,
+        isExactMatch: exact,
       );
       out.add(
         DanmuCandidate(
@@ -1149,7 +1529,7 @@ class DandanplayProvider implements DanmuProvider {
         ..headers['Accept'] = 'application/json, application/xml, text/xml, */*'
         ..headers['User-Agent'] = 'MarcoMovie-Danmu/1.0';
 
-      if (appId.isNotEmpty && appSecret.isNotEmpty) {
+      if (_shouldSignRequestUri(currentUri, originKey)) {
         final ts = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         req.headers['X-AppId'] = appId;
         req.headers['X-Timestamp'] = ts.toString();
@@ -1448,7 +1828,7 @@ class DandanplayProvider implements DanmuProvider {
       final padded = query.episodeIndex < 10
           ? '0${query.episodeIndex}'
           : '${query.episodeIndex}';
-      if (query.seasonNumber != null && query.seasonNumber! > 1) {
+      if (query.seasonNumber != null && query.seasonNumber! > 0) {
         final sPad = query.seasonNumber! < 10
             ? '0${query.seasonNumber}'
             : '${query.seasonNumber}';

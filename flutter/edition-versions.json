@@ -4,8 +4,8 @@
     "buildNumber": 78
   },
   "macos": {
-    "versionName": "0.5.20",
-    "buildNumber": 70
+    "versionName": "0.6.0",
+    "buildNumber": 72
   },
   "ios": {
     "versionName": "0.7.0",

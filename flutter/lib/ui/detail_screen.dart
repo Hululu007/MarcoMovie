@@ -5,7 +5,7 @@ import 'dart:ui' show ImageFilter;
 import 'dart:ui' as ui show FragmentProgram, Image;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, visibleForTesting;
+    show TargetPlatform, defaultTargetPlatform, kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import '../core/cms_client.dart';
@@ -65,6 +65,10 @@ class DetailScreen extends StatefulWidget {
   final ui.FragmentProgram? debugTransitionShaderProgram;
   @visibleForTesting
   final ValueChanged<PlayerTransitionMode>? debugOnTransitionModeResolved;
+  @visibleForTesting
+  final SeriesScrapeSearchFn? debugScrapeSearchFn;
+  @visibleForTesting
+  final SeriesScrapeHydrateFn? debugScrapeHydrateFn;
   const DetailScreen({
     super.key,
     required this.site,
@@ -75,6 +79,8 @@ class DetailScreen extends StatefulWidget {
     this.debugTransitionCapturer,
     this.debugTransitionShaderProgram,
     this.debugOnTransitionModeResolved,
+    this.debugScrapeSearchFn,
+    this.debugScrapeHydrateFn,
   });
 
   static List<CmsSite> selectRelatedSeasonSiblings(
@@ -172,6 +178,11 @@ class _DetailScreenState extends State<DetailScreen> {
   bool _windowsEpisodesExpanded = false;
   bool _windowsSynopsisExpanded = false;
   bool _windowsHeroHasLandscape = false;
+  bool _macHeroHasLandscape = false;
+  bool get _isMacosDetail =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.macOS &&
+      !OhosRuntime.isOhos;
   late bool _descending;
   late bool _isFavorite;
   final ValueNotifier<double> _scrollOffset = ValueNotifier<double>(0.0);
@@ -266,8 +277,12 @@ class _DetailScreenState extends State<DetailScreen> {
         : _video.title;
     final offset = ov?.episodeOffset ?? 0;
     final overrides = ov?.episodeNumberOverrides ?? const <String, int>{};
+    final calibs = ov?.episodeCalibrations ??
+        const <String, EpisodeManualCalibration>{};
     final sig =
-        '${line.name}|${line.episodes.length}|$title|$offset|${overrides.entries.map((e) => "${e.key}:${e.value}").join(",")}';
+        '${line.name}|${line.episodes.length}|$title|$offset|'
+        '${overrides.entries.map((e) => "${e.key}:${e.value}").join(",")}|'
+        '${calibs.entries.map((e) => "${e.key}:${e.value.seasonNumber}:${e.value.episodeNumber}:${e.value.isSpecial}").join(",")}';
     if (identical(_cachedScrapeLine, line) &&
         _cachedScrapeSig == sig &&
         _cachedScrapeResult != null) {
@@ -278,6 +293,7 @@ class _DetailScreenState extends State<DetailScreen> {
       seriesTitle: title,
       episodeOffset: offset,
       manualOverrides: overrides,
+      episodeCalibrations: calibs,
     );
     _cachedScrapeLine = line;
     _cachedScrapeSig = sig;
@@ -298,6 +314,8 @@ class _DetailScreenState extends State<DetailScreen> {
       activeLine: activeLine,
       initialOverride: _scrapeOverride,
       initialTab: initialTab,
+      debugSearchFn: widget.debugScrapeSearchFn,
+      debugHydrateFn: widget.debugScrapeHydrateFn,
     );
   }
 
@@ -308,7 +326,7 @@ class _DetailScreenState extends State<DetailScreen> {
     _resolvedDoubanScore = null;
     _resolvedRtScore = null;
     _seedCachedExternalFields();
-    _windowsHeroHasLandscape = !_activeSite.isEffectivelyPrivate &&
+    final hasCachedLandscape = !_activeSite.isEffectivelyPrivate &&
         PosterLoader.peekLandscapeMemory(
               _effectiveLookupTitle,
               year: _effectiveLookupYear,
@@ -317,6 +335,8 @@ class _DetailScreenState extends State<DetailScreen> {
               preferredDoubanId: _effectiveDoubanId,
             ) !=
             null;
+    _windowsHeroHasLandscape = hasCachedLandscape;
+    _macHeroHasLandscape = hasCachedLandscape;
     setState(() {
       _selectedPage = 0;
     });
@@ -416,6 +436,7 @@ class _DetailScreenState extends State<DetailScreen> {
               preferredDoubanId: _effectiveDoubanId,
             ) !=
             null;
+    _macHeroHasLandscape = _windowsHeroHasLandscape;
     PosterLoader.metadataRevision.addListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.addListener(_onWatchHistoryChanged);
     widget.storage.seriesScrapeRevision.addListener(_onSeriesScrapeRevision);
@@ -2324,7 +2345,9 @@ class _DetailScreenState extends State<DetailScreen> {
     if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
       screen = _buildWindowsDetail(context);
     } else {
-      final wideLayout = AppleViewportLayout.of(context).prefersWideDetail;
+      final wideLayout = _isMacosDetail
+          ? MediaQuery.sizeOf(context).width >= 860
+          : AppleViewportLayout.of(context).prefersWideDetail;
       screen = wideLayout
           ? _buildWideDesktopScreen(context)
           : _buildPortraitImmersiveScreen(context);
@@ -2351,15 +2374,24 @@ class _DetailScreenState extends State<DetailScreen> {
   Widget _buildPortraitImmersiveScreen(BuildContext context) {
     final targetBg = _resolveBaseAmbientColor();
     final bookmark = _findBookmark();
+    final isMac = _isMacosDetail;
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
     final topPad = math.max(
       MediaQuery.paddingOf(context).top,
-      defaultTargetPlatform == TargetPlatform.macOS ? 28.0 : 0.0,
+      isMac ? 36.0 : 0.0,
     );
     final viewport = AppleViewportLayout.of(context);
     final screenHeight = viewport.height;
     final double posterWindowHeight;
     final double foregroundHeroHeight;
-    if (viewport.isShortPortrait) {
+    if (isMac) {
+      posterWindowHeight = _macHeroHasLandscape
+          ? (viewport.width * 9 / 16).clamp(320.0, 460.0)
+          : (screenHeight * 0.64).clamp(430.0, 560.0);
+      foregroundHeroHeight = _macHeroHasLandscape
+          ? (posterWindowHeight * 0.92).clamp(300.0, 440.0)
+          : (posterWindowHeight * 0.96).clamp(410.0, 540.0);
+    } else if (viewport.isShortPortrait) {
       // iPhone Duo 5.4" outer cover (`466×678 pt`) & compact phones:
       // keep title, badges, synopsis, and Play CTA visible above the fold.
       posterWindowHeight = (screenHeight * 0.72).clamp(390.0, 540.0);
@@ -2398,8 +2430,10 @@ class _DetailScreenState extends State<DetailScreen> {
                 child: ValueListenableBuilder<double>(
                   valueListenable: _scrollOffset,
                   builder: (context, offset, child) {
-                    final progress = (offset / 340.0).clamp(0.0, 1.0);
-                    final blurSigma = progress * 9.5;
+                    final progress = reduceMotion
+                        ? 0.0
+                        : (offset / 340.0).clamp(0.0, 1.0);
+                    final blurSigma = reduceMotion ? 0.0 : progress * 9.5;
                     final scrollVeilAlpha = progress * 0.38;
 
                     Widget posterStack = Stack(
@@ -2551,17 +2585,42 @@ class _DetailScreenState extends State<DetailScreen> {
                       ],
                     );
                   },
-                  child: PosterImage(
-                    url: _video.poster,
-                    title: _publicLookupTitle,
-                    year: _video.year,
-                    fit: BoxFit.cover,
-                    alignment: const Alignment(0.0, -0.32),
-                    highRes: true,
-                    strictHighRes: true,
-                    onBytesLoaded: _updateAmbientFromBytes,
-                    placeholder: _posterPlaceholder(bgColor),
-                  ),
+                  child: isMac
+                      ? LandscapePosterImage(
+                          key: const ValueKey('mac-detail-narrow-backdrop'),
+                          url: _effectivePosterUrl,
+                          title: _effectiveLookupTitle,
+                          year: _effectiveLookupYear,
+                          preferredBackdropUrl: _effectiveBackdropUrl,
+                          preferredDoubanId: _effectiveDoubanId,
+                          preferredDoubanIsTv: !_video.tag.contains('电影') &&
+                              (_video.lines.isEmpty ||
+                                  _video.lines.first.episodes.length > 1),
+                          wantMotionComic: _effectiveWantMotionComic,
+                          allowExternalLookup:
+                              !_activeSite.isEffectivelyPrivate,
+                          blurPortraitFallback: true,
+                          showRightFramedPortraitFallback: false,
+                          alignment: const Alignment(0.0, -0.2),
+                          onBytesLoaded: _updateAmbientFromBytes,
+                          onLandscapeStatusChanged: (isLand) {
+                            if (mounted && _macHeroHasLandscape != isLand) {
+                              setState(() => _macHeroHasLandscape = isLand);
+                            }
+                          },
+                          placeholder: _posterPlaceholder(bgColor),
+                        )
+                      : PosterImage(
+                          url: _effectivePosterUrl,
+                          title: _effectiveLookupTitle,
+                          year: _effectiveLookupYear,
+                          fit: BoxFit.cover,
+                          alignment: const Alignment(0.0, -0.32),
+                          highRes: true,
+                          strictHighRes: true,
+                          onBytesLoaded: _updateAmbientFromBytes,
+                          placeholder: _posterPlaceholder(bgColor),
+                        ),
                 ),
               ),
 
@@ -2689,24 +2748,29 @@ class _DetailScreenState extends State<DetailScreen> {
                 top: topPad + 8,
                 left: viewport.isCompactSplit ? 12 : 16,
                 right: viewport.isCompactSplit ? 12 : 16,
-                child: Row(
-                  children: [
-                    _buildFloatingGlassCircleButton(
-                      icon: CupertinoIcons.chevron_back,
-                      onTap: () => Navigator.of(context).maybePop(),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Align(
-                        alignment: Alignment.centerRight,
-                        child: _buildFloatingSourceButton(
-                          maxWidth: viewport.isCompactSplit ? 112.0 : 168.0,
+                child: Theme(
+                  data: _isMacosDetail
+                      ? Theme.of(context).copyWith(brightness: Brightness.dark)
+                      : Theme.of(context),
+                  child: Row(
+                    children: [
+                      _buildFloatingGlassCircleButton(
+                        icon: CupertinoIcons.chevron_back,
+                        onTap: () => Navigator.of(context).maybePop(),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: _buildFloatingSourceButton(
+                            maxWidth: viewport.isCompactSplit ? 112.0 : 168.0,
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    _buildFloatingTopRightPill(),
-                  ],
+                      const SizedBox(width: 8),
+                      _buildFloatingTopRightPill(),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -3112,7 +3176,7 @@ class _DetailScreenState extends State<DetailScreen> {
         ? 0
         : _video.lines[safeLineIdx].episodes.length;
     final pills = <String>[
-      if (_video.year.trim().isNotEmpty) _video.year.trim(),
+      if (_effectiveLookupYear.trim().isNotEmpty) _effectiveLookupYear.trim(),
       if (_video.area.trim().isNotEmpty) _video.area.trim(),
       if (_video.tag.trim().isNotEmpty) _video.tag.trim(),
       if (_video.remarks.trim().isNotEmpty)
@@ -3120,17 +3184,31 @@ class _DetailScreenState extends State<DetailScreen> {
       else if (epCount > 1)
         '共$epCount集',
     ];
+    final targetBg = _resolveBaseAmbientColor();
 
-    return SizedBox(
-      height: heroHeight,
+    return ConstrainedBox(
+      constraints: BoxConstraints(minHeight: heroHeight),
       child: Align(
         alignment: Alignment.bottomCenter,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 14),
+          padding: EdgeInsets.fromLTRB(
+            20,
+            (_isMacosDetail && !_macHeroHasLandscape) ? 92 : 0,
+            20,
+            14,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
+              if (_isMacosDetail && !_macHeroHasLandscape) ...[
+                SizedBox(
+                  key: const ValueKey('mac-detail-narrow-portrait-poster'),
+                  width: 132,
+                  child: _buildPosterCard(targetBg),
+                ),
+                const SizedBox(height: 14),
+              ],
               Text(
                 _video.title,
                 textAlign: TextAlign.center,
@@ -3204,6 +3282,10 @@ class _DetailScreenState extends State<DetailScreen> {
                     );
                   },
                 ),
+              ],
+              if (_isMacosDetail && !_activeSite.isEffectivelyPrivate) ...[
+                const SizedBox(height: 10),
+                _buildMacScrapeBar(alignment: WrapAlignment.center),
               ],
             ],
           ),
@@ -3716,6 +3798,72 @@ class _DetailScreenState extends State<DetailScreen> {
                 ),
               ),
             ),
+            if (_isMacosDetail && !_activeSite.isEffectivelyPrivate) ...[
+              const SizedBox(width: 8),
+              Semantics(
+                button: true,
+                label: (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                    ? '集数已校准'
+                    : '集数校准',
+                child: Material(
+                  color: Colors.transparent,
+                  borderRadius: BorderRadius.circular(999),
+                  child: InkWell(
+                    key: const ValueKey('mac-episodes-calibrate-btn'),
+                    borderRadius: BorderRadius.circular(999),
+                    focusColor: const Color(0x664C9AFF),
+                    hoverColor: const Color(0x33FFFFFF),
+                    onTap: () => _openSeriesScrapeSheet(initialTab: 1),
+                    child: Ink(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                            ? const Color(0x474C9AFF)
+                            : const Color(0x24FFFFFF),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color:
+                              (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                                  ? const Color(0x994C9AFF)
+                                  : const Color(0x30FFFFFF),
+                          width: 0.6,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            CupertinoIcons.slider_horizontal_3,
+                            color: (_scrapeOverride?.hasEpisodeCalibration ??
+                                    false)
+                                ? const Color(0xFF93C5FD)
+                                : const Color(0xE6FFFFFF),
+                            size: 12,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                                ? '集数已校准'
+                                : '集数校准',
+                            style: TextStyle(
+                              color: (_scrapeOverride?.hasEpisodeCalibration ??
+                                      false)
+                                  ? Colors.white
+                                  : const Color(0xE6FFFFFF),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(width: 8),
             GestureDetector(
               onTap: () => _showAllEpisodesGridSheet(bookmark),
@@ -3903,6 +4051,11 @@ class _DetailScreenState extends State<DetailScreen> {
               final visualIdx = start + idx;
               final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
               final originalIdx = activeIndices[posIdx];
+              final epScrape =
+                  _scrapeResultForLine(line).byOriginalIndex[originalIdx];
+              final pillLabel = epScrape.isSpecial
+                  ? epScrape.displayLabel
+                  : '${epScrape.resolvedEpisodeNumber ?? (posIdx + 1)}';
               final unavailReason =
                   _episodeUnavailableReason(line.episodes[originalIdx]);
               final isUnavailable = unavailReason != null;
@@ -3932,7 +4085,7 @@ class _DetailScreenState extends State<DetailScreen> {
                   ),
                   alignment: Alignment.center,
                   child: Text(
-                    '${posIdx + 1}',
+                    pillLabel,
                     style: TextStyle(
                       color: isCurrent
                           ? const Color(0xFF121215)
@@ -3970,16 +4123,25 @@ class _DetailScreenState extends State<DetailScreen> {
               final ep = line.episodes[originalIdx];
               final epScrape =
                   _scrapeResultForLine(line).byOriginalIndex[originalIdx];
-              final realEpNum = epScrape.resolvedEpisodeNumber ?? (posIdx + 1);
+              final resolvedEpNum = epScrape.resolvedEpisodeNumber;
+              final realEpNum = resolvedEpNum ?? (posIdx + 1);
               final unavailReason = _episodeUnavailableReason(ep);
               final isUnavailable = unavailReason != null;
               final isCurrent = !isUnavailable && originalIdx == currentActiveEpIdx;
               final (cleanTitle, parsedBadge) =
                   _parseEpisodeDisplay(ep.name, realEpNum);
               final specBadge = isUnavailable ? '不可解析' : parsedBadge;
-              final unitLabel = epScrape.isSpecial
-                  ? epScrape.displayLabel
-                  : (_isVarietyShow ? '第$realEpNum期' : '第$realEpNum集');
+              final unitLabel = epScrape.needsConfirmation
+                  ? '待确认'
+                  : (epScrape.isSpecial
+                      ? epScrape.displayLabel
+                      : (epScrape.seasonNumber != null &&
+                              epScrape.seasonNumber! > 0 &&
+                              resolvedEpNum != null
+                          ? '第${epScrape.seasonNumber}季 第$resolvedEpNum集'
+                          : (_isVarietyShow
+                              ? '第$realEpNum期'
+                              : '第$realEpNum集')));
               final subMeta = isUnavailable
                   ? unavailReason
                   : [
@@ -3988,12 +4150,15 @@ class _DetailScreenState extends State<DetailScreen> {
                       unitLabel,
                       if (specBadge != null) specBadge,
                     ].join(' · ');
-              final headline =
-                  _formatEpisodeCardHeadline(cleanTitle, realEpNum);
-              final epDesc = _resolveAuthenticEpisodeSummary(
-                realEpNum,
-                cleanTitle,
-              );
+              final headline = epScrape.needsConfirmation
+                  ? (ep.name.trim().isNotEmpty ? ep.name.trim() : '待确认')
+                  : _formatEpisodeCardHeadline(cleanTitle, realEpNum);
+              final epDesc = epScrape.needsConfirmation
+                  ? ''
+                  : _resolveAuthenticEpisodeSummary(
+                      realEpNum,
+                      cleanTitle,
+                    );
 
               final card = GestureDetector(
                 key: ValueKey('ep_card_${safeLineIdx}_$originalIdx'),
@@ -4102,7 +4267,19 @@ class _DetailScreenState extends State<DetailScreen> {
                                             ),
                                             const SizedBox(width: 3),
                                             Text(
-                                              'E${(posIdx + 1).toString().padLeft(2, '0')}',
+                                              epScrape.needsConfirmation
+                                                  ? '待确认'
+                                                  : (epScrape.isSpecial
+                                                      ? epScrape.displayLabel
+                                                      : (epScrape.seasonNumber !=
+                                                                  null &&
+                                                              epScrape.seasonNumber! >
+                                                                  0 &&
+                                                              resolvedEpNum !=
+                                                                  null
+                                                          ? epScrape
+                                                              .formattedSeasonEpisode
+                                                          : 'E${realEpNum.toString().padLeft(2, '0')}')),
                                               style: TextStyle(
                                                 color: isCurrent
                                                     ? const Color(0xFF121215)
@@ -4257,9 +4434,12 @@ class _DetailScreenState extends State<DetailScreen> {
     final bookmark = _findBookmark();
     final size = MediaQuery.sizeOf(context);
     final safePad = MediaQuery.paddingOf(context);
+    final isMac = _isMacosDetail;
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+    final isLightMode = !ApplePalette.isDarkOf(context);
     final topPad = math.max(
       safePad.top,
-      defaultTargetPlatform == TargetPlatform.macOS ? 28.0 : 0.0,
+      isMac ? 36.0 : 0.0,
     );
     final horizontalPad = (size.width * 0.045).clamp(24.0, 56.0);
     final compactWideH = size.height < 520;
@@ -4269,10 +4449,11 @@ class _DetailScreenState extends State<DetailScreen> {
     final posterCardW = compactWideH
         ? (heroStageHeight * 0.43).clamp(132.0, 176.0)
         : (heroStageHeight * 0.48).clamp(168.0, 224.0);
+    final showFramedPortraitCard = !isMac || !_macHeroHasLandscape;
 
     return TweenAnimationBuilder<Color?>(
       tween: ColorTween(begin: targetBg, end: targetBg),
-      duration: Ios27ConcentricGeometry.isReduceMotion(context)
+      duration: reduceMotion
           ? Ios27ConcentricGeometry.reducedMotionDuration
           : Ios27Spring.smooth.nominalDuration,
       curve: Ios27Spring.smooth.curve,
@@ -4286,9 +4467,8 @@ class _DetailScreenState extends State<DetailScreen> {
               // 1. Unified Solid Ambient Canvas Matching Poster Edge Color
               ColoredBox(color: bgColor),
 
-              // 2. Full-Screen Widescreen Backdrop (`Positioned.fill` eliminates both
-              //    the vertical 34% line and the horizontal heroStageHeight line, while
-              //    keeping right-side poster artwork clearly visible with low blur!)
+              // 2. Full-Screen Widescreen Backdrop (`Positioned.fill` with `TileMode.clamp`
+              //    eliminates vertical/horizontal seams and right-edge blur streaks)
               Positioned.fill(
                 child: isWindowsDesktopUi
                     ? Stack(
@@ -4302,12 +4482,12 @@ class _DetailScreenState extends State<DetailScreen> {
                                   imageFilter: ImageFilter.blur(
                                     sigmaX: 2.2,
                                     sigmaY: 2.2,
-                                    tileMode: TileMode.decal,
+                                    tileMode: TileMode.clamp,
                                   ),
                                   child: PosterImage(
-                                    url: _video.poster,
-                                    title: _publicLookupTitle,
-                                    year: _video.year,
+                                    url: _effectivePosterUrl,
+                                    title: _effectiveLookupTitle,
+                                    year: _effectiveLookupYear,
                                     fit: BoxFit.cover,
                                     alignment: const Alignment(0.35, -0.2),
                                     forBackdrop: true,
@@ -4353,8 +4533,9 @@ class _DetailScreenState extends State<DetailScreen> {
                           ValueListenableBuilder<double>(
                             valueListenable: _scrollOffset,
                             builder: (context, offset, _) {
-                              final veil =
-                                  (offset / 320.0).clamp(0.0, 1.0) * 0.52;
+                              final veil = reduceMotion
+                                  ? 0.0
+                                  : (offset / 320.0).clamp(0.0, 1.0) * 0.52;
                               if (veil <= 0.01) return const SizedBox.shrink();
                               return ColoredBox(
                                 color: bgColor.withValues(alpha: veil),
@@ -4366,18 +4547,25 @@ class _DetailScreenState extends State<DetailScreen> {
                     : ValueListenableBuilder<double>(
                         valueListenable: _scrollOffset,
                         builder: (context, offset, child) {
-                          final progress = (offset / 320.0).clamp(0.0, 1.0);
-                          final blurSigma = 1.6 + progress * 7.5;
+                          final progress = reduceMotion
+                              ? 0.0
+                              : (offset / 320.0).clamp(0.0, 1.0);
+                          final baseBlur =
+                              (isMac && _macHeroHasLandscape) ? 0.0 : 1.6;
+                          final blurSigma =
+                              reduceMotion ? baseBlur : (baseBlur + progress * 7.5);
                           final scrollVeilAlpha = progress * 0.36;
 
-                          final backdropImage = ImageFiltered(
-                            imageFilter: ImageFilter.blur(
-                              sigmaX: blurSigma,
-                              sigmaY: blurSigma,
-                              tileMode: TileMode.decal,
-                            ),
-                            child: child!,
-                          );
+                          final Widget backdropImage = blurSigma > 0.15
+                              ? ImageFiltered(
+                                  imageFilter: ImageFilter.blur(
+                                    sigmaX: blurSigma,
+                                    sigmaY: blurSigma,
+                                    tileMode: TileMode.clamp,
+                                  ),
+                                  child: child!,
+                                )
+                              : child!;
 
                           return Stack(
                             fit: StackFit.expand,
@@ -4388,13 +4576,21 @@ class _DetailScreenState extends State<DetailScreen> {
                                   gradient: LinearGradient(
                                     begin: Alignment.centerLeft,
                                     end: Alignment.centerRight,
-                                    colors: [
-                                      bgColor,
-                                      bgColor.withValues(alpha: 0.94),
-                                      bgColor.withValues(alpha: 0.46),
-                                      bgColor.withValues(alpha: 0.14),
-                                      bgColor.withValues(alpha: 0.05),
-                                    ],
+                                    colors: isMac && _macHeroHasLandscape
+                                        ? [
+                                            bgColor.withValues(alpha: 0.92),
+                                            bgColor.withValues(alpha: 0.68),
+                                            bgColor.withValues(alpha: 0.24),
+                                            bgColor.withValues(alpha: 0.06),
+                                            Colors.transparent,
+                                          ]
+                                        : [
+                                            bgColor,
+                                            bgColor.withValues(alpha: 0.94),
+                                            bgColor.withValues(alpha: 0.46),
+                                            bgColor.withValues(alpha: 0.14),
+                                            bgColor.withValues(alpha: 0.05),
+                                          ],
                                     stops: const [0.0, 0.24, 0.46, 0.72, 1.0],
                                   ),
                                 ),
@@ -4405,7 +4601,9 @@ class _DetailScreenState extends State<DetailScreen> {
                                     begin: Alignment.topCenter,
                                     end: Alignment.bottomCenter,
                                     colors: [
-                                      bgColor.withValues(alpha: 0.56),
+                                      bgColor.withValues(
+                                        alpha: (isMac && isLightMode) ? 0.32 : 0.56,
+                                      ),
                                       bgColor.withValues(alpha: 0.04),
                                       bgColor.withValues(alpha: 0.32),
                                       bgColor.withValues(alpha: 0.90),
@@ -4426,16 +4624,44 @@ class _DetailScreenState extends State<DetailScreen> {
                             ],
                           );
                         },
-                        child: PosterImage(
-                          url: _video.poster,
-                          title: _publicLookupTitle,
-                          year: _video.year,
-                          fit: BoxFit.cover,
-                          alignment: const Alignment(0.35, -0.2),
-                          forBackdrop: true,
-                          onBytesLoaded: _updateAmbientFromBytes,
-                          placeholder: _posterPlaceholder(bgColor),
-                        ),
+                        child: isMac
+                            ? LandscapePosterImage(
+                                key: const ValueKey('mac-detail-backdrop'),
+                                url: _effectivePosterUrl,
+                                title: _effectiveLookupTitle,
+                                year: _effectiveLookupYear,
+                                preferredBackdropUrl: _effectiveBackdropUrl,
+                                preferredDoubanId: _effectiveDoubanId,
+                                preferredDoubanIsTv: !_video.tag.contains('电影') &&
+                                    (_video.lines.isEmpty ||
+                                        _video.lines.first.episodes.length > 1),
+                                wantMotionComic: _effectiveWantMotionComic,
+                                allowExternalLookup:
+                                    !_activeSite.isEffectivelyPrivate,
+                                blurPortraitFallback: true,
+                                showRightFramedPortraitFallback: false,
+                                alignment: const Alignment(0.25, -0.2),
+                                onBytesLoaded: _updateAmbientFromBytes,
+                                onLandscapeStatusChanged: (isLand) {
+                                  if (mounted &&
+                                      _macHeroHasLandscape != isLand) {
+                                    setState(
+                                      () => _macHeroHasLandscape = isLand,
+                                    );
+                                  }
+                                },
+                                placeholder: _posterPlaceholder(bgColor),
+                              )
+                            : PosterImage(
+                                url: _effectivePosterUrl,
+                                title: _effectiveLookupTitle,
+                                year: _effectiveLookupYear,
+                                fit: BoxFit.cover,
+                                alignment: const Alignment(0.35, -0.2),
+                                forBackdrop: true,
+                                onBytesLoaded: _updateAmbientFromBytes,
+                                placeholder: _posterPlaceholder(bgColor),
+                              ),
                       ),
               ),
 
@@ -4474,11 +4700,16 @@ class _DetailScreenState extends State<DetailScreen> {
                             child: Row(
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
-                                SizedBox(
-                                  width: posterCardW,
-                                  child: _buildPosterCard(bgColor),
-                                ),
-                                SizedBox(width: compactWideH ? 20 : 28),
+                                if (showFramedPortraitCard) ...[
+                                  SizedBox(
+                                    key: const ValueKey(
+                                      'mac-detail-portrait-poster-card',
+                                    ),
+                                    width: posterCardW,
+                                    child: _buildPosterCard(bgColor),
+                                  ),
+                                  SizedBox(width: compactWideH ? 20 : 28),
+                                ],
                                 Expanded(
                                   child: _buildWideHeroShowcaseColumn(bookmark),
                                 ),
@@ -4552,17 +4783,22 @@ class _DetailScreenState extends State<DetailScreen> {
                 top: topPad + 10,
                 left: horizontalPad + safePad.left,
                 right: horizontalPad + safePad.right,
-                child: Row(
-                  children: [
-                    _buildFloatingGlassCircleButton(
-                      icon: CupertinoIcons.chevron_back,
-                      onTap: () => Navigator.of(context).maybePop(),
-                    ),
-                    const Spacer(),
-                    _buildFloatingSourceButton(),
-                    const SizedBox(width: 10),
-                    _buildFloatingTopRightPill(),
-                  ],
+                child: Theme(
+                  data: _isMacosDetail
+                      ? Theme.of(context).copyWith(brightness: Brightness.dark)
+                      : Theme.of(context),
+                  child: Row(
+                    children: [
+                      _buildFloatingGlassCircleButton(
+                        icon: CupertinoIcons.chevron_back,
+                        onTap: () => Navigator.of(context).maybePop(),
+                      ),
+                      const Spacer(),
+                      _buildFloatingSourceButton(),
+                      const SizedBox(width: 10),
+                      _buildFloatingTopRightPill(),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -4593,9 +4829,9 @@ class _DetailScreenState extends State<DetailScreen> {
             fit: StackFit.expand,
             children: [
               PosterImage(
-                url: _video.poster,
-                title: _publicLookupTitle,
-                year: _video.year,
+                url: _effectivePosterUrl,
+                title: _effectiveLookupTitle,
+                year: _effectiveLookupYear,
                 highRes: true,
                 strictHighRes: true,
                 onBytesLoaded: _onPosterCardBytesLoaded,
@@ -4650,7 +4886,7 @@ class _DetailScreenState extends State<DetailScreen> {
         ? 0
         : _video.lines[safeLineIdx].episodes.length;
     final pills = <String>[
-      if (_video.year.trim().isNotEmpty) _video.year.trim(),
+      if (_effectiveLookupYear.trim().isNotEmpty) _effectiveLookupYear.trim(),
       if (_video.area.trim().isNotEmpty) _video.area.trim(),
       if (_video.tag.trim().isNotEmpty) _video.tag.trim(),
       if (_video.remarks.trim().isNotEmpty)
@@ -4737,6 +4973,10 @@ class _DetailScreenState extends State<DetailScreen> {
             },
           ),
         ],
+        if (_isMacosDetail && !_activeSite.isEffectivelyPrivate) ...[
+          const SizedBox(height: 10),
+          _buildMacScrapeBar(alignment: WrapAlignment.start),
+        ],
         if (desc.isNotEmpty || cast.isNotEmpty) ...[
           const SizedBox(height: 12),
           GestureDetector(
@@ -4786,6 +5026,142 @@ class _DetailScreenState extends State<DetailScreen> {
             child: _buildPortraitBookmarkProgress(bookmark),
           ),
         ],
+      ],
+    );
+  }
+
+  /// macOS series scrape & episode calibration toolbar (hidden for private sources).
+  Widget _buildMacScrapeBar({required WrapAlignment alignment}) {
+    final ov = _scrapeOverride;
+    final hasWorkBinding = ov?.hasWorkBinding ?? false;
+    final hasEpCalib = ov?.hasEpisodeCalibration ?? false;
+    final calibrated = hasWorkBinding || hasEpCalib;
+    final statusParts = <String>[];
+    if (hasWorkBinding) {
+      final t = ov!.matchedTitle.trim();
+      final y = ov.matchedYear.trim();
+      if (t.isNotEmpty) {
+        statusParts.add(y.isNotEmpty ? '$t ($y)' : t);
+      }
+      if (ov.isMotionComic) {
+        statusParts.add('动态漫画');
+      }
+    }
+    if (hasEpCalib) {
+      if (ov!.episodeOffset != 0) {
+        final sign = ov.episodeOffset > 0 ? '+' : '';
+        statusParts.add('偏移 $sign${ov.episodeOffset}');
+      }
+      if (ov.hideSpecials) {
+        statusParts.add('隐藏特别篇');
+      }
+      final manualCount =
+          ov.episodeCalibrations.length + ov.episodeNumberOverrides.length;
+      if (manualCount > 0) {
+        statusParts.add('手动 $manualCount 集');
+      }
+    }
+
+    Widget pill({
+      required Key key,
+      required IconData icon,
+      required String label,
+      required bool selected,
+      required VoidCallback onTap,
+    }) {
+      return Semantics(
+        button: true,
+        label: label,
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(999),
+          child: InkWell(
+            key: key,
+            borderRadius: BorderRadius.circular(999),
+            focusColor: const Color(0x664C9AFF),
+            hoverColor: const Color(0x33FFFFFF),
+            onTap: onTap,
+            child: Ink(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 11, vertical: 5.5),
+              decoration: BoxDecoration(
+                color: selected
+                    ? const Color(0x524C9AFF)
+                    : const Color(0x2BFFFFFF),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: selected
+                      ? const Color(0xB37BB4FF)
+                      : const Color(0x3DFFFFFF),
+                  width: 0.7,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    icon,
+                    size: 13,
+                    color: selected ? const Color(0xFFBFE0FF) : Colors.white,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Wrap(
+      alignment: alignment,
+      spacing: 8,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        pill(
+          key: const ValueKey('mac-detail-scrape-btn'),
+          icon: CupertinoIcons.sparkles,
+          label: calibrated ? '刮削匹配 · 已校准' : '刮削匹配',
+          selected: calibrated,
+          onTap: () => _openSeriesScrapeSheet(initialTab: 0),
+        ),
+        pill(
+          key: const ValueKey('mac-detail-calibrate-btn'),
+          icon: CupertinoIcons.slider_horizontal_3,
+          label: hasEpCalib ? '集数已校准' : '集数校准',
+          selected: hasEpCalib,
+          onTap: () => _openSeriesScrapeSheet(initialTab: 1),
+        ),
+        if (statusParts.isNotEmpty)
+          Container(
+            key: const ValueKey('mac-detail-scrape-status-badge'),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
+            decoration: BoxDecoration(
+              color: const Color(0x381D4ED8),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: const Color(0x8060A5FA),
+                width: 0.65,
+              ),
+            ),
+            child: Text(
+              statusParts.join(' · '),
+              style: const TextStyle(
+                color: Color(0xFFE0F2FE),
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
       ],
     );
   }

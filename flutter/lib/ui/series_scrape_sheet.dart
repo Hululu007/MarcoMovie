@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import '../core/danmu/provider.dart';
 import '../core/models.dart';
 import '../core/series_scraper.dart';
 import '../core/storage_service.dart';
@@ -31,6 +32,10 @@ Future<SeriesScrapeOverride?> showSeriesScrapeSheet(
   CmsLine? activeLine,
   SeriesScrapeOverride? initialOverride,
   int initialTab = 0,
+  int? focusEpisodeIndex,
+  Map<String, Map<String, String>> runtimeContainerTags = const {},
+  List<DanmuCandidate> pendingDanmuCandidates = const [],
+  ValueChanged<DanmuCandidate>? onSelectDanmuCandidate,
   SeriesScrapeSearchFn? debugSearchFn,
   SeriesScrapeHydrateFn? debugHydrateFn,
 }) {
@@ -41,7 +46,7 @@ Future<SeriesScrapeOverride?> showSeriesScrapeSheet(
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 720, maxHeight: 680),
+        constraints: const BoxConstraints(maxWidth: 740, maxHeight: 720),
         child: SeriesScrapeSheet(
           site: site,
           video: video,
@@ -49,6 +54,10 @@ Future<SeriesScrapeOverride?> showSeriesScrapeSheet(
           activeLine: activeLine,
           initialOverride: initialOverride,
           initialTab: initialTab,
+          focusEpisodeIndex: focusEpisodeIndex,
+          runtimeContainerTags: runtimeContainerTags,
+          pendingDanmuCandidates: pendingDanmuCandidates,
+          onSelectDanmuCandidate: onSelectDanmuCandidate,
           debugSearchFn: debugSearchFn,
           debugHydrateFn: debugHydrateFn,
         ),
@@ -64,6 +73,10 @@ class SeriesScrapeSheet extends StatefulWidget {
   final CmsLine? activeLine;
   final SeriesScrapeOverride? initialOverride;
   final int initialTab;
+  final int? focusEpisodeIndex;
+  final Map<String, Map<String, String>> runtimeContainerTags;
+  final List<DanmuCandidate> pendingDanmuCandidates;
+  final ValueChanged<DanmuCandidate>? onSelectDanmuCandidate;
   final SeriesScrapeSearchFn? debugSearchFn;
   final SeriesScrapeHydrateFn? debugHydrateFn;
 
@@ -75,6 +88,10 @@ class SeriesScrapeSheet extends StatefulWidget {
     this.activeLine,
     this.initialOverride,
     this.initialTab = 0,
+    this.focusEpisodeIndex,
+    this.runtimeContainerTags = const {},
+    this.pendingDanmuCandidates = const [],
+    this.onSelectDanmuCandidate,
     this.debugSearchFn,
     this.debugHydrateFn,
   });
@@ -94,9 +111,11 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
   late final TextEditingController _searchCtrl;
   late final TextEditingController _danmuTitleCtrl;
   late final TextEditingController _epFilterCtrl;
+  final ScrollController _epListCtrl = ScrollController();
 
   String _formFilter = 'all';
   bool _searching = false;
+  bool _searchTriggered = false;
   bool _hydrating = false;
   String? _searchError;
   List<SeriesScrapeCandidate> _candidates = const [];
@@ -104,6 +123,7 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
   late SeriesScrapeOverride _draft;
   bool _hasExistingOverride = false;
   String _epFilterText = '';
+  bool _initialFocusScrolled = false;
 
   @override
   void initState() {
@@ -122,6 +142,7 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
         ? SeriesScraper.scrapeLineEpisodes(
             line.episodes,
             seriesTitle: widget.video.title,
+            runtimeContainerTags: widget.runtimeContainerTags,
           )
         : null;
     _draft = existing ??
@@ -144,7 +165,10 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
       _formFilter = 'motion_comic';
     }
 
-    unawaited(_runSearch());
+    if (_tabIndex == 0 || widget.debugSearchFn != null) {
+      _searchTriggered = true;
+      unawaited(_runSearch());
+    }
   }
 
   @override
@@ -152,6 +176,7 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
     _searchCtrl.dispose();
     _danmuTitleCtrl.dispose();
     _epFilterCtrl.dispose();
+    _epListCtrl.dispose();
     super.dispose();
   }
 
@@ -249,80 +274,193 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
     Navigator.of(context).pop(null);
   }
 
+  void _applyEpisodeCalibration(
+    String rawName,
+    String stableKey,
+    EpisodeManualCalibration? calibration,
+  ) {
+    final nextCalibs =
+        Map<String, EpisodeManualCalibration>.from(_draft.episodeCalibrations);
+    final nextLegacy = Map<String, int>.from(_draft.episodeNumberOverrides);
+    if (calibration == null || calibration.isEmpty) {
+      if (stableKey.isNotEmpty) nextCalibs.remove(stableKey);
+      nextLegacy.remove(rawName);
+    } else {
+      if (stableKey.isNotEmpty) {
+        nextCalibs[stableKey] = calibration;
+      }
+      if (!calibration.isSpecial &&
+          calibration.seasonNumber == null &&
+          calibration.episodeNumber != null &&
+          calibration.episodeNumber! > 0) {
+        nextLegacy[rawName] = calibration.episodeNumber!;
+      } else {
+        nextLegacy.remove(rawName);
+      }
+    }
+    setState(() {
+      _draft = _draft.copyWith(
+        episodeCalibrations: nextCalibs,
+        episodeNumberOverrides: nextLegacy,
+      );
+    });
+  }
+
   Future<void> _editManualEpisodeNumber(
     int originalIndex,
     String rawName,
     ScrapedEpisodeInfo info,
   ) async {
-    final ctrl = TextEditingController(
-      text: info.resolvedEpisodeNumber?.toString() ?? '',
+    final seasonCtrl = TextEditingController(
+      text: (info.seasonNumber ?? info.suggestedSeasonNumber)?.toString() ?? '',
     );
-    final result = await showDialog<int?>(
+    final epCtrl = TextEditingController(
+      text: (info.resolvedEpisodeNumber ?? info.suggestedEpisodeNumber)
+              ?.toString() ??
+          '',
+    );
+    bool markAsSpecial = info.isSpecial;
+    final result = await showDialog<({bool reset, bool isSpecial, int? season, int? episode})?>(
       context: context,
-      builder: (dlgCtx) => AlertDialog(
-        backgroundColor: _cardBg,
-        title: const Text(
-          '手动校准集数',
-          style: TextStyle(color: Colors.white, fontSize: 16),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              rawName,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Colors.white70, fontSize: 12.5),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: ctrl,
-              autofocus: true,
-              keyboardType: TextInputType.number,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: '真实集数（正整数，留空恢复自动识别）',
-                border: OutlineInputBorder(),
-                isDense: true,
+      builder: (dlgCtx) => StatefulBuilder(
+        builder: (ctx, setDlgState) => AlertDialog(
+          backgroundColor: _cardBg,
+          title: const Text(
+            '手动校准季集',
+            style: TextStyle(color: Colors.white, fontSize: 16),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                info.originalFileName.isNotEmpty
+                    ? info.originalFileName
+                    : rawName,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white70, fontSize: 12.5),
               ),
-              onSubmitted: (_) {
-                final v = int.tryParse(ctrl.text.trim());
-                Navigator.of(dlgCtx).pop(v ?? -1);
+              if (info.evidenceSource.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  '当前依据：${info.evidenceSource}',
+                  style: const TextStyle(color: Colors.white54, fontSize: 11.5),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  SizedBox(
+                    width: 110,
+                    child: TextField(
+                      key: const ValueKey('scrape-manual-season-field'),
+                      controller: seasonCtrl,
+                      enabled: !markAsSpecial,
+                      keyboardType: TextInputType.number,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: const InputDecoration(
+                        labelText: '季号（可选）',
+                        hintText: '如 2',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextField(
+                      key: const ValueKey('scrape-manual-episode-field'),
+                      controller: epCtrl,
+                      autofocus: true,
+                      enabled: !markAsSpecial,
+                      keyboardType: TextInputType.number,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: const InputDecoration(
+                        labelText: '真实集数（正整数）',
+                        hintText: '如 10',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      onSubmitted: (_) {
+                        final s = int.tryParse(seasonCtrl.text.trim());
+                        final e = int.tryParse(epCtrl.text.trim());
+                        Navigator.of(dlgCtx).pop((
+                          reset: !markAsSpecial && (e == null || e <= 0),
+                          isSpecial: markAsSpecial,
+                          season: s != null && s > 0 ? s : null,
+                          episode: e != null && e > 0 ? e : null,
+                        ));
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              CheckboxListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                title: const Text(
+                  '标记为特别篇 / 预告（不参与正片弹幕自动匹配）',
+                  style: TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+                value: markAsSpecial,
+                onChanged: (v) =>
+                    setDlgState(() => markAsSpecial = v ?? false),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              key: const ValueKey('scrape-manual-reset-btn'),
+              onPressed: () => Navigator.of(dlgCtx).pop((
+                reset: true,
+                isSpecial: false,
+                season: null,
+                episode: null,
+              )),
+              child: const Text('恢复自动'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dlgCtx).pop(null),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const ValueKey('scrape-manual-confirm-btn'),
+              onPressed: () {
+                final s = int.tryParse(seasonCtrl.text.trim());
+                final e = int.tryParse(epCtrl.text.trim());
+                Navigator.of(dlgCtx).pop((
+                  reset: !markAsSpecial && (e == null || e <= 0),
+                  isSpecial: markAsSpecial,
+                  season: s != null && s > 0 ? s : null,
+                  episode: e != null && e > 0 ? e : null,
+                ));
               },
+              child: const Text('确定'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dlgCtx).pop(-1),
-            child: const Text('恢复自动'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dlgCtx).pop(null),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final v = int.tryParse(ctrl.text.trim());
-              Navigator.of(dlgCtx).pop(v != null && v > 0 ? v : -1);
-            },
-            child: const Text('确定'),
-          ),
-        ],
       ),
     );
-    ctrl.dispose();
+    seasonCtrl.dispose();
+    epCtrl.dispose();
     if (result == null || !mounted) return;
-    final nextMap = Map<String, int>.from(_draft.episodeNumberOverrides);
-    if (result <= 0) {
-      nextMap.remove(rawName);
-    } else {
-      nextMap[rawName] = result;
+    if (result.reset) {
+      _applyEpisodeCalibration(rawName, info.stableKey, null);
+      return;
     }
-    setState(() {
-      _draft = _draft.copyWith(episodeNumberOverrides: nextMap);
-    });
+    _applyEpisodeCalibration(
+      rawName,
+      info.stableKey,
+      EpisodeManualCalibration(
+        seasonNumber: result.isSpecial ? null : result.season,
+        episodeNumber: result.isSpecial ? null : result.episode,
+        isSpecial: result.isSpecial,
+        updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
   }
 
   @override
@@ -415,7 +553,13 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
       return Expanded(
         child: InkWell(
           key: key,
-          onTap: () => setState(() => _tabIndex = index),
+          onTap: () {
+            setState(() => _tabIndex = index);
+            if (index == 0 && !_searchTriggered) {
+              _searchTriggered = true;
+              unawaited(_runSearch());
+            }
+          },
           borderRadius: BorderRadius.circular(10),
           child: Container(
             padding: const EdgeInsets.symmetric(vertical: 9),
@@ -815,6 +959,8 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
       seriesTitle: effectiveTitle,
       episodeOffset: _draft.episodeOffset,
       manualOverrides: _draft.episodeNumberOverrides,
+      episodeCalibrations: _draft.episodeCalibrations,
+      runtimeContainerTags: widget.runtimeContainerTags,
     );
     final sortByScraped =
         _draft.sortByScrapedEpisode ?? scrape.sourceOrderScrambled;
@@ -822,6 +968,14 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
       sortByScraped: sortByScraped,
       hideSpecials: _draft.hideSpecials,
     );
+    final focusIdx = (widget.focusEpisodeIndex != null &&
+            widget.focusEpisodeIndex! >= 0 &&
+            widget.focusEpisodeIndex! < line.episodes.length)
+        ? widget.focusEpisodeIndex!
+        : null;
+    final focusEp = focusIdx != null ? line.episodes[focusIdx] : null;
+    final focusInfo =
+        focusIdx != null ? scrape.byOriginalIndex[focusIdx] : null;
 
     final filterKw = _epFilterText.trim().toLowerCase();
     final visibleIndices = filterKw.isEmpty
@@ -831,277 +985,432 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
             final info = scrape.byOriginalIndex[idx];
             final numStr = info.resolvedEpisodeNumber?.toString() ?? '';
             return ep.name.toLowerCase().contains(filterKw) ||
+                info.originalFileName.toLowerCase().contains(filterKw) ||
                 info.displayLabel.toLowerCase().contains(filterKw) ||
+                info.evidenceSource.toLowerCase().contains(filterKw) ||
                 numStr == filterKw;
           }).toList();
+    if (focusIdx != null && filterKw.isEmpty && !visibleIndices.contains(focusIdx)) {
+      visibleIndices.insert(0, focusIdx);
+    }
+
+    if (focusIdx != null && !_initialFocusScrolled) {
+      final targetPos = visibleIndices.indexOf(focusIdx);
+      if (targetPos > 0) {
+        _initialFocusScrolled = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_epListCtrl.hasClients) return;
+          final targetOffset = (targetPos * 56.0).clamp(
+            0.0,
+            _epListCtrl.position.maxScrollExtent,
+          );
+          _epListCtrl.jumpTo(targetOffset);
+        });
+      } else {
+        _initialFocusScrolled = true;
+      }
+    }
+
+    final pendingCount = scrape.byOriginalIndex
+        .where((e) => e.needsConfirmation)
+        .length;
 
     return Column(
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Diagnostic summary card
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: _cardBg,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: _border),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '线路：${line.name} · 共 ${line.episodes.length} 项（识别正片 ${scrape.regularCount} 集'
-                      '${scrape.specialCount > 0 ? " · 特别篇/预告 ${scrape.specialCount} 项" : ""}'
-                      '${scrape.minEpisodeNumber != null && scrape.maxEpisodeNumber != null ? " · 第 ${scrape.minEpisodeNumber}–${scrape.maxEpisodeNumber} 集" : ""}）',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
+        Expanded(
+          child: CustomScrollView(
+            controller: _epListCtrl,
+            slivers: [
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (focusIdx != null &&
+                          focusEp != null &&
+                          focusInfo != null) ...[
+                        _buildFocusedCurrentEpisodeCard(
+                          focusIdx,
+                          focusEp,
+                          focusInfo,
+                          effectiveTitle,
+                        ),
+                        const SizedBox(height: 10),
+                      ],
+                      // Diagnostic summary card
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: _cardBg,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: _border),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '线路：${line.name} · 共 ${line.episodes.length} 项（识别正片 ${scrape.regularCount} 集'
+                              '${scrape.specialCount > 0 ? " · 特别篇/预告 ${scrape.specialCount} 项" : ""}'
+                              '${pendingCount > 0 ? " · 待确认 $pendingCount 项" : ""}'
+                              '${scrape.minEpisodeNumber != null && scrape.maxEpisodeNumber != null ? " · 第 ${scrape.minEpisodeNumber}–${scrape.maxEpisodeNumber} 集" : ""}）',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            if (scrape.sourceOrderScrambled ||
+                                scrape.hasMissingNumbers ||
+                                pendingCount > 0) ...[
+                              const SizedBox(height: 6),
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: 4,
+                                children: [
+                                  if (scrape.sourceOrderScrambled)
+                                    _miniTag(
+                                      '检测到源集数顺序错乱，建议开启智能排序',
+                                      bg: _mcAmber.withValues(alpha: 0.22),
+                                      fg: const Color(0xFFFFD080),
+                                    ),
+                                  if (scrape.hasMissingNumbers)
+                                    _miniTag(
+                                      '检测到缺集/跳集，弹幕将按真实集数匹配',
+                                      bg: _accent.withValues(alpha: 0.22),
+                                      fg: const Color(0xFFB5D5FF),
+                                    ),
+                                  if (pendingCount > 0)
+                                    _miniTag(
+                                      '存在 $pendingCount 项待确认，已禁用位置自动猜测',
+                                      bg: _mcAmber.withValues(alpha: 0.24),
+                                      fg: const Color(0xFFFFD080),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ],
+                        ),
                       ),
-                    ),
-                    if (scrape.sourceOrderScrambled || scrape.hasMissingNumbers) ...[
-                      const SizedBox(height: 6),
+                      const SizedBox(height: 10),
+                      // Switches + Offset row
                       Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
+                        spacing: 10,
+                        runSpacing: 8,
+                        crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
-                          if (scrape.sourceOrderScrambled)
-                            _miniTag(
-                              '检测到源集数顺序错乱，建议开启智能排序',
-                              bg: _mcAmber.withValues(alpha: 0.22),
-                              fg: const Color(0xFFFFD080),
+                          FilterChip(
+                            key: const ValueKey('scrape-toggle-smart-sort'),
+                            label: const Text('按刮削集数智能排序'),
+                            selected: sortByScraped,
+                            labelStyle: TextStyle(
+                              color:
+                                  sortByScraped ? Colors.white : Colors.white70,
+                              fontSize: 12.5,
                             ),
-                          if (scrape.hasMissingNumbers)
-                            _miniTag(
-                              '检测到缺集/跳集，弹幕将按真实集数匹配',
-                              bg: _accent.withValues(alpha: 0.22),
-                              fg: const Color(0xFFB5D5FF),
+                            selectedColor: _accent.withValues(alpha: 0.35),
+                            backgroundColor:
+                                Colors.white.withValues(alpha: 0.06),
+                            onSelected: (v) => setState(() {
+                              _draft =
+                                  _draft.copyWith(sortByScrapedEpisode: v);
+                            }),
+                          ),
+                          FilterChip(
+                            key: const ValueKey('scrape-toggle-hide-specials'),
+                            label: const Text('隐藏预告 / 特别篇'),
+                            selected: _draft.hideSpecials,
+                            labelStyle: TextStyle(
+                              color: _draft.hideSpecials
+                                  ? Colors.white
+                                  : Colors.white70,
+                              fontSize: 12.5,
                             ),
+                            selectedColor: _accent.withValues(alpha: 0.35),
+                            backgroundColor:
+                                Colors.white.withValues(alpha: 0.06),
+                            onSelected: (v) => setState(() {
+                              _draft = _draft.copyWith(hideSpecials: v);
+                            }),
+                          ),
                         ],
                       ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(height: 10),
-              // Switches + Offset row
-              Wrap(
-                spacing: 10,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  FilterChip(
-                    key: const ValueKey('scrape-toggle-smart-sort'),
-                    label: const Text('按刮削集数智能排序'),
-                    selected: sortByScraped,
-                    labelStyle: TextStyle(
-                      color: sortByScraped ? Colors.white : Colors.white70,
-                      fontSize: 12.5,
-                    ),
-                    selectedColor: _accent.withValues(alpha: 0.35),
-                    backgroundColor: Colors.white.withValues(alpha: 0.06),
-                    onSelected: (v) => setState(() {
-                      _draft = _draft.copyWith(sortByScrapedEpisode: v);
-                    }),
-                  ),
-                  FilterChip(
-                    key: const ValueKey('scrape-toggle-hide-specials'),
-                    label: const Text('隐藏预告 / 特别篇'),
-                    selected: _draft.hideSpecials,
-                    labelStyle: TextStyle(
-                      color: _draft.hideSpecials ? Colors.white : Colors.white70,
-                      fontSize: 12.5,
-                    ),
-                    selectedColor: _accent.withValues(alpha: 0.35),
-                    backgroundColor: Colors.white.withValues(alpha: 0.06),
-                    onSelected: (v) => setState(() {
-                      _draft = _draft.copyWith(hideSpecials: v);
-                    }),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  const Text(
-                    '集数全局偏移：',
-                    style: TextStyle(color: Colors.white70, fontSize: 12.5),
-                  ),
-                  const SizedBox(width: 6),
-                  _offsetBtn('-10', () => _changeOffset(_draft.episodeOffset - 10)),
-                  const SizedBox(width: 4),
-                  _offsetBtn('-1', () => _changeOffset(_draft.episodeOffset - 1)),
-                  const SizedBox(width: 8),
-                  Text(
-                    _draft.episodeOffset == 0
-                        ? '0'
-                        : (_draft.episodeOffset > 0
-                            ? '+${_draft.episodeOffset}'
-                            : '${_draft.episodeOffset}'),
-                    key: const ValueKey('scrape-offset-value'),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  _offsetBtn('+1', () => _changeOffset(_draft.episodeOffset + 1)),
-                  const SizedBox(width: 4),
-                  _offsetBtn('+10', () => _changeOffset(_draft.episodeOffset + 10)),
-                  if (_draft.episodeOffset != 0) ...[
-                    const SizedBox(width: 6),
-                    _offsetBtn('归零', () => _changeOffset(0)),
-                  ],
-                  const Spacer(),
-                  SizedBox(
-                    width: 170,
-                    child: TextField(
-                      controller: _epFilterCtrl,
-                      style: const TextStyle(color: Colors.white, fontSize: 12.5),
-                      decoration: InputDecoration(
-                        hintText: '筛选集数/文件名',
-                        hintStyle: const TextStyle(color: Colors.white38, fontSize: 12),
-                        isDense: true,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 8,
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          const Text(
+                            '集数全局偏移：',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          _offsetBtn(
+                            '-10',
+                            () => _changeOffset(_draft.episodeOffset - 10),
+                          ),
+                          const SizedBox(width: 4),
+                          _offsetBtn(
+                            '-1',
+                            () => _changeOffset(_draft.episodeOffset - 1),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _draft.episodeOffset == 0
+                                ? '0'
+                                : (_draft.episodeOffset > 0
+                                    ? '+${_draft.episodeOffset}'
+                                    : '${_draft.episodeOffset}'),
+                            key: const ValueKey('scrape-offset-value'),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          _offsetBtn(
+                            '+1',
+                            () => _changeOffset(_draft.episodeOffset + 1),
+                          ),
+                          const SizedBox(width: 4),
+                          _offsetBtn(
+                            '+10',
+                            () => _changeOffset(_draft.episodeOffset + 10),
+                          ),
+                          if (_draft.episodeOffset != 0) ...[
+                            const SizedBox(width: 6),
+                            _offsetBtn('归零', () => _changeOffset(0)),
+                          ],
+                          const Spacer(),
+                          SizedBox(
+                            width: 170,
+                            child: TextField(
+                              controller: _epFilterCtrl,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12.5,
+                              ),
+                              decoration: InputDecoration(
+                                hintText: '筛选集数/文件名',
+                                hintStyle: const TextStyle(
+                                  color: Colors.white38,
+                                  fontSize: 12,
+                                ),
+                                isDense: true,
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 8,
+                                ),
+                                filled: true,
+                                fillColor: Colors.white.withValues(alpha: 0.06),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                  borderSide: const BorderSide(color: _border),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                  borderSide: const BorderSide(color: _border),
+                                ),
+                              ),
+                              onChanged: (v) =>
+                                  setState(() => _epFilterText = v),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _danmuTitleCtrl,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12.5,
                         ),
-                        filled: true,
-                        fillColor: Colors.white.withValues(alpha: 0.06),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
-                          borderSide: const BorderSide(color: _border),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
-                          borderSide: const BorderSide(color: _border),
+                        decoration: InputDecoration(
+                          labelText: '弹幕匹配片名覆写（可选，留空自动使用绑定作品名）',
+                          labelStyle: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 12,
+                          ),
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          filled: true,
+                          fillColor: Colors.white.withValues(alpha: 0.05),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                            borderSide: const BorderSide(color: _border),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                            borderSide: const BorderSide(color: _border),
+                          ),
                         ),
                       ),
-                      onChanged: (v) => setState(() => _epFilterText = v),
-                    ),
+                    ],
                   ),
-                ],
+                ),
               ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: _danmuTitleCtrl,
-                style: const TextStyle(color: Colors.white, fontSize: 12.5),
-                decoration: InputDecoration(
-                  labelText: '弹幕匹配片名覆写（可选，留空自动使用绑定作品名）',
-                  labelStyle: const TextStyle(color: Colors.white54, fontSize: 12),
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  filled: true,
-                  fillColor: Colors.white.withValues(alpha: 0.05),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: _border),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: _border),
-                  ),
+              const SliverToBoxAdapter(
+                child: Divider(height: 1, color: _border),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                sliver: SliverList.separated(
+                  itemCount: visibleIndices.length,
+                  separatorBuilder: (_, __) =>
+                      const Divider(height: 1, color: Color(0x18FFFFFF)),
+                  itemBuilder: (ctx, pos) {
+                    final origIdx = visibleIndices[pos];
+                    final ep = line.episodes[origIdx];
+                    final info = scrape.byOriginalIndex[origIdx];
+                    final isManual = info.hasManualOverride;
+                    final isFocused = origIdx == focusIdx;
+                    final displayFile = info.originalFileName.isNotEmpty
+                        ? info.originalFileName
+                        : ep.name;
+                    return Container(
+                      key: ValueKey('scrape-episode-row-$origIdx'),
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 7,
+                        horizontal: 6,
+                      ),
+                      decoration: isFocused
+                          ? BoxDecoration(
+                              color: _accent.withValues(alpha: 0.14),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: _accent.withValues(alpha: 0.65),
+                                width: 0.9,
+                              ),
+                            )
+                          : null,
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 34,
+                            child: Text(
+                              '#${origIdx + 1}',
+                              style: TextStyle(
+                                color: isFocused ? _accent : Colors.white38,
+                                fontSize: 11.5,
+                                fontWeight: isFocused
+                                    ? FontWeight.w700
+                                    : FontWeight.w400,
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    if (isFocused) ...[
+                                      _miniTag(
+                                        '正在播放',
+                                        bg: _accent.withValues(alpha: 0.30),
+                                        fg: Colors.white,
+                                      ),
+                                      const SizedBox(width: 6),
+                                    ],
+                                    Expanded(
+                                      child: Text(
+                                        displayFile.isNotEmpty
+                                            ? displayFile
+                                            : '(无文件名)',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: isFocused
+                                              ? Colors.white
+                                              : Colors.white70,
+                                          fontSize: 12.5,
+                                          fontWeight: isFocused
+                                              ? FontWeight.w600
+                                              : FontWeight.w400,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                if (info.evidenceSource.isNotEmpty)
+                                  Text(
+                                    info.evidenceSource,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: info.needsConfirmation
+                                          ? const Color(0xFFFFD080)
+                                          : Colors.white38,
+                                      fontSize: 10.5,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 8),
+                            child: Icon(
+                              CupertinoIcons.arrow_right,
+                              size: 12,
+                              color: Colors.white38,
+                            ),
+                          ),
+                          _miniTag(
+                            info.displayLabel,
+                            bg: info.needsConfirmation
+                                ? _mcAmber.withValues(alpha: 0.28)
+                                : (info.isSpecial
+                                    ? _mcAmber.withValues(alpha: 0.22)
+                                    : (isManual
+                                        ? const Color(0x3330D158)
+                                        : _accent.withValues(alpha: 0.22))),
+                            fg: info.needsConfirmation
+                                ? const Color(0xFFFFD60A)
+                                : (info.isSpecial
+                                    ? const Color(0xFFFFD080)
+                                    : (isManual
+                                        ? const Color(0xFF9DF2B2)
+                                        : const Color(0xFFB5D5FF))),
+                          ),
+                          if (info.qualityTag.isNotEmpty) ...[
+                            const SizedBox(width: 5),
+                            _miniTag(
+                              info.qualityTag,
+                              bg: Colors.white.withValues(alpha: 0.08),
+                              fg: Colors.white70,
+                            ),
+                          ],
+                          const SizedBox(width: 8),
+                          TextButton(
+                            key: ValueKey('scrape-calibrate-row-$origIdx'),
+                            onPressed: () =>
+                                _editManualEpisodeNumber(origIdx, ep.name, info),
+                            style: TextButton.styleFrom(
+                              foregroundColor: Colors.white70,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 4,
+                              ),
+                              minimumSize: const Size(0, 28),
+                            ),
+                            child: const Text(
+                              '校准',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
                 ),
               ),
             ],
-          ),
-        ),
-        const Divider(height: 1, color: _border),
-        Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
-            itemCount: visibleIndices.length,
-            separatorBuilder: (_, __) =>
-                const Divider(height: 1, color: Color(0x18FFFFFF)),
-            itemBuilder: (ctx, pos) {
-              final origIdx = visibleIndices[pos];
-              final ep = line.episodes[origIdx];
-              final info = scrape.byOriginalIndex[origIdx];
-              final isManual = info.hasManualOverride;
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 7),
-                child: Row(
-                  children: [
-                    SizedBox(
-                      width: 34,
-                      child: Text(
-                        '#${origIdx + 1}',
-                        style: const TextStyle(
-                          color: Colors.white38,
-                          fontSize: 11.5,
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      child: Text(
-                        ep.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 12.5,
-                        ),
-                      ),
-                    ),
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 8),
-                      child: Icon(
-                        CupertinoIcons.arrow_right,
-                        size: 12,
-                        color: Colors.white38,
-                      ),
-                    ),
-                    _miniTag(
-                      info.displayLabel,
-                      bg: info.isSpecial
-                          ? _mcAmber.withValues(alpha: 0.22)
-                          : (isManual
-                              ? const Color(0x3330D158)
-                              : _accent.withValues(alpha: 0.22)),
-                      fg: info.isSpecial
-                          ? const Color(0xFFFFD080)
-                          : (isManual
-                              ? const Color(0xFF9DF2B2)
-                              : const Color(0xFFB5D5FF)),
-                    ),
-                    if (info.qualityTag.isNotEmpty) ...[
-                      const SizedBox(width: 5),
-                      _miniTag(
-                        info.qualityTag,
-                        bg: Colors.white.withValues(alpha: 0.08),
-                        fg: Colors.white70,
-                      ),
-                    ],
-                    const SizedBox(width: 8),
-                    TextButton(
-                      onPressed: () =>
-                          _editManualEpisodeNumber(origIdx, ep.name, info),
-                      style: TextButton.styleFrom(
-                        foregroundColor: Colors.white70,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 4,
-                        ),
-                        minimumSize: const Size(0, 28),
-                      ),
-                      child: const Text(
-                        '校准',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
           ),
         ),
         const Divider(height: 1, color: _border),
@@ -1111,7 +1420,7 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
             children: [
               const Expanded(
                 child: Text(
-                  '校准后的集数将同步用于剧集列表定位与弹幕精确匹配',
+                  '校准后的季集将同步用于详情、选集、切线与弹幕精确匹配',
                   style: TextStyle(color: Colors.white54, fontSize: 12),
                 ),
               ),
@@ -1133,6 +1442,217 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildFocusedCurrentEpisodeCard(
+    int origIdx,
+    CmsEpisode ep,
+    ScrapedEpisodeInfo info,
+    String effectiveTitle,
+  ) {
+    final fileName = info.originalFileName.isNotEmpty
+        ? info.originalFileName
+        : (ep.name.trim().isNotEmpty ? ep.name.trim() : '(未命名文件)');
+    final workName = info.recognizedWorkTitle.trim().isNotEmpty
+        ? info.recognizedWorkTitle.trim()
+        : effectiveTitle;
+    final evidenceText = info.evidenceDetails.isNotEmpty
+        ? info.evidenceDetails.join(' · ')
+        : info.evidenceSource;
+
+    return Container(
+      key: const ValueKey('scrape-current-episode-card'),
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: info.needsConfirmation
+            ? const Color(0x22FF9F0A)
+            : _accent.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: info.needsConfirmation
+              ? _mcAmber.withValues(alpha: 0.65)
+              : _accent.withValues(alpha: 0.65),
+          width: 1.0,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _miniTag(
+                '当前正在播放',
+                bg: _accent.withValues(alpha: 0.35),
+                fg: Colors.white,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '原文件名：$fileName',
+                  key: const ValueKey('scrape-current-filename'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '识别结果：$workName · ${info.readableSeasonEpisodeZh}',
+            key: const ValueKey('scrape-current-recognition'),
+            style: TextStyle(
+              color: info.needsConfirmation
+                  ? const Color(0xFFFFD60A)
+                  : const Color(0xFFBFE0FF),
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '判断依据：${info.evidenceSource}${evidenceText.isNotEmpty && evidenceText != info.evidenceSource ? "（$evidenceText）" : ""}',
+            key: const ValueKey('scrape-current-evidence'),
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 11.5,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              FilledButton.tonal(
+                key: const ValueKey('scrape-calibrate-current-btn'),
+                onPressed: () =>
+                    _editManualEpisodeNumber(origIdx, ep.name, info),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  minimumSize: const Size(0, 30),
+                ),
+                child: const Text('校准本集季集', style: TextStyle(fontSize: 12)),
+              ),
+              if (info.needsConfirmation && info.suggestedEpisodeNumber != null)
+                OutlinedButton(
+                  key: const ValueKey('scrape-apply-suggestion-btn'),
+                  onPressed: () => _applyEpisodeCalibration(
+                    ep.name,
+                    info.stableKey,
+                    EpisodeManualCalibration(
+                      seasonNumber: info.suggestedSeasonNumber,
+                      episodeNumber: info.suggestedEpisodeNumber,
+                      updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFFFD60A),
+                    side: BorderSide(color: _mcAmber.withValues(alpha: 0.6)),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    minimumSize: const Size(0, 30),
+                  ),
+                  child: Text(
+                    info.suggestedSeasonNumber != null
+                        ? '采用辅助建议 S${info.suggestedSeasonNumber!.toString().padLeft(2, '0')}E${info.suggestedEpisodeNumber!.toString().padLeft(2, '0')}'
+                        : '采用辅助建议 第 ${info.suggestedEpisodeNumber} 集',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              if (info.hasManualOverride ||
+                  (_draft.episodeCalibrations[info.stableKey]?.hasDanmuBinding ==
+                      true))
+                TextButton(
+                  key: const ValueKey('scrape-undo-current-btn'),
+                  onPressed: () =>
+                      _applyEpisodeCalibration(ep.name, info.stableKey, null),
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFFFF8A80),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    minimumSize: const Size(0, 30),
+                  ),
+                  child: const Text('撤销本集校准', style: TextStyle(fontSize: 12)),
+                ),
+            ],
+          ),
+          if (widget.pendingDanmuCandidates.isNotEmpty &&
+              widget.onSelectDanmuCandidate != null) ...[
+            const SizedBox(height: 8),
+            const Text(
+              '弹幕服务仅返回相近/邻集候选，请手动确认：',
+              style: TextStyle(
+                color: Color(0xFFFFD080),
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: widget.pendingDanmuCandidates.take(6).map((cand) {
+                return ActionChip(
+                  key: ValueKey('scrape-danmu-cand-${cand.boundEpisodeId}'),
+                  label: Text(
+                    '${cand.animeTitle} · ${cand.episodeTitle}'.trim(),
+                    style: const TextStyle(color: Colors.white, fontSize: 11.5),
+                  ),
+                  backgroundColor: Colors.white.withValues(alpha: 0.08),
+                  side: const BorderSide(color: _border),
+                  onPressed: () {
+                    final nextCalibs = Map<String, EpisodeManualCalibration>.from(
+                      _draft.episodeCalibrations,
+                    );
+                    if (info.stableKey.isNotEmpty) {
+                      final prev = nextCalibs[info.stableKey] ??
+                          const EpisodeManualCalibration();
+                      nextCalibs[info.stableKey] = prev.copyWith(
+                        danmuBoundEpisodeId: cand.boundEpisodeId,
+                        danmuSourceOrigin: cand.sourceOrigin,
+                        danmuAnimeId: cand.animeId,
+                        danmuAnimeTitle: cand.animeTitle,
+                        danmuEpisodeTitle: cand.episodeTitle,
+                        updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+                      );
+                    }
+                    final updatedDraft = _draft.copyWith(
+                      danmuAnimeId: cand.animeId.isNotEmpty
+                          ? cand.animeId
+                          : _draft.danmuAnimeId,
+                      danmuOrigin: cand.sourceOrigin.isNotEmpty
+                          ? cand.sourceOrigin
+                          : _draft.danmuOrigin,
+                      danmuTitleOverride: cand.animeTitle.isNotEmpty
+                          ? cand.animeTitle
+                          : _draft.danmuTitleOverride,
+                      episodeCalibrations: nextCalibs,
+                    );
+                    widget.onSelectDanmuCandidate!(cand);
+                    Navigator.of(context).pop(updatedDraft);
+                  },
+                );
+              }).toList(),
+            ),
+          ],
+        ],
+      ),
     );
   }
 

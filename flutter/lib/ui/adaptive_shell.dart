@@ -48,6 +48,7 @@ import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
 import 'live_station_badge.dart';
+import 'macos_update_sheet.dart';
 import 'motion/aurora_background.dart';
 import 'motion/ios27_springs.dart';
 import 'motion/player_enter_transition.dart';
@@ -325,7 +326,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   List<WatchHistoryEntry> _cachedWatchHistory = const [];
   bool _onboardingRouteOpen = false;
   bool _startupOnboardingChecked = false;
-  bool get _isMacOS => !kIsWeb && Platform.isMacOS;
+  bool get _isMacOS =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.macOS &&
+      !OhosRuntime.isOhos;
   CmsFilter get _currentFilter => CmsFilter(
         primaryTab: _primaryTab,
         categoryId: _filterSubCategoryId,
@@ -1991,7 +1995,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           storage: widget.storage,
         );
     final usePosterExpand =
-        defaultTargetPlatform == TargetPlatform.iOS &&
+        (defaultTargetPlatform == TargetPlatform.iOS ||
+            defaultTargetPlatform == TargetPlatform.macOS) &&
         !OhosRuntime.isOhos &&
         sourceContext != null;
     final initialRect =
@@ -2532,7 +2537,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           // blurred ambient artwork of the featured title on the home tab.
           RepaintBoundary(
             child: AnimatedSwitcher(
-              duration: isWindowsDesktopUi
+              duration: (isWindowsDesktopUi ||
+                      Ios27ConcentricGeometry.isReduceMotion(context))
                   ? Duration.zero
                   : const Duration(milliseconds: 600),
               child: AppleAmbientBackground(
@@ -3129,7 +3135,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   SliverPadding(
                     padding: EdgeInsets.fromLTRB(
                       0,
-                      useSidebar && _isMacOS ? 24 : 12,
+                      _isMacOS ? 38 : 12,
                       0,
                       12,
                     ),
@@ -3152,6 +3158,30 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               child: _privateSessionUnlocked
                                   ? _buildEmptyPrivacySpaceNotice(context)
                                   : _buildPluginOnlyConfigNotice(context),
+                            ),
+                          ] else if (_isMacOS &&
+                              !CspBridge.isMyDriveSite(_activeSite!) &&
+                              _primaryTab == 'recommend' &&
+                              !_currentFilter.hasSubFilter &&
+                              _currentPage == 1) ...[
+                            _buildMacWideHomeHeroSection(
+                              context,
+                              site: _activeSite!,
+                              history: (!_privateSessionUnlocked &&
+                                      widget.storage.showContinueWatching)
+                                  ? history
+                                  : const <WatchHistoryEntry>[],
+                              contentWidth: math.max(
+                                320.0,
+                                constraints.maxWidth - horizontalPad * 2,
+                              ),
+                              horizontalPad: horizontalPad,
+                            ),
+                            _buildHomeCategoryFilterSection(
+                              context,
+                              horizontalPad: horizontalPad,
+                              activeFilterCount: activeFilterCount,
+                              topSpacing: 18,
                             ),
                           ] else ...[
                             if (!_privateSessionUnlocked &&
@@ -4889,6 +4919,515 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       ),
     );
   }
+  /// macOS widescreen home hero + optional docked right-hand Continue Watching
+  /// panel (inspired by Windows 0.6.0 wide home while preserving Apple Glass
+  /// aesthetics, Light/Dark contrast, Reduce Motion, and iOS poster expand).
+  Widget _buildMacWideHomeHeroSection(
+    BuildContext context, {
+    required CmsSite site,
+    required List<WatchHistoryEntry> history,
+    required double contentWidth,
+    required double horizontalPad,
+  }) {
+    final showHero = widget.storage.showHeroBanner;
+    final candidates = _homeVideos
+        .where((v) => !v.id.startsWith('netdisk_qr:'))
+        .toList(growable: false);
+    final sideHistory =
+        showHero && candidates.isNotEmpty && history.isNotEmpty && contentWidth >= 960;
+    final historyWidth = contentWidth >= 1480 ? 336.0 : 304.0;
+    final heroHeight = contentWidth >= 1480
+        ? 284.0
+        : (contentWidth >= 1060 ? 256.0 : 228.0);
+    final heroAreaWidth =
+        sideHistory ? math.max(320.0, contentWidth - historyWidth - 18.0) : contentWidth;
+    final maxHeroSlots = (heroAreaWidth / 340.0).floor().clamp(1, 4);
+    final heroVideos = showHero
+        ? candidates.take(math.min(candidates.length, maxHeroSlots)).toList(growable: false)
+        : const <CmsVideo>[];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (history.isNotEmpty && !sideHistory)
+          _buildHomeHistoryShelf(
+            context,
+            history: history,
+            horizontalPad: horizontalPad,
+            topSpacing: 18,
+          ),
+        if (heroVideos.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: horizontalPad),
+            child: SizedBox(
+              key: const ValueKey('mac-home-hero-row'),
+              height: heroHeight,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (var i = 0; i < heroVideos.length; i++) ...[
+                          if (i > 0) const SizedBox(width: 14),
+                          Expanded(
+                            child: _buildMacWideHeroCard(
+                              context,
+                              site,
+                              heroVideos[i],
+                              index: i,
+                              compact: heroVideos.length >= 3 ||
+                                  (heroAreaWidth / heroVideos.length) < 420,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  if (sideHistory) ...[
+                    const SizedBox(width: 16),
+                    SizedBox(
+                      key: const ValueKey('mac-home-side-history'),
+                      width: historyWidth,
+                      child: _buildMacSideHistoryPanel(context, history),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildMacWideHeroCard(
+    BuildContext context,
+    CmsSite site,
+    CmsVideo featured, {
+    required int index,
+    required bool compact,
+  }) {
+    final palette = ApplePalette.of(context);
+    final isDark = palette.isDark;
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+    final cardId =
+        'mac_hero_${site.key}_${featured.id.isNotEmpty ? featured.id : featured.title}_$index';
+    final tags = <String>[
+      if (featured.year.trim().isNotEmpty) featured.year.trim(),
+      if (featured.area.trim().isNotEmpty) featured.area.trim(),
+      if (featured.remarks.trim().isNotEmpty) featured.remarks.trim(),
+    ];
+    final infoLine = featured.description.trim().isNotEmpty
+        ? featured.description.trim()
+        : (featured.actor.trim().isNotEmpty ? '主演：${featured.actor.trim()}' : '');
+    BuildContext? cardCtx;
+    void openFeatured() => _openVideoDetail(
+          site,
+          featured,
+          sourceContext: cardCtx ?? context,
+          sourceRadius: 22.0,
+          sourceCardId: cardId,
+        );
+
+    final inner = PosterExpandSourceCard(
+      cardId: cardId,
+      child: Builder(
+        builder: (ctx) {
+          cardCtx = ctx;
+          return AppleSmoothClipCard(
+            key: ValueKey('mac-home-hero-card-$index'),
+            borderRadius: 24,
+            backgroundColor:
+                isDark ? const Color(0xFF111319) : const Color(0xFF1A202C),
+            rimStrength: isDark ? 1.0 : 0.65,
+            boxShadow: isDark
+                ? const [
+                    BoxShadow(
+                      color: Color(0x52000000),
+                      blurRadius: 24,
+                      offset: Offset(0, 10),
+                    ),
+                  ]
+                : const [
+                    BoxShadow(
+                      color: Color(0x240F172A),
+                      blurRadius: 20,
+                      offset: Offset(0, 8),
+                    ),
+                  ],
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                LandscapePosterImage(
+                  url: featured.poster,
+                  title: site.isEffectivelyPrivate ? '' : featured.title,
+                  year: site.isEffectivelyPrivate ? '' : featured.year,
+                  allowExternalLookup: !site.isEffectivelyPrivate,
+                  blurPortraitFallback: true,
+                  showRightFramedPortraitFallback: !compact,
+                  placeholder: Container(
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [Color(0xFF1D2434), Color(0xFF0E1118)],
+                      ),
+                    ),
+                  ),
+                ),
+                const DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      colors: [
+                        Color(0xD90A0D14),
+                        Color(0x8C0A0D14),
+                        Color(0x1A0A0D14),
+                      ],
+                      stops: [0.0, 0.56, 1.0],
+                    ),
+                  ),
+                ),
+                const DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Color(0x14000000),
+                        Color(0x28000000),
+                        Color(0xCF080A10),
+                      ],
+                      stops: [0.0, 0.48, 1.0],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 16 : 20,
+                    compact ? 14 : 18,
+                    compact ? 16 : 124,
+                    compact ? 14 : 18,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (index == 0)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0x40FFFFFF),
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: const Color(0x4DFFFFFF),
+                              width: 0.6,
+                            ),
+                          ),
+                          child: const Text(
+                            '精选推荐',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      const Spacer(),
+                      Text(
+                        featured.title,
+                        maxLines: compact ? 1 : 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: compact ? 18 : 22,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.4,
+                          height: 1.18,
+                        ),
+                      ),
+                      if (tags.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 4,
+                          children: [
+                            for (final tag in tags.take(compact ? 2 : 3))
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 2.5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0x33FFFFFF),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  tag,
+                                  style: const TextStyle(
+                                    color: Color(0xF2FFFFFF),
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ],
+                      if (!compact && infoLine.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          infoLine,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xCCFFFFFF),
+                            fontSize: 12,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+
+    if (reduceMotion) {
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: openFeatured,
+        child: inner,
+      );
+    }
+    return ApplePressableScale(
+      pressedScale: 0.975,
+      pressedOpacity: 0.94,
+      onTap: openFeatured,
+      child: inner,
+    );
+  }
+
+  Widget _buildMacSideHistoryPanel(
+    BuildContext context,
+    List<WatchHistoryEntry> history,
+  ) {
+    final palette = ApplePalette.of(context);
+    final isDark = palette.isDark;
+    final items = history.take(3).toList(growable: false);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xA6161820) : const Color(0xE8FFFFFF),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: isDark
+              ? Colors.white.withValues(alpha: 0.12)
+              : const Color(0x1F0F172A),
+          width: 0.85,
+        ),
+        boxShadow: isDark
+            ? const [
+                BoxShadow(
+                  color: Color(0x3D000000),
+                  blurRadius: 20,
+                  offset: Offset(0, 8),
+                ),
+              ]
+            : const [
+                BoxShadow(
+                  color: Color(0x140F172A),
+                  blurRadius: 16,
+                  offset: Offset(0, 6),
+                ),
+              ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                '继续观看',
+                style: TextStyle(
+                  color: palette.labelPrimary,
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.2,
+                ),
+              ),
+              const Spacer(),
+              CupertinoButton(
+                padding: EdgeInsets.zero,
+                minSize: 22,
+                onPressed: _showWatchHistorySheet,
+                child: const Text(
+                  '全部',
+                  style: TextStyle(
+                    color: AppleColors.systemBlue,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                for (final entry in items)
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Builder(
+                        builder: (ctx) {
+                          final resolvedPoster = _resolveHistoryPoster(entry);
+                          final cwCardId = 'mac_side_cw_${entry.site}_${entry.id}';
+                          final hasKnownDuration = entry.duration > 0;
+                          final realProgress = hasKnownDuration
+                              ? entry.progressFraction.clamp(0.0, 1.0)
+                              : null;
+                          return Semantics(
+                            button: true,
+                            label: entry.episode.isNotEmpty
+                                ? '继续观看 ${entry.title} ${entry.episode}'
+                                : '继续观看 ${entry.title}',
+                            child: Material(
+                              color: Colors.transparent,
+                              borderRadius: BorderRadius.circular(12),
+                              child: InkWell(
+                                key: ValueKey(
+                                  'mac-side-history-item-${entry.site}-${entry.id}',
+                                ),
+                                borderRadius: BorderRadius.circular(12),
+                                focusColor:
+                                    AppleColors.systemBlue.withValues(alpha: 0.24),
+                                hoverColor: isDark
+                                    ? Colors.white.withValues(alpha: 0.08)
+                                    : const Color(0x140F172A),
+                                onTap: () => _openSyncedMediaEntry(
+                                  siteKey: entry.site,
+                                  videoId: entry.id,
+                                  title: entry.title,
+                                  poster: resolvedPoster,
+                                  sourceContext: ctx,
+                                  sourceRadius: 10.0,
+                                  sourceCardId: cwCardId,
+                                ),
+                                child: Ink(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: isDark
+                                        ? Colors.white.withValues(alpha: 0.05)
+                                        : const Color(0x0A0F172A),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      PosterExpandSourceCard(
+                                        cardId: cwCardId,
+                                        child: ClipRRect(
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          child: SizedBox(
+                                            width: 36,
+                                            height: 50,
+                                            child: PosterImage(
+                                              url: resolvedPoster,
+                                              title: entry.title,
+                                              placeholder:
+                                                  _buildPosterPlaceholder(),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              entry.title,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: palette.labelPrimary,
+                                                fontSize: 12.5,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              entry.episode.isNotEmpty
+                                                  ? entry.episode
+                                                  : '继续观看',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: palette.labelSecondary,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                            if (realProgress != null) ...[
+                                              const SizedBox(height: 4),
+                                              ClipRRect(
+                                                borderRadius:
+                                                    BorderRadius.circular(999),
+                                                child: LinearProgressIndicator(
+                                                  key: ValueKey(
+                                                    'mac-side-history-progress-${entry.site}-${entry.id}',
+                                                  ),
+                                                  value: realProgress,
+                                                  minHeight: 3,
+                                                  backgroundColor:
+                                                      palette.groupedTertiary,
+                                                  valueColor:
+                                                      const AlwaysStoppedAnimation<
+                                                          Color>(
+                                                    AppleColors.systemBlue,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHeroShowcaseCard(
     CmsSite site,
     CmsVideo featured, {
@@ -5576,20 +6115,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     fontSize: 12,
                   ),
                 ),
-                const SizedBox(height: 8),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(999),
-                  child: LinearProgressIndicator(
-                    value: entry.progressFraction > 0
-                        ? entry.progressFraction
-                        : 0.15,
-                    minHeight: 3.5,
-                    backgroundColor: palette.groupedTertiary,
-                    valueColor: const AlwaysStoppedAnimation<Color>(
-                      AppleColors.systemBlue,
+                if (entry.duration > 0) ...[
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: LinearProgressIndicator(
+                      key: ValueKey('cw-progress-${entry.site}-${entry.id}'),
+                      value: entry.progressFraction.clamp(0.0, 1.0),
+                      minHeight: 3.5,
+                      backgroundColor: palette.groupedTertiary,
+                      valueColor: const AlwaysStoppedAnimation<Color>(
+                        AppleColors.systemBlue,
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -7140,7 +7680,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           livePad,
-          useSidebar && _isMacOS ? 28 : 14,
+          _isMacOS ? 38 : 14,
           livePad,
           0,
         ),
@@ -8778,7 +9318,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           pad,
-          useSidebar && _isMacOS ? 28 : 14,
+          _isMacOS ? 38 : 14,
           pad,
           0,
         ),
@@ -9601,7 +10141,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           child: ListView(
             padding: EdgeInsets.fromLTRB(
               pad,
-              useSidebar && _isMacOS ? 28 : 16,
+              _isMacOS ? 38 : 16,
               pad,
               useSidebar ? 36 : MediaQuery.paddingOf(context).bottom + 28,
             ),
@@ -12021,6 +12561,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         title: '软件更新',
         backLabel: '返回',
         builder: (_) => IosUpdateSheet(installedVersion: _currentAppVersion),
+      );
+      return;
+    }
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.macOS) {
+      showAppleModalSheet<void>(
+        context: context,
+        title: '检查版本更新',
+        builder: (_) => MacosUpdateSheet(installedVersion: _currentAppVersion),
       );
       return;
     }
@@ -16161,7 +16709,9 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                               ),
                               SizedBox(height: 4),
                               Text(
-                                '$epLabel · 已看 $pct%',
+                                h.duration > 0
+                                    ? '$epLabel · 已看 $pct%'
+                                    : epLabel,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
@@ -16169,21 +16719,21 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                                   fontSize: 12.5,
                                 ),
                               ),
-                              SizedBox(height: 8),
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(999),
-                                child: LinearProgressIndicator(
-                                  value: h.progressFraction > 0
-                                      ? h.progressFraction
-                                      : 0.12,
-                                  minHeight: 3.5,
-                                  backgroundColor: ApplePalette.of(context).groupedTertiary,
-                                  valueColor:
-                                      const AlwaysStoppedAnimation<Color>(
-                                    AppleColors.systemBlue,
+                              if (h.duration > 0) ...[
+                                SizedBox(height: 8),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(999),
+                                  child: LinearProgressIndicator(
+                                    value: h.progressFraction.clamp(0.0, 1.0),
+                                    minHeight: 3.5,
+                                    backgroundColor: ApplePalette.of(context).groupedTertiary,
+                                    valueColor:
+                                        const AlwaysStoppedAnimation<Color>(
+                                      AppleColors.systemBlue,
+                                    ),
                                   ),
                                 ),
-                              ),
+                              ],
                             ],
                           ),
                         ),

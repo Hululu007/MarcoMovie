@@ -91,6 +91,26 @@ class PlaybackStartup {
     }
   }
 
+  /// Confirms real rendered video frame output for a live session even when
+  /// the transport position clock stays at `Duration.zero`. Cancels the
+  /// initial startup timeout immediately and closes the startup window once
+  /// sustained frame output is observed.
+  void confirmVideoOutput({bool sustained = false}) {
+    if (_onTimeout == null || _pastStartupWindow) return;
+    if (!_progressed) {
+      _progressed = true;
+      _timer?.cancel();
+      _timer = null;
+    }
+    if (_stallTimer != null && _buffering && _playing && !_userPaused) {
+      _armStallTimer();
+    }
+    if (sustained) {
+      _pastStartupWindow = true;
+      cancel();
+    }
+  }
+
   void setUserPaused(bool paused) => updateState(userPaused: paused);
 
   void updateState({bool? playing, bool? buffering, bool? userPaused}) {

@@ -7,6 +7,7 @@ import shutil
 import struct
 import subprocess
 import sys
+from urllib.parse import unquote, urlparse
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 IOS_LIQUID_GLASS_SWIFT_PATH = Path(__file__).resolve().parent / "ios_native" / "MarcoLiquidGlass.swift"
@@ -712,6 +713,347 @@ MACOS_WEB_SNIFFER_CHANNEL_SNIPPET = r'''
       }
     }'''
 
+MACOS_WINDOW_CHANNEL_SNIPPET = r'''
+    let macosWindowChannel = FlutterMethodChannel(name: "marco_movie/macos_window", binaryMessenger: flutterViewController.engine.binaryMessenger)
+    macosWindowChannel.setMethodCallHandler { [weak self] call, result in
+      DispatchQueue.main.async {
+        guard let self = self else {
+          result(nil)
+          return
+        }
+        self.marcoHandleWindowMethodCall(call, result: result)
+      }
+    }'''
+
+MACOS_WINDOW_EXTENSION_SWIFT = r'''
+extension MainFlutterWindow {
+  private static let marcoWindowFrameDefaultsKey = "marco_macos_window_frame_v1"
+  private static let marcoMinWindowSize = NSSize(width: 720, height: 520)
+  private static let marcoDefaultWindowSize = NSSize(width: 1280, height: 760)
+  private static let marcoMinVisibleWidth: CGFloat = 180
+  private static let marcoMinVisibleHeight: CGFloat = 80
+
+  private static func marcoIsValidFrame(_ frame: NSRect) -> Bool {
+    return frame.origin.x.isFinite
+      && frame.origin.y.isFinite
+      && frame.size.width.isFinite
+      && frame.size.height.isFinite
+      && frame.size.width >= marcoMinWindowSize.width
+      && frame.size.height >= marcoMinWindowSize.height
+      && frame.size.width <= 16384
+      && frame.size.height <= 16384
+      && frame.origin.x > -16000
+      && frame.origin.y > -16000
+      && frame.origin.x < 32768
+      && frame.origin.y < 32768
+  }
+
+  private static func marcoCenteredFrame(in visibleFrame: NSRect, preferredSize: NSSize) -> NSRect {
+    let safeW = visibleFrame.width > 0 ? visibleFrame.width : marcoDefaultWindowSize.width
+    let safeH = visibleFrame.height > 0 ? visibleFrame.height : marcoDefaultWindowSize.height
+    let minW = min(marcoMinWindowSize.width, safeW)
+    let minH = min(marcoMinWindowSize.height, safeH)
+    let targetW: CGFloat
+    if preferredSize.width <= safeW {
+      targetW = max(minW, preferredSize.width)
+    } else {
+      targetW = min(safeW, max(minW, safeW - 24))
+    }
+    let targetH: CGFloat
+    if preferredSize.height <= safeH {
+      targetH = max(minH, preferredSize.height)
+    } else {
+      targetH = min(safeH, max(minH, safeH - 24))
+    }
+    let x = visibleFrame.minX + (safeW - targetW) / 2.0
+    let y = visibleFrame.minY + (safeH - targetH) / 2.0
+    return NSRect(x: x.rounded(), y: y.rounded(), width: targetW.rounded(), height: targetH.rounded())
+  }
+
+  private static func marcoResolveFrame(
+    saved: NSRect?,
+    visibleFrames: [NSRect],
+    primaryVisibleFrame: NSRect
+  ) -> NSRect {
+    let validFrames = visibleFrames.filter { $0.width > 0 && $0.height > 0 }
+    let primary = (primaryVisibleFrame.width > 0 && primaryVisibleFrame.height > 0)
+      ? primaryVisibleFrame
+      : (validFrames.first ?? NSRect(x: 0, y: 0, width: 1440, height: 875))
+
+    guard let candidate = saved, marcoIsValidFrame(candidate) else {
+      return marcoCenteredFrame(in: primary, preferredSize: marcoDefaultWindowSize)
+    }
+    if validFrames.isEmpty {
+      return candidate
+    }
+
+    var bestFrame: NSRect?
+    var bestArea: CGFloat = -1
+    var bestInter = NSRect.zero
+    for frame in validFrames {
+      let inter = candidate.intersection(frame)
+      if inter.isNull || inter.width <= 0 || inter.height <= 0 { continue }
+      let area = inter.width * inter.height
+      if area > bestArea {
+        bestArea = area
+        bestFrame = frame
+        bestInter = inter
+      }
+    }
+
+    guard let target = bestFrame, bestInter.width >= 120, bestInter.height >= marcoMinVisibleHeight else {
+      return marcoCenteredFrame(in: primary, preferredSize: candidate.size)
+    }
+
+    let minW = min(marcoMinWindowSize.width, target.width)
+    let minH = min(marcoMinWindowSize.height, target.height)
+    let clampedW = min(target.width, max(minW, candidate.width))
+    let clampedH = min(target.height, max(minH, candidate.height))
+
+    let minX = target.minX
+    let maxX = max(target.minX, target.maxX - min(marcoMinVisibleWidth, clampedW))
+    let clampedX = min(maxX, max(minX, candidate.minX))
+
+    let minTopY = min(target.maxY, target.minY + min(marcoMinVisibleHeight, clampedH))
+    let clampedTopY = min(target.maxY, max(minTopY, candidate.minY + clampedH))
+    let clampedY = clampedTopY - clampedH
+
+    return NSRect(
+      x: clampedX.rounded(),
+      y: clampedY.rounded(),
+      width: clampedW.rounded(),
+      height: clampedH.rounded()
+    )
+  }
+
+  private static func marcoEncodeFrame(_ frame: NSRect) -> [String: Double] {
+    return [
+      "x": Double(frame.origin.x),
+      "y": Double(frame.origin.y),
+      "width": Double(frame.size.width),
+      "height": Double(frame.size.height),
+    ]
+  }
+
+  private static func marcoDecodeFrame(_ dict: [String: Any]?) -> NSRect? {
+    guard let dict = dict,
+          let x = (dict["x"] as? NSNumber)?.doubleValue,
+          let y = (dict["y"] as? NSNumber)?.doubleValue,
+          let w = (dict["width"] as? NSNumber)?.doubleValue,
+          let h = (dict["height"] as? NSNumber)?.doubleValue else {
+      return nil
+    }
+    let rect = NSRect(x: x, y: y, width: w, height: h)
+    return marcoIsValidFrame(rect) ? rect : nil
+  }
+
+  private static func marcoLoadSavedFrame() -> NSRect? {
+    let raw = UserDefaults.standard.dictionary(forKey: marcoWindowFrameDefaultsKey)
+    return marcoDecodeFrame(raw)
+  }
+
+  func marcoRestoreInitialFrame() {
+    let screens = NSScreen.screens
+    let visibleFrames = screens.map { $0.visibleFrame }
+    let primary = NSScreen.main?.visibleFrame
+      ?? screens.first?.visibleFrame
+      ?? NSRect(x: 0, y: 0, width: 1440, height: 875)
+    let saved = Self.marcoLoadSavedFrame()
+    let resolved = Self.marcoResolveFrame(
+      saved: saved,
+      visibleFrames: visibleFrames,
+      primaryVisibleFrame: primary
+    )
+    self.marcoRestoredFromSaved = (saved != nil)
+    self.marcoLastNormalFrame = (saved != nil) ? resolved : nil
+    self.setFrame(resolved, display: true)
+  }
+
+  func marcoEnsureWindowChromeVisible() {
+    self.titleVisibility = .hidden
+    self.titlebarAppearsTransparent = true
+    self.styleMask.insert(.fullSizeContentView)
+    if !self.styleMask.contains(.fullScreen) {
+      self.standardWindowButton(.closeButton)?.isHidden = false
+      self.standardWindowButton(.miniaturizeButton)?.isHidden = false
+      self.standardWindowButton(.zoomButton)?.isHidden = false
+    }
+  }
+
+  func marcoClampVisibleIfNeeded() {
+    guard !self.marcoInFullscreenTransition,
+          !self.marcoIsMiniaturizing,
+          !self.marcoIsClosing,
+          !self.styleMask.contains(.fullScreen),
+          !self.isMiniaturized else {
+      return
+    }
+    let screens = NSScreen.screens
+    guard !screens.isEmpty else { return }
+    let visibleFrames = screens.map { $0.visibleFrame }
+    let primary = NSScreen.main?.visibleFrame ?? screens[0].visibleFrame
+    let current = self.frame
+    let clamped = Self.marcoResolveFrame(
+      saved: current,
+      visibleFrames: visibleFrames,
+      primaryVisibleFrame: primary
+    )
+    if abs(clamped.origin.x - current.origin.x) > 1
+        || abs(clamped.origin.y - current.origin.y) > 1
+        || abs(clamped.size.width - current.size.width) > 1
+        || abs(clamped.size.height - current.size.height) > 1 {
+      self.setFrame(clamped, display: true)
+      self.marcoLastNormalFrame = clamped
+    }
+  }
+
+  func marcoPersistNormalFrame(forceSynchronize: Bool = false) {
+    guard !self.marcoInFullscreenTransition,
+          !self.marcoIsMiniaturizing,
+          !self.marcoIsClosing,
+          !self.styleMask.contains(.fullScreen),
+          !self.isMiniaturized,
+          self.isVisible else {
+      return
+    }
+    let current = self.frame
+    guard Self.marcoIsValidFrame(current) else { return }
+    self.marcoLastNormalFrame = current
+    UserDefaults.standard.set(Self.marcoEncodeFrame(current), forKey: Self.marcoWindowFrameDefaultsKey)
+    if forceSynchronize {
+      UserDefaults.standard.synchronize()
+    }
+  }
+
+  func marcoInstallWindowObservers() {
+    guard self.marcoWindowObservers.isEmpty else { return }
+    let nc = NotificationCenter.default
+    let add: (Notification.Name, Any?, @escaping (MainFlutterWindow) -> Void) -> Void = { [weak self] name, obj, block in
+      guard let self = self else { return }
+      let token = nc.addObserver(forName: name, object: obj, queue: .main) { [weak self] _ in
+        guard let strongSelf = self else { return }
+        block(strongSelf)
+      }
+      self.marcoWindowObservers.append(token)
+    }
+
+    add(NSWindow.didMoveNotification, self) { win in
+      win.marcoPersistNormalFrame()
+    }
+    add(NSWindow.didResizeNotification, self) { win in
+      win.marcoPersistNormalFrame()
+    }
+    add(NSWindow.didEndLiveResizeNotification, self) { win in
+      win.marcoPersistNormalFrame(forceSynchronize: true)
+    }
+    add(NSWindow.willEnterFullScreenNotification, self) { win in
+      win.marcoPersistNormalFrame(forceSynchronize: true)
+      win.marcoInFullscreenTransition = true
+    }
+    add(NSWindow.didEnterFullScreenNotification, self) { win in
+      win.marcoInFullscreenTransition = false
+    }
+    add(NSWindow.willExitFullScreenNotification, self) { win in
+      win.marcoInFullscreenTransition = true
+    }
+    add(NSWindow.didExitFullScreenNotification, self) { win in
+      win.marcoInFullscreenTransition = false
+      win.marcoEnsureWindowChromeVisible()
+      win.marcoClampVisibleIfNeeded()
+      win.marcoPersistNormalFrame(forceSynchronize: true)
+    }
+    add(NSWindow.willMiniaturizeNotification, self) { win in
+      win.marcoPersistNormalFrame(forceSynchronize: true)
+      win.marcoIsMiniaturizing = true
+    }
+    add(NSWindow.didDeminiaturizeNotification, self) { win in
+      win.marcoIsMiniaturizing = false
+      win.marcoEnsureWindowChromeVisible()
+      win.marcoClampVisibleIfNeeded()
+    }
+    add(NSWindow.willCloseNotification, self) { win in
+      win.marcoPersistNormalFrame(forceSynchronize: true)
+      win.marcoIsClosing = true
+    }
+    add(NSApplication.willTerminateNotification, nil) { win in
+      win.marcoPersistNormalFrame(forceSynchronize: true)
+    }
+    add(NSApplication.didChangeScreenParametersNotification, nil) { win in
+      win.marcoClampVisibleIfNeeded()
+      win.marcoEnsureWindowChromeVisible()
+    }
+  }
+
+  func marcoHandleWindowMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    switch call.method {
+    case "getWindowBoundsState":
+      var payload: [String: Any] = [
+        "restoredFromSaved": self.marcoRestoredFromSaved,
+        "isFullScreen": self.styleMask.contains(.fullScreen) || self.marcoInFullscreenTransition,
+        "isMiniaturized": self.isMiniaturized || self.marcoIsMiniaturizing,
+        "minWidth": Double(self.minSize.width),
+        "minHeight": Double(self.minSize.height),
+        "currentFrame": Self.marcoEncodeFrame(self.frame),
+      ]
+      if let saved = Self.marcoLoadSavedFrame() ?? (self.marcoRestoredFromSaved ? self.marcoLastNormalFrame : nil) {
+        payload["savedFrame"] = Self.marcoEncodeFrame(saved)
+      }
+      result(payload)
+    case "saveNormalBounds":
+      self.marcoPersistNormalFrame(forceSynchronize: true)
+      result(true)
+    case "applyNormalBounds":
+      guard !self.styleMask.contains(.fullScreen),
+            !self.isMiniaturized,
+            let dict = call.arguments as? [String: Any],
+            let requested = Self.marcoDecodeFrame(dict) else {
+        result(false)
+        return
+      }
+      let screens = NSScreen.screens
+      let visibleFrames = screens.map { $0.visibleFrame }
+      let primary = NSScreen.main?.visibleFrame
+        ?? screens.first?.visibleFrame
+        ?? NSRect(x: 0, y: 0, width: 1440, height: 875)
+      let resolved = Self.marcoResolveFrame(
+        saved: requested,
+        visibleFrames: visibleFrames,
+        primaryVisibleFrame: primary
+      )
+      self.setFrame(resolved, display: true)
+      self.marcoEnsureWindowChromeVisible()
+      self.marcoLastNormalFrame = resolved
+      UserDefaults.standard.set(Self.marcoEncodeFrame(resolved), forKey: Self.marcoWindowFrameDefaultsKey)
+      result(true)
+    case "setAppearance":
+      let mode = (call.arguments as? String)?.lowercased() ?? "system"
+      switch mode {
+      case "light":
+        self.appearance = NSAppearance(named: .aqua)
+      case "dark":
+        self.appearance = NSAppearance(named: .darkAqua)
+      default:
+        self.appearance = nil
+      }
+      self.marcoEnsureWindowChromeVisible()
+      result(nil)
+    case "revealInFinder":
+      guard let args = call.arguments as? [String: Any],
+            let path = args["path"] as? String,
+            !path.isEmpty,
+            FileManager.default.fileExists(atPath: path) else {
+        result(false)
+        return
+      }
+      NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+      result(true)
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+}
+'''
+
 APPLE_WEB_SNIFFER_SWIFT = r'''
 
 private final class WeakSnifferScriptHandler: NSObject, WKScriptMessageHandler {
@@ -1094,6 +1436,72 @@ def _write_windows_ico(ico_path: Path, source_png: Path) -> None:
     ico_path.write_bytes(directory + payload)
 
 
+def _upgrade_macos_media_kit_mpv_v073() -> None:
+    """Upgrade pub-cached media_kit_libs_macos_video Makefile from v0.6.0 to v0.7.3 on macOS.
+
+    media_kit_libs_macos_video 1.1.4 (latest on pub.dev) bundles libmpv-darwin-build v0.6.0,
+    whose Avcodec.framework omits FFmpeg's pgssub decoder, preventing Blu-ray PGS subtitles
+    from rendering on macOS. Official upstream v0.7.3 enables --enable-decoder=pgssub while
+    retaining -mmacosx-version-min=10.9 and identical mpv 0.36.0 / FFmpeg 6.0 ABI.
+    """
+    if sys.platform != "darwin":
+        return
+    pkg_cfg = ROOT / ".dart_tool" / "package_config.json"
+    if not pkg_cfg.is_file():
+        return
+    try:
+        cfg = json.loads(pkg_cfg.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    target_ver = "v0.7.3"
+    target_sha = "2e58ac66b0ea875239bf4db29b3ef2100a719df1d61fa1e780c38d651d4c9f27"
+    for pkg in cfg.get("packages", []):
+        if pkg.get("name") != "media_kit_libs_macos_video":
+            continue
+        root_uri = pkg.get("rootUri", "")
+        if not root_uri:
+            continue
+        if root_uri.startswith("file://"):
+            pkg_root = Path(unquote(urlparse(root_uri).path))
+        else:
+            pkg_root = (pkg_cfg.parent / root_uri).resolve()
+        macos_dir = pkg_root / "macos"
+        makefile = macos_dir / "Makefile"
+        if not makefile.is_file():
+            return
+        src = makefile.read_text(encoding="utf-8")
+        if f"MPV_XCFRAMEWORKS_VERSION={target_ver}" in src and target_sha in src:
+            print(f"media_kit_libs_macos_video Makefile already at libmpv {target_ver}: {makefile}", flush=True)
+            return
+        updated = re.sub(
+            r"^MPV_XCFRAMEWORKS_VERSION=.*$",
+            f"MPV_XCFRAMEWORKS_VERSION={target_ver}",
+            src,
+            flags=re.MULTILINE,
+        )
+        updated = re.sub(
+            r"^MPV_XCFRAMEWORKS_SHA256SUM=.*$",
+            f"MPV_XCFRAMEWORKS_SHA256SUM={target_sha}",
+            updated,
+            flags=re.MULTILINE,
+        )
+        if updated != src:
+            makefile.write_text(updated, encoding="utf-8")
+            fw_dir = macos_dir / "Frameworks"
+            if fw_dir.is_dir():
+                for child in fw_dir.iterdir():
+                    if child.name.endswith(".xcframework") or child.name == ".symlinks":
+                        if child.is_dir() and not child.is_symlink():
+                            shutil.rmtree(child)
+                        else:
+                            child.unlink(missing_ok=True)
+            print(
+                f"Upgraded media_kit_libs_macos_video Makefile to libmpv {target_ver} (pgssub enabled): {makefile}",
+                flush=True,
+            )
+        return
+
+
 def main() -> None:
     subprocess.run([sys.executable, str(REPO_ROOT / 'scripts/prepare_python_html.py'), '--check'], check=True)
     subprocess.run([sys.executable, str(REPO_ROOT / 'scripts/prepare_python_modules.py'), '--check'], check=True)
@@ -1154,6 +1562,13 @@ def main() -> None:
                     "</dict>",
                     "  <key>com.apple.security.files.user-selected.read-write</key>\n  <true/>\n</dict>",
                 )
+            # Release distributions must never carry the debug get-task-allow entitlement.
+            if ent.name == "Release.entitlements":
+                text = re.sub(
+                    r"\s*<key>com\.apple\.security\.get-task-allow</key>\s*<(?:true|false)\s*/>\s*",
+                    "\n",
+                    text,
+                )
             ent.write_text(text, encoding="utf-8")
         info_plist = macos_runner / "Info.plist"
         if info_plist.exists():
@@ -1182,6 +1597,29 @@ def main() -> None:
                     "  private var playbackActivity: NSObjectProtocol?",
                     1,
                 )
+            if "private var marcoWindowObservers:" not in swift_text:
+                anchor = (
+                    "  private var playbackActivity: NSObjectProtocol?"
+                    if "  private var playbackActivity: NSObjectProtocol?" in swift_text
+                    else "class MainFlutterWindow: NSWindow {"
+                )
+                swift_text = swift_text.replace(
+                    anchor,
+                    anchor + "\n"
+                    "  private var marcoWindowObservers: [NSObjectProtocol] = []\n"
+                    "  private var marcoInFullscreenTransition = false\n"
+                    "  private var marcoIsMiniaturizing = false\n"
+                    "  private var marcoIsClosing = false\n"
+                    "  private var marcoRestoredFromSaved = false\n"
+                    "  private var marcoLastNormalFrame: NSRect?\n\n"
+                    "  deinit {\n"
+                    "    for observer in marcoWindowObservers {\n"
+                    "      NotificationCenter.default.removeObserver(observer)\n"
+                    "    }\n"
+                    "    marcoWindowObservers.removeAll()\n"
+                    "  }",
+                    1,
+                )
             if "marco_movie/wakelock" not in swift_text and "RegisterGeneratedPlugins(registry: flutterViewController)" in swift_text:
                 swift_text = swift_text.replace(
                     "RegisterGeneratedPlugins(registry: flutterViewController)",
@@ -1204,6 +1642,13 @@ def main() -> None:
                     "    }",
                     1,
                 )
+            if "marco_movie/macos_window" not in swift_text and "RegisterGeneratedPlugins(registry: flutterViewController)" in swift_text:
+                swift_text = swift_text.replace(
+                    "RegisterGeneratedPlugins(registry: flutterViewController)",
+                    "RegisterGeneratedPlugins(registry: flutterViewController)"
+                    + MACOS_WINDOW_CHANNEL_SNIPPET,
+                    1,
+                )
             if "marco_movie/web_sniffer" not in swift_text and "RegisterGeneratedPlugins(registry: flutterViewController)" in swift_text:
                 swift_text = swift_text.replace(
                     "RegisterGeneratedPlugins(registry: flutterViewController)",
@@ -1211,18 +1656,41 @@ def main() -> None:
                     + MACOS_WEB_SNIFFER_CHANNEL_SNIPPET,
                     1,
                 )
+            if "self.marcoRestoreInitialFrame()" not in swift_text:
+                if "titlebarAppearsTransparent" in swift_text:
+                    swift_text = re.sub(
+                        r"self\.titleVisibility = \.hidden.*?super\.awakeFromNib\(\)",
+                        "self.isRestorable = false\n"
+                        "    self.titleVisibility = .hidden\n"
+                        "    self.titlebarAppearsTransparent = true\n"
+                        "    self.styleMask.insert(.fullSizeContentView)\n"
+                        "    self.minSize = NSSize(width: 720, height: 520)\n"
+                        "    self.marcoRestoreInitialFrame()\n"
+                        "    super.awakeFromNib()\n"
+                        "    self.marcoEnsureWindowChromeVisible()\n"
+                        "    self.marcoInstallWindowObservers()",
+                        swift_text,
+                        count=1,
+                        flags=re.DOTALL,
+                    )
+                else:
+                    swift_text = swift_text.replace(
+                        "super.awakeFromNib()",
+                        "self.isRestorable = false\n"
+                        "    self.titleVisibility = .hidden\n"
+                        "    self.titlebarAppearsTransparent = true\n"
+                        "    self.styleMask.insert(.fullSizeContentView)\n"
+                        "    self.minSize = NSSize(width: 720, height: 520)\n"
+                        "    self.marcoRestoreInitialFrame()\n"
+                        "    super.awakeFromNib()\n"
+                        "    self.marcoEnsureWindowChromeVisible()\n"
+                        "    self.marcoInstallWindowObservers()",
+                        1,
+                    )
             if "private final class HeadlessMediaWebSniffer" not in swift_text:
                 swift_text = swift_text.rstrip() + "\n" + APPLE_WEB_SNIFFER_SWIFT
-            if "titlebarAppearsTransparent" not in swift_text:
-                swift_text = swift_text.replace(
-                    "super.awakeFromNib()",
-                    "self.titleVisibility = .hidden\n"
-                    "    self.titlebarAppearsTransparent = true\n"
-                    "    self.styleMask.insert(.fullSizeContentView)\n"
-                    "    self.appearance = NSAppearance(named: .darkAqua)\n"
-                    "    self.minSize = NSSize(width: 900, height: 600)\n"
-                    "    super.awakeFromNib()",
-                )
+            if "extension MainFlutterWindow {" not in swift_text:
+                swift_text = swift_text.rstrip() + "\n" + MACOS_WINDOW_EXTENSION_SWIFT
             window_swift.write_text(swift_text, encoding="utf-8")
     macos_podfile = ROOT / "macos" / "Podfile"
     if macos_podfile.exists():
@@ -1232,6 +1700,38 @@ def main() -> None:
             "platform :osx, '11.0'",
             text,
         )
+        mpv_upgrade_marker = "# MarcoMovie: upgrade media_kit macOS libmpv to v0.7.3 (enables FFmpeg pgssub Blu-ray PGS decoder)"
+        if mpv_upgrade_marker not in text and "flutter_install_all_macos_pods" in text:
+            mpv_upgrade_ruby = (
+                f"  {mpv_upgrade_marker}\n"
+                "  begin\n"
+                "    require 'fileutils'\n"
+                "    mk_macos_dir = File.expand_path('Flutter/ephemeral/.symlinks/plugins/media_kit_libs_macos_video/macos', __dir__)\n"
+                "    mk_makefile = File.join(mk_macos_dir, 'Makefile')\n"
+                "    if File.exist?(mk_makefile)\n"
+                "      mk_src = File.read(mk_makefile)\n"
+                "      target_ver = 'v0.7.3'\n"
+                "      target_sha = '2e58ac66b0ea875239bf4db29b3ef2100a719df1d61fa1e780c38d651d4c9f27'\n"
+                "      unless mk_src.include?(\"MPV_XCFRAMEWORKS_VERSION=#{target_ver}\")\n"
+                "        mk_src = mk_src.sub(/^MPV_XCFRAMEWORKS_VERSION=.*$/, \"MPV_XCFRAMEWORKS_VERSION=#{target_ver}\")\n"
+                "        mk_src = mk_src.sub(/^MPV_XCFRAMEWORKS_SHA256SUM=.*$/, \"MPV_XCFRAMEWORKS_SHA256SUM=#{target_sha}\")\n"
+                "        File.write(mk_makefile, mk_src)\n"
+                "        Dir.glob(File.join(mk_macos_dir, 'Frameworks', '*.xcframework')).each { |p| FileUtils.rm_rf(p) }\n"
+                "        FileUtils.rm_rf(File.join(mk_macos_dir, 'Frameworks', '.symlinks'))\n"
+                "        Pod::UI.puts(\"MarcoMovie: upgraded media_kit macOS libmpv to #{target_ver} (pgssub enabled)\")\n"
+                "      end\n"
+                "    end\n"
+                "  rescue => e\n"
+                "    Pod::UI.warn(\"MarcoMovie: skipped libmpv v0.7.3 upgrade: #{e}\")\n"
+                "  end\n\n"
+            )
+            text = re.sub(
+                r"(^\s*flutter_install_all_macos_pods\b)",
+                lambda m: mpv_upgrade_ruby + m.group(1),
+                text,
+                count=1,
+                flags=re.MULTILINE,
+            )
         macos_podfile.write_text(text, encoding="utf-8")
     macos_pbx = ROOT / "macos" / "Runner.xcodeproj" / "project.pbxproj"
     if macos_pbx.exists():
@@ -1242,6 +1742,7 @@ def main() -> None:
             text,
         )
         macos_pbx.write_text(text, encoding="utf-8")
+    _upgrade_macos_media_kit_mpv_v073()
     # iOS Info.plist, deployment target, and opaque AppIcon set
     ios_runner = ROOT / "ios" / "Runner"
     if ios_runner.exists():

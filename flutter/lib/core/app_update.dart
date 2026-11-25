@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'ed25519.dart';
+import 'macos_window_bounds.dart';
 import 'ohos_runtime.dart';
 
 class UpdateCancelled implements Exception {
@@ -134,6 +135,7 @@ class AppUpdate {
   final String? checksum;
   final int? size;
   final Uri? iosUrl;
+  final Uri? macosUrl;
   final Uri? harmonyosUrl;
   final Uri? releaseUrl;
   final String? packageFileName;
@@ -144,6 +146,7 @@ class AppUpdate {
     this.checksum,
     this.size, [
     this.iosUrl,
+    this.macosUrl,
     this.harmonyosUrl,
     this.releaseUrl,
     this.packageFileName,
@@ -178,6 +181,15 @@ class AppUpdate {
 
   static bool isRemoteVersionNewer(String remote, String current) =>
       compareVersions(remote, current) > 0;
+
+  static List<String> macosAssetNames(String version) => <String>[
+        'MarcoMovie-$version-macos-desktop.zip',
+        'MarcoMovie-$version-macos.zip',
+      ];
+
+  static bool _isTrustedMacosAssetPath(String path, String version) =>
+      path.endsWith('/MarcoMovie-$version-macos-desktop.zip') ||
+      path.endsWith('/MarcoMovie-$version-macos.zip');
 
   static bool isValidHarmonyosAssetName(String name, String version) {
     final trimmed = name.trim();
@@ -215,6 +227,7 @@ class AppUpdate {
     return switch (target) {
       'windows' => windowsUrl,
       'ios' => iosUrl,
+      'macos' => macosUrl,
       'harmonyos' => harmonyosUrl,
       _ => null,
     };
@@ -293,6 +306,14 @@ class AppUpdate {
               isValidHarmonyosAssetName(itemName, version)) {
             asset ??= item;
             matchedFileName ??= itemName;
+          } else if (platform == 'macos') {
+            if (itemName == 'MarcoMovie-$version-macos-desktop.zip') {
+              asset = item;
+              matchedFileName = itemName;
+            } else if (itemName == 'MarcoMovie-$version-macos.zip') {
+              asset ??= item;
+              matchedFileName ??= itemName;
+            }
           }
         }
       }
@@ -341,6 +362,24 @@ class AppUpdate {
       } else if (json['harmonyos'] is Map) {
         asset = json['harmonyos'] as Map;
       }
+    } else if (platform == 'macos') {
+      if (json['packages'] is Map) {
+        final pkgs = json['packages'] as Map;
+        for (final candidateName in macosAssetNames(version)) {
+          final cand = pkgs[candidateName];
+          if (cand is Map) {
+            asset = cand;
+            matchedFileName = candidateName;
+            break;
+          }
+        }
+      }
+      if (asset == null && json['package'] is Map) {
+        asset = json['package'] as Map;
+      }
+      if (asset == null && json['macos'] is Map) {
+        asset = json['macos'] as Map;
+      }
     }
     final data = asset ?? const <String, dynamic>{};
     final digest = (github ? data['digest'] : data['sha256'])
@@ -364,11 +403,16 @@ class AppUpdate {
               '/MarcoMovie-$version-ios-iphone-ipad-unsigned.ipa',
             )) &&
         validDigest;
+    final verifiedMacos = platform == 'macos' &&
+        uri != null &&
+        _isTrustedMacosAssetPath(uri.path, version) &&
+        validDigest;
     final verifiedHarmonyos = platform == 'harmonyos' &&
         uri != null &&
         isValidHarmonyosAssetPath(uri.path, version) &&
         validDigest;
-    final verified = verifiedWin || verifiedIos || verifiedHarmonyos;
+    final verified =
+        verifiedWin || verifiedIos || verifiedMacos || verifiedHarmonyos;
     final releasePage = trustedReleasePage(
       github ? json['html_url'] : (json['release_url'] ?? json['releaseUrl']),
     );
@@ -383,6 +427,7 @@ class AppUpdate {
       verified ? digest.toLowerCase() : null,
       verified ? size : null,
       verifiedIos ? uri : null,
+      verifiedMacos ? uri : null,
       verifiedHarmonyos ? uri : null,
       releasePage,
       verified ? resolvedFileName : null,
@@ -422,6 +467,7 @@ class AppUpdate {
         final name = 'MarcoMovie-${release.version}-${_suffix(platform)}';
         final altIosName =
             'MarcoMovie-${release.version}-ios-iphone-ipad-unsigned.ipa';
+        final altMacosName = 'MarcoMovie-${release.version}-macos-desktop.zip';
         final assets = item['assets'];
         if (assets is! List ||
             !assets.whereType<Map>().any(
@@ -429,6 +475,7 @@ class AppUpdate {
                     final assetName = (asset['name'] ?? '').toString().trim();
                     final matchesName = assetName == name ||
                         (platform == 'ios' && assetName == altIosName) ||
+                        (platform == 'macos' && assetName == altMacosName) ||
                         (platform == 'harmonyos' &&
                             isValidHarmonyosAssetName(
                               assetName,
@@ -442,6 +489,7 @@ class AppUpdate {
         }
         if (platform == 'windows' && release.windowsUrl == null ||
             platform == 'ios' && release.iosUrl == null ||
+            platform == 'macos' && release.macosUrl == null ||
             platform == 'harmonyos' && release.harmonyosUrl == null) {
           continue;
         }
@@ -549,6 +597,7 @@ class AppUpdate {
           final release = parse(manifest, platform: platform);
           if (platform == 'windows' && release.windowsUrl == null ||
               platform == 'ios' && release.iosUrl == null ||
+              platform == 'macos' && release.macosUrl == null ||
               platform == 'harmonyos' && release.harmonyosUrl == null) {
             continue;
           }
@@ -675,8 +724,182 @@ class AppUpdate {
     }
   }
 
+  /// Downloads the published macOS ZIP asset to an isolated staging file.
+  /// Only a complete, size- and SHA-256-verified archive is exposed to Finder.
+  Future<File> downloadMacos({
+    required Directory directory,
+    required UpdateCancellation cancellation,
+    http.Client? client,
+    Duration connectionTimeout = const Duration(seconds: 15),
+    Duration stallTimeout = const Duration(seconds: 30),
+    Duration totalTimeout = const Duration(minutes: 10),
+    void Function(int received, int total)? onProgress,
+  }) async {
+    final target = macosUrl;
+    if (target == null ||
+        trustedAsset(target.toString()) == null ||
+        !_isTrustedMacosAssetPath(target.path, version) ||
+        size == null ||
+        checksum == null) {
+      throw const FormatException('缺少可信的 macOS 更新信息');
+    }
+    final rawName =
+        target.pathSegments.isNotEmpty ? target.pathSegments.last : '';
+    final expectedFileName =
+        RegExp(r'^MarcoMovie-\d+\.\d+\.\d+-macos(?:-desktop)?\.zip$')
+                .hasMatch(rawName)
+            ? rawName
+            : 'MarcoMovie-$version-macos-desktop.zip';
+    final installedFile =
+        File('${directory.path}${Platform.pathSeparator}$expectedFileName');
+    cancellation.check();
+    if (await installedFile.exists()) {
+      try {
+        await verifyFile(installedFile);
+        cancellation.check();
+        return installedFile;
+      } on FormatException {
+        // Never delete a pre-existing local file with different content;
+        // download and verify in an isolated temporary directory first, then
+        // pick a non-colliding filename if the namesake still exists.
+      }
+    }
+    final transport = client ?? http.Client();
+    final abort = Completer<void>();
+    final deadline = Timer(totalTimeout, () {
+      if (!abort.isCompleted) abort.complete();
+    });
+    cancellation.whenCancelled.then((_) {
+      if (!abort.isCompleted) abort.complete();
+    });
+    Directory? staging;
+    IOSink? sink;
+    File? publishTemp;
+    try {
+      cancellation.check();
+      staging = await Directory.systemTemp.createTemp('marco-macos-update-');
+      final partial =
+          File('${staging.path}${Platform.pathSeparator}package.part');
+      final request =
+          http.AbortableRequest('GET', target, abortTrigger: abort.future);
+      final response = await cancellation
+          .bind(transport.send(request).timeout(connectionTimeout));
+      if (response.statusCode != 200) {
+        throw HttpException('HTTP ${response.statusCode}');
+      }
+      if (response.contentLength != null && response.contentLength != size) {
+        throw const FormatException('更新包大小与发布清单不一致');
+      }
+      var received = 0;
+      sink = partial.openWrite();
+      Future<void> receive() async {
+        await for (final chunk in response.stream.timeout(stallTimeout)) {
+          cancellation.check();
+          if (abort.isCompleted) throw TimeoutException('更新包下载超时');
+          received += chunk.length;
+          if (received > size!) throw const FormatException('更新包超过发布大小');
+          sink!.add(chunk);
+          onProgress?.call(received, size!);
+        }
+      }
+
+      await cancellation.bind(Future.any([
+        receive(),
+        abort.future.then<void>((_) => throw TimeoutException('更新包下载超时')),
+      ]));
+      await sink.flush();
+      await sink.close();
+      sink = null;
+      cancellation.check();
+      await verifyFile(partial);
+      cancellation.check();
+
+      await directory.create(recursive: true);
+      final destination = await _resolveUniqueMacosDestination(
+        directory,
+        expectedFileName,
+      );
+      if (await destination.exists()) {
+        // Exact SHA-256 verified file already present at canonical path.
+        return destination;
+      }
+      publishTemp = File(
+        '${directory.path}${Platform.pathSeparator}'
+        '.$expectedFileName.tmp.${DateTime.now().microsecondsSinceEpoch}',
+      );
+      await partial.copy(publishTemp.path);
+      await verifyFile(publishTemp);
+      cancellation.check();
+      final finalDestination = await _resolveUniqueMacosDestination(
+        directory,
+        expectedFileName,
+      );
+      if (await finalDestination.exists()) {
+        return finalDestination;
+      }
+      final published = await publishTemp.rename(finalDestination.path);
+      publishTemp = null;
+      return published;
+    } finally {
+      deadline.cancel();
+      if (!abort.isCompleted) abort.complete();
+      if (client == null) transport.close();
+      await sink?.close();
+      if (publishTemp != null && await publishTemp.exists()) {
+        try {
+          await publishTemp.delete();
+        } catch (_) {}
+      }
+      if (staging != null && await staging.exists()) {
+        try {
+          await staging.delete(recursive: true);
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<File> _resolveUniqueMacosDestination(
+    Directory directory,
+    String expectedFileName,
+  ) async {
+    final primary =
+        File('${directory.path}${Platform.pathSeparator}$expectedFileName');
+    if (!await primary.exists()) return primary;
+    try {
+      await verifyFile(primary);
+      return primary;
+    } on FormatException {
+      // Preserve pre-existing different file; pick a fresh non-colliding name.
+    }
+    final dot = expectedFileName.lastIndexOf('.');
+    final stem = dot > 0 ? expectedFileName.substring(0, dot) : expectedFileName;
+    final ext = dot > 0 ? expectedFileName.substring(dot) : '';
+    for (var i = 1; i <= 99; i++) {
+      final candidate = File(
+        '${directory.path}${Platform.pathSeparator}$stem ($i)$ext',
+      );
+      if (!await candidate.exists()) return candidate;
+      try {
+        await verifyFile(candidate);
+        return candidate;
+      } on FormatException {
+        // Occupied by another file; keep trying.
+      }
+    }
+    return File(
+      '${directory.path}${Platform.pathSeparator}'
+      '$stem-${DateTime.now().millisecondsSinceEpoch}$ext',
+    );
+  }
+
+  static Future<bool> revealMacosPackageInFinder(File file) =>
+      const DefaultMacosWindowPlatformAdapter().revealInFinder(file.path);
+
   Future<void> verifyFile(File file) async {
-    if ((windowsUrl == null && iosUrl == null && harmonyosUrl == null) ||
+    if ((windowsUrl == null &&
+            iosUrl == null &&
+            macosUrl == null &&
+            harmonyosUrl == null) ||
         size == null ||
         checksum == null ||
         await file.length() != size) {

@@ -3387,3 +3387,221 @@ class PlayerLocalMediaSession {
     if (lease != null && !owns(lease)) await lease.close();
   }
 }
+
+/// Serves an offline local HLS bundle (`.m3u8` + `hls/` sub-playlists & segments)
+/// strictly from `127.0.0.1` over an ephemeral loopback port with a random
+/// capability path prefix.
+///
+/// Why loopback HTTP instead of raw file paths:
+/// - `libmpv`'s plaintext playlist reader and FFmpeg's `hls` demuxer fail on
+///   local `.m3u8` relative paths on Windows (backslash/drive-letter URL
+///   resolution) and on macOS paths containing spaces or CJK filenames.
+/// - iOS `AVPlayer` also requires `http://127.0.0.1` rather than `file://` for
+///   HLS manifests.
+/// - Serving strictly inside the manifest's canonical parent directory keeps
+///   playback 100% offline with zero network egress and full HTTP Range seek.
+class OfflineHlsLease {
+  OfflineHlsLease._(
+    this._server,
+    this._capability,
+    this._masterFile,
+    this._rootDirPath,
+  ) {
+    _server.listen(
+      _handleRequest,
+      onError: (_) {},
+      cancelOnError: false,
+    );
+  }
+
+  final HttpServer _server;
+  final String _capability;
+  final File _masterFile;
+  final String _rootDirPath;
+  bool _closed = false;
+
+  Uri get url => Uri.parse(
+        'http://127.0.0.1:${_server.port}/offline/$_capability/master.m3u8',
+      );
+
+  static bool isLocalM3u8(String rawPath) {
+    final trimmed = rawPath.trim();
+    if (trimmed.isEmpty) return false;
+    final lower = trimmed.toLowerCase();
+    if (lower.startsWith('http://') ||
+        lower.startsWith('https://') ||
+        lower.startsWith('rtmp://') ||
+        lower.startsWith('rtsp://')) {
+      return false;
+    }
+    var path = trimmed;
+    if (lower.startsWith('file://')) {
+      try {
+        path = Uri.parse(trimmed).toFilePath();
+      } catch (_) {
+        return false;
+      }
+    }
+    if (!path.toLowerCase().endsWith('.m3u8')) return false;
+    return File(path).existsSync();
+  }
+
+  static Future<OfflineHlsLease> open(String rawPath) async {
+    var path = rawPath.trim();
+    if (path.toLowerCase().startsWith('file://')) {
+      path = Uri.parse(path).toFilePath();
+    }
+    final master = File(path).absolute;
+    if (!await master.exists()) {
+      throw FileSystemException('离线 HLS 清单不存在', master.path);
+    }
+    String canonicalMaster;
+    String canonicalRoot;
+    try {
+      canonicalMaster = master.resolveSymbolicLinksSync();
+      canonicalRoot = File(canonicalMaster).parent.resolveSymbolicLinksSync();
+    } catch (_) {
+      canonicalMaster = master.path;
+      canonicalRoot = master.parent.path;
+    }
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0)
+      ..autoCompress = false;
+    final random = math.Random.secure();
+    final capability = List.generate(
+      16,
+      (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
+    return OfflineHlsLease._(
+      server,
+      capability,
+      File(canonicalMaster),
+      canonicalRoot,
+    );
+  }
+
+  String _contentTypeFor(String path) {
+    final lower = path.toLowerCase();
+    if (lower.endsWith('.m3u8')) return 'application/vnd.apple.mpegurl; charset=utf-8';
+    if (lower.endsWith('.ts')) return 'video/mp2t';
+    if (lower.endsWith('.m4s') || lower.endsWith('.mp4')) return 'video/mp4';
+    if (lower.endsWith('.m4a')) return 'audio/mp4';
+    if (lower.endsWith('.aac')) return 'audio/aac';
+    if (lower.endsWith('.mp3')) return 'audio/mpeg';
+    if (lower.endsWith('.ac3')) return 'audio/ac3';
+    if (lower.endsWith('.ec3')) return 'audio/eac3';
+    return 'application/octet-stream';
+  }
+
+  File? _resolveTargetFile(String requestPath) {
+    final prefix = '/offline/$_capability/';
+    if (!requestPath.startsWith(prefix)) return null;
+    final rel = requestPath.substring(prefix.length);
+    if (rel.isEmpty || rel.contains('\x00') || rel.contains('\\')) return null;
+    if (rel == 'master.m3u8') return _masterFile;
+    final segments = rel.split('/');
+    for (final seg in segments) {
+      if (seg.isEmpty || seg == '.' || seg == '..') return null;
+    }
+    final candidate = File(
+      '$_rootDirPath${Platform.pathSeparator}${segments.join(Platform.pathSeparator)}',
+    );
+    if (!candidate.existsSync()) return null;
+    String resolved;
+    try {
+      resolved = candidate.resolveSymbolicLinksSync();
+    } catch (_) {
+      return null;
+    }
+    final rootPrefix = _rootDirPath.endsWith(Platform.pathSeparator)
+        ? _rootDirPath
+        : '$_rootDirPath${Platform.pathSeparator}';
+    final normalizedRoot =
+        Platform.isWindows ? rootPrefix.toLowerCase() : rootPrefix;
+    final normalizedResolved =
+        Platform.isWindows ? resolved.toLowerCase() : resolved;
+    if (!normalizedResolved.startsWith(normalizedRoot)) return null;
+    return File(resolved);
+  }
+
+  Future<void> _handleRequest(HttpRequest request) async {
+    final response = request.response;
+    try {
+      if (_closed) {
+        response.statusCode = HttpStatus.serviceUnavailable;
+        await response.close();
+        return;
+      }
+      if (request.method != 'GET' && request.method != 'HEAD') {
+        response.statusCode = HttpStatus.methodNotAllowed;
+        await response.close();
+        return;
+      }
+      final target = _resolveTargetFile(request.uri.path);
+      if (target == null) {
+        response.statusCode = HttpStatus.notFound;
+        await response.close();
+        return;
+      }
+      final length = await target.length();
+      response.headers.set(HttpHeaders.contentTypeHeader, _contentTypeFor(target.path));
+      response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+      response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+
+      final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
+      if (rangeHeader != null && rangeHeader.startsWith('bytes=')) {
+        final spec = rangeHeader.substring(6).split(',').first.trim();
+        final dash = spec.indexOf('-');
+        if (dash >= 0) {
+          final startStr = spec.substring(0, dash).trim();
+          final endStr = spec.substring(dash + 1).trim();
+          int start;
+          int end;
+          if (startStr.isEmpty) {
+            final suffix = int.tryParse(endStr) ?? 0;
+            start = math.max(0, length - suffix);
+            end = length - 1;
+          } else {
+            start = int.tryParse(startStr) ?? 0;
+            end = endStr.isEmpty
+                ? length - 1
+                : math.min(length - 1, int.tryParse(endStr) ?? (length - 1));
+          }
+          if (start < 0 || start >= length || end < start) {
+            response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+            response.headers.set(HttpHeaders.contentRangeHeader, 'bytes */$length');
+            await response.close();
+            return;
+          }
+          response.statusCode = HttpStatus.partialContent;
+          response.headers.set(
+            HttpHeaders.contentRangeHeader,
+            'bytes $start-$end/$length',
+          );
+          response.contentLength = end - start + 1;
+          if (request.method != 'HEAD') {
+            await response.addStream(target.openRead(start, end + 1));
+          }
+          await response.close();
+          return;
+        }
+      }
+
+      response.statusCode = HttpStatus.ok;
+      response.contentLength = length;
+      if (request.method != 'HEAD') {
+        await response.addStream(target.openRead());
+      }
+      await response.close();
+    } catch (_) {
+      try {
+        await response.close();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    await _server.close(force: true);
+  }
+}

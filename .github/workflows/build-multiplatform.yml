@@ -66,7 +66,7 @@ jobs:
           python scripts/test_drpy_assets.py
           python scripts/update_drpy_assets.py --check
       - name: Check Java formatting
-        if: github.event_name != 'workflow_dispatch' || inputs.target != 'harmonyos'
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'android' || inputs.target == 'android-tv' || inputs.target == 'android-mobile'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -82,8 +82,8 @@ jobs:
           formatter()
           PY
           python scripts/format_java.py --check
-      - name: Run pure-JVM regression checks
-        if: github.event_name != 'workflow_dispatch' || inputs.target != 'harmonyos'
+      - name: Run Android pure-JVM regression checks
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'android' || inputs.target == 'android-tv' || inputs.target == 'android-mobile'
         run: |
           python android-tv/tests/run_checks.py
           python android-tv/tests/run_direct_cms_import_checks.py
@@ -119,8 +119,12 @@ jobs:
           python android-mobile/tests/run_update_checks.py
           python android-mobile/tests/run_conformance_checks.py
           python scripts/test_lite_conformance.py
+      - name: Run tvOS runner regression checks
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'appletv'
+        run: python -m unittest discover -s tvos -p "test_*.py"
+      - name: Run cross-platform script & runner regression checks
+        run: |
           python -m unittest discover -s flutter -p "test_*.py"
-          python -m unittest discover -s tvos -p "test_*.py"
           python scripts/test_movie_mirror.py
           python scripts/test_platform_packages.py
           python scripts/test_ios_python_packaging.py
@@ -341,11 +345,13 @@ jobs:
       - name: Generate platform runner & build macOS release
         working-directory: flutter
         run: |
+          set -eo pipefail
           python3 prepare_platform.py
           flutter config --enable-macos-desktop
           flutter create --platforms=macos --project-name=marco_movie .
-          python3 prepare_platform.py
           flutter pub get
+          python3 prepare_platform.py
+          flutter analyze --no-fatal-infos --no-fatal-warnings
           cmake -S packages/quickjs_engine/native -B packages/quickjs_engine/native/build -DCMAKE_BUILD_TYPE=Release
           cmake --build packages/quickjs_engine/native/build --parallel 4
           flutter test
@@ -353,20 +359,188 @@ jobs:
           BUILD_NUM=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['macos']['buildNumber'])")
           flutter build macos --release --build-name="$VERSION" --build-number="$BUILD_NUM"
           APP=$(find "$PWD/build/macos/Build/Products/Release" -maxdepth 1 -name '*.app' -print -quit)
-          DYLD_FRAMEWORK_PATH="$APP/Contents/Frameworks" MARCOMOVIE_TEST_MPV="$APP/Contents/Frameworks/Mpv.framework/Mpv" flutter test test/native_cloud_playback_test.dart
           python3 ../scripts/prepare_catpaw_runtime.py --platform macos --destination "$APP/Contents/Frameworks/node"
-          codesign --force --deep --sign - --preserve-metadata=entitlements "$APP"
+          # Sign ancillary files under Contents/Frameworks/node as subcomponents, keep node/bin/node signed
+          # with its app-sandbox + inherit entitlements, and re-sign only the outer .app bundle with
+          # Release.entitlements (no --deep, no --preserve-metadata=entitlements) so Xcode's ad-hoc injected
+          # com.apple.security.get-task-allow is stripped.
+          find "$APP/Contents/Frameworks/node" -type f ! -path "*/bin/node" -exec codesign --force --sign - {} \;
+          codesign --force --sign - --entitlements "$APP/Contents/Frameworks/node/node.entitlements" "$APP/Contents/Frameworks/node/bin/node"
+          codesign --force --sign - --entitlements "$PWD/macos/Runner/Release.entitlements" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p dist
           ZIP_NAME="MarcoMovie-$VERSION-macos.zip"
           (cd build/macos/Build/Products/Release && ditto -c -k --sequesterRsrc --keepParent *.app "$GITHUB_WORKSPACE/flutter/dist/$ZIP_NAME")
           (cd dist && shasum -a 256 "$ZIP_NAME" > "$ZIP_NAME.sha256")
           python3 ../scripts/platform_package_names.py --folder dist --platform macos --version "$VERSION"
+          # Verify the FINAL unzipped .app from the canonical -macos-desktop.zip artifact
+          CANONICAL_ZIP="$PWD/dist/MarcoMovie-$VERSION-macos-desktop.zip"
+          VERIFY_DIR=$(mktemp -d /tmp/marco-macos-verify.XXXXXX)
+          REPORT="$PWD/dist/macos-verification-report.txt"
+          ditto -x -k "$CANONICAL_ZIP" "$VERIFY_DIR"
+          UNZIPPED_APP=$(find "$VERIFY_DIR" -maxdepth 1 -name '*.app' -print -quit)
+          MAIN_BIN=$(find "$UNZIPPED_APP/Contents/MacOS" -maxdepth 1 -type f -perm +111 -print -quit)
+          LAUNCH_STATUS_FILE="$VERIFY_DIR/launch_smoke.status"
+          {
+            echo "=== Host Info ==="
+            uname -a
+            sw_vers
+            echo "=== Canonical ZIP ==="
+            ls -lh "$CANONICAL_ZIP"
+            shasum -a 256 "$CANONICAL_ZIP"
+            echo "=== Codesign Verify (deep + strict) ==="
+            codesign --verify --deep --strict --verbose=2 "$UNZIPPED_APP" 2>&1
+            echo "=== App Entitlements ==="
+            codesign -d --entitlements - --xml "$UNZIPPED_APP" 2>&1
+            echo "=== Bundled Node Entitlements ==="
+            codesign -d --entitlements - --xml "$UNZIPPED_APP/Contents/Frameworks/node/bin/node" 2>&1 || true
+            echo "=== Frameworks Inventory ==="
+            ls -la "$UNZIPPED_APP/Contents/Frameworks"
+            echo "=== Universal Slices (lipo -info) ==="
+            MPV_LIB=$(find "$UNZIPPED_APP/Contents/Frameworks" \( -path "*/Mpv.framework/Mpv" -o -path "*/Mpv.framework/Versions/A/Mpv" -o -name "libmpv*.dylib" \) -print -quit)
+            echo "Discovered Mpv lib: ${MPV_LIB:-MISSING}"
+            for target in \
+              "$MAIN_BIN" \
+              "$UNZIPPED_APP/Contents/Frameworks/FlutterMacOS.framework/FlutterMacOS" \
+              "$UNZIPPED_APP/Contents/Frameworks/App.framework/App" \
+              "$MPV_LIB" \
+              "$UNZIPPED_APP/Contents/Frameworks/node/bin/node"; do
+              if [ -n "$target" ] && [ -e "$target" ]; then
+                lipo -info "$target" 2>&1 || file "$target"
+              else
+                echo "MISSING: $target"
+              fi
+            done
+            find "$UNZIPPED_APP/Contents/Frameworks" -maxdepth 3 \( -name "*quickjs*" -o -name "*.dylib" \) | sort | while read -r lib; do
+              if [ -f "$lib" ] && [ ! -L "$lib" ]; then
+                lipo -info "$lib" 2>&1 || true
+              fi
+            done
+            echo "=== Info.plist Metadata ==="
+            plutil -p "$UNZIPPED_APP/Contents/Info.plist" | grep -E "CFBundleShortVersionString|CFBundleVersion|CFBundleName|LSMinimumSystemVersion|NSAllowsArbitraryLoads|NSLocalNetworkUsageDescription" || true
+            echo "=== Bundled Node Runtime (unmodified .app sandbox-inherit verified above; standalone CLI smoke uses temp copy without inherit because macOS blocks direct shell exec of inherit binaries) ==="
+            mkdir -p "$VERIFY_DIR/node-exec-smoke"
+            cp "$UNZIPPED_APP/Contents/Frameworks/node/bin/node" "$VERIFY_DIR/node-exec-smoke/node"
+            codesign --force --sign - "$VERIFY_DIR/node-exec-smoke/node" 2>&1
+            "$VERIFY_DIR/node-exec-smoke/node" --jitless --version
+            "$VERIFY_DIR/node-exec-smoke/node" --jitless -p "process.arch + ' ' + process.platform"
+            echo "=== Intel App Binary Dyld / Launch Smoke (Unmodified .app) ==="
+            otool -L "$MAIN_BIN"
+            LAUNCH_LOG="$VERIFY_DIR/launch.log"
+            "$MAIN_BIN" >"$LAUNCH_LOG" 2>&1 &
+            APP_PID=$!
+            sleep 3
+            if kill -0 "$APP_PID" 2>/dev/null; then
+              echo "INTEL_LAUNCH_SMOKE=ALIVE_3S (pid=$APP_PID)"
+              echo "ALIVE_3S" > "$LAUNCH_STATUS_FILE"
+              kill -TERM "$APP_PID" 2>/dev/null || true
+              wait "$APP_PID" 2>/dev/null || true
+            else
+              LAUNCH_RC=0
+              wait "$APP_PID" || LAUNCH_RC=$?
+              echo "INTEL_LAUNCH_SMOKE=EXITED_EARLY (rc=${LAUNCH_RC})"
+              echo "EXITED_EARLY:${LAUNCH_RC}" > "$LAUNCH_STATUS_FILE"
+            fi
+            cat "$LAUNCH_LOG" || true
+          } | tee "$REPORT"
+          # Fail CI immediately if the unmodified .app process exited early
+          if [ ! -f "$LAUNCH_STATUS_FILE" ] || [ "$(cat "$LAUNCH_STATUS_FILE")" != "ALIVE_3S" ]; then
+            echo "ERROR: Intel unmodified .app launch smoke failed ($(cat "$LAUNCH_STATUS_FILE" 2>/dev/null || echo MISSING))" >&2
+            exit 1
+          fi
+          # Ensure required sandbox entitlements, absence of debug get-task-allow, and dual-arch slices
+          codesign --verify --deep --strict "$UNZIPPED_APP"
+          APP_ENT=$(codesign -d --entitlements - --xml "$UNZIPPED_APP" 2>&1)
+          for req in "com.apple.security.app-sandbox" "com.apple.security.network.client" "com.apple.security.network.server" "com.apple.security.files.downloads.read-write" "com.apple.security.files.user-selected.read-write"; do
+            echo "$APP_ENT" | grep -q "$req"
+          done
+          if echo "$APP_ENT" | grep -q "com.apple.security.get-task-allow"; then
+            echo "ERROR: Release .app must NOT contain com.apple.security.get-task-allow" >&2
+            exit 1
+          fi
+          NODE_ENT=$(codesign -d --entitlements - --xml "$UNZIPPED_APP/Contents/Frameworks/node/bin/node" 2>&1)
+          echo "$NODE_ENT" | grep -q "com.apple.security.app-sandbox"
+          echo "$NODE_ENT" | grep -q "com.apple.security.inherit"
+          if echo "$NODE_ENT" | grep -q "com.apple.security.get-task-allow"; then
+            echo "ERROR: Bundled node must NOT contain com.apple.security.get-task-allow" >&2
+            exit 1
+          fi
+          echo "RELEASE_ENTITLEMENTS_CHECK=PASS (no get-task-allow)" | tee -a "$REPORT"
+          lipo -info "$MAIN_BIN" | grep -q "arm64"
+          lipo -info "$MAIN_BIN" | grep -q "x86_64"
+          lipo -info "$UNZIPPED_APP/Contents/Frameworks/node/bin/node" | grep -q "arm64"
+          lipo -info "$UNZIPPED_APP/Contents/Frameworks/node/bin/node" | grep -q "x86_64"
+          python3 -c 'import pathlib, sys; assert b"pgssub" in pathlib.Path(sys.argv[1]).read_bytes(), "pgssub decoder missing"' "$UNZIPPED_APP/Contents/Frameworks/Avcodec.framework/Versions/A/Avcodec"
+          echo "AVCODEC_PGSSUB_DECODER=PASS" | tee -a "$REPORT"
+          # Ensure ffprobe/ffmpeg are available on macOS runner for separate-audio HLS & unmodified Mpv verification
+          if ! command -v ffprobe >/dev/null 2>&1 || ! command -v ffmpeg >/dev/null 2>&1; then
+            HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ffmpeg
+          fi
+          echo "=== ffprobe Availability ===" | tee -a "$REPORT"
+          ffprobe -version | head -n 1 | tee -a "$REPORT"
+          echo "=== Unmodified .app Direct Mpv.framework + Legacy 4429808 Runner Swiftc Verification ===" | tee -a "$REPORT"
+          VERIFY_ARTIFACTS_DIR="$PWD/dist/macos-verification-artifacts"
+          mkdir -p "$VERIFY_ARTIFACTS_DIR"
+          python3 ../scripts/verify_macos_candidate.py --app "$UNZIPPED_APP" --flutter-dir "$PWD" --artifacts-dir "$VERIFY_ARTIFACTS_DIR" 2>&1 | tee -a "$REPORT"
+          echo "=== Bundled Node CatPaw Smoke (--jitless, standalone temp copy without inherit) ===" | tee -a "$REPORT"
+          MARCOMOVIE_NODE="$VERIFY_DIR/node-exec-smoke/node" MARCOMOVIE_NODE_FLAGS="--jitless" python3 ../scripts/test_catpaw_host.py 2>&1 | tee -a "$REPORT"
+          echo "=== macOS Flutter Verification Suite ===" | tee -a "$REPORT"
+          MPV_LIB=$(find "$UNZIPPED_APP/Contents/Frameworks" \( -path "*/Mpv.framework/Mpv" -o -path "*/Mpv.framework/Versions/A/Mpv" -o -name "libmpv*.dylib" \) -print -quit)
+          echo "Discovered Mpv binary: $MPV_LIB" | tee -a "$REPORT"
+          test -n "$MPV_LIB"
+          otool -L "$MPV_LIB" | tee -a "$REPORT"
+          FLUTTER_ROOT=$(python3 -c "import os, shutil; print(os.path.dirname(os.path.dirname(os.path.realpath(shutil.which('flutter')))))")
+          DART_BIN="$FLUTTER_ROOT/bin/cache/dart-sdk/bin/dart"
+          TOOLS_PKG="$FLUTTER_ROOT/packages/flutter_tools/.dart_tool/package_config.json"
+          TOOLS_SNAP="$FLUTTER_ROOT/bin/cache/flutter_tools.snapshot"
+          TEST_FILES=(
+            test/native_cloud_playback_test.dart
+            test/macos_hls_separate_audio_download_test.dart
+            test/subscription_format_contract_test.dart
+            test/macos_window_bounds_test.dart
+            test/macos_update_and_profile_test.dart
+            test/live_snapshot_and_first_frame_test.dart
+            test/macos_desktop_ux_and_player_test.dart
+            test/macos_round3_subtitle_episode_danmu_sync_test.dart
+          )
+          # Prefer running flutter test directly against the unmodified .app Mpv.framework via non-SIP dart.
+          # Only fall back to a temp rpath copy if Flutter SDK's hardened flutter_tester strips DYLD_FRAMEWORK_PATH.
+          if DYLD_FRAMEWORK_PATH="$UNZIPPED_APP/Contents/Frameworks" \
+              MARCOMOVIE_TEST_MPV="$MPV_LIB" \
+              "$DART_BIN" --packages="$TOOLS_PKG" "$TOOLS_SNAP" test \
+                --plain-name "bundled native decoder advances" \
+                test/native_cloud_playback_test.dart >/dev/null 2>&1; then
+            echo "FLUTTER_TEST_MPV_MODE=UNMODIFIED_APP_FRAMEWORK" | tee -a "$REPORT"
+            DYLD_FRAMEWORK_PATH="$UNZIPPED_APP/Contents/Frameworks" \
+              MARCOMOVIE_TEST_MPV="$MPV_LIB" \
+              MARCOMOVIE_VERIFY_ARTIFACTS_DIR="$VERIFY_ARTIFACTS_DIR" \
+              MARCOMOVIE_MPV_FRAMES_DIR="$VERIFY_ARTIFACTS_DIR/mpv_frames" \
+              "$DART_BIN" --packages="$TOOLS_PKG" "$TOOLS_SNAP" test "${TEST_FILES[@]}" 2>&1 | tee -a "$REPORT"
+          else
+            echo "FLUTTER_TEST_MPV_MODE=TEMP_RPATH_COPY (flutter_tester hardened runtime strips DYLD_FRAMEWORK_PATH; unmodified .app Mpv.framework verified above via rpath C harness)" | tee -a "$REPORT"
+            mkdir -p "$VERIFY_DIR/mpv-test-copy"
+            cp "$MPV_LIB" "$VERIFY_DIR/mpv-test-copy/Mpv"
+            install_name_tool -add_rpath "$UNZIPPED_APP/Contents/Frameworks" "$VERIFY_DIR/mpv-test-copy/Mpv" 2>&1 || true
+            codesign --force --sign - "$VERIFY_DIR/mpv-test-copy/Mpv" 2>&1
+            MARCOMOVIE_TEST_MPV="$VERIFY_DIR/mpv-test-copy/Mpv" \
+              MARCOMOVIE_VERIFY_ARTIFACTS_DIR="$VERIFY_ARTIFACTS_DIR" \
+              MARCOMOVIE_MPV_FRAMES_DIR="$VERIFY_ARTIFACTS_DIR/mpv_frames" \
+              flutter test "${TEST_FILES[@]}" 2>&1 | tee -a "$REPORT"
+          fi
+          echo "=== Exported Real-Mac Verification Artifacts ===" | tee -a "$REPORT"
+          ls -la "$VERIFY_ARTIFACTS_DIR" "$VERIFY_ARTIFACTS_DIR/mpv_frames" 2>&1 | tee -a "$REPORT"
+          # Re-verify unmodified .app signature at the very end
+          codesign --verify --deep --strict "$UNZIPPED_APP"
+          echo "FINAL_UNMODIFIED_APP_CODESIGN=PASS" | tee -a "$REPORT"
+          rm -rf "$VERIFY_DIR"
       - uses: actions/upload-artifact@v4
         with:
           name: MarcoMovie-macOS-App
           path: |
             flutter/dist/*.zip
             flutter/dist/*.sha256
+            flutter/dist/macos-verification-report.txt
+            flutter/dist/macos-verification-artifacts/**
 
   build-ios:
     if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'ios'
