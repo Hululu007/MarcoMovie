@@ -4642,6 +4642,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       final srcSeason = srcInfo.seasonNumber;
       final srcEp = srcInfo.resolvedEpisodeNumber;
       if (!srcInfo.isSpecial && !srcInfo.needsConfirmation && srcEp != null) {
+        final targetHasWrongWork = targetScrape.byOriginalIndex.any(
+          (c) =>
+              !c.isSpecial &&
+              c.resolvedEpisodeNumber == srcEp &&
+              !SeriesScraper.areWorkTitlesCompatible(srcInfo, c),
+        );
         final targetHasOtherSeason = srcSeason != null &&
             targetScrape.byOriginalIndex.any(
               (c) =>
@@ -4650,22 +4656,61 @@ class _PlayerScreenState extends State<PlayerScreen>
                   c.seasonNumber != srcSeason,
             );
         final targetHasExplicitEpisodes = targetScrape.regularCount > 0;
-        if (targetHasOtherSeason || targetHasExplicitEpisodes) {
+        final targetHasExplicitSpecials = targetScrape.specialCount > 0;
+        if (targetHasWrongWork ||
+            targetHasOtherSeason ||
+            targetHasExplicitEpisodes ||
+            targetHasExplicitSpecials) {
+          final String summary;
+          if (targetHasWrongWork) {
+            summary =
+                '目标线路「${targetLine.name}」的 ${srcInfo.formattedSeasonEpisode} 属于其他作品，请手动选集';
+          } else if (targetHasExplicitSpecials && !targetHasExplicitEpisodes) {
+            summary =
+                '目标线路「${targetLine.name}」仅有预告/特别篇，未找到正片 ${srcInfo.formattedSeasonEpisode}，请手动选集';
+          } else {
+            summary =
+                '目标线路「${targetLine.name}」未找到 ${srcInfo.formattedSeasonEpisode}，请手动选集';
+          }
+          return (
+            matchedIndex: null,
+            seasonConflict: true,
+            conflictSummary: summary,
+          );
+        }
+      }
+    }
+    final fallbackIdx = CspBridge.matchEpisodeIndexInLine(
+      targetLine,
+      _currentEpisode.name,
+      _episodeIndex,
+    );
+    if (srcInfo != null &&
+        !srcInfo.isSpecial &&
+        fallbackIdx >= 0 &&
+        fallbackIdx < targetLine.episodes.length) {
+      final fallbackInfo = targetScrape.infoForOriginalIndex(fallbackIdx);
+      if (fallbackInfo != null) {
+        if (fallbackInfo.isSpecial) {
           return (
             matchedIndex: null,
             seasonConflict: true,
             conflictSummary:
-                '目标线路「${targetLine.name}」未找到 ${srcInfo.formattedSeasonEpisode}，请手动选集',
+                '目标线路「${targetLine.name}」仅匹配到预告/特别篇，请手动选集',
+          );
+        }
+        if (!SeriesScraper.areWorkTitlesCompatible(srcInfo, fallbackInfo)) {
+          return (
+            matchedIndex: null,
+            seasonConflict: true,
+            conflictSummary:
+                '目标线路「${targetLine.name}」对应条目作品不一致，请手动选集',
           );
         }
       }
     }
     return (
-      matchedIndex: CspBridge.matchEpisodeIndexInLine(
-        targetLine,
-        _currentEpisode.name,
-        _episodeIndex,
-      ),
+      matchedIndex: fallbackIdx,
       seasonConflict: false,
       conflictSummary: '',
     );
@@ -5404,11 +5449,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       _isMacosPlayerPlatform &&
       !OhosRuntime.shouldUseTvUi(widget.storage.tvUiMode);
 
+  // Keep subtitles lifted throughout the entire HUD fade-out transition
+  // (`_hudFadingOut == true` while `_controlsVisible == true`) and only restore
+  // to baseline once `_controlsVisible` becomes `false` after fade-out finishes.
   bool get _isDesktopBottomControlsVisible =>
       _usesDesktopSubtitleHudLayout &&
       !_screenLocked &&
       !_castController.isCasting &&
-      ((_controlsVisible && !_hudFadingOut) || _isSliderDragging);
+      (_controlsVisible || _isSliderDragging);
 
   double _effectiveDesktopBottomControlsHeight(EdgeInsets viewPadding) {
     if (_measuredDesktopBottomBarHeight > 0.0) {

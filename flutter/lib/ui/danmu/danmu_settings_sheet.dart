@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../core/danmu/block_filter.dart';
 import '../../core/danmu/dandanplay_provider.dart';
 import '../../core/danmu/danmu_prefs.dart';
+import '../../core/danmu/danmu_source_sync.dart';
 import '../../core/danmu/provider.dart';
 import '../../core/ohos_runtime.dart';
 import '../apple_theme.dart';
@@ -95,16 +96,26 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
   late final TextEditingController _appSecretCtrl;
   final TextEditingController _blockRuleCtrl = TextEditingController();
   final TextEditingController _newSourceCtrl = TextEditingController();
+  late List<String> _editorBaseOrigins;
   String? _ruleError;
   String? _sourceError;
   List<String> _pendingAuthOrigins = const <String>[];
   late int _episodeOffset;
   late String _matchSummary;
 
+  static bool _sameOriginList(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   @override
   void initState() {
     super.initState();
     _settings = widget.initialSettings;
+    _editorBaseOrigins = List<String>.of(_settings.normalizedOrigins);
     _episodeOffset = widget.episodeOffset;
     _matchSummary = widget.currentMatchSummary;
     _serverUrlsCtrl = TextEditingController(text: _settings.serverUrls);
@@ -119,16 +130,21 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     final fresh = await DanmuPrefs.load();
     final pending = await DanmuPrefs.loadPendingAuthOrigins();
     if (!mounted) return;
-    final prevUrls = _settings.serverUrls.trim();
-    final editorUnmodified = _serverUrlsCtrl.text.trim() == prevUrls;
+    final currentEditorOrigins =
+        DandanplayProvider.parseConfiguredOrigins(_serverUrlsCtrl.text);
+    final editorUnmodified =
+        _sameOriginList(currentEditorOrigins, _editorBaseOrigins);
     setState(() {
       _settings = _settings.copyWith(
         serverUrls: fresh.serverUrls,
         authorizedCredentialOrigins: fresh.authorizedCredentialOrigins,
       );
       _pendingAuthOrigins = pending;
-      if (editorUnmodified && _serverUrlsCtrl.text != fresh.serverUrls) {
-        _serverUrlsCtrl.text = fresh.serverUrls;
+      if (editorUnmodified) {
+        _editorBaseOrigins = List<String>.of(fresh.normalizedOrigins);
+        if (_serverUrlsCtrl.text != fresh.serverUrls) {
+          _serverUrlsCtrl.text = fresh.serverUrls;
+        }
       }
     });
   }
@@ -191,39 +207,96 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     }
   }
 
-  void _saveServerFields() {
+  Future<void> _saveServerFields() async {
     setState(() => _sourceError = null);
     final pendingAdd = _newSourceCtrl.text.trim();
     final combinedRaw = pendingAdd.isEmpty
         ? _serverUrlsCtrl.text
         : '${_serverUrlsCtrl.text}\n$pendingAdd';
-    final normalized = DandanplayProvider.parseConfiguredOrigins(combinedRaw);
-    final nextText = normalized.join('\n');
+    final editedOrigins = DandanplayProvider.parseConfiguredOrigins(combinedRaw);
+    final baseOrigins = List<String>.of(_editorBaseOrigins);
+
+    final fresh = widget.persistAutomatically && !OhosRuntime.isOhos
+        ? await DanmuPrefs.load()
+        : _settings;
+    final freshPending = widget.persistAutomatically && !OhosRuntime.isOhos
+        ? await DanmuPrefs.loadPendingAuthOrigins()
+        : _pendingAuthOrigins;
+    if (!mounted) return;
+
+    final latestOrigins = fresh.normalizedOrigins;
+    final List<String> finalOrigins;
+    if (!_sameOriginList(latestOrigins, baseOrigins)) {
+      // Cloud/external sync updated the stored list while the user was editing
+      // the text box: 3-way merge the user's actual delta (`baseOrigins` ->
+      // `editedOrigins`) onto `latestOrigins` so peer additions, deletions, and
+      // reorders are preserved alongside the user's edits.
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final baseDoc = DanmuSourceSyncDocument(
+        initialized: true,
+        updatedAt: 1,
+        revision: 1,
+        sources: [
+          for (final u in baseOrigins) DanmuSyncSourceEntry(url: u),
+        ],
+      );
+      final localEditedDoc = DanmuSourceSyncDocument(
+        initialized: true,
+        updatedAt: 2,
+        revision: 2,
+        sources: [
+          for (final u in editedOrigins) DanmuSyncSourceEntry(url: u),
+        ],
+      );
+      final latestRemoteDoc = DanmuSourceSyncDocument(
+        initialized: true,
+        updatedAt: 3,
+        revision: 3,
+        sources: [
+          for (final u in latestOrigins) DanmuSyncSourceEntry(url: u),
+        ],
+      );
+      final merged = DanmuSourceSyncMerger.merge(
+        local: localEditedDoc,
+        base: baseDoc,
+        remote: latestRemoteDoc,
+        hasLocalCredentials: fresh.appId.isNotEmpty && fresh.appSecret.isNotEmpty,
+        authorizedCredentialOrigins: fresh.authorizedCredentialOrigins,
+        nowMs: nowMs,
+      );
+      finalOrigins = merged.merged.urls;
+    } else {
+      finalOrigins = editedOrigins;
+    }
+
+    final nextText = finalOrigins.join('\n');
     if (_serverUrlsCtrl.text.trim() != nextText) {
       _serverUrlsCtrl.text = nextText;
     }
+    _editorBaseOrigins = List<String>.of(finalOrigins);
     if (pendingAdd.isNotEmpty) {
       _newSourceCtrl.clear();
     }
-    final prevOrigins = _settings.normalizedOrigins;
-    final prevHasCreds = _settings.appId.trim().isNotEmpty &&
-        _settings.appSecret.trim().isNotEmpty;
+    final prevHasCreds = fresh.appId.trim().isNotEmpty &&
+        fresh.appSecret.trim().isNotEmpty;
     final nextAppId = _appIdCtrl.text.trim();
     final nextAppSecret = _appSecretCtrl.text.trim();
     final hasCreds = nextAppId.isNotEmpty && nextAppSecret.isNotEmpty;
+    final baseSet = baseOrigins.toSet();
+    final userAddedLocally = editedOrigins.where((u) => !baseSet.contains(u)).toSet();
     final Set<String> nextAuthorized;
     if (!hasCreds) {
       nextAuthorized = const <String>{};
     } else {
-      final prevAuth = _settings.authorizedCredentialOrigins ?? const <String>{};
+      final prevAuth = fresh.authorizedCredentialOrigins ?? const <String>{};
       nextAuthorized = <String>{
         for (final u in prevAuth)
-          if (normalized.contains(u)) u,
-        for (final u in normalized)
-          if (!prevOrigins.contains(u)) u,
+          if (finalOrigins.contains(u)) u,
+        for (final u in userAddedLocally)
+          if (finalOrigins.contains(u)) u,
         if (!prevHasCreds)
-          for (final u in _pendingAuthOrigins)
-            if (normalized.contains(u)) u,
+          for (final u in freshPending)
+            if (finalOrigins.contains(u)) u,
       };
     }
     _update(
@@ -242,6 +315,7 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
   void _applyOrigins(List<String> origins) {
     final text = origins.join('\n');
     _serverUrlsCtrl.text = text;
+    _editorBaseOrigins = List<String>.of(origins);
     setState(() => _sourceError = null);
     _update(
       _settings.copyWith(

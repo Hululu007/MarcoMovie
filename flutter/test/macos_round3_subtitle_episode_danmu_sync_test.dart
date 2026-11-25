@@ -1453,6 +1453,23 @@ void main() {
             await tester.pump(const Duration(milliseconds: 80));
 
             // 4. Re-hidden (auto-hide again after drag release -> restores exact hidden baseline!):
+            // Sample at 16ms intervals during the entire fade-out transition to
+            // prove native `sub-pos` NEVER drops back to hidden baseline while
+            // bottom controls are still mounted / fading out!
+            if (viewportCase.label.startsWith('narrow') && nativeCase.kind == 'ass') {
+              for (int tick = 0; tick < 180; tick++) {
+                await tester.pump(const Duration(milliseconds: 16));
+                final curSubPos = player.platformImpl.properties['sub-pos'];
+                if (controlsFinder.evaluate().isNotEmpty) {
+                  expect(
+                    curSubPos,
+                    isNot('${viewportCase.expectedHiddenSubPos}'),
+                    reason:
+                        'tick=$tick: subtitle must not reset to ${viewportCase.expectedHiddenSubPos} while bottom controls are still fading out',
+                  );
+                }
+              }
+            }
             await tester.pump(const Duration(milliseconds: 3600));
             await tester.pump(const Duration(milliseconds: 450));
             expect(controlsFinder, findsNothing);
@@ -4247,6 +4264,440 @@ void main() {
         expect(find.byType(PlayerEpisodePickerSheet), findsOneWidget);
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(milliseconds: 450));
+      },
+    );
+  });
+
+  // =========================================================================
+  // POST-ffbac25 REWORK REGRESSIONS (Work-Aware Line Switch, Trailer Guard,
+  // Unique Full-Identity Danmu, Dirty Editor Baseline Merge, Reorder Preserve,
+  // 409 MKCOL Abort & Fade-Out Transition)
+  // =========================================================================
+  group('Post-ffbac25 Rework: Work/Trailer Line Switch, Full-Match Danmu, Dirty Editor & MKCOL Abort', () {
+    testWidgets(
+      'Line switch checks work+season+episode in both orders, blocks trailer-only on manual switch AND failure auto-recovery, and binds unique S02E10 (210) over unseasoned E10',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        const origin = 'https://comments.example';
+        const site = CmsSite(key: 'rev2', name: 'Rev2', type: 1, api: 'https://cdn.example/api');
+        final tmp = Directory.systemTemp.createTempSync('marco_ffbac25_ep_');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+
+        CmsEpisode mkMkv(String stem, String show) {
+          final f = File('${tmp.path}/$stem.mkv')
+            ..writeAsBytesSync(
+              _buildMkvWithContainerTags(
+                infoTitle: 'S02E10',
+                simpleTags: {'SHOW': show, 'SEASON': '2', 'EPISODE': '10'},
+              ),
+            );
+          return CmsEpisode(name: '$stem.mkv', url: f.path);
+        }
+
+        CmsEpisode mkMp4(String label, String stem) {
+          final f = File('${tmp.path}/$stem.mp4')..writeAsBytesSync(const [0, 1, 2, 3]);
+          return CmsEpisode(name: label, url: f.path);
+        }
+
+        Future<void> pickLine(String target) async {
+          await tester.tap(find.byKey(const Key('desktop-more-button')));
+          await tester.pump(const Duration(milliseconds: 250));
+          await tester.tap(find.text('切换线路'));
+          await tester.pump(const Duration(milliseconds: 350));
+          await tester.tap(find.textContaining(target).first);
+          await tester.pump(const Duration(milliseconds: 500));
+          await tester.pump();
+        }
+
+        tester.view.physicalSize = const Size(1280, 800);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final mainEp = mkMkv('opaque-main', '山中之花');
+        final wrongWorkEp = mkMkv('opaque-wrong', '远航之夜');
+        final rightWorkEp = mkMkv('opaque-correct', '山中之花');
+
+        // 1a. Wrong-work-only backup -> stays on opaque-main.mkv and prompts picker.
+        final s1 = await initTestStorage();
+        final p1 = _Round3FakePlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(brightness: Brightness.dark, platform: TargetPlatform.macOS),
+            home: PlayerScreen(
+              site: site,
+              video: CmsVideo(
+                id: 'movie',
+                title: '山中之花',
+                lines: [
+                  CmsLine(name: '主线', episodes: [mainEp]),
+                  CmsLine(name: '错剧备线', episodes: [wrongWorkEp]),
+                ],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: s1,
+              debugPlayer: p1,
+              debugVideoSurface: const SizedBox.shrink(),
+              debugDanmuSettings: const DanmuSettings(enabled: false),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 450));
+        await pickLine('错剧备线');
+        expect(p1.openedUris.last, endsWith('opaque-main.mkv'));
+        expect(find.byType(PlayerEpisodePickerSheet), findsOneWidget);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 450));
+
+        // 1b. Mixed backup in BOTH orders ([wrong, right] AND [right, wrong]) -> opens opaque-correct.mkv!
+        for (final reversed in const [false, true]) {
+          final backupEps = reversed ? [rightWorkEp, wrongWorkEp] : [wrongWorkEp, rightWorkEp];
+          final p = _Round3FakePlayer();
+          final s = await initTestStorage();
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: ThemeData(brightness: Brightness.dark, platform: TargetPlatform.macOS),
+              home: PlayerScreen(
+                site: site,
+                video: CmsVideo(
+                  id: 'movie',
+                  title: '山中之花',
+                  lines: [
+                    CmsLine(name: '主线', episodes: [mainEp]),
+                    CmsLine(name: '混排备线', episodes: backupEps),
+                  ],
+                ),
+                initialLineIndex: 0,
+                initialEpisodeIndex: 0,
+                storage: s,
+                debugPlayer: p,
+                debugVideoSurface: const SizedBox.shrink(),
+                debugDanmuSettings: const DanmuSettings(enabled: false),
+              ),
+            ),
+          );
+          await tester.pump(const Duration(milliseconds: 450));
+          await pickLine('混排备线');
+          expect(
+            p.openedUris.last,
+            endsWith('opaque-correct.mkv'),
+            reason: 'reversed=$reversed must pick matching work 山中之花 S02E10',
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump(const Duration(milliseconds: 450));
+        }
+
+        // 2. Regular S02E10 -> trailer-only backup: blocked on BOTH manual switch AND failure auto-recovery!
+        final s2 = await initTestStorage();
+        final p2 = _Round3FakePlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(brightness: Brightness.dark, platform: TargetPlatform.macOS),
+            home: PlayerScreen(
+              site: site,
+              video: CmsVideo(
+                id: 'movie',
+                title: '山中之花',
+                lines: [
+                  CmsLine(name: '常规线路', episodes: [mkMp4('S02E10', 'main10')]),
+                  CmsLine(name: '预告备线', episodes: [mkMp4('预告片', 'trailer')]),
+                ],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: s2,
+              debugPlayer: p2,
+              debugVideoSurface: const SizedBox.shrink(),
+              debugDanmuSettings: const DanmuSettings(enabled: false),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 450));
+        // 2a. Manual switch blocked
+        await pickLine('预告备线');
+        expect(p2.openedUris.last, endsWith('main10.mp4'));
+        expect(find.byType(PlayerEpisodePickerSheet), findsOneWidget);
+        // Dismiss picker and simulate playback failure -> auto-recovery MUST NOT open trailer.mp4!
+        Navigator.of(tester.element(find.byType(PlayerEpisodePickerSheet))).pop();
+        await tester.pumpAndSettle();
+        p2.streamImpl.errorCtrl.add('Failed to open media');
+        await tester.pump(const Duration(milliseconds: 600));
+        await tester.pump(const Duration(milliseconds: 600));
+        expect(
+          p2.openedUris.any((u) => u.endsWith('trailer.mp4')),
+          isFalse,
+          reason: 'playback failure auto-recovery must never jump into trailer.mp4',
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 450));
+
+        // 3. Confirmed S02E10 + unique exact S02E10 (210) vs unseasoned E10 (110) -> binds 210!
+        final s3 = await initTestStorage();
+        final p3 = _Round3FakePlayer();
+        final provider = DandanplayProvider(
+          multilineServerUrls: origin,
+          minRequestIntervalMs: 0,
+          client: MockClient((req) async {
+            if (req.url.path.contains('/comment/')) return http.Response('{"count":0,"comments":[]}', 200);
+            if (req.url.path.contains('/search/')) return http.Response('{"animes":[]}', 200);
+            return http.Response.bytes(
+              utf8.encode(
+                jsonEncode({
+                  'isMatched': false,
+                  'matches': [
+                    {'episodeId': 110, 'animeId': 1, 'animeTitle': '山中之花', 'episodeTitle': '第10集'},
+                    {'episodeId': 210, 'animeId': 2, 'animeTitle': '山中之花 第二季', 'episodeTitle': 'S02E10'},
+                  ],
+                }),
+              ),
+              200,
+            );
+          }),
+        );
+        addTearDown(provider.close);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(brightness: Brightness.dark, platform: TargetPlatform.macOS),
+            home: PlayerScreen(
+              site: site,
+              video: CmsVideo(
+                id: 'movie',
+                title: '山中之花',
+                lines: [CmsLine(name: '主线', episodes: [mkMp4('S02E10', 'ten')])],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: s3,
+              debugPlayer: p3,
+              debugVideoSurface: const SizedBox.shrink(),
+              debugDanmuProvider: provider,
+              debugDanmuSettings: const DanmuSettings(enabled: true, serverUrls: origin),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 450));
+        final boundId = tester
+            .widget<DanmuLayer>(find.byType(DanmuLayer))
+            .segmentCache
+            ?.currentSession
+            ?.boundEpisodeId;
+        expect(boundId, DandanplayProvider.encodeBoundEpisodeId(origin, '210'));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 450));
+      },
+    );
+
+    testWidgets(
+      'WebDAV: dirty multiline editor rebases +M onto cloud [A,R], remote reorder preserved on local add/delete, and 409 MKCOL aborts when disabled (while working when enabled)',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        const a = 'https://a.example';
+        const b = 'https://b.example';
+        const c = 'https://c.example';
+        const l = 'https://local.example';
+        const r = 'https://peer.example';
+        const m = 'https://manual.example';
+
+        DanmuSourceSyncDocument mkDoc(List<String> urls, int rev, int ts) =>
+            DanmuSourceSyncDocument(
+              initialized: true,
+              revision: rev,
+              updatedAt: ts,
+              sources: [for (final u in urls) DanmuSyncSourceEntry(url: u)],
+            );
+
+        // 1. Dirty multiline editor: opened [A,B], typed +M, remote synced [A,R], Save & sync -> [A,R,M]!
+        tester.view.physicalSize = const Size(1000, 1800);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final s1 = await initTestStorage();
+        await s1.saveWebdavConfig(
+          url: 'https://dav.example/dav/family/profile.json',
+          user: '',
+          pass: '',
+          auto: false,
+          syncSubs: false,
+          syncHistory: false,
+          syncDanmu: true,
+        );
+        await DanmuPrefs.applySyncedDocument(
+          mkDoc([a, b], 1, 1),
+          prefs: await SharedPreferences.getInstance(),
+          pendingAuthOrigins: const <String>[],
+        );
+        var remote1 = mkDoc([a, r], 2, 200);
+        final client1 = MockClient((req) async {
+          if (req.method == 'GET') {
+            return http.Response(
+              remote1.toPayloadJson(),
+              200,
+              headers: {'etag': '"r${remote1.revision}"'},
+            );
+          }
+          remote1 = DanmuSourceSyncDocument.tryParseJson(req.body)!;
+          return http.Response('', 204);
+        });
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: DanmuSettingsSheet(
+                key: const ValueKey('dirty-editor-rebase-sheet'),
+                initialSettings: await DanmuPrefs.load(),
+                onChanged: (_) {},
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final field = find.byKey(const Key('danmu-server-urls-field'));
+        await tester.ensureVisible(field);
+        await tester.enterText(field, '$a\n$b\n$m');
+        await s1.syncWithWebdav(client: client1);
+        await tester.pumpAndSettle();
+        expect((await DanmuPrefs.load()).normalizedOrigins, [a, r]);
+        final saveBtn = find.byKey(const Key('danmu-save-server-btn'));
+        await tester.ensureVisible(saveBtn);
+        await tester.tap(saveBtn);
+        await tester.pumpAndSettle();
+        await s1.syncWithWebdav(client: client1);
+        await tester.pumpAndSettle();
+        expect((await DanmuPrefs.load()).normalizedOrigins, [a, r, m]);
+        expect(remote1.urls, [a, r, m]);
+
+        // 2a. Remote reordered [B,A] while local only appended L -> [B,A,L]!
+        final s2 = await initTestStorage();
+        await s2.saveWebdavConfig(
+          url: 'https://dav.example/dav/family/profile.json',
+          user: '',
+          pass: '',
+          auto: false,
+          syncSubs: false,
+          syncHistory: false,
+          syncDanmu: true,
+        );
+        await DanmuPrefs.applySyncedDocument(
+          mkDoc([a, b], 1, 1),
+          prefs: await SharedPreferences.getInstance(),
+          pendingAuthOrigins: const <String>[],
+        );
+        await DanmuPrefs.save(const DanmuSettings(serverUrls: '$a\n$b\n$l'), nowMs: 200);
+        var remote2 = mkDoc([b, a], 2, 100);
+        final client2 = MockClient((req) async {
+          if (req.method == 'GET') {
+            return http.Response(
+              remote2.toPayloadJson(),
+              200,
+              headers: {'etag': '"r${remote2.revision}"'},
+            );
+          }
+          remote2 = DanmuSourceSyncDocument.tryParseJson(req.body)!;
+          return http.Response('', 204);
+        });
+        await s2.syncWithWebdav(client: client2);
+        expect(remote2.urls, [b, a, l]);
+
+        // 2b. Remote reordered [B,A,C,R] while local deleted C during PUT -> {A,B,R,L} with B before A!
+        final s3 = await initTestStorage();
+        await s3.saveWebdavConfig(
+          url: 'https://dav.example/dav/family/profile.json',
+          user: '',
+          pass: '',
+          auto: false,
+          syncSubs: false,
+          syncHistory: false,
+          syncDanmu: true,
+        );
+        await DanmuPrefs.applySyncedDocument(
+          mkDoc([a, b, c], 1, 1),
+          prefs: await SharedPreferences.getInstance(),
+          pendingAuthOrigins: const <String>[],
+        );
+        await DanmuPrefs.save(const DanmuSettings(serverUrls: '$a\n$b\n$c\n$l'), nowMs: 100);
+        var remote3 = mkDoc([b, a, c, r], 2, 200);
+        final hold3 = Completer<void>();
+        final rel3 = Completer<void>();
+        int puts3 = 0;
+        final client3 = MockClient((req) async {
+          if (req.method == 'GET') {
+            return http.Response(
+              remote3.toPayloadJson(),
+              200,
+              headers: {'etag': '"r${remote3.revision}"'},
+            );
+          }
+          puts3++;
+          final inc = DanmuSourceSyncDocument.tryParseJson(req.body)!;
+          if (puts3 == 1) {
+            hold3.complete();
+            await rel3.future;
+          }
+          remote3 = inc;
+          return http.Response('', 204);
+        });
+        final run3 = s3.syncWithWebdav(client: client3);
+        await hold3.future;
+        await DanmuPrefs.save(const DanmuSettings(serverUrls: '$a\n$b\n$l'), nowMs: 300);
+        rel3.complete();
+        await run3;
+        expect(remote3.urls.toSet(), {a, b, r, l});
+        expect(remote3.urls.indexOf(b), lessThan(remote3.urls.indexOf(a)));
+
+        // 3a. Switch off during first PUT -> 409 must NOT issue MKCOL or retry PUT!
+        final s4 = await initTestStorage();
+        await s4.saveWebdavConfig(
+          url: 'https://dav.example/dav/family/profile.json',
+          user: '',
+          pass: '',
+          auto: false,
+          syncSubs: false,
+          syncHistory: false,
+          syncDanmu: true,
+        );
+        await DanmuPrefs.applySyncedDocument(
+          mkDoc([a], 1, 1),
+          prefs: await SharedPreferences.getInstance(),
+          pendingAuthOrigins: const <String>[],
+        );
+        final hold4 = Completer<void>();
+        final rel4 = Completer<void>();
+        final methodsOff = <String>[];
+        int puts4 = 0;
+        final client4 = MockClient((req) async {
+          methodsOff.add(req.method);
+          if (req.method == 'GET') return http.Response('', 404);
+          if (req.method == 'MKCOL') return http.Response('', 201);
+          puts4++;
+          if (puts4 == 1) {
+            hold4.complete();
+            await rel4.future;
+            return http.Response('', 409);
+          }
+          return http.Response('', 204);
+        });
+        final run4 = s4.syncWithWebdav(client: client4);
+        await hold4.future;
+        await s4.setWebdavSyncDanmu(false);
+        rel4.complete();
+        await expectLater(run4, throwsA(isA<FormatException>()));
+        expect(methodsOff, ['GET', 'PUT']);
+
+        // 3b. Positive control: switch stays ON -> 409 runs MKCOL and retry PUT succeeds!
+        await s4.setWebdavSyncDanmu(true);
+        final methodsOn = <String>[];
+        int putsOn = 0;
+        final clientOn = MockClient((req) async {
+          methodsOn.add(req.method);
+          if (req.method == 'GET') return http.Response('', 404);
+          if (req.method == 'MKCOL') return http.Response('', 201);
+          putsOn++;
+          return http.Response('', putsOn == 1 ? 409 : 204);
+        });
+        final resOn = await s4.syncWithWebdav(client: clientOn);
+        expect(resOn.danmuSynced, isTrue);
+        expect(methodsOn, ['GET', 'PUT', 'MKCOL', 'MKCOL', 'PUT']);
       },
     );
   });

@@ -193,6 +193,48 @@ class DandanplayProvider implements DanmuProvider {
     return _shouldSignOrigin(effectiveOrigin);
   }
 
+  static bool _hasConfirmedFullIdentity(
+    DanmuCandidate candidate,
+    DanmuMatchQuery query,
+  ) {
+    final normQ = SeriesScraper.normalizeWorkCoreTitle(query.title);
+    final normA = SeriesScraper.normalizeWorkCoreTitle(candidate.animeTitle);
+    if (normQ.isNotEmpty) {
+      if (normA.isEmpty) return false;
+      final titleMatches =
+          normA == normQ || normA.contains(normQ) || normQ.contains(normA);
+      if (!titleMatches) return false;
+    }
+    if (query.episodeIndex > 0) {
+      final epText = candidate.episodeTitle.trim();
+      if (epText.isEmpty) return false;
+      final scraped = SeriesScraper.scrapeEpisodeName(
+        epText,
+        seriesTitle: candidate.animeTitle,
+      );
+      if (scraped.isSpecial ||
+          scraped.resolvedEpisodeNumber != query.episodeIndex) {
+        return false;
+      }
+    }
+    final reqSeason = query.seasonNumber;
+    if (reqSeason != null && reqSeason > 0) {
+      final candSeason =
+          _extractCandidateSeason(candidate.animeTitle, candidate.episodeTitle);
+      if (candSeason == reqSeason) return true;
+      if (candSeason == null && reqSeason > 1) {
+        final normalizedAnime =
+            SeriesScraper.normalizeSequelNumerals(candidate.animeTitle);
+        if (RegExp('(?<=[\\u4e00-\\u9fff])$reqSeason\\b')
+            .hasMatch(normalizedAnime)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return true;
+  }
+
   /// Selects a unique, order-independent auto-bind candidate from [candidates].
   ///
   /// Returns `null` (leaving candidates in pending user selection) when:
@@ -200,6 +242,11 @@ class DandanplayProvider implements DanmuProvider {
   /// - Multiple distinct candidates near the top score are ambiguous (e.g.
   ///   both `S01E10` and `S02E10` returned by an origin when season is unknown,
   ///   or conflicting seasons/works across top candidates).
+  ///
+  /// When [query] has a confirmed season and exactly one qualifying candidate
+  /// positively confirms the full `(work, season, episode)` identity while
+  /// another candidate omits season info (e.g. `S02E10` vs unseasoned `第10集`),
+  /// the unique fully-confirmed candidate wins cleanly.
   static DanmuCandidate? selectUniqueAutoBindCandidate(
     List<DanmuCandidate> candidates, {
     required DanmuMatchQuery query,
@@ -214,12 +261,22 @@ class DandanplayProvider implements DanmuProvider {
         .toList();
     if (qualifying.isEmpty) return null;
 
+    var pool = qualifying;
+    if (query.seasonNumber != null && query.seasonNumber! > 0) {
+      final fullyConfirmed = qualifying
+          .where((c) => _hasConfirmedFullIdentity(c, query))
+          .toList();
+      if (fullyConfirmed.isNotEmpty) {
+        pool = fullyConfirmed;
+      }
+    }
+
     int originRank(String origin) {
       final idx = preferredOrigins.indexOf(origin);
       return idx >= 0 ? idx : preferredOrigins.length + 1;
     }
 
-    qualifying.sort((a, b) {
+    pool.sort((a, b) {
       final confDiff = b.confidence.compareTo(a.confidence);
       if (confDiff != 0 && (b.confidence - a.confidence).abs() >= 0.001) {
         return confDiff;
@@ -229,12 +286,12 @@ class DandanplayProvider implements DanmuProvider {
       return a.boundEpisodeId.compareTo(b.boundEpisodeId);
     });
 
-    final best = qualifying.first;
+    final best = pool.first;
     final bestSeason = _extractCandidateSeason(best.animeTitle, best.episodeTitle);
     final bestCoreTitle = SeriesScraper.normalizeWorkCoreTitle(best.animeTitle);
 
     const double ambiguityMargin = 0.08;
-    for (final other in qualifying.skip(1)) {
+    for (final other in pool.skip(1)) {
       if ((best.confidence - other.confidence).abs() >= ambiguityMargin) {
         continue;
       }

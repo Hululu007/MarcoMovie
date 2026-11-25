@@ -246,6 +246,29 @@ class DanmuSourceSyncMerger {
     return true;
   }
 
+  static bool _changedRelativeOrder(
+    List<String> baseOrder,
+    List<String> sideOrder,
+  ) {
+    if (baseOrder.length < 2 || sideOrder.length < 2) return false;
+    final baseSet = baseOrder.toSet();
+    final sideSet = sideOrder.toSet();
+    final baseCommon = <String>[
+      for (final u in baseOrder)
+        if (sideSet.contains(u)) u,
+    ];
+    if (baseCommon.length < 2) return false;
+    final sideCommon = <String>[
+      for (final u in sideOrder)
+        if (baseSet.contains(u)) u,
+    ];
+    if (baseCommon.length != sideCommon.length) return false;
+    for (int i = 0; i < baseCommon.length; i++) {
+      if (baseCommon[i] != sideCommon[i]) return true;
+    }
+    return false;
+  }
+
   static bool _sameState(
     DanmuSourceSyncDocument a,
     DanmuSourceSyncDocument b,
@@ -441,8 +464,21 @@ class DanmuSourceSyncMerger {
     final addedByLocal = localByUrl.keys.toSet().difference(baseUrls);
     final addedByRemote = remoteByUrl.keys.toSet().difference(baseUrls);
 
+    final bool localReordered =
+        base != null && _changedRelativeOrder(base.urls, local.urls);
+    final bool remoteReordered =
+        base != null && _changedRelativeOrder(base.urls, remote.urls);
+
     final bool localIsPrimary;
-    if (local.updatedAt != remote.updatedAt) {
+    if (remoteReordered && !localReordered) {
+      // Only remote changed the relative order of surviving base entries;
+      // local only added/deleted entries -> preserve remote's priority order!
+      localIsPrimary = false;
+    } else if (localReordered && !remoteReordered) {
+      // Only local changed the relative order of surviving base entries;
+      // remote only added/deleted entries -> preserve local's priority order!
+      localIsPrimary = true;
+    } else if (local.updatedAt != remote.updatedAt) {
       localIsPrimary = local.updatedAt > remote.updatedAt;
     } else if (local.revision != remote.revision) {
       localIsPrimary = local.revision > remote.revision;

@@ -2343,9 +2343,23 @@ class SeriesScraper {
     );
   }
 
+  /// Returns true if [a] and [b] agree on work identity (or at least one side
+  /// lacks a recognized work title). Prevents line switches from jumping into
+  /// a different series that happens to share the same `S02E10` marker.
+  static bool areWorkTitlesCompatible(
+    ScrapedEpisodeInfo a,
+    ScrapedEpisodeInfo b,
+  ) {
+    final coreA = normalizeWorkCoreTitle(a.recognizedWorkTitle);
+    final coreB = normalizeWorkCoreTitle(b.recognizedWorkTitle);
+    if (coreA.isEmpty || coreB.isEmpty) return true;
+    return coreA == coreB || coreA.contains(coreB) || coreB.contains(coreA);
+  }
+
   /// Matches the currently playing episode from [sourceInfo] onto [targetScrape]
   /// when switching playback lines so scrambled lines keep the exact same
-  /// `(seasonNumber, resolvedEpisodeNumber)` or stable identity.
+  /// `(recognizedWorkTitle, seasonNumber, resolvedEpisodeNumber)` or stable
+  /// identity without jumping into another work or a trailer/special.
   static int? matchEpisodeIndexInScrapedLine(
     ScrapedEpisodeInfo sourceInfo,
     LineEpisodeScrapeResult targetScrape,
@@ -2354,33 +2368,52 @@ class SeriesScraper {
     // 1. Exact stable key match (e.g., same Emby item / file ID across lines).
     if (sourceInfo.stableKey.isNotEmpty) {
       for (final cand in targetScrape.byOriginalIndex) {
-        if (cand.stableKey == sourceInfo.stableKey) return cand.originalIndex;
-      }
-    }
-    // 2. Exact (seasonNumber, resolvedEpisodeNumber) match.
-    final srcEp = sourceInfo.resolvedEpisodeNumber;
-    if (srcEp != null && srcEp > 0 && !sourceInfo.isSpecial) {
-      final srcSeason = sourceInfo.seasonNumber;
-      if (srcSeason != null && srcSeason > 0) {
-        for (final cand in targetScrape.byOriginalIndex) {
-          if (!cand.isSpecial &&
-              cand.seasonNumber == srcSeason &&
-              cand.resolvedEpisodeNumber == srcEp) {
-            return cand.originalIndex;
-          }
-        }
-      }
-      // Match by episode number when target line does not carry season tags
-      // (avoid cross-season mismatch if target explicitly specifies another season!).
-      for (final cand in targetScrape.byOriginalIndex) {
-        if (!cand.isSpecial &&
-            cand.resolvedEpisodeNumber == srcEp &&
-            (srcSeason == null ||
-                cand.seasonNumber == null ||
-                cand.seasonNumber == srcSeason)) {
+        if (cand.stableKey == sourceInfo.stableKey &&
+            areWorkTitlesCompatible(sourceInfo, cand)) {
           return cand.originalIndex;
         }
       }
+    }
+    // 2. Exact (work, seasonNumber, resolvedEpisodeNumber) match.
+    final srcEp = sourceInfo.resolvedEpisodeNumber;
+    if (srcEp != null && srcEp > 0 && !sourceInfo.isSpecial) {
+      final srcSeason = sourceInfo.seasonNumber;
+      final srcCore = normalizeWorkCoreTitle(sourceInfo.recognizedWorkTitle);
+      if (srcSeason != null && srcSeason > 0) {
+        int? compatFallback;
+        for (final cand in targetScrape.byOriginalIndex) {
+          if (cand.isSpecial ||
+              cand.seasonNumber != srcSeason ||
+              cand.resolvedEpisodeNumber != srcEp) {
+            continue;
+          }
+          if (!areWorkTitlesCompatible(sourceInfo, cand)) continue;
+          final candCore = normalizeWorkCoreTitle(cand.recognizedWorkTitle);
+          if (srcCore.isNotEmpty && candCore == srcCore) {
+            return cand.originalIndex;
+          }
+          compatFallback ??= cand.originalIndex;
+        }
+        if (compatFallback != null) return compatFallback;
+      }
+      // Match by episode number when target line does not carry season tags
+      // (avoid cross-season and cross-work mismatch!).
+      int? epCompatFallback;
+      for (final cand in targetScrape.byOriginalIndex) {
+        if (cand.isSpecial || cand.resolvedEpisodeNumber != srcEp) continue;
+        if (!(srcSeason == null ||
+            cand.seasonNumber == null ||
+            cand.seasonNumber == srcSeason)) {
+          continue;
+        }
+        if (!areWorkTitlesCompatible(sourceInfo, cand)) continue;
+        final candCore = normalizeWorkCoreTitle(cand.recognizedWorkTitle);
+        if (srcCore.isNotEmpty && candCore == srcCore) {
+          return cand.originalIndex;
+        }
+        epCompatFallback ??= cand.originalIndex;
+      }
+      if (epCompatFallback != null) return epCompatFallback;
     }
     return null;
   }

@@ -5096,13 +5096,15 @@ class StorageService {
   Future<void> _ensureWebdavCollections(
     http.Client client,
     String rawBaseUrl,
-    Uri fileUri,
-  ) async {
+    Uri fileUri, {
+    void Function()? ensureEnabled,
+  }) async {
     final segments =
         fileUri.pathSegments.where((s) => s.isNotEmpty).toList(growable: false);
     if (segments.length <= 1) return;
     final skipSegments = baseCollectionDepth(rawBaseUrl, fileUri);
     for (var i = skipSegments; i < segments.length - 1; i++) {
+      ensureEnabled?.call();
       final collUri = fileUri.replace(
         pathSegments: <String>[...segments.sublist(0, i + 1), ''],
       );
@@ -5113,9 +5115,12 @@ class StorageService {
             await client.send(req).timeout(const Duration(seconds: 10));
         final status = streamed.statusCode;
         await streamed.stream.drain<void>();
+        ensureEnabled?.call();
         if (status == 401) {
           break;
         }
+      } on FormatException {
+        rethrow;
       } on Object catch (e) {
         debugPrint('StorageService: MKCOL failed for $collUri: $e');
       }
@@ -5153,7 +5158,9 @@ class StorageService {
     List<int> encodedPayload, {
     String? ifMatch,
     String? ifNoneMatch,
+    void Function()? ensureEnabled,
   }) async {
+    ensureEnabled?.call();
     var putResp = await httpClient
         .put(
           uri,
@@ -5166,7 +5173,14 @@ class StorageService {
         )
         .timeout(const Duration(seconds: 15));
     if (putResp.statusCode == 404 || putResp.statusCode == 409) {
-      await _ensureWebdavCollections(httpClient, rawBaseUrl, uri);
+      ensureEnabled?.call();
+      await _ensureWebdavCollections(
+        httpClient,
+        rawBaseUrl,
+        uri,
+        ensureEnabled: ensureEnabled,
+      );
+      ensureEnabled?.call();
       putResp = await httpClient
           .put(
             uri,
@@ -5379,6 +5393,7 @@ class StorageService {
         encodedPayload,
         ifMatch: ifMatch,
         ifNoneMatch: ifNoneMatch,
+        ensureEnabled: ensureDanmuSyncEnabled,
       );
       ensureDanmuSyncEnabled();
 
@@ -5390,6 +5405,7 @@ class StorageService {
           rawBaseUrl,
           uri,
           encodedPayload,
+          ensureEnabled: ensureDanmuSyncEnabled,
         );
         ensureDanmuSyncEnabled();
         if (retryResp.statusCode >= 200 &&
@@ -5422,6 +5438,7 @@ class StorageService {
             rawBaseUrl,
             uri,
             encodedPayload,
+            ensureEnabled: ensureDanmuSyncEnabled,
           );
           ensureDanmuSyncEnabled();
           if (fallbackResp.statusCode >= 200 &&
