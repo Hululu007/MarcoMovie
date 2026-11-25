@@ -3,12 +3,16 @@ package com.pilipala.marcomovie.lite;
 
 import android.app.Activity;
 import android.app.Instrumentation;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.widget.ImageView;
+import android.widget.TextView;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -237,6 +241,7 @@ public final class LiteProbe extends Instrumentation {
                 runRound2ReworkChecks();
                 runRound3ReworkChecks();
                 runRound4ReworkChecks();
+                run0510NoticeAndSettingsChecks();
                 newChecksCount = count - baselineCount;
             }
 
@@ -247,7 +252,7 @@ public final class LiteProbe extends Instrumentation {
                             + (extended
                                     ? (" + "
                                             + newChecksCount
-                                            + " new 0.5.9 E2E checks (total "
+                                            + " new Lite E2E checks (total "
                                             + count
                                             + " PASSED, 0 FAILED, 0 SKIPPED)")
                                     : "")
@@ -3896,5 +3901,263 @@ public final class LiteProbe extends Instrumentation {
                 hasServerLog(r4LogRestored, "/cms-dup2", "ids=100")
                         && countServerLogs(r4LogRestored, "/cms-dup1") == 0,
                 "R4-3c: server confirmed picking B requested /cms-dup2?ac=detail&ids=100 (0 /cms-dup1)");
+    }
+
+    static void collectTexts(View view, StringBuilder out) {
+        if (view == null) return;
+        if (view instanceof TextView) {
+            CharSequence t = ((TextView) view).getText();
+            if (t != null && t.length() > 0) {
+                if (out.length() > 0) out.append('\n');
+                out.append(t);
+            }
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) view;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                collectTexts(g.getChildAt(i), out);
+            }
+        }
+    }
+
+    static View findClickableViewContainingText(View view, String needle) {
+        if (view == null) return null;
+        if (view instanceof TextView && view.isClickable()) {
+            CharSequence t = ((TextView) view).getText();
+            if (t != null && t.toString().contains(needle)) return view;
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) view;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View found = findClickableViewContainingText(g.getChildAt(i), needle);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    static boolean containsImageView(View view) {
+        if (view == null) return false;
+        if (view instanceof ImageView) return true;
+        if (view instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) view;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                if (containsImageView(g.getChildAt(i))) return true;
+            }
+        }
+        return false;
+    }
+
+    private void run0510NoticeAndSettingsChecks() throws Exception {
+        // 1. Fresh first launch shows official author social + website + anti-malware notice dialog
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.getPreferences(0)
+                                .edit()
+                                .remove(LiteActivity.PREF_OFFICIAL_NOTICE_SEEN)
+                                .commit();
+                        a.finish();
+                    }
+                });
+        SystemClock.sleep(500);
+        a =
+                (LiteActivity)
+                        startActivitySync(
+                                new Intent(getTargetContext(), LiteActivity.class)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        check(a != null, "0.5.10-1a: cold relaunch after clearing first-launch flag succeeded");
+
+        final boolean[] firstLaunchShowing = new boolean[1];
+        final String[] firstDialogText = new String[] {""};
+        final boolean[] dismissedAfterOk = new boolean[1];
+        final boolean[] seenAfterOk = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        if (a.activeOfficialNoticeDialog != null
+                                && a.activeOfficialNoticeDialog.isShowing()) {
+                            firstLaunchShowing[0] = true;
+                            StringBuilder sb = new StringBuilder();
+                            collectTexts(
+                                    a.activeOfficialNoticeDialog.getWindow().getDecorView(), sb);
+                            firstDialogText[0] = sb.toString();
+                            android.widget.Button okBtn =
+                                    a.activeOfficialNoticeDialog.getButton(
+                                            DialogInterface.BUTTON_POSITIVE);
+                            if (okBtn != null) okBtn.performClick();
+                        }
+                    }
+                });
+        SystemClock.sleep(250);
+        main(
+                new Runnable() {
+                    public void run() {
+                        dismissedAfterOk[0] =
+                                a.activeOfficialNoticeDialog == null
+                                        || !a.activeOfficialNoticeDialog.isShowing();
+                        seenAfterOk[0] =
+                                a.getPreferences(0)
+                                        .getBoolean(LiteActivity.PREF_OFFICIAL_NOTICE_SEEN, false);
+                    }
+                });
+        check(
+                firstLaunchShowing[0]
+                        && firstDialogText[0].contains("PILIPALA来信（小红书、B站、抖音、公众号、视频号）")
+                        && firstDialogText[0].contains("Marco官网：marcotv.wlj9919.top")
+                        && firstDialogText[0].contains(
+                                "下载软件请认准官网地址，以防不明渠道软件添加病毒等不良内容。"),
+                "0.5.10-1b: first-launch dialog displays author social handles, official site, and anti-malware notice");
+        check(
+                dismissedAfterOk[0] && seenAfterOk[0],
+                "0.5.10-1c: clicking 我知道了 dismisses first-launch notice and persists seen flag");
+
+        // 2. Subsequent cold launch does NOT show first-launch notice again
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.finish();
+                    }
+                });
+        SystemClock.sleep(500);
+        a =
+                (LiteActivity)
+                        startActivitySync(
+                                new Intent(getTargetContext(), LiteActivity.class)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        final boolean[] secondLaunchShowing = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        secondLaunchShowing[0] =
+                                a.activeOfficialNoticeDialog != null
+                                        && a.activeOfficialNoticeDialog.isShowing();
+                    }
+                });
+        check(
+                a != null && !secondLaunchShowing[0],
+                "0.5.10-2: second launch after acknowledgment does not re-show first-launch notice");
+
+        // 3. Back/cancel dismissal also persists seen; neutral button opens Settings page
+        final boolean[] seenAfterCancel = new boolean[1];
+        final boolean[] neutralOpenedSettings = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.getPreferences(0)
+                                .edit()
+                                .putBoolean(LiteActivity.PREF_OFFICIAL_NOTICE_SEEN, false)
+                                .commit();
+                        a.maybeShowFirstLaunchOfficialNotice();
+                        if (a.activeOfficialNoticeDialog != null) {
+                            a.activeOfficialNoticeDialog.cancel();
+                        }
+                    }
+                });
+        SystemClock.sleep(300);
+        main(
+                new Runnable() {
+                    public void run() {
+                        seenAfterCancel[0] =
+                                a.getPreferences(0)
+                                        .getBoolean(LiteActivity.PREF_OFFICIAL_NOTICE_SEEN, false);
+                        a.getPreferences(0)
+                                .edit()
+                                .putBoolean(LiteActivity.PREF_OFFICIAL_NOTICE_SEEN, false)
+                                .commit();
+                        a.maybeShowFirstLaunchOfficialNotice();
+                        if (a.activeOfficialNoticeDialog != null) {
+                            android.widget.Button moreBtn =
+                                    a.activeOfficialNoticeDialog.getButton(
+                                            DialogInterface.BUTTON_NEUTRAL);
+                            if (moreBtn != null) moreBtn.performClick();
+                        }
+                    }
+                });
+        SystemClock.sleep(300);
+        main(
+                new Runnable() {
+                    public void run() {
+                        neutralOpenedSettings[0] =
+                                "settings".equals(a.currentPageKind)
+                                        && a.getPreferences(0)
+                                                .getBoolean(
+                                                        LiteActivity.PREF_OFFICIAL_NOTICE_SEEN,
+                                                        false);
+                    }
+                });
+        check(
+                seenAfterCancel[0] && neutralOpenedSettings[0],
+                "0.5.10-3: canceling notice persists seen flag and neutral button navigates to Settings page");
+
+        // 4. Home top header has 设置 pill and home quick bar has 设置与联系反馈; clicking 设置 renders contact & group info
+        final boolean[] navAndHomeFound = new boolean[1];
+        final String[] settingsPageText = new String[] {""};
+        main(
+                new Runnable() {
+                    public void run() {
+                        a.home();
+                        View navSettings = findClickableViewContainingText(a.page, "设置");
+                        View quickSettings =
+                                findClickableViewContainingText(a.page, "设置与联系反馈");
+                        navAndHomeFound[0] = navSettings != null && quickSettings != null;
+                        if (navSettings != null) navSettings.performClick();
+                        StringBuilder sb = new StringBuilder();
+                        collectTexts(a.page, sb);
+                        settingsPageText[0] = sb.toString();
+                    }
+                });
+        check(
+                navAndHomeFound[0]
+                        && "settings".equals(a.currentPageKind)
+                        && settingsPageText[0].contains("PILIPALA来信（小红书、B站、抖音、公众号、视频号）")
+                        && settingsPageText[0].contains("marcotv.wlj9919.top")
+                        && settingsPageText[0].contains("https://marcotv.wlj9919.top/movie/#group")
+                        && settingsPageText[0].contains(
+                                "下载软件请认准官网地址，以防不明渠道软件添加病毒等不良内容。"),
+                "0.5.10-4: Settings page accessible from header & home displays author social handles, website, group link, and notice");
+
+        // 5. Clicking 官网交流群链接 opens QR + URL dialog cleanly; clicking 查看首次启动官方声明 opens notice dialog cleanly
+        final boolean[] groupDialogOk = new boolean[1];
+        final boolean[] reopenNoticeOk = new boolean[1];
+        main(
+                new Runnable() {
+                    public void run() {
+                        View groupBtn =
+                                findClickableViewContainingText(a.page, "官网交流群链接");
+                        if (groupBtn != null) groupBtn.performClick();
+                        if (a.activeOfficialNoticeDialog != null
+                                && a.activeOfficialNoticeDialog.isShowing()) {
+                            View decor = a.activeOfficialNoticeDialog.getWindow().getDecorView();
+                            StringBuilder sb = new StringBuilder();
+                            collectTexts(decor, sb);
+                            groupDialogOk[0] =
+                                    containsImageView(decor)
+                                            && sb.toString()
+                                                    .contains(
+                                                            "https://marcotv.wlj9919.top/movie/#group");
+                            a.dismissActiveOfficialNoticeDialog();
+                        }
+
+                        View noticeBtn =
+                                findClickableViewContainingText(a.page, "查看首次启动官方声明");
+                        if (noticeBtn != null) noticeBtn.performClick();
+                        if (a.activeOfficialNoticeDialog != null
+                                && a.activeOfficialNoticeDialog.isShowing()) {
+                            StringBuilder sb = new StringBuilder();
+                            collectTexts(
+                                    a.activeOfficialNoticeDialog.getWindow().getDecorView(), sb);
+                            reopenNoticeOk[0] =
+                                    sb.toString().contains("PILIPALA来信")
+                                            && sb.toString().contains("marcotv.wlj9919.top");
+                            a.home();
+                        }
+                    }
+                });
+        check(
+                groupDialogOk[0]
+                        && reopenNoticeOk[0]
+                        && a.activeOfficialNoticeDialog == null,
+                "0.5.10-5: Settings 官网交流群链接 shows QR+URL dialog and 查看首次启动官方声明 reopens and cleans up cleanly");
     }
 }
