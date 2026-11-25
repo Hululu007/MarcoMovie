@@ -180,6 +180,7 @@ class StorageService {
 
   final ValueNotifier<int> watchHistoryRevision = ValueNotifier<int>(0);
   final ValueNotifier<int> danmuSourcesRevision = ValueNotifier<int>(0);
+  int _danmuSyncGeneration = 0;
   final ValueNotifier<bool> historyCorruptionNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<bool> subscriptionsCorruptionNotifier =
       ValueNotifier<bool>(false);
@@ -4006,6 +4007,9 @@ class StorageService {
     }
     if (syncDanmu != null) {
       await _prefs.setBool(keyWebdavSyncDanmu, syncDanmu);
+      if (!syncDanmu) {
+        _danmuSyncGeneration++;
+      }
     }
     if (!auto || url.trim().isEmpty) {
       cancelPendingAutoSync();
@@ -4022,6 +4026,9 @@ class StorageService {
 
   Future<void> setWebdavSyncDanmu(bool enabled) async {
     await _prefs.setBool(keyWebdavSyncDanmu, enabled);
+    if (!enabled) {
+      _danmuSyncGeneration++;
+    }
   }
 
   static bool _isHttpOriginUrl(String raw) {
@@ -5196,8 +5203,55 @@ class StorageService {
     var attempt = 0;
     var sawAbsent412 = false;
     final rand = Random();
+    final syncGen = _danmuSyncGeneration;
+
+    void ensureDanmuSyncEnabled() {
+      if (!webdavSyncDanmu || syncGen != _danmuSyncGeneration) {
+        throw const FormatException('「同步弹幕源」已关闭，已停止读写弹幕源文件');
+      }
+    }
+
+    Future<DanmuSourceSyncMergeResult> rebaseInFlightLocalEdits({
+      required DanmuSourceSyncDocument startLocalDoc,
+      required DanmuSourceSyncDocument committedDoc,
+      required ({
+        DanmuSourceSyncDocument local,
+        DanmuSourceSyncDocument? base,
+        bool hasLocalCredentials,
+        Set<String> authorizedCredentialOrigins,
+        List<String> pendingAuthOrigins,
+      }) latestState,
+    }) async {
+      final minCausalTs = committedDoc.updatedAt + 1;
+      final latestLocal = latestState.local;
+      final causalLocal = latestLocal.copyWith(
+        updatedAt: max(latestLocal.updatedAt, minCausalTs),
+        clearedAt: latestLocal.clearedAt > 0
+            ? max(latestLocal.clearedAt, minCausalTs)
+            : 0,
+      );
+      final rebased = DanmuSourceSyncMerger.merge(
+        local: causalLocal,
+        base: startLocalDoc,
+        remote: committedDoc,
+        hasLocalCredentials: latestState.hasLocalCredentials,
+        authorizedCredentialOrigins: latestState.authorizedCredentialOrigins,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      await DanmuPrefs.applyRebasedLocalAndBase(
+        localDoc: rebased.merged,
+        baseDoc: committedDoc,
+        prefs: _prefs,
+        pendingAuthOrigins: rebased.pendingAuthOrigins,
+      );
+      if (rebased.localChanged) {
+        danmuSourcesRevision.value++;
+      }
+      return rebased;
+    }
 
     while (true) {
+      ensureDanmuSyncEnabled();
       DanmuSourceSyncDocument? remoteDoc;
       String? remoteEtag;
       var fileAbsent = false;
@@ -5205,6 +5259,7 @@ class StorageService {
       final getResp = await effectiveClient
           .get(uri, headers: _webdavHeaders())
           .timeout(const Duration(seconds: 15));
+      ensureDanmuSyncEnabled();
       if (getResp.statusCode >= 200 && getResp.statusCode < 300) {
         if (getResp.bodyBytes.length > maxSyncPayloadBytes) {
           throw const FormatException('远端弹幕源同步文件超过 8 MB 大小限制');
@@ -5214,7 +5269,7 @@ class StorageService {
           treatAsRemote: true,
         );
         if (remoteDoc == null) {
-          throw const FormatException('远端弹幕源同步文件格式无效');
+          throw const FormatException('远端弹幕源同步文件格式无效或缺少有效清空记录');
         }
         final h = getResp.headers['etag']?.trim();
         if (h != null && h.isNotEmpty && !isWeakEtag(h)) {
@@ -5232,11 +5287,12 @@ class StorageService {
       }
 
       final state = DanmuPrefs.readSyncStateSync(_prefs);
-      final startLocalRevision = state.local.revision;
-      final startLocalUpdatedAt = state.local.updatedAt;
+      final startLocalDoc = state.local;
+      final startLocalRevision = startLocalDoc.revision;
+      final startLocalUpdatedAt = startLocalDoc.updatedAt;
       final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
       final mergeRes = DanmuSourceSyncMerger.merge(
-        local: state.local,
+        local: startLocalDoc,
         base: state.base,
         remote: remoteDoc,
         hasLocalCredentials: state.hasLocalCredentials,
@@ -5245,15 +5301,17 @@ class StorageService {
       );
 
       if (!mergeRes.needsUpload) {
+        ensureDanmuSyncEnabled();
         final latestState = DanmuPrefs.readSyncStateSync(_prefs);
         final editedInFlight =
             latestState.local.revision != startLocalRevision ||
                 latestState.local.updatedAt != startLocalUpdatedAt;
         if (editedInFlight) {
           if (remoteDoc != null) {
-            await DanmuPrefs.updateSyncBaseSnapshotOnly(
-              mergeRes.merged,
-              prefs: _prefs,
+            await rebaseInFlightLocalEdits(
+              startLocalDoc: startLocalDoc,
+              committedDoc: mergeRes.merged,
+              latestState: latestState,
             );
           }
           if (attempt < maxRetries) {
@@ -5261,11 +5319,12 @@ class StorageService {
             continue;
           }
           scheduleAutoWebdavSync();
+          final afterRebase = DanmuPrefs.readSyncStateSync(_prefs);
           return (
-            sourceCount: latestState.local.sources.length,
+            sourceCount: afterRebase.local.sources.length,
             changed: false,
             uploaded: false,
-            pendingAuthOrigins: latestState.pendingAuthOrigins,
+            pendingAuthOrigins: afterRebase.pendingAuthOrigins,
             targetUrl: targetUrl,
           );
         }
@@ -5312,6 +5371,7 @@ class StorageService {
         }
       }
 
+      ensureDanmuSyncEnabled();
       var putResp = await _putWebdavWithMkcolRetry(
         effectiveClient,
         rawBaseUrl,
@@ -5320,15 +5380,18 @@ class StorageService {
         ifMatch: ifMatch,
         ifNoneMatch: ifNoneMatch,
       );
+      ensureDanmuSyncEnabled();
 
       if (ifNoneMatch != null &&
           _isIfNoneMatchRejectedStatus(putResp.statusCode)) {
+        ensureDanmuSyncEnabled();
         final retryResp = await _putWebdavWithMkcolRetry(
           effectiveClient,
           rawBaseUrl,
           uri,
           encodedPayload,
         );
+        ensureDanmuSyncEnabled();
         if (retryResp.statusCode >= 200 &&
             retryResp.statusCode < 300 &&
             hostKey.isNotEmpty) {
@@ -5345,6 +5408,7 @@ class StorageService {
           attempt++;
           final jitterMs = 35 + rand.nextInt(80);
           await Future<void>.delayed(Duration(milliseconds: jitterMs));
+          ensureDanmuSyncEnabled();
           continue;
         }
         // Only fall back to unconditional PUT when the server does not support
@@ -5352,12 +5416,14 @@ class StorageService {
         // real `If-Match` ETag conflict, NEVER drop preconditions and overwrite
         // peer writes — preserve both server data and local pending edits.
         if (ifNoneMatch != null && fileAbsent) {
+          ensureDanmuSyncEnabled();
           final fallbackResp = await _putWebdavWithMkcolRetry(
             effectiveClient,
             rawBaseUrl,
             uri,
             encodedPayload,
           );
+          ensureDanmuSyncEnabled();
           if (fallbackResp.statusCode >= 200 &&
               fallbackResp.statusCode < 300 &&
               hostKey.isNotEmpty) {
@@ -5386,17 +5452,19 @@ class StorageService {
       }
 
       // Guard against local edits that occurred while PUT was in flight:
-      // NEVER revert newer local edits back to the uploaded snapshot. Advance
-      // only the synced base snapshot and run a follow-up sync pass so the
-      // newer edit converges to the server.
+      // NEVER revert newer local edits back to the uploaded snapshot, and NEVER
+      // mistake previously unseen peer additions committed in `mergeRes.merged`
+      // for local deletions. Rebase the exact local delta (`startLocalDoc` ->
+      // `postPutState.local`) onto `mergeRes.merged` before the follow-up pass.
       final postPutState = DanmuPrefs.readSyncStateSync(_prefs);
       final editedDuringPut =
           postPutState.local.revision != startLocalRevision ||
               postPutState.local.updatedAt != startLocalUpdatedAt;
       if (editedDuringPut) {
-        await DanmuPrefs.updateSyncBaseSnapshotOnly(
-          mergeRes.merged,
-          prefs: _prefs,
+        final rebased = await rebaseInFlightLocalEdits(
+          startLocalDoc: startLocalDoc,
+          committedDoc: mergeRes.merged,
+          latestState: postPutState,
         );
         if (attempt < maxRetries) {
           attempt++;
@@ -5408,10 +5476,10 @@ class StorageService {
           '弹幕源已保留上传期间的新编辑，待继续同步',
         );
         return (
-          sourceCount: postPutState.local.sources.length,
-          changed: false,
+          sourceCount: rebased.merged.sources.length,
+          changed: rebased.localChanged,
           uploaded: true,
-          pendingAuthOrigins: postPutState.pendingAuthOrigins,
+          pendingAuthOrigins: rebased.pendingAuthOrigins,
           targetUrl: targetUrl,
         );
       }
@@ -5678,7 +5746,7 @@ class StorageService {
       String? danmuError;
       var danmuPendingAuthOrigins = const <String>[];
 
-      if (shouldSyncDanmu) {
+      if (shouldSyncDanmu && webdavSyncDanmu) {
         try {
           final dRes = await _syncDanmuSidecarWithClient(
             effectiveClient,

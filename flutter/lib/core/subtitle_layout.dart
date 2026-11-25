@@ -200,10 +200,17 @@ class SubtitleLayoutGeometry {
   }
 
   /// Computes libmpv's `sub-pos` (`45..100`, where `100` is native baseline) so
-  /// bottom-aligned ASS dialogue and bottom-half PGS bitmap subtitles lift above
-  /// the bottom HUD controls while ASS `\an8` top signs and top-half bitmaps
-  /// remain untouched at their original coordinates — across `BoxFit.contain`,
-  /// `BoxFit.cover` (crop), and `BoxFit.fill`.
+  /// bottom-aligned ASS dialogue and bottom-half PGS bitmap subtitles:
+  /// 1. When HUD controls are hidden on an uncropped frame (`BoxFit.contain` /
+  ///    `BoxFit.fill`), preserve exact native baseline (`100`).
+  /// 2. When HUD controls are hidden on a vertically cropped frame (e.g.
+  ///    ultrawide `2160×900` playing `1280×720` in `BoxFit.cover`), anchor
+  ///    inside the visible cropped frame with [baseBottomPadding] above the
+  ///    viewport bottom / slim progress line so 2-line ASS & PGS subtitles stay
+  ///    completely legible.
+  /// 3. When HUD controls are shown or dragged, lift strictly above
+  ///    `measuredBottomBarHeight + clearanceGap` while ASS `\an8` top signs and
+  ///    top-half bitmaps remain untouched at their original coordinates.
   static int computeMpvSubPos({
     required Size viewport,
     required int videoWidth,
@@ -211,11 +218,10 @@ class SubtitleLayoutGeometry {
     required BoxFit fit,
     required bool hudControlsVisible,
     required double measuredBottomBarHeight,
+    double baseBottomPadding = defaultBottomPadding,
     double clearanceGap = defaultHudClearanceGap,
   }) {
-    if (!hudControlsVisible ||
-        measuredBottomBarHeight <= 0.0 ||
-        viewport.height <= 0.0) {
+    if (viewport.height <= 0.0) {
       return 100;
     }
     final fullVideoRect = computeRenderedVideoRect(
@@ -229,8 +235,17 @@ class SubtitleLayoutGeometry {
     // Positive when letterboxed (black bar below video); negative in cover crop
     // where the bottom of the source frame is clipped below the viewport edge.
     final bottomMarginOrCrop = viewport.height - fullVideoRect.bottom;
-    final neededAboveVideoBottom =
-        (measuredBottomBarHeight + clearanceGap) - bottomMarginOrCrop;
+
+    final double desiredBottomMargin;
+    if (hudControlsVisible && measuredBottomBarHeight > 0.0) {
+      desiredBottomMargin = measuredBottomBarHeight + clearanceGap;
+    } else if (bottomMarginOrCrop < 0.0) {
+      desiredBottomMargin = math.max(0.0, baseBottomPadding);
+    } else {
+      return 100;
+    }
+
+    final neededAboveVideoBottom = desiredBottomMargin - bottomMarginOrCrop;
     if (neededAboveVideoBottom <= 0.0) {
       return 100;
     }

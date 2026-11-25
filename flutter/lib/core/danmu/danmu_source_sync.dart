@@ -173,6 +173,13 @@ class DanmuSourceSyncDocument {
       final updatedAt = (decoded['updatedAt'] as num?)?.toInt() ?? 0;
       final revision = (decoded['revision'] as num?)?.toInt() ?? 0;
       final clearedAt = (decoded['clearedAt'] as num?)?.toInt() ?? 0;
+      // An empty remote `sources: []` without an explicit clear timestamp
+      // (`clearedAt > 0`) lacks deliberate deletion evidence (e.g. a stripped
+      // or incomplete `{"schemaVersion":1,"sources":[]}` file) and MUST be
+      // rejected so it can never silently wipe existing local sources.
+      if (treatAsRemote && entries.isEmpty && clearedAt <= 0) {
+        return null;
+      }
       final initialized = treatAsRemote
           ? true
           : (decoded['initialized'] == true ||
@@ -309,6 +316,23 @@ class DanmuSourceSyncMerger {
         needsUpload: false,
         pendingAuthOrigins: _computePendingAuthOrigins(
           restored,
+          hasLocalCredentials,
+          authorizedCredentialOrigins: authorizedCredentialOrigins,
+        ),
+      );
+    }
+
+    // Defense-in-depth: an empty remote document lacking an explicit clear
+    // marker (`clearedAt <= 0`) must never clear non-empty local sources.
+    if (remote.sources.isEmpty &&
+        remote.clearedAt <= 0 &&
+        local.sources.isNotEmpty) {
+      return DanmuSourceSyncMergeResult(
+        merged: local.copyWith(initialized: true),
+        localChanged: false,
+        needsUpload: false,
+        pendingAuthOrigins: _computePendingAuthOrigins(
+          local,
           hasLocalCredentials,
           authorizedCredentialOrigins: authorizedCredentialOrigins,
         ),

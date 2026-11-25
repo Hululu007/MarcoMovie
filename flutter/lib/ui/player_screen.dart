@@ -429,6 +429,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(
         _iosAvPlayerController?.setVideoGravity(_avGravityForFit(nextFit)),
       );
+    } else {
+      unawaited(_syncNativeSubtitleState());
     }
   }
 
@@ -4648,8 +4650,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   c.seasonNumber != srcSeason,
             );
         final targetHasExplicitEpisodes = targetScrape.regularCount > 0;
-        if (targetHasOtherSeason ||
-            (srcSeason != null && targetHasExplicitEpisodes)) {
+        if (targetHasOtherSeason || targetHasExplicitEpisodes) {
           return (
             matchedIndex: null,
             seasonConflict: true,
@@ -5124,14 +5125,15 @@ class _PlayerScreenState extends State<PlayerScreen>
           unawaited(cache.bindSession(''));
           return;
         }
-        var best = candidates.first;
-        for (final c in candidates.skip(1)) {
-          if (c.confidence > best.confidence) best = c;
-        }
-        if (best.boundEpisodeId.trim().isEmpty ||
-            best.confidence < DandanplayProvider.autoBindMinConfidence) {
-          // Server only returned neighbor/unrelated/low-confidence candidates:
-          // do NOT silently bind a wrong episode; retain them for explicit user choice.
+        final best = DandanplayProvider.selectUniqueAutoBindCandidate(
+          candidates,
+          query: query,
+          preferredOrigins: _danmuSettings.normalizedOrigins,
+        );
+        if (best == null) {
+          // Server only returned neighbor/unrelated/low-confidence or ambiguous
+          // multi-season candidates: do NOT silently bind based on response
+          // order; retain them for explicit user choice.
           _matchedDanmuCandidate = null;
           _danmuBoundForEpisode = false;
           _pendingDanmuCandidates = List<DanmuCandidate>.unmodifiable(
@@ -5164,7 +5166,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       _danmuSettings = next;
     });
     if (persist) {
-      unawaited(DanmuPrefs.save(next));
+      unawaited(
+        DanmuPrefs.save(next, saveSourcesAndCredentials: serverChanged),
+      );
     }
     if (serverChanged && widget.debugDanmuProvider == null) {
       _rebuildDanmuPipeline();
@@ -9513,6 +9517,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         _showHud('画面：适应屏幕');
       }
     });
+    if (!_usingAvPlayer) {
+      unawaited(_syncNativeSubtitleState());
+    }
   }
 
   void _toggleAutoNext() {

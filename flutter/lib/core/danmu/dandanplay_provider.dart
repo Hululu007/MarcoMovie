@@ -155,6 +155,116 @@ class DandanplayProvider implements DanmuProvider {
     return !_locallyUnauthorizedCredentialOrigins.contains(originKey);
   }
 
+  String? _resolveMatchingConfiguredOrigin(
+    Uri targetUri,
+    String fallbackOriginKey,
+  ) {
+    if (targetUri.host.isEmpty) return null;
+    final scheme = targetUri.scheme.toLowerCase();
+    final host = targetUri.host.toLowerCase();
+    final port = _effectivePort(scheme, targetUri.hasPort ? targetUri.port : -1);
+    final path = targetUri.path;
+    final candidates = <String>{
+      ..._originWhitelist,
+      if (fallbackOriginKey.isNotEmpty) fallbackOriginKey,
+    };
+    String? bestMatch;
+    int bestPathLen = -1;
+    for (final origin in candidates) {
+      if (!_matchesOrigin(origin, scheme, host, port)) continue;
+      final oPath = Uri.parse(origin).path;
+      final pathMatches = oPath.isEmpty ||
+          path == oPath ||
+          path.startsWith('$oPath/');
+      if (!pathMatches) continue;
+      if (oPath.length > bestPathLen) {
+        bestPathLen = oPath.length;
+        bestMatch = origin;
+      }
+    }
+    return bestMatch;
+  }
+
+  bool _shouldSignRequestUri(Uri targetUri, String fallbackOriginKey) {
+    if (appId.isEmpty || appSecret.isEmpty) return false;
+    final effectiveOrigin =
+        _resolveMatchingConfiguredOrigin(targetUri, fallbackOriginKey);
+    if (effectiveOrigin == null) return false;
+    return _shouldSignOrigin(effectiveOrigin);
+  }
+
+  /// Selects a unique, order-independent auto-bind candidate from [candidates].
+  ///
+  /// Returns `null` (leaving candidates in pending user selection) when:
+  /// - No candidate meets [autoBindMinConfidence], OR
+  /// - Multiple distinct candidates near the top score are ambiguous (e.g.
+  ///   both `S01E10` and `S02E10` returned by an origin when season is unknown,
+  ///   or conflicting seasons/works across top candidates).
+  static DanmuCandidate? selectUniqueAutoBindCandidate(
+    List<DanmuCandidate> candidates, {
+    required DanmuMatchQuery query,
+    List<String> preferredOrigins = const <String>[],
+  }) {
+    final qualifying = candidates
+        .where(
+          (c) =>
+              c.boundEpisodeId.trim().isNotEmpty &&
+              c.confidence >= autoBindMinConfidence,
+        )
+        .toList();
+    if (qualifying.isEmpty) return null;
+
+    int originRank(String origin) {
+      final idx = preferredOrigins.indexOf(origin);
+      return idx >= 0 ? idx : preferredOrigins.length + 1;
+    }
+
+    qualifying.sort((a, b) {
+      final confDiff = b.confidence.compareTo(a.confidence);
+      if (confDiff != 0 && (b.confidence - a.confidence).abs() >= 0.001) {
+        return confDiff;
+      }
+      final oDiff = originRank(a.sourceOrigin).compareTo(originRank(b.sourceOrigin));
+      if (oDiff != 0) return oDiff;
+      return a.boundEpisodeId.compareTo(b.boundEpisodeId);
+    });
+
+    final best = qualifying.first;
+    final bestSeason = _extractCandidateSeason(best.animeTitle, best.episodeTitle);
+    final bestCoreTitle = SeriesScraper.normalizeWorkCoreTitle(best.animeTitle);
+
+    const double ambiguityMargin = 0.08;
+    for (final other in qualifying.skip(1)) {
+      if ((best.confidence - other.confidence).abs() >= ambiguityMargin) {
+        continue;
+      }
+      if (other.boundEpisodeId == best.boundEpisodeId) {
+        continue;
+      }
+      // Multiple distinct episodes from the SAME origin tied near top score:
+      // refuse to guess based on server response ordering.
+      if (other.sourceOrigin == best.sourceOrigin) {
+        return null;
+      }
+      // Conflicting explicit seasons across top candidates (e.g. S01 vs S02):
+      final otherSeason =
+          _extractCandidateSeason(other.animeTitle, other.episodeTitle);
+      if (bestSeason != null &&
+          otherSeason != null &&
+          bestSeason != otherSeason) {
+        return null;
+      }
+      // Conflicting work titles across top candidates:
+      final otherCoreTitle = SeriesScraper.normalizeWorkCoreTitle(other.animeTitle);
+      if (bestCoreTitle.isNotEmpty &&
+          otherCoreTitle.isNotEmpty &&
+          bestCoreTitle != otherCoreTitle) {
+        return null;
+      }
+    }
+    return best;
+  }
+
   bool _closed = false;
 
   bool get isClosed => _closed;
@@ -640,6 +750,7 @@ class DandanplayProvider implements DanmuProvider {
     required String animeTitle,
     required String episodeTitle,
     required double baseConfidence,
+    bool isExactMatch = false,
   }) {
     var score = baseConfidence;
     final candIsMc = SeriesScraper.isMotionComicText(
@@ -651,9 +762,16 @@ class DandanplayProvider implements DanmuProvider {
     }
 
     bool titleUnrelated = false;
+    bool missingIdentityEvidence = false;
     final normQ = SeriesScraper.normalizeWorkCoreTitle(query.title);
     final normA = SeriesScraper.normalizeWorkCoreTitle(animeTitle);
-    if (normQ.isNotEmpty && normA.isNotEmpty) {
+    if (normQ.isNotEmpty && normA.isEmpty) {
+      if (!isExactMatch) {
+        // Non-exact match supplied no work title (e.g. ID-only candidate):
+        // must never auto-bind by backfilling query metadata.
+        missingIdentityEvidence = true;
+      }
+    } else if (normQ.isNotEmpty && normA.isNotEmpty) {
       if (normA == normQ) {
         score += 0.14;
       } else if (normA.contains(normQ) || normQ.contains(normA)) {
@@ -682,18 +800,27 @@ class DandanplayProvider implements DanmuProvider {
             seriesTitle: animeTitle,
           )
         : null;
-    if (query.episodeIndex > 0 && scrapedEp != null) {
-      final epNum = scrapedEp.resolvedEpisodeNumber;
-      if (epNum != null && !scrapedEp.isSpecial) {
-        if (epNum == query.episodeIndex) {
-          score += 0.18;
-        } else {
+    if (query.episodeIndex > 0) {
+      if (scrapedEp != null) {
+        final epNum = scrapedEp.resolvedEpisodeNumber;
+        if (epNum != null && !scrapedEp.isSpecial) {
+          if (epNum == query.episodeIndex) {
+            score += 0.18;
+          } else {
+            episodeMismatched = true;
+            score -= 0.35;
+          }
+        } else if (scrapedEp.isSpecial) {
           episodeMismatched = true;
-          score -= 0.35;
+          score -= 0.40;
+        } else if (!isExactMatch) {
+          // Non-exact candidate supplied an episode title with no parseable
+          // episode number (e.g. "重逢"): cannot prove episode identity.
+          missingIdentityEvidence = true;
         }
-      } else if (scrapedEp.isSpecial) {
-        episodeMismatched = true;
-        score -= 0.40;
+      } else if (!isExactMatch) {
+        // Non-exact candidate supplied no episodeTitle at all.
+        missingIdentityEvidence = true;
       }
     }
 
@@ -736,6 +863,11 @@ class DandanplayProvider implements DanmuProvider {
       // auto-bind and are surfaced for explicit user choice.
       return math.min(score, 0.34).clamp(0.05, 0.34);
     }
+    if (missingIdentityEvidence) {
+      // Non-exact candidates missing positive work or episode-number identity
+      // stay candidate-only (strictly below autoBindMinConfidence).
+      return math.min(score, 0.36).clamp(0.05, 0.36);
+    }
     if (titleUnrelated) {
       // Unrelated work returning the same season/episode must stay candidate-only
       // (strictly below autoBindMinConfidence) so the user decides explicitly.
@@ -776,9 +908,10 @@ class DandanplayProvider implements DanmuProvider {
       final epId = _stringifyId(raw['episodeId']);
       if (epId.isEmpty) continue;
       final animeId = _stringifyId(raw['animeId']);
-      final animeTitle = (raw['animeTitle']?.toString() ?? query.title).trim();
-      final epTitle =
-          (raw['episodeTitle']?.toString() ?? query.episodeTitle).trim();
+      // NEVER backfill missing animeTitle / episodeTitle from the request query:
+      // candidate identity must come strictly from the server response itself.
+      final animeTitle = (raw['animeTitle']?.toString() ?? '').trim();
+      final epTitle = (raw['episodeTitle']?.toString() ?? '').trim();
       final rawConf = raw['confidence'] is num
           ? (raw['confidence'] as num).toDouble()
           : (exact ? 0.90 : 0.78);
@@ -787,6 +920,7 @@ class DandanplayProvider implements DanmuProvider {
         animeTitle: animeTitle,
         episodeTitle: epTitle,
         baseConfidence: rawConf,
+        isExactMatch: exact,
       );
       out.add(
         DanmuCandidate(
@@ -1321,7 +1455,7 @@ class DandanplayProvider implements DanmuProvider {
         ..headers['Accept'] = 'application/json, application/xml, text/xml, */*'
         ..headers['User-Agent'] = 'MarcoMovie-Danmu/1.0';
 
-      if (_shouldSignOrigin(originKey)) {
+      if (_shouldSignRequestUri(currentUri, originKey)) {
         final ts = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         req.headers['X-AppId'] = appId;
         req.headers['X-Timestamp'] = ts.toString();

@@ -110,7 +110,27 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     _serverUrlsCtrl = TextEditingController(text: _settings.serverUrls);
     _appIdCtrl = TextEditingController(text: _settings.appId);
     _appSecretCtrl = TextEditingController(text: _settings.appSecret);
+    DanmuPrefs.globalSourcesRevision.addListener(_onExternalSourcesChanged);
     _loadPendingAuthOrigins();
+  }
+
+  Future<void> _onExternalSourcesChanged() async {
+    if (!mounted || OhosRuntime.isOhos) return;
+    final fresh = await DanmuPrefs.load();
+    final pending = await DanmuPrefs.loadPendingAuthOrigins();
+    if (!mounted) return;
+    final prevUrls = _settings.serverUrls.trim();
+    final editorUnmodified = _serverUrlsCtrl.text.trim() == prevUrls;
+    setState(() {
+      _settings = _settings.copyWith(
+        serverUrls: fresh.serverUrls,
+        authorizedCredentialOrigins: fresh.authorizedCredentialOrigins,
+      );
+      _pendingAuthOrigins = pending;
+      if (editorUnmodified && _serverUrlsCtrl.text != fresh.serverUrls) {
+        _serverUrlsCtrl.text = fresh.serverUrls;
+      }
+    });
   }
 
   Future<void> _loadPendingAuthOrigins() async {
@@ -119,8 +139,21 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     setState(() => _pendingAuthOrigins = pending);
   }
 
+  Future<void> _refreshAuthStateFromPrefs() async {
+    final fresh = await DanmuPrefs.load();
+    final pending = await DanmuPrefs.loadPendingAuthOrigins();
+    if (!mounted) return;
+    setState(() {
+      _settings = _settings.copyWith(
+        authorizedCredentialOrigins: fresh.authorizedCredentialOrigins,
+      );
+      _pendingAuthOrigins = pending;
+    });
+  }
+
   @override
   void dispose() {
+    DanmuPrefs.globalSourcesRevision.removeListener(_onExternalSourcesChanged);
     _serverUrlsCtrl.dispose();
     _appIdCtrl.dispose();
     _appSecretCtrl.dispose();
@@ -132,6 +165,7 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
   void _update(
     DanmuSettings next, {
     bool persist = true,
+    bool includeServerConfig = false,
     bool markExplicitSourcesEdit = false,
     bool authorizeAllOrigins = false,
   }) {
@@ -145,11 +179,15 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     });
     widget.onChanged(next);
     if (persist && widget.persistAutomatically && !OhosRuntime.isOhos) {
-      DanmuPrefs.save(
-        next,
-        markExplicitSourcesEdit: markExplicitSourcesEdit,
-        authorizeAllOrigins: authorizeAllOrigins,
-      ).then((_) => _loadPendingAuthOrigins());
+      if (!includeServerConfig) {
+        DanmuPrefs.saveDisplayPreferences(next);
+      } else {
+        DanmuPrefs.save(
+          next,
+          markExplicitSourcesEdit: markExplicitSourcesEdit,
+          authorizeAllOrigins: authorizeAllOrigins,
+        ).then((_) => _refreshAuthStateFromPrefs());
+      }
     }
   }
 
@@ -167,18 +205,37 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     if (pendingAdd.isNotEmpty) {
       _newSourceCtrl.clear();
     }
+    final prevOrigins = _settings.normalizedOrigins;
+    final prevHasCreds = _settings.appId.trim().isNotEmpty &&
+        _settings.appSecret.trim().isNotEmpty;
     final nextAppId = _appIdCtrl.text.trim();
     final nextAppSecret = _appSecretCtrl.text.trim();
     final hasCreds = nextAppId.isNotEmpty && nextAppSecret.isNotEmpty;
+    final Set<String> nextAuthorized;
+    if (!hasCreds) {
+      nextAuthorized = const <String>{};
+    } else {
+      final prevAuth = _settings.authorizedCredentialOrigins ?? const <String>{};
+      nextAuthorized = <String>{
+        for (final u in prevAuth)
+          if (normalized.contains(u)) u,
+        for (final u in normalized)
+          if (!prevOrigins.contains(u)) u,
+        if (!prevHasCreds)
+          for (final u in _pendingAuthOrigins)
+            if (normalized.contains(u)) u,
+      };
+    }
     _update(
       _settings.copyWith(
         serverUrls: nextText,
         appId: nextAppId,
         appSecret: nextAppSecret,
-        authorizedCredentialOrigins: hasCreds ? normalized.toSet() : const <String>{},
+        authorizedCredentialOrigins: nextAuthorized,
       ),
+      includeServerConfig: true,
       markExplicitSourcesEdit: true,
-      authorizeAllOrigins: hasCreds,
+      authorizeAllOrigins: false,
     );
   }
 
@@ -192,8 +249,28 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
         appId: _appIdCtrl.text,
         appSecret: _appSecretCtrl.text,
       ),
+      includeServerConfig: true,
       markExplicitSourcesEdit: true,
     );
+  }
+
+  Future<void> _toggleOriginCredentialAuth(String origin) async {
+    final currentlyAuthorized =
+        _settings.authorizedCredentialOrigins?.contains(origin) ?? false;
+    final updatedAuthorized = await DanmuPrefs.setOriginCredentialAuthorization(
+      origin,
+      !currentlyAuthorized,
+    );
+    final pending = await DanmuPrefs.loadPendingAuthOrigins();
+    if (!mounted) return;
+    final next = _settings.copyWith(
+      authorizedCredentialOrigins: updatedAuthorized,
+    );
+    setState(() {
+      _settings = next;
+      _pendingAuthOrigins = pending;
+    });
+    widget.onChanged(next);
   }
 
   void _addSourceOrigin() {
@@ -837,6 +914,35 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
                             ),
                           ),
                         ),
+                        if (_appIdCtrl.text.trim().isNotEmpty &&
+                            _appSecretCtrl.text.trim().isNotEmpty)
+                          Builder(
+                            builder: (_) {
+                              final originUrl = _settings.normalizedOrigins[i];
+                              final isAuthed = _settings
+                                      .authorizedCredentialOrigins
+                                      ?.contains(originUrl) ??
+                                  false;
+                              return IconButton(
+                                key: Key('danmu-source-auth-$i'),
+                                tooltip: isAuthed
+                                    ? '已关联本机凭据（点击改为匿名）'
+                                    : '匿名访问（点击关联本机凭据）',
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () =>
+                                    _toggleOriginCredentialAuth(originUrl),
+                                icon: Icon(
+                                  isAuthed
+                                      ? Icons.verified_user_outlined
+                                      : Icons.lock_open_outlined,
+                                  size: 16,
+                                  color: isAuthed
+                                      ? const Color(0xFF30D158)
+                                      : AppleColors.labelSecondary,
+                                ),
+                              );
+                            },
+                          ),
                         IconButton(
                           key: Key('danmu-source-up-$i'),
                           tooltip: '上移',

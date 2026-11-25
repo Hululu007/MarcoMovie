@@ -28,6 +28,7 @@ import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/core/subtitle_layout.dart';
 import 'package:marco_movie/ui/cloud_sync_panel.dart';
 import 'package:marco_movie/ui/danmu/danmu_layer.dart';
+import 'package:marco_movie/ui/danmu/danmu_settings_sheet.dart';
 import 'package:marco_movie/ui/onboarding/onboarding_prefs.dart';
 import 'package:marco_movie/ui/player/player_hud_prefs.dart';
 import 'package:marco_movie/ui/player/slim_progress_bar.dart';
@@ -925,7 +926,9 @@ void main() {
       );
       // Ultrawide 2160x900 crop (BoxFit.cover) playing 1280x720 must compute
       // sub-pos from the full unclipped scaled video height (2160x1215, 157.5px
-      // bottom crop) -> sub-pos == 78, NOT 88!
+      // bottom crop):
+      // - HUD shown/dragging (86px bar + 16px gap) -> sub-pos == 78
+      // - HUD hidden/re-hidden (24px baseline above visible bottom) -> sub-pos == 85
       expect(
         SubtitleLayoutGeometry.computeMpvSubPos(
           viewport: const Size(2160, 900),
@@ -946,7 +949,7 @@ void main() {
           hudControlsVisible: false,
           measuredBottomBarHeight: 86,
         ),
-        100,
+        85,
       );
     });
 
@@ -957,6 +960,9 @@ void main() {
       String aspectMode,
       String frameTag,
       int? exactSubPos,
+      int expectedHiddenSubPos,
+      String assHiddenFrame,
+      String pgsHiddenFrame,
     })>[
       (
         label: 'narrow_900x600',
@@ -965,6 +971,9 @@ void main() {
         aspectMode: 'contain',
         frameTag: 'narrow',
         exactSubPos: null,
+        expectedHiddenSubPos: 100,
+        assHiddenFrame: 'mpv_ass_pos100.png',
+        pgsHiddenFrame: 'mpv_pgs_pos100.png',
       ),
       (
         label: 'fullscreen_1440x900',
@@ -973,6 +982,9 @@ void main() {
         aspectMode: 'contain',
         frameTag: 'fullscreen',
         exactSubPos: null,
+        expectedHiddenSubPos: 100,
+        assHiddenFrame: 'mpv_ass_pos100.png',
+        pgsHiddenFrame: 'mpv_pgs_pos100.png',
       ),
       (
         label: 'fullscreen_crop_2160x900',
@@ -981,6 +993,9 @@ void main() {
         aspectMode: 'cover',
         frameTag: 'crop_2160x900',
         exactSubPos: 78,
+        expectedHiddenSubPos: 85,
+        assHiddenFrame: 'mpv_ass_hidden_crop_2160x900.png',
+        pgsHiddenFrame: 'mpv_pgs_hidden_crop_2160x900.png',
       ),
     ]) {
       testWidgets(
@@ -1326,7 +1341,8 @@ void main() {
           final subRectRewoken = tester.getRect(find.byKey(twoLineSubtitleKey));
           expect(subRectRewoken.bottom, lessThan(tester.getRect(controlsFinder).top));
 
-          // --- Verify native libmpv ASS & PGS subtitle properties + real frame compositing ---
+          // --- Verify native libmpv ASS & PGS continuous 4-state transition:
+          //     1_hidden_slim -> 2_shown -> 3_dragging -> 4_rehidden_slim ---
           final sizeTag = viewportCase.frameTag;
           for (final nativeCase in <({
             String kind,
@@ -1337,13 +1353,13 @@ void main() {
             (
               kind: 'ass',
               track: assTrack,
-              hiddenFrame: 'mpv_ass_pos100.png',
+              hiddenFrame: viewportCase.assHiddenFrame,
               liftedFrame: 'mpv_ass_lifted_$sizeTag.png',
             ),
             (
               kind: 'pgs',
               track: pgsTrack,
-              hiddenFrame: 'mpv_pgs_pos100.png',
+              hiddenFrame: viewportCase.pgsHiddenFrame,
               liftedFrame: 'mpv_pgs_lifted_$sizeTag.png',
             ),
           ]) {
@@ -1355,56 +1371,17 @@ void main() {
             expect(player.platformImpl.properties['sub-ass'], 'yes');
             expect(player.platformImpl.properties['sub-ass-override'], 'yes');
             expect(player.platformImpl.properties['sub-visibility'], 'yes');
-            final liftedSubPos =
-                int.tryParse(player.platformImpl.properties['sub-pos'] ?? '') ??
-                    100;
-            expect(
-              liftedSubPos,
-              lessThan(96),
-              reason:
-                  '${nativeCase.kind} in ${viewportCase.label} should lower sub-pos when HUD visible',
-            );
-            if (viewportCase.exactSubPos != null) {
-              expect(
-                liftedSubPos,
-                viewportCase.exactSubPos,
-                reason:
-                    '${nativeCase.kind} in ${viewportCase.label} must compute exact cover sub-pos',
-              );
-            }
 
-            if (artifactsDirPath.isNotEmpty) {
-              await setMpvFrame(nativeCase.liftedFrame);
-              await tester.pump(const Duration(milliseconds: 120));
-              await _captureRepaintBoundaryPng(
-                tester,
-                boundaryKey,
-                File(
-                  '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_2_shown.png',
-                ),
-              );
-              // Dragging progress with native track active (at same t=00:02)
-              final g2 = await tester.startGesture(thumbAtTwoSec);
-              await tester.pump(const Duration(milliseconds: 50));
-              await g2.moveBy(const Offset(10, 0));
-              await tester.pump(const Duration(milliseconds: 120));
-              await _captureRepaintBoundaryPng(
-                tester,
-                boundaryKey,
-                File(
-                  '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_3_dragging.png',
-                ),
-              );
-              await g2.up();
-              await tester.pump(const Duration(milliseconds: 80));
-            }
-
-            // Let HUD auto-hide -> sub-pos must restore to 100!
+            // 1. Hidden (initial slim-progress baseline):
             await tester.pump(const Duration(milliseconds: 3600));
             await tester.pump(const Duration(milliseconds: 450));
             expect(controlsFinder, findsNothing);
-            expect(player.platformImpl.properties['sub-pos'], '100');
-
+            expect(
+              player.platformImpl.properties['sub-pos'],
+              '${viewportCase.expectedHiddenSubPos}',
+              reason:
+                  '${nativeCase.kind} in ${viewportCase.label} initial hidden state must use cropped-visible baseline ${viewportCase.expectedHiddenSubPos}',
+            );
             if (artifactsDirPath.isNotEmpty) {
               await setMpvFrame(nativeCase.hiddenFrame);
               await tester.pump(const Duration(milliseconds: 120));
@@ -1417,9 +1394,89 @@ void main() {
               );
             }
 
-            // Re-wake HUD for next track iteration
+            // 2. Shown (wake bottom controls via mouse hover):
             await mouse.moveTo(
               Offset(viewportCase.size.width / 2 - 20, viewportCase.size.height / 2),
+            );
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 300));
+            expect(controlsFinder, findsOneWidget);
+            final liftedSubPos =
+                int.tryParse(player.platformImpl.properties['sub-pos'] ?? '') ??
+                    100;
+            expect(
+              liftedSubPos,
+              lessThan(viewportCase.expectedHiddenSubPos),
+              reason:
+                  '${nativeCase.kind} in ${viewportCase.label} should lift sub-pos strictly above hidden baseline ${viewportCase.expectedHiddenSubPos} when HUD visible',
+            );
+            if (viewportCase.exactSubPos != null) {
+              expect(
+                liftedSubPos,
+                viewportCase.exactSubPos,
+                reason:
+                    '${nativeCase.kind} in ${viewportCase.label} must compute exact cover sub-pos',
+              );
+            }
+            if (artifactsDirPath.isNotEmpty) {
+              await setMpvFrame(nativeCase.liftedFrame);
+              await tester.pump(const Duration(milliseconds: 120));
+              await _captureRepaintBoundaryPng(
+                tester,
+                boundaryKey,
+                File(
+                  '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_2_shown.png',
+                ),
+              );
+            }
+
+            // 3. Dragging progress slider (at exact same t=00:02):
+            final g2 = await tester.startGesture(thumbAtTwoSec);
+            await tester.pump(const Duration(milliseconds: 50));
+            await g2.moveBy(const Offset(10, 0));
+            await tester.pump(const Duration(milliseconds: 120));
+            expect(controlsFinder, findsOneWidget);
+            expect(
+              int.tryParse(player.platformImpl.properties['sub-pos'] ?? ''),
+              liftedSubPos,
+            );
+            if (artifactsDirPath.isNotEmpty) {
+              await _captureRepaintBoundaryPng(
+                tester,
+                boundaryKey,
+                File(
+                  '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_3_dragging.png',
+                ),
+              );
+            }
+            await g2.up();
+            await tester.pump(const Duration(milliseconds: 80));
+
+            // 4. Re-hidden (auto-hide again after drag release -> restores exact hidden baseline!):
+            await tester.pump(const Duration(milliseconds: 3600));
+            await tester.pump(const Duration(milliseconds: 450));
+            expect(controlsFinder, findsNothing);
+            expect(
+              player.platformImpl.properties['sub-pos'],
+              '${viewportCase.expectedHiddenSubPos}',
+              reason:
+                  '${nativeCase.kind} in ${viewportCase.label} re-hidden state must restore baseline ${viewportCase.expectedHiddenSubPos}',
+            );
+            if (artifactsDirPath.isNotEmpty) {
+              await setMpvFrame(nativeCase.hiddenFrame);
+              await tester.pump(const Duration(milliseconds: 120));
+              await _captureRepaintBoundaryPng(
+                tester,
+                boundaryKey,
+                File(
+                  '$artifactsDirPath/subtitle_${nativeCase.kind}_${viewportCase.label}_4_rehidden_slim.png',
+                ),
+              );
+            }
+
+            // Re-wake HUD for next track iteration
+            await mouse.moveTo(
+              Offset(viewportCase.size.width / 2 + 20, viewportCase.size.height / 2),
             );
             await tester.pump(const Duration(milliseconds: 250));
           }
@@ -3588,6 +3645,608 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.byKey(const ValueKey('sync-switch-danmu')), findsNothing);
+      },
+    );
+  });
+
+  // =========================================================================
+  // REWORK REGRESSIONS (Post-2fec7f0 Independent Review Counterexamples)
+  // =========================================================================
+  group('Post-2fec7f0 Rework: WebDAV Rebase, Settings Guards, Danmu Ambiguity & Scoped MKV', () {
+    test(
+      'WebDAV 3-way rebase preserves peer R when local adds C during PUT, and still propagates deliberate deletion of R',
+      () async {
+        const baseUrl = 'https://base-a.example';
+        const localL = 'https://local-l.example';
+        const peerR = 'https://peer-r.example';
+        const localC = 'https://local-c.example';
+
+        DanmuSourceSyncDocument mkDoc(List<String> urls, int rev) =>
+            DanmuSourceSyncDocument(
+              initialized: true,
+              updatedAt: rev,
+              revision: rev,
+              sources: [for (final u in urls) DanmuSyncSourceEntry(url: u)],
+            );
+
+        // Scenario 1: Local adds L, peer adds R; while PUT #1 ([A,L,R]) is in
+        // flight, local adds C -> final local & remote MUST retain [A, L, R, C].
+        final storage = await initTestStorage();
+        await storage.saveWebdavConfig(
+          url: 'https://dav.example/family.json',
+          user: '',
+          pass: '',
+          auto: false,
+          syncSubs: false,
+          syncHistory: false,
+          syncDanmu: true,
+        );
+        final sp = await SharedPreferences.getInstance();
+        await DanmuPrefs.applySyncedDocument(
+          mkDoc([baseUrl], 1),
+          prefs: sp,
+          pendingAuthOrigins: const <String>[],
+        );
+        await DanmuPrefs.save(const DanmuSettings(serverUrls: '$baseUrl\n$localL'));
+
+        var remote = mkDoc([baseUrl, peerR], 2);
+        final firstPut = Completer<void>();
+        final release = Completer<void>();
+        final sent = <List<String>>[];
+        final client = MockClient((req) async {
+          if (req.method == 'GET') {
+            return http.Response(
+              remote.toPayloadJson(),
+              200,
+              headers: {'etag': '"r${remote.revision}"'},
+            );
+          }
+          final incoming = DanmuSourceSyncDocument.tryParseJson(req.body)!;
+          sent.add(incoming.urls);
+          if (sent.length == 1) {
+            firstPut.complete();
+            await release.future;
+          }
+          remote = incoming;
+          return http.Response('', 204);
+        });
+
+        final syncFut = storage.syncWithWebdav(client: client);
+        await firstPut.future;
+        expect(sent.first, containsAll(<String>[baseUrl, localL, peerR]));
+        final mid = await DanmuPrefs.load();
+        await DanmuPrefs.save(mid.copyWith(serverUrls: '$baseUrl\n$localL\n$localC'));
+        release.complete();
+        final res = await syncFut;
+        final afterLocal = (await DanmuPrefs.load()).normalizedOrigins;
+        expect(res.danmuSynced, isTrue);
+        expect(afterLocal, containsAll(<String>[baseUrl, localL, peerR, localC]));
+        expect(remote.urls, containsAll(<String>[baseUrl, localL, peerR, localC]));
+
+        // Scenario 2: User has now seen R and explicitly deletes R -> deletion propagates!
+        final loadedWithR = await DanmuPrefs.load();
+        await DanmuPrefs.save(
+          loadedWithR.copyWith(
+            serverUrls: afterLocal.where((u) => u != peerR).join('\n'),
+          ),
+        );
+        final delRes = await storage.syncWithWebdav(client: client);
+        final finalLocal = (await DanmuPrefs.load()).normalizedOrigins;
+        expect(delRes.danmuSynced, isTrue);
+        expect(finalLocal, containsAll(<String>[baseUrl, localL, localC]));
+        expect(finalLocal, isNot(contains(peerR)));
+        expect(remote.urls, containsAll(<String>[baseUrl, localL, localC]));
+        expect(remote.urls, isNot(contains(peerR)));
+      },
+    );
+
+    testWidgets(
+      'DanmuSettingsSheet: opacity edit preserves cloud restore, dismissed auth stays unassociated on save, and per-row auth toggle works',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        const oldUrl = 'https://original.example';
+        const peerUrl = 'https://remote.example';
+        const manualUrl = 'https://manual.example';
+
+        tester.view.physicalSize = const Size(1000, 1800);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        // 1. Open sheet, cloud restores peerUrl, user only changes opacity -> peerUrl preserved!
+        final s1 = await initTestStorage();
+        await s1.saveWebdavConfig(
+          url: 'https://dav.example/family.json',
+          user: '',
+          pass: '',
+          auto: false,
+          syncSubs: false,
+          syncHistory: false,
+          syncDanmu: true,
+        );
+        final sp1 = await SharedPreferences.getInstance();
+        await DanmuPrefs.applySyncedDocument(
+          const DanmuSourceSyncDocument(
+            initialized: true,
+            revision: 1,
+            updatedAt: 1,
+            sources: [DanmuSyncSourceEntry(url: oldUrl, requiresAuth: true)],
+          ),
+          prefs: sp1,
+          pendingAuthOrigins: const <String>[],
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: DanmuSettingsSheet(
+                key: const ValueKey('danmu-settings-sheet-opacity'),
+                initialSettings: await DanmuPrefs.load(),
+                onChanged: (_) {},
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await s1.syncWithWebdav(
+          client: MockClient(
+            (_) async => http.Response(
+              const DanmuSourceSyncDocument(
+                initialized: true,
+                revision: 5,
+                updatedAt: 5,
+                sources: [DanmuSyncSourceEntry(url: peerUrl, requiresAuth: true)],
+              ).toPayloadJson(),
+              200,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final slider = find.byType(Slider).first;
+        await tester.ensureVisible(slider);
+        await tester.pumpAndSettle();
+        final tapPt = tester.getTopLeft(slider) +
+            Offset(tester.getSize(slider).width * 0.4, tester.getSize(slider).height / 2);
+        await tester.tapAt(tapPt);
+        await tester.pumpAndSettle();
+        final afterOpacity = await DanmuPrefs.load();
+        expect(afterOpacity.opacity, isNot(0.85));
+        expect(afterOpacity.serverUrls, peerUrl);
+
+        // 2. Dismiss pending auth -> edit multiline URLs adding manualUrl -> save -> peerUrl stays unauthorized!
+        final s2 = await initTestStorage();
+        await s2.saveWebdavConfig(
+          url: 'https://dav.example/family.json',
+          user: '',
+          pass: '',
+          auto: false,
+          syncSubs: false,
+          syncHistory: false,
+          syncDanmu: true,
+        );
+        await DanmuPrefs.save(
+          const DanmuSettings(serverUrls: oldUrl, appId: 'mock', appSecret: 'dummy'),
+        );
+        await s2.syncWithWebdav(
+          client: MockClient(
+            (req) async => req.method == 'GET'
+                ? http.Response(
+                    const DanmuSourceSyncDocument(
+                      initialized: true,
+                      revision: 6,
+                      updatedAt: 6,
+                      sources: [
+                        DanmuSyncSourceEntry(url: oldUrl, requiresAuth: true),
+                        DanmuSyncSourceEntry(url: peerUrl, requiresAuth: true),
+                      ],
+                    ).toPayloadJson(),
+                    200,
+                  )
+                : http.Response('', 204),
+          ),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: DanmuSettingsSheet(
+                key: const ValueKey('danmu-settings-sheet-dismiss-auth'),
+                initialSettings: await DanmuPrefs.load(),
+                onChanged: (_) {},
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final dismissBtn = find.byKey(const Key('danmu-pending-auth-dismiss'));
+        await tester.ensureVisible(dismissBtn);
+        await tester.tap(dismissBtn);
+        await tester.pumpAndSettle();
+
+        final urlsField = find.byKey(const Key('danmu-server-urls-field'));
+        await tester.ensureVisible(urlsField);
+        await tester.enterText(urlsField, '$oldUrl\n$peerUrl\n$manualUrl');
+        final saveBtn = find.byKey(const Key('danmu-save-server-btn'));
+        await tester.ensureVisible(saveBtn);
+        await tester.tap(saveBtn);
+        await tester.pumpAndSettle();
+
+        final trusted = (await DanmuPrefs.load()).authorizedCredentialOrigins!;
+        expect(trusted, containsAll(<String>[oldUrl, manualUrl]));
+        expect(trusted, isNot(contains(peerUrl)));
+
+        // Explicit per-row auth toggle grants peerUrl authorization cleanly.
+        final rowAuthBtn = find.byKey(const Key('danmu-source-auth-1'));
+        await tester.ensureVisible(rowAuthBtn);
+        await tester.tap(rowAuthBtn);
+        await tester.pumpAndSettle();
+        expect(
+          (await DanmuPrefs.load()).authorizedCredentialOrigins!,
+          contains(peerUrl),
+        );
+      },
+    );
+
+    test(
+      'WebDAV switch-off mid-GET sends 0 PUTs, incomplete empty JSON rejected vs explicit clear & fresh join, and 302 redirect strips creds on unapproved origin',
+      () async {
+        const oldUrl = 'https://original.example';
+
+        // 1. Disable sync while GET awaits -> 0 PUTs!
+        final s1 = await initTestStorage();
+        await s1.saveWebdavConfig(
+          url: 'https://dav.example/family.json',
+          user: '',
+          pass: '',
+          auto: false,
+          syncSubs: false,
+          syncHistory: false,
+          syncDanmu: true,
+        );
+        await DanmuPrefs.save(const DanmuSettings(serverUrls: oldUrl));
+        final getStarted = Completer<void>();
+        final releaseGet = Completer<void>();
+        int puts = 0;
+        final syncRun = s1.syncWithWebdav(
+          client: MockClient((req) async {
+            if (req.method == 'GET') {
+              getStarted.complete();
+              await releaseGet.future;
+              return http.Response('', 404);
+            }
+            if (req.method == 'PUT') puts++;
+            return http.Response('', 204);
+          }),
+        );
+        await getStarted.future;
+        await s1.setWebdavSyncDanmu(false);
+        releaseGet.complete();
+        await expectLater(syncRun, throwsA(isA<FormatException>()));
+        expect(puts, 0);
+
+        // 2. Incomplete empty file {"schemaVersion":1,"sources":[]} must NOT wipe local sources.
+        final s2 = await initTestStorage();
+        await s2.saveWebdavConfig(
+          url: 'https://dav.example/family.json',
+          user: '',
+          pass: '',
+          auto: false,
+          syncSubs: false,
+          syncHistory: false,
+          syncDanmu: true,
+        );
+        await DanmuPrefs.applySyncedDocument(
+          const DanmuSourceSyncDocument(
+            initialized: true,
+            revision: 1,
+            updatedAt: 1,
+            sources: [DanmuSyncSourceEntry(url: oldUrl)],
+          ),
+          prefs: await SharedPreferences.getInstance(),
+          pendingAuthOrigins: const <String>[],
+        );
+        await expectLater(
+          () => s2.syncWithWebdav(
+            client: MockClient(
+              (_) async => http.Response(
+                jsonEncode({'schemaVersion': 1, 'sources': <dynamic>[]}),
+                200,
+              ),
+            ),
+          ),
+          throwsA(isA<FormatException>()),
+        );
+        expect((await DanmuPrefs.load()).serverUrls, oldUrl);
+
+        // Explicit deliberate clear (clearedAt > 0) DOES propagate!
+        final clearRes = await s2.syncWithWebdav(
+          client: MockClient(
+            (_) async => http.Response(
+              jsonEncode({
+                'schemaVersion': 1,
+                'updatedAt': 999999,
+                'revision': 5,
+                'clearedAt': 999999,
+                'sources': <dynamic>[],
+              }),
+              200,
+            ),
+          ),
+        );
+        expect(clearRes.danmuSynced, isTrue);
+        expect((await DanmuPrefs.load()).normalizedOrigins, isEmpty);
+
+        // 3. HTTP 302 redirect from authorized origin to unapproved configured origin must NOT send X-AppId/X-Signature!
+        const authOrigin = 'https://auth.example';
+        const unapprovedOrigin = 'https://unapproved.example';
+        final headersByHost = <String, Map<String, String>>{};
+        final redirectProvider = DandanplayProvider(
+          multilineServerUrls: '$authOrigin\n$unapprovedOrigin',
+          appId: 'my-app',
+          appSecret: 'my-secret',
+          authorizedCredentialOrigins: const <String>{authOrigin},
+          minRequestIntervalMs: 0,
+          client: MockClient((req) async {
+            headersByHost[req.url.host] = Map<String, String>.from(req.headers);
+            if (req.url.host == 'auth.example') {
+              return http.Response(
+                '',
+                302,
+                headers: {'location': '$unapprovedOrigin/api/v2/comment/42'},
+              );
+            }
+            return http.Response('{"count":0,"comments":[]}', 200);
+          }),
+        );
+        addTearDown(redirectProvider.close);
+        await redirectProvider.openSession(
+          DandanplayProvider.encodeBoundEpisodeId(authOrigin, '42'),
+        );
+        expect(headersByHost['auth.example']?['X-AppId'], 'my-app');
+        expect(headersByHost['unapproved.example']?.containsKey('X-AppId'), isFalse);
+        expect(headersByHost['unapproved.example']?.containsKey('X-Signature'), isFalse);
+      },
+    );
+
+    test(
+      'Matroska hierarchical TargetTypeValue (70/60/50) preserves Collection title, Season PART_NUMBER=2, and Episode PART_NUMBER=10',
+      () {
+        final tmp = Directory.systemTemp.createTempSync('marco_scoped_mkv_');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+
+        Uint8List mkTagGroup(int level, Map<String, String> fields) {
+          final body = BytesBuilder(copy: false)
+            ..add(
+              _ebmlElement(
+                const <int>[0x63, 0xC0],
+                _ebmlElement(const <int>[0x68, 0xCA], <int>[level]),
+              ),
+            );
+          for (final e in fields.entries) {
+            final st = BytesBuilder(copy: false)
+              ..add(_ebmlElement(const <int>[0x45, 0xA3], utf8.encode(e.key)))
+              ..add(_ebmlElement(const <int>[0x44, 0x87], utf8.encode(e.value)));
+            body.add(_ebmlElement(const <int>[0x67, 0xC8], st.toBytes()));
+          }
+          return _ebmlElement(const <int>[0x73, 0x73], body.toBytes());
+        }
+
+        final header = _ebmlElement(
+          const <int>[0x1A, 0x45, 0xDF, 0xA3],
+          _ebmlElement(const <int>[0x42, 0x82], utf8.encode('matroska')),
+        );
+        final tagsPayload = (BytesBuilder(copy: false)
+              ..add(mkTagGroup(70, const {'TITLE': 'The Series'}))
+              ..add(mkTagGroup(60, const {'PART_NUMBER': '2'}))
+              ..add(mkTagGroup(50, const {'TITLE': 'A Quiet Journey', 'PART_NUMBER': '10'})))
+            .toBytes();
+        final segment = _ebmlElement(
+          const <int>[0x18, 0x53, 0x80, 0x67],
+          _ebmlElement(const <int>[0x12, 0x54, 0xC3, 0x67], tagsPayload),
+        );
+        final clip = File('${tmp.path}/clip.mkv')
+          ..writeAsBytesSync((BytesBuilder(copy: false)..add(header)..add(segment)).toBytes());
+
+        final tags = ContainerMetadataReader.readLocalFileTagsSync(clip.path);
+        expect(tags['show'], 'The Series');
+        expect(tags['season_number'], '2');
+        expect(tags['episode_number'], '10');
+        expect(tags['title'], 'A Quiet Journey');
+
+        final scraped = SeriesScraper.scrapeEpisode(
+          CmsEpisode(name: 'clip.mkv', url: clip.path),
+        );
+        expect(scraped.recognizedWorkTitle, 'The Series');
+        expect(scraped.seasonNumber, 2);
+        expect(scraped.resolvedEpisodeNumber, 10);
+        expect(scraped.displayLabel, 'S02E10');
+      },
+    );
+
+    testWidgets(
+      'Danmu identity ambiguity (reversed S01E10/S02E10), non-exact ID/title-only candidates, CMS label vs file conflict, and unknown-season line switch',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        const origin = 'https://comments.example';
+        const site = CmsSite(key: 'rev', name: 'Rev', type: 1, api: 'https://cdn.example/api');
+        final tmp = Directory.systemTemp.createTempSync('marco_danmu_rework_');
+        addTearDown(() => tmp.deleteSync(recursive: true));
+
+        CmsEpisode mkEp(String label, String stem) {
+          final f = File('${tmp.path}/$stem.mp4')..writeAsBytesSync(const [0, 1, 2, 3]);
+          return CmsEpisode(name: label, url: f.path);
+        }
+
+        Future<String?> mountAndGetBound(
+          List<CmsLine> lines,
+          DandanplayProvider provider, {
+          _Round3FakePlayer? customPlayer,
+        }) async {
+          tester.view.physicalSize = const Size(1280, 800);
+          tester.view.devicePixelRatio = 1.0;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          final storage = await initTestStorage();
+          final player = customPlayer ?? _Round3FakePlayer();
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: ThemeData(brightness: Brightness.dark, platform: TargetPlatform.macOS),
+              home: PlayerScreen(
+                site: site,
+                video: CmsVideo(id: 'movie', title: '山中之花', lines: lines),
+                initialLineIndex: 0,
+                initialEpisodeIndex: 0,
+                storage: storage,
+                debugPlayer: player,
+                debugVideoSurface: const SizedBox.shrink(),
+                debugDanmuProvider: provider,
+                debugDanmuSettings: const DanmuSettings(enabled: true, serverUrls: origin),
+              ),
+            ),
+          );
+          await tester.pump(const Duration(milliseconds: 400));
+          await tester.pump(const Duration(milliseconds: 100));
+          final bound = tester
+              .widget<DanmuLayer>(find.byType(DanmuLayer))
+              .segmentCache
+              ?.currentSession
+              ?.boundEpisodeId;
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump(const Duration(milliseconds: 450));
+          return bound;
+        }
+
+        // 1. Ambiguous S01E10 (110) vs S02E10 (210) in BOTH orders -> neither auto-binds!
+        for (final reversed in const [false, true]) {
+          final matches = reversed
+              ? const [
+                  {'episodeId': 210, 'animeId': 2, 'animeTitle': '山中之花 第二季', 'episodeTitle': 'S02E10'},
+                  {'episodeId': 110, 'animeId': 1, 'animeTitle': '山中之花 第一季', 'episodeTitle': 'S01E10'},
+                ]
+              : const [
+                  {'episodeId': 110, 'animeId': 1, 'animeTitle': '山中之花 第一季', 'episodeTitle': 'S01E10'},
+                  {'episodeId': 210, 'animeId': 2, 'animeTitle': '山中之花 第二季', 'episodeTitle': 'S02E10'},
+                ];
+          final p = DandanplayProvider(
+            multilineServerUrls: origin,
+            minRequestIntervalMs: 0,
+            client: MockClient((req) async {
+              if (req.url.path.contains('/search/')) return http.Response('{"animes":[]}', 200);
+              return http.Response.bytes(
+                utf8.encode(jsonEncode({'isMatched': false, 'matches': matches})),
+                200,
+              );
+            }),
+          );
+          addTearDown(p.close);
+          final b = await mountAndGetBound(
+            [CmsLine(name: 'A', episodes: [mkEp('第10集', 'no-season')])],
+            p,
+          );
+          expect(b, isNull, reason: 'reversed=$reversed must leave ambiguous seasons for user choice');
+        }
+
+        // 2. Non-exact ID-only (83) and title-only ("重逢", 84) -> neither auto-binds!
+        for (final matchEntry in const [
+          {'episodeId': 83, 'animeId': 37},
+          {'episodeId': 84, 'animeId': 37, 'animeTitle': '山中之花', 'episodeTitle': '重逢'},
+        ]) {
+          final p = DandanplayProvider(
+            multilineServerUrls: origin,
+            minRequestIntervalMs: 0,
+            client: MockClient((req) async {
+              if (req.url.path.contains('/search/')) return http.Response('{"animes":[]}', 200);
+              return http.Response.bytes(
+                utf8.encode(jsonEncode({'isMatched': false, 'matches': [matchEntry]})),
+                200,
+              );
+            }),
+          );
+          addTearDown(p.close);
+          final b = await mountAndGetBound(
+            [CmsLine(name: '主', episodes: [mkEp('S02E10', 'target')])],
+            p,
+          );
+          expect(b, isNull);
+        }
+
+        // 3. CMS display name "第 1 集" vs real file Season.2/show.S02E10.mp4 -> conflict 待确认, never binds 201!
+        final parsed = CmsParser.parseListing(
+          jsonEncode({
+            'list': [
+              {
+                'vod_id': 'movie',
+                'vod_name': '山中之花',
+                'vod_play_from': 'cloud',
+                'vod_play_url': r'第 1 集$https://cdn.example/Season.2/show.S02E10.mp4',
+              },
+            ],
+          }),
+        );
+        final cmsEp = parsed.videos.single.lines.single.episodes.single;
+        final scrapedCms = SeriesScraper.scrapeEpisode(cmsEp, seriesTitle: '山中之花');
+        expect(scrapedCms.hasConflict, isTrue);
+        expect(scrapedCms.needsConfirmation, isTrue);
+        final pCms = DandanplayProvider(
+          multilineServerUrls: origin,
+          minRequestIntervalMs: 0,
+          client: MockClient((req) async {
+            if (req.url.path.contains('/search/')) return http.Response('{"animes":[]}', 200);
+            return http.Response.bytes(
+              utf8.encode(
+                jsonEncode({
+                  'isMatched': true,
+                  'matches': [
+                    {'episodeId': 201, 'animeId': 2, 'animeTitle': '山中之花 第二季', 'episodeTitle': 'S02E01'},
+                    {'episodeId': 210, 'animeId': 2, 'animeTitle': '山中之花 第二季', 'episodeTitle': 'S02E10'},
+                  ],
+                }),
+              ),
+              200,
+            );
+          }),
+        );
+        addTearDown(pCms.close);
+        final boundCms = await mountAndGetBound(parsed.videos.single.lines, pCms);
+        expect(boundCms, isNull);
+
+        // 4. Unknown-season E10 -> backup line only has E11 -> stay on main10 and open episode picker!
+        tester.view.physicalSize = const Size(1280, 800);
+        tester.view.devicePixelRatio = 1.0;
+        final storage4 = await initTestStorage();
+        final player4 = _Round3FakePlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(brightness: Brightness.dark, platform: TargetPlatform.macOS),
+            home: PlayerScreen(
+              site: site,
+              video: CmsVideo(
+                id: 'movie',
+                title: '山中之花',
+                lines: [
+                  CmsLine(name: '主线', episodes: [mkEp('第10集', 'main10')]),
+                  CmsLine(name: '缺集备线', episodes: [mkEp('第11集', 'wrong11')]),
+                ],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage4,
+              debugPlayer: player4,
+              debugVideoSurface: const SizedBox.shrink(),
+              debugDanmuSettings: const DanmuSettings(enabled: false),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.tap(find.byKey(const Key('desktop-more-button')));
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.text('切换线路'));
+        await tester.pump(const Duration(milliseconds: 350));
+        await tester.tap(find.textContaining('缺集备线').first);
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(player4.openedUris.last, endsWith('main10.mp4'));
+        expect(find.byType(PlayerEpisodePickerSheet), findsOneWidget);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 450));
       },
     );
   });

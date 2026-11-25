@@ -377,7 +377,16 @@ class ContainerMetadataReader {
     }
   }
 
-  static bool _isSubFileTagTargets(Uint8List buf, int start, int end) {
+  static ({bool isSubFileScoped, int targetTypeValue}) _parseTagTargets(
+    Uint8List buf,
+    int start,
+    int end,
+  ) {
+    // Per Matroska Tagging Spec: omitted TargetTypeValue defaults to 50
+    // (MOVIE / EPISODE). Values 70 = COLLECTION (series/work), 60 = SEASON /
+    // VOLUME, 50 = EPISODE / MOVIE, < 50 = track/chapter/sub-entity.
+    int targetTypeValue = 50;
+    bool isSubFile = false;
     int pos = start;
     while (pos < end) {
       final hdr = _readEbmlHeader(buf, pos);
@@ -396,20 +405,20 @@ class ContainerMetadataReader {
         for (int i = dataStart; i < dataEnd; i++) {
           uid = (uid << 8) | buf[i];
         }
-        if (uid != 0) return true;
+        if (uid != 0) isSubFile = true;
       } else if (hdr.id == _idTargetTypeValue && hdr.size > 0 && hdr.size <= 8) {
-        // Matroska TargetTypeValue: 50=MOVIE/EPISODE, 60=SEASON, 70=COLLECTION;
-        // values < 50 (e.g. 30=TRACK/CHAPTER, 20=SUBTRACK, 10=SHOT) are
-        // sub-file scopes and must not be promoted to whole-file episode tags.
         int ttv = 0;
         for (int i = dataStart; i < dataEnd; i++) {
           ttv = (ttv << 8) | buf[i];
         }
-        if (ttv > 0 && ttv < 50) return true;
+        if (ttv > 0) {
+          targetTypeValue = ttv;
+          if (ttv < 50) isSubFile = true;
+        }
       }
       pos = dataEnd;
     }
-    return false;
+    return (isSubFileScoped: isSubFile, targetTypeValue: targetTypeValue);
   }
 
   static void _parseTagChildren(
@@ -420,6 +429,7 @@ class ContainerMetadataReader {
   ) {
     final pendingSimpleTags = <({String name, String val})>[];
     bool isSubFileScoped = false;
+    int targetTypeValue = 50;
     int pos = start;
     while (pos < end) {
       final hdr = _readEbmlHeader(buf, pos);
@@ -428,9 +438,11 @@ class ContainerMetadataReader {
       final dataEnd = dataStart + hdr.size;
       if (dataEnd > end) break;
       if (hdr.id == _idTargets) {
-        if (_isSubFileTagTargets(buf, dataStart, dataEnd)) {
+        final parsed = _parseTagTargets(buf, dataStart, dataEnd);
+        if (parsed.isSubFileScoped) {
           isSubFileScoped = true;
         }
+        targetTypeValue = parsed.targetTypeValue;
       } else if (hdr.id == _idSimpleTag) {
         String name = '';
         String val = '';
@@ -467,8 +479,36 @@ class ContainerMetadataReader {
       return;
     }
     for (final st in pendingSimpleTags) {
-      // Do not overwrite Info.Title unless empty; otherwise keep first tag.
-      tags.putIfAbsent(st.name, () => st.val);
+      if (targetTypeValue >= 70) {
+        // Collection / Series scope (TargetTypeValue 70):
+        // TITLE names the work/series, never the episode title.
+        if (st.name == 'title' || st.name == 'show' || st.name == 'series') {
+          tags.putIfAbsent('show', () => st.val);
+        } else if (st.name != 'part_number') {
+          tags.putIfAbsent(st.name, () => st.val);
+        }
+      } else if (targetTypeValue >= 60) {
+        // Season / Volume scope (TargetTypeValue 60):
+        // PART_NUMBER names the season number; TITLE is season title.
+        if (st.name == 'part_number' ||
+            st.name == 'season' ||
+            st.name == 'season_number') {
+          tags.putIfAbsent('season_number', () => st.val);
+        } else if (st.name == 'title') {
+          tags.putIfAbsent('season_title', () => st.val);
+        } else {
+          tags.putIfAbsent(st.name, () => st.val);
+        }
+      } else {
+        // Episode / Movie scope (TargetTypeValue 50, or omitted default):
+        // PART_NUMBER names the episode number.
+        if (st.name == 'part_number') {
+          tags.putIfAbsent('episode_number', () => st.val);
+        } else {
+          // Do not overwrite Info.Title unless empty; otherwise keep first tag.
+          tags.putIfAbsent(st.name, () => st.val);
+        }
+      }
     }
   }
 

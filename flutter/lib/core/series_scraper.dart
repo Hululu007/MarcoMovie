@@ -1451,7 +1451,7 @@ class SeriesScraper {
     };
     int? season = _parseTagPositiveInt(
       norm,
-      const ['season_number', 'season', 'tvsn', 'part_number'],
+      const ['season_number', 'season', 'tvsn'],
     );
     int? ep = _parseTagPositiveInt(
       norm,
@@ -1698,32 +1698,101 @@ class SeriesScraper {
         tagEv.isSpecial ||
         tagEv.hasConflict;
 
-    // 3. Gather Priority 3 (directory & original filename signals).
+    // 3. Gather Priority 3 (display name, original filename, and directory
+    // signals parsed independently so conflicting CMS labels vs real filenames
+    // are explicitly surfaced for user calibration instead of silently picking
+    // the wrong episode).
     // Never parse app-generated display labels (`episode.nameIsGenerated == true`,
     // e.g. `第 1 集` synthesized for an unnamed CMS entry) as episode evidence.
     final int? dirSeason = _extractDirectorySeason(dirPath);
-    final String primaryNameSource = episode.nameIsGenerated
-        ? origFileName
-        : (episode.name.trim().isNotEmpty ? episode.name : origFileName);
-    var fileSig = _parseNameSignals(
-      primaryNameSource,
-      seriesTitle: seriesTitle,
-      constantNumbers: constantNumbers,
-      sharedPrefix: sharedPrefix,
-    );
-    if (!episode.nameIsGenerated &&
-        !fileSig.isSpecial &&
-        fileSig.ep == null &&
-        fileSig.season == null &&
-        origFileName.isNotEmpty &&
-        origFileName != episode.name.trim()) {
-      fileSig = _parseNameSignals(
-        origFileName,
-        seriesTitle: seriesTitle,
-        constantNumbers: constantNumbers,
-        sharedPrefix: sharedPrefix,
-      );
+    final String trimmedLabel = episode.name.trim();
+    final bool hasNonGeneratedLabel =
+        !episode.nameIsGenerated && trimmedLabel.isNotEmpty;
+    final labelSig = hasNonGeneratedLabel
+        ? _parseNameSignals(
+            trimmedLabel,
+            seriesTitle: seriesTitle,
+            constantNumbers: constantNumbers,
+            sharedPrefix: sharedPrefix,
+          )
+        : null;
+    final bool hasDistinctOrigFile = origFileName.isNotEmpty &&
+        (!hasNonGeneratedLabel || origFileName != trimmedLabel);
+    final origFileSig = hasDistinctOrigFile
+        ? _parseNameSignals(
+            origFileName,
+            seriesTitle: seriesTitle,
+            constantNumbers: constantNumbers,
+            sharedPrefix: sharedPrefix,
+          )
+        : null;
+
+    bool labelOrigConflict = false;
+    final labelOrigConflictReasons = <String>[];
+    if (labelSig != null && origFileSig != null) {
+      final labelExplicit = labelSig.isSpecial || labelSig.hasExplicitMarker;
+      final origExplicit = origFileSig.isSpecial || origFileSig.hasExplicitMarker;
+      if (labelExplicit && origExplicit) {
+        if (labelSig.isSpecial != origFileSig.isSpecial &&
+            (labelSig.ep != null || origFileSig.ep != null)) {
+          labelOrigConflict = true;
+          labelOrigConflictReasons.add(
+            '片源显示名（「$trimmedLabel」）与原文件名（「$origFileName」）的正片/特别篇标记冲突',
+          );
+        }
+        if (labelSig.season != null &&
+            origFileSig.season != null &&
+            labelSig.season != origFileSig.season) {
+          labelOrigConflict = true;
+          labelOrigConflictReasons.add(
+            '片源显示名季号(S${labelSig.season!.toString().padLeft(2, '0')})与原文件名季号(S${origFileSig.season!.toString().padLeft(2, '0')})冲突',
+          );
+        }
+        if (labelSig.ep != null &&
+            origFileSig.ep != null &&
+            labelSig.ep != origFileSig.ep) {
+          labelOrigConflict = true;
+          labelOrigConflictReasons.add(
+            '片源显示名集号(E${labelSig.ep!.toString().padLeft(2, '0')})与原文件名集号(E${origFileSig.ep!.toString().padLeft(2, '0')})冲突',
+          );
+        }
+      }
     }
+
+    final bool labelHasSignal = labelSig != null &&
+        (labelSig.isSpecial ||
+            labelSig.ep != null ||
+            labelSig.season != null ||
+            labelSig.isVarietyDate);
+    final bool origHasSignal = origFileSig != null &&
+        (origFileSig.isSpecial ||
+            origFileSig.ep != null ||
+            origFileSig.season != null ||
+            origFileSig.isVarietyDate);
+
+    final fileSig = labelHasSignal
+        ? (origFileSig != null && !labelOrigConflict
+            ? (
+                season: labelSig.season ?? origFileSig.season,
+                ep: labelSig.ep ?? origFileSig.ep,
+                endEp: labelSig.endEp ?? origFileSig.endEp,
+                isSpecial: labelSig.isSpecial,
+                specialTag: labelSig.specialTag,
+                cleanSpecialLabel: labelSig.cleanSpecialLabel,
+                confidence: math.max(labelSig.confidence, origFileSig.confidence),
+                hasExplicitMarker:
+                    labelSig.hasExplicitMarker || origFileSig.hasExplicitMarker,
+                isVarietyDate: labelSig.isVarietyDate,
+                varietyLabel: labelSig.varietyLabel,
+              )
+            : labelSig)
+        : (origFileSig ??
+            _parseNameSignals(
+              '',
+              seriesTitle: seriesTitle,
+              constantNumbers: constantNumbers,
+              sharedPrefix: sharedPrefix,
+            ));
 
     final details = <String>[];
     if (origFileName.isNotEmpty) {
@@ -1750,7 +1819,22 @@ class SeriesScraper {
     if (dirSeason != null) {
       details.add('目录标记：第 $dirSeason 季');
     }
-    if (fileSig.isSpecial) {
+    if (labelSig != null && hasDistinctOrigFile && labelHasSignal && origHasSignal) {
+      if (labelSig.isSpecial) {
+        details.add('显示名特别篇标记：${labelSig.specialTag}');
+      } else if (labelSig.ep != null && labelSig.ep! > 0) {
+        details.add(
+          '显示名标记：${_formatEpisodeDisplayLabel(labelSig.season, labelSig.ep!, labelSig.endEp)}',
+        );
+      }
+      if (origFileSig.isSpecial) {
+        details.add('文件名特别篇标记：${origFileSig.specialTag}');
+      } else if (origFileSig.ep != null && origFileSig.ep! > 0) {
+        details.add(
+          '文件名标记：${_formatEpisodeDisplayLabel(origFileSig.season, origFileSig.ep!, origFileSig.endEp)}',
+        );
+      }
+    } else if (fileSig.isSpecial) {
       details.add('文件名特别篇标记：${fileSig.specialTag}');
     } else if (fileSig.ep != null && fileSig.ep! > 0) {
       final fLabel = _formatEpisodeDisplayLabel(
@@ -1764,8 +1848,11 @@ class SeriesScraper {
     }
 
     // 4. Conflict detection across explicit independent evidences.
-    bool conflict = tagEv.hasConflict;
-    final conflictReasons = <String>[...tagEv.conflictReasons];
+    bool conflict = tagEv.hasConflict || (!hasStructured && !hasTagEvidence && labelOrigConflict);
+    final conflictReasons = <String>[
+      ...tagEv.conflictReasons,
+      if (!hasStructured && !hasTagEvidence) ...labelOrigConflictReasons,
+    ];
 
     // 4a. Structured source vs Container tags
     if (hasStructured && hasTagEvidence) {
@@ -1826,14 +1913,26 @@ class SeriesScraper {
           '标注季号(S${p2Season.toString().padLeft(2, '0')})与目录季号(S${dirSeason.toString().padLeft(2, '0')})冲突',
         );
       }
-    } else if (dirSeason != null &&
-        fileSig.season != null &&
-        dirSeason != fileSig.season) {
-      // 4c. Directory season vs explicit filename season
-      conflict = true;
-      conflictReasons.add(
-        '目录季号(S${dirSeason.toString().padLeft(2, '0')})与原文件名季号(S${fileSig.season!.toString().padLeft(2, '0')})冲突',
-      );
+    } else {
+      // 4c. Directory season vs explicit display-name or original-filename season
+      if (dirSeason != null &&
+          fileSig.season != null &&
+          dirSeason != fileSig.season) {
+        conflict = true;
+        conflictReasons.add(
+          '目录季号(S${dirSeason.toString().padLeft(2, '0')})与原文件名季号(S${fileSig.season!.toString().padLeft(2, '0')})冲突',
+        );
+      }
+      if (dirSeason != null &&
+          origFileSig != null &&
+          origFileSig.season != null &&
+          origFileSig.season != fileSig.season &&
+          dirSeason != origFileSig.season) {
+        conflict = true;
+        conflictReasons.add(
+          '目录季号(S${dirSeason.toString().padLeft(2, '0')})与原文件名季号(S${origFileSig.season!.toString().padLeft(2, '0')})冲突',
+        );
+      }
     }
 
     final recognizedWork =
