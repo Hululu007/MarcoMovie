@@ -745,12 +745,19 @@ final class PlaybackController {
     }
 
     static void showPlaybackLoading(MainActivity a) {
-        a.playbackLoadingFocus = a.getCurrentFocus();
+        boolean inlineActive = a.inlinePlayer != null && !a.inlinePlayer.isClosed();
+        a.playbackLoadingFocus = inlineActive ? null : a.getCurrentFocus();
         if (a.markerHost != null) a.markerHost.abort();
         a.playbackLoading = new PlaybackLoading(a);
-        a.root.addView(a.playbackLoading, new FrameLayout.LayoutParams(-1, -1));
+        FrameLayout.LayoutParams lp =
+                inlineActive
+                        ? new FrameLayout.LayoutParams(1, 1)
+                        : new FrameLayout.LayoutParams(-1, -1);
+        a.root.addView(a.playbackLoading, lp);
         if (a.playerChrome != null) a.playerChrome.update();
-        a.playbackLoading.requestFocus();
+        if (!inlineActive) {
+            a.playbackLoading.requestFocus();
+        }
     }
 
     static void clearPlaybackLoading(MainActivity a) {
@@ -2045,9 +2052,23 @@ final class PlaybackController {
         }
         if (a.playerChrome != null && a.playerChrome.unlockPill != null) {
             View pill = a.playerChrome.unlockPill;
-            pill.animate().cancel();
-            pill.setAlpha(1f);
-            pill.setVisibility(visible && a.playerLocked ? View.VISIBLE : View.GONE);
+            boolean show = visible && a.playerLocked;
+            a.playerChrome.unlockPillShown = show;
+            if (!a.isTvDevice() && UiCompat.isAttached(pill)) {
+                MobileMotion.crossfadeVisibility(
+                        pill,
+                        show,
+                        0f,
+                        0.94f,
+                        show ? MotionTokens.DURATION_STANDARD_MS : MotionTokens.DURATION_FAST_MS,
+                        true);
+            } else {
+                pill.animate().cancel();
+                pill.setAlpha(1f);
+                pill.setScaleX(1f);
+                pill.setScaleY(1f);
+                pill.setVisibility(show ? View.VISIBLE : View.GONE);
+            }
         }
         if (visible && autoHide && a.playerLocked) {
             a.hideLockButton =
@@ -2065,7 +2086,9 @@ final class PlaybackController {
         boolean currentlyVisible =
                 a.playerChrome != null
                         && a.playerChrome.unlockPill != null
-                        && a.playerChrome.unlockPill.getVisibility() == View.VISIBLE;
+                        && (!a.isTvDevice()
+                                ? a.playerChrome.unlockPillShown
+                                : a.playerChrome.unlockPill.getVisibility() == View.VISIBLE);
         setUnlockButtonVisible(a, !currentlyVisible, !currentlyVisible);
     }
 
@@ -2112,37 +2135,34 @@ final class PlaybackController {
             } catch (Exception ignored) {
             }
         }
+        boolean wasProgressOnly = a.playerChrome != null && a.playerChrome.progressOnlyMode;
         if (a.playerChrome != null) {
-            a.playerChrome.setProgressOnlyMode(visible && progressOnly);
+            if (visible || a.isTvDevice()) {
+                a.playerChrome.setProgressOnlyMode(visible && progressOnly);
+            }
         }
         if (a.playbackControls != null) a.playbackControls.visible(visible);
         if (a.playerChrome != null) a.playerChrome.update();
         if (a.playerOverlay != null) {
-            a.playerOverlay.animate().cancel();
-            if (visible) {
-                a.playerOverlay.setAlpha(1f);
-                a.playerOverlay.setTranslationY(0f);
-                a.playerOverlay.setVisibility(View.VISIBLE);
-                if (changed && !a.reduced && !a.isTvDevice()) {
-                    a.playerOverlay.setAlpha(0f);
-                    a.playerOverlay.animate().alpha(1f).setDuration(150).start();
+            if (!a.isTvDevice() && a.playerChrome != null) {
+                a.playerChrome.animateMobileControlsVisibility(
+                        visible, visible && progressOnly, changed, wasProgressOnly);
+                if (!visible && a.root != null) {
+                    a.root.requestFocus();
                 }
             } else {
-                if (a.reduced || a.isTvDevice()) {
+                a.playerOverlay.animate().cancel();
+                if (visible) {
+                    a.playerOverlay.setAlpha(1f);
+                    a.playerOverlay.setTranslationY(0f);
+                    a.playerOverlay.setVisibility(View.VISIBLE);
+                } else {
                     a.playerOverlay.setAlpha(0f);
                     a.playerOverlay.setVisibility(View.GONE);
-                } else {
-                    long hideDur = 140;
-                    UiCompat.startWithEndAction(
-                            a.playerOverlay.animate().alpha(0f).setDuration(hideDur),
-                            a.playerOverlay,
-                            hideDur,
-                            () -> {
-                                if (!a.controlsVisible && a.playerOverlay != null)
-                                    a.playerOverlay.setVisibility(View.GONE);
-                            });
+                    if (a.root != null) {
+                        a.root.requestFocus();
+                    }
                 }
-                a.root.requestFocus();
             }
         }
         if (visible) {

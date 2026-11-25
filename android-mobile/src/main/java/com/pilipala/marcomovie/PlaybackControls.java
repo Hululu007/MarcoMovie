@@ -59,6 +59,14 @@ final class PlaybackControls {
     private FirstPlayGestureHint firstPlayGestureHint;
     boolean currentMobileLandscape;
     final Map<String, Button> buttons = new LinkedHashMap<>();
+    private FrameLayout mobilePrevBtn;
+    private FrameLayout mobileNextBtn;
+    private LinearLayout mobileDanmuCapsule;
+    private MobileIcons.IconView mobileDanmuIcon;
+    private TextView mobileDanmuLabel;
+    private TextView mobileSpeedLabel;
+    private LinearLayout mobileSpeedPill;
+    private TextView mobileKernelLabel;
     Button lastFocusedModernButton;
     TextView buttonTooltip;
     private TooltipBubbleDrawable buttonTooltipBg;
@@ -457,6 +465,7 @@ final class PlaybackControls {
                 new DanmakuView.Listener() {
                     public void loaded(int count) {
                         danmakuLoaded = count > 0;
+                        syncMobileDanmakuCapsule();
                         a.toast("已加载 " + count + " 条弹幕");
                     }
 
@@ -697,7 +706,7 @@ final class PlaybackControls {
             timeline.setOnFocusChangeListener((focusedView, f) -> styleModernTimeline(f));
             timeline.setKeyProgressIncrement(15000);
             progress.addView(timeline, new LinearLayout.LayoutParams(-1, PlayerChrome.vp(a, 15)));
-        } else {
+        } else if (a.isTvDevice()) {
             timeline.setOnFocusChangeListener(
                     (focusedView, f) ->
                             FocusMotion.style(
@@ -712,11 +721,23 @@ final class PlaybackControls {
                                     false,
                                     1));
             UiCompat.tintSeekBar(timeline, 0xfff5f5f7, Color.WHITE);
-            if (!a.isTvDevice()) {
-                timeline.setPadding(a.dp(8), 0, a.dp(8), 0);
-            }
             timeline.setKeyProgressIncrement(15000);
             progress.addView(timeline, new LinearLayout.LayoutParams(-1, a.dp(32)));
+        } else {
+            timeline.setFocusable(false);
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                timeline.setMinHeight(0);
+            }
+            timeline.setMinimumHeight(0);
+            styleMobileTimeline();
+            timeline.setKeyProgressIncrement(15000);
+            if (a.playerChrome != null && a.playerChrome.mobileSeekSlot != null) {
+                a.playerChrome.mobileSeekSlot.removeAllViews();
+                a.playerChrome.mobileSeekSlot.addView(
+                        timeline, new FrameLayout.LayoutParams(-1, a.dp(30), Gravity.CENTER));
+            } else {
+                progress.addView(timeline, new LinearLayout.LayoutParams(-1, a.dp(30)));
+            }
         }
         timeline.setOnSeekBarChangeListener(
                 new SeekBar.OnSeekBarChangeListener() {
@@ -791,96 +812,27 @@ final class PlaybackControls {
             registerHiddenAction("aspect", this::aspect);
             registerHiddenAction("subtitles", () -> tracks(3));
         } else {
-            add(
-                    row,
-                    "锁定",
-                    "lock-tool",
-                    () -> {
-                        if (a.touchPlayerGesture != null) {
-                            a.touchPlayerGesture.onScreenLockRequested();
-                        }
-                        onScreenLockRequested();
-                        PlaybackController.setPlayerLocked(a, true);
-                    });
-            add(
-                    row,
-                    live ? "上台" : "上集",
-                    "prev-episode",
-                    () -> {
-                        if (live) a.liveStep(-1);
-                        else if (!step(-1))
-                            showBubble("已是第一集", new String[] {"知道了"}, -1, i -> {}, "");
-                    });
-            add(
-                    row,
-                    live ? "下台" : "下集",
-                    "next-episode",
-                    () -> {
-                        if (live) a.liveStep(1);
-                        else if (!step(1)) showBubble("无下集", new String[] {"知道了"}, -1, i -> {}, "");
-                    });
-            add(
-                    row,
-                    live ? "频道" : "选集",
+            // Mobile uses the horizontal high-frequency bottom deck built in rebuildToolDock;
+            // register hidden action anchors for programmatic callers & compatibility.
+            registerHiddenAction(
                     "episodes",
                     () -> {
                         if (live) a.chooseLiveChannel();
                         else chooseEpisodes();
                     });
-            add(
-                    row,
-                    "换源",
+            registerHiddenAction(
                     "lines",
                     () -> {
                         if (live) a.chooseLiveStream();
                         else chooseLine();
                     });
-            add(row, "1.0×", "speed", this::speed);
-            add(row, "画面", "aspect", this::aspect);
-            add(row, "字幕", "subtitles", () -> tracks(3));
-            add(row, "在线字幕", "online-sub", () -> showOnlineSubtitles(false));
-            add(row, "AI双语", "ai-sub", () -> showOnlineSubtitles(true));
-            add(row, "全屏", "fullscreen-tool", a::togglePlayerOrientation);
-            add(row, "音轨", "audio-tracks", () -> tracks(1));
-            add(row, "解码", "decoder", this::decoderMenu);
-            add(row, "弹幕", "danmaku-tool", this::danmaku);
-            add(row, "片头", "skip-intro-tool", () -> skip(true));
-            add(row, "片尾", "skip-outro-tool", () -> skip(false));
-            add(row, "循环", "repeat-tool", this::repeat);
-            add(
-                    row,
-                    "小窗",
-                    "pip-tool",
-                    () -> {
-                        if (!a.enterAppPip()) a.toast("当前设备或安卓版本不支持画中画小窗");
-                    });
-            add(row, "外部播", "external-player", this::openInExternalPlayer);
-            if (live) {
-                for (String vodKey :
-                        new String[] {
-                            "speed",
-                            "online-sub",
-                            "ai-sub",
-                            "skip-intro-tool",
-                            "skip-outro-tool",
-                            "repeat-tool"
-                        }) {
-                    Button vodBtn = buttons.get(vodKey);
-                    if (vodBtn != null) vodBtn.setVisibility(View.GONE);
-                }
-            }
-            add(
-                    row,
-                    "重播",
-                    "restart-tool",
-                    () -> {
-                        if (a.player != null && a.prepared) {
-                            a.player.seekTo(0);
-                            a.player.start();
-                            a.playing = true;
-                        } else reload(false);
-                    });
-            add(row, "更多", "more", this::more);
+            registerHiddenAction("speed", this::speed);
+            registerHiddenAction("subtitles", this::showMobileSubtitleSheet);
+            registerHiddenAction("decoder", this::decoderMenu);
+            registerHiddenAction("aspect", this::aspect);
+            registerHiddenAction("audio-tracks", () -> tracks(1));
+            registerHiddenAction("danmaku-tool", this::openDanmuSettingsPanel);
+            registerHiddenAction("more", this::more);
         }
         timeline.setId(UiCompat.generateViewId());
         List<Button> all = new ArrayList<>();
@@ -889,7 +841,7 @@ final class PlaybackControls {
             if (child instanceof Button) all.add((Button) child);
         }
         for (Button b : all) b.setId(UiCompat.generateViewId());
-        if (!modernTv) {
+        if (!modernTv && !all.isEmpty()) {
             for (Button b : all) b.setNextFocusUpId(timeline.getId());
             timeline.setNextFocusDownId(all.get(0).getId());
             all.get(0).setNextFocusLeftId(all.get(all.size() - 1).getId());
@@ -1241,7 +1193,7 @@ final class PlaybackControls {
                         .alpha(1f)
                         .translationY(0f)
                         .setDuration(110)
-                        .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                        .setInterpolator(MotionTokens.createDecelerateInterpolator())
                         .start();
             } else {
                 buttonTooltip.setAlpha(1f);
@@ -1588,10 +1540,274 @@ final class PlaybackControls {
         refreshTooltipForCurrentFocus();
     }
 
+    /**
+     * Pure-JVM ordering resolver for the mobile horizontal high-frequency bottom control bar.
+     * Consolidates the legacy 21-button right-edge strip down to the core touch pills while
+     * honoring user ordering in {@link Prefs#PLAYER_BUTTON_ORDER}.
+     */
+    static List<String> resolveMobileHighFrequencyOrder(String savedOrderCsv, boolean live) {
+        String[] allowed =
+                live
+                        ? new String[] {"episodes", "lines", "decoder"}
+                        : new String[] {"episodes", "lines", "speed", "subtitles", "decoder"};
+        Set<String> allowedSet = new LinkedHashSet<>(Arrays.asList(allowed));
+        List<String> out = new ArrayList<>();
+        String sanitized = Prefs.sanitizeButtonOrder(savedOrderCsv);
+        if (sanitized != null && !sanitized.isEmpty()) {
+            for (String raw : sanitized.split(",")) {
+                String k = raw.trim();
+                if (allowedSet.contains(k) && !out.contains(k)) {
+                    out.add(k);
+                }
+            }
+        }
+        for (String fallback : allowed) {
+            if (!out.contains(fallback)) {
+                out.add(fallback);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Pure-JVM policy: mobile prev/next steppers appear only on live channels or multi-episode VOD,
+     * keeping single-episode movie HUDs free of dead controls.
+     */
+    static boolean shouldShowEpisodeSteppers(boolean live, int episodeCount) {
+        return live || episodeCount > 1;
+    }
+
+    private void styleMobileTimeline() {
+        final int barH = Math.max(2, a.dp(3f));
+        final int accent = MobileTheme.of(a).accent;
+        GradientDrawable trackBg = new GradientDrawable();
+        trackBg.setColor(0x3DFFFFFF);
+        trackBg.setCornerRadius(barH * 0.5f);
+        GradientDrawable secBg = new GradientDrawable();
+        secBg.setColor(0x66FFFFFF);
+        secBg.setCornerRadius(barH * 0.5f);
+        GradientDrawable progBg = new GradientDrawable();
+        progBg.setColor(accent);
+        progBg.setCornerRadius(barH * 0.5f);
+
+        final Paint markerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        markerPaint.setStyle(Paint.Style.FILL);
+        markerPaint.setColor(0xFFFFC766);
+
+        Drawable[] layers =
+                new Drawable[] {
+                    trackBg,
+                    new ClipDrawable(secBg, Gravity.LEFT, ClipDrawable.HORIZONTAL),
+                    new ClipDrawable(progBg, Gravity.LEFT, ClipDrawable.HORIZONTAL)
+                };
+        LayerDrawable ld =
+                new LayerDrawable(layers) {
+                    private final RectF tickRect = new RectF();
+
+                    @Override
+                    protected void onBoundsChange(Rect bounds) {
+                        int cy = bounds.centerY();
+                        int top = cy - barH / 2;
+                        int bottom = top + barH;
+                        for (int i = 0; i < getNumberOfLayers(); i++) {
+                            getDrawable(i).setBounds(bounds.left, top, bounds.right, bottom);
+                        }
+                    }
+
+                    @Override
+                    public void draw(Canvas canvas) {
+                        super.draw(canvas);
+                        if (a.isLive() || timeline == null) return;
+                        int max = timeline.getMax();
+                        if (max <= 1000) return;
+                        Rect b = getBounds();
+                        float span = b.width();
+                        if (span <= 0f) return;
+                        float cy = b.centerY();
+                        float halfW = a.dp(1.6f);
+                        float halfH = a.dp(3.4f);
+                        int introMs = getVideoIntro(a, site, video) * 1000;
+                        if (introMs > 0 && introMs < max - 1000) {
+                            float x = b.left + span * (introMs / (float) max);
+                            tickRect.set(x - halfW, cy - halfH, x + halfW, cy + halfH);
+                            canvas.drawRoundRect(tickRect, halfW, halfW, markerPaint);
+                        }
+                        int outroMs = getVideoOutro(a, site, video) * 1000;
+                        if (outroMs > 0 && outroMs < max - 1000) {
+                            float x = b.left + span * ((max - outroMs) / (float) max);
+                            tickRect.set(x - halfW, cy - halfH, x + halfW, cy + halfH);
+                            canvas.drawRoundRect(tickRect, halfW, halfW, markerPaint);
+                        }
+                    }
+                };
+        ld.setId(0, android.R.id.background);
+        ld.setId(1, android.R.id.secondaryProgress);
+        ld.setId(2, android.R.id.progress);
+        int curProg = timeline.getProgress();
+        int curMax = timeline.getMax();
+        timeline.setProgressDrawable(ld);
+        if (curMax > 0) timeline.setMax(curMax);
+        timeline.setProgress(curProg);
+
+        int thumbSize = a.dp(13);
+        GradientDrawable thumb = new GradientDrawable();
+        thumb.setShape(GradientDrawable.OVAL);
+        thumb.setSize(thumbSize, thumbSize);
+        thumb.setColor(Color.WHITE);
+        thumb.setStroke(a.dp(2), MobileTheme.withAlpha(accent, 0x66));
+        timeline.setThumb(thumb);
+        timeline.setThumbOffset(0);
+        if (android.os.Build.VERSION.SDK_INT >= 21) {
+            timeline.setSplitTrack(false);
+        }
+        int padH = a.dp(6);
+        timeline.setPadding(padH, 0, padH, 0);
+    }
+
+    private FrameLayout buildMobileDeckIconBtn(int icon, String desc, Runnable action) {
+        FrameLayout btn = new FrameLayout(a);
+        btn.setContentDescription(desc);
+        btn.setClickable(true);
+        btn.setFocusable(false);
+        btn.setBackground(a.bg(0x26FFFFFF, 999));
+        MobileIcons.IconView iv = MobileIcons.create(a, icon, 17f, MainActivity.WHITE);
+        iv.setStrokeWidthUnits(2.0f);
+        btn.addView(iv, new FrameLayout.LayoutParams(a.dp(17), a.dp(17), Gravity.CENTER));
+        MobileMotion.bindPress(btn, 0.92f);
+        btn.setOnClickListener(
+                v -> {
+                    if (a.touchPlayerGesture != null) {
+                        a.touchPlayerGesture.cancelActiveGesture();
+                    }
+                    action.run();
+                });
+        return btn;
+    }
+
+    private LinearLayout buildMobileDeckPill(
+            String key, String text, int icon, TextView[] labelOut, Runnable action) {
+        LinearLayout pill = a.row();
+        pill.setTag("mobile-deck-" + key);
+        pill.setGravity(Gravity.CENTER_VERTICAL);
+        pill.setClickable(true);
+        pill.setFocusable(false);
+        pill.setPadding(a.dp(10), 0, a.dp(10), 0);
+        GradientDrawable bg = a.bg(0x26FFFFFF, 999);
+        bg.setStroke(MobileTheme.hairlinePx(a), 0x24FFFFFF);
+        pill.setBackground(bg);
+
+        if (icon > 0) {
+            MobileIcons.IconView iv = MobileIcons.create(a, icon, 14f, 0xEBF3F5F9);
+            iv.setStrokeWidthUnits(1.9f);
+            LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(a.dp(14), a.dp(14));
+            ilp.rightMargin = a.dp(4);
+            pill.addView(iv, ilp);
+        }
+        TextView tv = a.text(text, 12f, 0xFFF3F5F9);
+        tv.setTypeface(
+                android.graphics.Typeface.create(
+                        "sans-serif-medium", android.graphics.Typeface.NORMAL));
+        tv.setSingleLine(true);
+        tv.setIncludeFontPadding(false);
+        pill.addView(tv, new LinearLayout.LayoutParams(-2, -2));
+        if (labelOut != null && labelOut.length > 0) {
+            labelOut[0] = tv;
+        }
+        MobileMotion.bindPress(pill, 0.92f);
+        pill.setOnClickListener(
+                v -> {
+                    if (a.touchPlayerGesture != null) {
+                        a.touchPlayerGesture.cancelActiveGesture();
+                    }
+                    menuAnchor = pill;
+                    action.run();
+                });
+        return pill;
+    }
+
+    private void syncMobileDanmakuCapsule() {
+        if (mobileDanmuCapsule == null) return;
+        boolean on = danmaku != null && danmaku.enabled;
+        int accent = MobileTheme.of(a).accent;
+        GradientDrawable bg = a.bg(on ? MobileTheme.withAlpha(accent, 0x52) : 0x24FFFFFF, 999);
+        bg.setStroke(
+                MobileTheme.hairlinePx(a), on ? MobileTheme.withAlpha(accent, 0xCC) : 0x24FFFFFF);
+        mobileDanmuCapsule.setBackground(bg);
+        if (mobileDanmuIcon != null) {
+            mobileDanmuIcon.setTint(on ? 0xFFFFFFFF : 0xB8E5E7EB);
+        }
+        if (mobileDanmuLabel != null) {
+            mobileDanmuLabel.setText(on ? "弹幕 开" : "弹幕 关");
+            mobileDanmuLabel.setTextColor(on ? 0xFFFFFFFF : 0xB8E5E7EB);
+            mobileDanmuLabel.setTypeface(
+                    android.graphics.Typeface.create(
+                            "sans-serif-medium",
+                            on
+                                    ? android.graphics.Typeface.BOLD
+                                    : android.graphics.Typeface.NORMAL));
+        }
+    }
+
+    private void toggleMobileDanmakuQuick() {
+        if (a.touchPlayerGesture != null) {
+            a.touchPlayerGesture.cancelActiveGesture();
+        }
+        applyMobileDanmakuStyle();
+        boolean currentlyOn = danmaku != null && danmaku.enabled;
+        DanmuSettingsPanel.DanmuConfig cur = DanmuSettingsPanel.loadConfig(a, false);
+        if (currentlyOn) {
+            closeSegmentedDanmuSession();
+            if (danmaku != null) danmaku.enabled(false);
+            DanmuSettingsPanel.DanmuConfig.Builder b = cur.toBuilder();
+            b.enabled = false;
+            DanmuSettingsPanel.saveConfig(a, b.build());
+            syncMobileDanmakuCapsule();
+            a.toast("已关闭弹幕");
+            return;
+        }
+        DanmuSettingsPanel.DanmuConfig.Builder b = cur.toBuilder();
+        b.enabled = true;
+        DanmuSettingsPanel.DanmuConfig enabledCfg = b.build();
+        DanmuSettingsPanel.saveConfig(a, enabledCfg);
+        if (danmaku != null) {
+            danmaku.applyConfig(enabledCfg);
+            danmaku.enabled(true);
+        }
+        if (danmakuLoaded) {
+            syncMobileDanmakuCapsule();
+            a.toast("已开启弹幕");
+            return;
+        }
+        List<String> dmCandidates = collectResolvedDanmakuUrls();
+        if (dmCandidates.isEmpty()) {
+            String recentDm = CspEngine.consumeRecentPluginDanmaku(120000L);
+            if (!recentDm.isEmpty()) {
+                String rewritten = LocalProxy.rewrite(recentDm);
+                try {
+                    resolved.media.put("danmaku", rewritten);
+                } catch (Exception ignored) {
+                }
+                if (rewritten != null && !rewritten.isEmpty()) {
+                    dmCandidates = Collections.singletonList(rewritten);
+                }
+            }
+        }
+        if (!dmCandidates.isEmpty()) {
+            closeSegmentedDanmuSession();
+            loadDanmakuCandidateChain(dmCandidates, 0, true);
+        } else if (!enabledCfg.serverUrls.isEmpty()) {
+            startSegmentedDanmuSession(enabledCfg, true);
+        } else {
+            a.toast("已开启弹幕，点右侧「设置」配置弹幕源或导入本地文件");
+        }
+        syncMobileDanmakuCapsule();
+    }
+
     void relayout(boolean mobileLandscape) {
         if (mobileLandscape != currentMobileLandscape || dockOverlay.getChildCount() == 0) {
             currentMobileLandscape = mobileLandscape;
             rebuildToolDock(mobileLandscape);
+            updateLabels();
         }
         Button fsTool = buttons.get("fullscreen-tool");
         if (fsTool != null) {
@@ -1610,47 +1826,185 @@ final class PlaybackControls {
             fsTool.setText(mobileLandscape ? "竖屏" : "全屏");
         }
         if (!tv) {
-            LinearLayout col = a.vertical();
-            col.setMotionEventSplittingEnabled(false);
-            col.setGravity(Gravity.CENTER_HORIZONTAL);
-            col.setClipChildren(false);
-            col.setClipToPadding(false);
-            col.setPadding(a.dp(1), a.dp(2), a.dp(1), a.dp(2));
-            List<Button> orderedButtons = new ArrayList<>();
+            boolean live = "live".equals(site.key);
+            LinearLayout deckRow = a.row();
+            deckRow.setTag("mobile-horizontal-deck");
+            deckRow.setMotionEventSplittingEnabled(false);
+            deckRow.setGravity(Gravity.CENTER_VERTICAL);
+            deckRow.setClipChildren(false);
+            deckRow.setClipToPadding(false);
+            deckRow.setPadding(0, a.dp(2), 0, a.dp(2));
+
+            int pillH = a.dp(32);
+            int epCount =
+                    a.activeLine != null && a.activeLine.episodes != null
+                            ? a.activeLine.episodes.size()
+                            : 0;
+            boolean multiOrLive = shouldShowEpisodeSteppers(live, epCount);
+
+            // Left cluster: [IC_PREV_EP] [IC_NEXT_EP] + Dual-segment Danmaku capsule [弹幕 开/关 | 设置]
+            FrameLayout prevBtn =
+                    buildMobileDeckIconBtn(
+                            MobileIcons.IC_PREV_EP,
+                            live ? "上一频道" : "上一集",
+                            () -> {
+                                if (live) a.liveStep(-1);
+                                else if (!step(-1)) a.toast("已经是第一集");
+                            });
+            prevBtn.setVisibility(multiOrLive ? View.VISIBLE : View.GONE);
+            mobilePrevBtn = prevBtn;
+            LinearLayout.LayoutParams prevLp = new LinearLayout.LayoutParams(pillH, pillH);
+            prevLp.rightMargin = a.dp(6);
+            deckRow.addView(prevBtn, prevLp);
+
+            FrameLayout nextBtn =
+                    buildMobileDeckIconBtn(
+                            MobileIcons.IC_NEXT_EP,
+                            live ? "下一频道" : "下一集",
+                            () -> {
+                                if (live) a.liveStep(1);
+                                else if (!step(1)) a.toast("已经是最后一集");
+                            });
+            nextBtn.setVisibility(multiOrLive ? View.VISIBLE : View.GONE);
+            mobileNextBtn = nextBtn;
+            LinearLayout.LayoutParams nextLp = new LinearLayout.LayoutParams(pillH, pillH);
+            nextLp.rightMargin = a.dp(8);
+            deckRow.addView(nextBtn, nextLp);
+
+            if (!live) {
+                mobileDanmuCapsule = a.row();
+                mobileDanmuCapsule.setTag("mobile-danmaku-capsule");
+                mobileDanmuCapsule.setGravity(Gravity.CENTER_VERTICAL);
+                mobileDanmuCapsule.setMotionEventSplittingEnabled(false);
+
+                LinearLayout dmToggleHalf = a.row();
+                dmToggleHalf.setGravity(Gravity.CENTER_VERTICAL);
+                dmToggleHalf.setClickable(true);
+                dmToggleHalf.setFocusable(false);
+                dmToggleHalf.setPadding(a.dp(9), 0, a.dp(8), 0);
+                mobileDanmuIcon =
+                        MobileIcons.create(a, MobileIcons.IC_DANMAKU, 14.5f, MainActivity.WHITE);
+                mobileDanmuIcon.setStrokeWidthUnits(1.9f);
+                LinearLayout.LayoutParams dmIconLp =
+                        new LinearLayout.LayoutParams(a.dp(15), a.dp(15));
+                dmIconLp.rightMargin = a.dp(4);
+                dmToggleHalf.addView(mobileDanmuIcon, dmIconLp);
+                mobileDanmuLabel = a.text("弹幕 关", 12f, MainActivity.WHITE);
+                mobileDanmuLabel.setTypeface(
+                        android.graphics.Typeface.create(
+                                "sans-serif-medium", android.graphics.Typeface.NORMAL));
+                mobileDanmuLabel.setIncludeFontPadding(false);
+                mobileDanmuLabel.setSingleLine(true);
+                dmToggleHalf.addView(mobileDanmuLabel, new LinearLayout.LayoutParams(-2, -2));
+                MobileMotion.bindPress(dmToggleHalf, 0.92f);
+                dmToggleHalf.setOnClickListener(v -> toggleMobileDanmakuQuick());
+                mobileDanmuCapsule.addView(dmToggleHalf, new LinearLayout.LayoutParams(-2, -1));
+
+                View divider = new View(a);
+                divider.setBackgroundColor(0x38FFFFFF);
+                mobileDanmuCapsule.addView(
+                        divider,
+                        new LinearLayout.LayoutParams(MobileTheme.hairlinePx(a), a.dp(14)));
+
+                TextView dmSettingsHalf = a.text("设置", 11.5f, 0xE6E5E7EB);
+                dmSettingsHalf.setTag("mobile-danmaku-settings");
+                dmSettingsHalf.setGravity(Gravity.CENTER);
+                dmSettingsHalf.setIncludeFontPadding(false);
+                dmSettingsHalf.setSingleLine(true);
+                dmSettingsHalf.setClickable(true);
+                dmSettingsHalf.setFocusable(false);
+                dmSettingsHalf.setPadding(a.dp(8), 0, a.dp(10), 0);
+                MobileMotion.bindPress(dmSettingsHalf, 0.92f);
+                dmSettingsHalf.setOnClickListener(
+                        v -> {
+                            if (a.touchPlayerGesture != null) {
+                                a.touchPlayerGesture.cancelActiveGesture();
+                            }
+                            openDanmuSettingsPanel();
+                        });
+                mobileDanmuCapsule.addView(dmSettingsHalf, new LinearLayout.LayoutParams(-2, -1));
+
+                LinearLayout.LayoutParams dmCapLp = new LinearLayout.LayoutParams(-2, pillH);
+                dmCapLp.rightMargin = a.dp(8);
+                deckRow.addView(mobileDanmuCapsule, dmCapLp);
+                syncMobileDanmakuCapsule();
+            } else {
+                mobileDanmuCapsule = null;
+                mobileDanmuIcon = null;
+                mobileDanmuLabel = null;
+            }
+
+            // Flexible spacer spreads left & right clusters in landscape while staying compact on
+            // narrow portrait
+            View flexSpacer = new View(a);
+            flexSpacer.setMinimumWidth(a.dp(6));
+            deckRow.addView(flexSpacer, new LinearLayout.LayoutParams(0, 1, 1f));
+
+            // Right cluster: clean high-frequency pills honoring user custom order
             String orderCsv =
-                    Prefs.sanitizeButtonOrder(
-                            a.mobilePrefs()
-                                    .getString(
-                                            Prefs.PLAYER_BUTTON_ORDER,
-                                            Prefs.DEFAULT_PLAYER_BUTTON_ORDER));
-            Set<String> addedKeys = new HashSet<>();
-            for (String token : orderCsv.split(",")) {
-                String k = token.trim();
-                Button match = buttons.get(k);
-                if (match != null && addedKeys.add(k)) orderedButtons.add(match);
-            }
-            for (Map.Entry<String, Button> entry : buttons.entrySet()) {
-                if (addedKeys.add(entry.getKey())) orderedButtons.add(entry.getValue());
-            }
-            for (Button b : orderedButtons) {
-                if (b.getVisibility() == View.GONE) continue;
-                if (b.getParent() instanceof ViewGroup) {
-                    ((ViewGroup) b.getParent()).removeView(b);
+                    a.mobilePrefs()
+                            .getString(
+                                    Prefs.PLAYER_BUTTON_ORDER, Prefs.DEFAULT_PLAYER_BUTTON_ORDER);
+            List<String> keys = resolveMobileHighFrequencyOrder(orderCsv, live);
+            mobileSpeedLabel = null;
+            mobileSpeedPill = null;
+            mobileKernelLabel = null;
+            for (int i = 0; i < keys.size(); i++) {
+                String key = keys.get(i);
+                LinearLayout pill;
+                if ("episodes".equals(key)) {
+                    pill =
+                            buildMobileDeckPill(
+                                    key,
+                                    live ? "频道" : "选集",
+                                    0,
+                                    null,
+                                    () -> {
+                                        if (live) a.chooseLiveChannel();
+                                        else chooseEpisodes();
+                                    });
+                } else if ("lines".equals(key)) {
+                    pill =
+                            buildMobileDeckPill(
+                                    key,
+                                    "换源",
+                                    0,
+                                    null,
+                                    () -> {
+                                        if (live) a.chooseLiveStream();
+                                        else chooseLine();
+                                    });
+                } else if ("speed".equals(key)) {
+                    TextView[] holder = new TextView[1];
+                    pill = buildMobileDeckPill(key, "1.0×", 0, holder, this::speed);
+                    mobileSpeedPill = pill;
+                    mobileSpeedLabel = holder[0];
+                } else if ("subtitles".equals(key)) {
+                    pill =
+                            buildMobileDeckPill(
+                                    key,
+                                    "字幕",
+                                    MobileIcons.IC_SUBTITLE,
+                                    null,
+                                    this::showMobileSubtitleSheet);
+                } else if ("decoder".equals(key)) {
+                    TextView[] holder = new TextView[1];
+                    pill =
+                            buildMobileDeckPill(
+                                    key, "内核", MobileIcons.IC_ENGINE, holder, this::decoderMenu);
+                    mobileKernelLabel = holder[0];
+                } else {
+                    continue;
                 }
-                b.setSingleLine(true);
-                b.setTextSize(11f);
-                b.setMinHeight(0);
-                b.setMinimumHeight(0);
-                int padH = a.dp(2);
-                b.setPadding(padH, 0, padH, 0);
-                int w = a.dp(mobileLandscape ? 40 : 44);
-                int h = a.dp(mobileLandscape ? 30 : 33);
-                LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(w, h);
-                size.setMargins(a.dp(1), a.dp(2), a.dp(1), a.dp(2));
-                col.addView(b, size);
+                LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(-2, pillH);
+                if (i + 1 < keys.size()) {
+                    plp.rightMargin = a.dp(6);
+                }
+                deckRow.addView(pill, plp);
             }
-            ScrollView vScroller =
-                    new ScrollView(a) {
+
+            HorizontalScrollView hScroller =
+                    new HorizontalScrollView(a) {
                         @Override
                         public boolean onInterceptTouchEvent(MotionEvent ev) {
                             if (getParent() != null) {
@@ -1667,12 +2021,13 @@ final class PlaybackControls {
                             return super.onTouchEvent(ev);
                         }
                     };
-            vScroller.setVerticalScrollBarEnabled(false);
-            vScroller.setFillViewport(true);
-            vScroller.setClipChildren(true);
-            vScroller.setClipToPadding(true);
-            vScroller.addView(col, new ScrollView.LayoutParams(-1, -2));
-            dockOverlay.addView(vScroller, new LinearLayout.LayoutParams(-1, -1));
+            hScroller.setHorizontalScrollBarEnabled(false);
+            hScroller.setOverScrollMode(View.OVER_SCROLL_NEVER);
+            hScroller.setFillViewport(true);
+            hScroller.setClipChildren(false);
+            hScroller.setClipToPadding(false);
+            hScroller.addView(deckRow, new FrameLayout.LayoutParams(-1, -2));
+            dockOverlay.addView(hScroller, new LinearLayout.LayoutParams(-1, -2));
             return;
         }
         if (modernTv) {
@@ -2114,12 +2469,782 @@ final class PlaybackControls {
         showBubble("播放提示", new String[] {"完成"}, -1, i -> {}, text);
     }
 
+    private Dialog openMobilePlayerSheet(String title, View content) {
+        if (activeDialog != null) {
+            activeDialog.dismiss();
+            activeDialog = null;
+        }
+        if (skipCountdownPill != null) {
+            skipCountdownPill.dismissSilently();
+        }
+        if (a.touchPlayerGesture != null) {
+            a.touchPlayerGesture.onDialogOpened();
+        }
+        dialogOpen = true;
+        hideButtonTooltip(true);
+        if (a.hideControls != null) a.ui.removeCallbacks(a.hideControls);
+        final Dialog[] holder = new Dialog[1];
+        holder[0] = MobileBottomSheet.showPlayerSheet(a, title, content, true);
+        holder[0].setOnDismissListener(
+                d -> {
+                    if (activeDialog == holder[0]) {
+                        activeDialog = null;
+                        dialogOpen = false;
+                        if (!a.isFinishing()
+                                && (android.os.Build.VERSION.SDK_INT < 17 || !a.isDestroyed())) {
+                            a.scheduleHide();
+                        }
+                    }
+                });
+        activeDialog = holder[0];
+        return holder[0];
+    }
+
+    private void showMobileChoiceSheet(
+            String title,
+            String[] labels,
+            int selected,
+            PlayerBubble.IntAction action,
+            String message) {
+        final int accent = MobileTheme.of(a).accent;
+        final Dialog[] dlgRef = new Dialog[1];
+        LinearLayout body = a.vertical();
+        body.setPadding(0, a.dp(2), 0, a.dp(4));
+
+        if (message != null && !message.isEmpty()) {
+            TextView msgView = a.text(message, 13.5f, 0xFFD1D5DB);
+            msgView.setLineSpacing(a.dp(4), 1f);
+            msgView.setPadding(a.dp(4), a.dp(2), a.dp(4), a.dp(12));
+            body.addView(msgView, new LinearLayout.LayoutParams(-1, -2));
+        }
+
+        if (labels != null) {
+            int hairlinePx = MobileTheme.hairlinePx(a);
+            for (int i = 0; i < labels.length; i++) {
+                final int idx = i;
+                String raw = labels[i] == null ? "" : labels[i];
+                final boolean active = (i == selected) || raw.startsWith("✓");
+                String display = raw.replaceFirst("^✓\\s*", "");
+
+                LinearLayout optRow = a.row();
+                optRow.setGravity(Gravity.CENTER_VERTICAL);
+                optRow.setMinimumHeight(a.dp(46));
+                optRow.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+                if (active) {
+                    optRow.setBackground(a.bg(MobileTheme.withAlpha(accent, 0x33), 12));
+                } else {
+                    MobileSectionGroup.bindPressHighlight(optRow, 0x1EFFFFFF);
+                }
+
+                TextView lbl = a.text(display, 14f, active ? MainActivity.WHITE : 0xFFE5E7EB);
+                lbl.setTypeface(
+                        null,
+                        active ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+                lbl.setSingleLine(false);
+                lbl.setMaxLines(2);
+                lbl.setEllipsize(TextUtils.TruncateAt.END);
+                optRow.addView(lbl, new LinearLayout.LayoutParams(0, -2, 1f));
+
+                if (active) {
+                    MobileIcons.IconView check =
+                            MobileIcons.create(a, MobileIcons.IC_CHECK, 17f, accent);
+                    check.setStrokeWidthUnits(2.3f);
+                    LinearLayout.LayoutParams clp =
+                            new LinearLayout.LayoutParams(a.dp(17), a.dp(17));
+                    clp.leftMargin = a.dp(10);
+                    optRow.addView(check, clp);
+                }
+
+                optRow.setOnClickListener(
+                        v -> {
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            if (action != null) action.accept(idx);
+                        });
+                body.addView(optRow, new LinearLayout.LayoutParams(-1, -2));
+
+                boolean nextActive =
+                        (i + 1 < labels.length)
+                                && ((i + 1 == selected)
+                                        || (labels[i + 1] != null
+                                                && labels[i + 1].startsWith("✓")));
+                if (i + 1 < labels.length && !active && !nextActive) {
+                    View div = new View(a);
+                    div.setBackgroundColor(0x14FFFFFF);
+                    LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, hairlinePx);
+                    dlp.leftMargin = a.dp(12);
+                    dlp.rightMargin = a.dp(12);
+                    body.addView(div, dlp);
+                }
+            }
+        }
+        dlgRef[0] = openMobilePlayerSheet(title, body);
+    }
+
+    /**
+     * Unified 3-in-1 Mobile Subtitle Sheet: [内封/外挂轨 | 在线字幕搜索 | AI 双语字幕] + [样式调校] footer.
+     */
+    void showMobileSubtitleSheet() {
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        final Dialog[] dlgRef = new Dialog[1];
+
+        LinearLayout root = a.vertical();
+        root.setTag("mobile-unified-subtitle-sheet");
+
+        // 3-tab spring-sliding segmented header
+        final String[] tabLabels = {"内封/外挂轨", "在线字幕", "AI 双语"};
+        final int[] activeTab = {0};
+
+        final LinearLayout tabBody = a.vertical();
+        tabBody.setMinimumHeight(a.dp(150));
+
+        final Runnable[] renderTab = new Runnable[1];
+        renderTab[0] =
+                () -> {
+                    tabBody.removeAllViews();
+                    if (activeTab[0] == 0) {
+                        populateEmbeddedSubtitleTab(tabBody, dlgRef, p);
+                    } else if (activeTab[0] == 1) {
+                        populateOnlineSubtitleTab(tabBody, dlgRef, p, false);
+                    } else {
+                        populateAiBilingualSubtitleTab(tabBody, dlgRef, p);
+                    }
+                };
+
+        LinearLayout segBar =
+                MobileSectionGroup.segmentedControl(
+                        a,
+                        tabLabels,
+                        activeTab[0],
+                        idx -> {
+                            if (activeTab[0] != idx) {
+                                int dir = idx > activeTab[0] ? 1 : -1;
+                                activeTab[0] = idx;
+                                renderTab[0].run();
+                                MobileMotion.animatePageSwap(tabBody, dir, 10f);
+                            }
+                        });
+        LinearLayout.LayoutParams segLp = new LinearLayout.LayoutParams(-1, -2);
+        segLp.bottomMargin = a.dp(12);
+        root.addView(segBar, segLp);
+        root.addView(tabBody, new LinearLayout.LayoutParams(-1, -2));
+        renderTab[0].run();
+
+        // Divider + Footer Action: 样式调校
+        View footerDiv = new View(a);
+        footerDiv.setBackgroundColor(0x1CFFFFFF);
+        LinearLayout.LayoutParams fDivLp =
+                new LinearLayout.LayoutParams(-1, MobileTheme.hairlinePx(a));
+        fDivLp.topMargin = a.dp(12);
+        fDivLp.bottomMargin = a.dp(10);
+        root.addView(footerDiv, fDivLp);
+
+        LinearLayout styleRow = a.row();
+        styleRow.setTag("mobile-subtitle-style-footer");
+        styleRow.setGravity(Gravity.CENTER_VERTICAL);
+        styleRow.setPadding(a.dp(12), a.dp(11), a.dp(12), a.dp(11));
+        styleRow.setBackground(a.bg(0x1CFFFFFF, 12));
+        MobileMotion.bindPress(styleRow, 0.96f);
+
+        MobileIcons.IconView sliderIc =
+                MobileIcons.create(a, MobileIcons.IC_SLIDERS, 17f, p.accent);
+        LinearLayout.LayoutParams sicLp = new LinearLayout.LayoutParams(a.dp(17), a.dp(17));
+        sicLp.rightMargin = a.dp(10);
+        styleRow.addView(sliderIc, sicLp);
+
+        TextView styleTitle = a.text("样式调校", 14f, MainActivity.WHITE);
+        styleTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        styleRow.addView(styleTitle, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        TextView styleMeta =
+                a.text(subtitleSizeLabel() + " · " + subtitleStyleLabel(), 12f, 0xFF949BA8);
+        styleMeta.setSingleLine(true);
+        styleRow.addView(styleMeta, new LinearLayout.LayoutParams(-2, -2));
+
+        MobileIcons.IconView chev =
+                MobileIcons.create(a, MobileIcons.IC_CHEVRON_RIGHT, 15f, 0xFF949BA8);
+        LinearLayout.LayoutParams chLp = new LinearLayout.LayoutParams(a.dp(15), a.dp(15));
+        chLp.leftMargin = a.dp(6);
+        styleRow.addView(chev, chLp);
+
+        styleRow.setOnClickListener(
+                v -> {
+                    if (dlgRef[0] != null) dlgRef[0].dismiss();
+                    showSubtitleAdjuster(a, subtitle, this::applySubtitleStyle);
+                });
+        root.addView(styleRow, new LinearLayout.LayoutParams(-1, -2));
+
+        dlgRef[0] = openMobilePlayerSheet("字幕", root);
+    }
+
+    private void populateEmbeddedSubtitleTab(
+            LinearLayout container, Dialog[] dlgRef, MobileTheme.Palette p) {
+        List<String> rawTracks =
+                (a.player != null && a.prepared)
+                        ? a.player.trackLabels(3)
+                        : Collections.emptyList();
+        int selectedIdx = -1;
+        List<String> cleanNames = new ArrayList<>();
+        for (int i = 0; i < rawTracks.size(); i++) {
+            String raw = rawTracks.get(i);
+            if (raw != null && raw.startsWith("✓")) {
+                selectedIdx = i;
+                raw = raw.replaceFirst("^✓\\s*", "");
+            }
+            cleanNames.add(raw == null ? ("字幕轨 " + (i + 1)) : raw);
+        }
+
+        // Row 0: 关闭字幕
+        addDarkCheckRow(
+                container,
+                "关闭字幕",
+                selectedIdx < 0,
+                p.accent,
+                () -> {
+                    selectAndRememberSubtitle(-2, null);
+                    if (dlgRef[0] != null) dlgRef[0].dismiss();
+                });
+
+        for (int i = 0; i < cleanNames.size(); i++) {
+            final int trackIdx = i;
+            final String label = cleanNames.get(i);
+            addDarkCheckRow(
+                    container,
+                    label,
+                    trackIdx == selectedIdx,
+                    p.accent,
+                    () -> {
+                        selectAndRememberSubtitle(trackIdx, label);
+                        if (dlgRef[0] != null) dlgRef[0].dismiss();
+                    });
+        }
+        if (cleanNames.isEmpty()) {
+            TextView empty = a.text("当前视频流未包含内封字幕轨", 12.5f, 0xFF949BA8);
+            empty.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+            container.addView(empty, new LinearLayout.LayoutParams(-1, -2));
+        }
+
+        // Import local subtitle action
+        LinearLayout importRow = a.row();
+        importRow.setGravity(Gravity.CENTER_VERTICAL);
+        importRow.setPadding(a.dp(12), a.dp(11), a.dp(12), a.dp(11));
+        importRow.setBackground(a.bg(0x16FFFFFF, 11));
+        MobileMotion.bindPress(importRow, 0.96f);
+        MobileIcons.IconView folderIc = MobileIcons.create(a, MobileIcons.IC_FOLDER, 17f, p.accent);
+        LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(a.dp(17), a.dp(17));
+        flp.rightMargin = a.dp(10);
+        importRow.addView(folderIc, flp);
+        TextView importTxt = a.text("导入本地外挂字幕 (.srt / .ass / .vtt)", 13.5f, MainActivity.WHITE);
+        importRow.addView(importTxt, new LinearLayout.LayoutParams(0, -2, 1f));
+        importRow.setOnClickListener(
+                v -> {
+                    if (dlgRef[0] != null) dlgRef[0].dismiss();
+                    a.pickSubtitle();
+                });
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(-1, -2);
+        ilp.topMargin = a.dp(8);
+        container.addView(importRow, ilp);
+    }
+
+    private void populateOnlineSubtitleTab(
+            LinearLayout container, Dialog[] dlgRef, MobileTheme.Palette p, boolean aiBilingual) {
+        String assrt = a.secretsPrefs().getString(Prefs.SECRET_ASSRT_TOKEN, "").trim();
+        String osKey = a.secretsPrefs().getString(Prefs.SECRET_OPENSUBTITLES_KEY, "").trim();
+        if (assrt.isEmpty() && osKey.isEmpty()) {
+            TextView hint =
+                    a.text(
+                            "请先在「设置 → 字幕与弹幕」填入射手网 Token 或 OpenSubtitles API Key 后，即可在此一键检索在线字幕。",
+                            13f,
+                            0xFFB8C0CE);
+            hint.setLineSpacing(a.dp(4), 1f);
+            hint.setPadding(a.dp(12), a.dp(14), a.dp(12), a.dp(14));
+            hint.setBackground(a.bg(0x14FFFFFF, 12));
+            container.addView(hint, new LinearLayout.LayoutParams(-1, -2));
+            return;
+        }
+        final LinearLayout resultsBox = a.vertical();
+        final TextView status =
+                a.text("正在检索「" + (video != null ? video.title : "") + "」在线字幕…", 12.5f, 0xFFB8C0CE);
+        status.setPadding(a.dp(6), a.dp(8), a.dp(6), a.dp(8));
+        resultsBox.addView(status, new LinearLayout.LayoutParams(-1, -2));
+        container.addView(resultsBox, new LinearLayout.LayoutParams(-1, -2));
+
+        OnlineSubtitleDanmakuService.searchOnlineSubtitlesAsync(
+                a,
+                video != null ? video.title : "",
+                list -> {
+                    if (a.isFinishing() || (dlgRef[0] != null && !dlgRef[0].isShowing())) return;
+                    resultsBox.removeAllViews();
+                    if (list == null || list.isEmpty()) {
+                        TextView empty =
+                                a.text("未检索到匹配在线字幕，可切换至「内封/外挂轨」导入本地文件。", 12.5f, 0xFF949BA8);
+                        empty.setPadding(a.dp(8), a.dp(12), a.dp(8), a.dp(12));
+                        resultsBox.addView(empty, new LinearLayout.LayoutParams(-1, -2));
+                        return;
+                    }
+                    int limit = Math.min(12, list.size());
+                    for (int i = 0; i < limit; i++) {
+                        final OnlineSubtitleDanmakuService.SubtitleCandidate cand = list.get(i);
+                        String label =
+                                "["
+                                        + cand.provider.toUpperCase(Locale.ROOT)
+                                        + " · "
+                                        + cand.language
+                                        + "] "
+                                        + cand.title;
+                        addDarkCheckRow(
+                                resultsBox,
+                                label,
+                                false,
+                                p.accent,
+                                () -> {
+                                    if (dlgRef[0] != null) dlgRef[0].dismiss();
+                                    OnlineSubtitleDanmakuService.downloadAndAttachSubtitleAsync(
+                                            a, cand, aiBilingual);
+                                });
+                    }
+                });
+    }
+
+    private void populateAiBilingualSubtitleTab(
+            LinearLayout container, Dialog[] dlgRef, MobileTheme.Palette p) {
+        boolean bilingualOn = a.mobilePrefs().getBoolean(Prefs.SUBTITLE_BILINGUAL, true);
+        LinearLayout toggleRow = a.row();
+        toggleRow.setGravity(Gravity.CENTER_VERTICAL);
+        toggleRow.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+        toggleRow.setBackground(a.bg(0x18FFFFFF, 12));
+        MobileIcons.IconView spark = MobileIcons.create(a, MobileIcons.IC_SPARKLE, 17f, p.accent);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(a.dp(17), a.dp(17));
+        slp.rightMargin = a.dp(10);
+        toggleRow.addView(spark, slp);
+        TextView lbl = a.text("AI 双语同屏字幕", 14f, MainActivity.WHITE);
+        lbl.setTypeface(null, android.graphics.Typeface.BOLD);
+        toggleRow.addView(lbl, new LinearLayout.LayoutParams(0, -2, 1f));
+        UiWidgets.IosSwitchView sw = new UiWidgets.IosSwitchView(a, bilingualOn);
+        toggleRow.addView(sw, new LinearLayout.LayoutParams(a.dp(46), a.dp(27)));
+        toggleRow.setOnClickListener(
+                v -> {
+                    boolean next = !sw.isChecked();
+                    sw.setChecked(next, !MobileMotion.isReduced(a));
+                    a.mobilePrefs().edit().putBoolean(Prefs.SUBTITLE_BILINGUAL, next).apply();
+                    a.toast(next ? "已开启 AI 双语同屏字幕" : "已关闭 AI 双语同屏字幕");
+                });
+        LinearLayout.LayoutParams trLp = new LinearLayout.LayoutParams(-1, -2);
+        trLp.bottomMargin = a.dp(10);
+        container.addView(toggleRow, trLp);
+
+        if (!AiAssistantService.isConfigured(a)) {
+            TextView hint =
+                    a.text(
+                            "尚未启用 AI 翻译服务。请前往「设置 → 刮削、网盘与 AI 助手」配置模型与 Key 后，即可为在线字幕实时生成中英双语译文。",
+                            12.5f,
+                            0xFFB8C0CE);
+            hint.setLineSpacing(a.dp(4), 1f);
+            hint.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+            hint.setBackground(a.bg(0x14FFFFFF, 12));
+            container.addView(hint, new LinearLayout.LayoutParams(-1, -2));
+            return;
+        }
+        populateOnlineSubtitleTab(container, dlgRef, p, true);
+    }
+
+    private void addDarkCheckRow(
+            LinearLayout parent, String text, boolean active, int accent, Runnable onClick) {
+        LinearLayout row = a.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(a.dp(44));
+        row.setPadding(a.dp(12), a.dp(9), a.dp(12), a.dp(9));
+        if (active) {
+            row.setBackground(a.bg(MobileTheme.withAlpha(accent, 0x33), 11));
+        } else {
+            MobileSectionGroup.bindPressHighlight(row, 0x1EFFFFFF);
+        }
+        TextView tv = a.text(text, 13.5f, active ? MainActivity.WHITE : 0xFFE5E7EB);
+        tv.setTypeface(
+                null, active ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+        tv.setMaxLines(2);
+        tv.setEllipsize(TextUtils.TruncateAt.END);
+        row.addView(tv, new LinearLayout.LayoutParams(0, -2, 1f));
+        if (active) {
+            MobileIcons.IconView check = MobileIcons.create(a, MobileIcons.IC_CHECK, 16f, accent);
+            check.setStrokeWidthUnits(2.3f);
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(a.dp(16), a.dp(16));
+            clp.leftMargin = a.dp(8);
+            row.addView(check, clp);
+        }
+        row.setOnClickListener(v -> onClick.run());
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+        rlp.bottomMargin = a.dp(4);
+        parent.addView(row, rlp);
+    }
+
+    private LinearLayout buildMobileMoreToolRow(
+            int icon, String title, String value, Runnable onClick) {
+        LinearLayout row = a.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(a.dp(46));
+        row.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+        MobileSectionGroup.bindPressHighlight(row, 0x1EFFFFFF);
+
+        MobileIcons.IconView iv = MobileIcons.create(a, icon, 18f, 0xFFE5E7EB);
+        iv.setStrokeWidthUnits(1.9f);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(a.dp(18), a.dp(18));
+        ilp.rightMargin = a.dp(12);
+        row.addView(iv, ilp);
+
+        TextView titleView = a.text(title, 14f, MainActivity.WHITE);
+        titleView.setSingleLine(true);
+        titleView.setEllipsize(TextUtils.TruncateAt.END);
+        row.addView(titleView, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        if (value != null && !value.isEmpty()) {
+            TextView valView = a.text(value, 12.5f, 0xFF949BA8);
+            valView.setSingleLine(true);
+            valView.setEllipsize(TextUtils.TruncateAt.END);
+            valView.setMaxWidth(a.dp(140));
+            LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(-2, -2);
+            vlp.leftMargin = a.dp(8);
+            row.addView(valView, vlp);
+        }
+
+        MobileIcons.IconView chev =
+                MobileIcons.create(a, MobileIcons.IC_CHEVRON_RIGHT, 14f, 0x80FFFFFF);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(a.dp(14), a.dp(14));
+        clp.leftMargin = a.dp(6);
+        row.addView(chev, clp);
+
+        row.setOnClickListener(v -> onClick.run());
+        return row;
+    }
+
+    private void addMoreGroupCard(LinearLayout parent, List<View> rows) {
+        if (rows.isEmpty()) return;
+        LinearLayout card = a.vertical();
+        card.setBackground(a.bg(0x14FFFFFF, 14));
+        int hairlinePx = MobileTheme.hairlinePx(a);
+        for (int i = 0; i < rows.size(); i++) {
+            card.addView(rows.get(i), new LinearLayout.LayoutParams(-1, -2));
+            if (i + 1 < rows.size()) {
+                View div = new View(a);
+                div.setBackgroundColor(0x14FFFFFF);
+                LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, hairlinePx);
+                dlp.leftMargin = a.dp(42);
+                card.addView(div, dlp);
+            }
+        }
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-1, -2);
+        clp.bottomMargin = a.dp(12);
+        parent.addView(card, clp);
+    }
+
+    private void showMobileToolbarOrderSheet() {
+        String raw =
+                Prefs.sanitizeButtonOrder(
+                        a.mobilePrefs()
+                                .getString(
+                                        Prefs.PLAYER_BUTTON_ORDER,
+                                        Prefs.DEFAULT_PLAYER_BUTTON_ORDER));
+        final List<String> tokens =
+                new ArrayList<>(resolveMobileHighFrequencyOrder(raw, "live".equals(site.key)));
+        final int accent = MobileTheme.of(a).accent;
+        final Dialog[] dlgRef = new Dialog[1];
+
+        LinearLayout root = a.vertical();
+        TextView desc = a.text("调整底部高频功能胶囊的先后顺序，保存后立即生效。", 12.5f, 0xFF949BA8);
+        desc.setPadding(a.dp(2), 0, a.dp(2), a.dp(10));
+        root.addView(desc, new LinearLayout.LayoutParams(-1, -2));
+
+        final LinearLayout list = a.vertical();
+        root.addView(list, new LinearLayout.LayoutParams(-1, -2));
+
+        final Runnable[] rebuild = new Runnable[1];
+        rebuild[0] =
+                () -> {
+                    list.removeAllViews();
+                    for (int i = 0; i < tokens.size(); i++) {
+                        final int idx = i;
+                        String tk = tokens.get(i);
+                        String name =
+                                "episodes".equals(tk)
+                                        ? "选集 / 频道"
+                                        : "lines".equals(tk)
+                                                ? "换源 / 线路"
+                                                : "speed".equals(tk)
+                                                        ? "播放倍速"
+                                                        : "subtitles".equals(tk)
+                                                                ? "字幕中心"
+                                                                : "decoder".equals(tk)
+                                                                        ? "内核与解码"
+                                                                        : tk;
+                        LinearLayout row = a.row();
+                        row.setGravity(Gravity.CENTER_VERTICAL);
+                        row.setPadding(a.dp(12), a.dp(9), a.dp(10), a.dp(9));
+                        row.setBackground(a.bg(0x16FFFFFF, 11));
+                        TextView tv = a.text((i + 1) + ". " + name, 13.5f, MainActivity.WHITE);
+                        row.addView(tv, new LinearLayout.LayoutParams(0, -2, 1f));
+                        if (i > 0) {
+                            TextView up = a.text("上移", 12f, accent);
+                            up.setTypeface(null, android.graphics.Typeface.BOLD);
+                            up.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
+                            up.setOnClickListener(
+                                    v -> {
+                                        String tmp = tokens.set(idx - 1, tokens.get(idx));
+                                        tokens.set(idx, tmp);
+                                        rebuild[0].run();
+                                    });
+                            row.addView(up);
+                        }
+                        if (i < tokens.size() - 1) {
+                            TextView dn = a.text("下移", 12f, 0xFF93C5FD);
+                            dn.setTypeface(null, android.graphics.Typeface.BOLD);
+                            dn.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
+                            dn.setOnClickListener(
+                                    v -> {
+                                        String tmp = tokens.set(idx + 1, tokens.get(idx));
+                                        tokens.set(idx, tmp);
+                                        rebuild[0].run();
+                                    });
+                            row.addView(dn);
+                        }
+                        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+                        rlp.bottomMargin = a.dp(6);
+                        list.addView(row, rlp);
+                    }
+                };
+        rebuild[0].run();
+
+        LinearLayout actions = a.row();
+        actions.setGravity(Gravity.CENTER_VERTICAL);
+        TextView resetBtn = a.text("恢复默认", 13f, 0xFFD1D5DB);
+        resetBtn.setGravity(Gravity.CENTER);
+        resetBtn.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
+        resetBtn.setBackground(a.bg(0x1CFFFFFF, 11));
+        MobileMotion.bindPress(resetBtn, 0.95f);
+        resetBtn.setOnClickListener(
+                v -> {
+                    a.mobilePrefs()
+                            .edit()
+                            .putString(Prefs.PLAYER_BUTTON_ORDER, Prefs.DEFAULT_PLAYER_BUTTON_ORDER)
+                            .apply();
+                    rebuildToolDock(currentMobileLandscape);
+                    updateLabels();
+                    if (dlgRef[0] != null) dlgRef[0].dismiss();
+                    a.toast("已恢复默认工具栏排序");
+                });
+        LinearLayout.LayoutParams rstLp = new LinearLayout.LayoutParams(0, -2, 1f);
+        rstLp.rightMargin = a.dp(8);
+        actions.addView(resetBtn, rstLp);
+
+        TextView saveBtn = a.text("保存排序", 13f, MobileTheme.of(a).accentOnFill);
+        saveBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+        saveBtn.setGravity(Gravity.CENTER);
+        saveBtn.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
+        saveBtn.setBackground(a.bg(accent, 11));
+        MobileMotion.bindPress(saveBtn, 0.95f);
+        saveBtn.setOnClickListener(
+                v -> {
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < tokens.size(); i++) {
+                        if (i > 0) sb.append(',');
+                        sb.append(tokens.get(i));
+                    }
+                    a.mobilePrefs()
+                            .edit()
+                            .putString(
+                                    Prefs.PLAYER_BUTTON_ORDER,
+                                    Prefs.sanitizeButtonOrder(sb.toString()))
+                            .apply();
+                    rebuildToolDock(currentMobileLandscape);
+                    updateLabels();
+                    if (dlgRef[0] != null) dlgRef[0].dismiss();
+                    a.toast("已更新工具栏顺序");
+                });
+        actions.addView(saveBtn, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        LinearLayout.LayoutParams actLp = new LinearLayout.LayoutParams(-1, -2);
+        actLp.topMargin = a.dp(8);
+        root.addView(actions, actLp);
+
+        dlgRef[0] = openMobilePlayerSheet("工具栏自定义排序", root);
+    }
+
+    /** Layer 4 — Frosted Side/Bottom Panel housing secondary cinema tools with vector icons. */
+    private void showMobileMoreSheet() {
+        final boolean live = "live".equals(site.key);
+        final Dialog[] dlgRef = new Dialog[1];
+        LinearLayout body = a.vertical();
+        body.setTag("mobile-more-sheet");
+
+        String[] aspectNames = {"适应画面", "铺满屏幕", "16:9", "4:3", "裁切填充"};
+        int aspectIdx =
+                Math.max(0, Math.min(aspectNames.length - 1, a.prefs.getInt(Prefs.ASPECT, 0)));
+        String[] repeatNames = {"关闭", "单集循环", "列表循环"};
+        int repeatIdx =
+                Math.max(0, Math.min(repeatNames.length - 1, a.prefs.getInt(Prefs.REPEAT_MODE, 0)));
+        String sleepSummary =
+                SESSION_SLEEP_TIMER.summaryLabel(android.os.SystemClock.uptimeMillis());
+        int introSec = live ? 0 : getVideoIntro(a, site, video);
+        int outroSec = live ? 0 : getVideoOutro(a, site, video);
+        String skipSummary =
+                (introSec <= 0 && outroSec <= 0)
+                        ? "未设置"
+                        : ("头 " + skipLabel(introSec) + " · 尾 " + skipLabel(outroSec));
+
+        // Group 1: Video & Audio
+        List<View> avRows = new ArrayList<>();
+        avRows.add(
+                buildMobileMoreToolRow(
+                        MobileIcons.IC_ASPECT,
+                        "画面比例",
+                        aspectNames[aspectIdx],
+                        () -> {
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            aspect();
+                        }));
+        if (!live) {
+            avRows.add(
+                    buildMobileMoreToolRow(
+                            MobileIcons.IC_AUDIO_TRACK,
+                            "音轨选择",
+                            "",
+                            () -> {
+                                if (dlgRef[0] != null) dlgRef[0].dismiss();
+                                tracks(1);
+                            }));
+        }
+        avRows.add(
+                buildMobileMoreToolRow(
+                        MobileIcons.IC_PALETTE,
+                        "画面色彩",
+                        "",
+                        () -> {
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            pictureEffect();
+                        }));
+        addMoreGroupCard(body, avRows);
+
+        // Group 2: Playback utilities
+        List<View> playRows = new ArrayList<>();
+        if (!a.privateMode && !a.isCast()) {
+            playRows.add(
+                    buildMobileMoreToolRow(
+                            MobileIcons.IC_CAST,
+                            "投屏到电视",
+                            "搜索局域网设备",
+                            () -> {
+                                if (dlgRef[0] != null) dlgRef[0].dismiss();
+                                chooseCastDevice();
+                            }));
+        }
+        if (!live) {
+            playRows.add(
+                    buildMobileMoreToolRow(
+                            MobileIcons.IC_SKIP,
+                            "片头片尾设置",
+                            skipSummary,
+                            () -> {
+                                if (dlgRef[0] != null) dlgRef[0].dismiss();
+                                choose(
+                                        "片头片尾设置（本片独立）",
+                                        new String[] {
+                                            "设置跳过片头 · " + skipLabel(introSec),
+                                            "设置跳过片尾 · " + skipLabel(outroSec)
+                                        },
+                                        -1,
+                                        n -> skip(n == 0));
+                            }));
+        }
+        playRows.add(
+                buildMobileMoreToolRow(
+                        MobileIcons.IC_TIMER,
+                        "睡眠定时",
+                        sleepSummary,
+                        () -> {
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            sleepTimerMenu();
+                        }));
+        if (!live) {
+            playRows.add(
+                    buildMobileMoreToolRow(
+                            MobileIcons.IC_REPEAT,
+                            "单集循环",
+                            repeatNames[repeatIdx],
+                            () -> {
+                                if (dlgRef[0] != null) dlgRef[0].dismiss();
+                                repeat();
+                            }));
+        }
+        playRows.add(
+                buildMobileMoreToolRow(
+                        MobileIcons.IC_EXTERNAL,
+                        "外部播放器",
+                        "",
+                        () -> {
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            openInExternalPlayer();
+                        }));
+        if (!live) {
+            playRows.add(
+                    buildMobileMoreToolRow(
+                            MobileIcons.IC_REPLAY,
+                            "重播",
+                            "",
+                            () -> {
+                                if (dlgRef[0] != null) dlgRef[0].dismiss();
+                                pendingResumeMs = 0;
+                                if (a.playingBookmark != null) a.playingBookmark.position = 0;
+                                if (a.player != null && a.prepared) {
+                                    recordUserSeek(0);
+                                    a.player.seekTo(0);
+                                    a.player.start();
+                                    a.playing = true;
+                                } else {
+                                    a.resumeAt = -1;
+                                    reload(false);
+                                }
+                            }));
+        }
+        addMoreGroupCard(body, playRows);
+
+        // Group 3: Toolbar customization & playback info
+        List<View> sysRows = new ArrayList<>();
+        sysRows.add(
+                buildMobileMoreToolRow(
+                        MobileIcons.IC_SORT,
+                        "工具栏自定义排序",
+                        "",
+                        () -> {
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            showMobileToolbarOrderSheet();
+                        }));
+        sysRows.add(
+                buildMobileMoreToolRow(
+                        MobileIcons.IC_INFO,
+                        "播放信息",
+                        a.player != null ? a.player.activeEngineShortLabel() : "",
+                        () -> {
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            message(
+                                    a.player == null
+                                            ? "播放器尚未准备好。"
+                                            : a.player.playbackInfo()
+                                                    + "\n"
+                                                    + surface.outputName());
+                        }));
+        addMoreGroupCard(body, sysRows);
+
+        dlgRef[0] = openMobilePlayerSheet(live ? "直播更多工具" : "更多工具", body);
+    }
+
     void showBubble(
             String title,
             String[] labels,
             int selected,
             PlayerBubble.IntAction action,
             String message) {
+        if (!a.isTvDevice()) {
+            showMobileChoiceSheet(title, labels, selected, action, message);
+            return;
+        }
         if (activeDialog != null) {
             activeDialog.dismiss();
             activeDialog = null;
@@ -2265,7 +3390,7 @@ final class PlaybackControls {
         List<String> items = new ArrayList<>();
         final int epgIndex = canEpg ? items.size() : -1;
         if (canEpg) {
-            items.add("📅 节目单与回看 (EPG)");
+            items.add("节目单与回看 (EPG)");
         }
         final int vTrackStart = items.size();
         if (vTrackMenuCount > 0) {
@@ -2687,6 +3812,7 @@ final class PlaybackControls {
     private void onDanmuConfigUpdated(DanmuSettingsPanel.DanmuConfig config) {
         if (config == null || danmaku.closed) return;
         danmaku.applyConfig(config);
+        syncMobileDanmakuCapsule();
         String prevSig = lastObservedDanmuServerSignature;
         String nextSig = danmuServerSignature(config);
         lastObservedDanmuServerSignature = nextSig;
@@ -3360,38 +4486,39 @@ final class PlaybackControls {
                         return true;
                     });
 
+            final MobileTheme.Palette p = MobileTheme.of(a);
             // Top floating HUD bar
             LinearLayout topBar = a.row();
             topBar.setGravity(Gravity.CENTER_VERTICAL);
             topBar.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
-            android.graphics.drawable.GradientDrawable topBg = a.bg(0xdd141c19, 20);
-            topBg.setStroke(a.dp(1), 0x33ffffff);
+            android.graphics.drawable.GradientDrawable topBg = a.bg(0xE0141720, 18);
+            topBg.setStroke(MobileTheme.hairlinePx(a), 0x28FFFFFF);
             topBar.setBackground(topBg);
 
             LinearLayout titleCol = a.vertical();
             TextView t1 = a.text("全屏字幕触控调试", 14.5f, MainActivity.WHITE);
             t1.setTypeface(null, android.graphics.Typeface.BOLD);
             titleCol.addView(t1);
-            TextView t2 = a.text("单指按住拖拽位置（中轴线自动吸附） · 双指捏合缩放字号", 11.5f, 0xff9ca3af);
+            TextView t2 = a.text("单指按住拖拽位置（中轴线自动吸附） · 双指捏合缩放字号", 11.5f, 0xFF949BA8);
             titleCol.addView(t2);
             topBar.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
 
-            TextView resetBtn = a.text("重置居中", 12, 0xffe5e7eb);
+            TextView resetBtn = a.text("重置居中", 12, 0xFFE5E7EB);
             resetBtn.setGravity(Gravity.CENTER);
             resetBtn.setPadding(a.dp(12), a.dp(7), a.dp(12), a.dp(7));
-            resetBtn.setBackground(a.bg(0x28ffffff, 999));
-            MobileDetailScreen.bindTouchFeedback(resetBtn);
+            resetBtn.setBackground(a.bg(0x24FFFFFF, 999));
+            UiWidgets.bindTouchFeedback(resetBtn);
             resetBtn.setOnClickListener(v -> resetDefaults.run());
             LinearLayout.LayoutParams resetLp = new LinearLayout.LayoutParams(-2, -2);
             resetLp.rightMargin = a.dp(8);
             topBar.addView(resetBtn, resetLp);
 
-            TextView doneBtn = a.text("完成", 12.5f, Color.WHITE);
+            TextView doneBtn = a.text("完成", 12.5f, p.accentOnFill);
             doneBtn.setTypeface(null, android.graphics.Typeface.BOLD);
             doneBtn.setGravity(Gravity.CENTER);
             doneBtn.setPadding(a.dp(15), a.dp(7), a.dp(15), a.dp(7));
-            doneBtn.setBackground(a.bg(0xff1f7a54, 999));
-            MobileDetailScreen.bindTouchFeedback(doneBtn);
+            doneBtn.setBackground(a.bg(p.accent, 999));
+            UiWidgets.bindTouchFeedback(doneBtn);
             doneBtn.setOnClickListener(v -> dlg.dismiss());
             topBar.addView(doneBtn, new LinearLayout.LayoutParams(-2, -2));
 
@@ -3404,8 +4531,8 @@ final class PlaybackControls {
             // Compact floating control card at top-below-HUD (so bottom subtitle area stays clear)
             LinearLayout ctrlCard = a.vertical();
             ctrlCard.setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(12));
-            android.graphics.drawable.GradientDrawable ctrlBg = a.bg(0xdc141c19, 20);
-            ctrlBg.setStroke(a.dp(1), 0x2effffff);
+            android.graphics.drawable.GradientDrawable ctrlBg = a.bg(0xE0141720, 18);
+            ctrlBg.setStroke(MobileTheme.hairlinePx(a), 0x26FFFFFF);
             ctrlCard.setBackground(ctrlBg);
 
             // Size slider row
@@ -3414,10 +4541,10 @@ final class PlaybackControls {
             szRow.addView(a.text("字幕大小", 12.5f, MainActivity.WHITE));
             SeekBar szBar = new SeekBar(a);
             szBar.setMax(40);
-            UiCompat.tintSeekBar(szBar, 0xff34d399, Color.WHITE);
+            UiCompat.tintSeekBar(szBar, p.accent, Color.WHITE);
             sizeBarRef[0] = szBar;
             szRow.addView(szBar, new LinearLayout.LayoutParams(0, -2, 1f));
-            TextView szVal = a.text("45", 12.5f, 0xff34d399);
+            TextView szVal = a.text("45", 12.5f, p.accent);
             szVal.setGravity(Gravity.RIGHT);
             sizeValRef[0] = szVal;
             szRow.addView(szVal, new LinearLayout.LayoutParams(a.dp(32), -2));
@@ -4259,30 +5386,79 @@ final class PlaybackControls {
     static void showVideoSkipRecordsDialog(MainActivity a, Runnable onChanged) {
         if (a == null) return;
         int count = countVideoSkipRecords(a);
-        int v2Count = a.isTvDevice() ? VideoMarkerRepository.count(a) : 0;
+        if (!a.isTvDevice()) {
+            final MobileTheme.Palette p = MobileTheme.of(a);
+            final MobileBottomSheet.SheetHandle[] sheetRef = new MobileBottomSheet.SheetHandle[1];
+            LinearLayout box = a.vertical();
+            box.setPadding(0, a.dp(2), 0, a.dp(4));
+
+            TextView info =
+                    a.text(
+                            "每部影片在播放页面设置「片头」或「片尾」时，会默认记录当前播放时间并支持按秒微调。记录仅对当前影片独立生效，不会全局影响其他影视。",
+                            13.5f,
+                            p.textSecondary);
+            info.setLineSpacing(a.dp(3.5f), 1f);
+            box.addView(info, new LinearLayout.LayoutParams(-1, -2));
+            a.gap(box, 12);
+
+            LinearLayout statCard = a.row();
+            statCard.setGravity(Gravity.CENTER_VERTICAL);
+            statCard.setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12));
+            statCard.setBackground(MobileTheme.subtleBg(a, 14));
+            MobileIcons.IconView skipIcon =
+                    MobileIcons.create(a, MobileIcons.IC_SKIP, 18f, p.accent);
+            LinearLayout.LayoutParams icLp = new LinearLayout.LayoutParams(a.dp(18), a.dp(18));
+            icLp.rightMargin = a.dp(10);
+            statCard.addView(skipIcon, icLp);
+            TextView statLabel = a.text("本机已保存片头片尾记录", 14f, p.textPrimary);
+            statCard.addView(statLabel, new LinearLayout.LayoutParams(0, -2, 1f));
+            TextView statVal = a.text(count + " 部影片", 14f, count > 0 ? p.accent : p.textSecondary);
+            statVal.setTypeface(null, android.graphics.Typeface.BOLD);
+            statCard.addView(statVal, new LinearLayout.LayoutParams(-2, -2));
+            box.addView(statCard, new LinearLayout.LayoutParams(-1, -2));
+
+            if (count > 0) {
+                a.gap(box, 16);
+                TextView clearBtn = a.text("清空全部记录", 15f, 0xFFFFFFFF);
+                clearBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+                clearBtn.setGravity(Gravity.CENTER);
+                clearBtn.setMinimumHeight(a.dp(46));
+                clearBtn.setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(12));
+                clearBtn.setBackground(a.bg(p.danger, 14));
+                MobileMotion.bindPress(clearBtn, 0.96f);
+                clearBtn.setOnClickListener(
+                        v ->
+                                MobileBottomSheet.showConfirm(
+                                        a,
+                                        "清空全部跳过记录",
+                                        "将删除本机已保存的 " + count + " 部影片片头片尾记录，删除后无法恢复。",
+                                        "清空全部",
+                                        true,
+                                        () -> {
+                                            if (sheetRef[0] != null) sheetRef[0].dismiss();
+                                            clearVideoSkipRecords(a, onChanged);
+                                        }));
+                box.addView(clearBtn, new LinearLayout.LayoutParams(-1, -2));
+            }
+            sheetRef[0] = MobileBottomSheet.showHandle(a, "片头片尾独立记录", null, null, null, box, false);
+            return;
+        }
+        int v2Count = VideoMarkerRepository.count(a);
         AppDialog.Builder b =
                 new AppDialog.Builder(a)
                         .setTitle("片头片尾独立记录")
                         .setMessage(
-                                a.isTvDevice()
-                                        ? "旧记录为片头持续秒数/片尾剩余秒数；新标记为本集本线路绝对毫秒节点，互不改写。\n旧记录："
-                                                + count
-                                                + "，新标记："
-                                                + (v2Count < 0 ? "读取失败，原文件保留" : v2Count)
-                                                + "。\n清空将删除本空间两代记录及当前会话标记；不影响另一空间或远端。"
-                                        : "每部影片在播放页面点击「片头」或「片尾」按钮时，会优先默认记录当前播放时间，并支持按秒微调。\n\n"
-                                                + "记录仅对当前影片独立生效，不会全局同步影响其他影视。\n"
-                                                + "当前本机已保存："
-                                                + count
-                                                + " 部影片记录。")
+                                "旧记录为片头持续秒数/片尾剩余秒数；新标记为本集本线路绝对毫秒节点，互不改写。\n旧记录："
+                                        + count
+                                        + "，新标记："
+                                        + (v2Count < 0 ? "读取失败，原文件保留" : v2Count)
+                                        + "。\n清空将删除本空间两代记录及当前会话标记；不影响另一空间或远端。")
                         .setNegativeButton("关闭", null);
-        if (count > 0 || a.isTvDevice()) {
-            b.setPositiveButton(
-                    "清空全部记录",
-                    (d, w) -> {
-                        clearVideoSkipRecords(a, onChanged);
-                    });
-        }
+        b.setPositiveButton(
+                "清空全部记录",
+                (d, w) -> {
+                    clearVideoSkipRecords(a, onChanged);
+                });
         b.show();
     }
 
@@ -4303,6 +5479,7 @@ final class PlaybackControls {
                 captureSkipSecondsFromPlayback(intro, currentPlayerPosMs, currentPlayerDurMs);
         final boolean hasCapture = captureSec > 0;
         final boolean tv = a.isTvDevice();
+        final int skipAccent = tv ? 0xff34d399 : MobileTheme.of(a).accent;
         final int cardWidth =
                 resolveSkipDialogWidthPx(a.windowWidth(), a.dp(tv ? 452 : 368), a.dp(tv ? 96 : 36));
 
@@ -4341,7 +5518,7 @@ final class PlaybackControls {
         scope.setSingleLine(true);
         headRow.addView(scope, new LinearLayout.LayoutParams(0, -2, 1f));
 
-        final TextView valueLabel = a.text("", 15.5f, 0xff34d399);
+        final TextView valueLabel = a.text("", 15.5f, skipAccent);
         valueLabel.setTypeface(null, android.graphics.Typeface.BOLD);
         valueLabel.setSingleLine(true);
         valueLabel.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
@@ -4372,7 +5549,7 @@ final class PlaybackControls {
         bar.setId(View.generateViewId());
         bar.setMax(VideoSkipStore.MAX_SKIP_SECONDS);
         bar.setKeyProgressIncrement(5);
-        UiCompat.tintSeekBar(bar, 0xff34d399, Color.WHITE);
+        UiCompat.tintSeekBar(bar, skipAccent, Color.WHITE);
         UiCompat.setDefaultFocusHighlightEnabled(bar, false);
         bar.setProgress(savedSec);
         LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(0, a.dp(30), 1f);
@@ -4403,7 +5580,7 @@ final class PlaybackControls {
                     } else {
                         String fmt = PlaybackController.formatTime(clamped * 1000);
                         valueLabel.setText(intro ? fmt : "结束前 " + fmt);
-                        valueLabel.setTextColor(0xff34d399);
+                        valueLabel.setTextColor(skipAccent);
                     }
                 };
         final PlayerBubble.IntAction commitSec =
@@ -4474,8 +5651,8 @@ final class PlaybackControls {
                         a,
                         captureLabel,
                         "skip-confirm-current",
-                        0x2a34d399,
-                        0xff6ee7b7,
+                        tv ? 0x2a34d399 : MobileTheme.withAlpha(skipAccent, 0x33),
+                        tv ? 0xff6ee7b7 : skipAccent,
                         () -> {
                             if (captureSec > 0) {
                                 commitSec.accept(captureSec);
@@ -4705,7 +5882,11 @@ final class PlaybackControls {
             return;
         }
         String castUrl = resolved == null || resolved.url == null ? "" : resolved.url.trim();
-        String valid = CastService.validateCastMediaUrl(castUrl);
+        String rawUrl =
+                a.activeEpisode != null && a.activeEpisode.url != null
+                        ? a.activeEpisode.url.trim()
+                        : "";
+        String valid = DlnaCastClient.resolveCastableMediaUrl(castUrl, rawUrl);
         if (valid.isEmpty()) {
             a.toast("当前播放流为本地代理或非 HTTP 直链，暂不支持直接推送给外部投屏设备");
             return;
@@ -4739,6 +5920,10 @@ final class PlaybackControls {
     }
 
     void more() {
+        if (!a.isTvDevice()) {
+            showMobileMoreSheet();
+            return;
+        }
         if ("live".equals(site.key)) {
             final String clockKey =
                     a.isTvDevice() ? Prefs.TV_PLAYER_TOP_RIGHT_HUD : Prefs.PLAYER_ALWAYS_SHOW_CLOCK;
@@ -4991,14 +6176,52 @@ final class PlaybackControls {
             }
         }
         Button decBtn = buttons.get("decoder");
+        String engineLabel;
+        if (a.player != null) {
+            engineLabel = a.player.activeEngineShortLabel();
+        } else {
+            int eng = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+            engineLabel = eng == 3 ? "MPV" : (eng == 2 ? "IJK" : (eng == 1 ? "系统" : "Media3"));
+        }
         if (decBtn != null) {
-            if (a.player != null) {
-                decBtn.setText(a.player.activeEngineShortLabel());
-            } else {
-                int eng = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
-                decBtn.setText(
-                        eng == 3 ? "MPV" : (eng == 2 ? "IJK" : (eng == 1 ? "系统" : "Media3")));
+            decBtn.setText(engineLabel);
+        }
+        if (mobileSpeedLabel != null) {
+            boolean customSpeed = Math.abs(rate - 1f) >= 0.01f;
+            mobileSpeedLabel.setText(customSpeed ? (rate + "×") : "倍速");
+            if (mobileSpeedPill != null) {
+                int accent = MobileTheme.of(a).accent;
+                GradientDrawable spBg =
+                        a.bg(customSpeed ? MobileTheme.withAlpha(accent, 0x42) : 0x26FFFFFF, 999);
+                spBg.setStroke(
+                        MobileTheme.hairlinePx(a),
+                        customSpeed ? MobileTheme.withAlpha(accent, 0xAA) : 0x24FFFFFF);
+                mobileSpeedPill.setBackground(spBg);
             }
+        }
+        if (mobileKernelLabel != null) {
+            mobileKernelLabel.setText(engineLabel);
+        }
+        if (!a.isTvDevice() && (mobilePrevBtn != null || mobileNextBtn != null)) {
+            boolean isLive = site != null && "live".equals(site.key);
+            int epCount =
+                    a.activeLine != null && a.activeLine.episodes != null
+                            ? a.activeLine.episodes.size()
+                            : 0;
+            int stepVis = shouldShowEpisodeSteppers(isLive, epCount) ? View.VISIBLE : View.GONE;
+            if (mobilePrevBtn != null && mobilePrevBtn.getVisibility() != stepVis) {
+                mobilePrevBtn.setVisibility(stepVis);
+            }
+            if (mobileNextBtn != null && mobileNextBtn.getVisibility() != stepVis) {
+                mobileNextBtn.setVisibility(stepVis);
+            }
+        }
+        syncMobileDanmakuCapsule();
+        if (!a.isTvDevice() && timeline != null) {
+            timeline.invalidate();
+        }
+        if (!a.isTvDevice() && a.playerChrome != null) {
+            a.playerChrome.refreshMobileHeaderBadges();
         }
         if (a.isTvDevice() && activeTooltipButton != null && activeTooltipButton.hasFocus()) {
             refreshTooltipForCurrentFocus();
@@ -5393,6 +6616,7 @@ final class PlaybackControls {
         }
         syncModernActionVisibility();
         refreshPlayPauseGlyph();
+        syncMobileDanmakuCapsule();
         applyRememberedSubtitleIfNeeded();
         applyPreferredAudioIfNeeded();
         if ((!subtitlePrefAppliedForEpisode || !audioPrefAppliedForEpisode) && a.ui != null) {
@@ -5596,6 +6820,7 @@ final class PlaybackControls {
             }
         }
         if (subtitle.isPreviewActive()) {
+            subtitle.animate().cancel();
             subtitle.setTranslationY(0f);
             return;
         }
@@ -5606,6 +6831,16 @@ final class PlaybackControls {
                                         ? Math.max(modernTv ? 104 : 82, bottomDp + 16)
                                         : Math.max(modernTv ? 176 : 168, bottomDp + 24))
                         : basePx;
-        subtitle.setTranslationY(-(targetPx - basePx));
+        float targetTy = -(targetPx - basePx);
+        subtitle.animate().cancel();
+        if (MobileMotion.isReduced(a) || !UiCompat.isAttached(subtitle)) {
+            subtitle.setTranslationY(targetTy);
+        } else if (Math.abs(subtitle.getTranslationY() - targetTy) > 0.5f) {
+            subtitle.animate()
+                    .translationY(targetTy)
+                    .setDuration(MotionTokens.DURATION_STANDARD_MS)
+                    .setInterpolator(MotionTokens.createStandardInterpolator())
+                    .start();
+        }
     }
 }

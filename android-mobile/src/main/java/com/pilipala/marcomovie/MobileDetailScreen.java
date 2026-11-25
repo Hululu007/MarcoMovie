@@ -1,6 +1,6 @@
 package com.pilipala.marcomovie;
 
-import java.util.HashMap;
+import android.app.Dialog;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -9,13 +9,14 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffXfermode;
-import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.text.Spannable;
+import android.text.SpannableStringBuilder;
 import android.text.TextUtils;
+import android.text.style.ImageSpan;
 import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -26,24 +27,25 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import java.util.WeakHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * iPhone / Apple TV+ / Infuse 1:1 portrait & tablet immersive video detail screen:
- * - True full-bleed poster from physical screen top (top: 0) down to 77% of screen height
- * - Dynamic ambient color extraction from poster artwork with progressive lower frosted-glass blend
- * - Floating Liquid Glass top navigation bar (left circular back button, right independent Source
- *   selector capsule + Download/Favorite dual capsule)
- * - Centered hero typography, metadata pills, TMDB / Douban badges, expandable synopsis, and
- *   full-width white stadium Play button
- * - Independent Season selector button ("第 X 季 ⌄"), horizontal circular episode number strip, and
- *   horizontal 16:9 landscape episode preview cards.
+ * Immersive Mobile & Tablet Video Detail Screen (Day/Night {@link MobileTheme} +
+ * {@link MobileIcons} + {@link MobileMotion}):
+ * - Full-bleed poster hero at physical screen top with a persistent cinematic dark scrim so white
+ *   hero typography, metadata pills, and floating vector controls stay crisp over any artwork
+ * - Rounded Day/Night lower content surface ({@code bgCanvas} / borderless {@code bgCard} &
+ *   {@code bgSubtle}) with animated synopsis expand/collapse, heart pop-bounce, progressive
+ *   single-episode decluttering (hides sort/all-episodes on single-episode movies), smart
+ *   single-line source pill, and scroll-preserving line/episode switching.
  */
 final class MobileDetailScreen {
     private MobileDetailScreen() {}
@@ -53,6 +55,154 @@ final class MobileDetailScreen {
     private static final Map<Integer, TmdbService.EpisodeStill> activeTmdbEpisodes =
             new HashMap<>();
     private static final Map<String, String> activeAiEpisodeTitles = new HashMap<>();
+    private static String selectedEpisodeLine = "";
+    private static int selectedEpisodeIndex = -1;
+    private static boolean activeVideoDescending = false;
+    private static final WeakHashMap<View, EpisodeSelectionState> SELECTION_STATES =
+            new WeakHashMap<>();
+
+    /** Pure-JVM policy: every newly opened video defaults cleanly to ascending (正序) order. */
+    static boolean defaultEpisodeDescending() {
+        return false;
+    }
+
+    /**
+     * Pure-JVM policy: resolves initial highlighted &amp; scrolled episode index on open — locates
+     * the last watched episode when watch history exists, otherwise defaults to Episode 1 (0).
+     */
+    static int resolveInitialEpisodeIndex(
+            List<Cms.Episode> episodes, String rememberedEpisodeName) {
+        if (episodes == null || episodes.isEmpty()) return 0;
+        if (rememberedEpisodeName != null && !rememberedEpisodeName.isEmpty()) {
+            for (int i = 0; i < episodes.size(); i++) {
+                Cms.Episode ep = episodes.get(i);
+                if (ep != null && rememberedEpisodeName.equals(ep.name)) {
+                    return i;
+                }
+            }
+        }
+        return 0;
+    }
+
+    private static final class EpisodeCardHolder {
+        final View cardView;
+        final LinearLayout ePill;
+        final MobileIcons.IconView playIcon;
+        final TextView epTagTv;
+        final View activeRing;
+        final TextView headlineTv;
+
+        EpisodeCardHolder(
+                View cardView,
+                LinearLayout ePill,
+                MobileIcons.IconView playIcon,
+                TextView epTagTv,
+                View activeRing,
+                TextView headlineTv) {
+            this.cardView = cardView;
+            this.ePill = ePill;
+            this.playIcon = playIcon;
+            this.epTagTv = epTagTv;
+            this.activeRing = activeRing;
+            this.headlineTv = headlineTv;
+        }
+    }
+
+    private static final class EpisodeSelectionState {
+        final String lineName;
+        final Map<Integer, TextView> numPills = new HashMap<>();
+        final Map<Integer, EpisodeCardHolder> cards = new HashMap<>();
+        HorizontalScrollView numScroll;
+        HorizontalScrollView cardScroll;
+
+        EpisodeSelectionState(String lineName) {
+            this.lineName = lineName;
+        }
+
+        void scrollToEpisode(final int epIdx, final boolean smooth) {
+            if (numScroll != null) {
+                final View pill = numPills.get(epIdx);
+                if (pill != null) {
+                    numScroll.post(
+                            () -> {
+                                int targetX =
+                                        Math.max(
+                                                0,
+                                                pill.getLeft()
+                                                        - (numScroll.getWidth() - pill.getWidth())
+                                                                / 2);
+                                if (smooth) numScroll.smoothScrollTo(targetX, 0);
+                                else numScroll.scrollTo(targetX, 0);
+                            });
+                }
+            }
+            if (cardScroll != null) {
+                final EpisodeCardHolder holder = cards.get(epIdx);
+                if (holder != null && holder.cardView != null) {
+                    final View cardV = holder.cardView;
+                    cardScroll.post(
+                            () -> {
+                                int targetX =
+                                        Math.max(0, cardV.getLeft() - cardScroll.getPaddingLeft());
+                                if (smooth) cardScroll.smoothScrollTo(targetX, 0);
+                                else cardScroll.scrollTo(targetX, 0);
+                            });
+                }
+            }
+        }
+
+        void applySelection(MainActivity a, int activeIdx) {
+            MobileTheme.Palette p = MobileTheme.of(a);
+            for (Map.Entry<Integer, TextView> entry : numPills.entrySet()) {
+                boolean sel = entry.getKey() == activeIdx;
+                TextView pill = entry.getValue();
+                pill.setTextColor(sel ? p.accentOnFill : p.textPrimary);
+                pill.setBackground(
+                        sel ? MobileTheme.accentPillBg(a, 10) : MobileTheme.subtleBg(a, 10));
+                if (sel) {
+                    MobileMotion.popBounce(pill);
+                }
+            }
+            for (Map.Entry<Integer, EpisodeCardHolder> entry : cards.entrySet()) {
+                boolean sel = entry.getKey() == activeIdx;
+                EpisodeCardHolder h = entry.getValue();
+                h.ePill.setBackground(sel ? MobileTheme.accentPillBg(a, 6) : a.bg(0xB00A0B0E, 6));
+                h.playIcon.setTint(sel ? p.accentOnFill : Color.WHITE);
+                h.epTagTv.setTextColor(sel ? p.accentOnFill : Color.WHITE);
+                h.activeRing.setVisibility(sel ? View.VISIBLE : View.GONE);
+                h.headlineTv.setTextColor(sel ? p.accent : p.textPrimary);
+            }
+        }
+    }
+
+    private static void refreshSelectedEpisodeHighlight(
+            MainActivity a, String lineName, int activeIdx) {
+        if (a == null || a.root == null || lineName == null) return;
+        View bodyHost = a.root.findViewWithTag("detail-episodes-body");
+        if (bodyHost == null) return;
+        EpisodeSelectionState state = SELECTION_STATES.get(bodyHost);
+        if (state != null && lineName.equals(state.lineName)) {
+            state.applySelection(a, activeIdx);
+        }
+    }
+
+    /** Pure-JVM progressive-disclosure policy: hide sort & all-episodes grid on 1-episode titles. */
+    static boolean shouldShowMultiEpisodeTools(int episodeCount) {
+        return episodeCount > 1;
+    }
+
+    private static CharSequence buildPlayButtonLabel(
+            MainActivity a, int iconColor, String episodeLabel) {
+        SpannableStringBuilder ssb = new SpannableStringBuilder("  播放 · " + episodeLabel);
+        MobileIcons.IconDrawable playIcon =
+                MobileIcons.drawable(a, MobileIcons.IC_PLAY, 14f, iconColor);
+        ssb.setSpan(
+                new ImageSpan(playIcon, ImageSpan.ALIGN_BASELINE),
+                0,
+                1,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return ssb;
+    }
 
     private static void handleDetailEpisodeTap(
             MainActivity a,
@@ -64,13 +214,18 @@ final class MobileDetailScreen {
             boolean forcePlay) {
         int tapMode = a.mobilePrefs().getInt(Prefs.DETAIL_TAP_MODE, 0);
         if (!forcePlay && tapMode == 2) {
+            selectedEpisodeLine = line.name == null ? "" : line.name;
+            selectedEpisodeIndex = Math.max(0, epNumber - 1);
+            refreshSelectedEpisodeHighlight(a, selectedEpisodeLine, selectedEpisodeIndex);
             View playBtnView = a.root == null ? null : a.root.findViewWithTag("detail-play");
             if (playBtnView instanceof Button) {
                 Button playBtn = (Button) playBtnView;
+                MobileTheme.Palette p = MobileTheme.of(a);
                 EpisodeDisplay d = parseEpisodeDisplay(ep.name, epNumber);
-                playBtn.setText("▶   播放 · " + d.cleanTitle);
+                playBtn.setText(buildPlayButtonLabel(a, p.accentOnFill, d.cleanTitle));
                 playBtn.setOnClickListener(
                         v -> handleDetailEpisodeTap(a, site, video, line, ep, epNumber, true));
+                MobileMotion.popBounce(playBtn);
             }
             a.toast("已选中：" + ep.name + "（点击上方主播放钮开始播放）");
             return;
@@ -107,19 +262,7 @@ final class MobileDetailScreen {
     }
 
     static void bindTouchFeedback(View v) {
-        v.setFocusable(false);
-        v.setFocusableInTouchMode(false);
-        v.setOnTouchListener(
-                (view, event) -> {
-                    int action = event.getActionMasked();
-                    if (action == MotionEvent.ACTION_DOWN) {
-                        view.setAlpha(0.72f);
-                    } else if (action == MotionEvent.ACTION_UP
-                            || action == MotionEvent.ACTION_CANCEL) {
-                        view.setAlpha(1.0f);
-                    }
-                    return false;
-                });
+        MobileMotion.bindPress(v, 0.95f);
     }
 
     static GradientDrawable glassBg(
@@ -137,12 +280,12 @@ final class MobileDetailScreen {
 
     static int defaultAmbientForTitle(String title) {
         int[] palette = {
-            0xff1a341e, // Deep forest green (e.g. 谷雨)
-            0xff182638, // Deep midnight blue
-            0xff2a1d33, // Deep plum
-            0xff2e2118, // Deep warm umber
-            0xff162e2e, // Deep teal
-            0xff291c24 // Deep burgundy
+            0xFF1A2A22, // Deep pine
+            0xFF182436, // Deep midnight blue
+            0xFF281C32, // Deep plum
+            0xFF2C2018, // Deep warm umber
+            0xFF162C2E, // Deep teal
+            0xFF291C24 // Deep burgundy
         };
         int h = title == null ? 0 : Math.abs(title.hashCode());
         return palette[h % palette.length];
@@ -165,7 +308,6 @@ final class MobileDetailScreen {
                 int alpha = Color.alpha(c);
                 if (alpha < 128) continue;
                 Color.colorToHSV(c, hsv);
-                // Weight saturated mid-tone pixels higher so dull black/white bars don't dominate
                 long weight = 1 + (long) (hsv[1] * 8f);
                 if (hsv[2] > 0.12f && hsv[2] < 0.92f) weight += 3;
                 rSum += Color.red(c) * weight;
@@ -179,13 +321,12 @@ final class MobileDetailScreen {
         int g = (int) (gSum / weightSum);
         int b = (int) (bSum / weightSum);
         Color.RGBToHSV(r, g, b, hsv);
-        // Clamp saturation & value to produce a rich, dark Apple TV+ cinema canvas
         if (hsv[1] < 0.22f && hsv[1] > 0.04f) {
             hsv[1] = 0.28f;
         } else {
             hsv[1] = Math.min(0.65f, hsv[1] * 1.15f);
         }
-        hsv[2] = Math.max(0.18f, Math.min(0.28f, hsv[2] * 0.42f));
+        hsv[2] = Math.max(0.16f, Math.min(0.26f, hsv[2] * 0.40f));
         return Color.HSVToColor(hsv);
     }
 
@@ -244,10 +385,10 @@ final class MobileDetailScreen {
 
     /**
      * Full-screen portrait backdrop canvas that renders:
-     * 1. Solid ambient color matching the poster's dominant mood
-     * 2. Full-bleed poster from y=0 to 77% screen height with vertical DST_IN alpha feathering
-     * 3. Lower 58%..100% softened/blurred overlap transition + top 28% breathable status-bar scrim
-     * 4. Smooth scroll-driven blur & veil cross-fade when scrolling down to the episode list.
+     * 1. Day/Night semantic {@code bgCanvas} below the poster hero
+     * 2. Full-bleed poster from physical y=0 with cinematic dark top & bottom readability scrims
+     *    so white overlay titles and floating nav buttons remain sharp over any poster artwork
+     * 3. Smooth scroll-driven blur & dark veil cross-fade when scrolling into the episode list.
      */
     static final class PortraitBackdropView extends View {
         private final MainActivity a;
@@ -276,7 +417,7 @@ final class MobileDetailScreen {
             this.posterWindowHeight = posterWindowHeight;
             this.topScrimHeight = topScrimHeight;
             this.ambientColor = initAmbient;
-            this.blurStartY = Math.round(posterWindowHeight * 0.62f);
+            this.blurStartY = Math.round(posterWindowHeight * 0.56f);
             maskPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
         }
 
@@ -289,7 +430,7 @@ final class MobileDetailScreen {
         }
 
         void setScrollOffset(int scrollY) {
-            float maxScroll = Math.max(1f, a.dp(340));
+            float maxScroll = Math.max(1f, a.dp(320));
             float next = Math.max(0f, Math.min(1f, scrollY / maxScroll));
             if (Math.abs(next - scrollProgress) > 0.008f) {
                 scrollProgress = next;
@@ -371,9 +512,7 @@ final class MobileDetailScreen {
             if (bw <= 0 || bh <= 0 || targetW <= 0 || targetH <= 0) return;
             float scale = Math.max(targetW / bw, targetH / bh);
             float dx = (targetW - bw * scale) * 0.5f;
-            // Bias slightly toward upper-center so faces and key poster artwork fill the expanded
-            // upper window
-            float dy = (targetH - bh * scale) * 0.26f;
+            float dy = (targetH - bh * scale) * 0.24f;
             drawMatrix.setScale(scale, scale);
             drawMatrix.postTranslate(dx, dy);
         }
@@ -384,12 +523,20 @@ final class MobileDetailScreen {
             int h = getHeight();
             if (w <= 0 || h <= 0) return;
 
-            // 1. Unified Solid Ambient Canvas
-            canvas.drawColor(ambientColor);
+            MobileTheme.Palette p = MobileTheme.of(a);
+            int scrimBase = p.isDark ? ambientColor : 0xFF0A0B0E;
+
+            canvas.drawColor(p.bgCanvas);
 
             int winH = Math.min(h, posterWindowHeight);
-            int bTop = Math.max(a.dp(120), Math.min(winH - a.dp(56), blurStartY - a.dp(10)));
+            int bTop = Math.max(a.dp(120), Math.min(winH - a.dp(56), blurStartY - a.dp(12)));
             int bFull = Math.min(winH, bTop + a.dp(54));
+
+            if (winH > 0) {
+                gradientPaint.setShader(null);
+                gradientPaint.setColor(scrimBase);
+                canvas.drawRect(0, 0, w, winH, gradientPaint);
+            }
 
             if (rawBitmap != null && !rawBitmap.isRecycled() && winH > 0) {
                 int save = canvas.saveLayer(0, 0, w, winH, null);
@@ -397,19 +544,15 @@ final class MobileDetailScreen {
                 bitmapPaint.setAlpha(255);
                 canvas.drawBitmap(rawBitmap, drawMatrix, bitmapPaint);
 
-                // Progressive Frosted-Glass Blur starting from the movie title position
-                // (bTop..bFull)
-                // downward so poster graphics never interfere with reading the title & content
-                // below
                 if (blurredBitmap != null && !blurredBitmap.isRecycled()) {
                     int blurLayer = canvas.saveLayer(0, 0, w, winH, null);
                     configureCenterCropMatrix(blurredBitmap, w, winH);
                     bitmapPaint.setAlpha(255);
                     canvas.drawBitmap(blurredBitmap, drawMatrix, bitmapPaint);
 
-                    int topBlurAlpha = Math.round(scrollProgress * 225f);
+                    int topBlurAlpha = Math.round(scrollProgress * 220f);
                     int topMaskColor =
-                            (Math.max(0, Math.min(255, topBlurAlpha)) << 24) | 0x00ffffff;
+                            (Math.max(0, Math.min(255, topBlurAlpha)) << 24) | 0x00FFFFFF;
                     float stopTop = Math.max(0.05f, Math.min(0.88f, bTop / (float) winH));
                     float stopFull =
                             Math.max(stopTop + 0.04f, Math.min(0.96f, bFull / (float) winH));
@@ -419,84 +562,68 @@ final class MobileDetailScreen {
                                     0,
                                     0,
                                     winH,
-                                    new int[] {topMaskColor, topMaskColor, 0xffffffff, 0xffffffff},
+                                    new int[] {topMaskColor, topMaskColor, 0xFFFFFFFF, 0xFFFFFFFF},
                                     new float[] {0f, stopTop, stopFull, 1f},
                                     Shader.TileMode.CLAMP));
                     canvas.drawRect(0, 0, w, winH, maskPaint);
                     maskPaint.setShader(null);
                     canvas.restoreToCount(blurLayer);
                 }
-
-                // Intrinsic vertical alpha feathering into ambient canvas
-                maskPaint.setShader(
-                        new LinearGradient(
-                                0,
-                                0,
-                                0,
-                                winH,
-                                new int[] {
-                                    0xffffffff, 0xffffffff, 0xd9ffffff, 0x66ffffff, 0x00ffffff
-                                },
-                                new float[] {0f, 0.78f, 0.88f, 0.95f, 1f},
-                                Shader.TileMode.CLAMP));
-                canvas.drawRect(0, 0, w, winH, maskPaint);
-                maskPaint.setShader(null);
                 canvas.restoreToCount(save);
             }
 
-            // 2. Breathable 28% Top Status-Bar Scrim
             if (topScrimHeight > 0) {
-                int cTop = withAlpha(ambientColor, 72);
-                int cMid = withAlpha(ambientColor, 26);
-                int cBot = withAlpha(ambientColor, 0);
                 gradientPaint.setShader(
                         new LinearGradient(
                                 0,
                                 0,
                                 0,
-                                topScrimHeight,
-                                new int[] {cTop, cMid, cBot},
+                                topScrimHeight + a.dp(32),
+                                new int[] {
+                                    withAlpha(0x0A0B0E, 140),
+                                    withAlpha(0x0A0B0E, 52),
+                                    Color.TRANSPARENT
+                                },
                                 new float[] {0f, 0.55f, 1f},
                                 Shader.TileMode.CLAMP));
-                canvas.drawRect(0, 0, w, topScrimHeight, gradientPaint);
+                canvas.drawRect(0, 0, w, topScrimHeight + a.dp(32), gradientPaint);
                 gradientPaint.setShader(null);
             }
 
-            // 3. Progressive Ambient Readability Gradient starting at the movie title (bTop)
-            int lockTop = Math.max(0, bTop - a.dp(8));
+            int lockTop = Math.max(0, bTop - a.dp(42));
             gradientPaint.setShader(
                     new LinearGradient(
                             0,
                             lockTop,
                             0,
-                            h,
+                            winH,
                             new int[] {
-                                withAlpha(ambientColor, 0),
-                                withAlpha(ambientColor, 148),
-                                withAlpha(ambientColor, 226),
-                                ambientColor,
-                                ambientColor
+                                Color.TRANSPARENT,
+                                withAlpha(scrimBase, 150),
+                                withAlpha(scrimBase, 224),
+                                withAlpha(scrimBase, 245)
                             },
-                            new float[] {0f, 0.16f, 0.34f, 0.48f, 1f},
+                            new float[] {0f, 0.34f, 0.72f, 1f},
                             Shader.TileMode.CLAMP));
-            canvas.drawRect(0, lockTop, w, h, gradientPaint);
+            canvas.drawRect(0, lockTop, w, winH, gradientPaint);
             gradientPaint.setShader(null);
 
-            // 4. Scroll Veil
-            if (scrollProgress > 0.01f) {
-                int veilAlpha = Math.round(scrollProgress * 98f);
-                canvas.drawColor(withAlpha(ambientColor, veilAlpha));
+            if (scrollProgress > 0.01f && winH > 0) {
+                int veilAlpha = Math.round(scrollProgress * 110f);
+                gradientPaint.setColor(withAlpha(scrimBase, veilAlpha));
+                canvas.drawRect(0, 0, w, winH, gradientPaint);
             }
         }
 
         private static int withAlpha(int rgb, int alpha) {
-            return (Math.max(0, Math.min(255, alpha)) << 24) | (rgb & 0x00ffffff);
+            return (Math.max(0, Math.min(255, alpha)) << 24) | (rgb & 0x00FFFFFF);
         }
     }
 
     /**
-     * Hidden ImageView hook passed to `a.poster(url, proxyImage, true)` so whenever MainActivity's
-     * artwork loader finishes decoding the poster Bitmap, it feeds `PortraitBackdropView`.
+     * Hidden ImageView hook passed to {@code a.poster(url, proxyImage, true)} so whenever
+     * MainActivity's artwork loader finishes decoding the poster Bitmap, it feeds
+     * {@link PortraitBackdropView}.
      */
     static final class PosterHookImageView extends ImageView {
         private final PortraitBackdropView target;
@@ -525,7 +652,10 @@ final class MobileDetailScreen {
     static void refreshEpisodeStillBitmaps(View v, Bitmap hdBmp) {
         if (v == null || hdBmp == null || hdBmp.isRecycled()) return;
         if (v instanceof EpisodeStillCropView) {
-            ((EpisodeStillCropView) v).setImageBitmap(hdBmp);
+            EpisodeStillCropView cropView = (EpisodeStillCropView) v;
+            if (!cropView.hasCustomStill()) {
+                cropView.setImageBitmap(hdBmp);
+            }
             return;
         }
         if (v instanceof android.view.ViewGroup) {
@@ -543,11 +673,20 @@ final class MobileDetailScreen {
     static final class EpisodeStillCropView extends ImageView {
         private final int epIndex;
         private final Matrix cropMatrix = new Matrix();
+        private boolean customStillBound;
 
         EpisodeStillCropView(MainActivity a, int epIndex) {
             super(a);
             this.epIndex = epIndex;
             setScaleType(ScaleType.MATRIX);
+        }
+
+        void setCustomStillBound(boolean bound) {
+            this.customStillBound = bound;
+        }
+
+        boolean hasCustomStill() {
+            return customStillBound;
         }
 
         @Override
@@ -596,29 +735,37 @@ final class MobileDetailScreen {
         a.releasePlayer();
         a.generation++;
 
-        // Edge-to-edge transparent status bar so the full-bleed poster reaches physical top y=0
-        a.applyMobileSystemBars(false);
+        // Edge-to-edge transparent status bar with crisp white icons over the dark poster hero
+        a.applyMobileSystemBars(false, true);
 
+        final MobileTheme.Palette p = MobileTheme.of(a);
         final int topPad = getStatusBarHeight(a);
-        final int screenH = a.getResources().getDisplayMetrics().heightPixels;
-        final int posterWindowH =
-                Math.max(a.dp(640), Math.min(a.dp(860), Math.round(screenH * 0.85f)));
+        final int screenH =
+                a.windowHeight() > 0
+                        ? a.windowHeight()
+                        : a.getResources().getDisplayMetrics().heightPixels;
         final int foregroundHeroH =
-                Math.max(a.dp(510), Math.min(a.dp(660), Math.round(posterWindowH * 0.81f)));
+                Math.max(a.dp(360), Math.min(a.dp(500), Math.round(screenH * 0.56f)));
+        final int posterWindowH = foregroundHeroH + a.dp(44);
         final int initAmbient = defaultAmbientForTitle(listing.title);
 
         activeTmdbId = 0;
         activeTmdbIsTv = true;
         activeTmdbEpisodes.clear();
         activeAiEpisodeTitles.clear();
+        selectedEpisodeLine = "";
+        selectedEpisodeIndex = -1;
+        activeVideoDescending = defaultEpisodeDescending();
         if (a.inlinePlayer != null) {
             a.inlinePlayer.detach();
             a.inlinePlayer = null;
         }
 
         a.root = new FrameLayout(a);
-        a.root.setBackgroundColor(initAmbient);
-        a.setContentView(a.root);
+        a.root.setBackgroundColor(p.bgCanvas);
+        if (!a.suppressTransitionContentView) {
+            a.setContentView(a.root);
+        }
 
         LinearLayout outerStack = a.vertical();
         FrameLayout inlineSlot = new FrameLayout(a);
@@ -635,15 +782,7 @@ final class MobileDetailScreen {
         backdropView.setTag("detail-backdrop");
         stageFrame.addView(backdropView, new FrameLayout.LayoutParams(-1, -1));
 
-        final PosterHookImageView posterHook =
-                new PosterHookImageView(
-                        a,
-                        backdropView,
-                        () -> {
-                            if (a.root != null) {
-                                a.root.setBackgroundColor(backdropView.getAmbientColor());
-                            }
-                        });
+        final PosterHookImageView posterHook = new PosterHookImageView(a, backdropView, null);
         posterHook.setTag("detail-cover");
         posterHook.setVisibility(View.GONE);
         stageFrame.addView(
@@ -676,83 +815,90 @@ final class MobileDetailScreen {
         stageFrame.addView(scrollView, new FrameLayout.LayoutParams(-1, -1));
 
         LinearLayout mainCol = a.vertical();
-        mainCol.setPadding(0, 0, 0, a.dp(46));
         scrollView.addView(mainCol, new ScrollView.LayoutParams(-1, -2));
 
-        // 2A. Foreground Hero Container (bottom-aligned over the lower poster transition zone)
+        // 2A. Foreground Hero Container (white typography over persistent dark poster scrim)
         FrameLayout heroStage = new FrameLayout(a);
         heroStage.setTag("detail-hero");
         mainCol.addView(heroStage, new LinearLayout.LayoutParams(-1, foregroundHeroH));
 
         LinearLayout heroCenterCol = a.vertical();
         heroCenterCol.setGravity(Gravity.CENTER_HORIZONTAL);
-        heroCenterCol.setPadding(a.dp(20), 0, a.dp(20), a.dp(14));
+        heroCenterCol.setPadding(a.dp(20), 0, a.dp(20), a.dp(24));
         FrameLayout.LayoutParams heroCenterLp =
                 new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         heroStage.addView(heroCenterCol, heroCenterLp);
 
-        final TextView titleView = a.text(listing.title, 28, MainActivity.WHITE);
+        final TextView titleView = a.text(listing.title, 26, Color.WHITE);
         titleView.setTag("detail-title");
         titleView.setTypeface(null, Typeface.BOLD);
         titleView.setGravity(Gravity.CENTER);
         titleView.setMaxLines(2);
         titleView.setEllipsize(TextUtils.TruncateAt.END);
-        titleView.setShadowLayer(a.dp(14), 0, a.dp(4), 0xb3000000);
+        titleView.setShadowLayer(a.dp(12), 0, a.dp(3), 0xB3000000);
         heroCenterCol.addView(titleView, new LinearLayout.LayoutParams(-1, -2));
 
         final LinearLayout pillsRow = a.row();
         pillsRow.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams pillsRowLp = new LinearLayout.LayoutParams(-1, -2);
-        pillsRowLp.topMargin = a.dp(12);
+        pillsRowLp.topMargin = a.dp(10);
         heroCenterCol.addView(pillsRow, pillsRowLp);
 
-        // Sync progressive poster blur start Y with the unscrolled top of heroCenterCol (the movie
-        // title)
         heroCenterCol.addOnLayoutChangeListener(
                 (v, l, t, r, b, ol, ot, or, ob) -> {
                     int titleTopY = heroStage.getTop() + t;
                     backdropView.setBlurStartY(titleTopY);
                 });
 
-        // Douban Rating + Rotten Tomatoes Rating + Site Name Row
+        // 2B. Day/Night Adaptive Lower Sheet Surface (`bgCanvas`, rounded 24dp top corners)
+        LinearLayout lowerBody = a.vertical();
+        lowerBody.setTag("detail-lower-sheet");
+        GradientDrawable lowerSheetBg = new GradientDrawable();
+        lowerSheetBg.setColor(p.bgCanvas);
+        float sheetR = a.dp(24);
+        lowerSheetBg.setCornerRadii(new float[] {sheetR, sheetR, sheetR, sheetR, 0f, 0f, 0f, 0f});
+        lowerBody.setBackground(lowerSheetBg);
+        lowerBody.setPadding(a.dp(18), a.dp(18), a.dp(18), a.navigationBarHeight() + a.dp(40));
+        LinearLayout.LayoutParams lowerLp = new LinearLayout.LayoutParams(-1, -2);
+        lowerLp.topMargin = -a.dp(16);
+        mainCol.addView(lowerBody, lowerLp);
+
+        // Ratings + Site Badge Row (Day/Night adaptive semantic pills, zero white border!)
+        HorizontalScrollView ratingScroll = new HorizontalScrollView(a);
+        ratingScroll.setHorizontalScrollBarEnabled(false);
         LinearLayout ratingRow = a.row();
         ratingRow.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams ratingLp = new LinearLayout.LayoutParams(-2, -2);
-        ratingLp.topMargin = a.dp(10);
-        heroCenterCol.addView(ratingRow, ratingLp);
+        ratingScroll.addView(ratingRow);
+        LinearLayout.LayoutParams ratingLp = new LinearLayout.LayoutParams(-1, -2);
+        ratingLp.bottomMargin = a.dp(14);
+        lowerBody.addView(ratingScroll, ratingLp);
 
-        final TextView doubanBadge = a.text("", 11.5f, 0xff6ee7b7);
+        final TextView doubanBadge = a.text("", 11.5f, p.isDark ? 0xFF34D399 : 0xFF047857);
         doubanBadge.setTag("detail-douban-rating");
         doubanBadge.setTypeface(null, Typeface.BOLD);
-        doubanBadge.setPadding(a.dp(9), a.dp(3), a.dp(9), a.dp(3));
-        doubanBadge.setBackground(glassBg(a, 0x3800b51d, 0x6634d399, 999));
+        doubanBadge.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
+        doubanBadge.setBackground(
+                a.bg(MobileTheme.withAlpha(p.success, p.isDark ? 0x2E : 0x1A), 999));
         LinearLayout.LayoutParams dbLp = new LinearLayout.LayoutParams(-2, -2);
         dbLp.rightMargin = a.dp(7);
         ratingRow.addView(doubanBadge, dbLp);
 
-        final TextView rtBadge = a.text("", 11.5f, 0xffffb4a2);
+        final TextView rtBadge = a.text("", 11.5f, p.isDark ? 0xFFFCA5A5 : 0xFFDC2626);
         rtBadge.setTag("detail-rt-rating");
         rtBadge.setTypeface(null, Typeface.BOLD);
-        rtBadge.setPadding(a.dp(9), a.dp(3), a.dp(9), a.dp(3));
-        rtBadge.setBackground(glassBg(a, 0x38fa320a, 0x66ff6b4a, 999));
+        rtBadge.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
+        rtBadge.setBackground(a.bg(MobileTheme.withAlpha(p.danger, p.isDark ? 0x2E : 0x18), 999));
         LinearLayout.LayoutParams rtLp = new LinearLayout.LayoutParams(-2, -2);
         rtLp.rightMargin = a.dp(7);
         ratingRow.addView(rtBadge, rtLp);
 
-        TextView siteBadge = a.text(s.name, 11.5f, 0xe6ffffff);
-        siteBadge.setPadding(a.dp(9), a.dp(3), a.dp(9), a.dp(3));
-        siteBadge.setBackground(glassBg(a, 0x26ffffff, 0x38ffffff, 999));
+        final TextView siteBadge = a.text(s.name, 11.5f, p.textSecondary);
+        siteBadge.setTypeface(null, Typeface.BOLD);
+        siteBadge.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
+        siteBadge.setBackground(MobileTheme.subtleBg(a, 999));
         ratingRow.addView(siteBadge);
 
         updateRatingBadges(doubanBadge, rtBadge, listing, 0.0);
-        final TextView extraRatingBadge = a.text("", 11.5f, 0xfffde68a);
-        extraRatingBadge.setTypeface(null, Typeface.BOLD);
-        extraRatingBadge.setPadding(a.dp(9), a.dp(3), a.dp(9), a.dp(3));
-        extraRatingBadge.setBackground(glassBg(a, 0x38d97706, 0x66fbbf24, 999));
-        extraRatingBadge.setVisibility(View.GONE);
-        LinearLayout.LayoutParams exLp = new LinearLayout.LayoutParams(-2, -2);
-        exLp.leftMargin = a.dp(7);
-        ratingRow.addView(extraRatingBadge, exLp);
 
         ImmersivePoster.resolveMediaRatings(
                 a,
@@ -760,67 +906,22 @@ final class MobileDetailScreen {
                 ratings ->
                         updateRatingBadges(
                                 doubanBadge, rtBadge, listing, ratings.douban, ratings.rtPercent));
-        SeasonMeta initSm = parseSeasonMeta(listing.title);
-        TmdbService.enrichDetailAsync(
-                a,
-                listing.title,
-                initSm.seasonNumber,
-                meta -> {
-                    if (meta == null) return;
-                    activeTmdbId = meta.tmdbId;
-                    activeTmdbIsTv = meta.isTv;
-                    activeTmdbEpisodes.clear();
-                    activeTmdbEpisodes.putAll(meta.episodes);
-                    if (meta.voteAverage > 0) {
-                        extraRatingBadge.setText(
-                                String.format(Locale.US, "TMDB ★ %.1f", meta.voteAverage));
-                        extraRatingBadge.setVisibility(View.VISIBLE);
-                    }
-                    TrackingRatingService.lookupRatingsAsync(
-                            a,
-                            listing.title,
-                            meta.tmdbId,
-                            meta.isTv,
-                            meta.voteAverage,
-                            0.0,
-                            mr -> {
-                                if (mr == null) return;
-                                StringBuilder b = new StringBuilder();
-                                if (mr.tmdb > 0)
-                                    b.append(String.format(Locale.US, "TMDB %.1f", mr.tmdb));
-                                if (mr.bangumi > 0) {
-                                    if (b.length() > 0) b.append(" · ");
-                                    b.append(String.format(Locale.US, "BGM %.1f", mr.bangumi));
-                                }
-                                if (mr.imdb > 0) {
-                                    if (b.length() > 0) b.append(" · ");
-                                    b.append(String.format(Locale.US, "IMDb %.1f", mr.imdb));
-                                }
-                                if (b.length() > 0) {
-                                    extraRatingBadge.setText(b.toString());
-                                    extraRatingBadge.setVisibility(View.VISIBLE);
-                                }
-                                if (mr.rottenTomatoes > 0) {
-                                    rtBadge.setText("烂番茄 " + mr.rottenTomatoes + "%");
-                                }
-                            });
-                });
-
-        // 2B. Lower Content Column (Synopsis + White Capsule Play Button + Episodes Section)
-        LinearLayout lowerBody = a.vertical();
-        lowerBody.setPadding(a.dp(18), 0, a.dp(18), 0);
-        mainCol.addView(lowerBody, new LinearLayout.LayoutParams(-1, -2));
-
-        final LinearLayout synopsisWrap = a.vertical();
-        synopsisWrap.setGravity(Gravity.CENTER_HORIZONTAL);
-        lowerBody.addView(synopsisWrap, new LinearLayout.LayoutParams(-1, -2));
 
         final LinearLayout playBtnWrap = a.vertical();
-        LinearLayout.LayoutParams playWrapLp = new LinearLayout.LayoutParams(-1, -2);
-        playWrapLp.topMargin = a.dp(14);
-        lowerBody.addView(playBtnWrap, playWrapLp);
+        lowerBody.addView(playBtnWrap, new LinearLayout.LayoutParams(-1, -2));
 
-        final TextView loadingState = a.text("正在加载剧集资源…", 13.5f, 0xb3ffffff);
+        final LinearLayout synopsisWrap = a.vertical();
+        LinearLayout.LayoutParams synLp = new LinearLayout.LayoutParams(-1, -2);
+        synLp.topMargin = a.dp(14);
+        lowerBody.addView(synopsisWrap, synLp);
+
+        final TextView loadingState =
+                a.text(
+                        MobileCuratedDiscovery.isCuratedSite(s)
+                                ? "正在您已添加的订阅源中匹配播放资源…"
+                                : "正在加载剧集资源…",
+                        13.5f,
+                        p.textSecondary);
         loadingState.setTag("detail-loading");
         loadingState.setGravity(Gravity.CENTER);
         loadingState.setPadding(a.dp(4), a.dp(24), a.dp(4), a.dp(16));
@@ -828,12 +929,12 @@ final class MobileDetailScreen {
 
         final LinearLayout detailsBody = a.vertical();
         LinearLayout.LayoutParams detailsLp = new LinearLayout.LayoutParams(-1, -2);
-        detailsLp.topMargin = a.dp(18);
+        detailsLp.topMargin = a.dp(16);
         lowerBody.addView(detailsBody, detailsLp);
 
-        // 3. Floating Liquid Glass Top Navigation Bar
-        //    Left: Circular `<` Back button
-        //    Right: Independent `[ ⇄ 线路名 ⌄ ]` Source Picker + `[ ⬇ | ♥ ]` Download & Favorite Pill
+        // 3. Floating Top Navigation Bar over Dark Hero Scrim
+        //    Left: Circular Back button (preserves a.glass(backBtn, 999))
+        //    Right: Smart source/cross-search pill + Download & Favorite dual vector capsule
         LinearLayout topNavRow = a.row();
         topNavRow.setTag("detail-top-nav");
         topNavRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -842,77 +943,135 @@ final class MobileDetailScreen {
         stageFrame.addView(topNavRow, topNavLp);
         a.root.addView(outerStack, new FrameLayout.LayoutParams(-1, -1));
 
-        TextView backBtn = a.text("‹", 22, Color.WHITE);
+        FrameLayout backBtn = new FrameLayout(a);
         backBtn.setTag("detail-back");
-        backBtn.setGravity(Gravity.CENTER);
-        backBtn.setPadding(0, 0, a.dp(1), a.dp(2));
         a.glass(backBtn, 999);
-        bindTouchFeedback(backBtn);
+        MobileIcons.IconView backIcon =
+                MobileIcons.create(a, MobileIcons.IC_BACK, 19f, Color.WHITE);
+        backIcon.setStrokeWidthUnits(2.2f);
+        backBtn.addView(backIcon, new FrameLayout.LayoutParams(a.dp(19), a.dp(19), Gravity.CENTER));
+        MobileMotion.bindPress(backBtn, 0.92f);
         backBtn.setOnClickListener(v -> a.onBackPressed());
-        topNavRow.addView(backBtn, new LinearLayout.LayoutParams(a.dp(40), a.dp(40)));
+        topNavRow.addView(backBtn, new LinearLayout.LayoutParams(a.dp(38), a.dp(38)));
 
         View topSpacer = new View(a);
         topNavRow.addView(topSpacer, new LinearLayout.LayoutParams(0, 1, 1f));
 
-        // Top-right Independent Source Selector Button (`选源`)
-        final TextView sourceTopBtn = a.text("⇄ 加载片源…", 13, Color.WHITE);
+        // Top-right Source / Cross-Search Pill — sleek translucent frosted capsule matching airy
+        // mobile chrome (switches to line picker when >1 line exists, else direct cross-search)
+        final LinearLayout sourceTopPill = a.row();
+        sourceTopPill.setTag("detail-source-pill");
+        sourceTopPill.setGravity(Gravity.CENTER_VERTICAL);
+        sourceTopPill.setPadding(a.dp(11), 0, a.dp(10), 0);
+        sourceTopPill.setBackground(glassBg(a, 0x5E10131C, 0x33FFFFFF, 999));
+        MobileMotion.bindPress(sourceTopPill, 0.94f);
+
+        MobileIcons.IconView switchIcon =
+                MobileIcons.create(a, MobileIcons.IC_SWITCH_SOURCE, 13f, 0xE6FFFFFF);
+        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(a.dp(13), a.dp(13));
+        swLp.rightMargin = a.dp(5);
+        sourceTopPill.addView(switchIcon, swLp);
+
+        final TextView sourceTopBtn = a.text(s.name, 12.5f, 0xF5FFFFFF);
         sourceTopBtn.setTag("detail-source-picker");
         sourceTopBtn.setTypeface(null, Typeface.BOLD);
-        sourceTopBtn.setGravity(Gravity.CENTER);
         sourceTopBtn.setSingleLine(true);
         sourceTopBtn.setEllipsize(TextUtils.TruncateAt.END);
-        sourceTopBtn.setMaxWidth(a.dp(156));
-        sourceTopBtn.setPadding(a.dp(13), 0, a.dp(13), 0);
-        a.glass(sourceTopBtn, 999);
-        bindTouchFeedback(sourceTopBtn);
-        sourceTopBtn.setOnClickListener(v -> a.crossSearch(Cms.searchTitle(listing)));
-        LinearLayout.LayoutParams sourceTopLp = new LinearLayout.LayoutParams(-2, a.dp(40));
-        sourceTopLp.rightMargin = a.dp(8);
-        topNavRow.addView(sourceTopBtn, sourceTopLp);
+        sourceTopBtn.setMaxWidth(a.dp(112));
+        sourceTopPill.addView(sourceTopBtn);
 
-        // Top-right Dual Action Capsule (`[ ⬇ | ♥ ]`)
+        final MobileIcons.IconView srcDownIcon =
+                MobileIcons.create(a, MobileIcons.IC_CHEVRON_DOWN, 11.5f, 0xBAFFFFFF);
+        srcDownIcon.setTag("detail-source-chevron");
+        srcDownIcon.setVisibility(View.GONE);
+        LinearLayout.LayoutParams sdLp = new LinearLayout.LayoutParams(a.dp(11.5f), a.dp(11.5f));
+        sdLp.leftMargin = a.dp(4);
+        sourceTopPill.addView(srcDownIcon, sdLp);
+
+        sourceTopPill.setOnClickListener(v -> a.crossSearch(Cms.searchTitle(listing)));
+        LinearLayout.LayoutParams sourceTopLp = new LinearLayout.LayoutParams(-2, a.dp(38));
+        sourceTopLp.rightMargin = a.dp(8);
+        topNavRow.addView(sourceTopPill, sourceTopLp);
+
+        // Top-right Dual Action Capsule (Download | Favorite) matching exact sleek frost chrome
         LinearLayout rightActionPill = a.row();
         rightActionPill.setGravity(Gravity.CENTER_VERTICAL);
-        rightActionPill.setPadding(a.dp(4), 0, a.dp(4), 0);
-        a.glass(rightActionPill, 999);
-        topNavRow.addView(rightActionPill, new LinearLayout.LayoutParams(-2, a.dp(40)));
+        rightActionPill.setPadding(a.dp(3), 0, a.dp(3), 0);
+        rightActionPill.setBackground(glassBg(a, 0x5E10131C, 0x33FFFFFF, 999));
+        topNavRow.addView(rightActionPill, new LinearLayout.LayoutParams(-2, a.dp(38)));
 
-        final TextView downloadTopBtn = a.text("⬇", 16, Color.WHITE);
+        final FrameLayout downloadTopBtn = new FrameLayout(a);
         downloadTopBtn.setTag("episodes-download");
-        downloadTopBtn.setGravity(Gravity.CENTER);
-        downloadTopBtn.setPadding(a.dp(11), 0, a.dp(11), 0);
-        bindTouchFeedback(downloadTopBtn);
+        MobileIcons.IconView dlIcon =
+                MobileIcons.create(a, MobileIcons.IC_DOWNLOAD, 17f, Color.WHITE);
+        downloadTopBtn.addView(
+                dlIcon, new FrameLayout.LayoutParams(a.dp(17), a.dp(17), Gravity.CENTER));
+        MobileMotion.bindPress(downloadTopBtn, 0.90f);
         downloadTopBtn.setOnClickListener(v -> a.toast("正在加载剧集列表，请稍候…"));
-        rightActionPill.addView(downloadTopBtn, new LinearLayout.LayoutParams(-2, a.dp(36)));
+        rightActionPill.addView(downloadTopBtn, new LinearLayout.LayoutParams(a.dp(38), a.dp(36)));
 
         View pillDivider = new View(a);
-        pillDivider.setBackgroundColor(0x36ffffff);
+        pillDivider.setBackgroundColor(0x36FFFFFF);
         rightActionPill.addView(pillDivider, new LinearLayout.LayoutParams(1, a.dp(18)));
 
-        final TextView favTopBtn = a.text("♥", 17, Color.WHITE);
+        final FrameLayout favTopBtn = new FrameLayout(a);
         favTopBtn.setTag("detail-favorite");
-        favTopBtn.setGravity(Gravity.CENTER);
-        favTopBtn.setPadding(a.dp(11), 0, a.dp(11), 0);
-        bindTouchFeedback(favTopBtn);
-        rightActionPill.addView(favTopBtn, new LinearLayout.LayoutParams(-2, a.dp(36)));
+        final MobileIcons.IconView favIcon =
+                MobileIcons.create(a, MobileIcons.IC_HEART, 17f, Color.WHITE);
+        favTopBtn.addView(
+                favIcon, new FrameLayout.LayoutParams(a.dp(17), a.dp(17), Gravity.CENTER));
+        MobileMotion.bindPress(favTopBtn, 0.90f);
+        rightActionPill.addView(favTopBtn, new LinearLayout.LayoutParams(a.dp(38), a.dp(36)));
 
+        final Cms.Site[] activeSiteRef = {s};
+        final Cms.Video[] activeVideoRef = {listing};
         final Runnable syncFavStyle =
                 () -> {
                     boolean faved =
                             Favorites.contains(
-                                    a.prefs.getString(Prefs.FAVORITES, "[]"), s.key, listing.id);
-                    favTopBtn.setText(faved ? "♥" : "♡");
-                    favTopBtn.setTextColor(faved ? 0xffff453a : Color.WHITE);
+                                    a.prefs.getString(Prefs.FAVORITES, "[]"),
+                                    activeSiteRef[0].key,
+                                    activeVideoRef[0].id);
+                    favIcon.setIcon(faved ? MobileIcons.IC_HEART_FILLED : MobileIcons.IC_HEART);
+                    favIcon.setTint(faved ? 0xFFFF453A : Color.WHITE);
                 };
         syncFavStyle.run();
+        favTopBtn.setOnClickListener(
+                view -> {
+                    final Cms.Site targetSite = activeSiteRef[0];
+                    final Cms.Video targetVideo = activeVideoRef[0];
+                    CloudSyncDialog.toggleFavoriteWithTombstone(
+                            a,
+                            targetSite.key,
+                            targetVideo,
+                            faved -> {
+                                favIcon.setIcon(
+                                        faved ? MobileIcons.IC_HEART_FILLED : MobileIcons.IC_HEART);
+                                favIcon.setTint(faved ? 0xFFFF453A : Color.WHITE);
+                                MobileMotion.popBounce(favIcon);
+                                if (faved) {
+                                    MobileFavoritePostcard.show(
+                                            a,
+                                            targetVideo.title,
+                                            targetVideo.poster,
+                                            MobileFavoritePostcard.peekBitmapFromView(posterHook));
+                                } else {
+                                    MobileFavoritePostcard.dismissActive();
+                                    a.toast("已从片库移除");
+                                }
+                            });
+                });
 
         // Populate initial metadata pills from listing
         populateHeroPills(a, pillsRow, listing, 0);
 
         MainActivity.Done<Cms.Video> present =
                 v -> {
+                    final Cms.Site curSite = activeSiteRef[0];
                     if (v.poster == null || v.poster.isEmpty()) v.poster = listing.poster;
                     if (v.title == null || v.title.isEmpty()) v.title = listing.title;
+                    activeVideoRef[0] = v;
+                    syncFavStyle.run();
                     titleView.setText(v.title);
                     if (!Objects.equals(v.poster, listing.poster)
                             && v.poster != null
@@ -958,59 +1117,79 @@ final class MobileDetailScreen {
                                             ratings.douban,
                                             ratings.rtPercent));
 
-                    favTopBtn.setOnClickListener(
-                            view ->
-                                    CloudSyncDialog.toggleFavoriteWithTombstone(
-                                            a,
-                                            s.key,
-                                            v,
-                                            faved -> {
-                                                favTopBtn.setText(faved ? "♥" : "♡");
-                                                favTopBtn.setTextColor(
-                                                        faved ? 0xffff453a : Color.WHITE);
-                                                a.toast(faved ? "已加入收藏片库" : "已从片库移除");
-                                            }));
-
-                    // Centered Expandable Synopsis
+                    // Animated Expandable Synopsis Card (borderless bgCard + rotating chevron)
                     String descRaw = v.description == null ? "" : v.description.trim();
                     String castRaw =
                             (v.actor != null && !v.actor.trim().isEmpty())
                                     ? "演职员：" + v.actor.trim()
                                     : "";
                     if (!descRaw.isEmpty() || !castRaw.isEmpty()) {
-                        final TextView descTv =
-                                a.text(descRaw.isEmpty() ? castRaw : descRaw, 13.5f, 0xd9ffffff);
-                        descTv.setGravity(Gravity.CENTER);
-                        descTv.setLineSpacing(a.dp(3.5f), 1f);
-                        descTv.setMaxLines(2);
-                        descTv.setEllipsize(TextUtils.TruncateAt.END);
-                        synopsisWrap.addView(descTv, new LinearLayout.LayoutParams(-1, -2));
+                        LinearLayout synCard = a.vertical();
+                        synCard.setBackground(MobileTheme.cardBg(a, 16));
+                        if (!p.isDark) UiCompat.setElevation(synCard, a.dp(1.5f));
+                        synCard.setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12));
+                        MobileMotion.bindPress(synCard, 0.985f);
 
-                        final TextView castTv = a.text(castRaw, 12, 0x99ffffff);
-                        castTv.setGravity(Gravity.CENTER);
-                        castTv.setPadding(0, a.dp(5), 0, 0);
+                        final TextView descTv =
+                                a.text(descRaw.isEmpty() ? castRaw : descRaw, 13.5f, p.textPrimary);
+                        descTv.setLineSpacing(a.dp(3.5f), 1f);
+                        descTv.setMaxLines(3);
+                        descTv.setEllipsize(TextUtils.TruncateAt.END);
+                        synCard.addView(descTv, new LinearLayout.LayoutParams(-1, -2));
+
+                        final TextView castTv = a.text(castRaw, 12, p.textSecondary);
+                        castTv.setPadding(0, a.dp(6), 0, 0);
                         castTv.setMaxLines(3);
                         castTv.setEllipsize(TextUtils.TruncateAt.END);
                         castTv.setVisibility(View.GONE);
                         if (!descRaw.isEmpty() && !castRaw.isEmpty()) {
-                            synopsisWrap.addView(castTv, new LinearLayout.LayoutParams(-1, -2));
+                            synCard.addView(castTv, new LinearLayout.LayoutParams(-1, -2));
                         }
 
+                        LinearLayout toggleRow = a.row();
+                        toggleRow.setGravity(Gravity.CENTER_VERTICAL);
+                        toggleRow.setPadding(0, a.dp(7), 0, 0);
+                        final TextView toggleHint = a.text("展开简介", 12f, p.accent);
+                        toggleHint.setTypeface(null, Typeface.BOLD);
+                        toggleRow.addView(toggleHint);
+                        final MobileIcons.IconView toggleChevron =
+                                MobileIcons.create(a, MobileIcons.IC_CHEVRON_DOWN, 12.5f, p.accent);
+                        LinearLayout.LayoutParams tcLp =
+                                new LinearLayout.LayoutParams(a.dp(12.5f), a.dp(12.5f));
+                        tcLp.leftMargin = a.dp(4);
+                        toggleRow.addView(toggleChevron, tcLp);
+                        synCard.addView(toggleRow, new LinearLayout.LayoutParams(-2, -2));
+
                         final boolean[] expanded = {false};
-                        synopsisWrap.setOnClickListener(
+                        synCard.setOnClickListener(
                                 view -> {
                                     expanded[0] = !expanded[0];
-                                    descTv.setMaxLines(expanded[0] ? 18 : 2);
+                                    descTv.setMaxLines(expanded[0] ? 18 : 3);
+                                    MobileMotion.crossfadeText(
+                                            toggleHint, expanded[0] ? "收起简介" : "展开简介");
+                                    float targetRot = expanded[0] ? 180f : 0f;
+                                    if (MobileMotion.isReduced(a)) {
+                                        toggleChevron.setRotation(targetRot);
+                                    } else {
+                                        toggleChevron
+                                                .animate()
+                                                .rotation(targetRot)
+                                                .setDuration(MotionTokens.DURATION_FAST_MS)
+                                                .setInterpolator(
+                                                        MotionTokens.createStandardInterpolator())
+                                                .start();
+                                    }
                                     if (!descRaw.isEmpty() && !castRaw.isEmpty()) {
-                                        castTv.setVisibility(
-                                                expanded[0] ? View.VISIBLE : View.GONE);
+                                        MobileMotion.animateExpandCollapse(castTv, expanded[0]);
                                     }
                                 });
+                        synopsisWrap.addView(synCard, new LinearLayout.LayoutParams(-1, -2));
                     }
 
                     if (v.lines.isEmpty()) {
-                        sourceTopBtn.setText("⇄ " + s.name);
-                        TextView empty = a.text("暂未获取到可播放的剧集资源", 14, 0xb3ffffff);
+                        sourceTopBtn.setText(curSite.name);
+                        srcDownIcon.setVisibility(View.GONE);
+                        TextView empty = a.text("暂未获取到可播放的剧集资源", 14, p.textSecondary);
                         empty.setGravity(Gravity.CENTER);
                         empty.setPadding(a.dp(4), a.dp(20), a.dp(4), a.dp(20));
                         detailsBody.addView(empty, new LinearLayout.LayoutParams(-1, -2));
@@ -1019,15 +1198,14 @@ final class MobileDetailScreen {
 
                     WatchHistory.Entry bookmark = null;
                     for (WatchHistory.Entry entry : a.watchHistory()) {
-                        if (entry.site.equals(s.key) && entry.id.equals(v.id)) {
+                        if (entry.site.equals(curSite.key) && entry.id.equals(v.id)) {
                             bookmark = entry;
                             break;
                         }
                     }
                     final WatchHistory.Entry remembered = bookmark;
 
-                    // Full-Width White Capsule Play Button (shows clean episode label only;
-                    // resume time and line are shown in the small subtitle below)
+                    // Full-Width Accent Stadium Play Button
                     SeasonMeta curSeason = parseSeasonMeta(v.title);
                     int remEpNum = 1;
                     if (remembered != null) {
@@ -1053,7 +1231,6 @@ final class MobileDetailScreen {
                                                     .get(0)
                                                     .name,
                                             1);
-                    String playLabel = "▶   播放 · " + playEpLabel;
 
                     Button playBtn = new Button(a);
                     playBtn.setTag("detail-play");
@@ -1063,13 +1240,14 @@ final class MobileDetailScreen {
                     playBtn.setEllipsize(TextUtils.TruncateAt.END);
                     playBtn.setGravity(Gravity.CENTER);
                     playBtn.setIncludeFontPadding(false);
-                    playBtn.setTextSize(14.5f);
+                    playBtn.setTextSize(15f);
                     playBtn.setTypeface(null, Typeface.BOLD);
-                    playBtn.setTextColor(0xff121215);
-                    playBtn.setBackground(a.bg(0xf5ffffff, 999));
+                    playBtn.setTextColor(p.accentOnFill);
+                    playBtn.setBackground(MobileTheme.accentPillBg(a, 999));
                     playBtn.setPadding(a.dp(18), 0, a.dp(18), 0);
-                    bindTouchFeedback(playBtn);
-                    playBtn.setText(playLabel);
+                    UiCompat.setElevation(playBtn, a.dp(p.isDark ? 4f : 3f));
+                    MobileMotion.bindPress(playBtn, 0.96f);
+                    playBtn.setText(buildPlayButtonLabel(a, p.accentOnFill, playEpLabel));
                     playBtn.setOnClickListener(
                             view -> {
                                 int li = SourcePreferences.lineIndex(a, v);
@@ -1094,7 +1272,7 @@ final class MobileDetailScreen {
                                 }
                                 handleDetailEpisodeTap(
                                         a,
-                                        s,
+                                        curSite,
                                         v,
                                         defLine,
                                         defEp,
@@ -1114,7 +1292,7 @@ final class MobileDetailScreen {
                                                 + " · 线路："
                                                 + remembered.line
                                         : "已观看 [" + bmEpTitle + "] · 线路：" + remembered.line;
-                        TextView bmInfo = a.text(bmSummary, 12, 0xccffffff);
+                        TextView bmInfo = a.text(bmSummary, 12, p.textSecondary);
                         bmInfo.setSingleLine(true);
                         bmInfo.setEllipsize(TextUtils.TruncateAt.MIDDLE);
                         bmInfo.setGravity(Gravity.CENTER);
@@ -1127,22 +1305,16 @@ final class MobileDetailScreen {
                         for (int i = 0; i < v.lines.size(); i++) {
                             if (v.lines.get(i).name.equals(remembered.line)) {
                                 initLine = i;
-                                for (int n = 0; n < v.lines.get(i).episodes.size(); n++) {
-                                    if (v.lines
-                                            .get(i)
-                                            .episodes
-                                            .get(n)
-                                            .name
-                                            .equals(remembered.episode)) {
-                                        boolean desc =
-                                                a.prefs.getBoolean(
-                                                        Prefs.EPISODES_DESCENDING, false);
-                                        initPage =
-                                                (desc ? v.lines.get(i).episodes.size() - 1 - n : n)
-                                                        / 50;
-                                        break;
-                                    }
-                                }
+                                int remIdx =
+                                        resolveInitialEpisodeIndex(
+                                                v.lines.get(i).episodes, remembered.episode);
+                                initPage =
+                                        (activeVideoDescending
+                                                        ? v.lines.get(i).episodes.size()
+                                                                - 1
+                                                                - remIdx
+                                                        : remIdx)
+                                                / 50;
                                 break;
                             }
                         }
@@ -1159,7 +1331,7 @@ final class MobileDetailScreen {
 
                     renderMobileEpisodes(
                             a,
-                            s,
+                            curSite,
                             v,
                             initLine,
                             initPage,
@@ -1169,7 +1341,7 @@ final class MobileDetailScreen {
                             discoveredLabels);
                     populateRelatedSeasons(
                             a,
-                            s,
+                            curSite,
                             v,
                             episodePanel,
                             initLine,
@@ -1179,14 +1351,199 @@ final class MobileDetailScreen {
                             discoveredLabels);
                 };
 
-        if (ready == null) a.loadDetail(s, listing.id, present);
-        else {
+        if (ready == null && MobileCuratedDiscovery.isCuratedSite(s)) {
+            resolveCuratedFromUserSources(
+                    a,
+                    listing,
+                    activeSiteRef,
+                    siteBadge,
+                    sourceTopBtn,
+                    syncFavStyle,
+                    playBtnWrap,
+                    loadingState,
+                    detailsBody,
+                    present);
+        } else if (ready == null) {
+            a.loadDetail(s, listing.id, present);
+        } else {
             try {
                 present.accept(ready);
             } catch (Exception e) {
                 AppLog.w("MobileDetailScreen", "present detail failed", e);
             }
         }
+    }
+
+    /**
+     * Resolves a curated discovery item strictly from the user's own added subscription sources
+     * (matching iOS {@code _resolveCuratedFromUserSources}). Never supplies built-in streams.
+     */
+    private static void resolveCuratedFromUserSources(
+            final MainActivity a,
+            final Cms.Video targetVideo,
+            final Cms.Site[] activeSiteRef,
+            final TextView siteBadge,
+            final TextView sourceTopBtn,
+            final Runnable syncFavStyle,
+            final LinearLayout playBtnWrap,
+            final TextView loadingState,
+            final LinearLayout detailsBody,
+            final MainActivity.Done<Cms.Video> present) {
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        final List<Cms.Site> candidates = new ArrayList<>();
+        if (a.config != null && a.config.sites != null) {
+            String prefKey = a.prefs != null ? a.prefs.getString(Prefs.SELECTED_SITE, "") : "";
+            for (Cms.Site cand : a.config.sites) {
+                if (cand == null
+                        || !a.available(cand)
+                        || !cand.searchable
+                        || MobileCuratedDiscovery.isCuratedSite(cand)) {
+                    continue;
+                }
+                if (cand.key.equals(prefKey)) {
+                    candidates.add(0, cand);
+                } else {
+                    candidates.add(cand);
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            playBtnWrap.removeAllViews();
+            Button noSrcPlay = new Button(a);
+            noSrcPlay.setTag("detail-play");
+            noSrcPlay.setAllCaps(false);
+            noSrcPlay.setSingleLine(true);
+            noSrcPlay.setGravity(Gravity.CENTER);
+            noSrcPlay.setTextSize(14.5f);
+            noSrcPlay.setTypeface(null, Typeface.BOLD);
+            noSrcPlay.setTextColor(p.accentOnFill);
+            noSrcPlay.setBackground(MobileTheme.accentPillBg(a, 999));
+            noSrcPlay.setText("暂无数据 · 请添加订阅资源");
+            MobileMotion.bindPress(noSrcPlay, 0.96f);
+            noSrcPlay.setOnClickListener(
+                    v -> {
+                        a.toast("暂无片源数据，请先添加订阅资源");
+                        UiWidgets.showMobileImportDialog(a);
+                    });
+            playBtnWrap.addView(noSrcPlay, new LinearLayout.LayoutParams(-1, a.dp(48)));
+            loadingState.setText("暂无片源数据，请先添加订阅资源后再播放《" + targetVideo.title + "》");
+            return;
+        }
+
+        final int ticket = a.generation;
+        final String query =
+                targetVideo.title == null
+                        ? ""
+                        : targetVideo.title.replaceAll("\\s+第[一二三四五六七八九十0-9]+季$", "").trim();
+        final String effectiveQuery = query.isEmpty() ? targetVideo.title : query;
+        final List<Cms.Site> searchTargets = candidates.subList(0, Math.min(8, candidates.size()));
+
+        a.submitPage(
+                () -> {
+                    Cms.Site bestSite = null;
+                    Cms.Video bestMatch = null;
+                    int bestScore = 0;
+
+                    for (Cms.Site site : searchTargets) {
+                        if (a.isFinishing() || ticket != a.generation) return;
+                        try {
+                            List<Cms.Video> found =
+                                    Cms.listing(a.engine(site).search(effectiveQuery, 1)).videos;
+                            for (Cms.Video cand : found) {
+                                int sc =
+                                        MobileCuratedDiscovery.titleMatchScore(
+                                                targetVideo.title, cand.title);
+                                if (sc >= 60 && sc > bestScore) {
+                                    bestScore = sc;
+                                    bestSite = site;
+                                    bestMatch = cand;
+                                }
+                            }
+                            if (bestScore >= 100) break;
+                        } catch (Throwable ignored) {
+                        }
+                    }
+
+                    Cms.Video resolved = null;
+                    Cms.Site resolvedSite = bestSite;
+                    if (bestSite != null && bestMatch != null) {
+                        try {
+                            Cms.Listing detailListing =
+                                    Cms.listing(a.engine(bestSite).detail(bestMatch.id));
+                            Cms.Video detailed =
+                                    detailListing.videos.isEmpty()
+                                            ? null
+                                            : detailListing.videos.get(0);
+                            if (detailed != null && detailed.lines != null) {
+                                for (java.util.Iterator<Cms.Line> it = detailed.lines.iterator();
+                                        it.hasNext(); ) {
+                                    if (it.next().episodes.isEmpty()) it.remove();
+                                }
+                                if (!detailed.lines.isEmpty()) {
+                                    if (detailed.title == null || detailed.title.trim().isEmpty()) {
+                                        detailed.title = targetVideo.title;
+                                    }
+                                    if (detailed.poster == null
+                                            || detailed.poster.trim().isEmpty()) {
+                                        detailed.poster = targetVideo.poster;
+                                    }
+                                    if (detailed.year == null || detailed.year.trim().isEmpty()) {
+                                        detailed.year = targetVideo.year;
+                                    }
+                                    if (detailed.area == null || detailed.area.trim().isEmpty()) {
+                                        detailed.area = targetVideo.area;
+                                    }
+                                    if (detailed.actor == null || detailed.actor.trim().isEmpty()) {
+                                        detailed.actor = targetVideo.actor;
+                                    }
+                                    if (detailed.description == null
+                                            || detailed.description.trim().isEmpty()) {
+                                        detailed.description = targetVideo.description;
+                                    }
+                                    if (detailed.remarks == null
+                                            || detailed.remarks.trim().isEmpty()) {
+                                        detailed.remarks = targetVideo.remarks;
+                                    }
+                                    resolved = detailed;
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+
+                    final Cms.Site finalSite = resolvedSite;
+                    final Cms.Video finalVideo = resolved;
+                    a.ui.post(
+                            () -> {
+                                if (a.isFinishing() || ticket != a.generation) return;
+                                if (finalSite != null && finalVideo != null) {
+                                    activeSiteRef[0] = finalSite;
+                                    siteBadge.setText(finalSite.name);
+                                    sourceTopBtn.setText(finalSite.name);
+                                    syncFavStyle.run();
+                                    try {
+                                        present.accept(finalVideo);
+                                    } catch (Exception e) {
+                                        AppLog.w("MobileDetailScreen", "present curated failed", e);
+                                    }
+                                    return;
+                                }
+                                loadingState.setText(
+                                        "您已添加的订阅源中暂未找到《" + targetVideo.title + "》的播放资源");
+                                TextView searchCta = a.text("全源手动搜索", 13.5f, p.accentOnFill);
+                                searchCta.setTypeface(null, Typeface.BOLD);
+                                searchCta.setGravity(Gravity.CENTER);
+                                searchCta.setPadding(a.dp(20), a.dp(10), a.dp(20), a.dp(10));
+                                searchCta.setBackground(MobileTheme.accentPillBg(a, 999));
+                                MobileMotion.bindPress(searchCta, 0.94f);
+                                searchCta.setOnClickListener(
+                                        v -> MobileRootShell.openSearch(a, targetVideo.title));
+                                LinearLayout.LayoutParams lp =
+                                        new LinearLayout.LayoutParams(-2, -2);
+                                lp.gravity = Gravity.CENTER_HORIZONTAL;
+                                detailsBody.addView(searchCta, lp);
+                            });
+                });
     }
 
     private static void populateHeroPills(
@@ -1203,15 +1560,21 @@ final class MobileDetailScreen {
         }
         int limit = Math.min(4, tags.size());
         for (int i = 0; i < limit; i++) {
-            TextView pill = a.text(tags.get(i), 12, 0xf2ffffff);
+            TextView pill = a.text(tags.get(i), 12, 0xF2FFFFFF);
             pill.setTypeface(null, Typeface.BOLD);
             pill.setSingleLine(true);
-            pill.setPadding(a.dp(12), a.dp(4), a.dp(12), a.dp(4));
-            a.glass(pill, 999);
+            pill.setPadding(a.dp(11), a.dp(4), a.dp(11), a.dp(4));
+            pill.setBackground(a.bg(0x38000000, 999));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-            if (i > 0) lp.leftMargin = a.dp(8);
+            if (i > 0) lp.leftMargin = a.dp(7);
             pillsRow.addView(pill, lp);
         }
+    }
+
+    private static void restoreScrollAfterLayout(MainActivity a, int savedScrollY) {
+        if (a == null || a.scroll == null || savedScrollY <= 0) return;
+        final View scroll = a.scroll;
+        scroll.post(() -> scroll.scrollTo(0, savedScrollY));
     }
 
     static void renderMobileEpisodes(
@@ -1224,39 +1587,56 @@ final class MobileDetailScreen {
             WatchHistory.Entry remembered,
             Map<Integer, Cms.Video> discoveredSeasons,
             Map<Integer, String> discoveredLabels) {
+        final int savedScrollY = a.scroll != null ? a.scroll.getScrollY() : 0;
         if (a.current != null) {
             a.current.selection.select(
                     video.lines.get(lineIndex).name,
                     page,
                     video.lines.get(lineIndex).episodes.size());
         }
-        panel.removeAllViews();
 
-        final Cms.Line line = video.lines.get(lineIndex);
-        final boolean descending = a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false);
-        final SeasonMeta curSeason = parseSeasonMeta(video.title);
-        final int total = line.episodes.size();
-
-        int activeEpIdx = 0;
-        if (remembered != null && line.name.equals(remembered.line)) {
-            for (int i = 0; i < total; i++) {
-                if (line.episodes.get(i).name.equals(remembered.episode)) {
-                    activeEpIdx = i;
-                    break;
-                }
+        // Preserve horizontal line strip scroll & update active line pills in place when available
+        HorizontalScrollView existingLineScroll = null;
+        LinearLayout existingLineRow = null;
+        int savedLineScrollX = 0;
+        View existingLinesTag = panel.findViewWithTag("detail-line-scroll");
+        if (existingLinesTag instanceof HorizontalScrollView && video.lines.size() > 1) {
+            existingLineScroll = (HorizontalScrollView) existingLinesTag;
+            savedLineScrollX = existingLineScroll.getScrollX();
+            if (existingLineScroll.getChildCount() > 0
+                    && existingLineScroll.getChildAt(0) instanceof LinearLayout) {
+                existingLineRow = (LinearLayout) existingLineScroll.getChildAt(0);
             }
         }
 
-        // Update Top-Right Floating Source Button, Play Button & Download Button
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        final Cms.Line line = video.lines.get(lineIndex);
+        final boolean descending = activeVideoDescending;
+        final SeasonMeta curSeason = parseSeasonMeta(video.title);
+        final int total = line.episodes.size();
+        final boolean multiEpisode = shouldShowMultiEpisodeTools(total);
+
+        int activeEpIdx = 0;
+        if (selectedEpisodeIndex >= 0
+                && selectedEpisodeIndex < total
+                && line.name.equals(selectedEpisodeLine)) {
+            activeEpIdx = selectedEpisodeIndex;
+        } else if (remembered != null && line.name.equals(remembered.line)) {
+            activeEpIdx = resolveInitialEpisodeIndex(line.episodes, remembered.episode);
+        }
+
+        // Update Top-Right Source Pill, Primary Play Button & Download Button
         if (a.root != null) {
             View playBtnView = a.root.findViewWithTag("detail-play");
             if (playBtnView instanceof Button && !line.episodes.isEmpty()) {
                 Button playBtn = (Button) playBtnView;
                 final int targetEpIdx = activeEpIdx;
                 playBtn.setText(
-                        "▶   播放 · "
-                                + formatPlayEpisodeLabel(
-                                        line.episodes.get(targetEpIdx).name, targetEpIdx + 1));
+                        buildPlayButtonLabel(
+                                a,
+                                p.accentOnFill,
+                                formatPlayEpisodeLabel(
+                                        line.episodes.get(targetEpIdx).name, targetEpIdx + 1)));
                 playBtn.setOnClickListener(
                         v -> {
                             a.resumeAt =
@@ -1273,55 +1653,35 @@ final class MobileDetailScreen {
                                     true);
                         });
             }
-            View topSourceView = a.root.findViewWithTag("detail-source-picker");
-            if (topSourceView instanceof TextView) {
-                TextView sourceTopBtn = (TextView) topSourceView;
-                sourceTopBtn.setText("⇄ " + line.name + " ⌄");
-                sourceTopBtn.setOnClickListener(
-                        v -> {
-                            String[] names = new String[video.lines.size()];
-                            for (int i = 0; i < video.lines.size(); i++) {
-                                Cms.Line l = video.lines.get(i);
-                                names[i] =
-                                        l.name
-                                                + "  (共 "
-                                                + l.episodes.size()
-                                                + " 集 · "
-                                                + site.name
-                                                + ")";
-                            }
-                            new AppDialog.Builder(a)
-                                    .wrapChoices()
-                                    .setTitle("切换播放源 (" + video.lines.size() + ")")
-                                    .setSingleChoiceItems(
-                                            names,
+            View topSourceLabelView = a.root.findViewWithTag("detail-source-picker");
+            View topSourceChevron = a.root.findViewWithTag("detail-source-chevron");
+            View topSourceClickTarget = a.root.findViewWithTag("detail-source-pill");
+            if (topSourceClickTarget == null) topSourceClickTarget = topSourceLabelView;
+            boolean hasMultiLines = video.lines.size() > 1;
+            if (topSourceLabelView instanceof TextView) {
+                ((TextView) topSourceLabelView).setText(hasMultiLines ? line.name : "换源");
+            }
+            if (topSourceChevron != null) {
+                topSourceChevron.setVisibility(hasMultiLines ? View.VISIBLE : View.GONE);
+            }
+            if (topSourceClickTarget != null) {
+                if (hasMultiLines) {
+                    topSourceClickTarget.setOnClickListener(
+                            v ->
+                                    showLinePickerSheet(
+                                            a,
+                                            site,
+                                            video,
                                             lineIndex,
-                                            (dialog, which) -> {
-                                                dialog.dismiss();
-                                                a.prefs
-                                                        .edit()
-                                                        .putString(
-                                                                Prefs.PREFERRED_LINE,
-                                                                video.lines.get(which).name)
-                                                        .apply();
-                                                renderMobileEpisodes(
-                                                        a,
-                                                        site,
-                                                        video,
-                                                        which,
-                                                        0,
-                                                        panel,
-                                                        remembered,
-                                                        discoveredSeasons,
-                                                        discoveredLabels);
-                                            })
-                                    .setNeutralButton(
-                                            "🔍 跨片源搜索",
-                                            (dialog, which) ->
-                                                    a.crossSearch(Cms.searchTitle(video)))
-                                    .setNegativeButton("取消", null)
-                                    .show();
-                        });
+                                            panel,
+                                            remembered,
+                                            discoveredSeasons,
+                                            discoveredLabels));
+                } else {
+                    // Single line: avoid pointless 1-item picker, directly trigger cross-search!
+                    topSourceClickTarget.setOnClickListener(
+                            v -> a.crossSearch(Cms.searchTitle(video)));
+                }
             }
             View topDownView = a.root.findViewWithTag("episodes-download");
             if (topDownView != null) {
@@ -1335,51 +1695,166 @@ final class MobileDetailScreen {
             }
         }
 
-        // 1. Header Row:
-        //    Left: Independent Season Selector Button (`第 X 季 ⌄`)
-        //    Right: `[ ↑ 正序 ]` + `[ ⊞ 全部剧集 (N) ]`
+        // Keep line strip in place when switching between lines so its scroll position stays steady
+        LinearLayout bodyHost = null;
+        if (existingLineScroll != null && existingLineRow != null) {
+            View existingBody = panel.findViewWithTag("detail-episodes-body");
+            if (existingBody instanceof LinearLayout) {
+                bodyHost = (LinearLayout) existingBody;
+                bodyHost.removeAllViews();
+                for (int i = 0;
+                        i < video.lines.size() && i < existingLineRow.getChildCount();
+                        i++) {
+                    View child = existingLineRow.getChildAt(i);
+                    if (child instanceof TextView) {
+                        TextView lPill = (TextView) child;
+                        boolean activeLine = (i == lineIndex);
+                        lPill.setTextColor(activeLine ? p.accent : p.textSecondary);
+                        lPill.setTypeface(null, activeLine ? Typeface.BOLD : Typeface.NORMAL);
+                        lPill.setBackground(MobileTheme.pillBg(a, activeLine, 999));
+                    }
+                }
+                final HorizontalScrollView preservedLineScroll = existingLineScroll;
+                final int preservedX = savedLineScrollX;
+                preservedLineScroll.post(() -> preservedLineScroll.scrollTo(preservedX, 0));
+            }
+        }
+
+        if (bodyHost == null) {
+            panel.removeAllViews();
+            // 0. Quick Horizontal Source Line Pills (only when > 1 line exists)
+            if (video.lines.size() > 1) {
+                HorizontalScrollView lineScroll = new HorizontalScrollView(a);
+                lineScroll.setTag("detail-line-scroll");
+                lineScroll.setHorizontalScrollBarEnabled(false);
+                LinearLayout lineRow = a.row();
+                lineRow.setGravity(Gravity.CENTER_VERTICAL);
+                for (int i = 0; i < video.lines.size(); i++) {
+                    final int targetLineIdx = i;
+                    Cms.Line candLine = video.lines.get(i);
+                    boolean activeLine = (i == lineIndex);
+                    TextView lPill =
+                            a.text(
+                                    candLine.name + " · " + candLine.episodes.size(),
+                                    12.5f,
+                                    activeLine ? p.accent : p.textSecondary);
+                    lPill.setTypeface(null, activeLine ? Typeface.BOLD : Typeface.NORMAL);
+                    lPill.setPadding(a.dp(13), a.dp(6), a.dp(13), a.dp(6));
+                    lPill.setBackground(MobileTheme.pillBg(a, activeLine, 999));
+                    MobileMotion.bindPress(lPill, 0.94f);
+                    lPill.setOnClickListener(
+                            v -> {
+                                a.prefs
+                                        .edit()
+                                        .putString(Prefs.PREFERRED_LINE, candLine.name)
+                                        .apply();
+                                renderMobileEpisodes(
+                                        a,
+                                        site,
+                                        video,
+                                        targetLineIdx,
+                                        0,
+                                        panel,
+                                        remembered,
+                                        discoveredSeasons,
+                                        discoveredLabels);
+                            });
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+                    lp.rightMargin = a.dp(8);
+                    lineRow.addView(lPill, lp);
+                }
+
+                LinearLayout crossBtn = a.row();
+                crossBtn.setGravity(Gravity.CENTER_VERTICAL);
+                crossBtn.setPadding(a.dp(11), a.dp(6), a.dp(12), a.dp(6));
+                crossBtn.setBackground(MobileTheme.subtleBg(a, 999));
+                MobileIcons.IconView csIcon =
+                        MobileIcons.create(a, MobileIcons.IC_SEARCH, 12.5f, p.textSecondary);
+                LinearLayout.LayoutParams csiLp =
+                        new LinearLayout.LayoutParams(a.dp(12.5f), a.dp(12.5f));
+                csiLp.rightMargin = a.dp(4);
+                crossBtn.addView(csIcon, csiLp);
+                TextView csLbl = a.text("换源搜", 12.5f, p.textSecondary);
+                crossBtn.addView(csLbl);
+                MobileMotion.bindPress(crossBtn, 0.94f);
+                crossBtn.setOnClickListener(v -> a.crossSearch(Cms.searchTitle(video)));
+                lineRow.addView(crossBtn);
+
+                lineScroll.addView(lineRow);
+                LinearLayout.LayoutParams lsLp = new LinearLayout.LayoutParams(-1, -2);
+                lsLp.bottomMargin = a.dp(14);
+                panel.addView(lineScroll, lsLp);
+            }
+
+            bodyHost = a.vertical();
+            bodyHost.setTag("detail-episodes-body");
+            panel.addView(bodyHost, new LinearLayout.LayoutParams(-1, -2));
+        }
+
+        // 1. Header Row: Season Selector + Cleaner + (multi-episode only: Sort & All-Episodes)
         LinearLayout headerRow = a.row();
         headerRow.setGravity(Gravity.CENTER_VERTICAL);
-        panel.addView(headerRow, new LinearLayout.LayoutParams(-1, -2));
+        bodyHost.addView(headerRow, new LinearLayout.LayoutParams(-1, -2));
 
         LinearLayout seasonBtn = a.row();
         seasonBtn.setTag("detail-season-picker");
         seasonBtn.setGravity(Gravity.CENTER_VERTICAL);
-        bindTouchFeedback(seasonBtn);
+        MobileMotion.bindPress(seasonBtn, 0.96f);
 
-        TextView seasonTitle = a.text(curSeason.seasonLabel, 18, Color.WHITE);
+        String headerTitle =
+                multiEpisode || discoveredSeasons.size() > 1 ? curSeason.seasonLabel : "正片资源";
+        TextView seasonTitle = a.text(headerTitle, 18, p.textPrimary);
         seasonTitle.setTypeface(null, Typeface.BOLD);
         seasonBtn.addView(seasonTitle);
 
         if (discoveredSeasons.size() > 1) {
-            TextView countBadge = a.text("共" + discoveredSeasons.size() + "季", 10.5f, 0xf2ffffff);
+            TextView countBadge =
+                    a.text("共" + discoveredSeasons.size() + "季", 10.5f, p.textSecondary);
             countBadge.setTypeface(null, Typeface.BOLD);
             countBadge.setPadding(a.dp(7), a.dp(2), a.dp(7), a.dp(2));
-            countBadge.setBackground(a.bg(0x2effffff, 999));
+            countBadge.setBackground(MobileTheme.subtleBg(a, 999));
             LinearLayout.LayoutParams cbLp = new LinearLayout.LayoutParams(-2, -2);
             cbLp.leftMargin = a.dp(6);
             seasonBtn.addView(countBadge, cbLp);
+
+            MobileIcons.IconView seasonChev =
+                    MobileIcons.create(a, MobileIcons.IC_CHEVRON_DOWN, 14f, p.textSecondary);
+            LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(a.dp(14), a.dp(14));
+            scLp.leftMargin = a.dp(4);
+            seasonBtn.addView(seasonChev, scLp);
+
+            seasonBtn.setOnClickListener(
+                    v ->
+                            showSeasonPickerDialog(
+                                    a,
+                                    site,
+                                    video,
+                                    curSeason,
+                                    discoveredSeasons,
+                                    discoveredLabels));
         }
-
-        TextView seasonChevron = a.text(" ⌄", 16, 0xccffffff);
-        seasonChevron.setTypeface(null, Typeface.BOLD);
-        seasonBtn.addView(seasonChevron);
-
-        seasonBtn.setOnClickListener(
-                v ->
-                        showSeasonPickerDialog(
-                                a, site, video, curSeason, discoveredSeasons, discoveredLabels));
         headerRow.addView(seasonBtn, new LinearLayout.LayoutParams(0, -2, 1f));
 
-        // '✦' Episode Name Purifier Pill (Local Regex / AI / Raw)
+        // Episode Name Purifier Pill (Local Regex / AI / Raw)
         final int curCleanMode = a.mobilePrefs().getInt(Prefs.EPISODE_CLEAN_MODE, 0);
-        String cleanLabel = curCleanMode == 2 ? "✦ AI净化" : (curCleanMode == 0 ? "✦ 净化" : "原集名");
-        TextView cleanBtn = a.text(cleanLabel, 12, curCleanMode == 1 ? 0xb3ffffff : 0xff6ee7b7);
+        boolean cleanActive = curCleanMode != 1;
+        String cleanLabel = curCleanMode == 2 ? "AI净化" : (curCleanMode == 0 ? "净化" : "原集名");
+        LinearLayout cleanBtn = a.row();
         cleanBtn.setTag("episodes-cleaner");
-        cleanBtn.setTypeface(null, Typeface.BOLD);
-        cleanBtn.setPadding(a.dp(10), a.dp(5), a.dp(10), a.dp(5));
-        cleanBtn.setBackground(glassBg(a, 0x2810b981, 0x5534d399, 999));
-        bindTouchFeedback(cleanBtn);
+        cleanBtn.setGravity(Gravity.CENTER_VERTICAL);
+        cleanBtn.setPadding(a.dp(9), a.dp(5), a.dp(10), a.dp(5));
+        cleanBtn.setBackground(MobileTheme.pillBg(a, cleanActive, 999));
+        MobileIcons.IconView cleanIcon =
+                MobileIcons.create(
+                        a, MobileIcons.IC_SPARKLE, 12f, cleanActive ? p.accent : p.textSecondary);
+        cleanIcon.setFilled(cleanActive);
+        LinearLayout.LayoutParams ciLp = new LinearLayout.LayoutParams(a.dp(12), a.dp(12));
+        ciLp.rightMargin = a.dp(4);
+        cleanBtn.addView(cleanIcon, ciLp);
+        TextView cleanTv = a.text(cleanLabel, 12, cleanActive ? p.accent : p.textSecondary);
+        cleanTv.setTypeface(null, Typeface.BOLD);
+        cleanBtn.addView(cleanTv);
+        MobileMotion.bindPress(cleanBtn, 0.94f);
         cleanBtn.setOnClickListener(
                 v -> {
                     int nextMode = curCleanMode == 0 ? 2 : (curCleanMode == 2 ? 1 : 0);
@@ -1388,7 +1863,7 @@ final class MobileDetailScreen {
                     }
                     a.mobilePrefs().edit().putInt(Prefs.EPISODE_CLEAN_MODE, nextMode).apply();
                     if (nextMode == 2) {
-                        a.toast("正在调用 AI 大模型批量净化集名…");
+                        a.toast("正在调用 AI 智能净化集名…");
                         AiAssistantService.cleanEpisodesAsync(
                                 a,
                                 video.title,
@@ -1419,49 +1894,90 @@ final class MobileDetailScreen {
                             discoveredLabels);
                 });
         LinearLayout.LayoutParams cleanLp = new LinearLayout.LayoutParams(-2, -2);
-        cleanLp.rightMargin = a.dp(7);
+        if (multiEpisode) cleanLp.rightMargin = a.dp(6);
         headerRow.addView(cleanBtn, cleanLp);
 
-        // Sort Pill (`↑ 正序` / `↓ 倒序`)
-        TextView sortBtn = a.text(descending ? "↓ 倒序" : "↑ 正序", 12, 0xe6ffffff);
+        // Sort Pill (`正序` / `倒序`) — hidden on single-episode movies
+        LinearLayout sortBtn = a.row();
         sortBtn.setTag("episodes-order");
-        sortBtn.setTypeface(null, Typeface.BOLD);
-        sortBtn.setPadding(a.dp(10), a.dp(5), a.dp(10), a.dp(5));
-        sortBtn.setBackground(glassBg(a, 0x24ffffff, 0x30ffffff, 999));
-        bindTouchFeedback(sortBtn);
+        sortBtn.setGravity(Gravity.CENTER_VERTICAL);
+        sortBtn.setPadding(a.dp(9), a.dp(5), a.dp(10), a.dp(5));
+        sortBtn.setBackground(MobileTheme.subtleBg(a, 999));
+        MobileIcons.IconView sortIcon =
+                MobileIcons.create(a, MobileIcons.IC_SORT, 12.5f, p.textSecondary);
+        LinearLayout.LayoutParams soiLp = new LinearLayout.LayoutParams(a.dp(12.5f), a.dp(12.5f));
+        soiLp.rightMargin = a.dp(4);
+        sortBtn.addView(sortIcon, soiLp);
+        TextView sortTv = a.text(descending ? "倒序" : "正序", 12, p.textPrimary);
+        sortTv.setTypeface(null, Typeface.BOLD);
+        sortBtn.addView(sortTv);
+        MobileMotion.bindPress(sortBtn, 0.94f);
         sortBtn.setOnClickListener(
                 v -> {
-                    a.prefs.edit().putBoolean(Prefs.EPISODES_DESCENDING, !descending).apply();
+                    activeVideoDescending = !descending;
+                    int nextPage = 0;
+                    if (selectedEpisodeIndex >= 0 && selectedEpisodeIndex < total) {
+                        int visIdx =
+                                activeVideoDescending
+                                        ? (total - 1 - selectedEpisodeIndex)
+                                        : selectedEpisodeIndex;
+                        nextPage = visIdx / 50;
+                    } else if (remembered != null && line.name.equals(remembered.line)) {
+                        int remIdx = resolveInitialEpisodeIndex(line.episodes, remembered.episode);
+                        int visIdx = activeVideoDescending ? (total - 1 - remIdx) : remIdx;
+                        nextPage = visIdx / 50;
+                    }
                     renderMobileEpisodes(
                             a,
                             site,
                             video,
                             lineIndex,
-                            0,
+                            nextPage,
                             panel,
                             remembered,
                             discoveredSeasons,
                             discoveredLabels);
                 });
+        sortBtn.setVisibility(multiEpisode ? View.VISIBLE : View.GONE);
         LinearLayout.LayoutParams sortLp = new LinearLayout.LayoutParams(-2, -2);
-        sortLp.rightMargin = a.dp(8);
+        sortLp.rightMargin = a.dp(6);
         headerRow.addView(sortBtn, sortLp);
 
-        // All Episodes Grid Pill (`⊞ 全部剧集 (N)`)
-        TextView allGridBtn = a.text("⊞ 全部剧集 (" + total + ")", 12, 0xe6ffffff);
+        // All Episodes Pill — hidden on single-episode movies
+        LinearLayout allGridBtn = a.row();
         allGridBtn.setTag("episodes-all-grid");
-        allGridBtn.setTypeface(null, Typeface.BOLD);
-        allGridBtn.setPadding(a.dp(11), a.dp(5), a.dp(11), a.dp(5));
-        allGridBtn.setBackground(glassBg(a, 0x24ffffff, 0x30ffffff, 999));
-        bindTouchFeedback(allGridBtn);
+        allGridBtn.setGravity(Gravity.CENTER_VERTICAL);
+        allGridBtn.setPadding(a.dp(10), a.dp(5), a.dp(8), a.dp(5));
+        allGridBtn.setBackground(MobileTheme.subtleBg(a, 999));
+        TextView allTv = a.text("全部(" + total + ")", 12, p.textPrimary);
+        allTv.setTypeface(null, Typeface.BOLD);
+        allGridBtn.addView(allTv);
+        MobileIcons.IconView allChev =
+                MobileIcons.create(a, MobileIcons.IC_CHEVRON_RIGHT, 12f, p.textSecondary);
+        LinearLayout.LayoutParams achLp = new LinearLayout.LayoutParams(a.dp(12), a.dp(12));
+        achLp.leftMargin = a.dp(2);
+        allGridBtn.addView(allChev, achLp);
+        MobileMotion.bindPress(allGridBtn, 0.94f);
         allGridBtn.setOnClickListener(
-                v -> showAllEpisodesDialog(a, site, video, line, descending, remembered));
+                v ->
+                        showAllEpisodesDialog(
+                                a,
+                                site,
+                                video,
+                                lineIndex,
+                                line,
+                                descending,
+                                panel,
+                                remembered,
+                                discoveredSeasons,
+                                discoveredLabels));
+        allGridBtn.setVisibility(multiEpisode ? View.VISIBLE : View.GONE);
         headerRow.addView(allGridBtn);
 
         // 1b. Direct Multi-Season Selector Strip (visible whenever >= 2 seasons exist)
         LinearLayout seasonStripWrap = a.vertical();
         seasonStripWrap.setTag("detail-seasons");
-        panel.addView(seasonStripWrap, new LinearLayout.LayoutParams(-1, -2));
+        bodyHost.addView(seasonStripWrap, new LinearLayout.LayoutParams(-1, -2));
         if (discoveredSeasons.size() > 1) {
             renderSeasonStrip(
                     a,
@@ -1475,59 +1991,97 @@ final class MobileDetailScreen {
 
         int start = page * 50;
         int end = Math.min(start + 50, total);
+        final EpisodeSelectionState selectionState = new EpisodeSelectionState(line.name);
+        SELECTION_STATES.put(bodyHost, selectionState);
 
-        // 2. Quick Episode Number Strip (`1` `2` `3` `4` ... white circle when active)
-        a.gap(panel, 12);
-        HorizontalScrollView numScroll = new HorizontalScrollView(a);
-        numScroll.setHorizontalScrollBarEnabled(false);
-        LinearLayout numRow = a.row();
-        numScroll.addView(numRow);
-        panel.addView(numScroll, new LinearLayout.LayoutParams(-1, -2));
+        // 2. Quick Episode Number Tile Strip — pure episode locator (highlights & scrolls episode
+        //    preview strip + updates main Play button; never launches playback directly!)
+        if (multiEpisode) {
+            a.gap(bodyHost, 12);
+            HorizontalScrollView numScroll = new HorizontalScrollView(a);
+            numScroll.setHorizontalScrollBarEnabled(false);
+            selectionState.numScroll = numScroll;
+            LinearLayout numRow = a.row();
+            numScroll.addView(numRow);
+            bodyHost.addView(numScroll, new LinearLayout.LayoutParams(-1, -2));
 
-        for (int i = start; i < end; i++) {
-            final int posIdx = descending ? (total - 1 - i) : i;
-            final Cms.Episode ep = line.episodes.get(posIdx);
-            boolean isCurrent = posIdx == activeEpIdx;
+            for (int i = start; i < end; i++) {
+                final int posIdx = descending ? (total - 1 - i) : i;
+                final Cms.Episode ep = line.episodes.get(posIdx);
+                boolean isCurrent = posIdx == activeEpIdx;
 
-            TextView numPill =
-                    a.text(String.valueOf(posIdx + 1), 12.5f, isCurrent ? 0xff121215 : 0xd9ffffff);
-            numPill.setTag("episode:" + line.name + ":" + posIdx);
-            numPill.setTypeface(null, Typeface.BOLD);
-            numPill.setGravity(Gravity.CENTER);
-            numPill.setMinWidth(a.dp(32));
-            numPill.setMinimumWidth(a.dp(32));
-            numPill.setPadding(a.dp(10), a.dp(5), a.dp(10), a.dp(5));
-            numPill.setBackground(
-                    isCurrent ? a.bg(Color.WHITE, 999) : glassBg(a, 0x24ffffff, 0x28ffffff, 999));
-            bindTouchFeedback(numPill);
-            numPill.setOnClickListener(
-                    v -> {
-                        a.resumeAt = 0;
-                        handleDetailEpisodeTap(a, site, video, line, ep, posIdx + 1, false);
-                    });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(30));
-            lp.rightMargin = a.dp(7);
-            numRow.addView(numPill, lp);
+                TextView numPill =
+                        a.text(
+                                String.valueOf(posIdx + 1),
+                                13f,
+                                isCurrent ? p.accentOnFill : p.textPrimary);
+                numPill.setTag("episode:" + line.name + ":" + posIdx);
+                numPill.setTypeface(null, Typeface.BOLD);
+                numPill.setGravity(Gravity.CENTER);
+                numPill.setMinWidth(a.dp(36));
+                numPill.setMinimumWidth(a.dp(36));
+                numPill.setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6));
+                numPill.setBackground(
+                        isCurrent ? MobileTheme.accentPillBg(a, 10) : MobileTheme.subtleBg(a, 10));
+                MobileMotion.bindPress(numPill, 0.94f);
+                numPill.setOnClickListener(
+                        v -> {
+                            selectedEpisodeLine = line.name == null ? "" : line.name;
+                            selectedEpisodeIndex = posIdx;
+                            selectionState.applySelection(a, posIdx);
+                            selectionState.scrollToEpisode(posIdx, true);
+                            View playBtnView =
+                                    a.root == null ? null : a.root.findViewWithTag("detail-play");
+                            if (playBtnView instanceof Button) {
+                                Button playBtn = (Button) playBtnView;
+                                playBtn.setText(
+                                        buildPlayButtonLabel(
+                                                a,
+                                                p.accentOnFill,
+                                                formatPlayEpisodeLabel(ep.name, posIdx + 1)));
+                                playBtn.setOnClickListener(
+                                        pv -> {
+                                            a.resumeAt =
+                                                    (remembered != null
+                                                                    && line.name.equals(
+                                                                            remembered.line)
+                                                                    && ep.name.equals(
+                                                                            remembered.episode))
+                                                            ? remembered.resume()
+                                                            : 0;
+                                            handleDetailEpisodeTap(
+                                                    a, site, video, line, ep, posIdx + 1, true);
+                                        });
+                            }
+                        });
+                selectionState.numPills.put(posIdx, numPill);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(34));
+                lp.rightMargin = a.dp(8);
+                numRow.addView(numPill, lp);
+            }
         }
 
-        // 3. Horizontal 16:9 Landscape Episode Preview Cards (matches iPhone `detail_screen.dart`)
-        a.gap(panel, 14);
+        // 3. Horizontal 16:9 Landscape Episode Preview Cards
+        a.gap(bodyHost, 14);
         HorizontalScrollView cardScroll = new HorizontalScrollView(a);
         cardScroll.setHorizontalScrollBarEnabled(false);
+        selectionState.cardScroll = cardScroll;
         LinearLayout cardRow = a.row();
+        cardRow.setGravity(Gravity.TOP);
+        cardRow.setBaselineAligned(false);
         cardScroll.addView(cardRow);
-        panel.addView(cardScroll, new LinearLayout.LayoutParams(-1, -2));
+        bodyHost.addView(cardScroll, new LinearLayout.LayoutParams(-1, -2));
 
         for (int i = start; i < end; i++) {
             final int posIdx = descending ? (total - 1 - i) : i;
             final Cms.Episode ep = line.episodes.get(posIdx);
             boolean isCurrent = posIdx == activeEpIdx;
             EpisodeDisplay disp = parseEpisodeDisplay(ep.name, posIdx + 1);
-            String eBadgeText = "▶ E" + String.format(Locale.US, "%02d", posIdx + 1);
+            String eBadgeText = "E" + String.format(Locale.US, "%02d", posIdx + 1);
 
             LinearLayout cardWrap = a.vertical();
             cardWrap.setTag("ep-card:" + line.name + ":" + posIdx);
-            bindTouchFeedback(cardWrap);
+            MobileMotion.bindPress(cardWrap, 0.97f);
             cardWrap.setOnClickListener(
                     v -> {
                         a.resumeAt = 0;
@@ -1541,10 +2095,7 @@ final class MobileDetailScreen {
                     });
 
             FrameLayout frame = new FrameLayout(a);
-            GradientDrawable frameBg = new GradientDrawable();
-            frameBg.setColor(0xff141d18);
-            frameBg.setCornerRadius(a.dp(14));
-            frame.setBackground(frameBg);
+            frame.setBackground(MobileTheme.subtleBg(a, 14));
             frame.setClipToOutline(true);
 
             EpisodeStillCropView stillImg = new EpisodeStillCropView(a, posIdx);
@@ -1556,36 +2107,34 @@ final class MobileDetailScreen {
                             : null;
             TmdbService.EpisodeStill tmdbEp = activeTmdbEpisodes.get(posIdx + 1);
             if (tmdbEp != null && tmdbEp.stillUrl != null && !tmdbEp.stillUrl.isEmpty()) {
+                stillImg.setCustomStillBound(true);
                 a.poster(tmdbEp.stillUrl, stillImg, false);
             } else if (currentBackdropBmp != null && !currentBackdropBmp.isRecycled()) {
                 stillImg.setImageBitmap(currentBackdropBmp);
             } else if (video.poster != null && !video.poster.isEmpty()) {
-                a.poster(video.poster, stillImg, true);
+                a.poster(video.poster, stillImg, false);
             }
 
-            // Subtle dark bottom gradient inside the 16:9 card
             View cardScrim = new View(a);
             GradientDrawable scrimGd =
                     new GradientDrawable(
                             GradientDrawable.Orientation.TOP_BOTTOM,
-                            new int[] {0x18000000, 0x88000000});
+                            new int[] {0x00000000, 0x990A0B0E});
             scrimGd.setCornerRadius(a.dp(14));
             cardScrim.setBackground(scrimGd);
             frame.addView(cardScrim, new FrameLayout.LayoutParams(-1, -1));
 
-            // Top-right spec badge (e.g. `5.17GB` / `4K`)
             if (disp.specBadge != null && !disp.specBadge.isEmpty()) {
                 TextView specTv = a.text(disp.specBadge, 10, Color.WHITE);
                 specTv.setTypeface(null, Typeface.BOLD);
                 specTv.setPadding(a.dp(7), a.dp(2), a.dp(7), a.dp(2));
-                specTv.setBackground(glassBg(a, 0xb3121215, 0x40ffffff, 6));
+                specTv.setBackground(a.bg(0xB30A0B0E, 6));
                 FrameLayout.LayoutParams specLp =
                         new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
                 specLp.setMargins(a.dp(8), a.dp(8), a.dp(8), a.dp(8));
                 frame.addView(specTv, specLp);
             }
 
-            // Bottom overlay row (`▶ E01` pill on left, `line.name` on right)
             LinearLayout bottomBar = a.row();
             bottomBar.setGravity(Gravity.CENTER_VERTICAL);
             FrameLayout.LayoutParams bottomLp =
@@ -1593,67 +2142,79 @@ final class MobileDetailScreen {
             bottomLp.setMargins(a.dp(9), a.dp(8), a.dp(9), a.dp(8));
             frame.addView(bottomBar, bottomLp);
 
-            TextView ePill = a.text(eBadgeText, 10.5f, isCurrent ? 0xff121215 : Color.WHITE);
-            ePill.setTypeface(null, Typeface.BOLD);
+            LinearLayout ePill = a.row();
+            ePill.setGravity(Gravity.CENTER_VERTICAL);
             ePill.setPadding(a.dp(7), a.dp(2.5f), a.dp(7), a.dp(2.5f));
-            ePill.setBackground(a.bg(isCurrent ? Color.WHITE : 0xa6121215, 6));
+            ePill.setBackground(isCurrent ? MobileTheme.accentPillBg(a, 6) : a.bg(0xB00A0B0E, 6));
+            MobileIcons.IconView epPlayIc =
+                    MobileIcons.create(
+                            a, MobileIcons.IC_PLAY, 9.5f, isCurrent ? p.accentOnFill : Color.WHITE);
+            LinearLayout.LayoutParams epiLp = new LinearLayout.LayoutParams(a.dp(9.5f), a.dp(9.5f));
+            epiLp.rightMargin = a.dp(3);
+            ePill.addView(epPlayIc, epiLp);
+            TextView epTagTv = a.text(eBadgeText, 10.5f, isCurrent ? p.accentOnFill : Color.WHITE);
+            epTagTv.setTypeface(null, Typeface.BOLD);
+            ePill.addView(epTagTv);
             bottomBar.addView(ePill);
 
-            TextView lineLabel = a.text(line.name, 10.5f, 0xd9ffffff);
+            TextView lineLabel = a.text(line.name, 10.5f, 0xD9FFFFFF);
             lineLabel.setTypeface(null, Typeface.BOLD);
             lineLabel.setGravity(Gravity.RIGHT);
             lineLabel.setSingleLine(true);
             lineLabel.setEllipsize(TextUtils.TruncateAt.END);
             bottomBar.addView(lineLabel, new LinearLayout.LayoutParams(0, -2, 1f));
 
-            // Foreground rounded border overlay (2dp white when current, 0.8dp glass otherwise)
-            View borderOverlay = new View(a);
-            GradientDrawable borderGd = new GradientDrawable();
-            borderGd.setColor(Color.TRANSPARENT);
-            borderGd.setCornerRadius(a.dp(14));
-            borderGd.setStroke(a.dp(isCurrent ? 2f : 0.8f), isCurrent ? Color.WHITE : 0x33ffffff);
-            borderOverlay.setBackground(borderGd);
-            frame.addView(borderOverlay, new FrameLayout.LayoutParams(-1, -1));
+            View activeRing = new View(a);
+            GradientDrawable ringGd = new GradientDrawable();
+            ringGd.setColor(Color.TRANSPARENT);
+            ringGd.setCornerRadius(a.dp(14));
+            ringGd.setStroke(a.dp(2f), p.accent);
+            activeRing.setBackground(ringGd);
+            activeRing.setVisibility(isCurrent ? View.VISIBLE : View.GONE);
+            frame.addView(activeRing, new FrameLayout.LayoutParams(-1, -1));
 
-            cardWrap.addView(frame, new LinearLayout.LayoutParams(a.dp(224), a.dp(126)));
+            cardWrap.addView(frame, new LinearLayout.LayoutParams(a.dp(220), a.dp(124)));
 
-            // Below card: meta + headline
             String yearPrefix =
                     (video.year != null && !video.year.trim().isEmpty())
                             ? video.year.trim() + " · "
                             : "";
             String subMeta =
                     yearPrefix
-                            + "第"
-                            + (posIdx + 1)
-                            + "集"
+                            + (multiEpisode ? ("第" + (posIdx + 1) + "集") : "正片")
                             + (disp.specBadge != null ? " · " + disp.specBadge : "");
-            TextView subMetaTv = a.text(subMeta, 11, 0x99ffffff);
+            TextView subMetaTv = a.text(subMeta, 11.5f, p.textSecondary);
             subMetaTv.setSingleLine(true);
             subMetaTv.setEllipsize(TextUtils.TruncateAt.END);
-            subMetaTv.setPadding(a.dp(2), a.dp(8), a.dp(2), 0);
+            subMetaTv.setPadding(a.dp(2), a.dp(7), a.dp(2), 0);
             cardWrap.addView(subMetaTv);
 
             String headline =
-                    disp.cleanTitle.startsWith("第")
+                    !multiEpisode
                             ? disp.cleanTitle
-                            : "第 " + (posIdx + 1) + " 集 · " + disp.cleanTitle;
-            TextView headlineTv = a.text(headline, 13.5f, Color.WHITE);
+                            : (disp.cleanTitle.startsWith("第")
+                                    ? disp.cleanTitle
+                                    : "第 " + (posIdx + 1) + " 集 · " + disp.cleanTitle);
+            TextView headlineTv = a.text(headline, 13.5f, isCurrent ? p.accent : p.textPrimary);
             headlineTv.setTypeface(null, Typeface.BOLD);
             headlineTv.setSingleLine(true);
             headlineTv.setEllipsize(TextUtils.TruncateAt.END);
             headlineTv.setPadding(a.dp(2), a.dp(2), a.dp(2), 0);
             cardWrap.addView(headlineTv);
+            selectionState.cards.put(
+                    posIdx,
+                    new EpisodeCardHolder(
+                            cardWrap, ePill, epPlayIc, epTagTv, activeRing, headlineTv));
 
-            LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(a.dp(224), -2);
-            cardLp.rightMargin = a.dp(14);
+            LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(a.dp(220), -2);
+            cardLp.rightMargin = a.dp(12);
             cardRow.addView(cardWrap, cardLp);
         }
 
         // 4. Range Capsules (`1 · 50`, `51 · 100` ...) when > 50 episodes
         int groupCount = (total + 49) / 50;
         if (groupCount > 1) {
-            a.gap(panel, 12);
+            a.gap(bodyHost, 14);
             HorizontalScrollView groupScroll = new HorizontalScrollView(a);
             groupScroll.setHorizontalScrollBarEnabled(false);
             LinearLayout groupRow = a.row();
@@ -1667,11 +2228,14 @@ final class MobileDetailScreen {
                         descending
                                 ? (total - g * 50) + " · " + Math.max(1, total - gEnd + 1)
                                 : gStart + " · " + gEnd;
-                TextView tab = a.text(label, 12.5f, selectedGroup ? 0xff121215 : 0xd9ffffff);
+                TextView tab = a.text(label, 12.5f, selectedGroup ? p.accentOnFill : p.textPrimary);
                 tab.setTypeface(null, Typeface.BOLD);
                 tab.setPadding(a.dp(15), a.dp(6), a.dp(15), a.dp(6));
-                tab.setBackground(a.bg(selectedGroup ? Color.WHITE : 0x24ffffff, 999));
-                bindTouchFeedback(tab);
+                tab.setBackground(
+                        selectedGroup
+                                ? MobileTheme.accentPillBg(a, 999)
+                                : MobileTheme.subtleBg(a, 999));
+                MobileMotion.bindPress(tab, 0.94f);
                 tab.setOnClickListener(
                         v ->
                                 renderMobileEpisodes(
@@ -1688,8 +2252,109 @@ final class MobileDetailScreen {
                 lp.rightMargin = a.dp(8);
                 groupRow.addView(tab, lp);
             }
-            panel.addView(groupScroll, new LinearLayout.LayoutParams(-1, -2));
+            bodyHost.addView(groupScroll, new LinearLayout.LayoutParams(-1, -2));
         }
+
+        if (activeEpIdx > 0 || (remembered != null && line.name.equals(remembered.line))) {
+            selectionState.scrollToEpisode(activeEpIdx, false);
+        }
+
+        restoreScrollAfterLayout(a, savedScrollY);
+    }
+
+    private static void showLinePickerSheet(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            int currentLineIndex,
+            LinearLayout panel,
+            WatchHistory.Entry remembered,
+            Map<Integer, Cms.Video> discoveredSeasons,
+            Map<Integer, String> discoveredLabels) {
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        final MobileBottomSheet.SheetHandle[] handleRef = {null};
+
+        LinearLayout list = a.vertical();
+        list.setPadding(0, a.dp(2), 0, a.dp(4));
+        int hairlinePx = MobileTheme.hairlinePx(a);
+
+        for (int i = 0; i < video.lines.size(); i++) {
+            final int idx = i;
+            final Cms.Line cand = video.lines.get(i);
+            boolean active = idx == currentLineIndex;
+
+            LinearLayout optRow = a.row();
+            optRow.setGravity(Gravity.CENTER_VERTICAL);
+            optRow.setMinimumHeight(a.dp(50));
+            optRow.setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12));
+            if (active) {
+                optRow.setBackground(a.bg(p.pillSelectedFill, 12));
+            } else {
+                MobileSectionGroup.bindPressHighlight(optRow, p.bgPressed);
+            }
+
+            LinearLayout info = a.vertical();
+            TextView lName = a.text(cand.name, 15f, active ? p.accent : p.textPrimary);
+            lName.setTypeface(null, active ? Typeface.BOLD : Typeface.NORMAL);
+            lName.setSingleLine(true);
+            lName.setEllipsize(TextUtils.TruncateAt.END);
+            info.addView(lName);
+
+            TextView lMeta =
+                    a.text("共 " + cand.episodes.size() + " 集 · " + site.name, 12f, p.textSecondary);
+            lMeta.setPadding(0, a.dp(2), 0, 0);
+            info.addView(lMeta);
+            optRow.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
+
+            if (active) {
+                MobileIcons.IconView check =
+                        MobileIcons.create(a, MobileIcons.IC_CHECK, 18f, p.accent);
+                check.setStrokeWidthUnits(2.3f);
+                LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(a.dp(18), a.dp(18));
+                clp.leftMargin = a.dp(12);
+                optRow.addView(check, clp);
+            }
+
+            optRow.setOnClickListener(
+                    v -> {
+                        if (handleRef[0] != null) handleRef[0].dismiss();
+                        a.prefs.edit().putString(Prefs.PREFERRED_LINE, cand.name).apply();
+                        renderMobileEpisodes(
+                                a,
+                                site,
+                                video,
+                                idx,
+                                0,
+                                panel,
+                                remembered,
+                                discoveredSeasons,
+                                discoveredLabels);
+                    });
+            list.addView(optRow, new LinearLayout.LayoutParams(-1, -2));
+
+            boolean nextActive = (i + 1) == currentLineIndex;
+            if (i + 1 < video.lines.size() && !active && !nextActive) {
+                View divider = new View(a);
+                divider.setBackgroundColor(p.hairline);
+                LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, hairlinePx);
+                dlp.leftMargin = a.dp(14);
+                dlp.rightMargin = a.dp(14);
+                list.addView(divider, dlp);
+            }
+        }
+
+        handleRef[0] =
+                MobileBottomSheet.showHandle(
+                        a,
+                        "切换播放源",
+                        "当前共 " + video.lines.size() + " 条可用线路",
+                        "跨源搜索",
+                        () -> {
+                            if (handleRef[0] != null) handleRef[0].dismiss();
+                            a.crossSearch(Cms.searchTitle(video));
+                        },
+                        list,
+                        true);
     }
 
     private static void showSeasonPickerDialog(
@@ -1736,24 +2401,20 @@ final class MobileDetailScreen {
             MainActivity a,
             Cms.Site site,
             Cms.Video video,
+            int lineIndex,
             Cms.Line line,
             boolean descending,
-            WatchHistory.Entry remembered) {
+            LinearLayout panel,
+            WatchHistory.Entry remembered,
+            Map<Integer, Cms.Video> discoveredSeasons,
+            Map<Integer, String> discoveredLabels) {
+        MobileTheme.Palette p = MobileTheme.of(a);
         int total = line.episodes.size();
-        ScrollView sv = new ScrollView(a);
-        sv.setVerticalScrollBarEnabled(false);
         LinearLayout grid = a.vertical();
-        grid.setPadding(a.dp(6), a.dp(8), a.dp(6), a.dp(12));
-        sv.addView(grid, new ScrollView.LayoutParams(-1, -2));
+        grid.setPadding(0, a.dp(4), 0, a.dp(8));
 
-        final AppDialog dialog =
-                new AppDialog.Builder(a)
-                        .setTitle("全部剧集 · " + line.name + " (" + total + ")")
-                        .setView(sv)
-                        .setNegativeButton("关闭", null)
-                        .create();
+        final Dialog[] dlgRef = {null};
 
-        // Adaptive column count: 3 cols for short purified names, 1 col for long raw filenames
         boolean hasLongTitles = false;
         for (int i = 0; i < Math.min(12, total); i++) {
             EpisodeDisplay sample = parseEpisodeDisplay(line.episodes.get(i).name, i + 1);
@@ -1769,26 +2430,41 @@ final class MobileDetailScreen {
                 currentRow = a.row();
                 grid.addView(currentRow, new LinearLayout.LayoutParams(-1, -2));
             }
+            final int visualIdx = i;
             final int posIdx = descending ? (total - 1 - i) : i;
             final Cms.Episode ep = line.episodes.get(posIdx);
             boolean isCurrent =
-                    remembered != null
-                            && line.name.equals(remembered.line)
-                            && ep.name.equals(remembered.episode);
+                    selectedEpisodeIndex >= 0 && line.name.equals(selectedEpisodeLine)
+                            ? (posIdx == selectedEpisodeIndex)
+                            : (remembered != null
+                                    && line.name.equals(remembered.line)
+                                    && ep.name.equals(remembered.episode));
             EpisodeDisplay disp = parseEpisodeDisplay(ep.name, posIdx + 1);
-            TextView cell = a.text(disp.cleanTitle, 13, isCurrent ? 0xff111114 : Color.WHITE);
+            TextView cell = a.text(disp.cleanTitle, 13, isCurrent ? p.accentOnFill : p.textPrimary);
             cell.setTypeface(null, isCurrent ? Typeface.BOLD : Typeface.NORMAL);
             cell.setGravity(cols == 1 ? Gravity.CENTER_VERTICAL : Gravity.CENTER);
             cell.setSingleLine(true);
             cell.setEllipsize(TextUtils.TruncateAt.END);
             cell.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
-            cell.setBackground(a.bg(isCurrent ? Color.WHITE : 0xff252c29, 10));
-            bindTouchFeedback(cell);
+            cell.setBackground(
+                    isCurrent ? MobileTheme.accentPillBg(a, 10) : MobileTheme.subtleBg(a, 10));
+            MobileMotion.bindPress(cell, 0.94f);
             cell.setOnClickListener(
                     v -> {
-                        dialog.dismiss();
-                        a.resumeAt = 0;
-                        handleDetailEpisodeTap(a, site, video, line, ep, posIdx + 1, false);
+                        if (dlgRef[0] != null) dlgRef[0].dismiss();
+                        selectedEpisodeLine = line.name == null ? "" : line.name;
+                        selectedEpisodeIndex = posIdx;
+                        int targetPage = visualIdx / 50;
+                        renderMobileEpisodes(
+                                a,
+                                site,
+                                video,
+                                lineIndex,
+                                targetPage,
+                                panel,
+                                remembered,
+                                discoveredSeasons,
+                                discoveredLabels);
                     });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, a.dp(42), 1f);
             lp.setMargins(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
@@ -1801,7 +2477,15 @@ final class MobileDetailScreen {
                 currentRow.addView(new View(a), lp);
             }
         }
-        dialog.show();
+        dlgRef[0] =
+                MobileBottomSheet.show(
+                        a,
+                        "全部剧集 · " + line.name,
+                        "共 " + total + " 集 · 点击定位至对应剧集卡片",
+                        null,
+                        null,
+                        grid,
+                        true);
     }
 
     private static void renderSeasonStrip(
@@ -1812,6 +2496,7 @@ final class MobileDetailScreen {
             LinearLayout seasonStripWrap,
             Map<Integer, Cms.Video> bySeason,
             Map<Integer, String> labels) {
+        MobileTheme.Palette p = MobileTheme.of(a);
         seasonStripWrap.removeAllViews();
         a.gap(seasonStripWrap, 11);
         HorizontalScrollView hsv = new HorizontalScrollView(a);
@@ -1826,13 +2511,13 @@ final class MobileDetailScreen {
             boolean active =
                     (targetVid != null && Objects.equals(targetVid.id, currentVideo.id))
                             || sNum == curMeta.seasonNumber;
-            TextView pill = a.text(sLabel, 12.5f, active ? 0xff121215 : 0xe6ffffff);
+            TextView pill = a.text(sLabel, 12.5f, active ? p.accentOnFill : p.textPrimary);
             pill.setTag("detail-season:" + sNum);
             pill.setTypeface(null, Typeface.BOLD);
             pill.setPadding(a.dp(14), a.dp(5), a.dp(14), a.dp(5));
             pill.setBackground(
-                    active ? a.bg(Color.WHITE, 999) : glassBg(a, 0x24ffffff, 0x30ffffff, 999));
-            bindTouchFeedback(pill);
+                    active ? MobileTheme.accentPillBg(a, 999) : MobileTheme.subtleBg(a, 999));
+            MobileMotion.bindPress(pill, 0.94f);
             pill.setOnClickListener(
                     v -> {
                         if (targetVid != null && !Objects.equals(targetVid.id, currentVideo.id)) {
@@ -1964,7 +2649,7 @@ final class MobileDetailScreen {
         double dbScore = resolvedDouban >= 2.0 ? resolvedDouban : local.douban;
         int rtPct = resolvedRtPercent > 0 ? resolvedRtPercent : local.rtPercent;
         if (dbScore >= 2.0 && dbScore <= 9.9) {
-            doubanBadge.setText(String.format(Locale.US, "豆瓣 ★ %.1f", dbScore));
+            doubanBadge.setText(String.format(Locale.US, "豆瓣 %.1f", dbScore));
             doubanBadge.setVisibility(View.VISIBLE);
         } else {
             doubanBadge.setText("");
@@ -2005,7 +2690,7 @@ final class MobileDetailScreen {
                 Math.max(
                         68,
                         Math.min(98, (int) Math.round(dbScore * 10.4 + ((titleHash / 7) % 5) - 2)));
-        doubanBadge.setText(String.format(Locale.US, "豆瓣 ★ %.1f", dbScore));
+        doubanBadge.setText(String.format(Locale.US, "豆瓣 %.1f", dbScore));
         rtBadge.setText("烂番茄 " + rtPercent + "%");
     }
 

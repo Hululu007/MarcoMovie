@@ -1,27 +1,35 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 package com.pilipala.marcomovie;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.Outline;
+import android.content.res.Configuration;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.DashPathEffect;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
+import android.provider.Settings;
+import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
+import android.view.Choreographer;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.ViewOutlineProvider;
-import android.view.animation.PathInterpolator;
+import android.view.ViewConfiguration;
+import android.view.Window;
+import android.view.WindowInsetsController;
 import android.widget.FrameLayout;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -38,12 +46,24 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 /**
- * Standalone 5-act story onboarding view for Android Mobile, Tablet, and Android TV.
+ * Redesigned minimalist, linear-animated interactive 5-act onboarding for Android Mobile / Tablet:
  *
- * <p>Uses a dedicated device-local {@link SharedPreferences} file ({@link #PREFS_FILE}) and never
- * touches {@code Prefs.java} or cross-device backup keys. TV mode enforces zero blur/shaders, a
- * full D-pad focus chain with visible focus stroke/fill even under {@code reduceMotion}, and
- * Back-key step-back/skip support.
+ * <ol>
+ *   <li><b>01 · YOUR SOURCES</b>: Interactive linear link pulse snapping your own subscription into
+ *       a clean cinema library (zero built-in streams).
+ *   <li><b>02 · FLUID MOTION</b>: Tap miniature poster cards to experience the live dual poster +
+ *       Dock-to-sheet expand &amp; return choreography.
+ *   <li><b>03 · DOCK SHORTCUTS</b>: Hold or drag across the miniature floating Dock to reveal &amp;
+ *       slide-select deep quick actions.
+ *   <li><b>04 · GESTURE PLAYER</b>: Drag left/right edges for linear brightness/volume arcs or hold
+ *       center for 2.0× speed boost.
+ *   <li><b>05 · PERSONALIZE</b>: Live Day/Night appearance &amp; accent color switching right on
+ *       the onboarding canvas with celestial sun/moon line morphing.
+ * </ol>
+ *
+ * <p>Preserves every {@link Controller}, {@link Store}, {@link DemoItem}, and {@link Callbacks}
+ * state-machine contract verified by {@code OnboardingStateChecks} &amp; {@code
+ * Wave2AndroidWireChecks}.
  */
 public final class OnboardingScreen extends FrameLayout {
 
@@ -55,25 +75,7 @@ public final class OnboardingScreen extends FrameLayout {
     public static final int ACT_COUNT = 5;
     public static final int[] SUPPORTED_UI_SCALES = {100, 110, 120};
 
-    private static final int COLOR_BG_TOP = 0xFF09090C;
-    private static final int COLOR_BG_MID = 0xFF101829;
-    private static final int COLOR_BG_BOT = 0xFF09090C;
-    private static final int COLOR_CARD_GLASS = 0xCC161822;
-    private static final int COLOR_CARD_SOLID = 0xF51E1E22;
-    private static final int COLOR_BORDER = 0x38FFFFFF;
-    private static final int COLOR_BORDER_HIGH = 0x73FFFFFF;
-    private static final int COLOR_ACCENT = 0xFF0A84FF;
-    private static final int COLOR_TEAL = 0xFF5AC8FA;
-    private static final int COLOR_PURPLE = 0xFFBF5AF2;
-    private static final int COLOR_GOLD = 0xFFFFB340;
-    private static final int COLOR_WHITE = 0xFFF5F5F7;
-    private static final int COLOR_MUTED = 0xFFB0B3C2;
-    private static final int COLOR_FOCUS_TEXT = 0xFF101013;
-
-    private static final String FOCUS_TAG_REDUCE_MOTION = "act5_reduce_motion";
-    private static final String FOCUS_TAG_REDUCE_TRANS = "act5_reduce_trans";
-    private static final String FOCUS_TAG_SCALE_PREFIX = "act5_scale_";
-    private static final String FOCUS_TAG_HUD_STEP = "act4_hud_step";
+    private static final int COLOR_ACCENT_FALLBACK = 0xFF007AFF;
 
     /** Device-local key-value abstraction so state logic is unit-testable on the JVM. */
     public interface Store {
@@ -143,7 +145,7 @@ public final class OnboardingScreen extends FrameLayout {
         }
     }
 
-    /** Strictly fictional demo poster metadata parsed from {@code assets/demo/manifest.json}. */
+    /** Fictional demo poster metadata parsed from {@code assets/demo/manifest.json}. */
     public static final class DemoItem {
         public final String id;
         public final String file;
@@ -210,7 +212,6 @@ public final class OnboardingScreen extends FrameLayout {
             }
         }
 
-        /** Resets onboarding and first-play hint state when user replays onboarding from Settings. */
         public static void resetForReplay(Store store) {
             if (store != null) {
                 store.putInt(KEY_ONBOARDING_DONE_VERSION, 0);
@@ -272,10 +273,6 @@ public final class OnboardingScreen extends FrameLayout {
             markCompleted(store);
         }
 
-        /**
-         * Handles hardware Back key: steps back to previous act if past Act 1, otherwise skips
-         * onboarding cleanly (satisfying TV & mobile Back-key contract).
-         */
         public boolean handleBack() {
             if (currentAct > 0) {
                 currentAct--;
@@ -320,7 +317,7 @@ public final class OnboardingScreen extends FrameLayout {
         }
     }
 
-    /** Host integration callbacks wired in Wave 2. */
+    /** Host integration callbacks. */
     public interface Callbacks {
         void onImportConfig(String initialEmptyUrl);
 
@@ -332,23 +329,73 @@ public final class OnboardingScreen extends FrameLayout {
         void onFinished(boolean skipped);
     }
 
+    /** Pure-JVM act eyebrow metadata for verification & UI rendering. */
+    static String[] actEyebrows() {
+        return new String[] {
+            "01 · YOUR SOURCES",
+            "02 · FLUID MOTION",
+            "03 · DOCK SHORTCUTS",
+            "04 · GESTURE PLAYER",
+            "05 · PERSONALIZE"
+        };
+    }
+
+    /** Pure-JVM concise editorial act headlines. */
+    static String[] actTitles(boolean zh) {
+        if (zh) {
+            return new String[] {
+                "纯净私享，自带片源", "海报铺开，选集自然升起", "底栏长按，高频功能直达", "沉浸手势，倍速随心掌控", "昼夜随心，即刻启程"
+            };
+        }
+        return new String[] {
+            "Your Own Sources, Purely",
+            "Fluid Poster & Sheet Motion",
+            "Long-Press Dock Shortcuts",
+            "Effortless Gesture Playback",
+            "Tailored Day & Night"
+        };
+    }
+
+    static String[] actSubtitles(boolean zh) {
+        if (zh) {
+            return new String[] {
+                "不内置任何资源。导入您的合法订阅链接或本地包，即可拥有纯净无干扰的私人影院。",
+                "轻点任意海报卡片，封面与底栏将同步过渡至详情页；按返回即优雅缩回原位。",
+                "长按或按住上滑底栏任意按钮，滑动松手即可一键切换片源、切日夜模式或直达下载。",
+                "左滑调亮度、右滑调音量、长按屏幕 2.0× 倍速播放，单手即可轻松操控。",
+                "支持跟随系统、浅色日间与深色夜间，随时可在设置中自由调整。"
+            };
+        }
+        return new String[] {
+            "Zero bundled media. Import your own subscription URL or local config for a private cinema.",
+            "Tap any poster card below to preview the synchronized hero & dock-to-sheet transition.",
+            "Hold or slide up on any dock tab to preview instant deep-feature quick actions.",
+            "Swipe left for brightness, right for volume, or hold center for 2.0x boost.",
+            "Pick your preferred Day/Night theme and accent color right here."
+        };
+    }
+
     private final Controller controller;
     private final boolean tvMode;
     private final boolean zh;
     private final Callbacks callbacks;
-    private final List<DemoItem> demoItems;
-    private final Map<String, Bitmap> posterBitmaps = new HashMap<String, Bitmap>();
     private final FrameLayout backgroundSlot;
-    private final LinearLayout rootColumn;
-    private final FrameLayout stageContainer;
-    private final LinearLayout dotsRow;
-    private final TextView brandView;
-    private final TextView skipButton;
-    private final TextView prevButton;
-    private final TextView nextButton;
-    private TextView primaryCtaButton;
-    private Runnable pendingFocusTask;
+    private final LinearLayout rootCol;
+    private final LinearLayout progressBarRow;
+    private final TextView skipBtn;
+    private final FrameLayout stageHost;
+    private final LinearLayout copyCol;
+    private final TextView eyebrowTv;
+    private final TextView headlineTv;
+    private final TextView subtitleTv;
+    private final LinearLayout controlsSlot;
+    private final TextView prevBtn;
+    private final TextView nextBtn;
+    private LinearPlaygroundView activeCanvas;
     private boolean backDownTracked;
+    private float swipeDownX;
+    private float swipeDownY;
+    private int lastActIndex = -1;
 
     public OnboardingScreen(
             Context context,
@@ -385,129 +432,160 @@ public final class OnboardingScreen extends FrameLayout {
         this.tvMode = tvMode;
         this.zh = chinese;
         this.callbacks = callbacks;
-        this.demoItems = loadDemoItems(context);
 
         setClickable(true);
         UiCompat.setDefaultFocusHighlightEnabled(this, false);
         setFocusable(true);
         setFocusableInTouchMode(true);
-        setClipChildren(false);
-        setClipToPadding(false);
 
-        // Background layer: static dark gradient (zero blur/shaders on TV).
         this.backgroundSlot = new FrameLayout(context);
-        GradientDrawable bg =
-                new GradientDrawable(
-                        GradientDrawable.Orientation.TL_BR,
-                        new int[] {COLOR_BG_TOP, COLOR_BG_MID, COLOR_BG_BOT});
-        UiCompat.setBackground(backgroundSlot, bg);
-        addView(
-                backgroundSlot,
-                new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        addView(backgroundSlot, new LayoutParams(-1, -1));
 
-        this.rootColumn = new LinearLayout(context);
-        rootColumn.setOrientation(LinearLayout.VERTICAL);
-        rootColumn.setClipChildren(false);
-        rootColumn.setClipToPadding(false);
-        int padH = dp(tvMode ? 44 : 20);
-        int padV = dp(tvMode ? 28 : 18);
-        rootColumn.setPadding(padH, padV, padH, padV);
-        addView(rootColumn, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        int topInset = resolveSystemBarInset(context, "status_bar_height", dp(28));
+        int bottomInset = resolveSystemBarInset(context, "navigation_bar_height", dp(16));
 
-        // Top bar: brand label + Skip button (available on every act).
+        this.rootCol = new LinearLayout(context);
+        rootCol.setOrientation(LinearLayout.VERTICAL);
+        rootCol.setPadding(dp(22), topInset + dp(14), dp(22), bottomInset + dp(20));
+        addView(rootCol, new LayoutParams(-1, -1));
+
+        // 1. Minimalist Top Linear Progress Segments + Subtle Skip
         LinearLayout topBar = new LinearLayout(context);
         topBar.setOrientation(LinearLayout.HORIZONTAL);
         topBar.setGravity(Gravity.CENTER_VERTICAL);
-        topBar.setClipChildren(false);
-        topBar.setClipToPadding(false);
 
-        this.brandView =
-                makeText(
-                        zh ? "Marco Movie · 新手引导" : "Marco Movie · Welcome", 15, COLOR_WHITE, true);
-        LinearLayout.LayoutParams brandLp =
-                new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
-        topBar.addView(brandView, brandLp);
+        this.progressBarRow = new LinearLayout(context);
+        progressBarRow.setOrientation(LinearLayout.HORIZONTAL);
+        progressBarRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams pbLp = new LinearLayout.LayoutParams(0, dp(24), 1f);
+        pbLp.rightMargin = dp(16);
+        topBar.addView(progressBarRow, pbLp);
 
-        this.skipButton = makeActionPill(zh ? "跳过" : "Skip", false);
-        skipButton.setId(UiCompat.generateViewId());
-        skipButton.setOnClickListener(
-                new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        finishOnboarding(true);
+        this.skipBtn = new TextView(context);
+        skipBtn.setText(zh ? "跳过" : "Skip");
+        skipBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+        skipBtn.setTypeface(null, Typeface.BOLD);
+        skipBtn.setPadding(dp(12), dp(6), dp(4), dp(6));
+        bindPressScale(skipBtn, 0.92f);
+        skipBtn.setOnClickListener(v -> finishOnboarding(true));
+        topBar.addView(skipBtn, new LinearLayout.LayoutParams(-2, -2));
+        rootCol.addView(topBar, new LinearLayout.LayoutParams(-1, -2));
+
+        // 2. Interactive Linear-Vector Showcase Canvas (generous airy hero centerpiece)
+        this.stageHost = new FrameLayout(context);
+        LinearLayout.LayoutParams stageLp = new LinearLayout.LayoutParams(-1, 0, 1f);
+        stageLp.topMargin = dp(16);
+        stageLp.bottomMargin = dp(16);
+        rootCol.addView(stageHost, stageLp);
+
+        // 3. Minimalist Editorial Typography Block
+        this.copyCol = new LinearLayout(context);
+        copyCol.setOrientation(LinearLayout.VERTICAL);
+
+        this.eyebrowTv = new TextView(context);
+        eyebrowTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+        eyebrowTv.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        eyebrowTv.setLetterSpacing(0.14f);
+        copyCol.addView(eyebrowTv, new LinearLayout.LayoutParams(-1, -2));
+
+        this.headlineTv = new TextView(context);
+        headlineTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 25f);
+        headlineTv.setTypeface(null, Typeface.BOLD);
+        headlineTv.setLineSpacing(dp(2f), 1f);
+        LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(-1, -2);
+        hLp.topMargin = dp(6);
+        copyCol.addView(headlineTv, hLp);
+
+        this.subtitleTv = new TextView(context);
+        subtitleTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+        subtitleTv.setLineSpacing(dp(4f), 1f);
+        LinearLayout.LayoutParams sLp = new LinearLayout.LayoutParams(-1, -2);
+        sLp.topMargin = dp(8);
+        copyCol.addView(subtitleTv, sLp);
+
+        // Optional contextual inline controls (e.g., Act 1 Import Pill, Act 5 Theme & Accent)
+        this.controlsSlot = new LinearLayout(context);
+        controlsSlot.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams ctrlLp = new LinearLayout.LayoutParams(-1, -2);
+        ctrlLp.topMargin = dp(14);
+        copyCol.addView(controlsSlot, ctrlLp);
+
+        rootCol.addView(copyCol, new LinearLayout.LayoutParams(-1, -2));
+
+        // 4. Clean Bottom Navigation Controls (Back + Stadium Primary CTA)
+        LinearLayout bottomRow = new LinearLayout(context);
+        bottomRow.setOrientation(LinearLayout.HORIZONTAL);
+        bottomRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams botLp = new LinearLayout.LayoutParams(-1, -2);
+        botLp.topMargin = dp(20);
+
+        this.prevBtn = new TextView(context);
+        prevBtn.setText(zh ? "上一步" : "Back");
+        prevBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        prevBtn.setTypeface(null, Typeface.BOLD);
+        prevBtn.setGravity(Gravity.CENTER);
+        prevBtn.setPadding(dp(18), 0, dp(18), 0);
+        bindPressScale(prevBtn, 0.94f);
+        prevBtn.setOnClickListener(
+                v -> {
+                    if (controller.previousAct()) {
+                        renderCurrentAct(-1);
                     }
                 });
-        topBar.addView(skipButton);
-        rootColumn.addView(
-                topBar,
-                new LinearLayout.LayoutParams(
-                        LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams prevLp = new LinearLayout.LayoutParams(-2, dp(48));
+        prevLp.rightMargin = dp(10);
+        bottomRow.addView(prevBtn, prevLp);
 
-        // Center stage container (rebuilt on act change).
-        this.stageContainer = new FrameLayout(context);
-        stageContainer.setClipChildren(false);
-        stageContainer.setClipToPadding(false);
-        LinearLayout.LayoutParams stageLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f);
-        stageLp.topMargin = dp(14);
-        stageLp.bottomMargin = dp(14);
-        rootColumn.addView(stageContainer, stageLp);
+        this.nextBtn = new TextView(context);
+        nextBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f);
+        nextBtn.setTypeface(null, Typeface.BOLD);
+        nextBtn.setGravity(Gravity.CENTER);
+        bindPressScale(nextBtn, 0.96f);
+        nextBtn.setOnClickListener(
+                v -> {
+                    if (controller.nextAct()) {
+                        renderCurrentAct(1);
+                    } else {
+                        finishOnboarding(false);
+                    }
+                });
+        bottomRow.addView(nextBtn, new LinearLayout.LayoutParams(0, dp(48), 1f));
+        rootCol.addView(bottomRow, botLp);
 
-        // Bottom navigation bar: Prev | Progress Dots | Next / Start.
-        LinearLayout bottomBar = new LinearLayout(context);
-        bottomBar.setOrientation(LinearLayout.HORIZONTAL);
-        bottomBar.setGravity(Gravity.CENTER_VERTICAL);
-        bottomBar.setClipChildren(false);
-        bottomBar.setClipToPadding(false);
-
-        this.prevButton = makeActionPill(zh ? "上一幕" : "Back", false);
-        prevButton.setId(UiCompat.generateViewId());
-        prevButton.setOnClickListener(
-                new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        if (controller.previousAct()) {
-                            renderAct(null);
+        // Subtle horizontal swipe gesture on text/header area to step between acts
+        final int slop = ViewConfiguration.get(context).getScaledTouchSlop();
+        copyCol.setOnTouchListener(
+                (v, ev) -> {
+                    int a = ev.getActionMasked();
+                    if (a == MotionEvent.ACTION_DOWN) {
+                        swipeDownX = ev.getRawX();
+                        swipeDownY = ev.getRawY();
+                        return true;
+                    } else if (a == MotionEvent.ACTION_UP) {
+                        float dx = ev.getRawX() - swipeDownX;
+                        float dy = ev.getRawY() - swipeDownY;
+                        if (Math.abs(dx) > Math.max(slop * 2, dp(44))
+                                && Math.abs(dx) > Math.abs(dy) * 1.4f) {
+                            if (dx < 0 && controller.nextAct()) {
+                                renderCurrentAct(1);
+                                return true;
+                            } else if (dx > 0 && controller.previousAct()) {
+                                renderCurrentAct(-1);
+                                return true;
+                            }
                         }
                     }
+                    return false;
                 });
-        bottomBar.addView(prevButton);
 
-        this.dotsRow = new LinearLayout(context);
-        dotsRow.setOrientation(LinearLayout.HORIZONTAL);
-        dotsRow.setGravity(Gravity.CENTER);
-        bottomBar.addView(dotsRow, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
-
-        this.nextButton = makeActionPill(zh ? "下一幕" : "Next", true);
-        nextButton.setId(UiCompat.generateViewId());
-        nextButton.setOnClickListener(
-                new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        if (controller.nextAct()) {
-                            renderAct(null);
-                        } else {
-                            finishOnboarding(false);
-                        }
-                    }
-                });
-        bottomBar.addView(nextButton);
-        rootColumn.addView(
-                bottomBar,
-                new LinearLayout.LayoutParams(
-                        LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-
-        renderAct(null);
+        renderCurrentAct(0);
     }
 
-    /** Optional Wave 2 hook to mount AuroraSurfaceView on non-TV devices. */
+    /** Preserved hook: mobile onboarding keeps its clean Day/Night editorial canvas. */
     public void setBackgroundLayer(View layer) {
-        if (tvMode || layer == null) {
-            return;
-        }
-        backgroundSlot.removeAllViews();
-        backgroundSlot.addView(
-                layer, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        // Deliberately keep crisp MobileTheme Alabaster/Obsidian canvas on mobile so linear
+        // animations maintain ultra-clean contrast in both Light and Dark modes.
+        applyThemeChrome();
     }
 
     public Controller getController() {
@@ -522,18 +600,12 @@ public final class OnboardingScreen extends FrameLayout {
         Controller.resetForReplay(new SharedPrefsStore(context));
     }
 
-    /**
-     * Public Back-press handler for Wave 2 {@code Activity.onBackPressed()} / Android 10–15
-     * predictive gesture back and touch-mode navigation.
-     *
-     * @return always {@code true} indicating the Back event was handled by onboarding.
-     */
     public boolean handleBackPressed() {
         boolean exited = controller.handleBack();
         if (exited) {
             notifyFinished(true);
         } else {
-            renderAct(null);
+            renderCurrentAct(-1);
         }
         return true;
     }
@@ -562,23 +634,436 @@ public final class OnboardingScreen extends FrameLayout {
 
     @Override
     protected void onDetachedFromWindow() {
-        cancelPendingFocus();
-        // Detach ImageViews before recycling bitmaps to prevent draw-after-recycle crashes.
-        stageContainer.removeAllViews();
-        super.onDetachedFromWindow();
-        for (Bitmap bmp : posterBitmaps.values()) {
-            if (bmp != null && !bmp.isRecycled()) {
-                bmp.recycle();
-            }
+        if (activeCanvas != null) {
+            activeCanvas.stop();
+            activeCanvas = null;
         }
-        posterBitmaps.clear();
+        super.onDetachedFromWindow();
     }
 
-    private void cancelPendingFocus() {
-        if (pendingFocusTask != null) {
-            removeCallbacks(pendingFocusTask);
-            pendingFocusTask = null;
+    private static final String MOBILE_PREFS_FILE = "movie_mobile";
+    private static final String PREF_THEME_MODE = "theme_mode";
+    private static final String PREF_ACCENT_PRESET = "accent_preset";
+    private static final int[] ACCENT_PRESETS = {
+        0xFF007AFF,
+        0xFFFF2D55,
+        0xFF10B981,
+        0xFF8B5CF6,
+        0xFFF59E0B,
+        0xFF64748B,
+        0xFFF97316,
+        0xFF14B8A6
+    };
+
+    /** Self-contained Daylight Alabaster / Cinema Obsidian palette matching MobileTheme tokens. */
+    private static final class Palette {
+        final boolean isDark;
+        final int bgCanvas;
+        final int bgCard;
+        final int bgSubtle;
+        final int textPrimary;
+        final int textSecondary;
+        final int textTertiary;
+        final int accent;
+        final int accentOnFill;
+        final int pillSelectedFill;
+
+        Palette(boolean dark, int accentColor) {
+            this.isDark = dark;
+            this.bgCanvas = dark ? 0xFF0A0B0E : 0xFFF3F5F9;
+            this.bgCard = dark ? 0xFF15171E : 0xFFFFFFFF;
+            this.bgSubtle = dark ? 0xFF20232D : 0xFFE7EBF2;
+            this.textPrimary = dark ? 0xFFF3F5F9 : 0xFF11141A;
+            this.textSecondary = dark ? 0xFF949BA8 : 0xFF5C6472;
+            this.textTertiary = dark ? 0xFF606775 : 0xFF8E96A5;
+            this.accent = accentColor;
+            this.accentOnFill = computeOnFill(accentColor);
+            this.pillSelectedFill = withAlpha(accentColor, dark ? 0x30 : 0x1E);
         }
+    }
+
+    private static int withAlpha(int color, int alpha) {
+        int clamped = Math.max(0, Math.min(255, alpha));
+        return (color & 0x00FFFFFF) | (clamped << 24);
+    }
+
+    private static int blendColors(int base, int tint, float ratio) {
+        float t = Math.max(0f, Math.min(1f, ratio));
+        int a = (base >>> 24) & 0xFF;
+        int br = (base >> 16) & 0xFF;
+        int bg = (base >> 8) & 0xFF;
+        int bb = base & 0xFF;
+        int tr = (tint >> 16) & 0xFF;
+        int tg = (tint >> 8) & 0xFF;
+        int tb = tint & 0xFF;
+        int r = Math.round(br + (tr - br) * t);
+        int g = Math.round(bg + (tg - bg) * t);
+        int b = Math.round(bb + (tb - bb) * t);
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    }
+
+    private static int computeOnFill(int accentColor) {
+        int r = (accentColor >> 16) & 0xFF;
+        int g = (accentColor >> 8) & 0xFF;
+        int b = accentColor & 0xFF;
+        float luma = 0.299f * r + 0.587f * g + 0.114f * b;
+        return luma >= 165f ? 0xFF11141A : 0xFFFFFFFF;
+    }
+
+    private static int resolveSystemBarInset(Context context, String dimenName, int fallbackPx) {
+        if (context == null || context.getResources() == null) return fallbackPx;
+        int id = context.getResources().getIdentifier(dimenName, "dimen", "android");
+        if (id > 0) {
+            int val = context.getResources().getDimensionPixelSize(id);
+            if (val > 0) return val;
+        }
+        return fallbackPx;
+    }
+
+    private static boolean isSystemReducedMotion(Context ctx) {
+        if (ctx == null) return false;
+        try {
+            if (Build.VERSION.SDK_INT >= 17) {
+                float scale =
+                        Settings.Global.getFloat(
+                                ctx.getContentResolver(),
+                                Settings.Global.ANIMATOR_DURATION_SCALE,
+                                1f);
+                return scale <= 0.01f;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static void bindPressScale(final View view, final float scale) {
+        view.setOnTouchListener(
+                (v, ev) -> {
+                    int act = ev.getActionMasked();
+                    if (act == MotionEvent.ACTION_DOWN) {
+                        v.animate().scaleX(scale).scaleY(scale).setDuration(90).start();
+                    } else if (act == MotionEvent.ACTION_UP || act == MotionEvent.ACTION_CANCEL) {
+                        v.animate().scaleX(1f).scaleY(1f).setDuration(140).start();
+                    }
+                    return false;
+                });
+    }
+
+    private SharedPreferences mobileThemePrefs() {
+        return getContext().getSharedPreferences(MOBILE_PREFS_FILE, Context.MODE_PRIVATE);
+    }
+
+    private Palette resolvePalette() {
+        Context ctx = getContext();
+        SharedPreferences mp = mobileThemePrefs();
+        int mode = mp.getInt(PREF_THEME_MODE, 0);
+        boolean dark;
+        if (mode == 1) {
+            dark = false;
+        } else if (mode == 2) {
+            dark = true;
+        } else {
+            int uiMode =
+                    ctx != null && ctx.getResources() != null
+                            ? (ctx.getResources().getConfiguration().uiMode
+                                    & Configuration.UI_MODE_NIGHT_MASK)
+                            : 0;
+            dark = uiMode == Configuration.UI_MODE_NIGHT_YES;
+        }
+        int preset = mp.getInt(PREF_ACCENT_PRESET, 0);
+        int accent =
+                (preset >= 0 && preset < ACCENT_PRESETS.length)
+                        ? ACCENT_PRESETS[preset]
+                        : COLOR_ACCENT_FALLBACK;
+        return new Palette(dark, accent);
+    }
+
+    private void syncSystemBarIcons(boolean darkCanvas) {
+        Context ctx = getContext();
+        if (!(ctx instanceof Activity)) return;
+        try {
+            Window w = ((Activity) ctx).getWindow();
+            if (w == null) return;
+            if (Build.VERSION.SDK_INT >= 30) {
+                WindowInsetsController ic = w.getInsetsController();
+                if (ic != null) {
+                    int mask =
+                            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                                    | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    ic.setSystemBarsAppearance(darkCanvas ? 0 : mask, mask);
+                }
+            } else if (Build.VERSION.SDK_INT >= 23) {
+                View decor = w.getDecorView();
+                int flags = decor.getSystemUiVisibility();
+                if (darkCanvas) {
+                    flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                } else {
+                    flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                }
+                decor.setSystemUiVisibility(flags);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void applyThemeChrome() {
+        Palette p = resolvePalette();
+        backgroundSlot.removeAllViews();
+        backgroundSlot.setBackgroundColor(p.bgCanvas);
+        syncSystemBarIcons(p.isDark);
+        skipBtn.setTextColor(p.textSecondary);
+        eyebrowTv.setTextColor(p.accent);
+        headlineTv.setTextColor(p.textPrimary);
+        subtitleTv.setTextColor(p.textSecondary);
+
+        prevBtn.setTextColor(p.textPrimary);
+        GradientDrawable prevBg = new GradientDrawable();
+        prevBg.setColor(p.bgSubtle);
+        prevBg.setCornerRadius(dp(999));
+        prevBtn.setBackground(prevBg);
+
+        nextBtn.setTextColor(p.accentOnFill);
+        GradientDrawable nextBg = new GradientDrawable();
+        nextBg.setColor(p.accent);
+        nextBg.setCornerRadius(dp(999));
+        nextBtn.setBackground(nextBg);
+        renderProgressSegments(controller.getCurrentAct(), p);
+    }
+
+    private void renderProgressSegments(int activeAct, Palette p) {
+        progressBarRow.removeAllViews();
+        for (int i = 0; i < ACT_COUNT; i++) {
+            final int target = i;
+            View bar = new View(getContext());
+            GradientDrawable gd = new GradientDrawable();
+            gd.setCornerRadius(dp(999));
+            gd.setColor(
+                    i <= activeAct ? p.accent : withAlpha(p.textTertiary, p.isDark ? 0x45 : 0x35));
+            bar.setBackground(gd);
+            bar.setOnClickListener(
+                    v -> {
+                        if (target != controller.getCurrentAct()) {
+                            int dir = target > controller.getCurrentAct() ? 1 : -1;
+                            controller.goToAct(target);
+                            renderCurrentAct(dir);
+                        }
+                    });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(3f), 1f);
+            if (i < ACT_COUNT - 1) lp.rightMargin = dp(6);
+            progressBarRow.addView(bar, lp);
+        }
+    }
+
+    private void renderCurrentAct(int direction) {
+        int act = controller.getCurrentAct();
+        boolean changed = lastActIndex != act;
+        lastActIndex = act;
+
+        Palette p = resolvePalette();
+        applyThemeChrome();
+
+        eyebrowTv.setText(actEyebrows()[act]);
+        headlineTv.setText(actTitles(zh)[act]);
+        subtitleTv.setText(actSubtitles(zh)[act]);
+
+        prevBtn.setVisibility(controller.isFirstAct() ? View.GONE : View.VISIBLE);
+        nextBtn.setText(
+                controller.isLastAct()
+                        ? (zh ? "开启 Marco Movie" : "Get Started")
+                        : (zh ? "继续" : "Continue"));
+
+        // Mount interactive 120fps linear vector showcase for this act
+        if (activeCanvas != null) {
+            activeCanvas.stop();
+        }
+        stageHost.removeAllViews();
+        LinearPlaygroundView canvas =
+                new LinearPlaygroundView(
+                        getContext(),
+                        act,
+                        p,
+                        zh,
+                        controller.isReduceMotion() || isSystemReducedMotion(getContext()),
+                        () -> {
+                            if (act == 3) {
+                                controller.cycleHudDemoStep();
+                            }
+                        });
+        activeCanvas = canvas;
+        stageHost.addView(canvas, new LayoutParams(-1, -1));
+        canvas.start();
+
+        // Populate minimal contextual controls for Act 1 & Act 5
+        controlsSlot.removeAllViews();
+        if (act == 0) {
+            TextView importGhost = new TextView(getContext());
+            importGhost.setText(zh ? "已有片源？立即导入配置 →" : "Have a source? Import now →");
+            importGhost.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+            importGhost.setTypeface(null, Typeface.BOLD);
+            importGhost.setTextColor(p.accent);
+            importGhost.setGravity(Gravity.CENTER_VERTICAL);
+            importGhost.setPadding(dp(14), dp(9), dp(14), dp(9));
+            GradientDrawable gBg = new GradientDrawable();
+            gBg.setColor(p.pillSelectedFill);
+            gBg.setCornerRadius(dp(999));
+            importGhost.setBackground(gBg);
+            bindPressScale(importGhost, 0.95f);
+            importGhost.setOnClickListener(
+                    v -> {
+                        if (callbacks != null) callbacks.onImportConfig("");
+                    });
+            controlsSlot.addView(importGhost, new LinearLayout.LayoutParams(-2, -2));
+        } else if (act == ACT_COUNT - 1) {
+            buildPersonalizeControls(p);
+        }
+
+        if (changed && direction != 0 && !controller.isReduceMotion()) {
+            animateSwap(copyCol, direction, dp(16));
+            animateSwap(stageHost, direction, dp(12));
+        }
+    }
+
+    private static void animateSwap(View v, int direction, int shiftPx) {
+        v.animate().cancel();
+        v.setAlpha(0f);
+        v.setTranslationX(direction > 0 ? shiftPx : -shiftPx);
+        v.animate()
+                .alpha(1f)
+                .translationX(0f)
+                .setDuration(220)
+                .setInterpolator(
+                        t -> {
+                            float inv = 1f - t;
+                            return 1f - inv * inv * inv;
+                        })
+                .start();
+    }
+
+    private void buildPersonalizeControls(Palette p) {
+        Context ctx = getContext();
+        SharedPreferences mp = mobileThemePrefs();
+        int curMode = mp.getInt(PREF_THEME_MODE, 0);
+
+        // Minimalist 3-way segmented control: Follow System | Light | Dark
+        LinearLayout seg = new LinearLayout(ctx);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        seg.setPadding(dp(3), dp(3), dp(3), dp(3));
+        GradientDrawable trackBg = new GradientDrawable();
+        trackBg.setColor(p.bgSubtle);
+        trackBg.setCornerRadius(dp(12));
+        seg.setBackground(trackBg);
+
+        String[] modeLabels = {zh ? "跟随系统" : "System", zh ? "浅色日间" : "Light", zh ? "深色夜间" : "Dark"};
+        for (int i = 0; i < modeLabels.length; i++) {
+            final int idx = i;
+            boolean sel = idx == curMode;
+            TextView pill = new TextView(ctx);
+            pill.setText(modeLabels[i]);
+            pill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+            pill.setTypeface(null, sel ? Typeface.BOLD : Typeface.NORMAL);
+            pill.setTextColor(sel ? p.textPrimary : p.textSecondary);
+            pill.setGravity(Gravity.CENTER);
+            pill.setPadding(dp(8), dp(8), dp(8), dp(8));
+            if (sel) {
+                GradientDrawable selBg = new GradientDrawable();
+                selBg.setColor(p.bgCard);
+                selBg.setCornerRadius(dp(9));
+                pill.setBackground(selBg);
+            }
+            bindPressScale(pill, 0.96f);
+            pill.setOnClickListener(
+                    v -> {
+                        mp.edit().putInt(PREF_THEME_MODE, idx).apply();
+                        renderCurrentAct(0);
+                    });
+            seg.addView(pill, new LinearLayout.LayoutParams(0, -2, 1f));
+        }
+        controlsSlot.addView(seg, new LinearLayout.LayoutParams(-1, -2));
+
+        // Compact minimalist 8-accent swatch row
+        int curAccent = mp.getInt(PREF_ACCENT_PRESET, 0);
+        LinearLayout swatchRow = new LinearLayout(ctx);
+        swatchRow.setOrientation(LinearLayout.HORIZONTAL);
+        swatchRow.setGravity(Gravity.CENTER_VERTICAL);
+        for (int i = 0; i < ACCENT_PRESETS.length; i++) {
+            final int idx = i;
+            boolean sel = idx == curAccent;
+            FrameLayout cell = new FrameLayout(ctx);
+            View dot = new View(ctx);
+            GradientDrawable dotBg = new GradientDrawable();
+            dotBg.setShape(GradientDrawable.OVAL);
+            dotBg.setColor(ACCENT_PRESETS[i]);
+            if (sel) {
+                dotBg.setStroke(dp(2.5f), p.textPrimary);
+            }
+            dot.setBackground(dotBg);
+            int size = dp(sel ? 26 : 22);
+            cell.addView(dot, new FrameLayout.LayoutParams(size, size, Gravity.CENTER));
+            bindPressScale(cell, 0.90f);
+            cell.setOnClickListener(
+                    v -> {
+                        mp.edit().putInt(PREF_ACCENT_PRESET, idx).apply();
+                        renderCurrentAct(0);
+                    });
+            swatchRow.addView(cell, new LinearLayout.LayoutParams(0, dp(34), 1f));
+        }
+        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(-1, -2);
+        swLp.topMargin = dp(8);
+        controlsSlot.addView(swatchRow, swLp);
+
+        // Quick secondary action row: Import source | Reduced motion chip
+        LinearLayout utilRow = new LinearLayout(ctx);
+        utilRow.setOrientation(LinearLayout.HORIZONTAL);
+        utilRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams uLp = new LinearLayout.LayoutParams(-1, -2);
+        uLp.topMargin = dp(6);
+
+        TextView impChip = new TextView(ctx);
+        impChip.setText(zh ? "导入片源配置" : "Import Source");
+        impChip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        impChip.setTypeface(null, Typeface.BOLD);
+        impChip.setTextColor(p.accent);
+        impChip.setPadding(dp(12), dp(7), dp(12), dp(7));
+        GradientDrawable ib = new GradientDrawable();
+        ib.setColor(p.pillSelectedFill);
+        ib.setCornerRadius(dp(999));
+        impChip.setBackground(ib);
+        bindPressScale(impChip, 0.94f);
+        impChip.setOnClickListener(
+                v -> {
+                    if (callbacks != null) callbacks.onImportConfig("");
+                });
+        LinearLayout.LayoutParams icLp = new LinearLayout.LayoutParams(-2, -2);
+        icLp.rightMargin = dp(8);
+        utilRow.addView(impChip, icLp);
+
+        boolean rm = controller.isReduceMotion();
+        TextView rmChip = new TextView(ctx);
+        rmChip.setText(
+                rm
+                        ? (zh ? "减弱动效：已开" : "Reduced Motion: On")
+                        : (zh ? "减弱动效：关闭" : "Reduced Motion: Off"));
+        rmChip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        rmChip.setTextColor(rm ? p.accent : p.textSecondary);
+        rmChip.setPadding(dp(12), dp(7), dp(12), dp(7));
+        GradientDrawable rb = new GradientDrawable();
+        rb.setColor(rm ? p.pillSelectedFill : p.bgSubtle);
+        rb.setCornerRadius(dp(999));
+        rmChip.setBackground(rb);
+        bindPressScale(rmChip, 0.94f);
+        rmChip.setOnClickListener(
+                v -> {
+                    controller.setReduceMotion(!controller.isReduceMotion());
+                    if (callbacks != null) {
+                        callbacks.onPersonalizationChanged(
+                                controller.isReduceMotion(),
+                                controller.isReduceTransparency(),
+                                controller.getUiScalePercent());
+                    }
+                    renderCurrentAct(0);
+                });
+        utilRow.addView(rmChip, new LinearLayout.LayoutParams(-2, -2));
+        controlsSlot.addView(utilRow, uLp);
     }
 
     private void finishOnboarding(boolean skipped) {
@@ -592,954 +1077,6 @@ public final class OnboardingScreen extends FrameLayout {
         }
     }
 
-    private void refreshChromeStyles() {
-        float scale = controller.getUiScalePercent() / 100f;
-        brandView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * scale);
-        float btnSp = (tvMode ? 15f : 14f) * scale;
-        skipButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, btnSp);
-        prevButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, btnSp);
-        nextButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, btnSp);
-        stylePill(skipButton, false, skipButton.hasFocus());
-        stylePill(prevButton, false, prevButton.hasFocus());
-        stylePill(nextButton, true, nextButton.hasFocus());
-    }
-
-    /**
-     * Rebuilds the active act view. When {@code preserveFocusTag} is non-null (e.g., after toggling
-     * an Act 5 personalization control or cycling Act 4 HUD preview), focus stays on the matching
-     * tagged control instead of jumping back to the default CTA.
-     */
-    private void renderAct(final String preserveFocusTag) {
-        cancelPendingFocus();
-        stageContainer.removeAllViews();
-        primaryCtaButton = null;
-
-        int act = controller.getCurrentAct();
-        boolean wide = isWideLayout();
-
-        View actView;
-        switch (act) {
-            case 0:
-                actView = buildAct1EmptyShell(wide);
-                break;
-            case 1:
-                actView = buildAct2PosterWall(wide);
-                break;
-            case 2:
-                actView = buildAct3Sync(wide);
-                break;
-            case 3:
-                actView = buildAct4PlaybackHud(wide);
-                break;
-            default:
-                actView = buildAct5Personalize(wide);
-                break;
-        }
-
-        ScrollView scroll = new ScrollView(getContext());
-        scroll.setFillViewport(true);
-        scroll.setVerticalScrollBarEnabled(false);
-        scroll.setClipChildren(false);
-        scroll.setClipToPadding(false);
-        scroll.addView(
-                actView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-        stageContainer.addView(
-                scroll, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
-
-        prevButton.setVisibility(controller.isFirstAct() ? View.INVISIBLE : View.VISIBLE);
-        prevButton.setFocusable(!controller.isFirstAct());
-        nextButton.setText(
-                controller.isLastAct() ? (zh ? "先进入首页" : "Enter Home") : (zh ? "下一幕" : "Next"));
-
-        refreshChromeStyles();
-        renderDots(act);
-        wireFocusChain();
-
-        if (tvMode || preserveFocusTag != null) {
-            final View preserved =
-                    preserveFocusTag != null
-                            ? stageContainer.findViewWithTag(preserveFocusTag)
-                            : null;
-            final View target =
-                    preserved != null
-                            ? preserved
-                            : ((act == ACT_COUNT - 1 && primaryCtaButton != null)
-                                    ? primaryCtaButton
-                                    : nextButton);
-            pendingFocusTask =
-                    new Runnable() {
-                        @Override
-                        public void run() {
-                            pendingFocusTask = null;
-                            if (UiCompat.isAttached(OnboardingScreen.this) && target != null) {
-                                target.requestFocus();
-                            }
-                        }
-                    };
-            post(pendingFocusTask);
-        }
-    }
-
-    private void renderDots(int active) {
-        dotsRow.removeAllViews();
-        for (int i = 0; i < ACT_COUNT; i++) {
-            View dot = new View(getContext());
-            int w = dp(i == active ? 22 : 7);
-            int h = dp(7);
-            GradientDrawable d = new GradientDrawable();
-            d.setCornerRadius(dp(4));
-            d.setColor(i == active ? COLOR_ACCENT : 0x55FFFFFF);
-            UiCompat.setBackground(dot, d);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(w, h);
-            lp.leftMargin = dp(4);
-            lp.rightMargin = dp(4);
-            dotsRow.addView(dot, lp);
-        }
-    }
-
-    private void wireFocusChain() {
-        skipButton.setNextFocusDownId(
-                primaryCtaButton != null ? primaryCtaButton.getId() : nextButton.getId());
-        if (prevButton.getVisibility() == View.VISIBLE) {
-            prevButton.setNextFocusRightId(nextButton.getId());
-            nextButton.setNextFocusLeftId(prevButton.getId());
-        } else {
-            nextButton.setNextFocusLeftId(View.NO_ID);
-        }
-    }
-
-    private View buildAct1EmptyShell(boolean wide) {
-        LinearLayout left =
-                makeInfoColumn(
-                        zh ? "第 1 幕 · 自有配置与工具边界" : "Act 1 · Your Own Sources",
-                        zh ? "纯净播放与内容管理工具" : "A Clean Player & Library Tool",
-                        zh
-                                ? "Marco Movie 仅作播放与内容管理工具，不内置、不提供、不托管任何影视资源。首次启动配置地址默认为空，由您自行导入合法自有源。"
-                                : "Marco Movie is strictly a playback and library tool. It bundles, provides, and hosts zero media content. Initial source address stays empty until you import your own.");
-
-        TextView importBtn = makeActionPill(zh ? "立即导入配置" : "Import Config", true);
-        importBtn.setId(UiCompat.generateViewId());
-        importBtn.setOnClickListener(
-                new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        if (callbacks != null) {
-                            callbacks.onImportConfig("");
-                        }
-                    }
-                });
-        primaryCtaButton = importBtn;
-        LinearLayout.LayoutParams ctaLp =
-                new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        ctaLp.topMargin = dp(16);
-        left.addView(importBtn, ctaLp);
-
-        LinearLayout right = makeGlassCard();
-        right.addView(
-                makeText(
-                        zh ? "空配置地址预览（默认 \"\"）" : "Empty Config Preview (Default \"\")",
-                        13,
-                        COLOR_TEAL,
-                        true));
-        TextView inputBox =
-                makeText("https://your-own-config.example/config.json", 13, COLOR_MUTED, false);
-        GradientDrawable boxBg = new GradientDrawable();
-        boxBg.setColor(0x6609090C);
-        boxBg.setCornerRadius(dp(10));
-        boxBg.setStroke(dp(1), COLOR_BORDER);
-        UiCompat.setBackground(inputBox, boxBg);
-        inputBox.setPadding(dp(12), dp(10), dp(12), dp(10));
-        LinearLayout.LayoutParams boxLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        boxLp.topMargin = dp(10);
-        right.addView(inputBox, boxLp);
-
-        String platformHint =
-                tvMode
-                        ? (zh
-                                ? "电视端支持局域网扫码推送与遥控器快速输入"
-                                : "TV supports LAN QR push and remote-friendly input")
-                        : (zh
-                                ? "手机/平板支持剪贴板一键粘贴与本地配置文件导入"
-                                : "Mobile & Tablet support one-tap clipboard paste and local file import");
-        TextView hintView = makeText(platformHint, 13, COLOR_WHITE, false);
-        LinearLayout.LayoutParams hintLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        hintLp.topMargin = dp(12);
-        right.addView(hintView, hintLp);
-
-        return assembleSplit(wide, left, right);
-    }
-
-    private View buildAct2PosterWall(boolean wide) {
-        LinearLayout left =
-                makeInfoColumn(
-                        zh ? "第 2 幕 · 海报墙、规格徽章与续播" : "Act 2 · Poster Wall & Spec Badges",
-                        zh ? "规格一目了然，续播无缝衔接" : "Clear Specs & Seamless Resume",
-                        zh
-                                ? "以下 14 张抽象几何海报均为程序化生成的虚构示例素材，展示纯文字规格徽章（4K、DV · ATMOS、HDR10+、REMUX）与继续观看进度条。"
-                                : "These 14 procedurally generated abstract posters are fictional samples showcasing text-only spec badges (4K, DV · ATMOS, HDR10+, REMUX) and continue-watching progress.");
-
-        LinearLayout right = makeGlassCard();
-        right.setClipChildren(false);
-        right.setClipToPadding(false);
-        right.addView(
-                makeText(
-                        zh
-                                ? "14 张示例海报网格（全部为虚构占位素材）"
-                                : "14 Sample Posters Grid (Fictional Placeholders)",
-                        13,
-                        COLOR_GOLD,
-                        true));
-
-        int columns = wide ? 4 : 3;
-        LinearLayout grid = new LinearLayout(getContext());
-        grid.setOrientation(LinearLayout.VERTICAL);
-        grid.setClipChildren(false);
-        grid.setClipToPadding(false);
-        grid.setPadding(dp(4), dp(8), dp(4), dp(4));
-
-        int count = demoItems.size();
-        for (int start = 0; start < count; start += columns) {
-            LinearLayout row = new LinearLayout(getContext());
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setClipChildren(false);
-            row.setClipToPadding(false);
-            for (int col = 0; col < columns; col++) {
-                int idx = start + col;
-                LinearLayout.LayoutParams cellLp =
-                        new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
-                if (col > 0) {
-                    cellLp.leftMargin = dp(8);
-                }
-                if (idx < count) {
-                    row.addView(buildDemoPosterCard(demoItems.get(idx)), cellLp);
-                } else {
-                    row.addView(new View(getContext()), cellLp);
-                }
-            }
-            LinearLayout.LayoutParams rowLp =
-                    new LinearLayout.LayoutParams(
-                            LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-            if (start > 0) {
-                rowLp.topMargin = dp(10);
-            }
-            grid.addView(row, rowLp);
-        }
-
-        right.addView(
-                grid,
-                new LinearLayout.LayoutParams(
-                        LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-        return assembleSplit(wide, left, right);
-    }
-
-    private View buildDemoPosterCard(DemoItem item) {
-        final LinearLayout card = new LinearLayout(getContext());
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setFocusable(tvMode);
-        card.setClickable(tvMode);
-        card.setClipChildren(false);
-        card.setClipToPadding(false);
-        card.setPadding(dp(5), dp(5), dp(5), dp(6));
-        styleCardContainer(card, false);
-
-        FrameLayout posterWrap = new FrameLayout(getContext());
-        int posterH = dp(tvMode ? 128 : 112);
-        applyRoundedClip(posterWrap, dp(8));
-
-        ImageView img = new ImageView(getContext());
-        img.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        Bitmap bmp = loadPosterBitmap(item.file);
-        if (bmp != null) {
-            img.setImageBitmap(bmp);
-        } else {
-            GradientDrawable fallback =
-                    new GradientDrawable(
-                            GradientDrawable.Orientation.TL_BR,
-                            new int[] {COLOR_BG_TOP, item.accentColor});
-            fallback.setCornerRadius(dp(8));
-            UiCompat.setBackground(img, fallback);
-        }
-        posterWrap.addView(
-                img, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
-
-        // Mandatory UI-layer "示例 / DEMO" badge in top-right corner.
-        TextView demoBadge = makeText(zh ? "示例" : "DEMO", 9.5f, COLOR_WHITE, true);
-        GradientDrawable badgeBg = new GradientDrawable();
-        badgeBg.setColor(0xD9101218);
-        badgeBg.setCornerRadius(dp(5));
-        badgeBg.setStroke(dp(1), 0x80FFFFFF);
-        UiCompat.setBackground(demoBadge, badgeBg);
-        demoBadge.setPadding(dp(5), dp(2), dp(5), dp(2));
-        LayoutParams badgeLp =
-                new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        badgeLp.gravity = Gravity.TOP | Gravity.END;
-        badgeLp.topMargin = dp(5);
-        badgeLp.rightMargin = dp(5);
-        posterWrap.addView(demoBadge, badgeLp);
-
-        // Continue-watching progress bar when progress > 0.
-        if (item.progress > 0f) {
-            LinearLayout track = new LinearLayout(getContext());
-            track.setOrientation(LinearLayout.HORIZONTAL);
-            track.setBackgroundColor(0x66000000);
-            View fill = new View(getContext());
-            fill.setBackgroundColor(COLOR_ACCENT);
-            track.addView(
-                    fill,
-                    new LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, item.progress));
-            View rest = new View(getContext());
-            track.addView(
-                    rest,
-                    new LinearLayout.LayoutParams(
-                            0, LayoutParams.MATCH_PARENT, 1f - item.progress));
-            LayoutParams trackLp = new LayoutParams(LayoutParams.MATCH_PARENT, dp(4));
-            trackLp.gravity = Gravity.BOTTOM;
-            posterWrap.addView(track, trackLp);
-        }
-
-        card.addView(posterWrap, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, posterH));
-
-        TextView title = makeText(item.title(zh), 11, COLOR_WHITE, true);
-        title.setSingleLine(true);
-        LinearLayout.LayoutParams titleLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        titleLp.topMargin = dp(5);
-        card.addView(title, titleLp);
-
-        // Compact pill-styled text-only spec badges per motion-tokens.json.
-        if (!item.specs.isEmpty()) {
-            LinearLayout badgeRow = new LinearLayout(getContext());
-            badgeRow.setOrientation(LinearLayout.HORIZONTAL);
-            int maxSpecs = Math.min(item.specs.size(), 2);
-            for (int i = 0; i < maxSpecs; i++) {
-                TextView pill = makeSpecBadgePill(item.specs.get(i));
-                LinearLayout.LayoutParams pLp =
-                        new LinearLayout.LayoutParams(
-                                LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-                if (i > 0) {
-                    pLp.leftMargin = dp(4);
-                }
-                badgeRow.addView(pill, pLp);
-            }
-            LinearLayout.LayoutParams brLp =
-                    new LinearLayout.LayoutParams(
-                            LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-            brLp.topMargin = dp(4);
-            card.addView(badgeRow, brLp);
-        }
-
-        if (tvMode) {
-            card.setOnFocusChangeListener(
-                    new OnFocusChangeListener() {
-                        @Override
-                        public void onFocusChange(View v, boolean hasFocus) {
-                            styleCardContainer(card, hasFocus);
-                            animateFocusScale(card, hasFocus);
-                        }
-                    });
-        }
-        return card;
-    }
-
-    private TextView makeSpecBadgePill(String spec) {
-        boolean isGold = spec.contains("4K");
-        boolean isPurple = spec.contains("DV") || spec.contains("ATMOS");
-        int fill =
-                controller.isReduceTransparency()
-                        ? (isGold ? 0xEB3A2810 : (isPurple ? 0xEB261F42 : 0xEB122640))
-                        : (isGold ? 0x2EFF9F0A : (isPurple ? 0x335E5CE6 : 0x2E0A84FF));
-        int stroke = isGold ? 0x66FF9F0A : (isPurple ? 0x73BF5AF2 : 0x660A84FF);
-        int text = isGold ? 0xFFFFB340 : (isPurple ? 0xFFE5C7FF : 0xFF64D2FF);
-
-        TextView pill = makeText(spec, 9.5f, text, true);
-        pill.setSingleLine(true);
-        pill.setPadding(dp(5), dp(1.5f), dp(5), dp(1.5f));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(fill);
-        bg.setCornerRadius(dp(5));
-        bg.setStroke(dp(1), stroke);
-        UiCompat.setBackground(pill, bg);
-        return pill;
-    }
-
-    private View buildAct3Sync(boolean wide) {
-        LinearLayout left =
-                makeInfoColumn(
-                        zh ? "第 3 幕 · 多端同步（WebDAV / 局域网）" : "Act 3 · Multi-Device Sync",
-                        zh ? "历史、收藏与订阅跨端同步" : "Sync History, Favorites & Sources",
-                        zh
-                                ? "基于 marco-movie-sync v2 协议，支持自配 WebDAV 云盘与同一局域网点对点免云盘直连同步。隐私空间与网盘/Emby 登录凭据始终保持本机隔离。"
-                                : "Powered by marco-movie-sync v2 with both self-hosted WebDAV and cloud-free LAN peer-to-peer sync. Privacy space and netdisk/Emby credentials remain strictly device-local.");
-
-        TextView syncBtn = makeActionPill(zh ? "配置同步" : "Configure Sync", false);
-        syncBtn.setId(UiCompat.generateViewId());
-        syncBtn.setOnClickListener(
-                new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        if (callbacks != null) {
-                            callbacks.onOpenSync();
-                        }
-                    }
-                });
-        primaryCtaButton = syncBtn;
-        LinearLayout.LayoutParams btnLp =
-                new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        btnLp.topMargin = dp(16);
-        left.addView(syncBtn, btnLp);
-
-        LinearLayout right = makeGlassCard();
-        right.addView(
-                makeSyncPathRow(
-                        zh ? "自配 WebDAV 云盘" : "Self-Hosted WebDAV",
-                        zh
-                                ? "自动双向合并观看历史、收藏与公开订阅"
-                                : "Two-way merge for history, favorites & public subscriptions",
-                        COLOR_ACCENT));
-        LinearLayout lanRow =
-                makeSyncPathRow(
-                        zh ? "局域网点对点直连" : "LAN Peer-to-Peer Direct",
-                        zh
-                                ? "同一 Wi-Fi / 局域网免云盘一键互传，零第三方中转"
-                                : "Same-network direct transfer with zero cloud relay",
-                        COLOR_TEAL);
-        LinearLayout.LayoutParams lanLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        lanLp.topMargin = dp(10);
-        right.addView(lanRow, lanLp);
-
-        TextView isolationNote =
-                makeText(
-                        zh
-                                ? "安全边界：隐私空间密码与网盘/Emby 凭据永不上传"
-                                : "Privacy boundary: Privacy space & netdisk/Emby credentials never sync",
-                        12,
-                        COLOR_PURPLE,
-                        true);
-        LinearLayout.LayoutParams isoLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        isoLp.topMargin = dp(12);
-        right.addView(isolationNote, isoLp);
-
-        return assembleSplit(wide, left, right);
-    }
-
-    private LinearLayout makeSyncPathRow(String title, String desc, int accent) {
-        LinearLayout row = new LinearLayout(getContext());
-        row.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0x5509090C);
-        bg.setCornerRadius(dp(12));
-        bg.setStroke(dp(1), (accent & 0x00FFFFFF) | 0x66000000);
-        UiCompat.setBackground(row, bg);
-        row.setPadding(dp(14), dp(12), dp(14), dp(12));
-        row.addView(makeText(title, 14, accent, true));
-        TextView d = makeText(desc, 12, COLOR_MUTED, false);
-        LinearLayout.LayoutParams lp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(4);
-        row.addView(d, lp);
-        return row;
-    }
-
-    private View buildAct4PlaybackHud(boolean wide) {
-        String body =
-                tvMode
-                        ? (zh
-                                ? "遥控器短按左右键快进/快退 15 秒，长按左右键加速预览并松手即播，返回键随时取消。支持起播规格提示、常驻细进度条、3 秒跳过片头倒计时与分片弹幕。"
-                                : "Short press Left/Right for 15s seek, hold Left/Right for accelerated scrub preview (release to play, Back to cancel). Includes start spec banner, thin progress bar, 3s skip countdown, and windowed danmaku.")
-                        : (zh
-                                ? "触控长按 2.0× 倍速，左右滑动在 1.25×–3.0× 间调速，上滑即可锁定倍速；两侧双击快进/快退，左右半屏上下滑动调亮度与音量。"
-                                : "Hold for 2.0× speed, slide horizontally across 1.25×–3.0×, and swipe up to lock speed. Double-tap sides to seek; swipe vertically on left/right edges for brightness and volume.");
-
-        LinearLayout left =
-                makeInfoColumn(
-                        zh ? "第 4 幕 · 进阶播放操控与 HUD" : "Act 4 · Playback Controls & HUD",
-                        tvMode
-                                ? (zh ? "遥控长按预览与清晰大屏 HUD" : "Remote Scrub Preview & Big-Screen HUD")
-                                : (zh
-                                        ? "长按倍速、滑动调速与上滑锁定"
-                                        : "Hold Speed, Slide Adjust & Swipe-Up Lock"),
-                        body);
-
-        int step = controller.getHudDemoStep();
-        String[] touchStates =
-                zh
-                        ? new String[] {
-                            "状态 1/3：长按触发 2.0× 临时倍速",
-                            "状态 2/3：左右滑调速（1.25× / 1.5× / 2.0× / 3.0×）",
-                            "状态 3/3：🔒 2.0× 锁定中 · 点击胶囊恢复",
-                        }
-                        : new String[] {
-                            "Step 1/3: Hold for 2.0× boost",
-                            "Step 2/3: Slide horizontally (1.25×–3.0×)",
-                            "Step 3/3: 🔒 2.0× Locked · Tap pill to reset",
-                        };
-        String[] tvStates =
-                zh
-                        ? new String[] {
-                            "状态 1/3：短按 ← / → 快进快退 15 秒",
-                            "状态 2/3：长按 ← / → 加速预览，松手即播",
-                            "状态 3/3：按返回键取消预览，恢复原位置",
-                        }
-                        : new String[] {
-                            "Step 1/3: Short Left/Right seeks 15s",
-                            "Step 2/3: Hold Left/Right scrubs, release to play",
-                            "Step 3/3: Press Back to cancel & restore",
-                        };
-        String activeStateText = (tvMode ? tvStates : touchStates)[step % 3];
-
-        // Component-level mock player HUD preview frame.
-        LinearLayout right = makeGlassCard();
-        FrameLayout mockScreen = new FrameLayout(getContext());
-        GradientDrawable screenBg =
-                new GradientDrawable(
-                        GradientDrawable.Orientation.TL_BR,
-                        new int[] {0xFF0C1222, 0xFF162238, 0xFF0A0D14});
-        screenBg.setCornerRadius(dp(12));
-        screenBg.setStroke(dp(1), COLOR_BORDER);
-        UiCompat.setBackground(mockScreen, screenBg);
-        mockScreen.setPadding(dp(12), dp(10), dp(12), dp(10));
-
-        // Top-left StartSpecOverlay pill
-        LinearLayout topSpecRow = new LinearLayout(getContext());
-        topSpecRow.setOrientation(LinearLayout.HORIZONTAL);
-        topSpecRow.addView(makeSpecBadgePill("4K"));
-        TextView dvPill = makeSpecBadgePill("DV · ATMOS");
-        LinearLayout.LayoutParams dvLp =
-                new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        dvLp.leftMargin = dp(5);
-        topSpecRow.addView(dvPill, dvLp);
-        LayoutParams topSpecLp =
-                new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        topSpecLp.gravity = Gravity.TOP | Gravity.START;
-        mockScreen.addView(topSpecRow, topSpecLp);
-
-        // Floating danmaku lane preview
-        TextView danmakuPill =
-                makeText(
-                        zh ? "弹幕示例 · 画面细节很清晰" : "Sample Danmaku · Crisp cinema detail",
-                        11,
-                        0xDDFFFFFF,
-                        false);
-        LayoutParams dmLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        dmLp.gravity = Gravity.TOP | Gravity.END;
-        dmLp.topMargin = dp(26);
-        mockScreen.addView(danmakuPill, dmLp);
-
-        // Center active gesture/remote state pill
-        TextView stateCapsule = makeText(activeStateText, 12, COLOR_WHITE, true);
-        GradientDrawable capBg = new GradientDrawable();
-        capBg.setColor(0xD9101626);
-        capBg.setCornerRadius(dp(16));
-        capBg.setStroke(dp(1), COLOR_ACCENT);
-        UiCompat.setBackground(stateCapsule, capBg);
-        stateCapsule.setPadding(dp(12), dp(6), dp(12), dp(6));
-        LayoutParams capLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        capLp.gravity = Gravity.CENTER;
-        mockScreen.addView(stateCapsule, capLp);
-
-        // Bottom-right 3s skip-intro countdown pill
-        TextView skipIntroPill =
-                makeText(zh ? "3s 跳过片头" : "Skip Intro 3s", 10.5f, COLOR_GOLD, true);
-        GradientDrawable skipBg = new GradientDrawable();
-        skipBg.setColor(0xD9241B10);
-        skipBg.setCornerRadius(dp(12));
-        skipBg.setStroke(dp(1), 0x88FF9F0A);
-        UiCompat.setBackground(skipIntroPill, skipBg);
-        skipIntroPill.setPadding(dp(8), dp(3), dp(8), dp(3));
-        LayoutParams siLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        siLp.gravity = Gravity.BOTTOM | Gravity.END;
-        siLp.bottomMargin = dp(12);
-        mockScreen.addView(skipIntroPill, siLp);
-
-        // Bottom persistent thin progress bar
-        float progressRatio = step == 0 ? 0.35f : (step == 1 ? 0.58f : 0.72f);
-        LinearLayout barTrack = new LinearLayout(getContext());
-        barTrack.setOrientation(LinearLayout.HORIZONTAL);
-        barTrack.setBackgroundColor(0x44FFFFFF);
-        View barFill = new View(getContext());
-        barFill.setBackgroundColor(COLOR_ACCENT);
-        barTrack.addView(
-                barFill,
-                new LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, progressRatio));
-        barTrack.addView(
-                new View(getContext()),
-                new LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, 1f - progressRatio));
-        LayoutParams barLp = new LayoutParams(LayoutParams.MATCH_PARENT, dp(4));
-        barLp.gravity = Gravity.BOTTOM;
-        mockScreen.addView(barTrack, barLp);
-
-        right.addView(
-                mockScreen, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(164)));
-
-        // Interactive cycle button (clickable & TV focusable) to step through HUD gesture states.
-        TextView cycleBtn =
-                makeActionPill(
-                        zh
-                                ? "切换操控演示状态 (" + (step + 1) + "/3)"
-                                : "Cycle Control Demo (" + (step + 1) + "/3)",
-                        false);
-        cycleBtn.setTag(FOCUS_TAG_HUD_STEP);
-        cycleBtn.setId(UiCompat.generateViewId());
-        cycleBtn.setOnClickListener(
-                new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        controller.cycleHudDemoStep();
-                        renderAct(FOCUS_TAG_HUD_STEP);
-                    }
-                });
-        LinearLayout.LayoutParams cyLp =
-                new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        cyLp.topMargin = dp(12);
-        right.addView(cycleBtn, cyLp);
-
-        return assembleSplit(wide, left, right);
-    }
-
-    private View buildAct5Personalize(boolean wide) {
-        LinearLayout left =
-                makeInfoColumn(
-                        zh ? "第 5 幕 · 个性化外观与立即开始" : "Act 5 · Personalize & Launch",
-                        zh ? "按您的观看习惯微调界面" : "Tailor Comfort & Visuals",
-                        zh
-                                ? "可在此快速预览减少动态效果、降低透明度与界面缩放（100% / 110% / 120%），稍后也可随时在「设置 -> 关于与帮助 -> 重新查看新手引导」再次打开。"
-                                : "Preview Reduce Motion, Reduce Transparency, and UI Scale (100% / 110% / 120%). Replay this guide anytime in Settings -> About & Help.");
-
-        LinearLayout ctaRow = new LinearLayout(getContext());
-        ctaRow.setOrientation(LinearLayout.HORIZONTAL);
-        ctaRow.setClipChildren(false);
-        ctaRow.setClipToPadding(false);
-        TextView importNow = makeActionPill(zh ? "立即导入配置" : "Import Config Now", true);
-        importNow.setId(UiCompat.generateViewId());
-        importNow.setOnClickListener(
-                new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        controller.complete(false);
-                        if (callbacks != null) {
-                            callbacks.onFinished(false);
-                            callbacks.onImportConfig("");
-                        }
-                    }
-                });
-        primaryCtaButton = importNow;
-        ctaRow.addView(importNow);
-
-        LinearLayout.LayoutParams ctaLp =
-                new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        ctaLp.topMargin = dp(16);
-        left.addView(ctaRow, ctaLp);
-
-        LinearLayout right = makeGlassCard();
-        right.setClipChildren(false);
-        right.setClipToPadding(false);
-
-        LinearLayout motionRow =
-                makeToggleRow(
-                        zh ? "减少动态效果" : "Reduce Motion",
-                        controller.isReduceMotion(),
-                        FOCUS_TAG_REDUCE_MOTION,
-                        new OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                controller.setReduceMotion(!controller.isReduceMotion());
-                                notifyPersonalization();
-                                renderAct(FOCUS_TAG_REDUCE_MOTION);
-                            }
-                        });
-        right.addView(motionRow);
-
-        LinearLayout transRow =
-                makeToggleRow(
-                        zh ? "降低透明度（高对比纯色）" : "Reduce Transparency",
-                        controller.isReduceTransparency(),
-                        FOCUS_TAG_REDUCE_TRANS,
-                        new OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                controller.setReduceTransparency(
-                                        !controller.isReduceTransparency());
-                                notifyPersonalization();
-                                renderAct(FOCUS_TAG_REDUCE_TRANS);
-                            }
-                        });
-        LinearLayout.LayoutParams tLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        tLp.topMargin = dp(10);
-        right.addView(transRow, tLp);
-
-        TextView scaleHeader = makeText(zh ? "界面缩放" : "UI Scale", 13, COLOR_MUTED, true);
-        LinearLayout.LayoutParams shLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        shLp.topMargin = dp(14);
-        right.addView(scaleHeader, shLp);
-
-        LinearLayout scaleRow = new LinearLayout(getContext());
-        scaleRow.setOrientation(LinearLayout.HORIZONTAL);
-        scaleRow.setClipChildren(false);
-        scaleRow.setClipToPadding(false);
-        for (int i = 0; i < SUPPORTED_UI_SCALES.length; i++) {
-            final int pct = SUPPORTED_UI_SCALES[i];
-            final String tag = FOCUS_TAG_SCALE_PREFIX + pct;
-            boolean selected = controller.getUiScalePercent() == pct;
-            TextView chip = makeActionPill(pct + "%", selected);
-            chip.setTag(tag);
-            chip.setOnClickListener(
-                    new OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            controller.setUiScalePercent(pct);
-                            notifyPersonalization();
-                            renderAct(tag);
-                        }
-                    });
-            LinearLayout.LayoutParams cLp =
-                    new LinearLayout.LayoutParams(
-                            LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-            if (i > 0) {
-                cLp.leftMargin = dp(8);
-            }
-            scaleRow.addView(chip, cLp);
-        }
-        LinearLayout.LayoutParams srLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        srLp.topMargin = dp(8);
-        right.addView(scaleRow, srLp);
-
-        return assembleSplit(wide, left, right);
-    }
-
-    private void notifyPersonalization() {
-        if (callbacks != null) {
-            callbacks.onPersonalizationChanged(
-                    controller.isReduceMotion(),
-                    controller.isReduceTransparency(),
-                    controller.getUiScalePercent());
-        }
-    }
-
-    private LinearLayout makeToggleRow(
-            String label, final boolean enabled, String focusTag, OnClickListener listener) {
-        final LinearLayout row = new LinearLayout(getContext());
-        row.setTag(focusTag);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setFocusable(true);
-        row.setClickable(true);
-        row.setOnClickListener(listener);
-        row.setPadding(dp(14), dp(12), dp(14), dp(12));
-
-        final TextView title = makeText(label, 14, COLOR_WHITE, false);
-        row.addView(title, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
-
-        final TextView state =
-                makeText(
-                        enabled ? (zh ? "已开启" : "ON") : (zh ? "已关闭" : "OFF"),
-                        12,
-                        enabled ? COLOR_TEAL : COLOR_MUTED,
-                        true);
-        row.addView(state);
-
-        styleToggleRow(row, title, state, enabled, false);
-        row.setOnFocusChangeListener(
-                new OnFocusChangeListener() {
-                    @Override
-                    public void onFocusChange(View v, boolean hasFocus) {
-                        styleToggleRow(row, title, state, enabled, hasFocus);
-                        animateFocusScale(row, hasFocus);
-                    }
-                });
-        return row;
-    }
-
-    private void styleToggleRow(
-            LinearLayout row, TextView title, TextView state, boolean enabled, boolean focused) {
-        GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(dp(12));
-        if (focused) {
-            bg.setColor(COLOR_WHITE);
-            bg.setStroke(dp(2), COLOR_WHITE);
-            title.setTextColor(COLOR_FOCUS_TEXT);
-            state.setTextColor(COLOR_ACCENT);
-        } else {
-            bg.setColor(controller.isReduceTransparency() ? 0xE6141418 : 0x5509090C);
-            bg.setStroke(dp(1), enabled ? COLOR_ACCENT : COLOR_BORDER);
-            title.setTextColor(COLOR_WHITE);
-            state.setTextColor(enabled ? COLOR_TEAL : COLOR_MUTED);
-        }
-        UiCompat.setBackground(row, bg);
-    }
-
-    private void styleCardContainer(LinearLayout card, boolean focused) {
-        GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(dp(10));
-        if (focused) {
-            bg.setColor(0x33F5F5F7);
-            bg.setStroke(dp(2), COLOR_WHITE);
-        } else {
-            bg.setColor(0x2209090C);
-            bg.setStroke(dp(1), 0x1FFFFFFF);
-        }
-        UiCompat.setBackground(card, bg);
-    }
-
-    private View assembleSplit(boolean wide, View left, View right) {
-        LinearLayout container = new LinearLayout(getContext());
-        container.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-        container.setGravity(wide ? Gravity.CENTER_VERTICAL : Gravity.TOP);
-        container.setClipChildren(false);
-        container.setClipToPadding(false);
-        if (wide) {
-            LinearLayout.LayoutParams leftLp =
-                    new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 0.9f);
-            leftLp.rightMargin = dp(24);
-            container.addView(left, leftLp);
-            container.addView(
-                    right, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.1f));
-        } else {
-            container.addView(
-                    left,
-                    new LinearLayout.LayoutParams(
-                            LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-            LinearLayout.LayoutParams rightLp =
-                    new LinearLayout.LayoutParams(
-                            LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-            rightLp.topMargin = dp(16);
-            container.addView(right, rightLp);
-        }
-        return container;
-    }
-
-    private LinearLayout makeInfoColumn(String eyebrow, String headline, String body) {
-        LinearLayout col = new LinearLayout(getContext());
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setClipChildren(false);
-        col.setClipToPadding(false);
-        col.addView(makeText(eyebrow, 13, COLOR_TEAL, true));
-
-        TextView h = makeText(headline, tvMode ? 28 : 24, COLOR_WHITE, true);
-        LinearLayout.LayoutParams hLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        hLp.topMargin = dp(8);
-        col.addView(h, hLp);
-
-        TextView b = makeText(body, tvMode ? 16 : 14, COLOR_MUTED, false);
-        b.setLineSpacing(dp(4), 1.0f);
-        LinearLayout.LayoutParams bLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        bLp.topMargin = dp(10);
-        col.addView(b, bLp);
-        return col;
-    }
-
-    private LinearLayout makeGlassCard() {
-        LinearLayout card = new LinearLayout(getContext());
-        card.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(controller.isReduceTransparency() ? COLOR_CARD_SOLID : COLOR_CARD_GLASS);
-        bg.setCornerRadius(dp(18));
-        bg.setStroke(dp(1), controller.isReduceTransparency() ? COLOR_BORDER_HIGH : COLOR_BORDER);
-        UiCompat.setBackground(card, bg);
-        card.setPadding(dp(18), dp(16), dp(18), dp(16));
-        return card;
-    }
-
-    private TextView makeActionPill(String label, boolean primary) {
-        TextView btn = makeText(label, tvMode ? 15 : 14, COLOR_WHITE, true);
-        btn.setGravity(Gravity.CENTER);
-        btn.setFocusable(true);
-        btn.setClickable(true);
-        btn.setPadding(dp(18), dp(10), dp(18), dp(10));
-        stylePill(btn, primary, false);
-        attachPillFocusHighlight(btn, primary);
-        return btn;
-    }
-
-    private void stylePill(TextView btn, boolean primary, boolean focused) {
-        GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(dp(22));
-        if (focused) {
-            bg.setColor(COLOR_WHITE);
-            bg.setStroke(dp(2), COLOR_WHITE);
-            btn.setTextColor(COLOR_FOCUS_TEXT);
-        } else if (primary) {
-            bg.setColor(COLOR_ACCENT);
-            bg.setStroke(dp(1), 0x44FFFFFF);
-            btn.setTextColor(COLOR_WHITE);
-        } else {
-            bg.setColor(controller.isReduceTransparency() ? COLOR_CARD_SOLID : 0x33FFFFFF);
-            bg.setStroke(dp(1), COLOR_BORDER);
-            btn.setTextColor(COLOR_WHITE);
-        }
-        UiCompat.setBackground(btn, bg);
-    }
-
-    private void attachPillFocusHighlight(final TextView btn, final boolean primary) {
-        btn.setOnFocusChangeListener(
-                new OnFocusChangeListener() {
-                    @Override
-                    public void onFocusChange(View v, boolean hasFocus) {
-                        stylePill(btn, primary, hasFocus);
-                        animateFocusScale(btn, hasFocus);
-                    }
-                });
-    }
-
-    private void animateFocusScale(View view, boolean focused) {
-        view.animate().cancel();
-        if (controller.isReduceMotion()) {
-            view.setScaleX(1.0f);
-            view.setScaleY(1.0f);
-            return;
-        }
-        float targetScale = focused ? 1.05f : 1.0f;
-        if (Build.VERSION.SDK_INT >= 21) {
-            view.animate()
-                    .scaleX(targetScale)
-                    .scaleY(targetScale)
-                    .setDuration(210L)
-                    .setInterpolator(new PathInterpolator(0.2f, 0.0f, 0.0f, 1.0f))
-                    .start();
-        } else {
-            view.animate().scaleX(targetScale).scaleY(targetScale).setDuration(210L).start();
-        }
-    }
-
-    private void applyRoundedClip(View view, final int radiusPx) {
-        if (Build.VERSION.SDK_INT >= 21) {
-            view.setOutlineProvider(
-                    new ViewOutlineProvider() {
-                        @Override
-                        public void getOutline(View v, Outline outline) {
-                            outline.setRoundRect(0, 0, v.getWidth(), v.getHeight(), radiusPx);
-                        }
-                    });
-            UiCompat.setClipToOutline(view, true);
-        }
-    }
-
-    private TextView makeText(String text, float sp, int color, boolean bold) {
-        TextView tv = new TextView(getContext());
-        float scale = controller.getUiScalePercent() / 100f;
-        tv.setText(text);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp * scale);
-        tv.setTextColor(color);
-        if (bold) {
-            tv.setTypeface(Typeface.DEFAULT_BOLD);
-        }
-        return tv;
-    }
-
-    private boolean isWideLayout() {
-        DisplayMetrics dm = getResources().getDisplayMetrics();
-        float widthDp = dm.widthPixels / Math.max(1f, dm.density);
-        return tvMode || widthDp >= 720f;
-    }
-
     private int dp(float value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
@@ -1549,26 +1086,755 @@ public final class OnboardingScreen extends FrameLayout {
         return lang != null && lang.toLowerCase(Locale.US).startsWith("zh");
     }
 
-    private Bitmap loadPosterBitmap(String file) {
-        Bitmap cached = posterBitmaps.get(file);
-        if (cached != null && !cached.isRecycled()) {
-            return cached;
+    /**
+     * Interactive 120fps Linear-Vector Showcase Canvas rendered cleanly via geometric strokes,
+     * animated dashed guides, and real spring physics — giving every act a tactile Apple-grade
+     * live playground without heavy bitmaps or clutter.
+     */
+    private static final class LinearPlaygroundView extends View {
+        private final int act;
+        private final Palette p;
+        private final boolean zh;
+        private final boolean reduced;
+        private final Runnable onStepPulse;
+        private final float d;
+
+        private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF r1 = new RectF();
+        private final RectF r2 = new RectF();
+        private final Path path = new Path();
+
+        private Choreographer.FrameCallback frameCb;
+        private long lastFrameNs = 0L;
+        private boolean running = false;
+        private float time = 0f;
+
+        // Act 1 interactive state: tap to connect source pulse
+        private boolean sourceConnected = false;
+        private float sourceAnim = 0f;
+
+        // Act 2 interactive state: tap any mini poster card to morph hero + rising dock sheet
+        private int selectedCard = 1;
+        private boolean cardExpanded = false;
+        private float morphAnim = 0f;
+
+        // Act 3 interactive state: touch/slide mini dock quick menu
+        private int activeDockTab = 0;
+        private boolean dockMenuOpen = true;
+        private float dockMenuAnim = 0f;
+        private int hoveredQuickIdx = 0;
+
+        // Act 4 interactive state: drag brightness/volume or hold 2.0x boost
+        private float brightnessVal = 0.68f;
+        private float volumeVal = 0.62f;
+        private boolean boostHolding = false;
+        private float boostAnim = 0f;
+        private int activeGestureSide = 0; // -1 left, +1 right, 0 none
+        private float lastTouchY = 0f;
+
+        // Act 5 interactive state: celestial sun <-> moon linear morph
+        private float moonAnim;
+
+        LinearPlaygroundView(
+                Context ctx,
+                int act,
+                Palette p,
+                boolean zh,
+                boolean reduced,
+                Runnable onStepPulse) {
+            super(ctx);
+            this.act = act;
+            this.p = p;
+            this.zh = zh;
+            this.reduced = reduced;
+            this.onStepPulse = onStepPulse;
+            this.d = ctx.getResources().getDisplayMetrics().density;
+            this.moonAnim = p.isDark ? 1f : 0f;
+            stroke.setStyle(Paint.Style.STROKE);
+            stroke.setStrokeCap(Paint.Cap.ROUND);
+            stroke.setStrokeJoin(Paint.Join.ROUND);
+            fill.setStyle(Paint.Style.FILL);
+            text.setTextAlign(Paint.Align.CENTER);
+            text.setTypeface(Typeface.DEFAULT_BOLD);
         }
-        try {
-            InputStream in = getContext().getAssets().open("demo/" + file);
-            try {
-                BitmapFactory.Options opts = new BitmapFactory.Options();
-                opts.inSampleSize = 2; // 180x270 keeps all 14 posters under ~1.2MB RAM.
-                Bitmap bmp = BitmapFactory.decodeStream(in, null, opts);
-                if (bmp != null) {
-                    posterBitmaps.put(file, bmp);
-                }
-                return bmp;
-            } finally {
-                in.close();
+
+        void start() {
+            stop();
+            if (reduced) {
+                sourceAnim = sourceConnected ? 1f : 0f;
+                morphAnim = cardExpanded ? 1f : 0f;
+                dockMenuAnim = dockMenuOpen ? 1f : 0f;
+                boostAnim = boostHolding ? 1f : 0f;
+                moonAnim = p.isDark ? 1f : 0f;
+                invalidate();
+                return;
             }
-        } catch (IOException ignored) {
-            return null;
+            running = true;
+            lastFrameNs = 0L;
+            if (Build.VERSION.SDK_INT >= 16) {
+                frameCb =
+                        frameTimeNanos -> {
+                            if (!running || !UiCompat.isAttached(this)) {
+                                running = false;
+                                return;
+                            }
+                            float dt =
+                                    lastFrameNs == 0L
+                                            ? 0.016f
+                                            : Math.min(
+                                                    0.05f,
+                                                    Math.max(
+                                                            0.001f,
+                                                            (frameTimeNanos - lastFrameNs)
+                                                                    * 1e-9f));
+                            lastFrameNs = frameTimeNanos;
+                            advanceFrame(dt);
+                            Choreographer.getInstance().postFrameCallback(frameCb);
+                        };
+                Choreographer.getInstance().postFrameCallback(frameCb);
+            }
+        }
+
+        private void advanceFrame(float step) {
+            time += step;
+            sourceAnim = approach(sourceAnim, sourceConnected ? 1f : 0f, step * 5.2f);
+            morphAnim = approach(morphAnim, cardExpanded ? 1f : 0f, step * 5.8f);
+            dockMenuAnim = approach(dockMenuAnim, dockMenuOpen ? 1f : 0f, step * 6.5f);
+            boostAnim = approach(boostAnim, boostHolding ? 1f : 0f, step * 7.5f);
+            moonAnim = approach(moonAnim, p.isDark ? 1f : 0f, step * 5.0f);
+            invalidate();
+        }
+
+        void stop() {
+            running = false;
+            if (Build.VERSION.SDK_INT >= 16 && frameCb != null) {
+                try {
+                    Choreographer.getInstance().removeFrameCallback(frameCb);
+                } catch (Throwable ignored) {
+                }
+                frameCb = null;
+            }
+        }
+
+        private static float approach(float cur, float tgt, float rate) {
+            float diff = tgt - cur;
+            if (Math.abs(diff) < 0.002f) return tgt;
+            return cur + diff * Math.min(1f, rate);
+        }
+
+        private float dp(float v) {
+            return v * d;
+        }
+
+        private void haptic(int code) {
+            try {
+                performHapticFeedback(code);
+            } catch (Throwable ignored) {
+            }
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent ev) {
+            int action = ev.getActionMasked();
+            float x = ev.getX();
+            float y = ev.getY();
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return false;
+
+            if (act == 0) {
+                if (action == MotionEvent.ACTION_UP) {
+                    sourceConnected = !sourceConnected;
+                    if (reduced) sourceAnim = sourceConnected ? 1f : 0f;
+                    haptic(HapticFeedbackConstants.KEYBOARD_TAP);
+                    invalidate();
+                }
+                return true;
+            }
+            if (act == 1) {
+                if (action == MotionEvent.ACTION_UP) {
+                    if (!cardExpanded) {
+                        int col = x < w * 0.36f ? 0 : (x > w * 0.64f ? 2 : 1);
+                        selectedCard = col;
+                        cardExpanded = true;
+                    } else {
+                        cardExpanded = false;
+                    }
+                    if (reduced) morphAnim = cardExpanded ? 1f : 0f;
+                    haptic(HapticFeedbackConstants.KEYBOARD_TAP);
+                    invalidate();
+                }
+                return true;
+            }
+            if (act == 2) {
+                if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) {
+                    float dockY = h * 0.78f;
+                    if (y >= dockY - dp(24)) {
+                        int nextTab =
+                                Math.max(0, Math.min(3, (int) ((x - w * 0.14f) / (w * 0.18f))));
+                        if (nextTab != activeDockTab) {
+                            activeDockTab = nextTab;
+                            hoveredQuickIdx = 0;
+                            haptic(HapticFeedbackConstants.CLOCK_TICK);
+                        }
+                        dockMenuOpen = true;
+                    } else if (dockMenuOpen) {
+                        float menuTop = h * 0.24f;
+                        float menuBot = h * 0.62f;
+                        if (y >= menuTop && y <= menuBot) {
+                            int idx =
+                                    Math.max(
+                                            0,
+                                            Math.min(
+                                                    2,
+                                                    (int)
+                                                            (((y - menuTop) / (menuBot - menuTop))
+                                                                    * 3f)));
+                            if (idx != hoveredQuickIdx) {
+                                hoveredQuickIdx = idx;
+                                haptic(HapticFeedbackConstants.CLOCK_TICK);
+                            }
+                        }
+                    }
+                    if (reduced) dockMenuAnim = dockMenuOpen ? 1f : 0f;
+                    invalidate();
+                }
+                return true;
+            }
+            if (act == 3) {
+                if (action == MotionEvent.ACTION_DOWN) {
+                    lastTouchY = y;
+                    if (x < w * 0.32f) {
+                        activeGestureSide = -1;
+                    } else if (x > w * 0.68f) {
+                        activeGestureSide = 1;
+                    } else {
+                        activeGestureSide = 0;
+                        boostHolding = true;
+                        haptic(HapticFeedbackConstants.LONG_PRESS);
+                        if (onStepPulse != null) onStepPulse.run();
+                    }
+                    if (reduced) boostAnim = boostHolding ? 1f : 0f;
+                    invalidate();
+                } else if (action == MotionEvent.ACTION_MOVE) {
+                    float dy = (lastTouchY - y) / Math.max(1f, h * 0.45f);
+                    lastTouchY = y;
+                    if (activeGestureSide == -1) {
+                        brightnessVal = Math.max(0.10f, Math.min(1f, brightnessVal + dy));
+                        invalidate();
+                    } else if (activeGestureSide == 1) {
+                        volumeVal = Math.max(0.10f, Math.min(1f, volumeVal + dy));
+                        invalidate();
+                    }
+                } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    boostHolding = false;
+                    activeGestureSide = 0;
+                    if (reduced) boostAnim = 0f;
+                    invalidate();
+                }
+                return true;
+            }
+            return false;
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+
+            // Subtle architectural canvas frame with hairline border
+            r1.set(0f, 0f, w, h);
+            fill.setColor(p.bgCard);
+            canvas.drawRoundRect(r1, dp(24), dp(24), fill);
+            stroke.setPathEffect(null);
+            stroke.setStrokeWidth(dp(0.8f));
+            stroke.setColor(p.isDark ? 0x1EFFFFFF : 0x14000000);
+            canvas.drawRoundRect(r1, dp(24), dp(24), stroke);
+
+            // Subtle geometric dot grid backdrop for Linear-app luxury depth
+            fill.setColor(withAlpha(p.textTertiary, p.isDark ? 0x26 : 0x20));
+            float gridStep = dp(24);
+            for (float gx = gridStep; gx < w - dp(12); gx += gridStep) {
+                for (float gy = gridStep; gy < h - dp(12); gy += gridStep) {
+                    canvas.drawCircle(gx, gy, dp(1f), fill);
+                }
+            }
+
+            switch (act) {
+                case 0:
+                    drawAct1Sources(canvas, w, h);
+                    break;
+                case 1:
+                    drawAct2DualMotion(canvas, w, h);
+                    break;
+                case 2:
+                    drawAct3DockShortcuts(canvas, w, h);
+                    break;
+                case 3:
+                    drawAct4GesturePlayer(canvas, w, h);
+                    break;
+                default:
+                    drawAct5CelestialTheme(canvas, w, h);
+                    break;
+            }
+        }
+
+        private void drawInteractiveHintChip(Canvas canvas, float w, float h, String label) {
+            text.setTextSize(dp(11.5f));
+            float tw = text.measureText(label);
+            float pw = tw + dp(24);
+            float ph = dp(26);
+            float l = (w - pw) * 0.5f;
+            float t = h - ph - dp(14);
+            r2.set(l, t, l + pw, t + ph);
+            fill.setColor(withAlpha(p.accent, p.isDark ? 0x2A : 0x18));
+            canvas.drawRoundRect(r2, ph * 0.5f, ph * 0.5f, fill);
+            text.setColor(p.accent);
+            canvas.drawText(label, w * 0.5f, t + ph * 0.66f, text);
+        }
+
+        private void drawAct1Sources(Canvas canvas, int w, int h) {
+            float cx = w * 0.5f;
+            float pillY = h * 0.22f;
+            float frameTop = h * 0.44f;
+            float frameH = h * 0.36f;
+            float frameW = Math.min(w * 0.74f, dp(248));
+            float frameL = cx - frameW * 0.5f;
+
+            // Top minimalist URL capsule
+            float pillW = Math.min(w * 0.66f, dp(216));
+            float pillH = dp(36);
+            r2.set(
+                    cx - pillW * 0.5f,
+                    pillY - pillH * 0.5f,
+                    cx + pillW * 0.5f,
+                    pillY + pillH * 0.5f);
+            int pillLitFill = blendColors(p.bgCard, p.accent, p.isDark ? 0.26f : 0.14f);
+            fill.setColor(blendColors(p.bgSubtle, pillLitFill, sourceAnim));
+            canvas.drawRoundRect(r2, pillH * 0.5f, pillH * 0.5f, fill);
+            stroke.setStrokeWidth(dp(1.4f));
+            stroke.setColor(blendColors(p.textTertiary, p.accent, sourceAnim));
+            canvas.drawRoundRect(r2, pillH * 0.5f, pillH * 0.5f, stroke);
+
+            text.setTextSize(dp(11.5f));
+            text.setColor(blendColors(p.textSecondary, p.accent, sourceAnim));
+            canvas.drawText(
+                    sourceConnected
+                            ? (zh ? "✓  自有片源已接入" : "✓  Source Connected")
+                            : "https://source.example/config.json",
+                    cx,
+                    pillY + dp(4),
+                    text);
+
+            // Vertical animated linear beam connecting URL capsule -> Library Frame
+            float lineTop = pillY + pillH * 0.5f + dp(6);
+            float lineBot = frameTop - dp(6);
+            stroke.setStrokeWidth(dp(1.4f));
+            stroke.setPathEffect(new DashPathEffect(new float[] {dp(4), dp(4)}, -(time * dp(24))));
+            stroke.setColor(withAlpha(p.accent, sourceConnected ? 0xD0 : 0x55));
+            canvas.drawLine(cx, lineTop, cx, lineBot, stroke);
+            stroke.setPathEffect(null);
+
+            float pulseY = lineTop + (lineBot - lineTop) * ((time * 0.9f) % 1f);
+            fill.setColor(p.accent);
+            canvas.drawCircle(cx, pulseY, dp(sourceConnected ? 3.5f : 2.5f), fill);
+
+            // Minimalist 3-card library wireframe morphing into illuminated cinema cards
+            r2.set(frameL, frameTop, frameL + frameW, frameTop + frameH);
+            stroke.setStrokeWidth(dp(1.2f));
+            stroke.setColor(withAlpha(p.textTertiary, 0x55));
+            canvas.drawRoundRect(r2, dp(16), dp(16), stroke);
+
+            float pad = dp(12);
+            float gap = dp(9);
+            float cardW = (frameW - pad * 2 - gap * 2) / 3f;
+            float cardH = frameH - pad * 2;
+            int[] cardTints = {p.accent, 0xFF8B5CF6, 0xFF10B981};
+            for (int i = 0; i < 3; i++) {
+                float cl = frameL + pad + i * (cardW + gap);
+                float ct = frameTop + pad;
+                float lit = Math.max(0f, Math.min(1f, sourceAnim * 1.4f - i * 0.18f));
+                r2.set(cl, ct, cl + cardW, ct + cardH);
+                int cardLitFill = blendColors(p.bgCard, cardTints[i], p.isDark ? 0.28f : 0.15f);
+                fill.setColor(blendColors(p.bgSubtle, cardLitFill, lit));
+                canvas.drawRoundRect(r2, dp(10), dp(10), fill);
+                stroke.setStrokeWidth(dp(1.2f));
+                stroke.setColor(
+                        blendColors(
+                                withAlpha(p.textTertiary, 0x45),
+                                withAlpha(cardTints[i], 0xD0),
+                                lit));
+                canvas.drawRoundRect(r2, dp(10), dp(10), stroke);
+
+                if (lit > 0.25f) {
+                    stroke.setStrokeWidth(dp(1.4f));
+                    stroke.setColor(withAlpha(cardTints[i], Math.round(180 * lit)));
+                    canvas.drawCircle(cl + cardW * 0.5f, ct + cardH * 0.42f, dp(8.5f), stroke);
+                }
+
+                // Minimalist linear title line inside each poster card
+                float lineY = ct + cardH - dp(12);
+                stroke.setStrokeWidth(dp(2f));
+                stroke.setColor(
+                        withAlpha(
+                                lit > 0.5f ? cardTints[i] : p.textTertiary,
+                                lit > 0.5f ? 0xD0 : 0x50));
+                canvas.drawLine(cl + dp(8), lineY, cl + cardW - dp(12), lineY, stroke);
+            }
+
+            drawInteractiveHintChip(
+                    canvas,
+                    w,
+                    h,
+                    sourceConnected
+                            ? (zh ? "再次轻点重置演示" : "Tap again to reset")
+                            : (zh ? "轻点画布 · 体验接入片源" : "Tap canvas to simulate import"));
+        }
+
+        private void drawAct2DualMotion(Canvas canvas, int w, int h) {
+            // Miniature sleek phone frame inside the stage
+            float phoneH = h * 0.76f;
+            float phoneW = Math.min(w * 0.62f, phoneH * 0.54f);
+            float pL = (w - phoneW) * 0.5f;
+            float pT = (h - phoneH) * 0.42f;
+            float pR = pL + phoneW;
+            float pB = pT + phoneH;
+
+            r1.set(pL, pT, pR, pB);
+            fill.setColor(p.bgCanvas);
+            canvas.drawRoundRect(r1, dp(22), dp(22), fill);
+            stroke.setStrokeWidth(dp(1.4f));
+            stroke.setColor(withAlpha(p.textTertiary, 0x65));
+            canvas.drawRoundRect(r1, dp(22), dp(22), stroke);
+
+            int save = canvas.save();
+            path.reset();
+            path.addRoundRect(r1, dp(22), dp(22), Path.Direction.CW);
+            canvas.clipPath(path);
+
+            float pad = dp(10);
+            float gap = dp(6);
+            float cardW = (phoneW - pad * 2 - gap * 2) / 3f;
+            float cardH = cardW * 1.45f;
+            float gridTop = pT + dp(26);
+            int[] tints = {0xFF5AC8FA, p.accent, 0xFFFF9F0A};
+
+            // Static background 3-card row (fades smoothly while selected card expands)
+            float bgCardVis = Math.max(0f, 1f - morphAnim * 1.35f);
+            if (bgCardVis > 0.01f) {
+                for (int i = 0; i < 3; i++) {
+                    if (i == selectedCard && morphAnim > 0.04f) continue;
+                    float cl = pL + pad + i * (cardW + gap);
+                    r2.set(cl, gridTop, cl + cardW, gridTop + cardH);
+                    fill.setColor(
+                            withAlpha(tints[i], Math.round((p.isDark ? 0x35 : 0x26) * bgCardVis)));
+                    canvas.drawRoundRect(r2, dp(7), dp(7), fill);
+                    stroke.setStrokeWidth(dp(1f));
+                    stroke.setColor(withAlpha(tints[i], Math.round(0x85 * bgCardVis)));
+                    canvas.drawRoundRect(r2, dp(7), dp(7), stroke);
+                }
+            }
+
+            // 1. Expanding Selected Poster Card -> Upper Hero (opaque tinted surface, zero bleed)
+            float srcL = pL + pad + selectedCard * (cardW + gap);
+            float srcT = gridTop;
+            float heroBot = pT + phoneH * 0.56f;
+            float curL = srcL + (pL - srcL) * morphAnim;
+            float curT = srcT + (pT - srcT) * morphAnim;
+            float curR = (srcL + cardW) + (pR - (srcL + cardW)) * morphAnim;
+            float curB = (srcT + cardH) + (heroBot - (srcT + cardH)) * morphAnim;
+            float curRad = dp(7) * (1f - morphAnim);
+            r2.set(curL, curT, curR, curB);
+            fill.setColor(blendColors(p.bgCanvas, tints[selectedCard], p.isDark ? 0.36f : 0.22f));
+            canvas.drawRoundRect(r2, curRad, curRad, fill);
+            stroke.setStrokeWidth(dp(1.3f));
+            stroke.setColor(tints[selectedCard]);
+            canvas.drawRoundRect(r2, curRad, curRad, stroke);
+
+            // Subtle linear play icon emerging in hero
+            if (morphAnim > 0.25f) {
+                float a = Math.min(1f, (morphAnim - 0.25f) / 0.5f);
+                stroke.setStrokeWidth(dp(1.6f));
+                stroke.setColor(withAlpha(Color.WHITE, Math.round(230 * a)));
+                float hCx = (curL + curR) * 0.5f;
+                float hCy = (curT + curB) * 0.5f;
+                canvas.drawCircle(hCx, hCy, dp(12), stroke);
+            }
+
+            // 2. Synchronized Dock Pill <-> Rising Lower Episode Sheet!
+            float dockW = phoneW * 0.68f;
+            float dockH = dp(18);
+            float dL = pL + (phoneW - dockW) * 0.5f;
+            float dT = pB - dockH - dp(10);
+            float dR = dL + dockW;
+            float dB = dT + dockH;
+
+            float sL = dL + (pL - dL) * morphAnim;
+            float sT = dT + ((heroBot - dp(10)) - dT) * morphAnim;
+            float sR = dR + (pR - dR) * morphAnim;
+            float sB = dB + (pB - dB) * morphAnim;
+            float sTopR = dp(9) + (dp(14) - dp(9)) * morphAnim;
+            float sBotR = dp(9) * (1f - morphAnim);
+
+            r2.set(sL, sT, sR, sB);
+            path.reset();
+            path.addRoundRect(
+                    r2,
+                    new float[] {sTopR, sTopR, sTopR, sTopR, sBotR, sBotR, sBotR, sBotR},
+                    Path.Direction.CW);
+            fill.setColor(p.bgCard);
+            canvas.drawPath(path, fill);
+            stroke.setStrokeWidth(dp(1.2f));
+            stroke.setColor(withAlpha(p.accent, Math.round(180 * (1f - morphAnim * 0.4f))));
+            canvas.drawPath(path, stroke);
+
+            // Miniature episode skeleton lines materializing inside rising sheet
+            if (morphAnim > 0.35f) {
+                float la = Math.min(1f, (morphAnim - 0.35f) / 0.45f);
+                fill.setColor(withAlpha(p.accent, Math.round(220 * la)));
+                r2.set(sL + dp(12), sT + dp(12), sR - dp(12), sT + dp(24));
+                canvas.drawRoundRect(r2, dp(6), dp(6), fill);
+
+                fill.setColor(withAlpha(p.textTertiary, Math.round(90 * la)));
+                for (int e = 0; e < 4; e++) {
+                    float ex = sL + dp(12) + e * dp(24);
+                    r2.set(ex, sT + dp(32), ex + dp(18), sT + dp(46));
+                    canvas.drawRoundRect(r2, dp(4), dp(4), fill);
+                }
+            }
+            canvas.restoreToCount(save);
+
+            drawInteractiveHintChip(
+                    canvas,
+                    w,
+                    h,
+                    cardExpanded
+                            ? (zh ? "再点一次 · 看海报与底栏优雅回位" : "Tap again to shrink back")
+                            : (zh ? "点击任意海报卡片 · 预览双动效" : "Tap a card to preview morph"));
+        }
+
+        private void drawAct3DockShortcuts(Canvas canvas, int w, int h) {
+            float dockW = Math.min(w * 0.78f, dp(248));
+            float dockH = dp(44);
+            float dockL = (w - dockW) * 0.5f;
+            float dockT = h * 0.68f;
+
+            // Floating Dock pill
+            r2.set(dockL, dockT, dockL + dockW, dockT + dockH);
+            fill.setColor(p.bgCanvas);
+            canvas.drawRoundRect(r2, dockH * 0.5f, dockH * 0.5f, fill);
+            stroke.setStrokeWidth(dp(1.2f));
+            stroke.setColor(withAlpha(p.textTertiary, 0x55));
+            canvas.drawRoundRect(r2, dockH * 0.5f, dockH * 0.5f, stroke);
+
+            String[] tabs =
+                    zh
+                            ? new String[] {"发现", "直播", "片库", "设置"}
+                            : new String[] {"Home", "Live", "Lib", "Set"};
+            float cellW = dockW / 4f;
+            float activeCx = dockL + (activeDockTab + 0.5f) * cellW;
+            for (int i = 0; i < 4; i++) {
+                float cx = dockL + (i + 0.5f) * cellW;
+                boolean sel = i == activeDockTab;
+                if (sel) {
+                    r2.set(cx - dp(22), dockT + dp(6), cx + dp(22), dockT + dockH - dp(6));
+                    fill.setColor(p.pillSelectedFill);
+                    canvas.drawRoundRect(r2, dp(16), dp(16), fill);
+                }
+                text.setTextSize(dp(11f));
+                text.setColor(sel ? p.accent : p.textSecondary);
+                canvas.drawText(tabs[i], cx, dockT + dockH * 0.62f, text);
+            }
+
+            // Floating Quick-Action Popover unfolding right above the active tab
+            if (dockMenuAnim > 0.02f) {
+                String[][] menuItems =
+                        zh
+                                ? new String[][] {
+                                    {"切换片源", "导入片源", "回到顶部"},
+                                    {"导入直播源", "节目单设置", "刷新频道"},
+                                    {"观看历史", "我的收藏", "离线下载"},
+                                    {"切换日夜模式", "播放与画质", "隐私空间"}
+                                }
+                                : new String[][] {
+                                    {"Switch Source", "Import", "Top"},
+                                    {"Import Live", "EPG", "Refresh"},
+                                    {"History", "Favorites", "Downloads"},
+                                    {"Day / Night", "Playback", "Privacy"}
+                                };
+                String[] rows = menuItems[activeDockTab % menuItems.length];
+                float menuW = dp(148);
+                float menuH = dp(112);
+                float mL = Math.max(dp(16), Math.min(w - menuW - dp(16), activeCx - menuW * 0.5f));
+                float mB = dockT - dp(14) + dp(12) * (1f - dockMenuAnim);
+                float mT = mB - menuH;
+
+                r2.set(mL, mT, mL + menuW, mB);
+                fill.setColor(p.bgCanvas);
+                canvas.drawRoundRect(r2, dp(16), dp(16), fill);
+                stroke.setStrokeWidth(dp(1.2f));
+                stroke.setColor(withAlpha(p.accent, 0x80));
+                canvas.drawRoundRect(r2, dp(16), dp(16), stroke);
+
+                float rowH = (menuH - dp(12)) / 3f;
+                for (int r = 0; r < 3; r++) {
+                    float rt = mT + dp(6) + r * rowH;
+                    boolean hov = r == hoveredQuickIdx;
+                    if (hov) {
+                        r2.set(mL + dp(6), rt, mL + menuW - dp(6), rt + rowH);
+                        fill.setColor(p.pillSelectedFill);
+                        canvas.drawRoundRect(r2, dp(10), dp(10), fill);
+                    }
+                    text.setTextSize(dp(12f));
+                    text.setColor(hov ? p.accent : p.textPrimary);
+                    canvas.drawText(rows[r], mL + menuW * 0.5f, rt + rowH * 0.64f, text);
+                }
+            }
+
+            drawInteractiveHintChip(
+                    canvas, w, h, zh ? "按住底部图标并上下滑动体验" : "Touch & slide dock tabs above");
+        }
+
+        private void drawAct4GesturePlayer(Canvas canvas, int w, int h) {
+            float vpW = Math.min(w * 0.84f, dp(280));
+            float vpH = vpW * 0.56f;
+            float vpL = (w - vpW) * 0.5f;
+            float vpT = (h - vpH) * 0.42f;
+            float vpR = vpL + vpW;
+            float vpB = vpT + vpH;
+
+            r2.set(vpL, vpT, vpR, vpB);
+            fill.setColor(p.isDark ? 0xFF0E1118 : 0xFF151923);
+            canvas.drawRoundRect(r2, dp(16), dp(16), fill);
+            stroke.setStrokeWidth(dp(1.2f));
+            stroke.setColor(withAlpha(p.accent, boostHolding ? 0xDD : 0x55));
+            canvas.drawRoundRect(r2, dp(16), dp(16), stroke);
+
+            // Animated minimalist cinema waveform / timeline inside viewport
+            float playY = vpB - dp(18);
+            stroke.setStrokeWidth(dp(2f));
+            stroke.setColor(0x38FFFFFF);
+            canvas.drawLine(vpL + dp(16), playY, vpR - dp(16), playY, stroke);
+            float speedMul = 1f + boostAnim * 2.2f;
+            float prog = ((time * 0.16f * speedMul) % 1f);
+            float headX = vpL + dp(16) + (vpW - dp(32)) * prog;
+            stroke.setColor(p.accent);
+            canvas.drawLine(vpL + dp(16), playY, headX, playY, stroke);
+            fill.setColor(Color.WHITE);
+            canvas.drawCircle(headX, playY, dp(3.5f), fill);
+
+            // Left linear brightness meter
+            drawSideMeter(
+                    canvas,
+                    vpL + dp(20),
+                    vpT + dp(22),
+                    vpB - dp(34),
+                    brightnessVal,
+                    activeGestureSide == -1 ? p.accent : 0xBBFFFFFF,
+                    zh ? "亮度" : "BRI");
+            // Right linear volume meter
+            drawSideMeter(
+                    canvas,
+                    vpR - dp(20),
+                    vpT + dp(22),
+                    vpB - dp(34),
+                    volumeVal,
+                    activeGestureSide == 1 ? p.accent : 0xBBFFFFFF,
+                    zh ? "音量" : "VOL");
+
+            // Center 2.0x boost capsule
+            float cX = (vpL + vpR) * 0.5f;
+            float cY = (vpT + vpB) * 0.44f;
+            String speedStr = boostHolding ? "2.0×  ▸▸" : "1.0×";
+            float capW = dp(boostHolding ? 86 : 64);
+            float capH = dp(28);
+            r2.set(cX - capW * 0.5f, cY - capH * 0.5f, cX + capW * 0.5f, cY + capH * 0.5f);
+            fill.setColor(boostHolding ? p.accent : 0x26FFFFFF);
+            canvas.drawRoundRect(r2, capH * 0.5f, capH * 0.5f, fill);
+            text.setTextSize(dp(12f));
+            text.setColor(Color.WHITE);
+            canvas.drawText(speedStr, cX, cY + dp(4.5f), text);
+
+            drawInteractiveHintChip(
+                    canvas,
+                    w,
+                    h,
+                    zh ? "滑左右调亮度音量 · 按住中间 2.0× 加速" : "Drag sides or hold center for 2.0x");
+        }
+
+        private void drawSideMeter(
+                Canvas canvas,
+                float x,
+                float top,
+                float bottom,
+                float value,
+                int color,
+                String label) {
+            stroke.setStrokeWidth(dp(3f));
+            stroke.setColor(0x30FFFFFF);
+            canvas.drawLine(x, top, x, bottom, stroke);
+            float fillTop = bottom - (bottom - top) * value;
+            stroke.setColor(color);
+            canvas.drawLine(x, bottom, x, fillTop, stroke);
+            text.setTextSize(dp(9.5f));
+            text.setColor(color);
+            canvas.drawText(label, x, top - dp(6), text);
+        }
+
+        private void drawAct5CelestialTheme(Canvas canvas, int w, int h) {
+            float cx = w * 0.5f;
+            float cy = h * 0.47f;
+            float radius = Math.min(w, h) * 0.20f;
+
+            // Rotating minimalist concentric orbital rings
+            stroke.setStrokeWidth(dp(1f));
+            stroke.setPathEffect(new DashPathEffect(new float[] {dp(5), dp(6)}, time * dp(12)));
+            stroke.setColor(withAlpha(p.accent, 0x55));
+            canvas.drawCircle(cx, cy, radius * 1.65f, stroke);
+            stroke.setPathEffect(null);
+
+            stroke.setColor(withAlpha(p.accent, 0x28));
+            canvas.drawCircle(cx, cy, radius * 2.15f, stroke);
+
+            // Sun rays smoothly retracting as moonAnim approaches 1
+            float rayVis = 1f - moonAnim;
+            if (rayVis > 0.02f) {
+                stroke.setStrokeWidth(dp(2f));
+                stroke.setColor(withAlpha(p.accent, Math.round(230 * rayVis)));
+                for (int i = 0; i < 8; i++) {
+                    double ang = i * (Math.PI / 4.0) + time * 0.35;
+                    float rIn = radius * 1.24f;
+                    float rOut = radius * (1.24f + 0.34f * rayVis);
+                    canvas.drawLine(
+                            cx + (float) Math.cos(ang) * rIn,
+                            cy + (float) Math.sin(ang) * rIn,
+                            cx + (float) Math.cos(ang) * rOut,
+                            cy + (float) Math.sin(ang) * rOut,
+                            stroke);
+                }
+            }
+
+            // Core geometric orb + crescent cutout overlay
+            fill.setColor(withAlpha(p.accent, p.isDark ? 0x35 : 0x22));
+            canvas.drawCircle(cx, cy, radius, fill);
+            stroke.setStrokeWidth(dp(2.2f));
+            stroke.setColor(p.accent);
+            canvas.drawCircle(cx, cy, radius, stroke);
+
+            if (moonAnim > 0.05f) {
+                float cutOff = radius * (1.25f - 0.65f * moonAnim);
+                fill.setColor(p.bgCard);
+                canvas.drawCircle(cx + cutOff, cy - cutOff * 0.45f, radius * 0.85f, fill);
+            }
+
+            drawInteractiveHintChip(
+                    canvas,
+                    w,
+                    h,
+                    p.isDark
+                            ? (zh ? "深色夜间 · 影院低眩光画布" : "Dark Obsidian · Cinema Canvas")
+                            : (zh ? "浅色日间 · 柔和雪花石膏画布" : "Light Alabaster · Crisp Daylight"));
         }
     }
 
@@ -1627,7 +1893,8 @@ public final class OnboardingScreen extends FrameLayout {
                         }
                     }
                 }
-                int accent = parseHexColor(o.optString("accentHex", "#0A84FF"), COLOR_ACCENT);
+                int accent =
+                        parseHexColor(o.optString("accentHex", "#007AFF"), COLOR_ACCENT_FALLBACK);
                 out.add(
                         new DemoItem(
                                 o.optString("id", "demo_" + (i + 1)),

@@ -90,6 +90,163 @@ public final class DanmuSettingsPanel {
     private static final int COLOR_PILL_IDLE = 0x1AFFFFFF;
     private static final int COLOR_PILL_IDLE_TEXT = 0xFFD8E0EA;
 
+    private static final class PanelTheme {
+        final int modalBg;
+        final int modalStroke;
+        final int cardBg;
+        final int cardStroke;
+        final int trackBg;
+        final int trackStroke;
+        final int divider;
+        final int accent;
+        final int accentOnFill;
+        final int accentSoft;
+        final int accentText;
+        final int green;
+        final int greenSoft;
+        final int greenStroke;
+        final int greenText;
+        final int focusFill;
+        final int focusText;
+        final int textPrimary;
+        final int textSecondary;
+        final int pillIdle;
+        final int pillIdleText;
+        final int chipIdle;
+        final int inputBg;
+        final int inputFocusBg;
+        final int inputStroke;
+        final int inputFocusStroke;
+        final int danger;
+        final boolean isDark;
+
+        private PanelTheme(
+                int modalBg,
+                int modalStroke,
+                int cardBg,
+                int cardStroke,
+                int trackBg,
+                int trackStroke,
+                int divider,
+                int accent,
+                int accentOnFill,
+                int accentSoft,
+                int accentText,
+                int green,
+                int greenSoft,
+                int greenStroke,
+                int greenText,
+                int focusFill,
+                int focusText,
+                int textPrimary,
+                int textSecondary,
+                int pillIdle,
+                int pillIdleText,
+                int chipIdle,
+                int inputBg,
+                int inputFocusBg,
+                int inputStroke,
+                int inputFocusStroke,
+                int danger,
+                boolean isDark) {
+            this.modalBg = modalBg;
+            this.modalStroke = modalStroke;
+            this.cardBg = cardBg;
+            this.cardStroke = cardStroke;
+            this.trackBg = trackBg;
+            this.trackStroke = trackStroke;
+            this.divider = divider;
+            this.accent = accent;
+            this.accentOnFill = accentOnFill;
+            this.accentSoft = accentSoft;
+            this.accentText = accentText;
+            this.green = green;
+            this.greenSoft = greenSoft;
+            this.greenStroke = greenStroke;
+            this.greenText = greenText;
+            this.focusFill = focusFill;
+            this.focusText = focusText;
+            this.textPrimary = textPrimary;
+            this.textSecondary = textSecondary;
+            this.pillIdle = pillIdle;
+            this.pillIdleText = pillIdleText;
+            this.chipIdle = chipIdle;
+            this.inputBg = inputBg;
+            this.inputFocusBg = inputFocusBg;
+            this.inputStroke = inputStroke;
+            this.inputFocusStroke = inputFocusStroke;
+            this.danger = danger;
+            this.isDark = isDark;
+        }
+
+        static PanelTheme resolve(Context context, boolean isTv, boolean reducedTransparency) {
+            if (!isTv && context instanceof MainActivity) {
+                MobileTheme.Palette p = MobileTheme.of((MainActivity) context);
+                int accentSoft = MobileTheme.withAlpha(p.accent, p.isDark ? 0x26 : 0x1A);
+                int greenSoft = MobileTheme.withAlpha(p.success, p.isDark ? 0x2B : 0x1A);
+                int greenStroke = MobileTheme.withAlpha(p.success, p.isDark ? 0x66 : 0x44);
+                return new PanelTheme(
+                        p.bgSheet,
+                        p.hairline,
+                        p.isDark ? p.bgCard : p.bgSubtle,
+                        p.hairline,
+                        p.isDark ? p.bgSubtle : p.bgCard,
+                        p.hairline,
+                        p.hairline,
+                        p.accent,
+                        p.accentOnFill,
+                        accentSoft,
+                        p.accent,
+                        p.success,
+                        greenSoft,
+                        greenStroke,
+                        p.isDark ? 0xFFE9FFF0 : p.success,
+                        p.accent,
+                        p.accentOnFill,
+                        p.textPrimary,
+                        p.textSecondary,
+                        p.bgSubtle,
+                        p.textSecondary,
+                        p.isDark ? p.bgSubtle : p.bgCard,
+                        p.isDark ? p.bgSubtle : p.bgCard,
+                        p.bgPressed,
+                        p.hairline,
+                        p.accent,
+                        p.danger,
+                        p.isDark);
+            }
+            return new PanelTheme(
+                    reducedTransparency ? COLOR_MODAL_OPAQUE : COLOR_MODAL_BG,
+                    0x30FFFFFF,
+                    COLOR_CARD_BG,
+                    COLOR_CARD_STROKE,
+                    COLOR_TRACK_BG,
+                    COLOR_TRACK_STROKE,
+                    COLOR_DIVIDER,
+                    COLOR_ACCENT,
+                    0xFFFFFFFF,
+                    COLOR_ACCENT_SOFT,
+                    COLOR_ACCENT_TEXT,
+                    COLOR_GREEN,
+                    COLOR_GREEN_SOFT,
+                    COLOR_GREEN_STROKE,
+                    0xFFE9FFF0,
+                    COLOR_FOCUS_FILL,
+                    COLOR_FOCUS_TEXT,
+                    COLOR_TEXT_PRIMARY,
+                    COLOR_TEXT_SECONDARY,
+                    COLOR_PILL_IDLE,
+                    COLOR_PILL_IDLE_TEXT,
+                    0x28000000,
+                    0x3B000000,
+                    0x52000000,
+                    0x2AFFFFFF,
+                    0xE6FFFFFF,
+                    0xFFFF6961,
+                    true);
+        }
+    }
+
     public interface OnConfigChangedListener {
         void onDanmuConfigChanged(DanmuConfig config);
     }
@@ -496,7 +653,14 @@ public final class DanmuSettingsPanel {
             win.getDecorView().setMinimumWidth(0);
             win.getDecorView().setPadding(0, 0, 0, 0);
             win.setBackgroundDrawableResource(android.R.color.transparent);
-            win.setDimAmount(isTv ? 0.48f : 0.54f);
+            if (!isTv && context instanceof MainActivity) {
+                MainActivity ma = (MainActivity) context;
+                MobileTheme.Palette mp = MobileTheme.of(ma);
+                win.setDimAmount(mp.isDark ? 0.62f : 0.42f);
+                MobileTheme.applyWindowBlurIfSupported(win, ma.isReducedTransparency(), 24);
+            } else {
+                win.setDimAmount(isTv ? 0.48f : 0.54f);
+            }
             win.setLayout(targetW, WindowManager.LayoutParams.WRAP_CONTENT);
             win.setGravity(Gravity.CENTER);
         }
@@ -532,18 +696,14 @@ public final class DanmuSettingsPanel {
                 context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE);
         final boolean reducedMotion = prefs.getBoolean(Prefs.REDUCED, false);
         final boolean reducedTransparency = prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        final PanelTheme th = PanelTheme.resolve(context, isTv, reducedTransparency);
 
         LinearLayout shell = new LinearLayout(context);
         shell.setOrientation(LinearLayout.VERTICAL);
         shell.setClipChildren(false);
         shell.setClipToPadding(false);
         UiCompat.setBackground(
-                shell,
-                roundedShape(
-                        reducedTransparency ? COLOR_MODAL_OPAQUE : COLOR_MODAL_BG,
-                        24f * d,
-                        0x30FFFFFF,
-                        Math.max(1, dp(d, 1))));
+                shell, roundedShape(th.modalBg, 24f * d, th.modalStroke, Math.max(1, dp(d, 1))));
         int hPad = dp(d, isTv ? 18 : 16);
         int topPad = dp(d, isTv ? 12 : 14);
         int bottomPad = dp(d, isTv ? 12 : 14);
@@ -551,23 +711,23 @@ public final class DanmuSettingsPanel {
 
         // ----- Header Chrome (Title + Live Summary + Tab Switcher + Reset / Done) -----
         final TextView summaryLine = new TextView(context);
-        summaryLine.setTextColor(COLOR_TEXT_SECONDARY);
+        summaryLine.setTextColor(th.textSecondary);
         summaryLine.setTextSize(TypedValue.COMPLEX_UNIT_SP, isTv ? 12f : 11.5f);
         summaryLine.setSingleLine(true);
         summaryLine.setEllipsize(TextUtils.TruncateAt.END);
 
         final TextView tabDisplay =
-                makePill(context, "显示样式", d, isTv, reducedMotion, PillStyle.SEGMENT);
+                makePill(context, "显示样式", d, isTv, reducedMotion, PillStyle.SEGMENT, th);
         final TextView tabAdvanced =
-                makePill(context, "源与屏蔽", d, isTv, reducedMotion, PillStyle.SEGMENT);
+                makePill(context, "源与屏蔽", d, isTv, reducedMotion, PillStyle.SEGMENT, th);
         final TextView resetBtn =
-                makePill(context, "恢复默认", d, isTv, reducedMotion, PillStyle.SUBTLE);
+                makePill(context, "恢复默认", d, isTv, reducedMotion, PillStyle.SUBTLE, th);
         final TextView doneBtn =
                 onClose != null
-                        ? makePill(context, "完成", d, isTv, reducedMotion, PillStyle.SUBTLE)
+                        ? makePill(context, "完成", d, isTv, reducedMotion, PillStyle.SUBTLE, th)
                         : null;
 
-        LinearLayout tabTrack = makeSegmentTrack(context, d);
+        LinearLayout tabTrack = makeSegmentTrack(context, d, th);
         LinearLayout.LayoutParams tabLp =
                 new LinearLayout.LayoutParams(
                         isTv ? ViewGroup.LayoutParams.WRAP_CONTENT : 0,
@@ -582,7 +742,7 @@ public final class DanmuSettingsPanel {
         titleCol.setOrientation(LinearLayout.VERTICAL);
         TextView titleView = new TextView(context);
         titleView.setText("弹幕设置");
-        titleView.setTextColor(COLOR_TEXT_PRIMARY);
+        titleView.setTextColor(th.textPrimary);
         titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, isTv ? 19f : 18f);
         titleView.setTypeface(null, Typeface.BOLD);
         titleView.setSingleLine(true);
@@ -643,7 +803,7 @@ public final class DanmuSettingsPanel {
 
         // Subtle divider between fixed header and body
         View headerDivider = new View(context);
-        headerDivider.setBackgroundColor(COLOR_DIVIDER);
+        headerDivider.setBackgroundColor(th.divider);
         LinearLayout.LayoutParams hdLp =
                 new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1);
         hdLp.topMargin = dp(d, isTv ? 8 : 10);
@@ -682,7 +842,7 @@ public final class DanmuSettingsPanel {
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         // =========================================================================
-        // TAB 0: 显示样式 (Clean, 1-screen Apple TV appearance controls)
+        // TAB 0: 显示样式 (Clean, 1-screen appearance controls)
         // =========================================================================
         final LinearLayout displayPane = new LinearLayout(context);
         displayPane.setOrientation(LinearLayout.VERTICAL);
@@ -690,7 +850,7 @@ public final class DanmuSettingsPanel {
         displayPane.setClipToPadding(false);
 
         // Master Toggle Banner
-        LinearLayout masterCard = makeGlassCard(context, d, 16f);
+        LinearLayout masterCard = makeGlassCard(context, d, 16f, th);
         masterCard.setOrientation(LinearLayout.HORIZONTAL);
         masterCard.setGravity(Gravity.CENTER_VERTICAL);
         masterCard.setPadding(dp(d, 14), dp(d, isTv ? 7 : 9), dp(d, 12), dp(d, isTv ? 7 : 9));
@@ -699,12 +859,12 @@ public final class DanmuSettingsPanel {
         masterTextCol.setOrientation(LinearLayout.VERTICAL);
         TextView masterTitle = new TextView(context);
         masterTitle.setText("显示弹幕");
-        masterTitle.setTextColor(COLOR_TEXT_PRIMARY);
+        masterTitle.setTextColor(th.textPrimary);
         masterTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, isTv ? 14.5f : 14.5f);
         masterTitle.setTypeface(null, Typeface.BOLD);
         TextView masterSub = new TextView(context);
         masterSub.setText("调整行数、字号、速度与透明度后立即生效");
-        masterSub.setTextColor(COLOR_TEXT_SECONDARY);
+        masterSub.setTextColor(th.textSecondary);
         masterSub.setTextSize(TypedValue.COMPLEX_UNIT_SP, isTv ? 11.5f : 11.5f);
         masterSub.setSingleLine(true);
         masterSub.setEllipsize(TextUtils.TruncateAt.END);
@@ -715,7 +875,7 @@ public final class DanmuSettingsPanel {
                 new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         final TextView masterToggle =
-                makePill(context, "已关闭", d, isTv, reducedMotion, PillStyle.SWITCH);
+                makePill(context, "已关闭", d, isTv, reducedMotion, PillStyle.SWITCH, th);
         masterToggle.setMinWidth(dp(d, 86));
         masterToggle.setPadding(dp(d, 14), 0, dp(d, 14), 0);
         LinearLayout.LayoutParams toggleLp =
@@ -733,7 +893,7 @@ public final class DanmuSettingsPanel {
         displayPane.addView(masterCard, masterCardLp);
 
         // Grouped Appearance Controls Card
-        final LinearLayout controlsCard = makeGlassCard(context, d, 18f);
+        final LinearLayout controlsCard = makeGlassCard(context, d, 18f, th);
         controlsCard.setOrientation(LinearLayout.VERTICAL);
         controlsCard.setPadding(0, dp(d, 2), 0, dp(d, 2));
 
@@ -741,87 +901,90 @@ public final class DanmuSettingsPanel {
         final float[] fontPresetValues = fontSizePresets(isTv);
         final float[] opacityPresetValues = opacityPresets();
 
-        final TextView rowsBadge = makeValueBadge(context, d);
-        final TextView fontBadge = makeValueBadge(context, d);
-        final TextView speedBadge = makeValueBadge(context, d);
-        final TextView opacityBadge = makeValueBadge(context, d);
-        final TextView areaBadge = makeValueBadge(context, d);
-        final TextView offsetBadge = makeValueBadge(context, d);
+        final TextView rowsBadge = makeValueBadge(context, d, th);
+        final TextView fontBadge = makeValueBadge(context, d, th);
+        final TextView speedBadge = makeValueBadge(context, d, th);
+        final TextView opacityBadge = makeValueBadge(context, d, th);
+        final TextView areaBadge = makeValueBadge(context, d, th);
+        final TextView offsetBadge = makeValueBadge(context, d, th);
 
         final TextView[] rowPills = new TextView[rowPresetValues.length];
         final TextView[] fontPills = new TextView[fontPresetValues.length];
         final TextView[] speedPills = new TextView[SPEED_OPTIONS.length];
         final TextView[] opacityPills = new TextView[opacityPresetValues.length];
         final TextView[] areaPills = new TextView[AREA_OPTIONS.length];
-        final TextView scrollChip = makePill(context, "滚动", d, isTv, reducedMotion, PillStyle.CHIP);
-        final TextView topChip = makePill(context, "顶部", d, isTv, reducedMotion, PillStyle.CHIP);
-        final TextView bottomChip = makePill(context, "底部", d, isTv, reducedMotion, PillStyle.CHIP);
+        final TextView scrollChip =
+                makePill(context, "滚动", d, isTv, reducedMotion, PillStyle.CHIP, th);
+        final TextView topChip =
+                makePill(context, "顶部", d, isTv, reducedMotion, PillStyle.CHIP, th);
+        final TextView bottomChip =
+                makePill(context, "底部", d, isTv, reducedMotion, PillStyle.CHIP, th);
         final TextView offsetMinus =
-                makePill(context, "-0.5s", d, isTv, reducedMotion, PillStyle.SEGMENT);
+                makePill(context, "-0.5s", d, isTv, reducedMotion, PillStyle.SEGMENT, th);
         final TextView offsetReset =
-                makePill(context, "归零", d, isTv, reducedMotion, PillStyle.SEGMENT);
+                makePill(context, "归零", d, isTv, reducedMotion, PillStyle.SEGMENT, th);
         final TextView offsetPlus =
-                makePill(context, "+0.5s", d, isTv, reducedMotion, PillStyle.SEGMENT);
+                makePill(context, "+0.5s", d, isTv, reducedMotion, PillStyle.SEGMENT, th);
 
         // 1. 显示行数 (maxRows)
-        LinearLayout rowTrack = makeSegmentTrack(context, d);
+        LinearLayout rowTrack = makeSegmentTrack(context, d, th);
         for (int i = 0; i < rowPresetValues.length; i++) {
             final int rows = rowPresetValues[i];
             TextView pill =
-                    makePill(context, rows + "行", d, isTv, reducedMotion, PillStyle.SEGMENT);
+                    makePill(context, rows + "行", d, isTv, reducedMotion, PillStyle.SEGMENT, th);
             rowPills[i] = pill;
             addSegmentPill(rowTrack, pill, d, isTv);
         }
-        addControlRow(controlsCard, context, "显示行数", rowsBadge, rowTrack, d, isTv, false);
+        addControlRow(controlsCard, context, "显示行数", rowsBadge, rowTrack, d, isTv, false, th);
 
         // 2. 字体大小 (fontSizeSp)
-        LinearLayout fontTrack = makeSegmentTrack(context, d);
+        LinearLayout fontTrack = makeSegmentTrack(context, d, th);
         for (int i = 0; i < fontPresetValues.length; i++) {
             String label =
                     i < FONT_PRESET_LABELS.length
                             ? FONT_PRESET_LABELS[i]
                             : Math.round(fontPresetValues[i]) + "sp";
-            TextView pill = makePill(context, label, d, isTv, reducedMotion, PillStyle.SEGMENT);
+            TextView pill = makePill(context, label, d, isTv, reducedMotion, PillStyle.SEGMENT, th);
             fontPills[i] = pill;
             addSegmentPill(fontTrack, pill, d, isTv);
         }
-        addControlRow(controlsCard, context, "字体大小", fontBadge, fontTrack, d, isTv, true);
+        addControlRow(controlsCard, context, "字体大小", fontBadge, fontTrack, d, isTv, true, th);
 
         // 3. 移动速度 (speedMultiplier)
-        LinearLayout speedTrack = makeSegmentTrack(context, d);
+        LinearLayout speedTrack = makeSegmentTrack(context, d, th);
         for (int i = 0; i < SPEED_OPTIONS.length; i++) {
             String label =
                     i < SPEED_PRESET_LABELS.length
                             ? SPEED_PRESET_LABELS[i]
                             : formatSpeedShort(SPEED_OPTIONS[i]);
-            TextView pill = makePill(context, label, d, isTv, reducedMotion, PillStyle.SEGMENT);
+            TextView pill = makePill(context, label, d, isTv, reducedMotion, PillStyle.SEGMENT, th);
             speedPills[i] = pill;
             addSegmentPill(speedTrack, pill, d, isTv);
         }
-        addControlRow(controlsCard, context, "移动速度", speedBadge, speedTrack, d, isTv, true);
+        addControlRow(controlsCard, context, "移动速度", speedBadge, speedTrack, d, isTv, true, th);
 
         // 4. 不透明度 (opacity)
-        LinearLayout opacityTrack = makeSegmentTrack(context, d);
+        LinearLayout opacityTrack = makeSegmentTrack(context, d, th);
         for (int i = 0; i < opacityPresetValues.length; i++) {
             String label = Math.round(opacityPresetValues[i] * 100f) + "%";
-            TextView pill = makePill(context, label, d, isTv, reducedMotion, PillStyle.SEGMENT);
+            TextView pill = makePill(context, label, d, isTv, reducedMotion, PillStyle.SEGMENT, th);
             opacityPills[i] = pill;
             addSegmentPill(opacityTrack, pill, d, isTv);
         }
-        addControlRow(controlsCard, context, "不透明度", opacityBadge, opacityTrack, d, isTv, true);
+        addControlRow(controlsCard, context, "不透明度", opacityBadge, opacityTrack, d, isTv, true, th);
 
         // 5. 显示区域 (displayArea)
-        LinearLayout areaTrack = makeSegmentTrack(context, d);
+        LinearLayout areaTrack = makeSegmentTrack(context, d, th);
         for (int i = 0; i < AREA_OPTIONS.length; i++) {
             String label =
                     i < AREA_PRESET_LABELS.length
                             ? AREA_PRESET_LABELS[i]
                             : Math.round(AREA_OPTIONS[i] * 100f) + "%";
-            TextView pill = makePill(context, label, d, isTv, reducedMotion, PillStyle.SEGMENT);
+            TextView pill = makePill(context, label, d, isTv, reducedMotion, PillStyle.SEGMENT, th);
             areaPills[i] = pill;
             addSegmentPill(areaTrack, pill, d, isTv);
         }
-        addControlRow(controlsCard, context, "显示区域", areaBadge, areaTrack, d, isTv, true);
+        addControlRow(controlsCard, context, "显示区域", areaBadge, areaTrack, d, isTv, true, th);
 
         // 6. 显示位置 (滚动 / 顶部 / 底部)
         LinearLayout posRow = new LinearLayout(context);
@@ -832,14 +995,14 @@ public final class DanmuSettingsPanel {
         addChip(posRow, scrollChip, d, isTv, true);
         addChip(posRow, topChip, d, isTv, true);
         addChip(posRow, bottomChip, d, isTv, false);
-        addControlRow(controlsCard, context, "显示位置", null, posRow, d, isTv, true);
+        addControlRow(controlsCard, context, "显示位置", null, posRow, d, isTv, true, th);
 
         // 7. 时间校准 (timeOffsetMs)
-        LinearLayout offsetTrack = makeSegmentTrack(context, d);
+        LinearLayout offsetTrack = makeSegmentTrack(context, d, th);
         addSegmentPill(offsetTrack, offsetMinus, d, isTv);
         addSegmentPill(offsetTrack, offsetReset, d, isTv);
         addSegmentPill(offsetTrack, offsetPlus, d, isTv);
-        addControlRow(controlsCard, context, "时间校准", offsetBadge, offsetTrack, d, isTv, true);
+        addControlRow(controlsCard, context, "时间校准", offsetBadge, offsetTrack, d, isTv, true, th);
 
         displayPane.addView(controlsCard);
         bodyStack.addView(
@@ -859,16 +1022,16 @@ public final class DanmuSettingsPanel {
         MainActivity hostActivity = context instanceof MainActivity ? (MainActivity) context : null;
 
         // Card A: Custom Server Sources
-        LinearLayout serverCard = makeGlassCard(context, d, 18f);
+        LinearLayout serverCard = makeGlassCard(context, d, 18f, th);
         serverCard.setOrientation(LinearLayout.VERTICAL);
         serverCard.setPadding(dp(d, 14), dp(d, 12), dp(d, 14), dp(d, 12));
 
-        final TextView serverBadge = makeValueBadge(context, d);
-        serverCard.addView(makeCardHeader(context, "自定义兼容弹幕服务", serverBadge, d));
-        serverCard.addView(makeCardCaption(context, "每行填写一个 HTTP / HTTPS 地址（最多 8 个），默认留空", d));
+        final TextView serverBadge = makeValueBadge(context, d, th);
+        serverCard.addView(makeCardHeader(context, "自定义兼容弹幕服务", serverBadge, d, th));
+        serverCard.addView(makeCardCaption(context, "每行填写一个 HTTP / HTTPS 地址（最多 8 个），默认留空", d, th));
 
         final EditText serverUrlsInput =
-                makeInput(context, state[0].serverUrls, "https://danmu.example", true, d);
+                makeInput(context, state[0].serverUrls, "https://danmu.example", true, d, th);
         LinearLayout.LayoutParams urlsLp =
                 new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -880,11 +1043,12 @@ public final class DanmuSettingsPanel {
                         : serverUrlsInput,
                 urlsLp);
 
-        serverCard.addView(makeCardCaption(context, "可选 Open API 凭据（AppId / AppSecret，可留空）", d));
+        serverCard.addView(
+                makeCardCaption(context, "可选 Open API 凭据（AppId / AppSecret，可留空）", d, th));
 
-        final EditText appIdInput = makeInput(context, state[0].appId, "AppId（可选）", false, d);
+        final EditText appIdInput = makeInput(context, state[0].appId, "AppId（可选）", false, d, th);
         final EditText appSecretInput =
-                makeInput(context, state[0].appSecret, "AppSecret（可选）", false, d);
+                makeInput(context, state[0].appSecret, "AppSecret（可选）", false, d, th);
         appSecretInput.setInputType(
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         View wrappedAppId =
@@ -944,14 +1108,14 @@ public final class DanmuSettingsPanel {
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         sfLp.topMargin = dp(d, 10);
         TextView saveServerBtn =
-                makePill(context, "保存服务配置", d, isTv, reducedMotion, PillStyle.PRIMARY);
+                makePill(context, "保存服务配置", d, isTv, reducedMotion, PillStyle.PRIMARY, th);
         saveServerBtn.setPadding(dp(d, 16), 0, dp(d, 16), 0);
         serverFooter.addView(
                 saveServerBtn,
                 new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(d, 34)));
         final TextView serverFeedback = new TextView(context);
         serverFeedback.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-        serverFeedback.setTextColor(COLOR_GREEN);
+        serverFeedback.setTextColor(th.green);
         serverFeedback.setVisibility(View.GONE);
         LinearLayout.LayoutParams fbLp =
                 new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
@@ -966,15 +1130,15 @@ public final class DanmuSettingsPanel {
         advancedPane.addView(serverCard, serverCardLp);
 
         // Card B: Keyword & Regex Blocklist
-        LinearLayout blockCard = makeGlassCard(context, d, 18f);
+        LinearLayout blockCard = makeGlassCard(context, d, 18f, th);
         blockCard.setOrientation(LinearLayout.VERTICAL);
         blockCard.setPadding(dp(d, 14), dp(d, 12), dp(d, 14), dp(d, 12));
 
-        final TextView rulesBadge = makeValueBadge(context, d);
-        blockCard.addView(makeCardHeader(context, "屏蔽词管理", rulesBadge, d));
-        blockCard.addView(makeCardCaption(context, "支持普通关键词或 re: 正则表达式，最多 100 条", d));
+        final TextView rulesBadge = makeValueBadge(context, d, th);
+        blockCard.addView(makeCardHeader(context, "屏蔽词管理", rulesBadge, d, th));
+        blockCard.addView(makeCardCaption(context, "支持普通关键词或 re: 正则表达式，最多 100 条", d, th));
 
-        final EditText ruleInput = makeInput(context, "", "输入关键词或 re:剧透|打卡", false, d);
+        final EditText ruleInput = makeInput(context, "", "输入关键词或 re:剧透|打卡", false, d, th);
         LinearLayout.LayoutParams ruleInputLp =
                 new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -986,7 +1150,7 @@ public final class DanmuSettingsPanel {
                 ruleInputLp);
 
         final TextView ruleError = new TextView(context);
-        ruleError.setTextColor(0xFFFF6961);
+        ruleError.setTextColor(th.danger);
         ruleError.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         ruleError.setVisibility(View.GONE);
         LinearLayout.LayoutParams errLp =
@@ -1005,10 +1169,10 @@ public final class DanmuSettingsPanel {
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         raLp.topMargin = dp(d, 8);
         TextView addRuleBtn =
-                makePill(context, "添加屏蔽规则", d, isTv, reducedMotion, PillStyle.PRIMARY);
+                makePill(context, "添加屏蔽规则", d, isTv, reducedMotion, PillStyle.PRIMARY, th);
         addRuleBtn.setPadding(dp(d, 14), 0, dp(d, 14), 0);
         TextView clearRulesBtn =
-                makePill(context, "清空规则", d, isTv, reducedMotion, PillStyle.SUBTLE);
+                makePill(context, "清空规则", d, isTv, reducedMotion, PillStyle.SUBTLE, th);
         clearRulesBtn.setPadding(dp(d, 14), 0, dp(d, 14), 0);
         ruleActions.addView(
                 addRuleBtn,
@@ -1020,7 +1184,7 @@ public final class DanmuSettingsPanel {
         blockCard.addView(ruleActions, raLp);
 
         final TextView rulesSummary = new TextView(context);
-        rulesSummary.setTextColor(COLOR_TEXT_SECONDARY);
+        rulesSummary.setTextColor(th.textSecondary);
         rulesSummary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         LinearLayout.LayoutParams rsLp =
                 new LinearLayout.LayoutParams(
@@ -1051,15 +1215,16 @@ public final class DanmuSettingsPanel {
                         tabAdvanced.setSelected(activeTab[0] == 1);
                         int advCount = originCount + cfg.blockRules.size();
                         tabAdvanced.setText(advCount > 0 ? "源与屏蔽 · " + advCount : "源与屏蔽");
-                        stylePill(tabDisplay, tabDisplay.hasFocus(), d, isTv, reducedMotion);
-                        stylePill(tabAdvanced, tabAdvanced.hasFocus(), d, isTv, reducedMotion);
+                        stylePill(tabDisplay, tabDisplay.hasFocus(), d, isTv, reducedMotion, th);
+                        stylePill(tabAdvanced, tabAdvanced.hasFocus(), d, isTv, reducedMotion, th);
                         displayPane.setVisibility(activeTab[0] == 0 ? View.VISIBLE : View.GONE);
                         advancedPane.setVisibility(activeTab[0] == 1 ? View.VISIBLE : View.GONE);
 
                         // Master switch
                         masterToggle.setSelected(cfg.enabled);
                         masterToggle.setText(cfg.enabled ? "● 已开启" : "已关闭");
-                        stylePill(masterToggle, masterToggle.hasFocus(), d, isTv, reducedMotion);
+                        stylePill(
+                                masterToggle, masterToggle.hasFocus(), d, isTv, reducedMotion, th);
                         controlsCard.setAlpha(cfg.enabled ? 1.0f : 0.72f);
 
                         // Badges
@@ -1073,14 +1238,25 @@ public final class DanmuSettingsPanel {
                         // Row presets
                         for (int i = 0; i < rowPresetValues.length; i++) {
                             rowPills[i].setSelected(cfg.maxRows == rowPresetValues[i]);
-                            stylePill(rowPills[i], rowPills[i].hasFocus(), d, isTv, reducedMotion);
+                            stylePill(
+                                    rowPills[i],
+                                    rowPills[i].hasFocus(),
+                                    d,
+                                    isTv,
+                                    reducedMotion,
+                                    th);
                         }
                         // Font presets
                         for (int i = 0; i < fontPresetValues.length; i++) {
                             fontPills[i].setSelected(
                                     Math.abs(cfg.fontSizeSp - fontPresetValues[i]) < 0.5f);
                             stylePill(
-                                    fontPills[i], fontPills[i].hasFocus(), d, isTv, reducedMotion);
+                                    fontPills[i],
+                                    fontPills[i].hasFocus(),
+                                    d,
+                                    isTv,
+                                    reducedMotion,
+                                    th);
                         }
                         // Speed presets
                         for (int i = 0; i < SPEED_OPTIONS.length; i++) {
@@ -1091,7 +1267,8 @@ public final class DanmuSettingsPanel {
                                     speedPills[i].hasFocus(),
                                     d,
                                     isTv,
-                                    reducedMotion);
+                                    reducedMotion,
+                                    th);
                         }
                         // Opacity presets
                         for (int i = 0; i < opacityPresetValues.length; i++) {
@@ -1102,32 +1279,38 @@ public final class DanmuSettingsPanel {
                                     opacityPills[i].hasFocus(),
                                     d,
                                     isTv,
-                                    reducedMotion);
+                                    reducedMotion,
+                                    th);
                         }
                         // Area presets
                         for (int i = 0; i < AREA_OPTIONS.length; i++) {
                             areaPills[i].setSelected(
                                     Math.abs(cfg.displayArea - AREA_OPTIONS[i]) < 0.01f);
                             stylePill(
-                                    areaPills[i], areaPills[i].hasFocus(), d, isTv, reducedMotion);
+                                    areaPills[i],
+                                    areaPills[i].hasFocus(),
+                                    d,
+                                    isTv,
+                                    reducedMotion,
+                                    th);
                         }
 
                         // Position chips
                         scrollChip.setSelected(cfg.showScroll);
                         scrollChip.setText(cfg.showScroll ? "✓ 滚动" : "滚动");
-                        stylePill(scrollChip, scrollChip.hasFocus(), d, isTv, reducedMotion);
+                        stylePill(scrollChip, scrollChip.hasFocus(), d, isTv, reducedMotion, th);
 
                         topChip.setSelected(cfg.showTop);
                         topChip.setText(cfg.showTop ? "✓ 顶部" : "顶部");
-                        stylePill(topChip, topChip.hasFocus(), d, isTv, reducedMotion);
+                        stylePill(topChip, topChip.hasFocus(), d, isTv, reducedMotion, th);
 
                         bottomChip.setSelected(cfg.showBottom);
                         bottomChip.setText(cfg.showBottom ? "✓ 底部" : "底部");
-                        stylePill(bottomChip, bottomChip.hasFocus(), d, isTv, reducedMotion);
+                        stylePill(bottomChip, bottomChip.hasFocus(), d, isTv, reducedMotion, th);
 
                         // Time offset zero indicator
                         offsetReset.setSelected(cfg.timeOffsetMs == 0L);
-                        stylePill(offsetReset, offsetReset.hasFocus(), d, isTv, reducedMotion);
+                        stylePill(offsetReset, offsetReset.hasFocus(), d, isTv, reducedMotion, th);
 
                         // Advanced tab badges & rules summary
                         serverBadge.setText(originCount > 0 ? "已配置 " + originCount + " 个" : "未配置");
@@ -1347,8 +1530,7 @@ public final class DanmuSettingsPanel {
                         int origins = state[0].createProvider().getConfiguredOrigins().size();
                         serverFeedback.setText(
                                 origins > 0 ? "✓ 已保存，生效 " + origins + " 个服务源" : "已保存（当前未配置服务源）");
-                        serverFeedback.setTextColor(
-                                origins > 0 ? COLOR_GREEN : COLOR_TEXT_SECONDARY);
+                        serverFeedback.setTextColor(origins > 0 ? th.green : th.textSecondary);
                         serverFeedback.setVisibility(View.VISIBLE);
                         refreshAll.run();
                     }
@@ -1443,18 +1625,17 @@ public final class DanmuSettingsPanel {
         return bg;
     }
 
-    private static LinearLayout makeGlassCard(Context context, float d, float radiusDp) {
+    private static LinearLayout makeGlassCard(
+            Context context, float d, float radiusDp, PanelTheme th) {
         LinearLayout card = new LinearLayout(context);
         card.setClipChildren(false);
         card.setClipToPadding(false);
         UiCompat.setBackground(
-                card,
-                roundedShape(
-                        COLOR_CARD_BG, radiusDp * d, COLOR_CARD_STROKE, Math.max(1, dp(d, 1))));
+                card, roundedShape(th.cardBg, radiusDp * d, th.cardStroke, Math.max(1, dp(d, 1))));
         return card;
     }
 
-    private static LinearLayout makeSegmentTrack(Context context, float d) {
+    private static LinearLayout makeSegmentTrack(Context context, float d, PanelTheme th) {
         LinearLayout track = new LinearLayout(context);
         track.setOrientation(LinearLayout.HORIZONTAL);
         track.setGravity(Gravity.CENTER_VERTICAL);
@@ -1463,8 +1644,7 @@ public final class DanmuSettingsPanel {
         int p = dp(d, 2);
         track.setPadding(p, p, p, p);
         UiCompat.setBackground(
-                track,
-                roundedShape(COLOR_TRACK_BG, 999f * d, COLOR_TRACK_STROKE, Math.max(1, dp(d, 1))));
+                track, roundedShape(th.trackBg, 999f * d, th.trackStroke, Math.max(1, dp(d, 1))));
         return track;
     }
 
@@ -1480,15 +1660,15 @@ public final class DanmuSettingsPanel {
         row.addView(chip, lp);
     }
 
-    private static TextView makeValueBadge(Context context, float d) {
+    private static TextView makeValueBadge(Context context, float d, PanelTheme th) {
         TextView badge = new TextView(context);
-        badge.setTextColor(COLOR_ACCENT_TEXT);
+        badge.setTextColor(th.accentText);
         badge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         badge.setTypeface(null, Typeface.BOLD);
         badge.setSingleLine(true);
         badge.setGravity(Gravity.CENTER);
         badge.setPadding(dp(d, 8), dp(d, 2), dp(d, 8), dp(d, 2));
-        UiCompat.setBackground(badge, roundedShape(COLOR_ACCENT_SOFT, 999f * d, 0, 0));
+        UiCompat.setBackground(badge, roundedShape(th.accentSoft, 999f * d, 0, 0));
         return badge;
     }
 
@@ -1500,10 +1680,11 @@ public final class DanmuSettingsPanel {
             View control,
             float d,
             boolean isTv,
-            boolean addTopDivider) {
+            boolean addTopDivider,
+            PanelTheme th) {
         if (addTopDivider) {
             View divider = new View(context);
-            divider.setBackgroundColor(COLOR_DIVIDER);
+            divider.setBackgroundColor(th.divider);
             LinearLayout.LayoutParams dlp =
                     new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1);
             dlp.leftMargin = dp(d, 14);
@@ -1517,7 +1698,7 @@ public final class DanmuSettingsPanel {
 
         TextView title = new TextView(context);
         title.setText(label);
-        title.setTextColor(COLOR_TEXT_PRIMARY);
+        title.setTextColor(th.textPrimary);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, isTv ? 14f : 13.5f);
         title.setTypeface(null, Typeface.BOLD);
         title.setSingleLine(true);
@@ -1572,13 +1753,13 @@ public final class DanmuSettingsPanel {
     }
 
     private static LinearLayout makeCardHeader(
-            Context context, String title, TextView badge, float d) {
+            Context context, String title, TextView badge, float d, PanelTheme th) {
         LinearLayout header = new LinearLayout(context);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
         TextView tv = new TextView(context);
         tv.setText(title);
-        tv.setTextColor(COLOR_TEXT_PRIMARY);
+        tv.setTextColor(th.textPrimary);
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f);
         tv.setTypeface(null, Typeface.BOLD);
         header.addView(
@@ -1589,10 +1770,10 @@ public final class DanmuSettingsPanel {
         return header;
     }
 
-    private static TextView makeCardCaption(Context context, String text, float d) {
+    private static TextView makeCardCaption(Context context, String text, float d, PanelTheme th) {
         TextView tv = new TextView(context);
         tv.setText(text);
-        tv.setTextColor(COLOR_TEXT_SECONDARY);
+        tv.setTextColor(th.textSecondary);
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         LinearLayout.LayoutParams lp =
                 new LinearLayout.LayoutParams(
@@ -1608,31 +1789,39 @@ public final class DanmuSettingsPanel {
             final float d,
             final boolean isTv,
             final boolean reducedMotion,
-            PillStyle style) {
+            PillStyle style,
+            final PanelTheme th) {
         final TextView pill = new TextView(context);
         pill.setText(text);
         pill.setTag(style);
         pill.setGravity(Gravity.CENTER);
         pill.setSingleLine(true);
         pill.setEllipsize(TextUtils.TruncateAt.END);
-        pill.setFocusable(true);
+        pill.setFocusable(isTv);
         pill.setClickable(true);
         pill.setTextSize(TypedValue.COMPLEX_UNIT_SP, isTv ? 13f : 12.5f);
         pill.setPadding(dp(d, 8), 0, dp(d, 8), 0);
         UiCompat.setDefaultFocusHighlightEnabled(pill, false);
-        stylePill(pill, false, d, isTv, reducedMotion);
-        pill.setOnFocusChangeListener(
-                new View.OnFocusChangeListener() {
-                    @Override
-                    public void onFocusChange(View v, boolean hasFocus) {
-                        stylePill(pill, hasFocus, d, isTv, reducedMotion);
-                    }
-                });
+        stylePill(pill, false, d, isTv, reducedMotion, th);
+        if (isTv) {
+            pill.setOnFocusChangeListener(
+                    new View.OnFocusChangeListener() {
+                        @Override
+                        public void onFocusChange(View v, boolean hasFocus) {
+                            stylePill(pill, hasFocus, d, isTv, reducedMotion, th);
+                        }
+                    });
+        }
         return pill;
     }
 
     private static void stylePill(
-            TextView pill, boolean focused, float d, boolean isTv, boolean reducedMotion) {
+            TextView pill,
+            boolean focused,
+            float d,
+            boolean isTv,
+            boolean reducedMotion,
+            PanelTheme th) {
         PillStyle style =
                 pill.getTag() instanceof PillStyle ? (PillStyle) pill.getTag() : PillStyle.SEGMENT;
         boolean selected = pill.isSelected();
@@ -1640,49 +1829,39 @@ public final class DanmuSettingsPanel {
         int textColor;
         boolean bold = focused || selected || style == PillStyle.PRIMARY;
 
-        if (focused) {
-            bg = roundedShape(COLOR_FOCUS_FILL, 999f * d, 0xFFFFFFFF, Math.max(2, dp(d, 2)));
-            textColor = COLOR_FOCUS_TEXT;
+        if (focused && isTv) {
+            bg = roundedShape(th.focusFill, 999f * d, 0xFFFFFFFF, Math.max(2, dp(d, 2)));
+            textColor = th.focusText;
         } else if (style == PillStyle.SWITCH) {
             if (selected) {
-                bg =
-                        roundedShape(
-                                COLOR_GREEN_SOFT,
-                                999f * d,
-                                COLOR_GREEN_STROKE,
-                                Math.max(1, dp(d, 1)));
-                textColor = 0xFFE9FFF0;
+                bg = roundedShape(th.greenSoft, 999f * d, th.greenStroke, Math.max(1, dp(d, 1)));
+                textColor = th.greenText;
             } else {
-                bg =
-                        roundedShape(
-                                COLOR_PILL_IDLE,
-                                999f * d,
-                                COLOR_CARD_STROKE,
-                                Math.max(1, dp(d, 1)));
-                textColor = COLOR_TEXT_SECONDARY;
+                bg = roundedShape(th.pillIdle, 999f * d, th.cardStroke, Math.max(1, dp(d, 1)));
+                textColor = th.textSecondary;
             }
         } else if (style == PillStyle.PRIMARY) {
-            bg = roundedShape(0xEB0A84FF, 999f * d, 0x55FFFFFF, Math.max(1, dp(d, 1)));
-            textColor = 0xFFFFFFFF;
+            bg = roundedShape(th.accent, 999f * d, 0, 0);
+            textColor = th.accentOnFill;
         } else if (style == PillStyle.SUBTLE) {
-            bg = roundedShape(COLOR_PILL_IDLE, 999f * d, COLOR_CARD_STROKE, Math.max(1, dp(d, 1)));
-            textColor = COLOR_PILL_IDLE_TEXT;
+            bg = roundedShape(th.pillIdle, 999f * d, th.cardStroke, Math.max(1, dp(d, 1)));
+            textColor = th.pillIdleText;
         } else if (style == PillStyle.CHIP) {
             if (selected) {
-                bg = roundedShape(0xDF0A84FF, 999f * d, 0x66FFFFFF, Math.max(1, dp(d, 1)));
-                textColor = 0xFFFFFFFF;
+                bg = roundedShape(th.accent, 999f * d, 0, 0);
+                textColor = th.accentOnFill;
             } else {
-                bg = roundedShape(0x28000000, 999f * d, COLOR_TRACK_STROKE, Math.max(1, dp(d, 1)));
-                textColor = COLOR_TEXT_SECONDARY;
+                bg = roundedShape(th.chipIdle, 999f * d, th.trackStroke, Math.max(1, dp(d, 1)));
+                textColor = th.textSecondary;
             }
         } else {
             // SEGMENT
             if (selected) {
-                bg = roundedShape(COLOR_ACCENT, 999f * d, 0x55FFFFFF, Math.max(1, dp(d, 1)));
-                textColor = 0xFFFFFFFF;
+                bg = roundedShape(th.accent, 999f * d, 0, 0);
+                textColor = th.accentOnFill;
             } else {
                 bg = roundedShape(0x00000000, 999f * d, 0, 0);
-                textColor = COLOR_PILL_IDLE_TEXT;
+                textColor = th.pillIdleText;
             }
         }
 
@@ -1692,22 +1871,27 @@ public final class DanmuSettingsPanel {
         float scale = (focused && isTv && !reducedMotion) ? 1.04f : 1.0f;
         pill.setScaleX(scale);
         pill.setScaleY(scale);
-        UiCompat.setElevation(pill, focused ? 4f * d : 0f);
+        UiCompat.setElevation(pill, focused && isTv ? 4f * d : 0f);
     }
 
     private static EditText makeInput(
-            Context context, String initial, String hint, boolean multiline, final float d) {
+            Context context,
+            String initial,
+            String hint,
+            boolean multiline,
+            final float d,
+            final PanelTheme th) {
         final EditText et = new EditText(context);
         et.setText(initial);
         et.setHint(hint);
-        et.setTextColor(COLOR_TEXT_PRIMARY);
-        et.setHintTextColor(COLOR_TEXT_SECONDARY);
+        et.setTextColor(th.textPrimary);
+        et.setHintTextColor(th.textSecondary);
         et.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
         et.setFocusable(true);
         et.setPadding(dp(d, 12), dp(d, 8), dp(d, 12), dp(d, 8));
         UiCompat.setDefaultFocusHighlightEnabled(et, false);
         UiCompat.setBackground(
-                et, roundedShape(0x3B000000, 12f * d, 0x2AFFFFFF, Math.max(1, dp(d, 1))));
+                et, roundedShape(th.inputBg, 12f * d, th.inputStroke, Math.max(1, dp(d, 1))));
         et.setOnFocusChangeListener(
                 new View.OnFocusChangeListener() {
                     @Override
@@ -1715,9 +1899,9 @@ public final class DanmuSettingsPanel {
                         UiCompat.setBackground(
                                 et,
                                 roundedShape(
-                                        hasFocus ? 0x52000000 : 0x3B000000,
+                                        hasFocus ? th.inputFocusBg : th.inputBg,
                                         12f * d,
-                                        hasFocus ? 0xE6FFFFFF : 0x2AFFFFFF,
+                                        hasFocus ? th.inputFocusStroke : th.inputStroke,
                                         Math.max(1, dp(d, hasFocus ? 2 : 1))));
                     }
                 });

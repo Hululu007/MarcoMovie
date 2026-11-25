@@ -144,6 +144,29 @@ public final class MediaDiskCache {
         return sid == null ? null : sessions.get(sid);
     }
 
+    /**
+     * Resolves an active local {@code /kcache/<sid>} proxy URL back to its upstream remote media
+     * URL so LAN DLNA cast receivers can play it directly.
+     */
+    public static String originalUrlForLocalUrl(String localUrl) {
+        if (localUrl == null || localUrl.trim().isEmpty()) return "";
+        MediaDiskCache cache = currentInstance();
+        if (cache == null) return "";
+        try {
+            URI u = new URI(localUrl.trim());
+            String path = u.getPath();
+            if (path == null || !path.startsWith("/kcache/")) return "";
+            String sid = path.substring("/kcache/".length());
+            int slash = sid.indexOf('/');
+            if (slash >= 0) sid = sid.substring(0, slash);
+            if (sid.isEmpty()) return "";
+            Session session = cache.getSession(sid);
+            return session == null || session.url == null ? "" : session.url;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
     static boolean handleRoute(
             String path, String method, Map<String, String> requestHeaders, OutputStream out)
             throws IOException {

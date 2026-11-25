@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.drawable.GradientDrawable;
 import android.media.AudioManager;
 import android.os.Build;
 import android.os.SystemClock;
@@ -50,6 +51,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
     private float miniDownX, miniDownY;
     private boolean miniTapCandidate;
     private boolean briefNoticeActive;
+    private boolean hudCardShown;
     private PlayerGestureStateMachine.InterruptReason activeCancelReason;
 
     private final Runnable fsmTickRunnable = this::handleFsmTick;
@@ -84,7 +86,14 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         SeekProgressBarView(MainActivity activity) {
             super(activity);
             trackPaint.setColor(0x38ffffff);
-            fillPaint.setColor(0xff34d399);
+            fillPaint.setColor(MobileTheme.of(activity).accent);
+        }
+
+        void setAccentColor(int accentArgb) {
+            if (accentArgb != 0 && fillPaint.getColor() != accentArgb) {
+                fillPaint.setColor(accentArgb);
+                invalidate();
+            }
         }
 
         void setProgressFraction(float fraction) {
@@ -111,10 +120,16 @@ final class TouchPlayerGesture implements View.OnTouchListener {
 
     private TouchPlayerGesture(MainActivity activity) {
         this.a = activity;
+        boolean reducedTransparency =
+                activity.prefs != null
+                        && activity.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        int accent = MobileTheme.of(activity).accent;
         this.hudCard = activity.vertical();
         this.hudCard.setGravity(Gravity.CENTER_HORIZONTAL);
         this.hudCard.setPadding(activity.dp(18), activity.dp(10), activity.dp(18), activity.dp(10));
-        UiCompat.setBackground(this.hudCard, activity.bg(0xdc181d1b, 20));
+        GradientDrawable hudBg = activity.bg(reducedTransparency ? 0xF2141720 : 0xE0141720, 18);
+        hudBg.setStroke(MobileTheme.hairlinePx(activity), 0x28FFFFFF);
+        UiCompat.setBackground(this.hudCard, hudBg);
         this.hudCard.setVisibility(View.GONE);
 
         this.hud = activity.text("", 13.5f, MainActivity.WHITE);
@@ -135,10 +150,12 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         activity.playbackLayer.addView(this.hudCard, lp);
 
         this.speedLockCapsule = new SpeedLockCapsule(activity);
-        boolean reducedTransparency =
-                activity.prefs != null
-                        && activity.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
-        this.speedLockCapsule.setAccessibilityFlags(activity.reduced, reducedTransparency);
+        this.speedLockCapsule.setAccentColor(accent);
+        this.speedLockCapsule.setStatusIcons(
+                MobileIcons.drawable(activity, MobileIcons.IC_LOCK, 15f, MainActivity.WHITE),
+                MobileIcons.drawable(activity, MobileIcons.IC_SPEED, 15f, MainActivity.WHITE));
+        this.speedLockCapsule.setAccessibilityFlags(
+                MobileMotion.isReduced(activity), reducedTransparency);
         FrameLayout.LayoutParams speedLp =
                 new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         speedLp.topMargin = activity.dp(16);
@@ -703,7 +720,10 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         cfg.longPressRestoreMode = PlayerHudPrefs.getLongPressRestoreMode(a);
         boolean reducedTransparency =
                 a.prefs != null && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
-        speedLockCapsule.setAccessibilityFlags(a.reduced, reducedTransparency);
+        int accent = MobileTheme.of(a).accent;
+        hudProgress.setAccentColor(accent);
+        speedLockCapsule.setAccentColor(accent);
+        speedLockCapsule.setAccessibilityFlags(MobileMotion.isReduced(a), reducedTransparency);
     }
 
     private void applyPlayerSpeedSafely(float speed) {
@@ -766,18 +786,42 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         hud.setText(text);
         if (progressFraction >= 0f) {
             briefNoticeActive = false;
+            hudProgress.setAccentColor(MobileTheme.of(a).accent);
             hudProgress.setProgressFraction(progressFraction);
             hudProgress.setVisibility(View.VISIBLE);
         } else {
             hudProgress.setVisibility(View.GONE);
         }
-        hudCard.setVisibility(View.VISIBLE);
+        if (!hudCardShown || hudCard.getVisibility() != View.VISIBLE) {
+            hudCardShown = true;
+            if (UiCompat.isAttached(hudCard)) {
+                MobileMotion.crossfadeVisibility(
+                        hudCard, true, -4f, 0.96f, MotionTokens.DURATION_FAST_MS, true);
+            } else {
+                hudCard.setAlpha(1f);
+                hudCard.setTranslationY(0f);
+                hudCard.setScaleX(1f);
+                hudCard.setScaleY(1f);
+                hudCard.setVisibility(View.VISIBLE);
+            }
+        }
     }
 
     private void hideHud() {
         briefNoticeActive = false;
-        hudCard.setVisibility(View.GONE);
-        hudProgress.setVisibility(View.GONE);
+        if (!hudCardShown && hudCard.getVisibility() != View.VISIBLE) {
+            hudProgress.setVisibility(View.GONE);
+            return;
+        }
+        hudCardShown = false;
+        if (UiCompat.isAttached(hudCard)) {
+            MobileMotion.crossfadeVisibility(
+                    hudCard, false, -4f, 0.96f, MotionTokens.DURATION_FAST_MS, true);
+        } else {
+            hudCard.animate().cancel();
+            hudCard.setVisibility(View.GONE);
+            hudProgress.setVisibility(View.GONE);
+        }
     }
 
     /**
@@ -824,6 +868,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         }
         if (speedLockCapsule != null
                 && speedLockCapsule.getVisibility() == View.VISIBLE
+                && speedLockCapsule.isClickable()
                 && isTouchInsideView(speedLockCapsule, localX, localY, rootLeft, rootTop)) {
             return true;
         }

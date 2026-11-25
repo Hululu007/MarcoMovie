@@ -46,9 +46,27 @@ final class PlayerChrome {
     final TextView hudProgressView;
     final View hudDivider;
     final Button backBtn;
+    final FrameLayout mobileBackBtn;
+    final LinearLayout mobileTopStatusRow;
+    final TextView mobileNetSpeedView;
+    final TextView mobileStatusSep1;
+    final MobileIcons.IconView mobileBatteryIcon;
+    final TextView mobileBatteryText;
+    final TextView mobileStatusSep2;
+    final TextView mobileTopClockView;
+    final FrameLayout mobilePipBtn;
+    final FrameLayout mobileCastBtn;
+    final FrameLayout mobileMoreBtn;
+    final FrameLayout mobileLiveRotateBtn;
+    final MobileIcons.IconView mobileLiveRotateIcon;
+    final FrameLayout mobileSeekSlot;
+    final TextView mobileElapsedTime;
+    final TextView mobileTotalTime;
+    final FrameLayout mobileRotateBtn;
+    final MobileIcons.IconView mobileRotateIcon;
     final FrameLayout lockBtn;
     final LinearLayout unlockPill;
-    final TextView rewindBtn, forwardBtn;
+    final View rewindBtn, forwardBtn;
     final TextView loadingText,
             loadingSubText,
             episodeLabel,
@@ -64,13 +82,19 @@ final class PlayerChrome {
     boolean loading = true;
     boolean progressOnlyMode = false;
     boolean hdrSurfaceActive = false;
+    boolean unlockPillShown = false;
+    private boolean loadingPillShown = true;
+    private int mobileHudAnimGen = 0;
     final Rect windowInsets = new Rect();
     boolean layoutPending;
     String lastBadgeSignature = "";
+    String lastMobileSpecSignature = "";
     String lastWallClock = "";
     String lastPersistentClockText = "";
     String lastWallClockText = "";
     String lastHudProgressKey = "";
+    java.util.List<StartSpecBanner.Badge> latestMobileSpecBadges =
+            java.util.Collections.emptyList();
 
     static float modernUnit(MainActivity a) {
         int w = Math.max(1, a.windowWidth());
@@ -290,6 +314,77 @@ final class PlayerChrome {
         }
     }
 
+    /** Pure-JVM mobile header title formatter combining title and cleaned episode name. */
+    static String formatMobileHeaderTitle(
+            String videoTitle, String episodeName, boolean multiEpisode) {
+        String base = videoTitle == null ? "" : videoTitle.trim();
+        String rawEp = episodeName == null ? "" : episodeName.trim();
+        if (rawEp.isEmpty() || rawEp.equalsIgnoreCase(base)) {
+            return base;
+        }
+        if (!multiEpisode && isGenericEpisodeLabel(rawEp)) {
+            return base.isEmpty() ? rawEp : base;
+        }
+        EpisodeNameCleaner.CleanedEpisode cleaned = EpisodeNameCleaner.clean(rawEp, base, 1);
+        String epPart =
+                cleaned != null && cleaned.shortLabel != null && !cleaned.shortLabel.isEmpty()
+                        ? cleaned.shortLabel
+                        : rawEp;
+        if (epPart.equalsIgnoreCase(base)) return base;
+        return base.isEmpty() ? epPart : base + " · " + epPart;
+    }
+
+    /** Mobile always uses a horizontal bottom control deck (never a right-edge vertical strip). */
+    static boolean shouldUseHorizontalMobileDock(boolean isTvDevice) {
+        return !isTvDevice;
+    }
+
+    /** Mobile renders soft cinema top/bottom gradient scrims over bright video frames. */
+    static boolean shouldRenderMobileGradientScrims(boolean isTvDevice) {
+        return !isTvDevice;
+    }
+
+    private FrameLayout buildMobileTopIconButton(
+            int icon, float iconSizeDp, String tag, String desc, Runnable action) {
+        FrameLayout btn = new FrameLayout(a);
+        btn.setTag(tag);
+        btn.setContentDescription(desc);
+        btn.setClickable(true);
+        btn.setFocusable(false);
+        btn.setBackground(a.bg(0x28000000, 999));
+        MobileIcons.IconView iv = MobileIcons.create(a, icon, iconSizeDp, MainActivity.WHITE);
+        iv.setStrokeWidthUnits(2.0f);
+        int px = a.dp(iconSizeDp);
+        btn.addView(iv, new FrameLayout.LayoutParams(px, px, Gravity.CENTER));
+        MobileMotion.bindPress(btn, 0.92f);
+        btn.setOnClickListener(
+                v -> {
+                    cancelActiveTouchGesture();
+                    if (action != null) action.run();
+                });
+        return btn;
+    }
+
+    private void syncMobileTimePair(CharSequence rawClock) {
+        if (mobileElapsedTime == null || mobileTotalTime == null) return;
+        String text = rawClock == null ? "" : rawClock.toString().trim();
+        int sep = text.indexOf('/');
+        if (sep >= 0) {
+            String left = text.substring(0, sep).trim();
+            String right = text.substring(sep + 1).trim();
+            if (!left.contentEquals(mobileElapsedTime.getText())) {
+                mobileElapsedTime.setText(left.isEmpty() ? "--:--" : left);
+            }
+            if (!right.contentEquals(mobileTotalTime.getText())) {
+                mobileTotalTime.setText(right.isEmpty() ? "--:--" : right);
+            }
+        } else if (!text.isEmpty()) {
+            if (!text.contentEquals(mobileElapsedTime.getText())) {
+                mobileElapsedTime.setText(text);
+            }
+        }
+    }
+
     PlayerChrome(MainActivity host, Cms.Video video, Cms.Episode episode, boolean live) {
         a = host;
         chromeVideo = video;
@@ -299,7 +394,7 @@ final class PlayerChrome {
         overlay.setTag("player-chrome");
         overlay.setMotionEventSplittingEnabled(false);
         overlay.setClipChildren(true);
-        overlay.setClipToPadding(true);
+        overlay.setClipToPadding(a.isTvDevice());
         overlay.addOnLayoutChangeListener(
                 (view, l, t, r, b, ol, ot, or, ob) -> {
                     if (l != ol || t != ot || r != or || b != ob) scheduleLayout();
@@ -311,12 +406,18 @@ final class PlayerChrome {
                             GradientDrawable.Orientation.TOP_BOTTOM,
                             new int[] {modernTv ? 0x8c000000 : 0xc4000000, 0x00000000}));
         } else {
-            topShade.setBackgroundColor(Color.TRANSPARENT);
+            topShade.setBackground(
+                    new GradientDrawable(
+                            GradientDrawable.Orientation.TOP_BOTTOM,
+                            new int[] {0xB8000000, 0x44000000, 0x00000000}));
         }
         float u = modernUnit(a);
         overlay.addView(
                 topShade,
-                new FrameLayout.LayoutParams(-1, modernTv ? vp(a, 110) : a.dp(160), Gravity.TOP));
+                new FrameLayout.LayoutParams(
+                        -1,
+                        modernTv ? vp(a, 110) : (a.isTvDevice() ? a.dp(160) : a.dp(128)),
+                        Gravity.TOP));
         bottomShade = new View(a);
         if (a.isTvDevice()) {
             bottomShade.setBackground(
@@ -324,125 +425,343 @@ final class PlayerChrome {
                             GradientDrawable.Orientation.BOTTOM_TOP,
                             new int[] {modernTv ? 0x84000000 : 0xb8000000, 0x00000000}));
         } else {
-            bottomShade.setBackgroundColor(Color.TRANSPARENT);
+            bottomShade.setBackground(
+                    new GradientDrawable(
+                            GradientDrawable.Orientation.BOTTOM_TOP,
+                            new int[] {0xCC000000, 0x52000000, 0x00000000}));
         }
         overlay.addView(
                 bottomShade,
                 new FrameLayout.LayoutParams(
-                        -1, modernTv ? vp(a, 176) : a.dp(210), Gravity.BOTTOM));
+                        -1,
+                        modernTv ? vp(a, 176) : (a.isTvDevice() ? a.dp(210) : a.dp(176)),
+                        Gravity.BOTTOM));
         heading = a.vertical();
         heading.setTag("player-heading");
         heading.setMotionEventSplittingEnabled(false);
+        String line = a.activeLine == null ? "" : a.activeLine.name;
+        boolean multiEp =
+                a.activeLine != null
+                        && a.activeLine.episodes != null
+                        && a.activeLine.episodes.size() > 1;
         if (!a.isTvDevice()) {
+            backBtn = null;
+            wallClock = null;
             topActions = a.row();
             topActions.setMotionEventSplittingEnabled(false);
             topActions.setGravity(Gravity.CENTER_VERTICAL);
-            topActions.setPadding(0, 0, 0, a.dp(8));
-            backBtn =
-                    a.navButton(
-                            "‹ 返回",
+
+            mobileBackBtn =
+                    buildMobileTopIconButton(
+                            MobileIcons.IC_BACK,
+                            20f,
                             "player-back",
+                            "返回",
                             () -> {
-                                cancelActiveTouchGesture();
                                 PlaybackControls.clearSleepTimerOnLeave();
                                 a.leavePlayback();
                             });
-            backBtn.setTextColor(MainActivity.WHITE);
-            backBtn.setBackground(chromeSurface(0xcc22222a, 17, 0x33ffffff));
-            topActions.addView(backBtn, new LinearLayout.LayoutParams(-2, a.dp(34)));
+            topActions.addView(mobileBackBtn, new LinearLayout.LayoutParams(a.dp(36), a.dp(36)));
+
+            LinearLayout titleCol = a.vertical();
+            titleCol.setGravity(Gravity.CENTER_VERTICAL);
+            LinearLayout.LayoutParams colLp = new LinearLayout.LayoutParams(0, -2, 1f);
+            colLp.leftMargin = a.dp(10);
+            colLp.rightMargin = a.dp(8);
+
+            titleView =
+                    a.text(
+                            formatMobileHeaderTitle(
+                                    video != null ? video.title : "",
+                                    episode != null ? episode.name : "",
+                                    multiEp),
+                            15.5f,
+                            MainActivity.WHITE);
+            titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+            titleView.setIncludeFontPadding(false);
+            titleView.setSingleLine(true);
+            titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            titleView.setShadowLayer(a.dp(3), 0, a.dp(1), 0xB8000000);
+            titleCol.addView(titleView, new LinearLayout.LayoutParams(-1, -2));
+
+            LinearLayout metaSubRow = a.row();
+            metaSubRow.setGravity(Gravity.CENTER_VERTICAL);
+            LinearLayout.LayoutParams subRowLp = new LinearLayout.LayoutParams(-1, -2);
+            subRowLp.topMargin = a.dp(3);
+
             mobileSpecBadgeRow = a.row();
             mobileSpecBadgeRow.setTag("player-inline-spec-badges");
             mobileSpecBadgeRow.setGravity(Gravity.CENTER_VERTICAL);
-            LinearLayout.LayoutParams specRowLp = new LinearLayout.LayoutParams(-2, -2);
-            specRowLp.leftMargin = a.dp(10);
-            topActions.addView(mobileSpecBadgeRow, specRowLp);
-            View spacer = new View(a);
-            topActions.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1));
-            // Orientation toggle lives only on the progress row ("全屏横屏 / 退出全屏").
+            LinearLayout.LayoutParams specLp = new LinearLayout.LayoutParams(-2, -2);
+            specLp.rightMargin = a.dp(6);
+            metaSubRow.addView(mobileSpecBadgeRow, specLp);
+
+            episodeLabel = a.text(line.isEmpty() ? "" : line, 11.5f, 0xCCD8E0EC);
+            episodeLabel.setTag("player-episode");
+            episodeLabel.setIncludeFontPadding(false);
+            episodeLabel.setSingleLine(true);
+            episodeLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            episodeLabel.setShadowLayer(a.dp(2), 0, a.dp(1), 0x99000000);
+            episodeLabel.setVisibility(line.isEmpty() ? View.GONE : View.VISIBLE);
+            metaSubRow.addView(episodeLabel, new LinearLayout.LayoutParams(0, -2, 1f));
+
+            resolution = a.text("分辨率读取中", 10.5f, 0xffeeeef2);
+            resolution.setTag("player-resolution");
+            resolution.setVisibility(View.GONE);
+            metaSubRow.addView(resolution, new LinearLayout.LayoutParams(-2, -2));
+
+            titleCol.addView(metaSubRow, subRowLp);
+            topActions.addView(titleCol, colLp);
+
+            // Integrated real telemetry strip (real net speed + vector battery + real clock)
+            mobileTopStatusRow = a.row();
+            mobileTopStatusRow.setTag("player-mobile-top-status");
+            mobileTopStatusRow.setGravity(Gravity.CENTER_VERTICAL);
+            mobileTopStatusRow.setPadding(a.dp(8), a.dp(3.5f), a.dp(8), a.dp(3.5f));
+            GradientDrawable statusPillBg = a.bg(0x40000000, 999);
+            statusPillBg.setStroke(MobileTheme.hairlinePx(a), 0x22FFFFFF);
+            mobileTopStatusRow.setBackground(statusPillBg);
+
+            mobileNetSpeedView = a.text("", 10.5f, 0xCCE2E8F0);
+            mobileNetSpeedView.setSingleLine(true);
+            mobileNetSpeedView.setIncludeFontPadding(false);
+            mobileNetSpeedView.setFontFeatureSettings("tnum");
+            mobileNetSpeedView.setVisibility(View.GONE);
+            mobileTopStatusRow.addView(mobileNetSpeedView, new LinearLayout.LayoutParams(-2, -2));
+
+            mobileStatusSep1 = a.text("·", 10.5f, 0x66FFFFFF);
+            mobileStatusSep1.setIncludeFontPadding(false);
+            mobileStatusSep1.setPadding(a.dp(4), 0, a.dp(4), 0);
+            mobileStatusSep1.setVisibility(View.GONE);
+            mobileTopStatusRow.addView(mobileStatusSep1, new LinearLayout.LayoutParams(-2, -2));
+
+            mobileBatteryIcon = MobileIcons.create(a, MobileIcons.IC_BATTERY, 14f, 0xE6FFFFFF);
+            mobileBatteryIcon.setStrokeWidthUnits(1.7f);
+            mobileBatteryIcon.setVisibility(View.GONE);
+            LinearLayout.LayoutParams batLp = new LinearLayout.LayoutParams(a.dp(14), a.dp(14));
+            batLp.rightMargin = a.dp(3);
+            mobileTopStatusRow.addView(mobileBatteryIcon, batLp);
+
+            mobileBatteryText = a.text("", 10.5f, 0xEBF3F5F9);
+            mobileBatteryText.setSingleLine(true);
+            mobileBatteryText.setIncludeFontPadding(false);
+            mobileBatteryText.setFontFeatureSettings("tnum");
+            mobileBatteryText.setVisibility(View.GONE);
+            mobileTopStatusRow.addView(mobileBatteryText, new LinearLayout.LayoutParams(-2, -2));
+
+            mobileStatusSep2 = a.text("·", 10.5f, 0x66FFFFFF);
+            mobileStatusSep2.setIncludeFontPadding(false);
+            mobileStatusSep2.setPadding(a.dp(4), 0, a.dp(4), 0);
+            mobileStatusSep2.setVisibility(View.GONE);
+            mobileTopStatusRow.addView(mobileStatusSep2, new LinearLayout.LayoutParams(-2, -2));
+
+            lastWallClock = formatWallTime();
+            mobileTopClockView = a.text(lastWallClock, 11f, 0xFFF3F5F9);
+            mobileTopClockView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            mobileTopClockView.setSingleLine(true);
+            mobileTopClockView.setIncludeFontPadding(false);
+            mobileTopClockView.setFontFeatureSettings("tnum");
+            mobileTopStatusRow.addView(mobileTopClockView, new LinearLayout.LayoutParams(-2, -2));
+
+            LinearLayout.LayoutParams statusRowLp = new LinearLayout.LayoutParams(-2, -2);
+            statusRowLp.rightMargin = a.dp(8);
+            topActions.addView(mobileTopStatusRow, statusRowLp);
+
+            mobilePipBtn =
+                    buildMobileTopIconButton(
+                            MobileIcons.IC_PIP,
+                            18f,
+                            "player-pip",
+                            "画中画小窗",
+                            () -> {
+                                if (!a.enterAppPip()) {
+                                    a.toast("当前设备或安卓版本不支持画中画小窗");
+                                }
+                            });
+            LinearLayout.LayoutParams pipLp = new LinearLayout.LayoutParams(a.dp(34), a.dp(34));
+            pipLp.rightMargin = a.dp(6);
+            topActions.addView(mobilePipBtn, pipLp);
+
+            mobileCastBtn =
+                    buildMobileTopIconButton(
+                            MobileIcons.IC_CAST,
+                            18f,
+                            "player-cast",
+                            "投屏",
+                            () -> {
+                                if (a.playbackControls != null) {
+                                    a.playbackControls.chooseCastDevice();
+                                }
+                            });
+            LinearLayout.LayoutParams castLp = new LinearLayout.LayoutParams(a.dp(34), a.dp(34));
+            castLp.rightMargin = a.dp(6);
+            if (a.privateMode || a.isCast()) {
+                mobileCastBtn.setVisibility(View.GONE);
+            }
+            topActions.addView(mobileCastBtn, castLp);
+
+            if (live) {
+                mobileLiveRotateIcon =
+                        MobileIcons.create(
+                                a,
+                                a.isPortrait()
+                                        ? MobileIcons.IC_FULLSCREEN
+                                        : MobileIcons.IC_EXIT_FULLSCREEN,
+                                18f,
+                                MainActivity.WHITE);
+                mobileLiveRotateIcon.setStrokeWidthUnits(2.0f);
+                mobileLiveRotateBtn = new FrameLayout(a);
+                mobileLiveRotateBtn.setTag("player-live-rotate");
+                mobileLiveRotateBtn.setContentDescription("切换横竖屏");
+                mobileLiveRotateBtn.setClickable(true);
+                mobileLiveRotateBtn.setFocusable(false);
+                mobileLiveRotateBtn.setBackground(a.bg(0x28000000, 999));
+                mobileLiveRotateBtn.addView(
+                        mobileLiveRotateIcon,
+                        new FrameLayout.LayoutParams(a.dp(18), a.dp(18), Gravity.CENTER));
+                MobileMotion.bindPress(mobileLiveRotateBtn, 0.92f);
+                mobileLiveRotateBtn.setOnClickListener(
+                        v -> {
+                            cancelActiveTouchGesture();
+                            a.togglePlayerOrientation();
+                        });
+                LinearLayout.LayoutParams liveRotLp =
+                        new LinearLayout.LayoutParams(a.dp(34), a.dp(34));
+                liveRotLp.rightMargin = a.dp(6);
+                topActions.addView(mobileLiveRotateBtn, liveRotLp);
+            } else {
+                mobileLiveRotateBtn = null;
+                mobileLiveRotateIcon = null;
+            }
+
+            mobileMoreBtn =
+                    buildMobileTopIconButton(
+                            MobileIcons.IC_MORE,
+                            19f,
+                            "player-more",
+                            "更多",
+                            () -> {
+                                if (a.playbackControls != null) {
+                                    a.playbackControls.more();
+                                }
+                            });
+            topActions.addView(mobileMoreBtn, new LinearLayout.LayoutParams(a.dp(34), a.dp(34)));
+
             heading.addView(topActions, new LinearLayout.LayoutParams(-1, -2));
+
+            a.playStatus = a.text("正在加载所选剧集…", 11.5f, 0xFFD8E0EC);
+            a.playStatus.setPadding(a.dp(46), a.dp(3), 0, 0);
+            a.playStatus.setSingleLine(true);
+            a.playStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            heading.addView(a.playStatus, new LinearLayout.LayoutParams(-1, -2));
         } else {
             topActions = null;
             backBtn = null;
+            mobileBackBtn = null;
             mobileSpecBadgeRow = null;
-        }
-        LinearLayout titleRow = a.row();
-        titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        titleView = a.text(video.title, a.isPortrait() ? 20 : 26, MainActivity.WHITE);
-        if (modernTv) {
-            titleView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 20.5f);
-            titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-            titleView.setIncludeFontPadding(false);
-            titleView.setShadowLayer(u * 3f, 0, u * 1.2f, 0xaa000000);
-        } else {
-            titleView.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-            titleView.getPaint().setFakeBoldText(true);
-            titleView.setShadowLayer(a.dp(4), 0, a.dp(2), 0xdd000000);
-        }
-        titleView.setSingleLine();
-        titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams titleLp =
-                modernTv
-                        ? new LinearLayout.LayoutParams(0, -2, 1)
-                        : new LinearLayout.LayoutParams(-2, -2);
-        titleLp.rightMargin = modernTv ? vp(a, 14) : a.dp(10);
-        titleRow.addView(titleView, titleLp);
-        resolution = a.text("分辨率读取中", 11, 0xffeeeef2);
-        resolution.setTag("player-resolution");
-        resolution.setSingleLine();
-        resolution.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        resolution.setPadding(a.dp(9), a.dp(3), a.dp(9), a.dp(3));
-        resolution.setBackground(chromeSurface(0xb824242c, 10, 0x28ffffff));
-        if (modernTv) resolution.setVisibility(View.GONE);
-        titleRow.addView(resolution, new LinearLayout.LayoutParams(-2, -2));
-        if (modernTv) {
-            lastWallClock = formatWallTime();
-            wallClock = a.text("", 15f, 0xcaf0f4fb);
-            wallClock.setTag("player-wall-clock");
-            wallClock.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 15.0f);
-            wallClock.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-            wallClock.setFontFeatureSettings("tnum");
-            if (android.os.Build.VERSION.SDK_INT >= 21) {
-                wallClock.setLetterSpacing(0.055f);
+            mobileTopStatusRow = null;
+            mobileNetSpeedView = null;
+            mobileStatusSep1 = null;
+            mobileBatteryIcon = null;
+            mobileBatteryText = null;
+            mobileStatusSep2 = null;
+            mobileTopClockView = null;
+            mobilePipBtn = null;
+            mobileCastBtn = null;
+            mobileMoreBtn = null;
+            mobileLiveRotateBtn = null;
+            mobileLiveRotateIcon = null;
+
+            LinearLayout titleRow = a.row();
+            titleRow.setGravity(Gravity.CENTER_VERTICAL);
+            titleView = a.text(video.title, a.isPortrait() ? 20 : 26, MainActivity.WHITE);
+            if (modernTv) {
+                titleView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 20.5f);
+                titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+                titleView.setIncludeFontPadding(false);
+                titleView.setShadowLayer(u * 3f, 0, u * 1.2f, 0xaa000000);
+            } else {
+                titleView.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+                titleView.getPaint().setFakeBoldText(true);
+                titleView.setShadowLayer(a.dp(4), 0, a.dp(2), 0xdd000000);
             }
-            wallClock.setIncludeFontPadding(false);
-            wallClock.setSingleLine();
-            wallClock.setShadowLayer(u * 2.2f, 0, u * .8f, 0x66000000);
-            wallClock.setText(styledWallTime(lastWallClock));
-            titleRow.addView(wallClock, new LinearLayout.LayoutParams(-2, -2));
-        } else {
-            wallClock = null;
+            titleView.setSingleLine();
+            titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams titleLp =
+                    modernTv
+                            ? new LinearLayout.LayoutParams(0, -2, 1)
+                            : new LinearLayout.LayoutParams(-2, -2);
+            titleLp.rightMargin = modernTv ? vp(a, 14) : a.dp(10);
+            titleRow.addView(titleView, titleLp);
+            resolution = a.text("分辨率读取中", 11, 0xffeeeef2);
+            resolution.setTag("player-resolution");
+            resolution.setSingleLine();
+            resolution.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            resolution.setPadding(a.dp(9), a.dp(3), a.dp(9), a.dp(3));
+            resolution.setBackground(chromeSurface(0xb824242c, 10, 0x28ffffff));
+            if (modernTv) resolution.setVisibility(View.GONE);
+            titleRow.addView(resolution, new LinearLayout.LayoutParams(-2, -2));
+            if (modernTv) {
+                lastWallClock = formatWallTime();
+                wallClock = a.text("", 15f, 0xcaf0f4fb);
+                wallClock.setTag("player-wall-clock");
+                wallClock.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 15.0f);
+                wallClock.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+                wallClock.setFontFeatureSettings("tnum");
+                if (android.os.Build.VERSION.SDK_INT >= 21) {
+                    wallClock.setLetterSpacing(0.055f);
+                }
+                wallClock.setIncludeFontPadding(false);
+                wallClock.setSingleLine();
+                wallClock.setShadowLayer(u * 2.2f, 0, u * .8f, 0x66000000);
+                wallClock.setText(styledWallTime(lastWallClock));
+                titleRow.addView(wallClock, new LinearLayout.LayoutParams(-2, -2));
+            } else {
+                wallClock = null;
+            }
+            heading.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
+            episodeLabel =
+                    a.text(episode.name + (line.isEmpty() ? "" : "  ·  " + line), 14, 0xffdddddf);
+            episodeLabel.setTag("player-episode");
+            episodeLabel.setSingleLine();
+            episodeLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            episodeLabel.setPadding(0, a.dp(6), 0, 0);
+            if (modernTv) episodeLabel.setVisibility(View.GONE);
+            heading.addView(episodeLabel);
+            a.playStatus = a.text("正在加载所选剧集…", 12, MainActivity.MUTED);
+            if (modernTv) {
+                a.playStatus.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 11f);
+                a.playStatus.setPadding(0, vp(a, 3), 0, 0);
+            } else {
+                a.playStatus.setPadding(0, a.dp(6), 0, 0);
+            }
+            heading.addView(a.playStatus);
         }
-        heading.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
-        String line = a.activeLine == null ? "" : a.activeLine.name;
-        episodeLabel =
-                a.text(episode.name + (line.isEmpty() ? "" : "  ·  " + line), 14, 0xffdddddf);
-        episodeLabel.setTag("player-episode");
-        episodeLabel.setSingleLine();
-        episodeLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        episodeLabel.setPadding(0, a.dp(6), 0, 0);
-        if (modernTv) episodeLabel.setVisibility(View.GONE);
-        heading.addView(episodeLabel);
-        a.playStatus = a.text("正在加载所选剧集…", 12, MainActivity.MUTED);
-        if (modernTv) {
-            a.playStatus.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 11f);
-            a.playStatus.setPadding(0, vp(a, 3), 0, 0);
-        } else {
-            a.playStatus.setPadding(0, a.dp(6), 0, 0);
-        }
-        heading.addView(a.playStatus);
         FrameLayout.LayoutParams top = new FrameLayout.LayoutParams(-1, -2, Gravity.TOP);
         int width = a.windowWidth();
         int initialCardW = Math.max(vp(a, 260), Math.min(vp(a, 824), Math.round(width * 0.855f)));
         int sideMargin =
-                a.isPortrait()
-                        ? a.dp(20)
-                        : (modernTv ? Math.max(vp(a, 24), (width - initialCardW) / 2) : a.dp(44));
-        top.setMargins(sideMargin, modernTv ? vp(a, 22) : a.dp(24), sideMargin, 0);
+                !a.isTvDevice()
+                        ? a.dp(14)
+                        : (a.isPortrait()
+                                ? a.dp(20)
+                                : (modernTv
+                                        ? Math.max(vp(a, 24), (width - initialCardW) / 2)
+                                        : a.dp(44)));
+        top.setMargins(
+                sideMargin,
+                modernTv ? vp(a, 22) : (a.isTvDevice() ? a.dp(24) : a.dp(10)),
+                sideMargin,
+                0);
         overlay.addView(heading, top);
 
-        boolean mobileLandscape = !a.isTvDevice() && !a.isPortrait();
         if (modernTv) {
             fsBtn = null;
+            mobileSeekSlot = null;
+            mobileElapsedTime = null;
+            mobileTotalTime = null;
+            mobileRotateBtn = null;
+            mobileRotateIcon = null;
             dock = a.vertical();
             dock.setTag("player-dock");
             dock.setMotionEventSplittingEnabled(false);
@@ -522,10 +841,16 @@ final class PlayerChrome {
                             initialCardW, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
             dockLp.bottomMargin = vp(a, 22);
             overlay.addView(dock, dockLp);
-        } else {
+        } else if (a.isTvDevice()) {
             actionHost = null;
             badgeRow = null;
             cardTitleView = null;
+            fsBtn = null;
+            mobileSeekSlot = null;
+            mobileElapsedTime = null;
+            mobileTotalTime = null;
+            mobileRotateBtn = null;
+            mobileRotateIcon = null;
             progress = a.vertical();
             progress.setTag("player-progress");
             progress.setMotionEventSplittingEnabled(false);
@@ -540,45 +865,13 @@ final class PlayerChrome {
             seekHint.setPadding(a.dp(8), 0, a.dp(8), 0);
             seekHint.setVisibility(View.GONE);
             clockRow.addView(seekHint, new LinearLayout.LayoutParams(-2, -2));
-            if (!a.isTvDevice()) {
-                fsBtn =
-                        a.navButton(
-                                a.isPortrait() ? "⛶ 全屏横屏" : "⛶ 退出全屏",
-                                "player-fullscreen",
-                                () -> {
-                                    cancelActiveTouchGesture();
-                                    a.togglePlayerOrientation();
-                                });
-                fsBtn.setTextColor(MainActivity.WHITE);
-                fsBtn.setTextSize(12);
-                fsBtn.setMinHeight(a.dp(30));
-                fsBtn.setMinimumHeight(a.dp(30));
-                fsBtn.setPadding(a.dp(12), a.dp(4), a.dp(12), a.dp(4));
-                fsBtn.setBackground(chromeSurface(0xcc22222a, 15, 0x33ffffff));
-                clockRow.addView(fsBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
-            } else {
-                fsBtn = null;
-            }
             progress.addView(clockRow, new LinearLayout.LayoutParams(-1, -2));
-            FrameLayout.LayoutParams track;
-            if (a.isTvDevice()) {
-                track =
-                        new FrameLayout.LayoutParams(
-                                Math.min(a.dp(760), Math.max(a.dp(220), width - a.dp(48))),
-                                -2,
-                                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-                track.bottomMargin = a.dp(94);
-            } else {
-                int trackSideMargin = a.dp(mobileLandscape ? 20 : 22);
-                track =
-                        new FrameLayout.LayoutParams(
-                                Math.max(a.dp(140), width - trackSideMargin * 2),
-                                -2,
-                                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-                track.leftMargin = trackSideMargin;
-                track.rightMargin = trackSideMargin;
-                track.bottomMargin = a.dp(mobileLandscape ? 12 : 20);
-            }
+            FrameLayout.LayoutParams track =
+                    new FrameLayout.LayoutParams(
+                            Math.min(a.dp(760), Math.max(a.dp(220), width - a.dp(48))),
+                            -2,
+                            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            track.bottomMargin = a.dp(94);
             // Browsing live channels leaves a live session available for returning.
             // Only the currently playing source decides whether seeking is hidden.
             progress.setVisibility(live ? View.GONE : View.VISIBLE);
@@ -587,33 +880,149 @@ final class PlayerChrome {
             dock = a.vertical();
             dock.setTag("player-dock");
             dock.setMotionEventSplittingEnabled(false);
-            if (a.isTvDevice()) {
-                dock.setPadding(a.dp(6), a.dp(5), a.dp(6), a.dp(5));
-            } else {
-                dock.setPadding(a.dp(3), a.dp(5), a.dp(3), a.dp(5));
-            }
+            dock.setPadding(a.dp(6), a.dp(5), a.dp(6), a.dp(5));
             dock.setClipChildren(true);
             dock.setClipToPadding(true);
             dock.setClipToOutline(true);
-            dock.setBackground(chromeSurface(0xd81c1c22, a.isTvDevice() ? 26 : 24, 0x2affffff));
+            dock.setBackground(chromeSurface(0xd81c1c22, 26, 0x2affffff));
             UiCompat.setElevation(dock, a.dp(10));
-            FrameLayout.LayoutParams dockLp;
-            if (a.isTvDevice()) {
-                dockLp =
-                        new FrameLayout.LayoutParams(
-                                Math.min(a.dp(612), Math.max(a.dp(240), width - a.dp(32))),
-                                -2,
-                                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-                dockLp.bottomMargin = a.dp(16);
-            } else {
-                dockLp =
-                        new FrameLayout.LayoutParams(
-                                a.dp(mobileLandscape ? 48 : 52),
-                                a.dp(mobileLandscape ? 276 : 356),
-                                Gravity.RIGHT | Gravity.BOTTOM);
-                dockLp.rightMargin = a.dp(10);
-                dockLp.bottomMargin = a.dp(mobileLandscape ? 66 : 82);
-            }
+            FrameLayout.LayoutParams dockLp =
+                    new FrameLayout.LayoutParams(
+                            Math.min(a.dp(612), Math.max(a.dp(240), width - a.dp(32))),
+                            -2,
+                            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            dockLp.bottomMargin = a.dp(16);
+            overlay.addView(dock, dockLp);
+        } else {
+            // Mobile Layer 3 — Dual-Row Bottom Cinema Control Deck:
+            // Row 1 (`progress`): [elapsed] [==== SeekBar ====] [total] [IC_FULLSCREEN/EXIT]
+            // Row 2 (`dock`): horizontal high-frequency control bar (ZERO right-edge strip!)
+            actionHost = null;
+            badgeRow = null;
+            cardTitleView = null;
+            fsBtn = null;
+
+            progress = a.vertical();
+            progress.setTag("player-progress");
+            progress.setMotionEventSplittingEnabled(false);
+            progress.setClipChildren(false);
+            progress.setClipToPadding(false);
+
+            seekHint = a.text("", 11.5f, 0xFFF3F5F9);
+            seekHint.setTag("player-seek-hint");
+            seekHint.setGravity(Gravity.CENTER);
+            seekHint.setPadding(a.dp(10), a.dp(3), a.dp(10), a.dp(3));
+            GradientDrawable hintBg = a.bg(0xAA141720, 999);
+            hintBg.setStroke(MobileTheme.hairlinePx(a), 0x28FFFFFF);
+            seekHint.setBackground(hintBg);
+            seekHint.setVisibility(View.GONE);
+            LinearLayout.LayoutParams hintLp = new LinearLayout.LayoutParams(-2, -2);
+            hintLp.gravity = Gravity.CENTER_HORIZONTAL;
+            hintLp.bottomMargin = a.dp(4);
+            progress.addView(seekHint, hintLp);
+
+            LinearLayout progressRow = a.row();
+            progressRow.setMotionEventSplittingEnabled(false);
+            progressRow.setGravity(Gravity.CENTER_VERTICAL);
+
+            mobileElapsedTime = a.text("00:00", 11.5f, 0xFFF3F5F9);
+            mobileElapsedTime.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            mobileElapsedTime.setFontFeatureSettings("tnum");
+            mobileElapsedTime.setIncludeFontPadding(false);
+            mobileElapsedTime.setSingleLine(true);
+            mobileElapsedTime.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+            progressRow.addView(mobileElapsedTime, new LinearLayout.LayoutParams(-2, -2));
+
+            mobileSeekSlot = new FrameLayout(a);
+            mobileSeekSlot.setTag("player-mobile-seek-slot");
+            mobileSeekSlot.setMotionEventSplittingEnabled(false);
+            LinearLayout.LayoutParams slotLp = new LinearLayout.LayoutParams(0, a.dp(30), 1f);
+            slotLp.leftMargin = a.dp(8);
+            slotLp.rightMargin = a.dp(8);
+            progressRow.addView(mobileSeekSlot, slotLp);
+
+            mobileTotalTime = a.text("--:--", 11.5f, 0xB8F3F5F9);
+            mobileTotalTime.setFontFeatureSettings("tnum");
+            mobileTotalTime.setIncludeFontPadding(false);
+            mobileTotalTime.setSingleLine(true);
+            mobileTotalTime.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+            progressRow.addView(mobileTotalTime, new LinearLayout.LayoutParams(-2, -2));
+
+            mobileRotateIcon =
+                    MobileIcons.create(
+                            a,
+                            a.isPortrait()
+                                    ? MobileIcons.IC_FULLSCREEN
+                                    : MobileIcons.IC_EXIT_FULLSCREEN,
+                            18f,
+                            MainActivity.WHITE);
+            mobileRotateIcon.setStrokeWidthUnits(2.0f);
+            mobileRotateBtn = new FrameLayout(a);
+            mobileRotateBtn.setTag("player-fullscreen");
+            mobileRotateBtn.setContentDescription(a.isPortrait() ? "全屏横屏" : "退出全屏");
+            mobileRotateBtn.setClickable(true);
+            mobileRotateBtn.setFocusable(false);
+            mobileRotateBtn.addView(
+                    mobileRotateIcon,
+                    new FrameLayout.LayoutParams(a.dp(18), a.dp(18), Gravity.CENTER));
+            MobileMotion.bindPress(mobileRotateBtn, 0.92f);
+            mobileRotateBtn.setOnClickListener(
+                    v -> {
+                        cancelActiveTouchGesture();
+                        a.togglePlayerOrientation();
+                    });
+            LinearLayout.LayoutParams rotLp = new LinearLayout.LayoutParams(a.dp(34), a.dp(34));
+            rotLp.leftMargin = a.dp(6);
+            progressRow.addView(mobileRotateBtn, rotLp);
+
+            progress.addView(progressRow, new LinearLayout.LayoutParams(-1, -2));
+
+            // Keep a.playClock synchronized with external writers (PlaybackController /
+            // TouchPlayerGesture)
+            a.playClock = a.text("--:-- / --:--", 11.5f, MainActivity.WHITE);
+            a.playClock.setVisibility(View.GONE);
+            a.playClock.addTextChangedListener(
+                    new TextWatcher() {
+                        @Override
+                        public void beforeTextChanged(
+                                CharSequence s, int start, int count, int after) {}
+
+                        @Override
+                        public void onTextChanged(
+                                CharSequence s, int start, int before, int count) {}
+
+                        @Override
+                        public void afterTextChanged(Editable s) {
+                            syncMobileTimePair(s);
+                        }
+                    });
+            progress.addView(a.playClock, new LinearLayout.LayoutParams(0, 0));
+
+            int trackSideMargin = a.dp(14);
+            FrameLayout.LayoutParams track =
+                    new FrameLayout.LayoutParams(
+                            Math.max(a.dp(160), width - trackSideMargin * 2),
+                            -2,
+                            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            track.bottomMargin = a.dp(56);
+            // Browsing live channels leaves a live session available for returning.
+            // Only the currently playing source decides whether seeking is hidden.
+            progress.setVisibility(live ? View.GONE : View.VISIBLE);
+            overlay.addView(progress, track);
+
+            dock = a.vertical();
+            dock.setTag("player-dock");
+            dock.setMotionEventSplittingEnabled(false);
+            dock.setPadding(0, 0, 0, 0);
+            dock.setClipChildren(false);
+            dock.setClipToPadding(false);
+            dock.setBackground(null);
+            FrameLayout.LayoutParams dockLp =
+                    new FrameLayout.LayoutParams(
+                            Math.max(a.dp(160), width - trackSideMargin * 2),
+                            -2,
+                            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            dockLp.bottomMargin = a.dp(10);
             overlay.addView(dock, dockLp);
         }
 
@@ -621,9 +1030,15 @@ final class PlayerChrome {
         state.setTag("player-state");
         state.setFocusable(false);
         state.setVisibility(View.GONE);
+        if (!a.isTvDevice()) {
+            MobileMotion.bindPress(state, 0.92f);
+        }
         state.setOnClickListener(
                 v -> {
                     cancelActiveTouchGesture();
+                    if (!a.isTvDevice()) {
+                        MobileMotion.popBounce(state);
+                    }
                     a.togglePlayback();
                     a.showControls(true);
                 });
@@ -631,10 +1046,10 @@ final class PlayerChrome {
             centerRow = a.row();
             centerRow.setMotionEventSplittingEnabled(false);
             centerRow.setGravity(Gravity.CENTER);
-            rewindBtn = buildSeekCircle("↺ 15s", -15000);
-            forwardBtn = buildSeekCircle("15s ↻", 15000);
-            LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(a.dp(58), a.dp(58));
-            LinearLayout.LayoutParams centerLp = new LinearLayout.LayoutParams(a.dp(76), a.dp(76));
+            rewindBtn = buildMobileSeekCircle(MobileIcons.IC_REWIND_15, "快退 15 秒", -15000);
+            forwardBtn = buildMobileSeekCircle(MobileIcons.IC_FORWARD_15, "快进 15 秒", 15000);
+            LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(a.dp(50), a.dp(50));
+            LinearLayout.LayoutParams centerLp = new LinearLayout.LayoutParams(a.dp(64), a.dp(64));
             centerLp.leftMargin = a.dp(28);
             centerLp.rightMargin = a.dp(28);
             boolean liveStream = episode != null && episode.media.optBoolean("live");
@@ -652,13 +1067,19 @@ final class PlayerChrome {
             lockBtn.setContentDescription("锁定屏幕");
             lockBtn.setClickable(true);
             lockBtn.setFocusable(false);
-            lockBtn.setBackground(chromeSurface(0xb81c1c24, 999, 0x33ffffff));
+            GradientDrawable lockBg =
+                    a.bg(a.isReducedTransparency() ? 0xE0141720 : 0x99141720, 999);
+            lockBg.setStroke(MobileTheme.hairlinePx(a), 0x2EFFFFFF);
+            lockBtn.setBackground(lockBg);
+            MobileIcons.IconView lockIv =
+                    MobileIcons.create(a, MobileIcons.IC_UNLOCK, 19f, MainActivity.WHITE);
+            lockIv.setStrokeWidthUnits(2.0f);
             lockBtn.addView(
-                    new PadlockGlyph(false, MainActivity.WHITE),
-                    new FrameLayout.LayoutParams(a.dp(20), a.dp(20), Gravity.CENTER));
-            a.pressFeedback(lockBtn);
+                    lockIv, new FrameLayout.LayoutParams(a.dp(19), a.dp(19), Gravity.CENTER));
+            MobileMotion.bindPress(lockBtn, 0.92f);
             lockBtn.setOnClickListener(
                     v -> {
+                        cancelActiveTouchGesture();
                         if (a.touchPlayerGesture != null) {
                             a.touchPlayerGesture.onScreenLockRequested();
                         }
@@ -669,8 +1090,8 @@ final class PlayerChrome {
                     });
             FrameLayout.LayoutParams lockLp =
                     new FrameLayout.LayoutParams(
-                            a.dp(44), a.dp(44), Gravity.LEFT | Gravity.CENTER_VERTICAL);
-            lockLp.leftMargin = a.dp(16);
+                            a.dp(42), a.dp(42), Gravity.LEFT | Gravity.CENTER_VERTICAL);
+            lockLp.leftMargin = a.dp(14);
             overlay.addView(lockBtn, lockLp);
         } else {
             centerRow = null;
@@ -690,18 +1111,24 @@ final class PlayerChrome {
             unlockPill.setFocusable(false);
             unlockPill.setGravity(Gravity.CENTER_VERTICAL);
             unlockPill.setPadding(a.dp(14), a.dp(9), a.dp(16), a.dp(9));
-            unlockPill.setBackground(chromeSurface(0xdc181a22, 999, 0x3dffffff));
-            UiCompat.setElevation(unlockPill, a.dp(14));
-            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(a.dp(18), a.dp(18));
+            GradientDrawable unlockBg =
+                    a.bg(a.isReducedTransparency() ? 0xF0141720 : 0xDC141720, 999);
+            unlockBg.setStroke(MobileTheme.hairlinePx(a), 0x36FFFFFF);
+            unlockPill.setBackground(unlockBg);
+            UiCompat.setElevation(unlockPill, a.dp(12));
+            MobileIcons.IconView unlockIv =
+                    MobileIcons.create(a, MobileIcons.IC_LOCK, 17f, MobileTheme.of(a).accent);
+            unlockIv.setStrokeWidthUnits(2.1f);
+            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(a.dp(17), a.dp(17));
             iconLp.rightMargin = a.dp(7);
-            unlockPill.addView(new PadlockGlyph(true, 0xffff9f0a), iconLp);
-            TextView unlockLabel = a.text("点击解锁", 13.5f, MainActivity.WHITE);
+            unlockPill.addView(unlockIv, iconLp);
+            TextView unlockLabel = a.text("点击解锁", 13f, MainActivity.WHITE);
             unlockLabel.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
             unlockLabel.setIncludeFontPadding(false);
             unlockLabel.setSingleLine(true);
             unlockPill.addView(unlockLabel, new LinearLayout.LayoutParams(-2, -2));
             unlockPill.setVisibility(View.GONE);
-            a.pressFeedback(unlockPill);
+            MobileMotion.bindPress(unlockPill, 0.92f);
             unlockPill.setOnClickListener(
                     v -> {
                         cancelActiveTouchGesture();
@@ -853,9 +1280,7 @@ final class PlayerChrome {
             persistentClock.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
             persistentClock.setBackground(chromeSurface(0x7a10141a, 999, 0x24ffffff));
             persistentClock.setText(styledWallTime(initialPersistentTime));
-            boolean showAlwaysClock =
-                    !a.miniMode && a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
-            persistentClock.setVisibility(showAlwaysClock ? View.VISIBLE : View.GONE);
+            persistentClock.setVisibility(View.GONE);
             FrameLayout.LayoutParams pClockLp =
                     new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
             pClockLp.topMargin = a.dp(14);
@@ -891,8 +1316,9 @@ final class PlayerChrome {
 
         boolean reducedTransparency =
                 a.prefs != null && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        boolean reducedMotion = MobileMotion.isReduced(a);
         startSpecBanner = new StartSpecBanner(a, a.isTvDevice());
-        startSpecBanner.setAccessibilityFlags(a.reduced, reducedTransparency);
+        startSpecBanner.setAccessibilityFlags(reducedMotion, reducedTransparency);
         FrameLayout.LayoutParams specLp =
                 new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
         specLp.leftMargin = a.dp(16);
@@ -900,7 +1326,10 @@ final class PlayerChrome {
         a.playbackLayer.addView(startSpecBanner, specLp);
 
         slimProgressBar = new SlimProgressBar(a, a.isTvDevice());
-        slimProgressBar.setReducedMotion(a.reduced);
+        slimProgressBar.setReducedMotion(reducedMotion);
+        if (!a.isTvDevice()) {
+            slimProgressBar.setAccentColor(MobileTheme.of(a).accent);
+        }
         a.playbackLayer.addView(
                 slimProgressBar,
                 new FrameLayout.LayoutParams(
@@ -964,13 +1393,18 @@ final class PlayerChrome {
         }
     }
 
-    TextView buildSeekCircle(String label, int deltaMs) {
-        TextView btn = a.text(label, 12, MainActivity.WHITE);
-        btn.setGravity(Gravity.CENTER);
-        btn.setTypeface(null, Typeface.BOLD);
-        GradientDrawable bg = a.bg(0x99303034, 29);
-        bg.setStroke(a.dp(1), 0x33ffffff);
+    FrameLayout buildMobileSeekCircle(int icon, String desc, int deltaMs) {
+        FrameLayout btn = new FrameLayout(a);
+        btn.setContentDescription(desc);
+        btn.setClickable(true);
+        btn.setFocusable(false);
+        GradientDrawable bg = a.bg(a.isReducedTransparency() ? 0xD8141720 : 0x8A141720, 999);
+        bg.setStroke(MobileTheme.hairlinePx(a), 0x2AFFFFFF);
         btn.setBackground(bg);
+        MobileIcons.IconView iv = MobileIcons.create(a, icon, 24f, MainActivity.WHITE);
+        iv.setStrokeWidthUnits(1.9f);
+        btn.addView(iv, new FrameLayout.LayoutParams(a.dp(24), a.dp(24), Gravity.CENTER));
+        MobileMotion.bindPress(btn, 0.92f);
         btn.setOnClickListener(
                 v -> {
                     cancelActiveTouchGesture();
@@ -994,6 +1428,45 @@ final class PlayerChrome {
                     a.showControls(true);
                 });
         return btn;
+    }
+
+    void updateMobileTopStatus(
+            String clockText, int batteryPercent, boolean charging, String netSpeed) {
+        if (mobileTopStatusRow == null) return;
+        boolean hasNet = netSpeed != null && !netSpeed.trim().isEmpty();
+        boolean hasBat = batteryPercent >= 0;
+        boolean hasClock = clockText != null && !clockText.trim().isEmpty();
+
+        if (mobileNetSpeedView != null) {
+            mobileNetSpeedView.setVisibility(hasNet ? View.VISIBLE : View.GONE);
+            if (hasNet && !netSpeed.contentEquals(mobileNetSpeedView.getText())) {
+                mobileNetSpeedView.setText(netSpeed);
+            }
+        }
+        if (mobileStatusSep1 != null) {
+            mobileStatusSep1.setVisibility(hasNet && hasBat ? View.VISIBLE : View.GONE);
+        }
+        if (mobileBatteryIcon != null && mobileBatteryText != null) {
+            mobileBatteryIcon.setVisibility(hasBat ? View.VISIBLE : View.GONE);
+            mobileBatteryText.setVisibility(hasBat ? View.VISIBLE : View.GONE);
+            if (hasBat) {
+                int clamped = Math.min(100, batteryPercent);
+                mobileBatteryIcon.setLevel(clamped, charging);
+                String batLabel = clamped + "%";
+                if (!batLabel.contentEquals(mobileBatteryText.getText())) {
+                    mobileBatteryText.setText(batLabel);
+                }
+            }
+        }
+        if (mobileStatusSep2 != null) {
+            mobileStatusSep2.setVisibility(
+                    (hasNet || hasBat) && hasClock ? View.VISIBLE : View.GONE);
+        }
+        if (mobileTopClockView != null && hasClock) {
+            if (!clockText.contentEquals(mobileTopClockView.getText())) {
+                mobileTopClockView.setText(clockText);
+            }
+        }
     }
 
     void scheduleLayout() {
@@ -1098,44 +1571,73 @@ final class PlayerChrome {
         int width = safe.width(), height = safe.height();
         boolean mobileLandscape = !a.isTvDevice() && !portrait;
         boolean compact = !a.isTvDevice() && (mobileLandscape || height < a.dp(440));
-        if (topActions != null && backBtn != null) {
-            topActions.setPadding(0, 0, 0, a.dp(compact ? 4 : 8));
-            ViewGroup.LayoutParams backLp = backBtn.getLayoutParams();
-            int backH = a.dp(compact ? 28 : 34);
-            if (backLp != null && backLp.height != backH) {
-                backLp.height = backH;
-                backBtn.setLayoutParams(backLp);
-            }
+        if (!a.isTvDevice()) {
+            int padRight = measuredWidth - safe.right;
+            int padBottom = measuredHeight - safe.bottom;
+            place(
+                    topShade,
+                    -1,
+                    safe.top + a.dp(compact ? 104 : 132),
+                    Gravity.TOP,
+                    -safe.left,
+                    -safe.top,
+                    -padRight,
+                    0);
+            place(
+                    bottomShade,
+                    -1,
+                    padBottom + a.dp(compact ? 148 : 186),
+                    Gravity.BOTTOM,
+                    -safe.left,
+                    0,
+                    -padRight,
+                    -padBottom);
         }
         if (titleView != null) {
             if (modernTv) {
                 titleView.setTextSize(
                         android.util.TypedValue.COMPLEX_UNIT_PX, modernUnit(a) * 20.5f);
+            } else if (a.isTvDevice()) {
+                titleView.setTextSize(portrait ? 20 : 26);
             } else {
-                titleView.setTextSize(compact ? 17 : (portrait ? 20 : 26));
+                titleView.setTextSize(compact ? 14.5f : 15.5f);
             }
         }
         boolean ultraShort = !a.isTvDevice() && height < a.dp(325);
-        episodeLabel.setTextSize(compact ? 12f : 13.5f);
-        episodeLabel.setVisibility(modernTv || ultraShort ? View.GONE : View.VISIBLE);
-        if (a.playStatus != null) {
-            boolean showStatusOnCompact = !a.prepared && !loading;
-            a.playStatus.setVisibility(
-                    showStatusOnCompact
-                            ? View.VISIBLE
-                            : compact
-                                    ? View.GONE
-                                    : (modernTv && a.prepared && a.playing && !loading
-                                            ? View.GONE
-                                            : View.VISIBLE));
+        if (a.isTvDevice()) {
+            episodeLabel.setTextSize(13.5f);
+            episodeLabel.setVisibility(modernTv ? View.GONE : View.VISIBLE);
+        } else {
+            episodeLabel.setTextSize(compact ? 11f : 11.5f);
+            boolean hasLineText =
+                    episodeLabel.getText() != null && episodeLabel.getText().length() > 0;
+            episodeLabel.setVisibility(!ultraShort && hasLineText ? View.VISIBLE : View.GONE);
         }
-        if (fsBtn != null) {
-            fsBtn.setText(portrait ? "⛶ 全屏横屏" : "⛶ 退出全屏");
+        if (mobileTopStatusRow != null) {
+            mobileTopStatusRow.setVisibility(width >= a.dp(460) ? View.VISIBLE : View.GONE);
+        }
+        if (mobileRotateIcon != null && mobileRotateBtn != null) {
+            mobileRotateIcon.setIcon(
+                    portrait ? MobileIcons.IC_FULLSCREEN : MobileIcons.IC_EXIT_FULLSCREEN);
+            mobileRotateBtn.setContentDescription(portrait ? "全屏横屏" : "退出全屏");
+        }
+        if (mobileLiveRotateIcon != null) {
+            mobileLiveRotateIcon.setIcon(
+                    portrait ? MobileIcons.IC_FULLSCREEN : MobileIcons.IC_EXIT_FULLSCREEN);
+        }
+        if (a.playStatus != null) {
+            if (a.isTvDevice()) {
+                a.playStatus.setVisibility(
+                        modernTv && a.prepared && a.playing && !loading ? View.GONE : View.VISIBLE);
+            } else {
+                boolean showStatus = !a.prepared && !loading;
+                a.playStatus.setVisibility(showStatus ? View.VISIBLE : View.GONE);
+            }
         }
         if (centerRow != null && rewindBtn != null && forwardBtn != null) {
-            int sideSz = a.dp(compact ? 44 : 54);
-            int centerSz = a.dp(compact ? 56 : 70);
-            int gap = a.dp(compact ? 20 : 26);
+            int sideSz = a.dp(compact ? 44 : 50);
+            int centerSz = a.dp(compact ? 58 : 64);
+            int gap = a.dp(compact ? 24 : 30);
             LinearLayout.LayoutParams rLp = (LinearLayout.LayoutParams) rewindBtn.getLayoutParams();
             LinearLayout.LayoutParams fLp =
                     (LinearLayout.LayoutParams) forwardBtn.getLayoutParams();
@@ -1203,49 +1705,51 @@ final class PlayerChrome {
             int side = Math.min(a.dp(44), width / 8);
             place(heading, -1, -2, Gravity.TOP, side, Math.min(a.dp(24), height / 8), side, 0);
         } else {
-            int sideMargin = Math.min(a.dp(compact ? 20 : 22), Math.max(a.dp(12), width / 16));
-            int trackWidth = Math.max(a.dp(120), width - sideMargin * 2);
-            int progressHeight = Math.max(progress.getMeasuredHeight(), a.dp(compact ? 46 : 56));
-            int bottom = Math.min(a.dp(compact ? 10 : 18), Math.max(0, height - progressHeight));
+            // Mobile 4-layer Cinema Touch HUD:
+            // Full-width Top Bar, unobstructed right half, horizontal bottom Deck (progress above
+            // dock)
+            int sideMargin = Math.min(a.dp(compact ? 16 : 14), Math.max(a.dp(10), width / 24));
+            int deckWidth = Math.max(a.dp(140), width - sideMargin * 2);
+            dock.setPadding(0, 0, 0, 0);
+            int dockBottom = a.dp(compact ? 6 : 12);
             place(
-                    progress,
-                    trackWidth,
+                    dock,
+                    deckWidth,
                     -2,
                     Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL,
                     sideMargin,
                     0,
                     sideMargin,
-                    bottom);
-            dock.setPadding(a.dp(3), a.dp(compact ? 4 : 6), a.dp(3), a.dp(compact ? 4 : 6));
-            int dockWidth = a.dp(compact ? 48 : 52);
-            int dockRight = Math.min(a.dp(10), Math.max(a.dp(6), width / 24));
-            int dockBottom = bottom + progressHeight + a.dp(8);
-            int dockTop = a.dp(compact ? 12 : 52);
-            int availDockH = Math.max(a.dp(96), height - dockBottom - dockTop);
-            int dockHeight = Math.min(a.dp(compact ? 286 : 368), availDockH);
-            place(
-                    dock,
-                    dockWidth,
-                    dockHeight,
-                    Gravity.RIGHT | Gravity.BOTTOM,
-                    0,
-                    0,
-                    dockRight,
                     dockBottom);
-            int side = sideMargin;
-            int headingRight = Math.max(side, dockWidth + dockRight + a.dp(12));
+
+            int measuredDockH = Math.max(dock.getMeasuredHeight(), a.dp(38));
+            int progressHeight = Math.max(progress.getMeasuredHeight(), a.dp(34));
+            int progressBottom =
+                    Math.min(
+                            Math.max(0, height - progressHeight),
+                            dockBottom + measuredDockH + a.dp(compact ? 2 : 4));
+            place(
+                    progress,
+                    deckWidth,
+                    -2,
+                    Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL,
+                    sideMargin,
+                    0,
+                    sideMargin,
+                    progressBottom);
+
             place(
                     heading,
                     -1,
                     -2,
                     Gravity.TOP,
-                    side,
-                    Math.min(a.dp(compact ? 8 : 22), height / 8),
-                    headingRight,
+                    sideMargin,
+                    Math.min(a.dp(compact ? 6 : 10), height / 10),
+                    sideMargin,
                     0);
             if (lockBtn != null) {
-                int lockSz = a.dp(compact ? 42 : 44);
-                int lockBottomOffset = width < a.dp(420) ? a.dp(74) : 0;
+                int lockSz = a.dp(compact ? 40 : 42);
+                int lockBottomOffset = width < a.dp(420) ? a.dp(44) : 0;
                 place(
                         lockBtn,
                         lockSz,
@@ -1454,29 +1958,68 @@ final class PlayerChrome {
 
     private void renderMobileInlineSpecBadges(java.util.List<StartSpecBanner.Badge> badges) {
         if (mobileSpecBadgeRow == null) return;
-        mobileSpecBadgeRow.removeAllViews();
-        if (badges == null || badges.isEmpty()) {
-            mobileSpecBadgeRow.setVisibility(View.GONE);
-            return;
+        latestMobileSpecBadges =
+                badges == null
+                        ? java.util.Collections.emptyList()
+                        : new java.util.ArrayList<>(badges);
+        refreshMobileHeaderBadges();
+    }
+
+    void refreshMobileHeaderBadges() {
+        if (mobileSpecBadgeRow == null || a.isTvDevice()) return;
+        String kernelLabel = "";
+        if (a.player != null) {
+            kernelLabel = a.player.activeEngineShortLabel();
+        } else if (a.prefs != null) {
+            int eng = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+            kernelLabel = eng == 3 ? "MPV" : (eng == 2 ? "IJK" : (eng == 1 ? "系统" : "Media3"));
         }
-        boolean solid = a.prefs != null && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
-        int limit = Math.min(3, badges.size());
+        StringBuilder sig = new StringBuilder();
+        int limit = Math.min(2, latestMobileSpecBadges.size());
         for (int i = 0; i < limit; i++) {
-            StartSpecBanner.Badge b = badges.get(i);
-            TextView pill = a.text(b.label, 10.5f, b.textArgb);
+            sig.append(latestMobileSpecBadges.get(i).label).append('|');
+        }
+        sig.append("k:").append(kernelLabel);
+        String nextSig = sig.toString();
+        if (nextSig.equals(lastMobileSpecSignature)) return;
+        lastMobileSpecSignature = nextSig;
+
+        mobileSpecBadgeRow.removeAllViews();
+        boolean solid = a.prefs != null && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        int added = 0;
+        for (int i = 0; i < limit; i++) {
+            StartSpecBanner.Badge b = latestMobileSpecBadges.get(i);
+            TextView pill = a.text(b.label, 9.5f, b.textArgb);
             pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
             pill.setSingleLine(true);
             pill.setIncludeFontPadding(false);
             pill.setGravity(Gravity.CENTER);
-            pill.setPadding(a.dp(6), a.dp(2), a.dp(6), a.dp(2));
-            GradientDrawable bg = a.bg(solid ? b.solidFillArgb : b.fillArgb, 5);
-            bg.setStroke(Math.max(1, a.dp(1)), b.strokeArgb);
+            pill.setPadding(a.dp(5.5f), a.dp(1.5f), a.dp(5.5f), a.dp(1.5f));
+            GradientDrawable bg = a.bg(solid ? b.solidFillArgb : b.fillArgb, 4.5f);
+            bg.setStroke(MobileTheme.hairlinePx(a), b.strokeArgb);
             pill.setBackground(bg);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-            if (i > 0) lp.leftMargin = a.dp(4);
+            if (added > 0) lp.leftMargin = a.dp(4);
             mobileSpecBadgeRow.addView(pill, lp);
+            added++;
         }
-        mobileSpecBadgeRow.setVisibility(View.VISIBLE);
+        if (kernelLabel != null && !kernelLabel.isEmpty()) {
+            int accent = MobileTheme.of(a).accent;
+            TextView kPill = a.text(kernelLabel, 9.5f, 0xFFF3F5F9);
+            kPill.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+            kPill.setSingleLine(true);
+            kPill.setIncludeFontPadding(false);
+            kPill.setGravity(Gravity.CENTER);
+            kPill.setPadding(a.dp(5.5f), a.dp(1.5f), a.dp(5.5f), a.dp(1.5f));
+            GradientDrawable kBg = a.bg(MobileTheme.withAlpha(accent, solid ? 0x99 : 0x45), 4.5f);
+            kBg.setStroke(MobileTheme.hairlinePx(a), MobileTheme.withAlpha(accent, 0x99));
+            kPill.setBackground(kBg);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+            if (added > 0) lp.leftMargin = a.dp(4);
+            mobileSpecBadgeRow.addView(kPill, lp);
+            added++;
+        }
+        mobileSpecBadgeRow.setVisibility(added > 0 ? View.VISIBLE : View.GONE);
     }
 
     void resolution(int width, int height) {
@@ -1544,6 +2087,8 @@ final class PlayerChrome {
         hdrSurfaceActive = false;
         PlaybackControls.markSleepTimerInPlaceSwitch();
         if (startSpecBanner != null) startSpecBanner.resetEpisode();
+        latestMobileSpecBadges = java.util.Collections.emptyList();
+        lastMobileSpecSignature = "";
         if (mobileSpecBadgeRow != null) {
             mobileSpecBadgeRow.removeAllViews();
             mobileSpecBadgeRow.setVisibility(View.GONE);
@@ -1556,7 +2101,18 @@ final class PlayerChrome {
         }
         String lineName = line == null || line.name == null ? "" : line.name;
         String epName = episode == null || episode.name == null ? "" : episode.name;
-        episodeLabel.setText(epName + (lineName.isEmpty() ? "" : "  ·  " + lineName));
+        if (a.isTvDevice()) {
+            episodeLabel.setText(epName + (lineName.isEmpty() ? "" : "  ·  " + lineName));
+        } else {
+            boolean multiEp = line != null && line.episodes != null && line.episodes.size() > 1;
+            if (titleView != null) {
+                titleView.setText(
+                        formatMobileHeaderTitle(
+                                chromeVideo != null ? chromeVideo.title : "", epName, multiEp));
+            }
+            episodeLabel.setText(lineName);
+            episodeLabel.setVisibility(lineName.isEmpty() ? View.GONE : View.VISIBLE);
+        }
         if (cardTitleView != null) {
             cardTitleView.setText(formatCardTitle(chromeVideo, episode));
         }
@@ -1645,7 +2201,10 @@ final class PlayerChrome {
 
     private void syncSlimProgressVisibility(int durationMs, boolean live) {
         if (slimProgressBar == null) return;
-        slimProgressBar.setReducedMotion(a.reduced);
+        slimProgressBar.setReducedMotion(MobileMotion.isReduced(a));
+        if (!a.isTvDevice()) {
+            slimProgressBar.setAccentColor(MobileTheme.of(a).accent);
+        }
         boolean suppressLiveHud =
                 shouldSuppressLiveHudRedraws(a.isTvDevice(), hdrSurfaceActive, a.controlsVisible);
         boolean showSlim =
@@ -1658,6 +2217,267 @@ final class PlayerChrome {
                                 durationMs,
                                 PlayerHudPrefs.isSlimProgressEnabled(a));
         slimProgressBar.setActiveVisible(showSlim);
+    }
+
+    /**
+     * Interruptible, coordinated 3-region Cinema HUD show/hide animation for mobile/tablet: top
+     * bar glides from {@code -8dp}, bottom deck glides from {@code +10dp}, center cluster pops from
+     * {@code 0.94x} using {@link MotionTokens#DURATION_STANDARD_MS} / {@link
+     * MotionTokens#DURATION_FAST_MS}. Honors {@link MobileMotion#isReduced} with {@code 120ms}
+     * opacity-only crossfade and zero translation/scale.
+     */
+    void animateMobileControlsVisibility(boolean visible, boolean progressOnly, boolean changed) {
+        animateMobileControlsVisibility(visible, progressOnly, changed, false);
+    }
+
+    void animateMobileControlsVisibility(
+            boolean visible, boolean progressOnly, boolean changed, boolean wasProgressOnly) {
+        if (a.isTvDevice() || overlay == null) return;
+        final int gen = ++mobileHudAnimGen;
+        boolean wasVisible = overlay.getVisibility() == View.VISIBLE;
+        cancelMobileChromeAnimations();
+
+        boolean reduced = MobileMotion.isReduced(a);
+        boolean attached = UiCompat.isAttached(overlay);
+
+        if (visible) {
+            boolean expandingFromProgressOnly = wasProgressOnly && !progressOnly;
+            boolean hasInFlight =
+                    wasVisible && (overlay.getAlpha() < 0.99f || bottomShade.getAlpha() < 0.99f);
+            boolean shouldAnimate =
+                    attached
+                            && (changed || !wasVisible || hasInFlight || expandingFromProgressOnly);
+            if (!shouldAnimate) {
+                overlay.setVisibility(View.VISIBLE);
+                overlay.setAlpha(1f);
+                overlay.setTranslationY(0f);
+                resetMobileChromeTransforms();
+                return;
+            }
+            if (reduced) {
+                float startAlpha = wasVisible ? overlay.getAlpha() : 0f;
+                resetMobileChromeTransforms();
+                overlay.setTranslationY(0f);
+                overlay.setAlpha(startAlpha);
+                overlay.setVisibility(View.VISIBLE);
+                overlay.animate()
+                        .alpha(1f)
+                        .setDuration(MotionTokens.DURATION_REDUCED_HUD_FADE_MS)
+                        .setInterpolator(MotionTokens.createLinearInterpolator())
+                        .withEndAction(null)
+                        .start();
+                return;
+            }
+            overlay.setAlpha(1f);
+            overlay.setTranslationY(0f);
+            overlay.setVisibility(View.VISIBLE);
+            float topSlide = -a.dp(8);
+            float bottomSlide = a.dp(10);
+            android.view.animation.Interpolator enterInterp =
+                    MotionTokens.createDecelerateInterpolator();
+            boolean revealAuxiliaryFromHidden = !wasVisible || expandingFromProgressOnly;
+            animateSlideLayerIn(
+                    topShade, !progressOnly, revealAuxiliaryFromHidden, topSlide, enterInterp);
+            animateSlideLayerIn(
+                    heading, !progressOnly, revealAuxiliaryFromHidden, topSlide, enterInterp);
+            animateSlideLayerIn(bottomShade, true, !wasVisible, bottomSlide, enterInterp);
+            animateSlideLayerIn(
+                    progress,
+                    progress.getVisibility() == View.VISIBLE,
+                    !wasVisible,
+                    bottomSlide,
+                    enterInterp);
+            animateSlideLayerIn(
+                    dock, !progressOnly, revealAuxiliaryFromHidden, bottomSlide, enterInterp);
+            animateScaleLayerIn(
+                    centerRow,
+                    !progressOnly && centerRow != null && centerRow.getVisibility() == View.VISIBLE,
+                    revealAuxiliaryFromHidden,
+                    enterInterp);
+            animateScaleLayerIn(
+                    lockBtn,
+                    !progressOnly && lockBtn != null && lockBtn.getVisibility() == View.VISIBLE,
+                    revealAuxiliaryFromHidden,
+                    enterInterp);
+            return;
+        }
+
+        if (!attached || !wasVisible) {
+            overlay.setVisibility(View.GONE);
+            overlay.setAlpha(1f);
+            overlay.setTranslationY(0f);
+            resetMobileChromeTransforms();
+            clearProgressOnlyModeWhileHidden();
+            return;
+        }
+        Runnable finishHide =
+                () -> {
+                    if (gen == mobileHudAnimGen && !a.controlsVisible) {
+                        overlay.setVisibility(View.GONE);
+                        overlay.setAlpha(1f);
+                        resetMobileChromeTransforms();
+                        clearProgressOnlyModeWhileHidden();
+                    }
+                };
+        if (reduced) {
+            overlay.animate()
+                    .alpha(0f)
+                    .setDuration(MotionTokens.DURATION_REDUCED_HUD_FADE_MS)
+                    .setInterpolator(MotionTokens.createLinearInterpolator())
+                    .withEndAction(finishHide)
+                    .start();
+            return;
+        }
+        float topSlide = -a.dp(8);
+        float bottomSlide = a.dp(10);
+        android.view.animation.Interpolator exitInterp =
+                MotionTokens.createAccelerateInterpolator();
+        animateSlideLayerOut(topShade, topSlide, exitInterp, null);
+        animateSlideLayerOut(heading, topSlide, exitInterp, null);
+        animateSlideLayerOut(progress, bottomSlide, exitInterp, null);
+        animateSlideLayerOut(dock, bottomSlide, exitInterp, null);
+        animateScaleLayerOut(centerRow, exitInterp);
+        animateScaleLayerOut(lockBtn, exitInterp);
+        if (bottomShade != null && bottomShade.getVisibility() == View.VISIBLE) {
+            animateSlideLayerOut(bottomShade, bottomSlide, exitInterp, finishHide);
+        } else {
+            overlay.animate()
+                    .alpha(0f)
+                    .setDuration(MotionTokens.DURATION_FAST_MS)
+                    .setInterpolator(exitInterp)
+                    .withEndAction(finishHide)
+                    .start();
+        }
+    }
+
+    /**
+     * Clears {@link #progressOnlyMode} and restores auxiliary chrome visibilities once {@link
+     * #overlay} is already {@link View#GONE}, preventing a full-HUD flash when ending headless
+     * horizontal seek previews.
+     */
+    private void clearProgressOnlyModeWhileHidden() {
+        if (!progressOnlyMode) return;
+        progressOnlyMode = false;
+        topShade.setVisibility(View.VISIBLE);
+        heading.setVisibility(View.VISIBLE);
+        dock.setVisibility(View.VISIBLE);
+        if (lockBtn != null) lockBtn.setVisibility(View.VISIBLE);
+        if (seekHint != null) seekHint.setVisibility(View.GONE);
+    }
+
+    private void cancelMobileChromeAnimations() {
+        cancelAnim(overlay);
+        cancelAnim(topShade);
+        cancelAnim(heading);
+        cancelAnim(bottomShade);
+        cancelAnim(progress);
+        cancelAnim(dock);
+        cancelAnim(centerRow);
+        cancelAnim(lockBtn);
+    }
+
+    private void resetMobileChromeTransforms() {
+        resetTransform(topShade);
+        resetTransform(heading);
+        resetTransform(bottomShade);
+        resetTransform(progress);
+        resetTransform(dock);
+        resetTransform(centerRow);
+        resetTransform(lockBtn);
+    }
+
+    private static void cancelAnim(View v) {
+        if (v != null) {
+            v.animate().withEndAction(null).cancel();
+        }
+    }
+
+    private static void resetTransform(View v) {
+        if (v == null) return;
+        v.setAlpha(1f);
+        v.setTranslationY(0f);
+        v.setScaleX(1f);
+        v.setScaleY(1f);
+    }
+
+    private static void animateSlideLayerIn(
+            View v,
+            boolean active,
+            boolean fromHidden,
+            float startTranslationY,
+            android.view.animation.Interpolator interpolator) {
+        if (v == null) return;
+        if (!active) {
+            resetTransform(v);
+            return;
+        }
+        if (fromHidden) {
+            v.setAlpha(0f);
+            v.setTranslationY(startTranslationY);
+        }
+        v.setScaleX(1f);
+        v.setScaleY(1f);
+        v.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(MotionTokens.DURATION_STANDARD_MS)
+                .setInterpolator(interpolator)
+                .withEndAction(null)
+                .start();
+    }
+
+    private static void animateScaleLayerIn(
+            View v,
+            boolean active,
+            boolean fromHidden,
+            android.view.animation.Interpolator interpolator) {
+        if (v == null) return;
+        if (!active) {
+            resetTransform(v);
+            return;
+        }
+        if (fromHidden) {
+            v.setAlpha(0f);
+            v.setScaleX(0.94f);
+            v.setScaleY(0.94f);
+        }
+        v.setTranslationY(0f);
+        v.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .setDuration(MotionTokens.DURATION_STANDARD_MS)
+                .setInterpolator(interpolator)
+                .withEndAction(null)
+                .start();
+    }
+
+    private static void animateSlideLayerOut(
+            View v,
+            float endTranslationY,
+            android.view.animation.Interpolator interpolator,
+            Runnable endAction) {
+        if (v == null || v.getVisibility() != View.VISIBLE) return;
+        v.animate()
+                .alpha(0f)
+                .translationY(endTranslationY)
+                .setDuration(MotionTokens.DURATION_FAST_MS)
+                .setInterpolator(interpolator)
+                .withEndAction(endAction)
+                .start();
+    }
+
+    private static void animateScaleLayerOut(
+            View v, android.view.animation.Interpolator interpolator) {
+        if (v == null || v.getVisibility() != View.VISIBLE) return;
+        v.animate()
+                .alpha(0f)
+                .scaleX(0.94f)
+                .scaleY(0.94f)
+                .setDuration(MotionTokens.DURATION_FAST_MS)
+                .setInterpolator(interpolator)
+                .withEndAction(null)
+                .start();
     }
 
     void syncClockViews() {
@@ -1698,13 +2518,27 @@ final class PlayerChrome {
             }
             return;
         }
+        if (mobileTopClockView != null
+                && (timeChanged || mobileTopClockView.getText().length() == 0)) {
+            mobileTopClockView.setText(now);
+        }
         boolean alwaysShow =
-                !a.miniMode && a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
+                !a.miniMode
+                        && !a.controlsVisible
+                        && !a.playerLocked
+                        && a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
+        int cornerMask = a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD, 7);
+        boolean overlayShowsClock =
+                a.mobilePlayerOverlay != null
+                        && MobilePlayerOverlay.shouldShowIdleCornerHud(
+                                a.controlsVisible, cornerMask, a.playerLocked)
+                        && (cornerMask & Prefs.HUD_CLOCK) != 0;
         if (persistentClock != null) {
             if (timeChanged || persistentClock.getText().length() == 0) {
                 persistentClock.setText(styledWallTime(now));
             }
-            persistentClock.setVisibility(alwaysShow ? View.VISIBLE : View.GONE);
+            persistentClock.setVisibility(
+                    alwaysShow && !overlayShowsClock ? View.VISIBLE : View.GONE);
         }
         if (wallClock != null) {
             if (timeChanged) {
@@ -1717,6 +2551,9 @@ final class PlayerChrome {
     void update() {
         if (a.prepared) loading = false;
         syncClockViews();
+        if (a.mobilePlayerOverlay != null) {
+            a.mobilePlayerOverlay.syncControlsVisibility();
+        }
         if (a.playbackControls != null) {
             a.playbackControls.syncSkipCountdownLifecycle();
             a.playbackControls.syncDanmuPlaybackState();
@@ -1728,11 +2565,20 @@ final class PlayerChrome {
         syncSlimProgressVisibility(dur, isLiveStream);
         syncTvScrubCapsule();
         boolean showSpinner = loading && !a.prepared && a.playbackLoading == null && !a.miniMode;
-        if (loadingPill.getVisibility() != (showSpinner ? View.VISIBLE : View.GONE)) {
-            loadingPill.setVisibility(showSpinner ? View.VISIBLE : View.GONE);
+        if (!a.isTvDevice() && UiCompat.isAttached(loadingPill)) {
+            if (loadingPillShown != showSpinner) {
+                loadingPillShown = showSpinner;
+                MobileMotion.crossfadeVisibility(
+                        loadingPill, showSpinner, 0f, 0.96f, MotionTokens.DURATION_FAST_MS, true);
+            }
+        } else {
+            loadingPillShown = showSpinner;
+            if (loadingPill.getVisibility() != (showSpinner ? View.VISIBLE : View.GONE)) {
+                loadingPill.setVisibility(showSpinner ? View.VISIBLE : View.GONE);
+            }
         }
         if (brandLoader != null) {
-            brandLoader.setReducedMotion(a.reduced);
+            brandLoader.setReducedMotion(MobileMotion.isReduced(a));
             brandLoader.setActive(showSpinner);
         }
         if (!a.controlsVisible && !loading && a.prepared) {
@@ -1748,14 +2594,16 @@ final class PlayerChrome {
                 if (badges != null && !badges.isEmpty()) renderBadgePills(badges);
             }
         }
+        if (!a.isTvDevice()) {
+            refreshMobileHeaderBadges();
+        }
         if (a.playStatus != null) {
             if (modernTv) {
                 a.playStatus.setVisibility(
                         loading || !a.prepared || !a.playing ? View.VISIBLE : View.GONE);
             } else if (!a.isTvDevice()) {
-                boolean compact = !a.isPortrait() || a.windowHeight() < a.dp(440);
-                a.playStatus.setVisibility(
-                        (!a.prepared && !loading) || !compact ? View.VISIBLE : View.GONE);
+                boolean showStatus = !a.prepared && !loading;
+                a.playStatus.setVisibility(showStatus ? View.VISIBLE : View.GONE);
             }
         }
         if (modernTv && cardTitleView != null && a.activeEpisode != null) {
@@ -1780,17 +2628,61 @@ final class PlayerChrome {
     }
 
     final class StateGlyph extends View {
-        final Paint paint = new Paint(3);
+        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Paint strokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
         StateGlyph() {
             super(a);
+            strokePaint.setStyle(Paint.Style.STROKE);
+            strokePaint.setStrokeCap(Paint.Cap.ROUND);
+            strokePaint.setStrokeJoin(Paint.Join.ROUND);
+            fillPaint.setStyle(Paint.Style.FILL);
+            fillPaint.setStrokeCap(Paint.Cap.ROUND);
+            fillPaint.setStrokeJoin(Paint.Join.ROUND);
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
-            float cx = getWidth() / 2f, cy = getHeight() / 2f;
+            float w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float cx = w / 2f, cy = h / 2f;
+            float radius = Math.min(w, h) / 2f;
+            if (!a.isTvDevice()) {
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(a.isReducedTransparency() ? 0xDC141720 : 0x99141720);
+                canvas.drawCircle(cx, cy, radius - a.dp(0.5f), paint);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(MobileTheme.hairlinePx(a));
+                paint.setColor(0x36FFFFFF);
+                canvas.drawCircle(cx, cy, radius - a.dp(0.5f), paint);
+                paint.setStyle(Paint.Style.FILL);
+                if (!a.prepared) {
+                    strokePaint.setColor(MainActivity.WHITE);
+                    strokePaint.setStrokeWidth(a.dp(2.5f));
+                    canvas.drawCircle(cx, cy, a.dp(11), strokePaint);
+                    return;
+                }
+                float glyphSize = Math.min(w, h) * 0.48f;
+                int icon = a.playing ? MobileIcons.IC_PAUSE : MobileIcons.IC_PLAY;
+                float nudgeX = a.playing ? 0f : a.dp(1.2f);
+                MobileIcons.drawIcon(
+                        canvas,
+                        cx - glyphSize * 0.5f + nudgeX,
+                        cy - glyphSize * 0.5f,
+                        glyphSize,
+                        icon,
+                        MainActivity.WHITE,
+                        true,
+                        -1,
+                        false,
+                        2.1f,
+                        strokePaint,
+                        fillPaint);
+                return;
+            }
             paint.setColor(0x99303034);
-            canvas.drawCircle(cx, cy, getWidth() / 2f, paint);
+            canvas.drawCircle(cx, cy, radius, paint);
             paint.setColor(MainActivity.WHITE);
             if (!a.prepared) {
                 paint.setStrokeWidth(a.dp(3));

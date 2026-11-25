@@ -46,7 +46,22 @@ import java.util.WeakHashMap;
  * and never mutates view tags.
  */
 final class PluginDialogStyler {
-    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static volatile Handler mainHandler;
+
+    private static Handler mainHandler() {
+        Handler h = mainHandler;
+        if (h == null) {
+            synchronized (PluginDialogStyler.class) {
+                h = mainHandler;
+                if (h == null) {
+                    h = new Handler(Looper.getMainLooper());
+                    mainHandler = h;
+                }
+            }
+        }
+        return h;
+    }
+
     private static final Set<View> STYLED_DECORS =
             Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
     private static final Set<View> STYLED_CARD_ROOTS =
@@ -133,13 +148,14 @@ final class PluginDialogStyler {
     static void watch(final MainActivity a) {
         if (a == null) return;
         for (int delay : WATCH_DELAYS_MS) {
-            MAIN.postDelayed(
-                    () -> {
-                        if (!a.isFinishing() && !a.isDestroyed()) {
-                            scanAndStyleWindows(a);
-                        }
-                    },
-                    delay);
+            mainHandler()
+                    .postDelayed(
+                            () -> {
+                                if (!a.isFinishing() && !a.isDestroyed()) {
+                                    scanAndStyleWindows(a);
+                                }
+                            },
+                            delay);
         }
     }
 
@@ -269,39 +285,43 @@ final class PluginDialogStyler {
                             hasFocus -> {
                                 if (hasFocus && AUTO_FORWARDED_DECORS.contains(decor)) {
                                     decor.setAlpha(0f);
-                                    MAIN.post(() -> dismissPluginDecor(decor, content));
+                                    mainHandler().post(() -> dismissPluginDecor(decor, content));
                                 }
                             });
         }
-        MAIN.post(
-                () -> {
-                    try {
-                        if (!decor.isAttachedToWindow()) return;
-                        targetBtn.performClick();
-                        if (toggleOnly) {
-                            MAIN.postDelayed(
-                                    () -> {
-                                        try {
-                                            List<LinearLayout> refreshed = new ArrayList<>();
-                                            collectSpiderDriveRows(content, refreshed, 0);
-                                            for (LinearLayout row : refreshed) {
-                                                harvestDriveRowStatus(a, row);
-                                            }
-                                            a.toast("已切换网盘启用状态");
-                                            dismissPluginDecor(decor, content);
-                                        } catch (Throwable ignored) {
-                                        }
-                                    },
-                                    260);
-                        } else {
-                            watch(a);
-                        }
-                    } catch (Throwable t) {
-                        AUTO_FORWARDED_DECORS.remove(decor);
-                        decor.setAlpha(1f);
-                        stylePluginDecor(a, decor, content);
-                    }
-                });
+        mainHandler()
+                .post(
+                        () -> {
+                            try {
+                                if (!decor.isAttachedToWindow()) return;
+                                targetBtn.performClick();
+                                if (toggleOnly) {
+                                    mainHandler()
+                                            .postDelayed(
+                                                    () -> {
+                                                        try {
+                                                            List<LinearLayout> refreshed =
+                                                                    new ArrayList<>();
+                                                            collectSpiderDriveRows(
+                                                                    content, refreshed, 0);
+                                                            for (LinearLayout row : refreshed) {
+                                                                harvestDriveRowStatus(a, row);
+                                                            }
+                                                            a.toast("已切换网盘启用状态");
+                                                            dismissPluginDecor(decor, content);
+                                                        } catch (Throwable ignored) {
+                                                        }
+                                                    },
+                                                    260);
+                                } else {
+                                    watch(a);
+                                }
+                            } catch (Throwable t) {
+                                AUTO_FORWARDED_DECORS.remove(decor);
+                                decor.setAlpha(1f);
+                                stylePluginDecor(a, decor, content);
+                            }
+                        });
         return true;
     }
 
@@ -410,11 +430,19 @@ final class PluginDialogStyler {
     }
 
     private static boolean isAppOwnedWindow(View decor) {
+        if (decor == null) return false;
         Object tag = decor.getTag();
         if (isAppOwnedTagValue(tag)) {
             return true;
         }
+        if (decor.getClass().getName().startsWith("com.pilipala.")) {
+            return true;
+        }
         return containsAppOwnedMarker(decor, 0);
+    }
+
+    static boolean isExemptTagForTest(Object tag) {
+        return isAppOwnedTagValue(tag);
     }
 
     private static boolean isAppOwnedTagValue(Object tag) {
@@ -422,11 +450,12 @@ final class PluginDialogStyler {
                 || "source-picker".equals(tag)
                 || "player-bubble".equals(tag)
                 || "mobile-drawer".equals(tag)
+                || MobileBottomSheet.DRAWER_TAG.equals(tag)
                 || "account-panel".equals(tag);
     }
 
     private static boolean containsAppOwnedMarker(View v, int depth) {
-        if (v == null || depth > 8) return false;
+        if (v == null || depth > 10) return false;
         if (isAppOwnedTagValue(v.getTag())) {
             return true;
         }

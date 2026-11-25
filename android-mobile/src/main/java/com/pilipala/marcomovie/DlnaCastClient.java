@@ -1,9 +1,14 @@
 package com.pilipala.marcomovie;
 
+import android.app.Dialog;
+import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import java.io.ByteArrayInputStream;
@@ -521,8 +526,26 @@ final class DlnaCastClient {
     }
 
     /**
+     * Pure-JVM helper resolving a castable remote HTTP(S) URL for external LAN DLNA renderers:
+     * accepts direct URLs immediately, unwraps local {@link HlsStreamProxy} or {@link
+     * MediaDiskCache} loopback URLs back to their upstream HTTP(S) origins, and falls back to the
+     * episode's raw HTTP(S) URL when available.
+     */
+    static String resolveCastableMediaUrl(String playUrl, String fallbackRawUrl) {
+        String valid = CastService.validateCastMediaUrl(playUrl);
+        if (!valid.isEmpty()) return valid;
+        String unwrappedHls = HlsStreamProxy.originalUrlForLocalUrl(playUrl);
+        valid = CastService.validateCastMediaUrl(unwrappedHls);
+        if (!valid.isEmpty()) return valid;
+        String unwrappedCache = MediaDiskCache.originalUrlForLocalUrl(playUrl);
+        valid = CastService.validateCastMediaUrl(unwrappedCache);
+        if (!valid.isEmpty()) return valid;
+        return CastService.validateCastMediaUrl(fallbackRawUrl);
+    }
+
+    /**
      * Opens an iQIYI/Youku/Tencent-style selectable DLNA cast device picker dialog during playback
-     * or from the Cast hub.
+     * or from the Cast hub. Uses a Day/Night {@link MobileBottomSheet} on phones/tablets.
      */
     static void showCastDevicePicker(
             final MainActivity a,
@@ -532,6 +555,10 @@ final class DlnaCastClient {
         if (a == null || a.isFinishing()) return;
         if (a.privateMode) {
             a.toast("隐私空间已隔离局域网投屏，退出后即可使用");
+            return;
+        }
+        if (!a.isTvDevice()) {
+            showMobileCastDevicePicker(a, mediaUrl, mediaTitle, onCastStarted);
             return;
         }
         final LinearLayout box = a.vertical();
@@ -795,6 +822,405 @@ final class DlnaCastClient {
         remoteRef[0] = dlg;
         dlg.show();
         pauseBtn.requestFocus();
+    }
+
+    private static void showMobileCastDevicePicker(
+            final MainActivity a,
+            final String mediaUrl,
+            final String mediaTitle,
+            final Runnable onCastStarted) {
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        final LinearLayout body = a.vertical();
+        body.setTag("mobile-dlna-picker");
+
+        if (mediaTitle != null && !mediaTitle.trim().isEmpty()) {
+            TextView mediaBanner = a.text("当前播放：" + mediaTitle.trim(), 12.5f, p.textSecondary);
+            mediaBanner.setSingleLine(true);
+            mediaBanner.setEllipsize(TextUtils.TruncateAt.END);
+            mediaBanner.setPadding(a.dp(12), a.dp(8), a.dp(12), a.dp(8));
+            mediaBanner.setBackground(MobileTheme.subtleBg(a, 12));
+            LinearLayout.LayoutParams mbLp = new LinearLayout.LayoutParams(-1, -2);
+            mbLp.bottomMargin = a.dp(12);
+            body.addView(mediaBanner, mbLp);
+        }
+
+        LinearLayout statusBar = a.row();
+        statusBar.setGravity(Gravity.CENTER_VERTICAL);
+        statusBar.setPadding(a.dp(2), 0, a.dp(2), a.dp(10));
+
+        final BrandLogoLoaderView spinner = new BrandLogoLoaderView(a);
+        spinner.setReducedMotion(MobileMotion.isReduced(a));
+        spinner.setActive(true);
+        LinearLayout.LayoutParams spLp = new LinearLayout.LayoutParams(a.dp(18), a.dp(18));
+        spLp.rightMargin = a.dp(8);
+        statusBar.addView(spinner, spLp);
+
+        final TextView status = a.text("正在搜索同一局域网内的电视 / 盒子 / 投影仪…", 13f, p.textSecondary);
+        status.setLineSpacing(a.dp(2), 1f);
+        statusBar.addView(status, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        final Runnable[] scanRef = new Runnable[1];
+        LinearLayout rescanPill = a.row();
+        rescanPill.setTag("dlna-rescan");
+        rescanPill.setGravity(Gravity.CENTER_VERTICAL);
+        rescanPill.setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6));
+        rescanPill.setBackground(MobileTheme.subtleBg(a, 999));
+        MobileIcons.IconView refreshIc =
+                MobileIcons.create(a, MobileIcons.IC_REFRESH, 13f, p.accent);
+        LinearLayout.LayoutParams riLp = new LinearLayout.LayoutParams(a.dp(13), a.dp(13));
+        riLp.rightMargin = a.dp(4);
+        rescanPill.addView(refreshIc, riLp);
+        TextView refreshTxt = a.text("重新搜索", 12f, p.accent);
+        refreshTxt.setTypeface(null, Typeface.BOLD);
+        rescanPill.addView(refreshTxt);
+        MobileMotion.bindPress(rescanPill, 0.94f);
+        rescanPill.setOnClickListener(
+                v -> {
+                    if (scanRef[0] != null) scanRef[0].run();
+                });
+        LinearLayout.LayoutParams rpLp = new LinearLayout.LayoutParams(-2, -2);
+        rpLp.leftMargin = a.dp(8);
+        statusBar.addView(rescanPill, rpLp);
+        body.addView(statusBar, new LinearLayout.LayoutParams(-1, -2));
+
+        final LinearLayout listHost = a.vertical();
+        body.addView(listHost, new LinearLayout.LayoutParams(-1, -2));
+
+        final Dialog[] dlgRef = new Dialog[1];
+        final String selfUuid =
+                a.castService != null
+                        ? a.castService.deviceUuid
+                        : a.prefs.getString(Prefs.CAST_DEVICE_UUID, "");
+
+        scanRef[0] =
+                () -> {
+                    spinner.setVisibility(View.VISIBLE);
+                    spinner.setActive(true);
+                    status.setText("正在搜索同一局域网内的可投屏设备…");
+                    status.setTextColor(p.textSecondary);
+                    listHost.removeAllViews();
+                    a.worker.execute(
+                            () -> {
+                                final List<Device> found = discoverDevices(2200, selfUuid);
+                                a.ui.post(
+                                        () -> {
+                                            if (a.isFinishing()
+                                                    || dlgRef[0] == null
+                                                    || !dlgRef[0].isShowing()) {
+                                                return;
+                                            }
+                                            spinner.setActive(false);
+                                            spinner.setVisibility(View.GONE);
+                                            listHost.removeAllViews();
+                                            if (found.isEmpty()) {
+                                                status.setText("未发现同一局域网内的 DLNA 投屏设备");
+                                                status.setTextColor(p.warning);
+                                                TextView hint =
+                                                        a.text(
+                                                                "请确认目标电视 / 盒子 / 投影仪与本机连接同一 Wi-Fi，并已开启无线投屏或 DLNA 接收功能，然后点击右上角「重新搜索」。",
+                                                                12.5f,
+                                                                p.textTertiary);
+                                                hint.setLineSpacing(a.dp(3), 1f);
+                                                hint.setPadding(
+                                                        a.dp(14), a.dp(12), a.dp(14), a.dp(12));
+                                                hint.setBackground(MobileTheme.subtleBg(a, 14));
+                                                listHost.addView(
+                                                        hint,
+                                                        new LinearLayout.LayoutParams(-1, -2));
+                                                return;
+                                            }
+                                            status.setText("发现 " + found.size() + " 台设备，轻触立即投屏");
+                                            status.setTextColor(p.success);
+                                            for (int i = 0; i < found.size(); i++) {
+                                                final Device dev = found.get(i);
+                                                LinearLayout row = a.row();
+                                                row.setTag("dlna-target:" + i);
+                                                row.setGravity(Gravity.CENTER_VERTICAL);
+                                                row.setPadding(
+                                                        a.dp(12), a.dp(11), a.dp(12), a.dp(11));
+                                                row.setBackground(MobileTheme.cardBg(a, 14));
+
+                                                FrameLayout icBadge = new FrameLayout(a);
+                                                icBadge.setBackground(
+                                                        a.bg(
+                                                                MobileTheme.withAlpha(
+                                                                        p.accent,
+                                                                        p.isDark ? 0x2E : 0x1A),
+                                                                10));
+                                                MobileIcons.IconView castIc =
+                                                        MobileIcons.create(
+                                                                a,
+                                                                MobileIcons.IC_CAST,
+                                                                17f,
+                                                                p.accent);
+                                                icBadge.addView(
+                                                        castIc,
+                                                        new FrameLayout.LayoutParams(
+                                                                a.dp(17),
+                                                                a.dp(17),
+                                                                Gravity.CENTER));
+                                                LinearLayout.LayoutParams icLp =
+                                                        new LinearLayout.LayoutParams(
+                                                                a.dp(36), a.dp(36));
+                                                icLp.rightMargin = a.dp(12);
+                                                row.addView(icBadge, icLp);
+
+                                                LinearLayout copy = a.vertical();
+                                                TextView nameTv =
+                                                        a.text(
+                                                                dev.friendlyName,
+                                                                14.5f,
+                                                                p.textPrimary);
+                                                nameTv.setTypeface(null, Typeface.BOLD);
+                                                nameTv.setSingleLine(true);
+                                                nameTv.setEllipsize(TextUtils.TruncateAt.END);
+                                                copy.addView(nameTv);
+                                                if (!dev.hostIp.isEmpty()) {
+                                                    TextView ipTv =
+                                                            a.text(
+                                                                    dev.hostIp,
+                                                                    11.5f,
+                                                                    p.textTertiary);
+                                                    ipTv.setPadding(0, a.dp(2), 0, 0);
+                                                    copy.addView(ipTv);
+                                                }
+                                                row.addView(
+                                                        copy,
+                                                        new LinearLayout.LayoutParams(0, -2, 1f));
+
+                                                MobileIcons.IconView chev =
+                                                        MobileIcons.create(
+                                                                a,
+                                                                MobileIcons.IC_CHEVRON_RIGHT,
+                                                                14f,
+                                                                p.textTertiary);
+                                                row.addView(
+                                                        chev,
+                                                        new LinearLayout.LayoutParams(
+                                                                a.dp(14), a.dp(14)));
+
+                                                MobileMotion.bindPress(row, 0.97f);
+                                                row.setOnClickListener(
+                                                        v -> {
+                                                            if (mediaUrl == null
+                                                                    || mediaUrl.trim().isEmpty()) {
+                                                                a.toast(
+                                                                        "已选中设备："
+                                                                                + dev.friendlyName
+                                                                                + "，播放影片时点「投屏」即可推送");
+                                                                if (dlgRef[0] != null) {
+                                                                    dlgRef[0].dismiss();
+                                                                }
+                                                                return;
+                                                            }
+                                                            spinner.setVisibility(View.VISIBLE);
+                                                            spinner.setActive(true);
+                                                            status.setText(
+                                                                    "正在向「"
+                                                                            + dev.friendlyName
+                                                                            + "」发起投屏…");
+                                                            status.setTextColor(p.accent);
+                                                            a.worker.execute(
+                                                                    () -> {
+                                                                        try {
+                                                                            castUrl(
+                                                                                    dev,
+                                                                                    mediaUrl,
+                                                                                    mediaTitle);
+                                                                            a.ui.post(
+                                                                                    () -> {
+                                                                                        if (dlgRef[
+                                                                                                        0]
+                                                                                                != null) {
+                                                                                            dlgRef[
+                                                                                                    0]
+                                                                                                    .dismiss();
+                                                                                        }
+                                                                                        if (onCastStarted
+                                                                                                != null) {
+                                                                                            onCastStarted
+                                                                                                    .run();
+                                                                                        }
+                                                                                        showMobileActiveRemoteSheet(
+                                                                                                a,
+                                                                                                dev,
+                                                                                                mediaUrl,
+                                                                                                mediaTitle);
+                                                                                    });
+                                                                        } catch (Throwable err) {
+                                                                            a.ui.post(
+                                                                                    () -> {
+                                                                                        spinner
+                                                                                                .setActive(
+                                                                                                        false);
+                                                                                        spinner
+                                                                                                .setVisibility(
+                                                                                                        View
+                                                                                                                .GONE);
+                                                                                        status
+                                                                                                .setText(
+                                                                                                        "投屏失败："
+                                                                                                                + (err
+                                                                                                                                        .getMessage()
+                                                                                                                                != null
+                                                                                                                        ? err
+                                                                                                                                .getMessage()
+                                                                                                                        : "设备无响应"));
+                                                                                        status
+                                                                                                .setTextColor(
+                                                                                                        p.danger);
+                                                                                    });
+                                                                        }
+                                                                    });
+                                                        });
+                                                LinearLayout.LayoutParams rLp =
+                                                        new LinearLayout.LayoutParams(-1, -2);
+                                                rLp.bottomMargin = a.dp(8);
+                                                listHost.addView(row, rLp);
+                                            }
+                                        });
+                            });
+                };
+
+        dlgRef[0] =
+                MobileBottomSheet.show(a, "投屏到设备", "选择同一 Wi-Fi 下的电视或投屏盒子", null, null, body, true);
+        scanRef[0].run();
+    }
+
+    private static void showMobileActiveRemoteSheet(
+            final MainActivity a,
+            final Device dev,
+            final String mediaUrl,
+            final String mediaTitle) {
+        if (a == null || a.isFinishing()) return;
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        LinearLayout body = a.vertical();
+        body.setTag("mobile-dlna-remote");
+
+        LinearLayout card = a.vertical();
+        card.setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12));
+        card.setBackground(MobileTheme.cardBg(a, 16));
+
+        LinearLayout headRow = a.row();
+        headRow.setGravity(Gravity.CENTER_VERTICAL);
+        View dot = new View(a);
+        dot.setBackground(a.bg(p.success, 999));
+        LinearLayout.LayoutParams dLp = new LinearLayout.LayoutParams(a.dp(8), a.dp(8));
+        dLp.rightMargin = a.dp(8);
+        headRow.addView(dot, dLp);
+        TextView head =
+                a.text(
+                        dev.friendlyName + (dev.hostIp.isEmpty() ? "" : " · " + dev.hostIp),
+                        14.5f,
+                        p.textPrimary);
+        head.setTypeface(null, Typeface.BOLD);
+        head.setSingleLine(true);
+        head.setEllipsize(TextUtils.TruncateAt.END);
+        headRow.addView(head, new LinearLayout.LayoutParams(0, -2, 1f));
+        card.addView(headRow, new LinearLayout.LayoutParams(-1, -2));
+
+        if (mediaTitle != null && !mediaTitle.trim().isEmpty()) {
+            TextView titleTv = a.text("正在投屏：" + mediaTitle.trim(), 12.5f, p.textSecondary);
+            titleTv.setSingleLine(true);
+            titleTv.setEllipsize(TextUtils.TruncateAt.END);
+            titleTv.setPadding(0, a.dp(6), 0, 0);
+            card.addView(titleTv);
+        }
+
+        final TextView feedback = a.text("已连接，可远程控制大屏播放状态", 12f, p.textTertiary);
+        feedback.setPadding(0, a.dp(4), 0, 0);
+        card.addView(feedback);
+
+        LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(-1, -2);
+        cLp.bottomMargin = a.dp(14);
+        body.addView(card, cLp);
+
+        final Dialog[] remoteRef = new Dialog[1];
+        LinearLayout btnRow = a.row();
+        btnRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        Runnable sendPause =
+                () ->
+                        a.worker.execute(
+                                () -> {
+                                    try {
+                                        sendTransportAction(dev, "Pause", null);
+                                        a.ui.post(() -> feedback.setText("已发送：暂停播放"));
+                                    } catch (Throwable e) {
+                                        a.ui.post(() -> feedback.setText("暂停指令发送失败"));
+                                    }
+                                });
+        Runnable sendPlay =
+                () ->
+                        a.worker.execute(
+                                () -> {
+                                    try {
+                                        Map<String, String> args = new LinkedHashMap<>();
+                                        args.put("Speed", "1");
+                                        sendTransportAction(dev, "Play", args);
+                                        a.ui.post(() -> feedback.setText("已发送：继续播放"));
+                                    } catch (Throwable e) {
+                                        a.ui.post(() -> feedback.setText("继续播放指令发送失败"));
+                                    }
+                                });
+        Runnable sendSwitch =
+                () -> {
+                    if (remoteRef[0] != null) remoteRef[0].dismiss();
+                    showCastDevicePicker(a, mediaUrl, mediaTitle, null);
+                };
+        Runnable sendStop =
+                () ->
+                        a.worker.execute(
+                                () -> {
+                                    try {
+                                        sendTransportAction(dev, "Stop", null);
+                                    } catch (Throwable ignored) {
+                                    }
+                                    a.ui.post(
+                                            () -> {
+                                                a.toast("已退出投屏");
+                                                if (remoteRef[0] != null) remoteRef[0].dismiss();
+                                            });
+                                });
+
+        int[] icons = {
+            MobileIcons.IC_PAUSE,
+            MobileIcons.IC_PLAY,
+            MobileIcons.IC_SWITCH_SOURCE,
+            MobileIcons.IC_CLOSE
+        };
+        String[] labels = {"暂停", "继续", "换设备", "退出"};
+        String[] tags = {
+            "dlna-remote-pause", "dlna-remote-play", "dlna-remote-switch", "dlna-remote-stop"
+        };
+        Runnable[] actions = {sendPause, sendPlay, sendSwitch, sendStop};
+        for (int i = 0; i < icons.length; i++) {
+            final Runnable act = actions[i];
+            boolean danger = i == 3;
+            LinearLayout cell = a.vertical();
+            cell.setTag(tags[i]);
+            cell.setGravity(Gravity.CENTER);
+            cell.setPadding(a.dp(6), a.dp(12), a.dp(6), a.dp(12));
+            cell.setBackground(
+                    danger
+                            ? a.bg(MobileTheme.withAlpha(p.danger, p.isDark ? 0x2E : 0x18), 14)
+                            : MobileTheme.subtleBg(a, 14));
+            MobileIcons.IconView ic =
+                    MobileIcons.create(a, icons[i], 18f, danger ? p.danger : p.textPrimary);
+            cell.addView(ic, new LinearLayout.LayoutParams(a.dp(18), a.dp(18)));
+            TextView lbl = a.text(labels[i], 12f, danger ? p.danger : p.textPrimary);
+            lbl.setTypeface(null, Typeface.BOLD);
+            lbl.setPadding(0, a.dp(6), 0, 0);
+            cell.addView(lbl);
+            MobileMotion.bindPress(cell, 0.94f);
+            cell.setOnClickListener(v -> act.run());
+            LinearLayout.LayoutParams cellLp = new LinearLayout.LayoutParams(0, -2, 1f);
+            if (i > 0) cellLp.leftMargin = a.dp(8);
+            btnRow.addView(cell, cellLp);
+        }
+        body.addView(btnRow, new LinearLayout.LayoutParams(-1, -2));
+
+        remoteRef[0] = MobileBottomSheet.show(a, "投屏遥控", null, null, null, body, false);
     }
 
     /** Returns active site-local IPv4 network interfaces for multi-NIC SSDP sending. */

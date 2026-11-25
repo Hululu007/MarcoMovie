@@ -8,7 +8,6 @@ import android.media.*;
 import android.net.Uri;
 import android.os.*;
 import android.view.*;
-import android.view.animation.DecelerateInterpolator;
 import android.widget.*;
 import android.util.LruCache;
 import java.io.*;
@@ -584,6 +583,8 @@ public final class MainActivity extends Activity {
     MobilePlayerOverlay mobilePlayerOverlay;
     private android.content.SharedPreferences cachedMobilePrefs;
     private android.content.SharedPreferences cachedSecretsPrefs;
+    private int lastUiModeNight = -1;
+    int pendingSettingsScrollY = -1;
 
     android.content.SharedPreferences mobilePrefs() {
         String targetName = privateMode ? "movie_mobile_private" : Prefs.MOBILE_FILE;
@@ -602,6 +603,29 @@ public final class MainActivity extends Activity {
 
     int mobileAccentColor() {
         return Prefs.accentColorForPreset(mobilePrefs().getInt(Prefs.ACCENT_PRESET, 0));
+    }
+
+    boolean isMobileDarkTheme() {
+        return MobileTheme.isDark(this);
+    }
+
+    MobileTheme.Palette mobilePalette() {
+        return MobileTheme.of(this);
+    }
+
+    void applyMobileThemeNow() {
+        if (isTvDevice() || isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) return;
+        for (Screen s : back) {
+            s.mobileHome = null;
+        }
+        boolean inPlayer = current != null && current.player && !miniMode;
+        applyMobileSystemBars(inPlayer);
+        if (!layoutReady || current == null || inPlayer) return;
+        if (current.home && mobileShell != null) {
+            mobileShell.render();
+        } else if (inlinePlayer == null) {
+            refresh();
+        }
     }
 
     boolean isReducedTransparency() {
@@ -1019,34 +1043,94 @@ public final class MainActivity extends Activity {
         return isTvDevice() && prefs.getInt(Prefs.TV_NAVIGATION_MODE, 0) == 1;
     }
 
+    boolean lastMobileForceLightStatusIcons;
+    boolean suppressTransitionContentView;
+
     void applyMobileSystemBars(boolean fullscreenPlayer) {
+        applyMobileSystemBars(fullscreenPlayer, false);
+    }
+
+    void applyMobileSystemBars(boolean fullscreenPlayer, boolean forceLightStatusIcons) {
         if (isTvDevice()) return;
+        if (!fullscreenPlayer) {
+            lastMobileForceLightStatusIcons = forceLightStatusIcons;
+        }
         try {
             Window w = getWindow();
             if (w == null) return;
             WindowManager.LayoutParams lp = w.getAttributes();
             try {
                 java.lang.reflect.Field f = lp.getClass().getField("layoutInDisplayCutoutMode");
-                // 1 == WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                if (f.getInt(lp) != 1) {
-                    f.setInt(lp, 1);
+                // 3 == LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS (API 30+), 1 == SHORT_EDGES (API 28+)
+                int cutoutMode = Build.VERSION.SDK_INT >= 30 ? 3 : 1;
+                if (f.getInt(lp) != cutoutMode) {
+                    f.setInt(lp, cutoutMode);
                     w.setAttributes(lp);
                 }
             } catch (Throwable ignored) {
             }
+            if (Build.VERSION.SDK_INT >= 29) {
+                w.setStatusBarContrastEnforced(false);
+                w.setNavigationBarContrastEnforced(false);
+            }
+            if (Build.VERSION.SDK_INT >= 30) {
+                w.setDecorFitsSystemWindows(false);
+            }
             if (fullscreenPlayer) {
                 w.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
                 w.getDecorView().setSystemUiVisibility(5894);
+                if (Build.VERSION.SDK_INT >= 30) {
+                    WindowInsetsController controller = w.getInsetsController();
+                    if (controller != null) {
+                        int mask =
+                                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                        controller.setSystemBarsAppearance(0, mask);
+                        controller.hide(WindowInsets.Type.systemBars());
+                        controller.setSystemBarsBehavior(
+                                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                    }
+                }
             } else {
+                MobileTheme.Palette p = mobilePalette();
+                boolean lightCanvas = !p.isDark;
+                boolean darkStatusIcons = lightCanvas && !forceLightStatusIcons;
+                boolean darkNavIcons = lightCanvas;
                 w.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
                 w.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
+                w.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION);
                 w.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
-                w.getDecorView()
-                        .setSystemUiVisibility(
-                                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
                 w.setStatusBarColor(Color.TRANSPARENT);
-                w.setNavigationBarColor(0xff060a08);
+                w.setNavigationBarColor(Color.TRANSPARENT);
+                w.setBackgroundDrawable(new ColorDrawable(p.bgCanvas));
+                int vis =
+                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+                if (darkStatusIcons && Build.VERSION.SDK_INT >= 23) {
+                    vis |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                }
+                if (darkNavIcons && Build.VERSION.SDK_INT >= 26) {
+                    vis |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                }
+                w.getDecorView().setSystemUiVisibility(vis);
+                if (Build.VERSION.SDK_INT >= 30) {
+                    WindowInsetsController controller = w.getInsetsController();
+                    if (controller != null) {
+                        controller.show(WindowInsets.Type.systemBars());
+                        int mask =
+                                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                        int flags = 0;
+                        if (darkStatusIcons) {
+                            flags |= WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS;
+                        }
+                        if (darkNavIcons) {
+                            flags |= WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                        }
+                        controller.setSystemBarsAppearance(flags, mask);
+                    }
+                }
             }
         } catch (Throwable ignored) {
         }
@@ -1056,29 +1140,37 @@ public final class MainActivity extends Activity {
         if (isTvDevice()) return 0;
         try {
             Window w = getWindow();
-            if (w == null || root == null) return 0;
-            android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
-            if (android.os.Build.VERSION.SDK_INT >= 17) {
-                getWindowManager().getDefaultDisplay().getRealMetrics(dm);
-            } else {
-                getWindowManager().getDefaultDisplay().getMetrics(dm);
+            if (w == null) return 0;
+            if (Build.VERSION.SDK_INT >= 30) {
+                WindowInsets insets = w.getDecorView().getRootWindowInsets();
+                if (insets != null) {
+                    int bottom = insets.getInsets(WindowInsets.Type.navigationBars()).bottom;
+                    return Math.max(0, Math.min(dp(56), bottom));
+                }
             }
-            int[] loc = new int[2];
-            root.getLocationOnScreen(loc);
-            int rootBottom = loc[1] + root.getHeight();
-            // Only return bottom inset when the view actually extends into the system bar zone
-            if (root.getHeight() > 0 && dm.heightPixels - rootBottom >= dp(24)) {
-                return 0;
+            if (root != null) {
+                android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+                if (android.os.Build.VERSION.SDK_INT >= 17) {
+                    getWindowManager().getDefaultDisplay().getRealMetrics(dm);
+                } else {
+                    getWindowManager().getDefaultDisplay().getMetrics(dm);
+                }
+                int[] loc = new int[2];
+                root.getLocationOnScreen(loc);
+                int rootBottom = loc[1] + root.getHeight();
+                if (root.getHeight() > 0 && dm.heightPixels - rootBottom >= dp(24)) {
+                    return 0;
+                }
             }
             if (android.os.Build.VERSION.SDK_INT >= 23) {
                 android.view.WindowInsets insets = w.getDecorView().getRootWindowInsets();
                 if (insets != null) {
-                    return Math.max(0, Math.min(dp(48), insets.getSystemWindowInsetBottom()));
+                    return Math.max(0, Math.min(dp(56), insets.getSystemWindowInsetBottom()));
                 }
             }
         } catch (Throwable ignored) {
         }
-        return 0;
+        return dp(18);
     }
 
     void togglePlayerOrientation() {
@@ -1139,6 +1231,11 @@ public final class MainActivity extends Activity {
     @Override
     public void onCreate(Bundle b) {
         super.onCreate(b);
+        if (getResources() != null && getResources().getConfiguration() != null) {
+            lastUiModeNight =
+                    getResources().getConfiguration().uiMode
+                            & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+        }
         privateMode = PrivacySpace.active;
         if (privateMode) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
         activeActivity = this;
@@ -1292,7 +1389,7 @@ public final class MainActivity extends Activity {
         initializePhonetic();
         layoutIntro = b == null || b.getBoolean("layout_initial_launch", false);
         root = newGlassBackdropRoot();
-        root.setBackgroundColor(DARK);
+        root.setBackgroundColor(isTvDevice() ? DARK : mobilePalette().bgCanvas);
         setContentView(root);
         root.addOnLayoutChangeListener(
                 new View.OnLayoutChangeListener() {
@@ -1424,7 +1521,16 @@ public final class MainActivity extends Activity {
     @Override
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        boolean uiModeChanged = false;
+        if (newConfig != null) {
+            int nextNight = newConfig.uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+            if (lastUiModeNight != -1 && nextNight != lastUiModeNight) {
+                uiModeChanged = true;
+            }
+            lastUiModeNight = nextNight;
+        }
         if (!layoutReady || root == null) return;
+        boolean refreshedForOrientation = false;
         if (!isTvDevice() && usableWidth > 0 && usableHeight > 0 && newConfig != null) {
             boolean configPortrait =
                     newConfig.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT;
@@ -1440,7 +1546,19 @@ public final class MainActivity extends Activity {
                     if (playerChrome != null) playerChrome.scheduleLayout();
                 } else if (current != null) {
                     refresh();
+                    refreshedForOrientation = true;
                 }
+            }
+        }
+        if (uiModeChanged
+                && !isTvDevice()
+                && mobilePrefs().getInt(Prefs.THEME_MODE, MobileTheme.MODE_SYSTEM)
+                        == MobileTheme.MODE_SYSTEM) {
+            if (refreshedForOrientation) {
+                for (Screen s : back) s.mobileHome = null;
+                applyMobileSystemBars(current != null && current.player && !miniMode);
+            } else {
+                applyMobileThemeNow();
             }
         }
         root.post(this::syncRootDimensions);
@@ -1567,17 +1685,12 @@ public final class MainActivity extends Activity {
     }
 
     void pressFeedback(View view) {
+        if (!isTvDevice()) {
+            MobileMotion.bindPress(view, 0.94f);
+            return;
+        }
         view.setOnTouchListener(
                 (v, event) -> {
-                    if (!isTvDevice()) {
-                        if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
-                            v.setAlpha(0.75f);
-                        } else if (event.getAction() == android.view.MotionEvent.ACTION_UP
-                                || event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
-                            v.setAlpha(1.0f);
-                        }
-                        return false;
-                    }
                     if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
                         v.requestFocus();
                         FocusMotion.press(this, v, true);
@@ -1626,14 +1739,24 @@ public final class MainActivity extends Activity {
     }
 
     int statusBarHeight() {
-        int best = isTvDevice() ? 0 : dp(38);
+        int best = isTvDevice() ? 0 : dp(34);
         try {
             if (getWindow() != null && getWindow().getDecorView() != null) {
                 WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
                 if (insets != null) {
-                    best = Math.max(best, insets.getSystemWindowInsetTop());
-                    if (Build.VERSION.SDK_INT >= 28 && insets.getDisplayCutout() != null) {
-                        best = Math.max(best, insets.getDisplayCutout().getSafeInsetTop());
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        best =
+                                Math.max(
+                                        best,
+                                        insets.getInsets(
+                                                        WindowInsets.Type.statusBars()
+                                                                | WindowInsets.Type.displayCutout())
+                                                .top);
+                    } else {
+                        best = Math.max(best, insets.getSystemWindowInsetTop());
+                        if (Build.VERSION.SDK_INT >= 28 && insets.getDisplayCutout() != null) {
+                            best = Math.max(best, insets.getDisplayCutout().getSafeInsetTop());
+                        }
                     }
                 }
             }
@@ -1692,7 +1815,7 @@ public final class MainActivity extends Activity {
         root = newGlassBackdropRoot();
         root.setClipChildren(false);
         root.setClipToPadding(false);
-        root.setBackgroundColor(isTvDevice() ? 0xff0d0f14 : DARK);
+        root.setBackgroundColor(isTvDevice() ? 0xff0d0f14 : mobilePalette().bgCanvas);
         int tvBgMode = HomeAmbient.effectiveBgMode(this);
         if (!isTvDevice() || tvBgMode == Prefs.BG_MODE_WALLPAPER) {
             root.addView(ImageLoader.createAtmosphere(this), new FrameLayout.LayoutParams(-1, -1));
@@ -1795,12 +1918,12 @@ public final class MainActivity extends Activity {
             body.addView(heading);
             gap(body, 16);
         }
-        if (!reduced) {
+        if (!MobileMotion.isReduced(this)) {
             body.setTranslationY(dp(4));
             body.animate()
                     .translationY(0)
-                    .setDuration(140)
-                    .setInterpolator(new DecelerateInterpolator())
+                    .setDuration(MotionTokens.DURATION_FAST_MS)
+                    .setInterpolator(MotionTokens.createDecelerateInterpolator())
                     .start();
         }
     }
@@ -2017,6 +2140,9 @@ public final class MainActivity extends Activity {
     void open(Screen s, boolean history) {
         dismissOnboarding();
         cancelActiveTransition();
+        if (!history && !isTvDevice()) {
+            MobilePosterTransition.clearSavedState(this);
+        }
         boolean detailToPlayer =
                 s != null
                         && s.player
@@ -2424,6 +2550,9 @@ public final class MainActivity extends Activity {
             return;
         }
         if (!back.isEmpty()) {
+            if (!isTvDevice() && MobilePosterTransition.tryAnimatedBack(this)) {
+                return;
+            }
             capture();
             current = back.pop();
             renderReturn(current);
@@ -3661,6 +3790,20 @@ public final class MainActivity extends Activity {
         if (layoutReady && !privateMode) {
             SourceController.runDailyAutoUpdateIfNeeded(this, false);
         }
+        if (!isTvDevice() && getResources() != null && getResources().getConfiguration() != null) {
+            int nextNight =
+                    getResources().getConfiguration().uiMode
+                            & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+            if (lastUiModeNight != -1
+                    && nextNight != lastUiModeNight
+                    && mobilePrefs().getInt(Prefs.THEME_MODE, MobileTheme.MODE_SYSTEM)
+                            == MobileTheme.MODE_SYSTEM) {
+                lastUiModeNight = nextNight;
+                applyMobileThemeNow();
+            } else {
+                lastUiModeNight = nextNight;
+            }
+        }
     }
 
     @Override
@@ -3688,6 +3831,9 @@ public final class MainActivity extends Activity {
     @Override
     protected void onStop() {
         clearStartupBootGuard(getCacheDir());
+        if (!isTvDevice()) {
+            MobilePosterTransition.cancelActive(this);
+        }
         cancelActiveTransition();
         PrivacySpace.cancelPrompt(this);
         if (playerChrome != null) playerChrome.cancelEpisodeHoldSwitch();
@@ -3758,6 +3904,9 @@ public final class MainActivity extends Activity {
             PrivacySpace.active = false;
         }
         if (activeActivity == this) activeActivity = null;
+        if (!isTvDevice()) {
+            MobilePosterTransition.clearSavedState(this);
+        }
         cancelActiveTransition();
         dismissOnboarding();
         clearPlaybackLoading();

@@ -113,6 +113,44 @@ public final class HlsStreamProxy {
         return buildLocalUrl("/hls", sid, rootId, false);
     }
 
+    /**
+     * Resolves an active local {@code /hls?sid=...&t=...} proxy URL back to its upstream remote
+     * playlist URL so LAN DLNA cast targets can fetch the stream directly.
+     */
+    public static String originalUrlForLocalUrl(String localUrl) {
+        if (localUrl == null || localUrl.trim().isEmpty()) return "";
+        try {
+            URI u = new URI(localUrl.trim());
+            String path = u.getPath();
+            if (path == null || !path.startsWith("/hls")) return "";
+            String query = u.getRawQuery();
+            if (query == null || query.isEmpty()) return "";
+            String sid = "";
+            int targetId = 0;
+            for (String pair : query.split("&")) {
+                int eq = pair.indexOf('=');
+                if (eq <= 0) continue;
+                String k = pair.substring(0, eq);
+                String v = pair.substring(eq + 1);
+                if ("sid".equals(k)) {
+                    sid = v;
+                } else if ("t".equals(k)) {
+                    try {
+                        targetId = Integer.parseInt(v);
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            if (sid.isEmpty()) return "";
+            Session session = SESSIONS.get(sid);
+            if (session == null) return "";
+            String resolved = session.resolveId(targetId);
+            return resolved == null ? "" : resolved;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
     static String buildLocalUrl(String route, String sid, int targetId, boolean raw) {
         StringBuilder sb =
                 new StringBuilder(ProxyAddress.base())

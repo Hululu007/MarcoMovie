@@ -4,16 +4,18 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.view.View;
-import android.view.animation.LinearInterpolator;
+import com.pilipala.marcomovie.MotionTokens;
 
 /**
  * Persistent bottom slim progress indicator shown when main playback controls are hidden
  * (player-hud-spec.md §4.2: 2.5dp mobile/tablet, 3.0dp TV, zero per-frame allocations).
  */
 public final class SlimProgressBar extends View {
-    public static final long FADE_OUT_MS = 150L;
-    public static final long REDUCED_FADE_MS = 120L;
+    public static final long FADE_OUT_MS = MotionTokens.DURATION_FAST_MS;
+    public static final long REDUCED_FADE_MS = MotionTokens.DURATION_REDUCED_HUD_FADE_MS;
+    private static final int DEFAULT_MOBILE_ACCENT_ARGB = 0xE6007AFF;
 
+    private final boolean tv;
     private final Paint trackPaint = new Paint();
     private final Paint progressPaint = new Paint();
     private float fraction = 0f;
@@ -22,13 +24,14 @@ public final class SlimProgressBar extends View {
 
     public SlimProgressBar(Context context, boolean tv) {
         super(context);
+        this.tv = tv;
         setTag("player-slim-progress");
         setFocusable(false);
         setClickable(false);
         setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         trackPaint.setColor(0x38ffffff);
         trackPaint.setStyle(Paint.Style.FILL);
-        progressPaint.setColor(tv ? 0xddf5f7fb : 0xe634d399);
+        progressPaint.setColor(tv ? 0xddf5f7fb : DEFAULT_MOBILE_ACCENT_ARGB);
         progressPaint.setStyle(Paint.Style.FILL);
         setVisibility(View.GONE);
         setAlpha(0f);
@@ -40,6 +43,18 @@ public final class SlimProgressBar extends View {
                         ? context.getResources().getDisplayMetrics().density
                         : 1f;
         return Math.max(2, Math.round((tv ? 3.0f : 2.5f) * d));
+    }
+
+    public void setAccentColor(int accentArgb) {
+        if (tv) return;
+        int next =
+                accentArgb == 0
+                        ? DEFAULT_MOBILE_ACCENT_ARGB
+                        : ((accentArgb & 0x00FFFFFF) | 0xE6000000);
+        if (progressPaint.getColor() != next) {
+            progressPaint.setColor(next);
+            invalidate();
+        }
     }
 
     public void setReducedMotion(boolean reducedMotion) {
@@ -65,14 +80,14 @@ public final class SlimProgressBar extends View {
             animate()
                     .alpha(1f)
                     .setDuration(dur)
-                    .setInterpolator(new LinearInterpolator())
+                    .setInterpolator(MotionTokens.createLinearInterpolator())
                     .withEndAction(null)
                     .start();
         } else {
             animate()
                     .alpha(0f)
                     .setDuration(dur)
-                    .setInterpolator(new LinearInterpolator())
+                    .setInterpolator(MotionTokens.createLinearInterpolator())
                     .withEndAction(
                             () -> {
                                 if (!shouldShow) setVisibility(View.GONE);

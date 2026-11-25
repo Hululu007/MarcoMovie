@@ -4,7 +4,6 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.graphics.Color;
 import android.graphics.Typeface;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -32,10 +31,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.json.JSONArray;
 
 /**
- * Mobile multi-source concurrent Search Page:
- * - Native soft-keyboard search input + 1-tap clipboard paste + public-only search history chips
- * - Supports both horizontal top site filter bar and BieCuiLe-style left vertical platform sidebar
- *   ({@link Prefs#SEARCH_PLATFORM_SIDEBAR})
+ * Mobile multi-source concurrent Search Page (Day/Night {@link MobileTheme} + {@link MobileIcons} +
+ * {@link MobileMotion}):
+ * - Native soft-keyboard borderless search bar ({@link MobileSectionGroup#searchBar}) with
+ *   auto-focus on fresh empty entry, {@link MobileMotion#shakeInvalid} on empty submit, 1-tap
+ *   clipboard paste, and {@link MobileBottomSheet#showConfirm}-guarded search history
+ * - Reversible site filter pills (tapping the active site filter toggles back to {@code 全部}) and
+ *   helpful 0-hit recovery CTA
  * - Isolates every query inside a dedicated {@link SearchSession} verified against space, config,
  *   engine epoch, generation, and page validity before updating results or cache.
  * - Optional title purification ({@link EpisodeNameCleaner#cleanSearchTitle}).
@@ -227,6 +229,16 @@ final class MobileSearchPage {
 
     private MobileSearchPage() {}
 
+    /** Pure-JVM reversible site filter toggle: tapping the active site returns {@code ""} (全部). */
+    static String toggleSiteFilter(String currentFilter, String tappedSiteKey) {
+        String cur = currentFilter == null ? "" : currentFilter;
+        String tapped = tappedSiteKey == null ? "" : tappedSiteKey;
+        if (tapped.isEmpty() || tapped.equals(cur)) {
+            return "";
+        }
+        return tapped;
+    }
+
     static long beginPage() {
         return PAGE_TOKEN.incrementAndGet();
     }
@@ -321,6 +333,7 @@ final class MobileSearchPage {
 
     static void render(final MobileRootShell shell, final FrameLayout container) {
         final MainActivity a = shell.a;
+        final MobileTheme.Palette p = MobileTheme.of(a);
         final long[] pageTokenHolder = {beginPage()};
 
         LinearLayout page = a.vertical();
@@ -343,48 +356,44 @@ final class MobileSearchPage {
                 });
         container.addView(page, new FrameLayout.LayoutParams(-1, -1));
 
-        // 1. Search Input Bar
-        LinearLayout searchBar = a.row();
-        searchBar.setGravity(Gravity.CENTER_VERTICAL);
-        searchBar.setPadding(a.dp(14), a.dp(6), a.dp(8), a.dp(6));
-        searchBar.setBackground(
-                UiWidgets.glassBg(0xd81d2623, 0xd8131917, a.dp(999), a.dp(0.9f), 0x38ffffff));
+        // 1. Borderless Search Input Row (MobileSectionGroup.searchBar + Paste + Search CTA)
+        LinearLayout searchRow = a.row();
+        searchRow.setGravity(Gravity.CENTER_VERTICAL);
 
         final EditText input = new EditText(a);
-        input.setHint("搜索电影、剧集、动漫、演员…");
-        input.setHintTextColor(0xff7c858e);
-        input.setTextColor(Color.WHITE);
-        input.setTextSize(14.5f);
-        input.setSingleLine(true);
-        input.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
-        input.setBackgroundColor(Color.TRANSPARENT);
-        input.setPadding(a.dp(4), a.dp(6), a.dp(8), a.dp(6));
-        searchBar.addView(input, new LinearLayout.LayoutParams(0, -2, 1f));
+        LinearLayout searchBar = MobileSectionGroup.searchBar(a, input, "搜索电影、剧集、动漫、演员…", null);
+        searchRow.addView(searchBar, new LinearLayout.LayoutParams(0, a.dp(42), 1f));
 
-        TextView pasteChip = a.text("粘贴", 12f, 0xffd1d5db);
-        pasteChip.setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6));
-        pasteChip.setBackground(a.bg(0x22ffffff, 999));
-        UiWidgets.bindTouchFeedback(pasteChip);
-        LinearLayout.LayoutParams pLp = new LinearLayout.LayoutParams(-2, -2);
-        pLp.rightMargin = a.dp(6);
-        searchBar.addView(pasteChip, pLp);
+        FrameLayout pasteChip = new FrameLayout(a);
+        pasteChip.setBackground(MobileTheme.subtleBg(a, 14));
+        pasteChip.setContentDescription("粘贴剪贴板");
+        MobileIcons.IconView pasteIcon =
+                MobileIcons.create(a, MobileIcons.IC_CLIPBOARD, 17f, p.textSecondary);
+        pasteChip.addView(
+                pasteIcon, new FrameLayout.LayoutParams(a.dp(17), a.dp(17), Gravity.CENTER));
+        MobileMotion.bindPress(pasteChip, 0.92f);
+        LinearLayout.LayoutParams pLp = new LinearLayout.LayoutParams(a.dp(40), a.dp(42));
+        pLp.leftMargin = a.dp(8);
+        searchRow.addView(pasteChip, pLp);
 
-        int accent = a.mobileAccentColor();
-        TextView goBtn = a.text("搜索", 13f, 0xff08120e);
+        TextView goBtn = a.text("搜索", 13.5f, p.accentOnFill);
         goBtn.setTypeface(null, Typeface.BOLD);
-        goBtn.setPadding(a.dp(15), a.dp(7), a.dp(15), a.dp(7));
-        goBtn.setBackground(a.bg(accent, 999));
-        UiWidgets.bindTouchFeedback(goBtn);
-        searchBar.addView(goBtn, new LinearLayout.LayoutParams(-2, -2));
+        goBtn.setGravity(Gravity.CENTER);
+        goBtn.setPadding(a.dp(16), 0, a.dp(16), 0);
+        goBtn.setBackground(MobileTheme.accentPillBg(a, 14));
+        MobileMotion.bindPress(goBtn, 0.94f);
+        LinearLayout.LayoutParams goLp = new LinearLayout.LayoutParams(-2, a.dp(42));
+        goLp.leftMargin = a.dp(8);
+        searchRow.addView(goBtn, goLp);
 
-        page.addView(searchBar, new LinearLayout.LayoutParams(-1, -2));
+        page.addView(searchRow, new LinearLayout.LayoutParams(-1, -2));
 
         // 2. History chips + status row
         final LinearLayout historySection = a.vertical();
         historySection.setPadding(0, a.dp(10), 0, a.dp(4));
         page.addView(historySection, new LinearLayout.LayoutParams(-1, -2));
 
-        final TextView statusText = a.text("", 12.5f, MainActivity.MUTED);
+        final TextView statusText = a.text("", 12.5f, p.textSecondary);
         statusText.setPadding(a.dp(2), a.dp(6), a.dp(2), a.dp(6));
         page.addView(statusText, new LinearLayout.LayoutParams(-1, -2));
 
@@ -399,6 +408,7 @@ final class MobileSearchPage {
         final TextView[] allFilterChipRef = {null};
         final Map<String, TextView> siteFilterChips = new LinkedHashMap<>();
         final Runnable[] runSearch = new Runnable[1];
+        final int bottomPad = a.navigationBarHeight() + a.dp(106);
 
         final Runnable rebuildResults =
                 new Runnable() {
@@ -425,6 +435,9 @@ final class MobileSearchPage {
                             allFilterChipRef[0] = null;
                             siteFilterChips.clear();
                             resultsStage.removeAllViews();
+                            if (session.isComplete()) {
+                                renderZeroHitsEmpty(shell, resultsStage, session.keyword);
+                            }
                             return;
                         }
 
@@ -476,7 +489,11 @@ final class MobileSearchPage {
                                                         sKey.equals(curFilter),
                                                         useSidebar,
                                                         () -> {
-                                                            session.setSelectedSiteFilter(sKey);
+                                                            session.setSelectedSiteFilter(
+                                                                    toggleSiteFilter(
+                                                                            session
+                                                                                    .selectedSiteFilter(),
+                                                                            sKey));
                                                             run();
                                                         });
                                         siteFilterChips.put(sKey, added);
@@ -501,7 +518,7 @@ final class MobileSearchPage {
                             ScrollView leftSv = new ScrollView(a);
                             leftSv.setVerticalScrollBarEnabled(false);
                             LinearLayout leftCol = a.vertical();
-                            leftCol.setPadding(0, a.dp(4), a.dp(8), a.dp(104));
+                            leftCol.setPadding(0, a.dp(4), a.dp(8), bottomPad);
                             allFilterChipRef[0] =
                                     addPlatformFilterItem(
                                             a,
@@ -523,19 +540,22 @@ final class MobileSearchPage {
                                                 sKey.equals(curFilter),
                                                 true,
                                                 () -> {
-                                                    session.setSelectedSiteFilter(sKey);
+                                                    session.setSelectedSiteFilter(
+                                                            toggleSiteFilter(
+                                                                    session.selectedSiteFilter(),
+                                                                    sKey));
                                                     run();
                                                 });
                                 siteFilterChips.put(sKey, chip);
                             }
                             leftSv.addView(leftCol);
-                            split.addView(leftSv, new LinearLayout.LayoutParams(a.dp(104), -1));
+                            split.addView(leftSv, new LinearLayout.LayoutParams(a.dp(106), -1));
 
                             ScrollView rightSv = new ScrollView(a);
                             rightSv.setVerticalScrollBarEnabled(false);
                             shell.bindScrollBehavior(rightSv);
                             LinearLayout rightCol = a.vertical();
-                            rightCol.setPadding(a.dp(4), a.dp(4), 0, a.dp(106));
+                            rightCol.setPadding(a.dp(4), a.dp(4), 0, bottomPad);
                             populateHitRowsRange(a, rightCol, snapshot, 0, curFilter);
                             rightSv.addView(rightCol);
                             split.addView(rightSv, new LinearLayout.LayoutParams(0, -1, 1f));
@@ -570,7 +590,10 @@ final class MobileSearchPage {
                                                 sKey.equals(curFilter),
                                                 false,
                                                 () -> {
-                                                    session.setSelectedSiteFilter(sKey);
+                                                    session.setSelectedSiteFilter(
+                                                            toggleSiteFilter(
+                                                                    session.selectedSiteFilter(),
+                                                                    sKey));
                                                     run();
                                                 });
                                 siteFilterChips.put(sKey, chip);
@@ -582,7 +605,7 @@ final class MobileSearchPage {
                             listSv.setVerticalScrollBarEnabled(false);
                             shell.bindScrollBehavior(listSv);
                             LinearLayout listCol = a.vertical();
-                            listCol.setPadding(0, a.dp(2), 0, a.dp(106));
+                            listCol.setPadding(0, a.dp(2), 0, bottomPad);
                             populateHitRowsRange(a, listCol, snapshot, 0, curFilter);
                             listSv.addView(listCol);
                             vBox.addView(listSv, new LinearLayout.LayoutParams(-1, 0, 1f));
@@ -602,31 +625,43 @@ final class MobileSearchPage {
                         if (hist.isEmpty()) return;
                         LinearLayout hRow = a.row();
                         hRow.setGravity(Gravity.CENTER_VERTICAL);
-                        hRow.addView(
-                                a.text("最近搜索", 12f, MainActivity.MUTED),
-                                new LinearLayout.LayoutParams(0, -2, 1f));
-                        TextView clear = a.text("清空", 12f, 0xffef4444);
-                        UiWidgets.bindTouchFeedback(clear);
+                        TextView hTitle = a.text("最近搜索", 12.5f, p.textSecondary);
+                        hTitle.setTypeface(null, Typeface.BOLD);
+                        hRow.addView(hTitle, new LinearLayout.LayoutParams(0, -2, 1f));
+
+                        TextView clear = a.text("清空", 12.5f, p.danger);
+                        clear.setTypeface(null, Typeface.BOLD);
+                        MobileMotion.bindPress(clear, 0.94f);
                         clear.setOnClickListener(
-                                v -> {
-                                    if (!a.privateMode && a.prefs != null) {
-                                        a.prefs.edit().remove(Prefs.GLOBAL_SEARCH_HISTORY).apply();
-                                    }
-                                    run();
-                                });
+                                v ->
+                                        MobileBottomSheet.showConfirm(
+                                                a,
+                                                "清空搜索历史？",
+                                                "将移除全部 " + hist.size() + " 条最近搜索记录。",
+                                                "清空历史",
+                                                true,
+                                                () -> {
+                                                    if (!a.privateMode && a.prefs != null) {
+                                                        a.prefs
+                                                                .edit()
+                                                                .remove(Prefs.GLOBAL_SEARCH_HISTORY)
+                                                                .apply();
+                                                    }
+                                                    run();
+                                                }));
                         hRow.addView(clear);
                         historySection.addView(hRow);
 
                         HorizontalScrollView hsv = new HorizontalScrollView(a);
                         hsv.setHorizontalScrollBarEnabled(false);
-                        hsv.setPadding(0, a.dp(6), 0, 0);
+                        hsv.setPadding(0, a.dp(8), 0, 0);
                         LinearLayout pills = a.row();
                         for (final String kw : hist) {
-                            TextView p = a.text(kw, 12f, 0xffe5e7eb);
-                            p.setPadding(a.dp(12), a.dp(5), a.dp(12), a.dp(5));
-                            p.setBackground(a.bg(0xff1c2421, 999));
-                            UiWidgets.bindTouchFeedback(p);
-                            p.setOnClickListener(
+                            TextView chip = a.text(kw, 12.5f, p.textPrimary);
+                            chip.setPadding(a.dp(13), a.dp(6), a.dp(13), a.dp(6));
+                            chip.setBackground(MobileTheme.subtleBg(a, 999));
+                            MobileMotion.bindPress(chip, 0.94f);
+                            chip.setOnClickListener(
                                     v -> {
                                         input.setText(kw);
                                         input.setSelection(kw.length());
@@ -634,7 +669,7 @@ final class MobileSearchPage {
                                     });
                             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
                             lp.rightMargin = a.dp(8);
-                            pills.addView(p, lp);
+                            pills.addView(chip, lp);
                         }
                         hsv.addView(pills);
                         historySection.addView(hsv);
@@ -645,6 +680,7 @@ final class MobileSearchPage {
                 () -> {
                     final String q = input.getText().toString().trim();
                     if (q.isEmpty()) {
+                        MobileMotion.shakeInvalid(input);
                         a.toast("请输入搜索关键词");
                         return;
                     }
@@ -671,6 +707,7 @@ final class MobileSearchPage {
                         invalidateSession();
                         displayedSession[0] = null;
                         statusText.setText("当前配置中没有可搜索的片源");
+                        renderZeroHitsEmpty(shell, resultsStage, q);
                         return;
                     }
 
@@ -814,6 +851,7 @@ final class MobileSearchPage {
                             }
                         }
                     }
+                    MobileMotion.shakeInvalid(pasteChip);
                     a.toast("剪贴板为空");
                 });
 
@@ -832,8 +870,56 @@ final class MobileSearchPage {
                 input.setText(cached.keyword);
                 statusText.setText(cached.status());
                 rebuildResults.run();
+            } else {
+                // Fresh empty Search tab: auto-focus input so user can start typing immediately
+                input.post(
+                        () -> {
+                            if (!a.isFinishing() && UiCompat.isAttached(input)) {
+                                input.requestFocus();
+                                showSoftKeyboard(a, input);
+                            }
+                        });
             }
         }
+    }
+
+    private static void renderZeroHitsEmpty(
+            MobileRootShell shell, FrameLayout stage, String keyword) {
+        MainActivity a = shell.a;
+        MobileTheme.Palette p = MobileTheme.of(a);
+        LinearLayout box = a.vertical();
+        box.setGravity(Gravity.CENTER_HORIZONTAL);
+        box.setPadding(a.dp(24), a.dp(48), a.dp(24), a.dp(48));
+
+        FrameLayout badge = MobileIcons.badge(a, MobileIcons.IC_SEARCH, p.textSecondary, 50, 24);
+        box.addView(badge, new LinearLayout.LayoutParams(a.dp(50), a.dp(50)));
+        a.gap(box, 14);
+
+        String titleStr =
+                (keyword == null || keyword.isEmpty())
+                        ? "暂未找到匹配影片"
+                        : ("未找到与「" + keyword + "」相关的影片");
+        TextView head = a.text(titleStr, 15.5f, p.textPrimary);
+        head.setTypeface(null, Typeface.BOLD);
+        head.setGravity(Gravity.CENTER);
+        box.addView(head);
+        a.gap(box, 6);
+
+        TextView hint = a.text("可尝试缩短关键词，或切换其他片源后再试", 13f, p.textSecondary);
+        hint.setGravity(Gravity.CENTER);
+        box.addView(hint);
+        a.gap(box, 18);
+
+        TextView switchBtn = a.text("切换片源", 13.5f, p.accentOnFill);
+        switchBtn.setTypeface(null, Typeface.BOLD);
+        switchBtn.setGravity(Gravity.CENTER);
+        switchBtn.setPadding(a.dp(22), a.dp(10), a.dp(22), a.dp(10));
+        switchBtn.setBackground(MobileTheme.accentPillBg(a, 999));
+        MobileMotion.bindPress(switchBtn, 0.94f);
+        switchBtn.setOnClickListener(v -> shell.showQuickSourceAndModeSheet());
+        box.addView(switchBtn, new LinearLayout.LayoutParams(-2, -2));
+
+        stage.addView(box, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
     }
 
     private static TextView addPlatformFilterItem(
@@ -843,24 +929,16 @@ final class MobileSearchPage {
             boolean active,
             boolean verticalSidebar,
             Runnable onTap) {
-        int accent = a.mobileAccentColor();
-        TextView tv = a.text(text, 12f, active ? 0xff08120e : 0xffe5e7eb);
+        MobileTheme.Palette p = MobileTheme.of(a);
+        TextView tv = a.text(text, 12.5f, active ? p.accent : p.textSecondary);
         tv.setTypeface(null, active ? Typeface.BOLD : Typeface.NORMAL);
         tv.setSingleLine(!verticalSidebar);
         if (verticalSidebar) tv.setMaxLines(2);
         tv.setEllipsize(TextUtils.TruncateAt.END);
         tv.setPadding(
-                a.dp(11), a.dp(verticalSidebar ? 9 : 6), a.dp(11), a.dp(verticalSidebar ? 9 : 6));
-        tv.setBackground(
-                active
-                        ? a.bg(accent, verticalSidebar ? 12 : 999)
-                        : UiWidgets.glassBg(
-                                0xb81c2421,
-                                0xb8141a18,
-                                a.dp(verticalSidebar ? 12 : 999),
-                                a.dp(0.7f),
-                                0x24ffffff));
-        UiWidgets.bindTouchFeedback(tv);
+                a.dp(12), a.dp(verticalSidebar ? 9 : 6), a.dp(12), a.dp(verticalSidebar ? 9 : 6));
+        tv.setBackground(MobileTheme.pillBg(a, active, verticalSidebar ? 12 : 999));
+        MobileMotion.bindPress(tv, 0.94f);
         tv.setOnClickListener(v -> onTap.run());
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(verticalSidebar ? -1 : -2, -2);
         if (verticalSidebar) lp.bottomMargin = a.dp(7);
@@ -875,7 +953,9 @@ final class MobileSearchPage {
             List<Hit> hits,
             int fromIndex,
             String selectedSiteFilter) {
+        MobileTheme.Palette p = MobileTheme.of(a);
         boolean cleanTitle = a.mobilePrefs().getBoolean(Prefs.AI_CLEAN_SEARCH, false);
+        boolean animateBatch = fromIndex > 0 && !MobileMotion.isReduced(a);
         int start = Math.max(0, fromIndex);
         for (int i = start; i < hits.size(); i++) {
             final Hit h = hits.get(i);
@@ -886,19 +966,21 @@ final class MobileSearchPage {
             }
             LinearLayout card = a.row();
             card.setGravity(Gravity.CENTER_VERTICAL);
-            card.setPadding(a.dp(10), a.dp(10), a.dp(12), a.dp(10));
-            card.setBackground(
-                    UiWidgets.glassBg(0xc01b2320, 0xc0131917, a.dp(16), a.dp(0.7f), 0x26ffffff));
-            UiWidgets.bindTouchFeedback(card);
-            card.setOnClickListener(v -> MobileHomePage.openVideoOrFolder(a, h.site, h.video));
-
-            ImageView pic = new ImageView(a);
+            card.setPadding(a.dp(11), a.dp(11), a.dp(12), a.dp(11));
+            card.setBackground(MobileTheme.cardBg(a, 16));
+            if (!p.isDark) UiCompat.setElevation(card, a.dp(1.5f));
+            MobileMotion.bindPress(card, 0.97f);
+            final ImageView pic = new ImageView(a);
             pic.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            pic.setBackground(a.bg(0xff232b28, 10));
+            pic.setBackground(MobileTheme.subtleBg(a, 10));
             pic.setClipToOutline(true);
             if (h.video.poster != null && !h.video.poster.isEmpty()) {
                 a.poster(h.video.poster, pic);
             }
+            card.setOnClickListener(
+                    v ->
+                            MobilePosterTransition.openDetailFromCard(
+                                    a, h.site, h.video, pic, 10f, false));
             LinearLayout.LayoutParams pLp = new LinearLayout.LayoutParams(a.dp(56), a.dp(78));
             pLp.rightMargin = a.dp(12);
             card.addView(pic, pLp);
@@ -906,25 +988,53 @@ final class MobileSearchPage {
             LinearLayout info = a.vertical();
             String displayTitle =
                     cleanTitle ? EpisodeNameCleaner.cleanSearchTitle(h.video.title) : h.video.title;
-            TextView t = a.text(displayTitle, 14.5f, Color.WHITE);
+            TextView t = a.text(displayTitle, 14.5f, p.textPrimary);
             t.setTypeface(null, Typeface.BOLD);
             t.setMaxLines(2);
             t.setEllipsize(TextUtils.TruncateAt.END);
             info.addView(t);
 
-            String meta =
-                    h.site.name
-                            + (h.video.remarks != null && !h.video.remarks.isEmpty()
-                                    ? ("  ·  " + h.video.remarks)
-                                    : "");
-            TextView sub = a.text(meta, 12f, a.mobileAccentColor());
-            sub.setPadding(0, a.dp(5), 0, 0);
-            info.addView(sub);
+            LinearLayout metaRow = a.row();
+            metaRow.setGravity(Gravity.CENTER_VERTICAL);
+            metaRow.setPadding(0, a.dp(6), 0, 0);
+
+            TextView siteTag = a.text(h.site.name, 11.5f, p.accent);
+            siteTag.setTypeface(null, Typeface.BOLD);
+            siteTag.setSingleLine(true);
+            siteTag.setPadding(a.dp(7), a.dp(2), a.dp(7), a.dp(2));
+            siteTag.setBackground(MobileTheme.pillBg(a, true, 6));
+            metaRow.addView(siteTag);
+
+            if (h.video.remarks != null && !h.video.remarks.trim().isEmpty()) {
+                TextView rem = a.text(h.video.remarks.trim(), 12f, p.textSecondary);
+                rem.setSingleLine(true);
+                rem.setEllipsize(TextUtils.TruncateAt.END);
+                LinearLayout.LayoutParams rLp = new LinearLayout.LayoutParams(0, -2, 1f);
+                rLp.leftMargin = a.dp(8);
+                metaRow.addView(rem, rLp);
+            }
+            info.addView(metaRow, new LinearLayout.LayoutParams(-1, -2));
 
             card.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
+
+            MobileIcons.IconView chev =
+                    MobileIcons.create(a, MobileIcons.IC_CHEVRON_RIGHT, 14f, p.textTertiary);
+            LinearLayout.LayoutParams chLp = new LinearLayout.LayoutParams(a.dp(14), a.dp(14));
+            chLp.leftMargin = a.dp(8);
+            card.addView(chev, chLp);
+
             LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(-1, -2);
             cLp.bottomMargin = a.dp(9);
             parent.addView(card, cLp);
+
+            if (animateBatch) {
+                card.setAlpha(0f);
+                card.animate()
+                        .alpha(1f)
+                        .setDuration(MotionTokens.DURATION_FAST_MS)
+                        .setInterpolator(MotionTokens.createDecelerateInterpolator())
+                        .start();
+            }
         }
     }
 
@@ -969,6 +1079,15 @@ final class MobileSearchPage {
     private static void saveSearchHistory(MainActivity a, String kw) {
         if (a == null) return;
         saveSearchHistory(a.prefs, a.privateMode, kw);
+    }
+
+    private static void showSoftKeyboard(MainActivity a, View v) {
+        try {
+            InputMethodManager imm =
+                    (InputMethodManager) a.getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) imm.showSoftInput(v, InputMethodManager.SHOW_IMPLICIT);
+        } catch (Exception ignored) {
+        }
     }
 
     private static void hideSoftKeyboard(MainActivity a, View v) {

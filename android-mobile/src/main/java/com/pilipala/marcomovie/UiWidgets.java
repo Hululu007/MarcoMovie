@@ -14,17 +14,12 @@ import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.text.TextUtils;
 import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.Window;
-import android.view.WindowManager;
-import android.view.animation.DecelerateInterpolator;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -75,42 +70,13 @@ final class UiWidgets {
 
     static void bindTouchFeedback(View v) {
         if (v == null) return;
-        v.setFocusable(false);
-        v.setFocusableInTouchMode(false);
-        v.setOnTouchListener(
-                (view, event) -> {
-                    int action = event.getActionMasked();
-                    if (action == MotionEvent.ACTION_DOWN) {
-                        view.setAlpha(0.72f);
-                    } else if (action == MotionEvent.ACTION_UP
-                            || action == MotionEvent.ACTION_CANCEL) {
-                        view.setAlpha(1.0f);
-                    }
-                    return false;
-                });
+        MobileMotion.bindPress(v, 0.94f);
     }
 
     static void bindCardTouchFeedback(
             MainActivity a, View card, Drawable normalBg, Drawable pressedBg) {
         if (card == null) return;
-        card.setOnTouchListener(
-                (v, ev) -> {
-                    int act = ev.getActionMasked();
-                    if (act == MotionEvent.ACTION_DOWN) {
-                        if (pressedBg != null) v.setBackground(pressedBg);
-                        if (!a.reduced) {
-                            v.animate().cancel();
-                            v.animate().scaleX(0.986f).scaleY(0.986f).setDuration(80).start();
-                        }
-                    } else if (act == MotionEvent.ACTION_UP || act == MotionEvent.ACTION_CANCEL) {
-                        if (normalBg != null) v.setBackground(normalBg);
-                        if (!a.reduced) {
-                            v.animate().cancel();
-                            v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
-                        }
-                    }
-                    return false;
-                });
+        MobileMotion.bindPress(card, 0.97f, normalBg, pressedBg);
     }
 
     static void showDrawerPicker(
@@ -134,219 +100,222 @@ final class UiWidgets {
                     .show();
             return;
         }
-        final Dialog dlg = new Dialog(a);
-        dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        if (dlg.getWindow() != null) {
-            dlg.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            dlg.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            dlg.getWindow()
-                    .setLayout(
-                            WindowManager.LayoutParams.MATCH_PARENT,
-                            WindowManager.LayoutParams.MATCH_PARENT);
+        MobileBottomSheet.showPicker(a, title, subtitle, options, selectedIndex, onSelect);
+    }
+
+    /** Pure-JVM classifier for clipboard import candidates (URL, JSON, M3U, TXT, ZIP, clan://). */
+    static String classifyImportCandidate(String raw) {
+        if (raw == null) return null;
+        String text = raw.trim();
+        if (text.length() < 6 || text.length() > 262144) return null;
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("#extm3u")
+                || lower.contains("#genre#")
+                || lower.contains(",http://")
+                || lower.contains(",https://")) {
+            return "直播源";
         }
-
-        FrameLayout backdrop = new FrameLayout(a);
-        backdrop.setMinimumWidth(a.windowWidth());
-        backdrop.setMinimumHeight(a.windowHeight());
-        backdrop.setBackgroundColor(0x88000000);
-        backdrop.setOnClickListener(v -> dlg.dismiss());
-
-        int sheetWidth =
-                a.isPortrait() ? a.windowWidth() : Math.min(a.windowWidth() - a.dp(32), a.dp(540));
-        LinearLayout sheet = a.vertical();
-        sheet.setClickable(true);
-        sheet.setMinimumWidth(sheetWidth);
-        sheet.setPadding(a.dp(20), a.dp(12), a.dp(20), a.dp(28));
-        GradientDrawable sheetBg =
-                new GradientDrawable(
-                        GradientDrawable.Orientation.TOP_BOTTOM,
-                        new int[] {0xf619221f, 0xfa101614});
-        float r = a.dp(26);
-        sheetBg.setCornerRadii(new float[] {r, r, r, r, 0, 0, 0, 0});
-        sheetBg.setStroke(Math.max(1, a.dp(1)), 0x33ffffff);
-        sheet.setBackground(sheetBg);
-
-        View handle = new View(a);
-        handle.setBackground(a.bg(0x48ffffff, 999));
-        LinearLayout.LayoutParams handleLp = new LinearLayout.LayoutParams(a.dp(40), a.dp(4));
-        handleLp.gravity = Gravity.CENTER_HORIZONTAL;
-        handleLp.bottomMargin = a.dp(14);
-        sheet.addView(handle, handleLp);
-
-        LinearLayout headerRow = a.row();
-        headerRow.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout titleCol = a.vertical();
-        TextView titleView = a.text(title, 18, Color.WHITE);
-        titleView.setTypeface(null, Typeface.BOLD);
-        titleCol.addView(titleView);
-        if (subtitle != null && !subtitle.isEmpty()) {
-            TextView subView = a.text(subtitle, 12.5f, MainActivity.MUTED);
-            subView.setPadding(0, a.dp(4), 0, 0);
-            titleCol.addView(subView);
+        if (lower.startsWith("http://") || lower.startsWith("https://")) {
+            if (lower.contains(".m3u")) return "直播源链接";
+            if (lower.endsWith(".zip") || lower.contains(".zip?")) return "压缩配置包";
+            if (lower.endsWith(".js")
+                    || lower.contains(".js?")
+                    || lower.endsWith(".py")
+                    || lower.contains(".py?")) return "脚本源链接";
+            return "网址配置";
         }
-        headerRow.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
-
-        TextView closeBtn = a.text("关闭", 12.5f, 0xffe5e7eb);
-        closeBtn.setGravity(Gravity.CENTER);
-        closeBtn.setPadding(a.dp(13), a.dp(6), a.dp(13), a.dp(6));
-        closeBtn.setBackground(a.bg(0x24ffffff, 999));
-        bindTouchFeedback(closeBtn);
-        closeBtn.setOnClickListener(v -> dlg.dismiss());
-        headerRow.addView(closeBtn, new LinearLayout.LayoutParams(-2, -2));
-        sheet.addView(headerRow, new LinearLayout.LayoutParams(-1, -2));
-
-        a.gap(sheet, 16);
-
-        int accent = a.mobileAccentColor();
-        int accentFillTop = (accent & 0x00ffffff) | 0x38000000;
-        int accentFillBot = (accent & 0x00ffffff) | 0x22000000;
-        int accentStroke = (accent & 0x00ffffff) | 0x88000000;
-
-        ScrollView scroll = new ScrollView(a);
-        scroll.setVerticalScrollBarEnabled(false);
-        LinearLayout list = a.vertical();
-        for (int i = 0; i < options.length; i++) {
-            final int idx = i;
-            boolean active = (i == selectedIndex);
-            LinearLayout optRow = a.row();
-            optRow.setGravity(Gravity.CENTER_VERTICAL);
-            optRow.setPadding(a.dp(16), a.dp(15), a.dp(16), a.dp(15));
-            optRow.setBackground(
-                    active
-                            ? glassBg(
-                                    accentFillTop, accentFillBot, a.dp(16), a.dp(1f), accentStroke)
-                            : glassBg(0xb8202926, 0xb818201d, a.dp(16), a.dp(0.7f), 0x22ffffff));
-            bindTouchFeedback(optRow);
-
-            TextView label = a.text(options[i], 14.5f, active ? Color.WHITE : 0xffe5e7eb);
-            label.setTypeface(null, active ? Typeface.BOLD : Typeface.NORMAL);
-            optRow.addView(label, new LinearLayout.LayoutParams(0, -2, 1f));
-
-            TextView check = a.text(active ? "✓" : "", 16, accent);
-            check.setTypeface(null, Typeface.BOLD);
-            optRow.addView(check, new LinearLayout.LayoutParams(-2, -2));
-
-            optRow.setOnClickListener(
-                    v -> {
-                        dlg.dismiss();
-                        if (onSelect != null) onSelect.accept(idx);
-                    });
-
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-            lp.bottomMargin = a.dp(10);
-            list.addView(optRow, lp);
+        if (lower.startsWith("clan://")) {
+            return "本地规则";
         }
-        scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
-        int maxSheetHeight = Math.round(a.windowHeight() * 0.72f);
-        sheet.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        if (text.startsWith("{")
+                && text.endsWith("}")
+                && (text.contains("\"sites\"")
+                        || text.contains("\"urls\"")
+                        || text.contains("\"lives\"")
+                        || text.contains("\"spider\""))) {
+            return "JSON 配置";
+        }
+        return null;
+    }
 
-        FrameLayout.LayoutParams sheetLp =
-                new FrameLayout.LayoutParams(
-                        sheetWidth, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        sheetLp.topMargin = Math.max(a.dp(80), a.windowHeight() - maxSheetHeight);
-        backdrop.addView(sheet, sheetLp);
-
-        dlg.setContentView(
-                backdrop,
-                new ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        dlg.show();
-        if (dlg.getWindow() != null) {
-            dlg.getWindow()
-                    .setLayout(
-                            WindowManager.LayoutParams.MATCH_PARENT,
-                            WindowManager.LayoutParams.MATCH_PARENT);
-            dlg.getWindow().setGravity(Gravity.BOTTOM | Gravity.FILL_HORIZONTAL);
+    private static String readClipboardImportCandidate(MainActivity a) {
+        try {
+            ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm == null || !cm.hasPrimaryClip()) return null;
+            ClipData clip = cm.getPrimaryClip();
+            if (clip == null || clip.getItemCount() <= 0 || clip.getItemAt(0).getText() == null) {
+                return null;
+            }
+            String text = clip.getItemAt(0).getText().toString().trim();
+            return classifyImportCandidate(text) != null ? text : null;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
     static void showMobileImportDialog(MainActivity a) {
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        final MobileBottomSheet.SheetHandle[] handleRef = new MobileBottomSheet.SheetHandle[1];
         LinearLayout panel = a.vertical();
-        panel.setPadding(a.dp(4), a.dp(6), a.dp(4), a.dp(4));
+        panel.setPadding(0, a.dp(2), 0, a.dp(6));
 
-        TextView tip =
-                a.text("输入或粘贴配置网址（JSON / JS / PY / TXT / M3U / ZIP）或源码文本：", 13, MainActivity.MUTED);
-        panel.addView(tip);
-        a.gap(panel, 10);
+        final String detectedClip = readClipboardImportCandidate(a);
+        if (detectedClip != null) {
+            String kind = classifyImportCandidate(detectedClip);
+            String preview = detectedClip.replace('\n', ' ').replace('\r', ' ').trim();
+            if (preview.length() > 64) {
+                preview = preview.substring(0, 64) + "…";
+            }
+            LinearLayout clipCard = a.row();
+            clipCard.setGravity(Gravity.CENTER_VERTICAL);
+            clipCard.setPadding(a.dp(14), a.dp(13), a.dp(14), a.dp(13));
+            clipCard.setBackground(a.bg(p.accent, 16));
+            MobileMotion.bindPress(clipCard, 0.96f);
+
+            FrameLayout clipBadge = new FrameLayout(a);
+            clipBadge.setBackground(a.bg(MobileTheme.withAlpha(p.accentOnFill, 0x26), 10));
+            MobileIcons.IconView clipIcon =
+                    MobileIcons.create(a, MobileIcons.IC_CLIPBOARD, 18f, p.accentOnFill);
+            clipBadge.addView(
+                    clipIcon, new FrameLayout.LayoutParams(a.dp(18), a.dp(18), Gravity.CENTER));
+            LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(a.dp(34), a.dp(34));
+            badgeLp.rightMargin = a.dp(12);
+            clipCard.addView(clipBadge, badgeLp);
+
+            LinearLayout clipTextCol = a.vertical();
+            TextView clipTitle = a.text("检测到剪贴板影视源，一键导入", 14.5f, p.accentOnFill);
+            clipTitle.setTypeface(null, Typeface.BOLD);
+            clipTitle.setSingleLine(true);
+            clipTitle.setEllipsize(TextUtils.TruncateAt.END);
+            clipTextCol.addView(clipTitle);
+
+            TextView clipSub =
+                    a.text(
+                            kind + " · " + preview,
+                            12f,
+                            MobileTheme.withAlpha(p.accentOnFill, 0xCC));
+            clipSub.setSingleLine(true);
+            clipSub.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            clipSub.setPadding(0, a.dp(2), 0, 0);
+            clipTextCol.addView(clipSub);
+            clipCard.addView(clipTextCol, new LinearLayout.LayoutParams(0, -2, 1f));
+
+            MobileIcons.IconView arrow =
+                    MobileIcons.create(a, MobileIcons.IC_CHEVRON_RIGHT, 15f, p.accentOnFill);
+            LinearLayout.LayoutParams arrowLp = new LinearLayout.LayoutParams(a.dp(15), a.dp(15));
+            arrowLp.leftMargin = a.dp(8);
+            clipCard.addView(arrow, arrowLp);
+
+            clipCard.setOnClickListener(
+                    v -> {
+                        if (handleRef[0] != null) handleRef[0].dismiss();
+                        importTextOrUrl(a, detectedClip);
+                    });
+            panel.addView(clipCard, new LinearLayout.LayoutParams(-1, -2));
+            a.gap(panel, 14);
+        }
 
         final EditText input = new EditText(a);
-        input.setHint("https://…/config.json 或 .js / .py / .txt / .zip");
-        input.setHintTextColor(0xff6b7280);
-        input.setTextColor(MainActivity.WHITE);
-        input.setTextSize(14);
+        input.setHint("输入或粘贴网址 / .json / .m3u / .zip");
+        input.setHintTextColor(p.textTertiary);
+        input.setTextColor(p.textPrimary);
+        input.setTextSize(14.5f);
         input.setSingleLine(true);
         input.setShowSoftInputOnFocus(true);
         input.setLongClickable(true);
         input.setTextIsSelectable(true);
-        input.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
-        input.setBackground(a.bg(0xff1e2623, 12));
+        input.setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12));
+        input.setBackground(MobileTheme.subtleBg(a, 14));
         String savedOrigin = a.prefs.getString(Prefs.ORIGIN, "");
         if (!savedOrigin.isEmpty()) {
             input.setText(savedOrigin);
             input.setSelection(savedOrigin.length());
         }
         panel.addView(input, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(panel, 12);
+        a.gap(panel, 10);
 
-        int accent = a.mobileAccentColor();
-        TextView pasteBtn = a.text("一键读取剪贴板并直接导入", 13, Color.WHITE);
-        pasteBtn.setTypeface(null, Typeface.BOLD);
-        pasteBtn.setGravity(Gravity.CENTER);
-        pasteBtn.setPadding(a.dp(14), a.dp(11), a.dp(14), a.dp(11));
-        pasteBtn.setBackground(a.bg(accent, 999));
-        bindTouchFeedback(pasteBtn);
-        panel.addView(pasteBtn, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(panel, 8);
-
-        TextView fileBtn = a.text("选择本地配置或本地包 (.json/.js/.py/.txt/.zip)", 13, MainActivity.WHITE);
-        fileBtn.setGravity(Gravity.CENTER);
-        fileBtn.setPadding(a.dp(14), a.dp(11), a.dp(14), a.dp(11));
-        fileBtn.setBackground(a.bg(0xff1e2623, 999));
-        bindTouchFeedback(fileBtn);
-        panel.addView(fileBtn, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(panel, 8);
-
-        TextView liveBtn = a.text("导入或管理电视直播源 (M3U / TXT / JSON)", 13, MainActivity.WHITE);
-        liveBtn.setGravity(Gravity.CENTER);
-        liveBtn.setPadding(a.dp(14), a.dp(11), a.dp(14), a.dp(11));
-        liveBtn.setBackground(a.bg(0xff1e2623, 999));
-        bindTouchFeedback(liveBtn);
-        panel.addView(liveBtn, new LinearLayout.LayoutParams(-1, -2));
-
-        final AppDialog dialog =
-                new AppDialog.Builder(a)
-                        .setTitle("导入或更新配置")
-                        .setView(panel)
-                        .setNegativeButton("取消", null)
-                        .setNeutralButton("连接 Emby", (d, w) -> EmbyEngine.connect(a))
-                        .setPositiveButton(
-                                "导入输入内容",
-                                (d, w) -> {
-                                    String raw = input.getText().toString().trim();
-                                    if (raw.isEmpty()) {
-                                        a.toast("请输入配置网址或点击剪贴板导入");
-                                        return;
-                                    }
-                                    importTextOrUrl(a, raw);
-                                })
-                        .create();
-
-        pasteBtn.setOnClickListener(
+        TextView submitBtn =
+                a.text("导入输入内容", 14.5f, detectedClip != null ? p.textPrimary : p.accentOnFill);
+        submitBtn.setTypeface(null, Typeface.BOLD);
+        submitBtn.setGravity(Gravity.CENTER);
+        submitBtn.setMinimumHeight(a.dp(46));
+        submitBtn.setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(12));
+        submitBtn.setBackground(
+                detectedClip != null ? MobileTheme.subtleBg(a, 14) : a.bg(p.accent, 14));
+        MobileMotion.bindPress(submitBtn, 0.96f);
+        submitBtn.setOnClickListener(
                 v -> {
-                    dialog.dismiss();
-                    pasteConfigFromClipboard(a);
+                    String raw = input.getText().toString().trim();
+                    if (raw.isEmpty()) {
+                        MobileMotion.shakeInvalid(input);
+                        a.toast("请输入配置网址或先复制影视源链接");
+                        return;
+                    }
+                    if (handleRef[0] != null) handleRef[0].dismiss();
+                    importTextOrUrl(a, raw);
                 });
-        fileBtn.setOnClickListener(
-                v -> {
-                    dialog.dismiss();
-                    a.pickConfig();
-                });
-        liveBtn.setOnClickListener(
-                v -> {
-                    dialog.dismiss();
-                    SourceController.showLiveImportDialog(a);
-                });
-        dialog.show();
+        panel.addView(submitBtn, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(panel, 14);
+
+        java.util.List<View> rows = new java.util.ArrayList<>();
+        if (detectedClip == null) {
+            rows.add(
+                    MobileSectionGroup.navRow(
+                            a,
+                            MobileIcons.IC_CLIPBOARD,
+                            p.accent,
+                            "从剪贴板粘贴导入",
+                            null,
+                            () -> {
+                                if (handleRef[0] != null) handleRef[0].dismiss();
+                                pasteConfigFromClipboard(a);
+                            }));
+        }
+        rows.add(
+                MobileSectionGroup.navRow(
+                        a,
+                        MobileIcons.IC_FOLDER,
+                        0xFF10B981,
+                        "选择本地文件或压缩包",
+                        ".json / .zip",
+                        () -> {
+                            if (handleRef[0] != null) handleRef[0].dismiss();
+                            a.pickConfig();
+                        }));
+        rows.add(
+                MobileSectionGroup.navRow(
+                        a,
+                        MobileIcons.IC_LIVE,
+                        0xFFF59E0B,
+                        "导入或管理电视直播源",
+                        "M3U / TXT",
+                        () -> {
+                            if (handleRef[0] != null) handleRef[0].dismiss();
+                            SourceController.showLiveImportDialog(a);
+                        }));
+        rows.add(
+                MobileSectionGroup.navRow(
+                        a,
+                        MobileIcons.IC_NETDISK,
+                        0xFF8B5CF6,
+                        "连接 Emby 媒体库",
+                        null,
+                        () -> {
+                            if (handleRef[0] != null) handleRef[0].dismiss();
+                            EmbyEngine.connect(a);
+                        }));
+        LinearLayout actionsGroup = MobileSectionGroup.create(a, "更多导入方式", null, rows);
+        panel.addView(actionsGroup, new LinearLayout.LayoutParams(-1, -2));
+
+        handleRef[0] =
+                MobileBottomSheet.showHandle(
+                        a,
+                        "导入影视源",
+                        "支持 JSON / JS / PY / TXT / M3U / ZIP 配置",
+                        null,
+                        null,
+                        panel,
+                        true);
     }
 
     static void pasteConfigFromClipboard(MainActivity a) {
@@ -579,14 +548,14 @@ final class UiWidgets {
                 animator.cancel();
                 animator = null;
             }
-            if (!animate || Math.abs(progress - target) < 0.01f) {
+            if (!animate || MobileMotion.isReduced(a) || Math.abs(progress - target) < 0.01f) {
                 progress = target;
                 invalidate();
                 return;
             }
             animator = ValueAnimator.ofFloat(progress, target);
-            animator.setDuration(160);
-            animator.setInterpolator(new DecelerateInterpolator());
+            animator.setDuration(MotionTokens.DURATION_FAST_MS);
+            animator.setInterpolator(MotionTokens.createStandardInterpolator());
             animator.addUpdateListener(
                     anim -> {
                         progress = (Float) anim.getAnimatedValue();
@@ -617,14 +586,24 @@ final class UiWidgets {
             float w = getWidth(), h = getHeight();
             if (w <= 0 || h <= 0) return;
             float radius = h / 2f;
-            int onColor = a.isTvDevice() ? 0xff30d158 : a.mobileAccentColor();
-            int trackColor = blendColor(0x58787880, onColor, progress);
+            boolean tv = a.isTvDevice();
+            int onColor;
+            int offColor;
+            if (tv) {
+                onColor = 0xff30d158;
+                offColor = 0x58787880;
+            } else {
+                MobileTheme.Palette p = MobileTheme.of(a);
+                onColor = p.accent;
+                offColor = p.isDark ? 0xff323644 : 0xffd5dae4;
+            }
+            int trackColor = blendColor(offColor, onColor, progress);
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(trackColor);
             RectF trackRect = new RectF(0, 0, w, h);
             c.drawRoundRect(trackRect, radius, radius, paint);
 
-            if (progress < 0.95f) {
+            if (tv && progress < 0.95f) {
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(Math.max(1f, a.dp(0.8f)));
                 paint.setColor(blendColor(0x2effffff, 0x00ffffff, progress));
@@ -641,8 +620,8 @@ final class UiWidgets {
             float cy = h / 2f;
 
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(0x33000000);
-            c.drawCircle(cx, cy + a.dp(0.8f), thumbRadius, paint);
+            paint.setColor(tv ? 0x33000000 : 0x22000000);
+            c.drawCircle(cx, cy + a.dp(0.7f), thumbRadius, paint);
 
             paint.setColor(Color.WHITE);
             c.drawCircle(cx, cy, thumbRadius, paint);

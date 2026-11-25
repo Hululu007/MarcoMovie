@@ -61,13 +61,15 @@ final class PrivacySpace {
             return;
         }
         boolean setup = !lock.contains("hash");
+        boolean tv = a.isTvDevice();
+        MobileTheme.Palette p = tv ? null : MobileTheme.of(a);
         LinearLayout panel = a.vertical();
-        panel.setPadding(a.dp(12), a.dp(8), a.dp(12), a.dp(8));
+        panel.setPadding(a.dp(tv ? 12 : 4), a.dp(8), a.dp(tv ? 12 : 4), a.dp(8));
         panel.addView(
                 a.text(
                         setup ? "设置 4 位数字密码。私密订阅单独保存，不进入公开备份。" : "输入密码进入隐私空间",
-                        15,
-                        MainActivity.MUTED));
+                        tv ? 15 : 13.5f,
+                        tv ? MainActivity.MUTED : p.textSecondary));
         EditText pin = input(a, "4 位数字密码");
         LinearLayout.LayoutParams pinLp = new LinearLayout.LayoutParams(-1, -2);
         pinLp.topMargin = a.dp(10);
@@ -251,9 +253,15 @@ final class PrivacySpace {
 
     private static EditText input(MainActivity a, String hint) {
         EditText input = new EditText(a);
+        boolean tv = a.isTvDevice();
+        MobileTheme.Palette p = tv ? null : MobileTheme.of(a);
         input.setHint(hint);
-        input.setTextColor(MainActivity.WHITE);
-        input.setHintTextColor(0x80ebebf5);
+        input.setTextColor(tv ? MainActivity.WHITE : p.textPrimary);
+        input.setHintTextColor(tv ? 0x80ebebf5 : p.textTertiary);
+        if (!tv) {
+            input.setBackground(MobileTheme.subtleBg(a, 12));
+            input.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+        }
         input.setTextSize(15f);
         input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
         input.setFilters(

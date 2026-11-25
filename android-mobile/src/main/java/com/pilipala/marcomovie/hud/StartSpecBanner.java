@@ -7,11 +7,10 @@ import android.os.Build;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
-import android.view.animation.DecelerateInterpolator;
-import android.view.animation.LinearInterpolator;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import com.pilipala.marcomovie.MotionTokens;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -813,7 +812,7 @@ public final class StartSpecBanner extends LinearLayout {
             animate()
                     .alpha(1f)
                     .setDuration(REDUCED_FADE_MS)
-                    .setInterpolator(new LinearInterpolator())
+                    .setInterpolator(MotionTokens.createLinearInterpolator())
                     .withEndAction(null)
                     .start();
         } else {
@@ -822,7 +821,7 @@ public final class StartSpecBanner extends LinearLayout {
                     .alpha(1f)
                     .translationY(0f)
                     .setDuration(FADE_IN_MS)
-                    .setInterpolator(new DecelerateInterpolator())
+                    .setInterpolator(MotionTokens.createDecelerateInterpolator())
                     .withEndAction(null)
                     .start();
         }
@@ -837,7 +836,7 @@ public final class StartSpecBanner extends LinearLayout {
         animate()
                 .alpha(0f)
                 .setDuration(dur)
-                .setInterpolator(new LinearInterpolator())
+                .setInterpolator(MotionTokens.createLinearInterpolator())
                 .withEndAction(
                         () -> {
                             if (!activeDisplay) setVisibility(View.GONE);

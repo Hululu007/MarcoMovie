@@ -72,7 +72,7 @@ final class CloudSyncDialog {
 
     private static final AtomicBoolean IN_FLIGHT = new AtomicBoolean(false);
     private static final AtomicBoolean PENDING_RESYNC = new AtomicBoolean(false);
-    private static WeakReference<AppDialog> activeDialogRef;
+    private static WeakReference<android.app.Dialog> activeDialogRef;
     private static WeakReference<MainActivity> activeDialogOwnerRef;
     private static WeakReference<MainActivity> lastExitPushActivityRef;
 
@@ -86,7 +86,7 @@ final class CloudSyncDialog {
             MainActivity dialogOwner =
                     activeDialogOwnerRef == null ? null : activeDialogOwnerRef.get();
             if (a == null || dialogOwner == null || dialogOwner == a) {
-                AppDialog d = activeDialogRef.get();
+                android.app.Dialog d = activeDialogRef.get();
                 if (d != null) {
                     try {
                         d.dismiss();
@@ -1406,28 +1406,39 @@ final class CloudSyncDialog {
             a.notice("隐私空间内的观看记录、收藏与订阅严格仅保存在本机，不会上传到 WebDAV 或通过局域网同步。");
             return;
         }
+        final boolean tv = a.isTvDevice();
+        final MobileTheme.Palette p = tv ? null : MobileTheme.of(a);
 
         LinearLayout panel = a.vertical();
-        panel.setPadding(a.dp(6), a.dp(4), a.dp(6), a.dp(6));
+        panel.setPadding(a.dp(tv ? 6 : 2), a.dp(4), a.dp(tv ? 6 : 2), a.dp(6));
 
         TextView intro =
                 a.text(
                         "在手机、平板、电视、iPhone/iPad、Mac 与 Windows 电脑间自动同步观看进度、收藏与公开订阅源（兼容坚果云、Nextcloud、Alist、群晖等 WebDAV 及同局域网设备直连）。",
                         13,
-                        MainActivity.MUTED);
+                        tv ? MainActivity.MUTED : p.textSecondary);
         intro.setLineSpacing(a.dp(3), 1f);
         panel.addView(intro);
-        a.gap(panel, 8);
+        a.gap(panel, 10);
 
-        TextView statusBadge = a.text("状态：" + statusSummary(a), 12.5f, 0xff5ac8fa);
+        TextView statusBadge = a.text("状态：" + statusSummary(a), 12.5f, tv ? 0xff5ac8fa : p.accent);
         statusBadge.setTypeface(null, Typeface.BOLD);
-        panel.addView(statusBadge);
-        a.gap(panel, 12);
+        if (!tv) {
+            statusBadge.setPadding(a.dp(12), a.dp(8), a.dp(12), a.dp(8));
+            statusBadge.setBackground(
+                    MobileTheme.outlinedBg(
+                            a,
+                            MobileTheme.withAlpha(p.accent, p.isDark ? 0x22 : 0x14),
+                            MobileTheme.withAlpha(p.accent, p.isDark ? 0x44 : 0x33),
+                            12));
+        }
+        panel.addView(statusBadge, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(panel, 14);
 
-        TextView secWebdav = a.text("一、WebDAV 自动云同步", 14, MainActivity.WHITE);
+        TextView secWebdav = a.text("一、WebDAV 自动云同步", 14, tv ? MainActivity.WHITE : p.textPrimary);
         secWebdav.setTypeface(null, Typeface.BOLD);
         panel.addView(secWebdav);
-        a.gap(panel, 6);
+        a.gap(panel, 8);
 
         final EditText urlInput =
                 styledInput(
@@ -1477,7 +1488,7 @@ final class CloudSyncDialog {
         panel.addView(
                 TvQrInputHelper.wrap(a, passInput, "WebDAV 密码", false, true, false, null),
                 new LinearLayout.LayoutParams(-1, -2));
-        a.gap(panel, 8);
+        a.gap(panel, 10);
 
         final Context dialogAppCtx =
                 a.getApplicationContext() != null ? a.getApplicationContext() : a;
@@ -1510,123 +1521,220 @@ final class CloudSyncDialog {
                             });
                 });
 
-        final CheckBox autoCheck = new CheckBox(a);
-        autoCheck.setText("开启后台自动云同步（启动自动拉取，播放进度、收藏与订阅变更自动推送）");
-        autoCheck.setTextColor(MainActivity.WHITE);
-        autoCheck.setTextSize(13);
-        autoCheck.setChecked(a.prefs.getBoolean(Prefs.WEBDAV_AUTO, true));
-        panel.addView(autoCheck, new LinearLayout.LayoutParams(-1, -2));
+        final boolean[] autoEnabled = {a.prefs.getBoolean(Prefs.WEBDAV_AUTO, true)};
+        final boolean[] syncSubsEnabled = {a.prefs.getBoolean(Prefs.WEBDAV_SYNC_SUBS, true)};
 
-        final CheckBox subsCheck = new CheckBox(a);
-        subsCheck.setTag("cloud-sync-subs-toggle");
-        subsCheck.setText("同时同步我的订阅源配置（新设备一次同步即可拿到公开订阅源 + 进度 + 收藏，不含隐私空间）");
-        subsCheck.setTextColor(MainActivity.WHITE);
-        subsCheck.setTextSize(13);
-        subsCheck.setChecked(a.prefs.getBoolean(Prefs.WEBDAV_SYNC_SUBS, true));
-        subsCheck.setOnCheckedChangeListener(
-                (btn, checked) ->
-                        a.prefs.edit().putBoolean(Prefs.WEBDAV_SYNC_SUBS, checked).apply());
-        panel.addView(subsCheck, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(panel, 10);
+        if (tv) {
+            final CheckBox autoCheck = new CheckBox(a);
+            autoCheck.setText("开启后台自动云同步（启动自动拉取，播放进度、收藏与订阅变更自动推送）");
+            autoCheck.setTextColor(MainActivity.WHITE);
+            autoCheck.setTextSize(13);
+            autoCheck.setChecked(autoEnabled[0]);
+            autoCheck.setOnCheckedChangeListener((btn, checked) -> autoEnabled[0] = checked);
+            panel.addView(autoCheck, new LinearLayout.LayoutParams(-1, -2));
+
+            final CheckBox subsCheck = new CheckBox(a);
+            subsCheck.setTag("cloud-sync-subs-toggle");
+            subsCheck.setText("同时同步我的订阅源配置（新设备一次同步即可拿到公开订阅源 + 进度 + 收藏，不含隐私空间）");
+            subsCheck.setTextColor(MainActivity.WHITE);
+            subsCheck.setTextSize(13);
+            subsCheck.setChecked(syncSubsEnabled[0]);
+            subsCheck.setOnCheckedChangeListener(
+                    (btn, checked) -> {
+                        syncSubsEnabled[0] = checked;
+                        a.prefs.edit().putBoolean(Prefs.WEBDAV_SYNC_SUBS, checked).apply();
+                    });
+            panel.addView(subsCheck, new LinearLayout.LayoutParams(-1, -2));
+        } else {
+            android.view.View autoRow =
+                    MobileSectionGroup.toggleRow(
+                            a,
+                            MobileIcons.IC_CLOUD_SYNC,
+                            0xFF0EA5E9,
+                            "后台自动云同步（进度与收藏变更自动推送）",
+                            autoEnabled[0],
+                            checked -> autoEnabled[0] = checked);
+            android.view.View subsRow =
+                    MobileSectionGroup.toggleRow(
+                            a,
+                            MobileIcons.IC_FOLDER,
+                            0xFF10B981,
+                            "同时同步公开订阅源配置（不含隐私空间）",
+                            syncSubsEnabled[0],
+                            checked -> {
+                                syncSubsEnabled[0] = checked;
+                                a.prefs.edit().putBoolean(Prefs.WEBDAV_SYNC_SUBS, checked).apply();
+                            });
+            subsRow.setTag("cloud-sync-subs-toggle");
+            LinearLayout toggleGroup =
+                    MobileSectionGroup.create(
+                            a, null, null, java.util.Arrays.asList(autoRow, subsRow));
+            panel.addView(toggleGroup, new LinearLayout.LayoutParams(-1, -2));
+        }
+        a.gap(panel, 12);
 
         final AppDialog[] holder = new AppDialog[1];
+        final MobileBottomSheet.SheetHandle[] sheetHolder = new MobileBottomSheet.SheetHandle[1];
+        final Runnable dismissActive =
+                () -> {
+                    if (holder[0] != null) holder[0].dismiss();
+                    if (sheetHolder[0] != null) sheetHolder[0].dismiss();
+                };
 
-        Button syncNowBtn =
-                a.button(
-                        "保存并立即 WebDAV 云同步",
-                        "cloud-sync-webdav-now",
-                        () -> {
-                            String u = urlInput.getText().toString().trim();
-                            if (u.isEmpty()) {
-                                a.toast("请先填写 WebDAV 地址");
-                                return;
-                            }
-                            try {
-                                CloudSync.resolveWebdavFileUrl(u);
-                            } catch (Exception ex) {
-                                a.toast(ex.getMessage());
-                                return;
-                            }
-                            Runnable proceed =
-                                    () -> {
-                                        saveWebdavPrefs(
-                                                a,
-                                                urlInput,
-                                                userInput,
-                                                passInput,
-                                                passLoaded.get() || passEditedByUser.get(),
-                                                false,
-                                                autoCheck,
-                                                subsCheck);
-                                        if (holder[0] != null) holder[0].dismiss();
-                                        runWebdavSync(
-                                                a,
-                                                false,
-                                                () -> {
-                                                    if (onUpdated != null) onUpdated.run();
-                                                    else a.refresh();
-                                                });
-                                    };
-                            if (isCleartextHttpWithPassword(u, passInput.getText().toString())) {
-                                confirmCleartextHttpWarning(a, proceed);
-                            } else {
-                                proceed.run();
-                            }
-                        });
+        Runnable onSyncNow =
+                () -> {
+                    String u = urlInput.getText().toString().trim();
+                    if (u.isEmpty()) {
+                        a.toast("请先填写 WebDAV 地址");
+                        return;
+                    }
+                    try {
+                        CloudSync.resolveWebdavFileUrl(u);
+                    } catch (Exception ex) {
+                        a.toast(ex.getMessage());
+                        return;
+                    }
+                    Runnable proceed =
+                            () -> {
+                                saveWebdavPrefs(
+                                        a,
+                                        urlInput,
+                                        userInput,
+                                        passInput,
+                                        passLoaded.get() || passEditedByUser.get(),
+                                        false,
+                                        autoEnabled[0],
+                                        syncSubsEnabled[0]);
+                                dismissActive.run();
+                                runWebdavSync(
+                                        a,
+                                        false,
+                                        () -> {
+                                            if (onUpdated != null) onUpdated.run();
+                                            else a.refresh();
+                                        });
+                            };
+                    if (isCleartextHttpWithPassword(u, passInput.getText().toString())) {
+                        confirmCleartextHttpWarning(a, proceed);
+                    } else {
+                        proceed.run();
+                    }
+                };
+        Runnable onSaveOnly =
+                () -> {
+                    Runnable proceed =
+                            () -> {
+                                saveWebdavPrefs(
+                                        a,
+                                        urlInput,
+                                        userInput,
+                                        passInput,
+                                        passLoaded.get() || passEditedByUser.get(),
+                                        true,
+                                        autoEnabled[0],
+                                        syncSubsEnabled[0]);
+                                a.toast("已保存多端同步配置");
+                                dismissActive.run();
+                                if (onUpdated != null) onUpdated.run();
+                            };
+                    if (isCleartextHttpWithPassword(
+                            urlInput.getText().toString().trim(), passInput.getText().toString())) {
+                        confirmCleartextHttpWarning(a, proceed);
+                    } else {
+                        proceed.run();
+                    }
+                };
+        Runnable onClearCfg =
+                () -> {
+                    a.prefs
+                            .edit()
+                            .remove(Prefs.WEBDAV_URL)
+                            .remove(Prefs.WEBDAV_USER)
+                            .remove(Prefs.SYNC_LAST_STATUS)
+                            .apply();
+                    SYNC_EXEC.execute(() -> SecureStorage.clearWebdavPass(dialogAppCtx));
+                    a.toast("已清除本机 WebDAV 云同步配置");
+                    dismissActive.run();
+                    if (onUpdated != null) onUpdated.run();
+                };
+        Runnable onOpenQr =
+                () -> {
+                    saveToggleOnly(a, autoEnabled[0], syncSubsEnabled[0]);
+                    dismissActive.run();
+                    if (a.phoneConfig != null) a.phoneConfig.close();
+                    a.phoneConfig = new PhoneConfigDialog(a);
+                    a.phoneConfig.showLanSyncReceiver(onUpdated != null ? onUpdated : a::refresh);
+                };
+        Runnable onConnectLan =
+                () -> {
+                    saveToggleOnly(a, autoEnabled[0], syncSubsEnabled[0]);
+                    dismissActive.run();
+                    showLanConnectDialog(a, onUpdated);
+                };
+
+        if (!tv) {
+            TextView syncBtn = buildMobileSyncButton(a, p, "保存并立即 WebDAV 云同步", true, onSyncNow);
+            syncBtn.setTag("cloud-sync-webdav-now");
+            panel.addView(syncBtn, new LinearLayout.LayoutParams(-1, a.dp(44)));
+            a.gap(panel, 8);
+
+            LinearLayout subActions = a.row();
+            TextView saveBtn = buildMobileSyncButton(a, p, "仅保存配置", false, onSaveOnly);
+            saveBtn.setTag("cloud-sync-save");
+            subActions.addView(saveBtn, new LinearLayout.LayoutParams(0, a.dp(42), 1f));
+            if (isConfigured(a)) {
+                ViewSpacer.add(a, subActions, 8);
+                TextView clearBtn = buildMobileSyncButton(a, p, "清除云配置", false, onClearCfg);
+                clearBtn.setTag("cloud-sync-clear");
+                clearBtn.setTextColor(p.danger);
+                subActions.addView(clearBtn, new LinearLayout.LayoutParams(0, a.dp(42), 1f));
+            }
+            panel.addView(subActions, new LinearLayout.LayoutParams(-1, -2));
+
+            a.gap(panel, 16);
+            TextView secLan = a.text("二、局域网设备点对点双向同步（无需网盘账号）", 14, p.textPrimary);
+            secLan.setTypeface(null, Typeface.BOLD);
+            panel.addView(secLan);
+            a.gap(panel, 6);
+
+            TextView lanHint =
+                    a.text(
+                            "同一 Wi-Fi 下，一台设备打开「本机局域网接收码」，另一台设备点击「连接局域网其他设备」并输入该地址，即可一键双向合并观看进度、收藏与公开订阅源。",
+                            12.5f,
+                            p.textSecondary);
+            lanHint.setLineSpacing(a.dp(3), 1f);
+            panel.addView(lanHint);
+            a.gap(panel, 10);
+
+            TextView qrBtn = buildMobileSyncButton(a, p, "打开本机局域网接收码（二维码 5 分钟有效）", false, onOpenQr);
+            qrBtn.setTag("cloud-sync-lan-receive");
+            panel.addView(qrBtn, new LinearLayout.LayoutParams(-1, a.dp(42)));
+            a.gap(panel, 8);
+
+            TextView lanBtn = buildMobileSyncButton(a, p, "连接局域网其他设备并双向同步", false, onConnectLan);
+            lanBtn.setTag("cloud-sync-lan-connect");
+            panel.addView(lanBtn, new LinearLayout.LayoutParams(-1, a.dp(42)));
+
+            sheetHolder[0] =
+                    MobileBottomSheet.showHandle(
+                            a, "多端网络同步", "WebDAV 自动云同步 · 局域网点对点互传", null, null, panel, true);
+            activeDialogRef = new WeakReference<>(sheetHolder[0].dialog);
+            activeDialogOwnerRef = new WeakReference<>(a);
+            return;
+        }
+
+        Button syncNowBtn = a.button("保存并立即 WebDAV 云同步", "cloud-sync-webdav-now", onSyncNow);
         syncNowBtn.setBackground(a.bg(0xff0a84ff, 12));
         syncNowBtn.setTextColor(Color.WHITE);
         panel.addView(syncNowBtn, new LinearLayout.LayoutParams(-1, a.dp(44)));
         a.gap(panel, 8);
 
         LinearLayout subActions = a.row();
-        Button saveOnlyBtn =
-                a.navButton(
-                        "仅保存配置",
-                        "cloud-sync-save",
-                        () -> {
-                            Runnable proceed =
-                                    () -> {
-                                        saveWebdavPrefs(
-                                                a,
-                                                urlInput,
-                                                userInput,
-                                                passInput,
-                                                passLoaded.get() || passEditedByUser.get(),
-                                                true,
-                                                autoCheck,
-                                                subsCheck);
-                                        a.toast("已保存多端同步配置");
-                                        if (holder[0] != null) holder[0].dismiss();
-                                        if (onUpdated != null) onUpdated.run();
-                                    };
-                            if (isCleartextHttpWithPassword(
-                                    urlInput.getText().toString().trim(),
-                                    passInput.getText().toString())) {
-                                confirmCleartextHttpWarning(a, proceed);
-                            } else {
-                                proceed.run();
-                            }
-                        });
+        Button saveOnlyBtn = a.navButton("仅保存配置", "cloud-sync-save", onSaveOnly);
         subActions.addView(saveOnlyBtn, new LinearLayout.LayoutParams(0, a.dp(40), 1f));
         if (isConfigured(a)) {
             ViewSpacer.add(a, subActions, 8);
-            Button clearCfgBtn =
-                    a.navButton(
-                            "清除云配置",
-                            "cloud-sync-clear",
-                            () -> {
-                                a.prefs
-                                        .edit()
-                                        .remove(Prefs.WEBDAV_URL)
-                                        .remove(Prefs.WEBDAV_USER)
-                                        .remove(Prefs.SYNC_LAST_STATUS)
-                                        .apply();
-                                SYNC_EXEC.execute(
-                                        () -> SecureStorage.clearWebdavPass(dialogAppCtx));
-                                a.toast("已清除本机 WebDAV 云同步配置");
-                                if (holder[0] != null) holder[0].dismiss();
-                                if (onUpdated != null) onUpdated.run();
-                            });
+            Button clearCfgBtn = a.navButton("清除云配置", "cloud-sync-clear", onClearCfg);
             subActions.addView(clearCfgBtn, new LinearLayout.LayoutParams(0, a.dp(40), 1f));
         }
         panel.addView(subActions, new LinearLayout.LayoutParams(-1, -2));
@@ -1648,29 +1756,12 @@ final class CloudSyncDialog {
 
         LinearLayout lanRow = a.vertical();
         Button openQrBtn =
-                a.navButton(
-                        "打开本机局域网接收码（二维码 5 分钟有效）",
-                        "cloud-sync-lan-receive",
-                        () -> {
-                            saveToggleOnly(a, autoCheck, subsCheck);
-                            if (holder[0] != null) holder[0].dismiss();
-                            if (a.phoneConfig != null) a.phoneConfig.close();
-                            a.phoneConfig = new PhoneConfigDialog(a);
-                            a.phoneConfig.showLanSyncReceiver(
-                                    onUpdated != null ? onUpdated : a::refresh);
-                        });
+                a.navButton("打开本机局域网接收码（二维码 5 分钟有效）", "cloud-sync-lan-receive", onOpenQr);
         lanRow.addView(openQrBtn, new LinearLayout.LayoutParams(-1, a.dp(42)));
         a.gap(lanRow, 8);
 
         Button connectLanBtn =
-                a.navButton(
-                        "连接局域网其他设备并双向同步",
-                        "cloud-sync-lan-connect",
-                        () -> {
-                            saveToggleOnly(a, autoCheck, subsCheck);
-                            if (holder[0] != null) holder[0].dismiss();
-                            showLanConnectDialog(a, onUpdated);
-                        });
+                a.navButton("连接局域网其他设备并双向同步", "cloud-sync-lan-connect", onConnectLan);
         lanRow.addView(connectLanBtn, new LinearLayout.LayoutParams(-1, a.dp(42)));
         panel.addView(lanRow, new LinearLayout.LayoutParams(-1, -2));
 
@@ -1684,22 +1775,37 @@ final class CloudSyncDialog {
         activeDialogRef = new WeakReference<>(dialog);
         activeDialogOwnerRef = new WeakReference<>(a);
         dialog.show();
-        if (a.isTvDevice()) {
-            a.ui.post(syncNowBtn::requestFocus);
-        }
+        a.ui.post(syncNowBtn::requestFocus);
+    }
+
+    private static TextView buildMobileSyncButton(
+            MainActivity a,
+            MobileTheme.Palette p,
+            String label,
+            boolean primary,
+            Runnable onClick) {
+        TextView btn = a.text(label, 14f, primary ? p.accentOnFill : p.textPrimary);
+        btn.setTypeface(null, Typeface.BOLD);
+        btn.setGravity(Gravity.CENTER);
+        btn.setBackground(primary ? a.bg(p.accent, 14) : MobileTheme.subtleBg(a, 14));
+        MobileMotion.bindPress(btn, 0.96f);
+        btn.setOnClickListener(v -> onClick.run());
+        return btn;
     }
 
     static void showLanConnectDialog(final MainActivity a, final Runnable onUpdated) {
+        final boolean tv = a.isTvDevice();
+        final MobileTheme.Palette p = tv ? null : MobileTheme.of(a);
         LinearLayout panel = a.vertical();
-        panel.setPadding(a.dp(6), a.dp(6), a.dp(6), a.dp(4));
+        panel.setPadding(a.dp(tv ? 6 : 2), a.dp(6), a.dp(tv ? 6 : 2), a.dp(4));
 
         TextView tip =
                 a.text(
-                        a.isTvDevice()
+                        tv
                                 ? "在另一台设备打开「多端网络同步 → 本机局域网接收码」，点击输入框右侧二维码图标即可用手机扫码发送对方地址："
                                 : "在另一台设备打开「多端网络同步 → 本机局域网接收码」（或电视「手机扫码配置」），将该设备上显示的局域网地址输入或粘贴到下方：",
                         13,
-                        MainActivity.MUTED);
+                        tv ? MainActivity.MUTED : p.textSecondary);
         tip.setLineSpacing(a.dp(3), 1f);
         panel.addView(tip);
         a.gap(panel, 10);
@@ -1710,30 +1816,58 @@ final class CloudSyncDialog {
                 TvQrInputHelper.wrap(a, peerInput, "对方局域网同步地址"),
                 new LinearLayout.LayoutParams(-1, -2));
 
-        if (!a.isTvDevice()) {
+        if (!tv) {
+            a.gap(panel, 10);
+            TextView pasteBtn =
+                    buildMobileSyncButton(
+                            a,
+                            p,
+                            "从剪贴板粘贴对方局域网地址",
+                            false,
+                            () -> {
+                                ClipboardManager cm =
+                                        (ClipboardManager)
+                                                a.getSystemService(Context.CLIPBOARD_SERVICE);
+                                if (cm != null && cm.hasPrimaryClip()) {
+                                    ClipData clip = cm.getPrimaryClip();
+                                    if (clip != null
+                                            && clip.getItemCount() > 0
+                                            && clip.getItemAt(0).getText() != null) {
+                                        String txt = clip.getItemAt(0).getText().toString().trim();
+                                        peerInput.setText(txt);
+                                        peerInput.setSelection(txt.length());
+                                    }
+                                }
+                            });
+            panel.addView(pasteBtn, new LinearLayout.LayoutParams(-1, a.dp(42)));
             a.gap(panel, 8);
-            TextView pasteBtn = a.text("从剪贴板粘贴对方局域网地址", 13, Color.WHITE);
-            pasteBtn.setTypeface(null, Typeface.BOLD);
-            pasteBtn.setGravity(Gravity.CENTER);
-            pasteBtn.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
-            pasteBtn.setBackground(a.bg(0xff1e2623, 999));
-            MobileDetailScreen.bindTouchFeedback(pasteBtn);
-            pasteBtn.setOnClickListener(
-                    v -> {
-                        ClipboardManager cm =
-                                (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
-                        if (cm != null && cm.hasPrimaryClip()) {
-                            ClipData clip = cm.getPrimaryClip();
-                            if (clip != null
-                                    && clip.getItemCount() > 0
-                                    && clip.getItemAt(0).getText() != null) {
-                                String txt = clip.getItemAt(0).getText().toString().trim();
-                                peerInput.setText(txt);
-                                peerInput.setSelection(txt.length());
-                            }
+
+            final MobileBottomSheet.SheetHandle[] hRef = new MobileBottomSheet.SheetHandle[1];
+            Runnable onSubmit =
+                    () -> {
+                        String raw = peerInput.getText().toString().trim();
+                        if (raw.isEmpty()) {
+                            a.toast("请输入对方设备的局域网同步地址");
+                            return;
                         }
-                    });
-            panel.addView(pasteBtn, new LinearLayout.LayoutParams(-1, -2));
+                        if (hRef[0] != null) hRef[0].dismiss();
+                        runLanPeerSync(
+                                a,
+                                raw,
+                                () -> {
+                                    if (onUpdated != null) onUpdated.run();
+                                    else a.refresh();
+                                });
+                    };
+            panel.addView(
+                    buildMobileSyncButton(a, p, "立即双向同步", true, onSubmit),
+                    new LinearLayout.LayoutParams(-1, a.dp(44)));
+            hRef[0] =
+                    MobileBottomSheet.showHandle(
+                            a, "连接局域网其他设备", "免网盘直连合并进度、收藏与公开订阅源", null, null, panel, true);
+            activeDialogRef = new WeakReference<>(hRef[0].dialog);
+            activeDialogOwnerRef = new WeakReference<>(a);
+            return;
         }
 
         AppDialog lanDialog =
@@ -1763,11 +1897,11 @@ final class CloudSyncDialog {
         lanDialog.show();
     }
 
-    private static void saveToggleOnly(MainActivity a, CheckBox autoCheck, CheckBox subsCheck) {
+    private static void saveToggleOnly(MainActivity a, boolean autoEnabled, boolean syncSubs) {
         a.prefs
                 .edit()
-                .putBoolean(Prefs.WEBDAV_AUTO, autoCheck.isChecked())
-                .putBoolean(Prefs.WEBDAV_SYNC_SUBS, subsCheck.isChecked())
+                .putBoolean(Prefs.WEBDAV_AUTO, autoEnabled)
+                .putBoolean(Prefs.WEBDAV_SYNC_SUBS, syncSubs)
                 .apply();
     }
 
@@ -1779,6 +1913,16 @@ final class CloudSyncDialog {
     }
 
     private static void confirmCleartextHttpWarning(MainActivity a, Runnable onConfirm) {
+        if (!a.isTvDevice()) {
+            MobileBottomSheet.showConfirm(
+                    a,
+                    "明文传输风险提示",
+                    "您配置的 WebDAV 服务使用未加密的 HTTP 协议（http://），账号与应用密码将以明文在网络中传输，建议使用 HTTPS。是否继续保存？",
+                    "继续保存",
+                    true,
+                    onConfirm);
+            return;
+        }
         new AppDialog.Builder(a)
                 .setTitle("明文传输风险提示")
                 .setMessage(
@@ -1795,16 +1939,16 @@ final class CloudSyncDialog {
             EditText passInput,
             boolean shouldPersistPass,
             boolean notifyReauth,
-            CheckBox autoCheck,
-            CheckBox subsCheck) {
+            boolean autoEnabled,
+            boolean syncSubs) {
         final String pass = passInput.getText().toString();
         RUNTIME.tracker.resetBackoff();
         a.prefs
                 .edit()
                 .putString(Prefs.WEBDAV_URL, urlInput.getText().toString().trim())
                 .putString(Prefs.WEBDAV_USER, userInput.getText().toString().trim())
-                .putBoolean(Prefs.WEBDAV_AUTO, autoCheck.isChecked())
-                .putBoolean(Prefs.WEBDAV_SYNC_SUBS, subsCheck.isChecked())
+                .putBoolean(Prefs.WEBDAV_AUTO, autoEnabled)
+                .putBoolean(Prefs.WEBDAV_SYNC_SUBS, syncSubs)
                 .apply();
         if (shouldPersistPass) {
             final Context appCtx =
@@ -1830,10 +1974,12 @@ final class CloudSyncDialog {
 
     private static EditText styledInput(
             MainActivity a, String hint, String value, boolean password) {
+        boolean tv = a.isTvDevice();
+        MobileTheme.Palette p = tv ? null : MobileTheme.of(a);
         EditText input = new EditText(a);
         input.setHint(hint);
-        input.setHintTextColor(0xff6b7280);
-        input.setTextColor(MainActivity.WHITE);
+        input.setHintTextColor(tv ? 0xff6b7280 : p.textTertiary);
+        input.setTextColor(tv ? MainActivity.WHITE : p.textPrimary);
         input.setTextSize(13.5f);
         input.setSingleLine(true);
         if (password) {
@@ -1842,7 +1988,7 @@ final class CloudSyncDialog {
             input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         }
         input.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
-        input.setBackground(a.bg(0xff1e2428, 10));
+        input.setBackground(tv ? a.bg(0xff1e2428, 10) : MobileTheme.subtleBg(a, 12));
         if (value != null && !value.isEmpty()) {
             input.setText(value);
             input.setSelection(value.length());

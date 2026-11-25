@@ -69,35 +69,64 @@ final class UpdateScreen {
     }
 
     void show() {
-        a.renderPage("", "");
-        if (a.isTvDevice() && a.scroll instanceof TvScrollView)
-            ((TvScrollView) a.scroll).readingMode = true;
+        final boolean tv = a.isTvDevice();
+        final MobileTheme.Palette p = tv ? null : MobileTheme.of(a);
+        if (tv) {
+            a.renderPage("", "");
+            if (a.scroll instanceof TvScrollView) ((TvScrollView) a.scroll).readingMode = true;
+        } else {
+            FrameLayout pageRoot = new FrameLayout(a);
+            pageRoot.setBackgroundColor(p.bgCanvas);
+            a.applyMobileSystemBars(false, false);
+
+            ScrollView sv = new ScrollView(a);
+            sv.setVerticalScrollBarEnabled(false);
+            sv.setClipToPadding(false);
+
+            LinearLayout bodyCol = a.vertical();
+            int topInset = Math.max(a.dp(16), a.statusBarHeight()) + a.dp(8);
+            int navInset = a.navigationBarHeight();
+            bodyCol.setPadding(a.dp(16), topInset, a.dp(16), navInset + a.dp(24));
+            sv.addView(bodyCol, new ScrollView.LayoutParams(-1, -2));
+            pageRoot.addView(sv, new FrameLayout.LayoutParams(-1, -1));
+
+            a.root = pageRoot;
+            a.scroll = sv;
+            a.body = bodyCol;
+            a.setContentView(pageRoot);
+        }
         a.updateScreen = this;
-        boolean tv = a.isTvDevice();
 
         // Top Navigation Bar
         if (!tv) {
             LinearLayout topNav = a.row();
             topNav.setGravity(Gravity.CENTER_VERTICAL);
-            topNav.setPadding(0, 0, 0, a.dp(14));
-            TextView backBtn = a.text("‹", 22, MainActivity.WHITE);
-            backBtn.setGravity(Gravity.CENTER);
-            backBtn.setBackground(
-                    MobileShell.glassBg(0xb034343a, 0xc01e1e22, a.dp(999), a.dp(0.8f), 0x38ffffff));
-            MobileDetailScreen.bindTouchFeedback(backBtn);
+            topNav.setPadding(0, 0, 0, a.dp(16));
+
+            FrameLayout backBtn = new FrameLayout(a);
+            backBtn.setBackground(MobileTheme.cardBg(a, 999));
+            backBtn.addView(
+                    MobileIcons.create(a, MobileIcons.IC_BACK, 18f, p.textPrimary),
+                    new FrameLayout.LayoutParams(a.dp(18), a.dp(18), Gravity.CENTER));
+            MobileMotion.bindPress(backBtn, 0.92f);
             backBtn.setOnClickListener(v -> a.onBackPressed());
             LinearLayout.LayoutParams backLp = new LinearLayout.LayoutParams(a.dp(38), a.dp(38));
             backLp.rightMargin = a.dp(12);
             topNav.addView(backBtn, backLp);
 
-            TextView heading = a.text("软件更新", 22, MainActivity.WHITE);
+            TextView heading = a.text("软件更新", 22, p.textPrimary);
             heading.setTypeface(null, Typeface.BOLD);
             topNav.addView(heading, new LinearLayout.LayoutParams(0, -2, 1f));
 
-            TextView mirrorBadge = a.text("镜像站优先", 11.5f, 0xff34d399);
+            TextView mirrorBadge = a.text("镜像站优先", 11.5f, p.success);
             mirrorBadge.setTypeface(null, Typeface.BOLD);
             mirrorBadge.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
-            mirrorBadge.setBackground(cardSurface(0x2630d158, 0x1a30d158, 999, 0x5534d399));
+            mirrorBadge.setBackground(
+                    MobileTheme.outlinedBg(
+                            a,
+                            MobileTheme.withAlpha(p.success, p.isDark ? 0x26 : 0x1A),
+                            MobileTheme.withAlpha(p.success, p.isDark ? 0x55 : 0x40),
+                            999));
             topNav.addView(mirrorBadge, new LinearLayout.LayoutParams(-2, -2));
             a.body.addView(topNav, new LinearLayout.LayoutParams(-1, -2));
         } else {
@@ -121,20 +150,28 @@ final class UpdateScreen {
         // =====================================================================
         LinearLayout heroCard = a.vertical();
         heroCard.setPadding(a.dp(20), a.dp(20), a.dp(20), a.dp(20));
-        heroCard.setBackground(cardSurface(0xd81c2421, 0xe6121816, 24, 0x2effffff));
+        if (tv) {
+            heroCard.setBackground(cardSurface(0xd81c2421, 0xe6121816, 24, 0x2effffff));
+        } else {
+            heroCard.setBackground(MobileTheme.cardBg(a, 20));
+        }
 
         LinearLayout headerRow = a.row();
         headerRow.setGravity(Gravity.CENTER_VERTICAL);
 
         // App Squircle Icon Badge
         FrameLayout iconBox = new FrameLayout(a);
-        GradientDrawable squircle =
-                new GradientDrawable(
-                        GradientDrawable.Orientation.TL_BR,
-                        new int[] {0xff262a31, 0xff1d2025, 0xff14161a});
-        squircle.setCornerRadius(a.dp(16));
-        squircle.setStroke(Math.max(1, a.dp(1)), 0x38ffffff);
-        iconBox.setBackground(squircle);
+        if (tv) {
+            GradientDrawable squircle =
+                    new GradientDrawable(
+                            GradientDrawable.Orientation.TL_BR,
+                            new int[] {0xff262a31, 0xff1d2025, 0xff14161a});
+            squircle.setCornerRadius(a.dp(16));
+            squircle.setStroke(Math.max(1, a.dp(1)), 0x38ffffff);
+            iconBox.setBackground(squircle);
+        } else {
+            iconBox.setBackground(MobileTheme.subtleBg(a, 16));
+        }
         ImageView logo = new ImageView(a);
         logo.setImageResource(R.drawable.logo_mark);
         FrameLayout.LayoutParams logoLp =
@@ -146,16 +183,22 @@ final class UpdateScreen {
 
         LinearLayout titleCol = a.vertical();
         heroVersionTitle =
-                a.text("Marco Movie " + UpdateManager.installedVersion(a), 19, MainActivity.WHITE);
+                a.text(
+                        "Marco Movie " + UpdateManager.installedVersion(a),
+                        19,
+                        tv ? MainActivity.WHITE : p.textPrimary);
         heroVersionTitle.setTypeface(null, Typeface.BOLD);
         titleCol.addView(heroVersionTitle);
 
         heroMetaSubtitle =
-                a.text((tv ? "Android TV 端" : "Android 手机端") + " · 正式版渠道", 12.5f, 0xff9ca3af);
+                a.text(
+                        (tv ? "Android TV 端" : "Android 手机端") + " · 正式版渠道",
+                        12.5f,
+                        tv ? 0xff9ca3af : p.textSecondary);
         heroMetaSubtitle.setPadding(0, a.dp(3), 0, 0);
         titleCol.addView(heroMetaSubtitle);
 
-        status = a.text("", 13f, 0xff34d399);
+        status = a.text("", 13f, tv ? 0xff34d399 : p.success);
         status.setTag("update-status");
         status.setPadding(0, a.dp(5), 0, 0);
         status.setLineSpacing(a.dp(2), 1f);
@@ -164,23 +207,24 @@ final class UpdateScreen {
         headerRow.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
         heroCard.addView(headerRow, new LinearLayout.LayoutParams(-1, -2));
 
-        // Sleek iOS Download Progress Bar (shown when downloading / verifying)
+        // Sleek Download Progress Bar (shown when downloading / verifying)
         LinearLayout progContainer = a.vertical();
         progContainer.setPadding(0, a.dp(16), 0, 0);
         LinearLayout progLabelRow = a.row();
         progLabelRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView progTitle = a.text("正在优先从镜像站传输安装包…", 12, MainActivity.MUTED);
+        TextView progTitle =
+                a.text("正在优先从镜像站传输安装包…", 12, tv ? MainActivity.MUTED : p.textSecondary);
         progLabelRow.addView(progTitle, new LinearLayout.LayoutParams(0, -2, 1f));
-        progressPercentView = a.text("0%", 12, 0xff5ac8fa);
+        progressPercentView = a.text("0%", 12, tv ? 0xff5ac8fa : p.accent);
         progressPercentView.setTypeface(null, Typeface.BOLD);
         progLabelRow.addView(progressPercentView, new LinearLayout.LayoutParams(-2, -2));
         progContainer.addView(progLabelRow, new LinearLayout.LayoutParams(-1, -2));
         a.gap(progContainer, 6);
 
         FrameLayout track = new FrameLayout(a);
-        track.setBackground(a.bg(0x33ffffff, 999));
+        track.setBackground(a.bg(tv ? 0x33ffffff : p.bgSubtle, 999));
         progressFill = new View(a);
-        progressFill.setBackground(a.bg(0xff0a84ff, 999));
+        progressFill.setBackground(a.bg(tv ? 0xff0a84ff : p.accent, 999));
         track.addView(progressFill, new FrameLayout.LayoutParams(0, a.dp(6), Gravity.LEFT));
         progContainer.addView(track, new LinearLayout.LayoutParams(-1, a.dp(6)));
         progressWrap = progContainer;
@@ -190,17 +234,17 @@ final class UpdateScreen {
         // Hairline Divider
         a.gap(heroCard, 16);
         View divider = new View(a);
-        divider.setBackgroundColor(0x1fffffff);
+        divider.setBackgroundColor(tv ? 0x1fffffff : p.hairline);
         heroCard.addView(divider, new LinearLayout.LayoutParams(-1, Math.max(1, a.dp(0.7f))));
         a.gap(heroCard, 14);
 
         // Release Notes / Feature Highlights Box
-        notesHeading = a.text("关于此更新", 13.5f, MainActivity.WHITE);
+        notesHeading = a.text("关于此更新", 13.5f, tv ? MainActivity.WHITE : p.textPrimary);
         notesHeading.setTypeface(null, Typeface.BOLD);
         heroCard.addView(notesHeading);
         a.gap(heroCard, 6);
 
-        notesBody = a.text("", 13f, 0xffd1d5db);
+        notesBody = a.text("", 13f, tv ? 0xffd1d5db : p.textSecondary);
         notesBody.setTag("update-notes");
         notesBody.setId(View.generateViewId());
         notesBody.setFocusable(tv);
@@ -230,26 +274,31 @@ final class UpdateScreen {
                                 updates.check(true);
                             }
                         });
-        primaryBtn.setFocusable(true);
+        primaryBtn.setFocusable(tv);
         primaryBtn.setTextSize(14.5f);
         primaryBtn.setTypeface(null, Typeface.BOLD);
-        primaryBtn.setTextColor(MainActivity.WHITE);
+        primaryBtn.setTextColor(tv ? MainActivity.WHITE : p.accentOnFill);
         primaryBtn.setMinHeight(a.dp(46));
         primaryBtn.setMinimumHeight(a.dp(46));
-        primaryBtn.setBackground(a.bg(0xff0a84ff, 14));
-        primaryBtn.setOnFocusChangeListener(
-                (v, f) ->
-                        FocusMotion.style(
-                                a,
-                                primaryBtn,
-                                f,
-                                0xff0a84ff,
-                                MainActivity.WHITE,
-                                14,
-                                MainActivity.WHITE,
-                                MainActivity.DARK,
-                                false,
-                                1.02f));
+        primaryBtn.setBackground(a.bg(tv ? 0xff0a84ff : p.accent, 14));
+        if (tv) {
+            primaryBtn.setOnFocusChangeListener(
+                    (v, f) ->
+                            FocusMotion.style(
+                                    a,
+                                    primaryBtn,
+                                    f,
+                                    0xff0a84ff,
+                                    MainActivity.WHITE,
+                                    14,
+                                    MainActivity.WHITE,
+                                    MainActivity.DARK,
+                                    false,
+                                    1.02f));
+        } else {
+            primaryBtn.setOnFocusChangeListener(null);
+            MobileMotion.bindPress(primaryBtn, 0.97f);
+        }
         actionRow.addView(primaryBtn, new LinearLayout.LayoutParams(0, a.dp(46), 1f));
 
         secondaryActionBtn =
@@ -263,26 +312,32 @@ final class UpdateScreen {
                                 updates.check(true);
                             }
                         });
-        secondaryActionBtn.setFocusable(true);
+        secondaryActionBtn.setFocusable(tv);
         secondaryActionBtn.setTextSize(13.5f);
-        secondaryActionBtn.setTextColor(0xffe5e7eb);
+        secondaryActionBtn.setTextColor(tv ? 0xffe5e7eb : p.textPrimary);
         secondaryActionBtn.setMinHeight(a.dp(46));
         secondaryActionBtn.setMinimumHeight(a.dp(46));
         secondaryActionBtn.setPadding(a.dp(16), 0, a.dp(16), 0);
-        secondaryActionBtn.setBackground(cardSurface(0xff26312d, 0xff1c2522, 14, 0x2effffff));
-        secondaryActionBtn.setOnFocusChangeListener(
-                (v, f) ->
-                        FocusMotion.style(
-                                a,
-                                secondaryActionBtn,
-                                f,
-                                0xff26312d,
-                                MainActivity.WHITE,
-                                14,
-                                0xffe5e7eb,
-                                MainActivity.DARK,
-                                false,
-                                1.02f));
+        if (tv) {
+            secondaryActionBtn.setBackground(cardSurface(0xff26312d, 0xff1c2522, 14, 0x2effffff));
+            secondaryActionBtn.setOnFocusChangeListener(
+                    (v, f) ->
+                            FocusMotion.style(
+                                    a,
+                                    secondaryActionBtn,
+                                    f,
+                                    0xff26312d,
+                                    MainActivity.WHITE,
+                                    14,
+                                    0xffe5e7eb,
+                                    MainActivity.DARK,
+                                    false,
+                                    1.02f));
+        } else {
+            secondaryActionBtn.setBackground(MobileTheme.subtleBg(a, 14));
+            secondaryActionBtn.setOnFocusChangeListener(null);
+            MobileMotion.bindPress(secondaryActionBtn, 0.97f);
+        }
         LinearLayout.LayoutParams secLp = new LinearLayout.LayoutParams(-2, a.dp(46));
         secLp.leftMargin = a.dp(10);
         actionRow.addView(secondaryActionBtn, secLp);
@@ -293,16 +348,20 @@ final class UpdateScreen {
         a.gap(a.body, 16);
 
         // =====================================================================
-        // 2. iOS INSET-GROUPED SETTINGS CARD (Automatic Updates & Mirror Policy)
+        // 2. INSET-GROUPED SETTINGS CARD (Automatic Updates & Mirror Policy)
         // =====================================================================
         LinearLayout groupCard = a.vertical();
-        groupCard.setBackground(cardSurface(0xb81b2320, 0xb8131917, 20, 0x26ffffff));
+        if (tv) {
+            groupCard.setBackground(cardSurface(0xb81b2320, 0xb8131917, 20, 0x26ffffff));
+        } else {
+            groupCard.setBackground(MobileTheme.cardBg(a, 16));
+        }
 
         // Row 1: Automatic Update Mode
         LinearLayout modeRow = a.row();
         modeRow.setTag("update-mode");
         modeRow.setGravity(Gravity.CENTER_VERTICAL);
-        modeRow.setPadding(a.dp(18), a.dp(16), a.dp(18), a.dp(16));
+        modeRow.setPadding(a.dp(16), a.dp(15), a.dp(16), a.dp(15));
         modeRow.setClickable(true);
         modeRow.setFocusable(tv);
         modeRow.setFocusableInTouchMode(tv);
@@ -321,14 +380,24 @@ final class UpdateScreen {
                                     true,
                                     1.005f));
         } else {
-            MobileShell.bindCardTouchFeedback(
-                    a, modeRow, null, cardSurface(0x28ffffff, 0x18ffffff, 20, 0));
+            MobileSectionGroup.bindPressHighlight(modeRow, p.bgPressed);
         }
-        TextView modeTitle = a.text("自动更新策略", 15f, MainActivity.WHITE);
-        modeTitle.setTypeface(null, Typeface.BOLD);
+        TextView modeTitle = a.text("自动更新策略", 15f, tv ? MainActivity.WHITE : p.textPrimary);
+        if (tv) modeTitle.setTypeface(null, Typeface.BOLD);
         modeRow.addView(modeTitle, new LinearLayout.LayoutParams(0, -2, 1f));
-        modeValueView = a.text(modeName(updates.mode()) + "  ›", 13.5f, MainActivity.MUTED);
+        modeValueView =
+                a.text(
+                        tv ? (modeName(updates.mode()) + "  ›") : modeName(updates.mode()),
+                        13.5f,
+                        tv ? MainActivity.MUTED : p.textSecondary);
         modeRow.addView(modeValueView, new LinearLayout.LayoutParams(-2, -2));
+        if (!tv) {
+            MobileIcons.IconView chev =
+                    MobileIcons.create(a, MobileIcons.IC_CHEVRON_RIGHT, 14f, p.textTertiary);
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(a.dp(14), a.dp(14));
+            clp.leftMargin = a.dp(6);
+            modeRow.addView(chev, clp);
+        }
         modeRow.setOnClickListener(
                 v -> {
                     if (!tv) {
@@ -336,7 +405,7 @@ final class UpdateScreen {
                         String[] labels = {"自动检查并提醒（推荐）", "自动下载后提醒", "仅手动检查"};
                         int cur =
                                 Math.max(0, java.util.Arrays.asList(modes).indexOf(updates.mode()));
-                        MobileShell.showDrawerPicker(
+                        MobileBottomSheet.showPicker(
                                 a,
                                 "自动更新策略",
                                 "自动检查至少间隔六小时，播放过程中绝不弹窗打扰",
@@ -353,18 +422,18 @@ final class UpdateScreen {
         groupCard.addView(modeRow, new LinearLayout.LayoutParams(-1, -2));
 
         View rowDiv1 = new View(a);
-        rowDiv1.setBackgroundColor(0x16ffffff);
+        rowDiv1.setBackgroundColor(tv ? 0x16ffffff : p.hairline);
         LinearLayout.LayoutParams divLp1 =
                 new LinearLayout.LayoutParams(-1, Math.max(1, a.dp(0.6f)));
-        divLp1.leftMargin = a.dp(18);
-        divLp1.rightMargin = a.dp(18);
+        divLp1.leftMargin = a.dp(16);
+        divLp1.rightMargin = a.dp(16);
         groupCard.addView(rowDiv1, divLp1);
 
-        // Row 2: Manual Install Ready Package (if downloaded) or Release Notes Dialog
+        // Row 2: Manual Install Ready Package
         LinearLayout installRow = a.row();
         installRow.setTag("update-install");
         installRow.setGravity(Gravity.CENTER_VERTICAL);
-        installRow.setPadding(a.dp(18), a.dp(16), a.dp(18), a.dp(16));
+        installRow.setPadding(a.dp(16), a.dp(15), a.dp(16), a.dp(15));
         installRow.setClickable(true);
         installRow.setFocusable(tv);
         installRow.setFocusableInTouchMode(tv);
@@ -383,33 +452,43 @@ final class UpdateScreen {
                                     true,
                                     1.005f));
         } else {
-            MobileShell.bindCardTouchFeedback(
-                    a, installRow, null, cardSurface(0x28ffffff, 0x18ffffff, 20, 0));
+            MobileSectionGroup.bindPressHighlight(installRow, p.bgPressed);
         }
-        TextView installTitle = a.text("安装已下载更新包", 15f, MainActivity.WHITE);
-        installTitle.setTypeface(null, Typeface.BOLD);
+        TextView installTitle = a.text("安装已下载更新包", 15f, tv ? MainActivity.WHITE : p.textPrimary);
+        if (tv) installTitle.setTypeface(null, Typeface.BOLD);
         installRow.addView(installTitle, new LinearLayout.LayoutParams(0, -2, 1f));
-        TextView installHint = a.text("覆盖升级保留全部数据  ›", 13f, MainActivity.MUTED);
+        TextView installHint =
+                a.text(
+                        tv ? "覆盖升级保留全部数据  ›" : "覆盖升级保留全部数据",
+                        13f,
+                        tv ? MainActivity.MUTED : p.textSecondary);
         installRow.addView(installHint, new LinearLayout.LayoutParams(-2, -2));
+        if (!tv) {
+            MobileIcons.IconView chev =
+                    MobileIcons.create(a, MobileIcons.IC_CHEVRON_RIGHT, 14f, p.textTertiary);
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(a.dp(14), a.dp(14));
+            clp.leftMargin = a.dp(6);
+            installRow.addView(chev, clp);
+        }
         installRow.setOnClickListener(v -> install());
         groupCard.addView(installRow, new LinearLayout.LayoutParams(-1, -2));
 
         View rowDiv2 = new View(a);
-        rowDiv2.setBackgroundColor(0x16ffffff);
+        rowDiv2.setBackgroundColor(tv ? 0x16ffffff : p.hairline);
         LinearLayout.LayoutParams divLp2 =
                 new LinearLayout.LayoutParams(-1, Math.max(1, a.dp(0.6f)));
-        divLp2.leftMargin = a.dp(18);
-        divLp2.rightMargin = a.dp(18);
+        divLp2.leftMargin = a.dp(16);
+        divLp2.rightMargin = a.dp(16);
         groupCard.addView(rowDiv2, divLp2);
 
         // Row 3: Mirror Source Priority Info
         LinearLayout sourceRow = a.row();
         sourceRow.setGravity(Gravity.CENTER_VERTICAL);
-        sourceRow.setPadding(a.dp(18), a.dp(16), a.dp(18), a.dp(16));
-        TextView sourceTitle = a.text("下载线路优先级", 15f, MainActivity.WHITE);
-        sourceTitle.setTypeface(null, Typeface.BOLD);
+        sourceRow.setPadding(a.dp(16), a.dp(15), a.dp(16), a.dp(15));
+        TextView sourceTitle = a.text("下载线路优先级", 15f, tv ? MainActivity.WHITE : p.textPrimary);
+        if (tv) sourceTitle.setTypeface(null, Typeface.BOLD);
         sourceRow.addView(sourceTitle, new LinearLayout.LayoutParams(0, -2, 1f));
-        TextView sourceVal = a.text("镜像站优先 · GitHub 备用", 13f, 0xff34d399);
+        TextView sourceVal = a.text("镜像站优先 · GitHub 备用", 13f, tv ? 0xff34d399 : p.success);
         sourceRow.addView(sourceVal, new LinearLayout.LayoutParams(-2, -2));
         groupCard.addView(sourceRow, new LinearLayout.LayoutParams(-1, -2));
 
@@ -420,7 +499,7 @@ final class UpdateScreen {
                 a.text(
                         "各平台版本独立推进。检查更新与下载安装包均优先连接镜像站（marcotv.wlj9919.top），不可用时自动无缝回退至 GitHub 官方源。安装前自动核验 SHA-256 摘要与开发者签名。",
                         12f,
-                        MainActivity.MUTED);
+                        tv ? MainActivity.MUTED : p.textSecondary);
         footer.setPadding(a.dp(6), 0, a.dp(6), a.dp(16));
         footer.setLineSpacing(a.dp(3), 1f);
         a.body.addView(footer, new LinearLayout.LayoutParams(-1, -2));
@@ -431,6 +510,7 @@ final class UpdateScreen {
     void refresh() {
         String installedVer = UpdateManager.installedVersion(a);
         boolean tv = a.isTvDevice();
+        MobileTheme.Palette p = tv ? null : MobileTheme.of(a);
         String platformLabel = tv ? "Android TV 端" : "Android 手机端";
         UpdateManager.Release rel = updates.available;
 
@@ -444,11 +524,11 @@ final class UpdateScreen {
                             + "\n"
                             + modeName(updates.mode()));
             if (updates.ready() || (rel == null && !updates.busy)) {
-                status.setTextColor(0xff34d399);
+                status.setTextColor(tv ? 0xff34d399 : p.success);
             } else if (updates.busy) {
-                status.setTextColor(0xff5ac8fa);
+                status.setTextColor(tv ? 0xff5ac8fa : p.accent);
             } else {
-                status.setTextColor(0xfffbbf24);
+                status.setTextColor(tv ? 0xfffbbf24 : p.warning);
             }
         }
 
@@ -491,7 +571,7 @@ final class UpdateScreen {
         if (notesHeading != null && notesBody != null) {
             if (rel != null && rel.notes != null && !rel.notes.trim().isEmpty()) {
                 notesHeading.setText("版本 " + rel.version + " 更新摘要");
-                notesBody.setText(buildStyledNotes(rel.notes));
+                notesBody.setText(buildStyledNotes(rel.notes, tv, p));
             } else {
                 notesHeading.setText("版本特性与安全保障");
                 notesBody.setText(
@@ -520,11 +600,20 @@ final class UpdateScreen {
         }
 
         if (modeValueView != null) {
-            modeValueView.setText(modeName(updates.mode()) + "  ›");
+            modeValueView.setText(
+                    tv ? (modeName(updates.mode()) + "  ›") : modeName(updates.mode()));
         }
     }
 
     static CharSequence buildStyledNotes(String rawNotes) {
+        return buildStyledNotes(rawNotes, true, null);
+    }
+
+    static CharSequence buildStyledNotes(String rawNotes, boolean tv, MobileTheme.Palette p) {
+        int overviewColor = tv || p == null ? 0xffe5e7eb : p.textPrimary;
+        int mutedColor = tv || p == null ? 0xff9ca3af : p.textSecondary;
+        int headerColor = tv || p == null ? 0xff5ac8fa : p.accent;
+        int strongColor = tv || p == null ? MainActivity.WHITE : p.textPrimary;
         ReleaseNotesFormatter.Summary summary = ReleaseNotesFormatter.summarize(rawNotes);
         if (summary.sections.isEmpty()) {
             return summary.overview.isEmpty() ? rawNotes.trim() : summary.overview;
@@ -534,7 +623,7 @@ final class UpdateScreen {
             int start = sb.length();
             sb.append(summary.overview);
             sb.setSpan(
-                    new ForegroundColorSpan(0xffe5e7eb),
+                    new ForegroundColorSpan(overviewColor),
                     start,
                     sb.length(),
                     Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
@@ -543,7 +632,7 @@ final class UpdateScreen {
             int start = sb.length();
             sb.append("共整理 ").append(String.valueOf(summary.totalItems)).append(" 项重点升级改进");
             sb.setSpan(
-                    new ForegroundColorSpan(0xff9ca3af),
+                    new ForegroundColorSpan(mutedColor),
                     start,
                     sb.length(),
                     Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
@@ -561,7 +650,7 @@ final class UpdateScreen {
                         sb.length(),
                         Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 sb.setSpan(
-                        new ForegroundColorSpan(0xff5ac8fa),
+                        new ForegroundColorSpan(headerColor),
                         hStart,
                         sb.length(),
                         Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
@@ -579,7 +668,7 @@ final class UpdateScreen {
                             sb.length(),
                             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                     sb.setSpan(
-                            new ForegroundColorSpan(MainActivity.WHITE),
+                            new ForegroundColorSpan(strongColor),
                             bStart,
                             sb.length(),
                             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);

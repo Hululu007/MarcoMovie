@@ -7,9 +7,28 @@ import android.widget.*;
 
 /** Current-page playback feedback; never creates a navigation destination. */
 final class PlaybackLoading extends FrameLayout {
+    /**
+     * Pure-JVM policy: when {@link MobileInlinePlayer} is already presenting a top-viewport loading
+     * card, suppress the full-screen dimmed center modal so two loading prompts never appear at the
+     * same time (the transparent host still anchors any hidden 1x1 {@code WebResolver}).
+     */
+    static boolean shouldSuppressCenterOverlay(boolean hasActiveInlinePlayer) {
+        return hasActiveInlinePlayer;
+    }
+
     PlaybackLoading(MainActivity a) {
         super(a);
         setTag("playback-loading");
+        boolean suppressCenter =
+                shouldSuppressCenterOverlay(
+                        a != null && a.inlinePlayer != null && !a.inlinePlayer.isClosed());
+        if (suppressCenter) {
+            setBackgroundColor(Color.TRANSPARENT);
+            setFocusable(false);
+            setFocusableInTouchMode(false);
+            setClickable(false);
+            return;
+        }
         UiCompat.setBackground(this, UiCompat.createFocusSafeColorBackground(0x66000000));
         UiCompat.setDefaultFocusHighlightEnabled(this, false);
         setFocusable(true);

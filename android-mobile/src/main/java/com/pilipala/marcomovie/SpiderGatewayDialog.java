@@ -48,25 +48,36 @@ final class SpiderGatewayDialog {
         SpiderGatewayServer gw = a.spiderGateway;
         boolean running = enabled && gw != null && !gw.closed;
         String lanIp = safeLanIp();
+        boolean tv = a.isTvDevice();
+        MobileTheme.Palette p = tv ? null : MobileTheme.of(a);
 
-        ScrollView scroll = new TvScrollView(a);
         LinearLayout panel = a.vertical();
-        panel.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
-        scroll.addView(panel);
+        panel.setPadding(a.dp(tv ? 4 : 2), a.dp(4), a.dp(tv ? 4 : 2), a.dp(4));
 
         TextView intro =
                 a.text(
                         "开启后，同一 Wi-Fi 下的 iPhone / iPad / Mac / Windows 端 Marco Movie 可在「设置 → 蜘蛛扩展与网关 → 局域网发现 Android 端」自动搜到本机，用本机原生解析 .so 线路（只传目录与播放地址，视频流仍由对方直连）。",
                         13,
-                        MainActivity.MUTED);
+                        tv ? MainActivity.MUTED : p.textSecondary);
         intro.setLineSpacing(a.dp(3), 1f);
         panel.addView(intro);
-        a.gap(panel, 10);
+        a.gap(panel, 12);
 
         // Status & pairing card
         LinearLayout card = a.vertical();
-        card.setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12));
-        card.setBackground(TvV17Surface.rounded(0x66161b26, a.dp(14), 0x2cffffff, a.dp(1)));
+        card.setPadding(a.dp(14), a.dp(13), a.dp(14), a.dp(13));
+        if (tv) {
+            card.setBackground(TvV17Surface.rounded(0x66161b26, a.dp(14), 0x2cffffff, a.dp(1)));
+        } else {
+            card.setBackground(
+                    MobileTheme.outlinedBg(
+                            a,
+                            p.bgSubtle,
+                            running
+                                    ? MobileTheme.withAlpha(p.success, p.isDark ? 0x66 : 0x48)
+                                    : p.hairline,
+                            16));
+        }
 
         String badgeText =
                 running
@@ -75,7 +86,13 @@ final class SpiderGatewayDialog {
                                         ? " · UDP 41978 自动发现已就绪"
                                         : " · HTTP 已就绪"))
                         : (enabled ? "● 正在启动局域网服务…" : "○ 服务已关闭（默认关闭）");
-        TextView badge = a.text(badgeText, 13.5f, running ? 0xff4ade80 : 0xff94a3b8);
+        TextView badge =
+                a.text(
+                        badgeText,
+                        13.5f,
+                        running
+                                ? (tv ? 0xff4ade80 : p.success)
+                                : (tv ? 0xff94a3b8 : p.textSecondary));
         badge.setTypeface(null, Typeface.BOLD);
         card.addView(badge);
         a.gap(card, 8);
@@ -84,7 +101,7 @@ final class SpiderGatewayDialog {
         infoRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout details = a.vertical();
 
-        addMetaRow(a, details, "设备名称", deviceName, MainActivity.WHITE);
+        addMetaRow(a, details, "设备名称", deviceName, tv ? MainActivity.WHITE : p.textPrimary, tv, p);
         String addrText =
                 running && !lanIp.isEmpty()
                         ? gw.baseUrl(lanIp)
@@ -98,14 +115,21 @@ final class SpiderGatewayDialog {
                                                         Prefs.SPIDER_GATEWAY_PORT,
                                                         SpiderGatewayServer.DEFAULT_HTTP_PORT))
                                 : "开启后自动显示局域网地址");
-        addMetaRow(a, details, "网关地址", addrText, 0xff66d4cf);
-        addMetaRow(a, details, "访问令牌", SpiderGatewayServer.formatDisplayToken(token), 0xfffbbf24);
+        addMetaRow(a, details, "网关地址", addrText, tv ? 0xff66d4cf : p.accent, tv, p);
+        addMetaRow(
+                a,
+                details,
+                "访问令牌",
+                SpiderGatewayServer.formatDisplayToken(token),
+                tv ? 0xfffbbf24 : p.warning,
+                tv,
+                p);
         if (running) {
             TextView activity =
                     a.text(
                             gw.lastActivity + "（累计 " + gw.servedRequests.get() + " 次）",
                             11.5f,
-                            MainActivity.MUTED);
+                            tv ? MainActivity.MUTED : p.textSecondary);
             activity.setPadding(0, a.dp(6), 0, 0);
             details.addView(activity);
         }
@@ -113,7 +137,7 @@ final class SpiderGatewayDialog {
 
         if (running && !lanIp.isEmpty()) {
             try {
-                int qrPx = a.dp(a.isTvDevice() ? 104 : 112);
+                int qrPx = a.dp(tv ? 104 : 112);
                 LinearLayout qrBox = a.vertical();
                 qrBox.setGravity(Gravity.CENTER_HORIZONTAL);
                 LinearLayout.LayoutParams qrBoxLp = new LinearLayout.LayoutParams(-2, -2);
@@ -124,7 +148,8 @@ final class SpiderGatewayDialog {
                 qrImg.setBackground(a.bg(Color.WHITE, 10));
                 qrBox.addView(
                         qrImg, new LinearLayout.LayoutParams(qrPx + a.dp(12), qrPx + a.dp(12)));
-                TextView qrCap = a.text("手机扫码复制令牌", 10.5f, MainActivity.MUTED);
+                TextView qrCap =
+                        a.text("手机扫码复制令牌", 10.5f, tv ? MainActivity.MUTED : p.textSecondary);
                 qrCap.setPadding(0, a.dp(4), 0, 0);
                 qrBox.addView(qrCap);
                 infoRow.addView(qrBox, qrBoxLp);
@@ -133,48 +158,84 @@ final class SpiderGatewayDialog {
         }
         card.addView(infoRow, new LinearLayout.LayoutParams(-1, -2));
         panel.addView(card, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(panel, 12);
+        a.gap(panel, 14);
 
         final AppDialog[] holder = new AppDialog[1];
+        final MobileBottomSheet.SheetHandle[] sheetHolder = new MobileBottomSheet.SheetHandle[1];
+        final Runnable dismissPopup =
+                () -> {
+                    if (holder[0] != null) holder[0].dismiss();
+                    if (sheetHolder[0] != null) sheetHolder[0].dismiss();
+                };
+
+        Runnable onToggle =
+                () -> {
+                    boolean next = !enabled;
+                    a.prefs.edit().putBoolean(Prefs.SPIDER_GATEWAY_ENABLED, next).apply();
+                    a.syncSpiderGateway();
+                    dismissPopup.run();
+                    if (onUpdated != null) onUpdated.run();
+                    else a.refresh();
+                    a.toast(next ? "已开启局域网蜘蛛网关，iOS 端现在可搜到本机" : "已关闭局域网蜘蛛网关");
+                    a.ui.postDelayed(() -> show(a, onUpdated), next ? 350L : 80L);
+                };
+        Runnable onReset =
+                () -> {
+                    SpiderGatewayServer.resetToken(a);
+                    if (a.prefs.getBoolean(Prefs.SPIDER_GATEWAY_ENABLED, false)) {
+                        a.restartSpiderGateway();
+                    }
+                    dismissPopup.run();
+                    a.toast("已生成新的访问令牌，请在新设备上重新核对");
+                    a.ui.postDelayed(() -> show(a, onUpdated), 250L);
+                };
+        Runnable onRename =
+                () -> {
+                    dismissPopup.run();
+                    promptRename(a, deviceName, onUpdated);
+                };
+
+        if (!tv) {
+            TextView togglePill =
+                    buildMobileActionPill(a, p, enabled ? "关闭网关" : "开启网关", !enabled, onToggle);
+            togglePill.setTag("spider-gateway-toggle");
+            panel.addView(togglePill, new LinearLayout.LayoutParams(-1, a.dp(44)));
+            a.gap(panel, 8);
+
+            LinearLayout subActions = a.row();
+            TextView resetPill = buildMobileActionPill(a, p, "重置令牌", false, onReset);
+            resetPill.setTag("spider-gateway-reset-token");
+            TextView renamePill = buildMobileActionPill(a, p, "修改名称", false, onRename);
+            renamePill.setTag("spider-gateway-rename");
+            LinearLayout.LayoutParams rLp = new LinearLayout.LayoutParams(0, a.dp(42), 1f);
+            rLp.rightMargin = a.dp(8);
+            subActions.addView(resetPill, rLp);
+            subActions.addView(renamePill, new LinearLayout.LayoutParams(0, a.dp(42), 1f));
+            panel.addView(subActions, new LinearLayout.LayoutParams(-1, -2));
+
+            sheetHolder[0] =
+                    MobileBottomSheet.showHandle(
+                            a,
+                            "局域网蜘蛛网关",
+                            running ? "服务运行中 · 同局域网设备可发现本机" : "默认关闭 · 按需开启局域网共享",
+                            null,
+                            null,
+                            panel,
+                            true);
+            return;
+        }
+
+        ScrollView scroll = new TvScrollView(a);
+        scroll.addView(panel);
+
         LinearLayout actions = a.row();
         actions.setClipChildren(false);
         actions.setClipToPadding(false);
 
         Button toggleBtn =
-                a.navButton(
-                        enabled ? "关闭网关" : "开启网关",
-                        "spider-gateway-toggle",
-                        () -> {
-                            boolean next = !enabled;
-                            a.prefs.edit().putBoolean(Prefs.SPIDER_GATEWAY_ENABLED, next).apply();
-                            a.syncSpiderGateway();
-                            if (holder[0] != null) holder[0].dismiss();
-                            if (onUpdated != null) onUpdated.run();
-                            else a.refresh();
-                            a.toast(next ? "已开启局域网蜘蛛网关，iOS 端现在可搜到本机" : "已关闭局域网蜘蛛网关");
-                            a.ui.postDelayed(() -> show(a, onUpdated), next ? 350L : 80L);
-                        });
-        Button resetBtn =
-                a.navButton(
-                        "重置令牌",
-                        "spider-gateway-reset-token",
-                        () -> {
-                            SpiderGatewayServer.resetToken(a);
-                            if (a.prefs.getBoolean(Prefs.SPIDER_GATEWAY_ENABLED, false)) {
-                                a.restartSpiderGateway();
-                            }
-                            if (holder[0] != null) holder[0].dismiss();
-                            a.toast("已生成新的访问令牌，请在新设备上重新核对");
-                            a.ui.postDelayed(() -> show(a, onUpdated), 250L);
-                        });
-        Button renameBtn =
-                a.navButton(
-                        "修改名称",
-                        "spider-gateway-rename",
-                        () -> {
-                            if (holder[0] != null) holder[0].dismiss();
-                            promptRename(a, deviceName, onUpdated);
-                        });
+                a.navButton(enabled ? "关闭网关" : "开启网关", "spider-gateway-toggle", onToggle);
+        Button resetBtn = a.navButton("重置令牌", "spider-gateway-reset-token", onReset);
+        Button renameBtn = a.navButton("修改名称", "spider-gateway-rename", onRename);
 
         LinearLayout.LayoutParams b1 = new LinearLayout.LayoutParams(0, -2, 1f);
         b1.rightMargin = a.dp(8);
@@ -194,17 +255,36 @@ final class SpiderGatewayDialog {
                         .create();
         holder[0] = dialog;
         dialog.show();
-        if (a.isTvDevice()) {
-            a.ui.post(toggleBtn::requestFocus);
-        }
+        a.ui.post(toggleBtn::requestFocus);
+    }
+
+    private static TextView buildMobileActionPill(
+            MainActivity a,
+            MobileTheme.Palette p,
+            String label,
+            boolean primary,
+            Runnable onClick) {
+        TextView btn = a.text(label, 14f, primary ? p.accentOnFill : p.textPrimary);
+        btn.setTypeface(null, Typeface.BOLD);
+        btn.setGravity(Gravity.CENTER);
+        btn.setBackground(primary ? a.bg(p.accent, 14) : MobileTheme.subtleBg(a, 14));
+        MobileMotion.bindPress(btn, 0.96f);
+        btn.setOnClickListener(v -> onClick.run());
+        return btn;
     }
 
     private static void addMetaRow(
-            MainActivity a, LinearLayout parent, String label, String value, int valueColor) {
+            MainActivity a,
+            LinearLayout parent,
+            String label,
+            String value,
+            int valueColor,
+            boolean tv,
+            MobileTheme.Palette p) {
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(0, a.dp(3), 0, a.dp(3));
-        TextView k = a.text(label, 12, MainActivity.MUTED);
+        TextView k = a.text(label, 12, tv ? MainActivity.MUTED : p.textSecondary);
         row.addView(k, new LinearLayout.LayoutParams(a.dp(62), -2));
         TextView v = a.text(value, 13.5f, valueColor);
         v.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
@@ -213,6 +293,8 @@ final class SpiderGatewayDialog {
     }
 
     private static void promptRename(MainActivity a, String currentName, Runnable onUpdated) {
+        boolean tv = a.isTvDevice();
+        MobileTheme.Palette p = tv ? null : MobileTheme.of(a);
         LinearLayout box = a.vertical();
         box.setPadding(a.dp(4), a.dp(6), a.dp(4), a.dp(4));
         final EditText edit = new EditText(a);
@@ -220,12 +302,39 @@ final class SpiderGatewayDialog {
         edit.setText(currentName);
         edit.setSelection(edit.getText().length());
         edit.setHint("例如：客厅电视 · Marco Movie");
-        edit.setTextColor(MainActivity.WHITE);
-        edit.setHintTextColor(MainActivity.MUTED);
-        edit.setBackground(a.bg(0xff242834, 12));
+        edit.setTextColor(tv ? MainActivity.WHITE : p.textPrimary);
+        edit.setHintTextColor(tv ? MainActivity.MUTED : p.textTertiary);
+        edit.setBackground(tv ? a.bg(0xff242834, 12) : MobileTheme.subtleBg(a, 12));
         edit.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
         View row = TvQrInputHelper.wrap(a, edit, "蜘蛛网关设备名称");
         box.addView(row, new LinearLayout.LayoutParams(-1, -2));
+
+        if (!tv) {
+            final MobileBottomSheet.SheetHandle[] hRef = new MobileBottomSheet.SheetHandle[1];
+            hRef[0] =
+                    MobileBottomSheet.showHandle(
+                            a,
+                            "修改蜘蛛网关设备名称",
+                            "同局域网设备扫描发现本机时将展示此名称",
+                            "保存",
+                            () -> {
+                                String next =
+                                        SearchInputServer.sanitizeKeyword(
+                                                edit.getText() == null
+                                                        ? ""
+                                                        : edit.getText().toString());
+                                if (next.isEmpty()) next = "Marco Movie Android 网关";
+                                a.prefs.edit().putString(Prefs.SPIDER_GATEWAY_NAME, next).apply();
+                                if (a.spiderGateway != null) a.spiderGateway.updateDeviceName(next);
+                                if (hRef[0] != null) hRef[0].dismiss();
+                                a.toast("网关名称已更新为：" + next);
+                                show(a, onUpdated);
+                            },
+                            box,
+                            false);
+            return;
+        }
+
         new AppDialog.Builder(a)
                 .setTitle("修改蜘蛛网关设备名称")
                 .setView(box)

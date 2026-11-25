@@ -145,6 +145,7 @@ final class Prefs {
     static final String ACCOUNT_CONFIG_CENTER_KEY = "account_config_center_key";
 
     // Mobile-exclusive preferences stored in MOBILE_FILE ("movie_mobile").
+    static final String THEME_MODE = "theme_mode";
     static final String MOBILE_UI_SCALE_PERCENT = "mobile_ui_scale_percent";
     static final String NAV_STYLE = "nav_style";
     static final String NAV_SCROLL_BEHAVIOR = "nav_scroll_behavior";
@@ -261,6 +262,7 @@ final class Prefs {
     };
 
     static final String[] MOBILE_KEYS = {
+        THEME_MODE,
         MOBILE_UI_SCALE_PERCENT,
         NAV_STYLE,
         NAV_SCROLL_BEHAVIOR,
@@ -431,6 +433,7 @@ final class Prefs {
         INT_RANGES = Collections.unmodifiableMap(ranges);
 
         Map<String, int[]> mr = new HashMap<>();
+        mr.put(THEME_MODE, new int[] {0, 2});
         mr.put(MOBILE_UI_SCALE_PERCENT, new int[] {90, 120});
         mr.put(NAV_STYLE, new int[] {0, 1});
         mr.put(NAV_SCROLL_BEHAVIOR, new int[] {0, 2});
@@ -647,22 +650,22 @@ final class Prefs {
     static int accentColorForPreset(int preset) {
         switch (preset) {
             case 1:
-                return 0xff0a84ff;
-            case 2:
                 return 0xffff2d55;
+            case 2:
+                return 0xff10b981;
             case 3:
-                return 0xfff59e0b;
+                return 0xff8b5cf6;
             case 4:
-                return 0xffa855f7;
+                return 0xfff59e0b;
             case 5:
-                return 0xff14b8a6;
+                return 0xff64748b;
             case 6:
                 return 0xfff97316;
             case 7:
-                return 0xff94a3b8;
+                return 0xff14b8a6;
             case 0:
             default:
-                return 0xff34d399;
+                return 0xff007aff;
         }
     }
 

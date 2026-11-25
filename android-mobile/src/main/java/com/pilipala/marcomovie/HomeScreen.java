@@ -684,9 +684,11 @@ final class HomeScreen {
         }
     }
 
-    private static void writeDiskSnapshot(MainActivity a, String siteKey, Snapshot snap) {
-        if (a == null || snap == null || (snap.videos.isEmpty() && snap.categories.isEmpty()))
-            return;
+    static void writeDiskSnapshot(MainActivity a, String siteKey, Snapshot snap) {
+        if (a == null
+                || a.privateMode
+                || snap == null
+                || (snap.videos.isEmpty() && snap.categories.isEmpty())) return;
         java.io.File file = snapshotCacheFile(a, siteKey);
         if (file == null) return;
         try {
@@ -730,7 +732,7 @@ final class HomeScreen {
         }
     }
 
-    private static Snapshot readDiskSnapshot(MainActivity a, String siteKey) {
+    static Snapshot readDiskSnapshot(MainActivity a, String siteKey) {
         java.io.File file = snapshotCacheFile(a, siteKey);
         if (file == null || !file.exists() || file.length() <= 0 || file.length() > 512 * 1024)
             return null;
