@@ -12,7 +12,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:http/testing.dart';
+import 'package:marco_movie/core/cms_parser.dart';
 import 'package:marco_movie/core/container_metadata_reader.dart';
 import 'package:marco_movie/core/danmu/dandanplay_provider.dart';
 import 'package:marco_movie/core/danmu/danmu_prefs.dart';
@@ -920,11 +923,65 @@ void main() {
         ),
         100,
       );
+      // Ultrawide 2160x900 crop (BoxFit.cover) playing 1280x720 must compute
+      // sub-pos from the full unclipped scaled video height (2160x1215, 157.5px
+      // bottom crop) -> sub-pos == 78, NOT 88!
+      expect(
+        SubtitleLayoutGeometry.computeMpvSubPos(
+          viewport: const Size(2160, 900),
+          videoWidth: 1280,
+          videoHeight: 720,
+          fit: BoxFit.cover,
+          hudControlsVisible: true,
+          measuredBottomBarHeight: 86,
+        ),
+        78,
+      );
+      expect(
+        SubtitleLayoutGeometry.computeMpvSubPos(
+          viewport: const Size(2160, 900),
+          videoWidth: 1280,
+          videoHeight: 720,
+          fit: BoxFit.cover,
+          hudControlsVisible: false,
+          measuredBottomBarHeight: 86,
+        ),
+        100,
+      );
     });
 
-    for (final viewportCase in const <({String label, Size size})>[
-      (label: 'narrow_900x600', size: Size(900, 600)),
-      (label: 'fullscreen_1440x900', size: Size(1440, 900)),
+    for (final viewportCase in const <({
+      String label,
+      Size size,
+      BoxFit fit,
+      String aspectMode,
+      String frameTag,
+      int? exactSubPos,
+    })>[
+      (
+        label: 'narrow_900x600',
+        size: Size(900, 600),
+        fit: BoxFit.contain,
+        aspectMode: 'contain',
+        frameTag: 'narrow',
+        exactSubPos: null,
+      ),
+      (
+        label: 'fullscreen_1440x900',
+        size: Size(1440, 900),
+        fit: BoxFit.contain,
+        aspectMode: 'contain',
+        frameTag: 'fullscreen',
+        exactSubPos: null,
+      ),
+      (
+        label: 'fullscreen_crop_2160x900',
+        size: Size(2160, 900),
+        fit: BoxFit.cover,
+        aspectMode: 'cover',
+        frameTag: 'crop_2160x900',
+        exactSubPos: 78,
+      ),
     ]) {
       testWidgets(
         'PlayerScreen lifts 2-line subtitle above bottom controls in ${viewportCase.label} for hidden/shown/dragging/slim-progress while keeping video, danmu & drag region stable',
@@ -941,9 +998,10 @@ void main() {
           addTearDown(tester.view.resetDevicePixelRatio);
 
           final storage = await initTestStorage(
-            initialPrefs: const <String, Object>{
+            initialPrefs: <String, Object>{
               OnboardingPrefs.playHintDismissedKey: true,
               OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+              StorageService.keyDefaultAspectMode: viewportCase.aspectMode,
             },
           );
           const winChannel = MethodChannel('window_manager');
@@ -1089,9 +1147,11 @@ void main() {
                         return ColoredBox(
                           color: Colors.black,
                           child: SizedBox.expand(
-                            child: FittedBox(
-                              fit: BoxFit.contain,
-                              child: RawImage(image: image),
+                            child: ClipRect(
+                              child: FittedBox(
+                                fit: viewportCase.fit,
+                                child: RawImage(image: image),
+                              ),
                             ),
                           ),
                         );
@@ -1267,9 +1327,7 @@ void main() {
           expect(subRectRewoken.bottom, lessThan(tester.getRect(controlsFinder).top));
 
           // --- Verify native libmpv ASS & PGS subtitle properties + real frame compositing ---
-          final sizeTag = viewportCase.label.startsWith('narrow')
-              ? 'narrow'
-              : 'fullscreen';
+          final sizeTag = viewportCase.frameTag;
           for (final nativeCase in <({
             String kind,
             SubtitleTrack track,
@@ -1306,6 +1364,14 @@ void main() {
               reason:
                   '${nativeCase.kind} in ${viewportCase.label} should lower sub-pos when HUD visible',
             );
+            if (viewportCase.exactSubPos != null) {
+              expect(
+                liftedSubPos,
+                viewportCase.exactSubPos,
+                reason:
+                    '${nativeCase.kind} in ${viewportCase.label} must compute exact cover sub-pos',
+              );
+            }
 
             if (artifactsDirPath.isNotEmpty) {
               await setMpvFrame(nativeCase.liftedFrame);
@@ -2455,6 +2521,1073 @@ void main() {
         ioClient.close();
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(milliseconds: 500));
+      },
+    );
+  });
+
+  // =========================================================================
+  // Round 4 Rework Regressions (P1 Scraping/Danmu, P1 WebDAV/Auth, P2 Crop/Scope)
+  // =========================================================================
+  group('Round 4 Rework: P1 Scraping/Danmu, P1 WebDAV/Auth, P2 Crop & Platform Scope', () {
+    testWidgets(
+      'P2 Platform Scope: new macOS subtitle control stays disabled on Windows mpv and iOS mpv',
+      variant: TargetPlatformVariant(<TargetPlatform>{
+        TargetPlatform.windows,
+        TargetPlatform.iOS,
+      }),
+      (tester) async {
+        tester.view.physicalSize = const Size(1280, 720);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final storage = await initTestStorage(
+          initialPrefs: const <String, Object>{
+            OnboardingPrefs.playHintDismissedKey: true,
+            OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+          },
+        );
+        final player = _Round3FakePlayer();
+        final assTrack = SubtitleTrack('2', 'Styled ASS', 'zh', codec: 'ass');
+        player.setActiveSubtitleTrack(
+          assTrack,
+          available: <SubtitleTrack>[
+            SubtitleTrack.auto(),
+            SubtitleTrack.no(),
+            assTrack,
+          ],
+        );
+        final subDir = Directory.systemTemp.createTempSync('marco_scope_');
+        addTearDown(() => subDir.deleteSync(recursive: true));
+        final file = File('${subDir.path}/sample.mkv')..writeAsBytesSync([0, 1]);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(
+                key: 's_scope',
+                name: 'Scope',
+                type: 1,
+                api: 'https://scope.invalid',
+              ),
+              video: CmsVideo(
+                id: 'v_scope',
+                title: 'Scope Test',
+                lines: <CmsLine>[
+                  CmsLine(
+                    name: 'Main',
+                    episodes: <CmsEpisode>[
+                      CmsEpisode(name: 'EP1', url: Uri.file(file.path).toString()),
+                    ],
+                  ),
+                ],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: player,
+              debugHudPrefs: PlayerHudPrefs.inMemory(isDesktop: true),
+              debugOnboardingPrefs: OnboardingPrefs(
+                _IsolatedSharedPreferences(const <String, Object>{
+                  OnboardingPrefs.playHintDismissedKey: true,
+                  OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+                }),
+              ),
+              debugDanmuSettings: const DanmuSettings(enabled: false),
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+
+        // Neither Windows mpv nor iOS mpv receives new macOS sub-pos/sub-visibility/
+        // sub-ass-override=yes writes from _syncNativeSubtitleState.
+        expect(player.platformImpl.properties['sub-pos'], isNull);
+        expect(player.platformImpl.properties['sub-visibility'], isNull);
+        expect(player.platformImpl.properties['sub-ass'], isNull);
+        expect(player.platformImpl.properties['sub-ass-override'], isNot('yes'));
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 300));
+        await player.dispose();
+      },
+    );
+
+    test(
+      'P1 Container Scope & Cloud Path: global vs track-only vs conflicting MKV tags + Season 2/E02.mkv',
+      () {
+        List<int> vintSize(int n) {
+          if (n < 0x7F) return <int>[0x80 | n];
+          return <int>[0x40 | ((n >> 8) & 0x3F), n & 0xFF];
+        }
+
+        List<int> ebmlElem(List<int> id, List<int> payload) => <int>[
+              ...id,
+              ...vintSize(payload.length),
+              ...payload,
+            ];
+
+        List<int> simpleTag(String name, String value) => ebmlElem(
+              const [0x67, 0xC8],
+              <int>[
+                ...ebmlElem(const [0x45, 0xA3], utf8.encode(name)),
+                ...ebmlElem(const [0x44, 0x87], utf8.encode(value)),
+              ],
+            );
+
+        List<int> buildMkv({
+          String? infoTitle,
+          required List<List<int>> tagElements,
+        }) {
+          final ebmlHeader = ebmlElem(
+            const [0x1A, 0x45, 0xDF, 0xA3],
+            ebmlElem(const [0x42, 0x82], utf8.encode('matroska')),
+          );
+          final infoChildren = <int>[
+            if (infoTitle != null)
+              ...ebmlElem(const [0x7B, 0xA9], utf8.encode(infoTitle)),
+          ];
+          final segBody = <int>[
+            if (infoChildren.isNotEmpty)
+              ...ebmlElem(const [0x15, 0x49, 0xA9, 0x66], infoChildren),
+            if (tagElements.isNotEmpty)
+              ...ebmlElem(
+                const [0x12, 0x54, 0xC3, 0x67],
+                tagElements.expand((e) => e).toList(),
+              ),
+          ];
+          return <int>[
+            ...ebmlHeader,
+            ...ebmlElem(const [0x18, 0x53, 0x80, 0x67], segBody),
+          ];
+        }
+
+        final dir = Directory.systemTemp.createTempSync('marco_mkv_scope_');
+        addTearDown(() => dir.deleteSync(recursive: true));
+
+        // 1. Track-only audio tags (TagTrackUID != 0) MUST be ignored!
+        final trackOnlyPath = '${dir.path}/track-only.mkv';
+        File(trackOnlyPath).writeAsBytesSync(
+          buildMkv(
+            tagElements: <List<int>>[
+              ebmlElem(
+                const [0x73, 0x73],
+                <int>[
+                  ...ebmlElem(
+                    const [0x63, 0xC0],
+                    ebmlElem(const [0x63, 0xC5], const [0x01, 0x02, 0x03, 0x04]),
+                  ),
+                  ...simpleTag('SEASON', '2'),
+                  ...simpleTag('EPISODE', '10'),
+                ],
+              ),
+            ],
+          ),
+        );
+        final trackOnlyTags = ContainerMetadataReader.readLocalFileTagsSync(trackOnlyPath);
+        expect(trackOnlyTags['season'], isNull);
+        expect(trackOnlyTags['episode'], isNull);
+        final trackOnlyInfo = SeriesScraper.scrapeEpisode(
+          CmsEpisode(name: 'track-only.mkv', url: trackOnlyPath),
+          seriesTitle: 'Example',
+        );
+        expect(trackOnlyInfo.status, EpisodeRecognitionStatus.needsConfirmation);
+        expect(trackOnlyInfo.displayLabel, '待确认');
+        expect(trackOnlyInfo.resolvedEpisodeNumber, isNull);
+
+        // 2. Global tags (empty Targets) MUST resolve to S02E10!
+        final globalPath = '${dir.path}/global.mkv';
+        File(globalPath).writeAsBytesSync(
+          buildMkv(
+            tagElements: <List<int>>[
+              ebmlElem(
+                const [0x73, 0x73],
+                <int>[
+                  ...ebmlElem(const [0x63, 0xC0], const <int>[]),
+                  ...simpleTag('SEASON', '2'),
+                  ...simpleTag('EPISODE', '10'),
+                ],
+              ),
+            ],
+          ),
+        );
+        final globalInfo = SeriesScraper.scrapeEpisode(
+          CmsEpisode(name: 'global.mkv', url: globalPath),
+          seriesTitle: 'Example',
+        );
+        expect(globalInfo.seasonNumber, 2);
+        expect(globalInfo.resolvedEpisodeNumber, 10);
+        expect(globalInfo.displayLabel, 'S02E10');
+
+        // 3. Conflicting global Info.Title ("Example S02E10") vs EPISODE="2" -> 待确认!
+        final conflictPath = '${dir.path}/conflict.mkv';
+        File(conflictPath).writeAsBytesSync(
+          buildMkv(
+            infoTitle: 'Example S02E10',
+            tagElements: <List<int>>[
+              ebmlElem(
+                const [0x73, 0x73],
+                <int>[
+                  ...ebmlElem(const [0x63, 0xC0], const <int>[]),
+                  ...simpleTag('SEASON', '2'),
+                  ...simpleTag('EPISODE', '2'),
+                ],
+              ),
+            ],
+          ),
+        );
+        final conflictInfo = SeriesScraper.scrapeEpisode(
+          CmsEpisode(name: 'conflict.mkv', url: conflictPath),
+          seriesTitle: 'Example',
+        );
+        expect(conflictInfo.hasConflict, isTrue);
+        expect(conflictInfo.status, EpisodeRecognitionStatus.needsConfirmation);
+        expect(conflictInfo.displayLabel, '待确认');
+        expect(conflictInfo.resolvedEpisodeNumber, isNull);
+
+        // 4. Netdisk path `Season 2/E02.mkv` inside mmcloud URL/playbackSession preserves Season 2!
+        const cloudEp = CmsEpisode(
+          name: 'E02.mkv',
+          url: 'mmcloud://uc?fid=foo&name=E02.mkv&path=%2FTV%2FSeason+2%2FE02.mkv',
+          playbackSession: <String, dynamic>{
+            'provider': 'uc',
+            'fileName': 'E02.mkv',
+            'path': '/TV/Season 2/E02.mkv',
+          },
+        );
+        final cloudInfo = SeriesScraper.scrapeEpisode(cloudEp, seriesTitle: 'Example');
+        expect(cloudInfo.seasonNumber, 2);
+        expect(cloudInfo.resolvedEpisodeNumber, 2);
+        expect(cloudInfo.displayLabel, 'S02E02');
+      },
+    );
+
+    testWidgets(
+      'P1 CMS missing episode name -> Player -> real Danmu service binds 210 (not 101), opaque URL -> 待确认, and container SHOW tag propagates into HTTP query',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        tester.view.physicalSize = const Size(1280, 720);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        // 1. Real CMS parser response where item 1 omits episode name before `$`
+        final cmsVideo = CmsParser.parseListing(
+          jsonEncode(<String, dynamic>{
+            'list': <Map<String, dynamic>>[
+              <String, dynamic>{
+                'vod_id': 'cms_e7',
+                'vod_name': '山中之花',
+                'vod_play_from': 'main',
+                'vod_play_url':
+                    r'$https://cdn.example/Season%202/Show.S02E10.mp4#$https://cdn.example/stream/opaque-clip.mp4',
+              },
+            ],
+          }),
+        ).videos.first;
+        expect(cmsVideo.lines.first.episodes[0].name, '第 1 集');
+        expect(cmsVideo.lines.first.episodes[0].nameIsGenerated, isTrue);
+        expect(cmsVideo.lines.first.episodes[0].originalFileName, 'Show.S02E10.mp4');
+        expect(cmsVideo.lines.first.episodes[1].nameIsGenerated, isTrue);
+
+        // Opaque URL with generated name has NO reliable episode evidence -> 待确认!
+        final opaqueScrape = SeriesScraper.scrapeEpisode(
+          cmsVideo.lines.first.episodes[1],
+          originalIndex: 1,
+          seriesTitle: cmsVideo.title,
+        );
+        expect(opaqueScrape.status, EpisodeRecognitionStatus.needsConfirmation);
+        expect(opaqueScrape.displayLabel, '待确认');
+        expect(opaqueScrape.resolvedEpisodeNumber, isNull);
+
+        // 2. Drive real PlayerScreen + DandanplayProvider MockClient for item 0 (Show.S02E10.mp4)
+        final matchBodies = <String>[];
+        final mockDanmuHttp = MockClient((req) async {
+          if (req.url.path == '/api/v2/match') {
+            matchBodies.add(req.body);
+            return http.Response(
+              jsonEncode(<String, dynamic>{
+                'isMatched': false,
+                'matches': <Map<String, dynamic>>[
+                  <String, dynamic>{
+                    'episodeId': 101,
+                    'animeId': 77,
+                    'animeTitle': '山中之花',
+                    'episodeTitle': '第1集',
+                  },
+                  <String, dynamic>{
+                    'episodeId': 210,
+                    'animeId': 77,
+                    'animeTitle': '山中之花 第二季',
+                    'episodeTitle': 'S02E10',
+                  },
+                ],
+              }),
+              200,
+              headers: const <String, String>{'content-type': 'application/json'},
+            );
+          }
+          if (req.url.path.startsWith('/api/v2/comment/')) {
+            return http.Response(
+              jsonEncode(<String, dynamic>{'comments': <dynamic>[]}),
+              200,
+              headers: const <String, String>{'content-type': 'application/json'},
+            );
+          }
+          return http.Response('{}', 404);
+        });
+
+        final storage = await initTestStorage(
+          initialPrefs: const <String, Object>{
+            OnboardingPrefs.playHintDismissedKey: true,
+            OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+          },
+        );
+        final player = _Round3FakePlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(
+                key: 'cms_site',
+                name: 'CMS',
+                type: 1,
+                api: 'https://cms.invalid',
+              ),
+              video: cmsVideo,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: player,
+              debugHudPrefs: PlayerHudPrefs.inMemory(isDesktop: true),
+              debugOnboardingPrefs: OnboardingPrefs(
+                _IsolatedSharedPreferences(const <String, Object>{
+                  OnboardingPrefs.playHintDismissedKey: true,
+                  OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+                }),
+              ),
+              debugDanmuSettings: const DanmuSettings(
+                enabled: true,
+                serverUrls: 'https://comments.example',
+              ),
+              debugDanmuProviderFactory: (s) => DandanplayProvider(
+                multilineServerUrls: s.serverUrls,
+                client: mockDanmuHttp,
+                minRequestIntervalMs: 0,
+              ),
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+
+        final danmuLayer = tester.widget<DanmuLayer>(find.byType(DanmuLayer));
+        final boundSession =
+            danmuLayer.segmentCache?.currentSession?.boundEpisodeId ?? '';
+        expect(
+          boundSession,
+          DandanplayProvider.encodeBoundEpisodeId(
+            'https://comments.example',
+            '210',
+          ),
+        );
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 300));
+        await player.dispose();
+
+        // 3. Container SHOW tag ("远航之夜") overrides catalog ("山中之花") in actual HTTP query
+        //    AND unrelated work ("完全无关的作品 S02E10") stays candidate-only (never auto-binds)!
+        final showBodies = <String>[];
+        final showMockHttp = MockClient((req) async {
+          if (req.url.path == '/api/v2/match') {
+            showBodies.add(req.body);
+            return http.Response(
+              jsonEncode(<String, dynamic>{
+                'isMatched': false,
+                'matches': <Map<String, dynamic>>[
+                  <String, dynamic>{
+                    'episodeId': 999,
+                    'animeId': 99,
+                    'animeTitle': '完全无关的作品 第二季',
+                    'episodeTitle': 'S02E10',
+                  },
+                ],
+              }),
+              200,
+              headers: const <String, String>{'content-type': 'application/json'},
+            );
+          }
+          return http.Response(
+            jsonEncode(<String, dynamic>{'animes': <dynamic>[]}),
+            200,
+            headers: const <String, String>{'content-type': 'application/json'},
+          );
+        });
+        final player2 = _Round3FakePlayer();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: const CmsSite(
+                key: 'show_site',
+                name: 'Show',
+                type: 1,
+                api: 'https://show.invalid',
+              ),
+              video: const CmsVideo(
+                id: 'v_show',
+                title: '山中之花',
+                lines: <CmsLine>[
+                  CmsLine(
+                    name: '主线',
+                    episodes: <CmsEpisode>[
+                      CmsEpisode(
+                        name: 'clip-A.mkv',
+                        url: 'https://cdn.example/clip-A.mkv',
+                        containerTags: <String, String>{
+                          'show': '远航之夜',
+                          'season': '2',
+                          'episode': '10',
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: player2,
+              debugHudPrefs: PlayerHudPrefs.inMemory(isDesktop: true),
+              debugOnboardingPrefs: OnboardingPrefs(
+                _IsolatedSharedPreferences(const <String, Object>{
+                  OnboardingPrefs.playHintDismissedKey: true,
+                  OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+                }),
+              ),
+              debugDanmuSettings: const DanmuSettings(
+                enabled: true,
+                serverUrls: 'https://comments.example',
+              ),
+              debugDanmuProviderFactory: (s) => DandanplayProvider(
+                multilineServerUrls: s.serverUrls,
+                client: showMockHttp,
+                minRequestIntervalMs: 0,
+              ),
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(showBodies, isNotEmpty);
+        final reqJson = jsonDecode(showBodies.first) as Map<String, dynamic>;
+        expect(reqJson['fileName'], '远航之夜 S02E10');
+        final layer2 = tester.widget<DanmuLayer>(find.byType(DanmuLayer));
+        // Unrelated work ("完全无关的作品") must NEVER auto-bind!
+        expect(layer2.segmentCache?.currentSession?.boundEpisodeId ?? '', isEmpty);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 300));
+        await player2.dispose();
+      },
+    );
+
+    testWidgets(
+      'P1 Manual danmu choice survives save/refresh/restart at current playback time, conflicting season line switch prompts picker, and sorted+hidden Prev/Next/N/auto-next skip hidden trailer',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        tester.view.physicalSize = const Size(1280, 720);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final storage = await initTestStorage(
+          initialPrefs: const <String, Object>{
+            OnboardingPrefs.playHintDismissedKey: true,
+            OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+          },
+        );
+        final navDir = Directory.systemTemp.createTempSync('marco_nav_test_');
+        addTearDown(() => navDir.deleteSync(recursive: true));
+        final s2e02Path = '${navDir.path}/s2e02.mp4';
+        final trailerPath = '${navDir.path}/trailer.mp4';
+        final s2e01Path = '${navDir.path}/s2e01.mp4';
+        final s1e01Path = '${navDir.path}/s1e01.mp4';
+        for (final p in <String>[s2e02Path, trailerPath, s2e01Path, s1e01Path]) {
+          File(p).writeAsBytesSync(const <int>[0, 1, 2]);
+        }
+
+        const site = CmsSite(
+          key: 's_nav',
+          name: 'Nav',
+          type: 1,
+          api: 'https://nav.invalid',
+        );
+        final video = CmsVideo(
+          id: 'v_nav',
+          title: '山中之花',
+          lines: <CmsLine>[
+            CmsLine(
+              name: '主线',
+              episodes: <CmsEpisode>[
+                CmsEpisode(name: 'Show.S02E02.mkv', url: s2e02Path),
+                CmsEpisode(name: '预告.mkv', url: trailerPath),
+                CmsEpisode(name: 'Show.S02E01.mkv', url: s2e01Path),
+              ],
+            ),
+            CmsLine(
+              name: '仅第一季备用',
+              episodes: <CmsEpisode>[
+                CmsEpisode(name: 'Show.S01E01.mkv', url: s1e01Path),
+              ],
+            ),
+          ],
+        );
+        await storage.saveSeriesScrapeOverride(
+          site.key,
+          video.id,
+          const SeriesScrapeOverride(
+            sortByScrapedEpisode: true,
+            hideSpecials: true,
+          ),
+        );
+
+        final fetchedSegments = <({String epId, int seg})>[];
+        final mockDanmuHttp = MockClient((req) async {
+          if (req.url.path == '/api/v2/match') {
+            return http.Response(
+              jsonEncode(<String, dynamic>{
+                'isMatched': false,
+                'matches': <Map<String, dynamic>>[
+                  <String, dynamic>{
+                    'episodeId': 999,
+                    'animeId': 77,
+                    'animeTitle': '山中之花 第二季',
+                    'episodeTitle': 'S02E09',
+                  },
+                ],
+              }),
+              200,
+              headers: const <String, String>{'content-type': 'application/json'},
+            );
+          }
+          if (req.url.path == '/api/v2/bangumi/77') {
+            return http.Response(
+              jsonEncode(<String, dynamic>{
+                'bangumi': <String, dynamic>{
+                  'animeId': 77,
+                  'animeTitle': '山中之花 第二季',
+                  'episodes': <Map<String, dynamic>>[
+                    <String, dynamic>{'episodeId': 888, 'episodeTitle': '预告'},
+                    <String, dynamic>{'episodeId': 999, 'episodeTitle': 'S02E09'},
+                  ],
+                },
+              }),
+              200,
+              headers: const <String, String>{'content-type': 'application/json'},
+            );
+          }
+          if (req.url.path.startsWith('/api/v2/comment/')) {
+            final epId = req.url.pathSegments.last;
+            fetchedSegments.add((epId: epId, seg: 0));
+            return http.Response(
+              jsonEncode(<String, dynamic>{
+                'comments': <Map<String, dynamic>>[
+                  <String, dynamic>{'p': '120.5,1,16777215', 'm': '手动绑定弹幕'},
+                ],
+              }),
+              200,
+              headers: const <String, String>{'content-type': 'application/json'},
+            );
+          }
+          return http.Response('{}', 404);
+        });
+
+        // Start on raw index 2 (S02E01) at t=120s
+        final player = _Round3FakePlayer();
+        player.stateImpl.positionValue = const Duration(seconds: 120);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: site,
+              video: video,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 2,
+              initialPositionMs: 120000,
+              storage: storage,
+              debugPlayer: player,
+              debugHudPrefs: PlayerHudPrefs.inMemory(isDesktop: true),
+              debugOnboardingPrefs: OnboardingPrefs(
+                _IsolatedSharedPreferences(const <String, Object>{
+                  OnboardingPrefs.playHintDismissedKey: true,
+                  OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+                }),
+              ),
+              debugDanmuSettings: const DanmuSettings(
+                enabled: true,
+                serverUrls: 'https://comments.example',
+              ),
+              debugDanmuProviderFactory: (s) => DandanplayProvider(
+                multilineServerUrls: s.serverUrls,
+                client: mockDanmuHttp,
+                minRequestIntervalMs: 0,
+              ),
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+
+        // 1. Neighbor-only candidate 999 was NOT auto-bound initially.
+        final layerInit = tester.widget<DanmuLayer>(find.byType(DanmuLayer));
+        expect(layerInit.segmentCache?.currentSession?.boundEpisodeId ?? '', isEmpty);
+
+        // Open Episodes -> Calibrate -> pick low-confidence candidate 999
+        await tester.tap(find.text('选集'));
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.byKey(const ValueKey('player-episode-calibrate-btn')));
+        await tester.pump(const Duration(milliseconds: 250));
+        final cand999 = DandanplayProvider.encodeBoundEpisodeId(
+          'https://comments.example',
+          '999',
+        );
+        final candChip = find.byKey(ValueKey('scrape-danmu-cand-$cand999'));
+        expect(candChip, findsOneWidget);
+        await tester.tap(candChip);
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+
+        // 2. Manual choice stays bound after save & refresh!
+        expect(
+          tester
+              .widget<DanmuLayer>(find.byType(DanmuLayer))
+              .segmentCache
+              ?.currentSession
+              ?.boundEpisodeId,
+          cand999,
+        );
+        expect(fetchedSegments.any((f) => f.epId == '999'), isTrue);
+
+        // Trigger revision refresh (simulating saving calibration sheet / refresh)
+        storage.seriesScrapeRevision.value++;
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(
+          tester
+              .widget<DanmuLayer>(find.byType(DanmuLayer))
+              .segmentCache
+              ?.currentSession
+              ?.boundEpisodeId,
+          cand999,
+        );
+
+        // 3. Conflicting season line switch: S02E01 -> line "仅第一季备用" (only S01E01)
+        //    Must NOT auto-open s1e01.mp4; must stay on s2e01.mp4 & open picker!
+        await tester.tap(find.byKey(const Key('desktop-more-button')));
+        await tester.pump(const Duration(milliseconds: 200));
+        await tester.tap(find.text('切换线路'));
+        await tester.pump(const Duration(milliseconds: 250));
+        await tester.tap(find.text('仅第一季备用'));
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(player.openedUris.last.replaceAll('\\', '/'), s2e01Path.replaceAll('\\', '/'));
+        expect(find.byType(PlayerEpisodePickerSheet), findsOneWidget);
+        // Dismiss episode picker
+        Navigator.of(tester.element(find.byType(PlayerEpisodePickerSheet))).pop();
+        await tester.pump(const Duration(milliseconds: 200));
+
+        // 4. N key follows visible sorted+hidden order: S02E01 -> S02E02 (skipping hidden 预告!)
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyN);
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(player.openedUris.last.replaceAll('\\', '/'), s2e02Path.replaceAll('\\', '/'));
+
+        // Pressing N at last visible episode (S02E02) does NOT jump into hidden 预告!
+        final countBeforeEndN = player.openedUris.length;
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyN);
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(player.openedUris.length, countBeforeEndN);
+
+        // P key returns to S02E01
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyP);
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(player.openedUris.last.replaceAll('\\', '/'), s2e01Path.replaceAll('\\', '/'));
+
+        // Auto-play-next on completion follows visible order -> S02E02 (NOT 预告!)
+        player.streamImpl.completedCtrl.add(true);
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(player.openedUris.last.replaceAll('\\', '/'), s2e02Path.replaceAll('\\', '/'));
+
+        // 5. Restart / remount PlayerScreen on S02E01 -> persisted manual binding 999 still active!
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 300));
+        await player.dispose();
+
+        final playerRestart = _Round3FakePlayer();
+        playerRestart.stateImpl.positionValue = const Duration(seconds: 120);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: site,
+              video: video,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 2,
+              initialPositionMs: 120000,
+              storage: storage,
+              debugPlayer: playerRestart,
+              debugHudPrefs: PlayerHudPrefs.inMemory(isDesktop: true),
+              debugOnboardingPrefs: OnboardingPrefs(
+                _IsolatedSharedPreferences(const <String, Object>{
+                  OnboardingPrefs.playHintDismissedKey: true,
+                  OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+                }),
+              ),
+              debugDanmuSettings: const DanmuSettings(
+                enabled: true,
+                serverUrls: 'https://comments.example',
+              ),
+              debugDanmuProviderFactory: (s) => DandanplayProvider(
+                multilineServerUrls: s.serverUrls,
+                client: mockDanmuHttp,
+                minRequestIntervalMs: 0,
+              ),
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(
+          tester
+              .widget<DanmuLayer>(find.byType(DanmuLayer))
+              .segmentCache
+              ?.currentSession
+              ?.boundEpisodeId,
+          cand999,
+        );
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 300));
+        await playerRestart.dispose();
+      },
+    );
+
+    test(
+      'P1 WebDAV Safety: in-flight PUT edit preserved, 5x ETag 412 never drops preconditions, unknown schema/missing sources rejected, per-origin headers isolated on both endpoints, disabled retry sends 0 calls',
+      () async {
+        const oldOrigin = 'https://old.example';
+        const editedOrigin = 'https://edited.example';
+        const restoredOrigin = 'https://restored.example';
+        const davUrl = 'https://dav.example/dav/family.json';
+
+        // 1. Unknown schemaVersion & missing sources both fail without wiping local
+        for (final badBody in <String>[
+          jsonEncode(<String, dynamic>{
+            'schemaVersion': 2,
+            'updatedAt': 999999,
+            'serversV2': <String>['https://future.example'],
+          }),
+          jsonEncode(<String, dynamic>{
+            'schemaVersion': 1,
+            'updatedAt': 999999,
+          }),
+        ]) {
+          final storage = await initTestStorage();
+          await storage.saveWebdavConfig(
+            url: davUrl,
+            user: 'u',
+            pass: 'p',
+            auto: false,
+            syncSubs: false,
+            syncHistory: false,
+            syncDanmu: true,
+          );
+          await DanmuPrefs.save(
+            const DanmuSettings(serverUrls: oldOrigin),
+            triggerSync: false,
+          );
+          final badClient = MockClient((req) async {
+            if (req.url.path.endsWith('family.danmu.json')) {
+              return http.Response(badBody, 200, headers: const {'etag': '"v-bad"'});
+            }
+            return http.Response('', 404);
+          });
+          await expectLater(
+            () => storage.syncDanmuSourcesWithWebdav(client: badClient),
+            throwsA(isA<FormatException>()),
+          );
+          expect((await DanmuPrefs.load()).normalizedOrigins, <String>[oldOrigin]);
+        }
+
+        // 2. In-flight PUT edit preservation (`old` -> `edited` during HTTP 204)
+        {
+          final storage = await initTestStorage();
+          await storage.saveWebdavConfig(
+            url: davUrl,
+            user: 'u',
+            pass: 'p',
+            auto: false,
+            syncSubs: false,
+            syncHistory: false,
+            syncDanmu: true,
+          );
+          await DanmuPrefs.save(
+            const DanmuSettings(serverUrls: oldOrigin),
+            triggerSync: false,
+          );
+          String? serverDoc;
+          int putCount = 0;
+          final firstPutStarted = Completer<void>();
+          final releaseFirstPut = Completer<void>();
+          final client = MockClient((req) async {
+            if (req.method == 'GET') {
+              if (serverDoc == null) return http.Response('', 404);
+              return http.Response(
+                serverDoc!,
+                200,
+                headers: <String, String>{'etag': '"e-$putCount"'},
+              );
+            }
+            if (req.method == 'PUT') {
+              putCount++;
+              if (putCount == 1) {
+                firstPutStarted.complete();
+                await releaseFirstPut.future;
+              }
+              serverDoc = req.body;
+              return http.Response('', 204);
+            }
+            return http.Response('', 201);
+          });
+
+          final syncFuture = storage.syncDanmuSourcesWithWebdav(client: client);
+          await firstPutStarted.future;
+          await DanmuPrefs.save(
+            const DanmuSettings(serverUrls: editedOrigin),
+            triggerSync: false,
+          );
+          releaseFirstPut.complete();
+          await syncFuture;
+
+          expect((await DanmuPrefs.load()).normalizedOrigins, <String>[editedOrigin]);
+          final finalServer = DanmuSourceSyncDocument.tryParseJson(serverDoc);
+          expect(finalServer?.urls, <String>[editedOrigin]);
+        }
+
+        // 3. Five consecutive real ETag 412 conflicts MUST NOT send unconditional PUT
+        {
+          final storage = await initTestStorage();
+          await storage.saveWebdavConfig(
+            url: davUrl,
+            user: 'u',
+            pass: 'p',
+            auto: false,
+            syncSubs: false,
+            syncHistory: false,
+            syncDanmu: true,
+          );
+          await DanmuPrefs.save(
+            const DanmuSettings(serverUrls: oldOrigin),
+            triggerSync: false,
+          );
+          int peerRev = 1;
+          int conflicts = 0;
+          int unconditionalPuts = 0;
+          String serverBody() => jsonEncode(<String, dynamic>{
+                'schemaVersion': 1,
+                'updatedAt': 10000 + peerRev,
+                'revision': peerRev,
+                'clearedAt': 0,
+                'sources': <Map<String, dynamic>>[
+                  <String, dynamic>{'url': 'https://peer$peerRev.example', 'requiresAuth': false},
+                ],
+              });
+          String latestServerDoc = serverBody();
+          final conflictClient = MockClient((req) async {
+            if (req.method == 'GET') {
+              return http.Response(
+                latestServerDoc,
+                200,
+                headers: <String, String>{'etag': '"peer-$peerRev"'},
+              );
+            }
+            if (req.method == 'PUT') {
+              if (!req.headers.containsKey('If-Match')) {
+                unconditionalPuts++;
+                latestServerDoc = req.body;
+                return http.Response('', 204);
+              }
+              conflicts++;
+              peerRev++;
+              latestServerDoc = serverBody();
+              return http.Response('', 412);
+            }
+            return http.Response('', 201);
+          });
+
+          await expectLater(
+            () => storage.syncDanmuSourcesWithWebdav(client: conflictClient),
+            throwsA(isA<FormatException>()),
+          );
+          expect(conflicts, 5);
+          expect(unconditionalPuts, 0);
+          expect((await DanmuPrefs.load()).normalizedOrigins, <String>[oldOrigin]);
+          expect(
+            DanmuSourceSyncDocument.tryParseJson(latestServerDoc)?.urls,
+            <String>['https://peer6.example'],
+          );
+        }
+
+        // 4. Per-origin credential isolation: inspect ACTUAL headers sent to BOTH endpoints!
+        {
+          final storage = await initTestStorage();
+          await storage.saveWebdavConfig(
+            url: davUrl,
+            user: 'u',
+            pass: 'p',
+            auto: false,
+            syncSubs: false,
+            syncHistory: false,
+            syncDanmu: true,
+          );
+          await DanmuPrefs.save(
+            const DanmuSettings(
+              serverUrls: oldOrigin,
+              appId: 'local-device-app-id',
+              appSecret: 'local-device-secret',
+            ),
+            triggerSync: false,
+          );
+          final remoteWithBoth = jsonEncode(<String, dynamic>{
+            'schemaVersion': 1,
+            'updatedAt': DateTime.now().millisecondsSinceEpoch + 50000,
+            'revision': 5,
+            'clearedAt': 0,
+            'sources': <Map<String, dynamic>>[
+              <String, dynamic>{'url': oldOrigin, 'requiresAuth': true},
+              <String, dynamic>{'url': restoredOrigin, 'requiresAuth': true},
+            ],
+          });
+          final davClient = MockClient((req) async {
+            if (req.method == 'GET') {
+              return http.Response(
+                remoteWithBoth,
+                200,
+                headers: const {'etag': '"auth-v1"'},
+              );
+            }
+            return http.Response('', 204);
+          });
+          final synced = await storage.syncWithWebdav(client: davClient);
+          expect(synced.danmuPendingAuthOrigins, <String>[restoredOrigin]);
+
+          final headersByHost = <String, List<Map<String, String>>>{};
+          final probeClient = MockClient((req) async {
+            headersByHost
+                .putIfAbsent(req.url.host, () => <Map<String, String>>[])
+                .add(Map<String, String>.from(req.headers));
+            // Return empty from old.example so provider also queries restored.example
+            return http.Response(
+              jsonEncode(<String, dynamic>{'isMatched': false, 'matches': <dynamic>[]}),
+              200,
+              headers: const {'content-type': 'application/json'},
+            );
+          });
+          final loaded = await DanmuPrefs.load();
+          final provider = DandanplayProvider(
+            multilineServerUrls: loaded.serverUrls,
+            appId: loaded.appId,
+            appSecret: loaded.appSecret,
+            client: probeClient,
+            minRequestIntervalMs: 0,
+          );
+          await provider.matchOrSearch(
+            const DanmuMatchQuery(
+              title: '测试番剧',
+              episodeTitle: 'S02E10',
+              episodeIndex: 10,
+              seasonNumber: 2,
+            ),
+          );
+          // Endpoint 1 (old.example, locally authorized) RECEIVED X-AppId + X-Signature!
+          expect(headersByHost['old.example'], isNotEmpty);
+          expect(headersByHost['old.example']!.first['X-AppId'], 'local-device-app-id');
+          expect(headersByHost['old.example']!.first['X-Signature'], isNotEmpty);
+          // Endpoint 2 (restored.example, cloud-imported unapproved) RECEIVED ZERO auth headers!
+          expect(headersByHost['restored.example'], isNotEmpty);
+          for (final h in headersByHost['restored.example']!) {
+            expect(h.containsKey('X-AppId'), isFalse);
+            expect(h.containsKey('X-Signature'), isFalse);
+          }
+
+          // After explicit per-origin authorization, restored.example receives auth headers!
+          await DanmuPrefs.authorizeOriginsForLocalCredentials(<String>[restoredOrigin]);
+          expect(await DanmuPrefs.loadPendingAuthOrigins(), isEmpty);
+          headersByHost.clear();
+          final loadedAfterAuth = await DanmuPrefs.load();
+          final providerAfterAuth = DandanplayProvider(
+            multilineServerUrls: loadedAfterAuth.serverUrls,
+            appId: loadedAfterAuth.appId,
+            appSecret: loadedAfterAuth.appSecret,
+            client: probeClient,
+            minRequestIntervalMs: 0,
+          );
+          await providerAfterAuth.matchOrSearch(
+            const DanmuMatchQuery(
+              title: '测试番剧',
+              episodeTitle: 'S02E10',
+              episodeIndex: 10,
+              seasonNumber: 2,
+            ),
+          );
+          expect(
+            headersByHost['restored.example']!.first['X-AppId'],
+            'local-device-app-id',
+          );
+          expect(
+            headersByHost['restored.example']!.first['X-Signature'],
+            isNotEmpty,
+          );
+
+          // 5. Disabled toggle stops syncDanmuSourcesWithWebdav with 0 requests
+          await storage.setWebdavSyncDanmu(false);
+          int calls = 0;
+          final zeroClient = MockClient((_) async {
+            calls++;
+            return http.Response('', 200);
+          });
+          await expectLater(
+            () => storage.syncDanmuSourcesWithWebdav(client: zeroClient),
+            throwsA(isA<FormatException>()),
+          );
+          expect(calls, 0);
+        }
+      },
+    );
+
+    testWidgets(
+      'P1 WebDAV UI Scope: sync-switch-danmu is absent on iOS and Windows',
+      variant: TargetPlatformVariant(<TargetPlatform>{
+        TargetPlatform.iOS,
+        TargetPlatform.windows,
+      }),
+      (tester) async {
+        final storage = await initTestStorage();
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: CloudSyncSettingsPanel(
+                  storage: storage,
+                  embeddedInList: false,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('sync-switch-danmu')), findsNothing);
       },
     );
   });

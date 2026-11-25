@@ -1573,7 +1573,9 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
                     style: const TextStyle(fontSize: 12),
                   ),
                 ),
-              if (info.hasManualOverride)
+              if (info.hasManualOverride ||
+                  (_draft.episodeCalibrations[info.stableKey]?.hasDanmuBinding ==
+                      true))
                 TextButton(
                   key: const ValueKey('scrape-undo-current-btn'),
                   onPressed: () =>
@@ -1615,8 +1617,35 @@ class _SeriesScrapeSheetState extends State<SeriesScrapeSheet> {
                   backgroundColor: Colors.white.withValues(alpha: 0.08),
                   side: const BorderSide(color: _border),
                   onPressed: () {
+                    final nextCalibs = Map<String, EpisodeManualCalibration>.from(
+                      _draft.episodeCalibrations,
+                    );
+                    if (info.stableKey.isNotEmpty) {
+                      final prev = nextCalibs[info.stableKey] ??
+                          const EpisodeManualCalibration();
+                      nextCalibs[info.stableKey] = prev.copyWith(
+                        danmuBoundEpisodeId: cand.boundEpisodeId,
+                        danmuSourceOrigin: cand.sourceOrigin,
+                        danmuAnimeId: cand.animeId,
+                        danmuAnimeTitle: cand.animeTitle,
+                        danmuEpisodeTitle: cand.episodeTitle,
+                        updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+                      );
+                    }
+                    final updatedDraft = _draft.copyWith(
+                      danmuAnimeId: cand.animeId.isNotEmpty
+                          ? cand.animeId
+                          : _draft.danmuAnimeId,
+                      danmuOrigin: cand.sourceOrigin.isNotEmpty
+                          ? cand.sourceOrigin
+                          : _draft.danmuOrigin,
+                      danmuTitleOverride: cand.animeTitle.isNotEmpty
+                          ? cand.animeTitle
+                          : _draft.danmuTitleOverride,
+                      episodeCalibrations: nextCalibs,
+                    );
                     widget.onSelectDanmuCandidate!(cand);
-                    Navigator.of(context).pop(_draft);
+                    Navigator.of(context).pop(updatedDraft);
                   },
                 );
               }).toList(),

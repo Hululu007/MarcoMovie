@@ -140,7 +140,7 @@ class SubtitleLayoutGeometry {
     return math.max(baseline, safeMeasured + clearanceGap);
   }
 
-  /// Exact rectangle occupied by the rendered video texture inside [viewport]
+  /// Exact rectangle occupied by the visible video surface inside [viewport]
   /// for [fit], matching Flutter's `FittedBox` / `media_kit_video` `Video`.
   static Rect computeDisplayedVideoRect({
     required Size viewport,
@@ -160,10 +160,50 @@ class SubtitleLayoutGeometry {
     return Rect.fromLTWH(left, top, dest.width, dest.height);
   }
 
+  /// Full unclipped rectangle of the scaled source video frame in viewport
+  /// coordinates for [fit].
+  ///
+  /// For `BoxFit.contain` and `BoxFit.fill`, this equals
+  /// [computeDisplayedVideoRect]. For `BoxFit.cover` (crop), `applyBoxFit`
+  /// returns the visible cropped `source` slice mapped onto `destination`; the
+  /// full source frame extends beyond [viewport] (`top < 0`,
+  /// `bottom > viewport.height` when vertically cropped), which determines how
+  /// libmpv's `sub-pos` (expressed in source video frame height) maps to
+  /// visible screen coordinates.
+  static Rect computeRenderedVideoRect({
+    required Size viewport,
+    required int videoWidth,
+    required int videoHeight,
+    required BoxFit fit,
+  }) {
+    if (viewport.width <= 0 || viewport.height <= 0) {
+      return Rect.zero;
+    }
+    final vw = videoWidth > 0 ? videoWidth.toDouble() : viewport.width;
+    final vh = videoHeight > 0 ? videoHeight.toDouble() : viewport.height;
+    final fitted = applyBoxFit(fit, Size(vw, vh), viewport);
+    if (fitted.source.width <= 0 || fitted.source.height <= 0) {
+      return computeDisplayedVideoRect(
+        viewport: viewport,
+        videoWidth: videoWidth,
+        videoHeight: videoHeight,
+        fit: fit,
+      );
+    }
+    final scaleX = fitted.destination.width / fitted.source.width;
+    final scaleY = fitted.destination.height / fitted.source.height;
+    final fullW = vw * scaleX;
+    final fullH = vh * scaleY;
+    final left = (viewport.width - fullW) / 2.0;
+    final top = (viewport.height - fullH) / 2.0;
+    return Rect.fromLTWH(left, top, fullW, fullH);
+  }
+
   /// Computes libmpv's `sub-pos` (`45..100`, where `100` is native baseline) so
   /// bottom-aligned ASS dialogue and bottom-half PGS bitmap subtitles lift above
   /// the bottom HUD controls while ASS `\an8` top signs and top-half bitmaps
-  /// remain untouched at their original coordinates.
+  /// remain untouched at their original coordinates — across `BoxFit.contain`,
+  /// `BoxFit.cover` (crop), and `BoxFit.fill`.
   static int computeMpvSubPos({
     required Size viewport,
     required int videoWidth,
@@ -178,23 +218,24 @@ class SubtitleLayoutGeometry {
         viewport.height <= 0.0) {
       return 100;
     }
-    final videoRect = computeDisplayedVideoRect(
+    final fullVideoRect = computeRenderedVideoRect(
       viewport: viewport,
       videoWidth: videoWidth,
       videoHeight: videoHeight,
       fit: fit,
     );
-    if (videoRect.height <= 0.0) return 100;
+    if (fullVideoRect.height <= 0.0) return 100;
 
-    // Positive when letterboxed (black bar below video); negative in cover crop.
-    final letterboxBottom = viewport.height - videoRect.bottom;
+    // Positive when letterboxed (black bar below video); negative in cover crop
+    // where the bottom of the source frame is clipped below the viewport edge.
+    final bottomMarginOrCrop = viewport.height - fullVideoRect.bottom;
     final neededAboveVideoBottom =
-        (measuredBottomBarHeight + clearanceGap) - letterboxBottom;
+        (measuredBottomBarHeight + clearanceGap) - bottomMarginOrCrop;
     if (neededAboveVideoBottom <= 0.0) {
       return 100;
     }
 
-    final liftPercent = (neededAboveVideoBottom / videoRect.height) * 100.0;
+    final liftPercent = (neededAboveVideoBottom / fullVideoRect.height) * 100.0;
     return (100.0 - liftPercent).floor().clamp(minMpvSubPos, 100);
   }
 }

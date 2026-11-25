@@ -133,10 +133,13 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     DanmuSettings next, {
     bool persist = true,
     bool markExplicitSourcesEdit = false,
+    bool authorizeAllOrigins = false,
   }) {
     setState(() {
       _settings = next;
-      if (next.appId.trim().isNotEmpty && next.appSecret.trim().isNotEmpty) {
+      if (authorizeAllOrigins &&
+          next.appId.trim().isNotEmpty &&
+          next.appSecret.trim().isNotEmpty) {
         _pendingAuthOrigins = const <String>[];
       }
     });
@@ -145,7 +148,8 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
       DanmuPrefs.save(
         next,
         markExplicitSourcesEdit: markExplicitSourcesEdit,
-      );
+        authorizeAllOrigins: authorizeAllOrigins,
+      ).then((_) => _loadPendingAuthOrigins());
     }
   }
 
@@ -163,13 +167,18 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     if (pendingAdd.isNotEmpty) {
       _newSourceCtrl.clear();
     }
+    final nextAppId = _appIdCtrl.text.trim();
+    final nextAppSecret = _appSecretCtrl.text.trim();
+    final hasCreds = nextAppId.isNotEmpty && nextAppSecret.isNotEmpty;
     _update(
       _settings.copyWith(
         serverUrls: nextText,
-        appId: _appIdCtrl.text,
-        appSecret: _appSecretCtrl.text,
+        appId: nextAppId,
+        appSecret: nextAppSecret,
+        authorizedCredentialOrigins: hasCreds ? normalized.toSet() : const <String>{},
       ),
       markExplicitSourcesEdit: true,
+      authorizeAllOrigins: hasCreds,
     );
   }
 
@@ -242,6 +251,19 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     if (mounted) {
       setState(() => _pendingAuthOrigins = const <String>[]);
     }
+  }
+
+  Future<void> _authorizePendingOriginsWithLocalCreds() async {
+    final authorized = await DanmuPrefs.authorizeOriginsForLocalCredentials(
+      _pendingAuthOrigins,
+    );
+    if (!mounted) return;
+    final next = _settings.copyWith(authorizedCredentialOrigins: authorized);
+    setState(() {
+      _settings = next;
+      _pendingAuthOrigins = const <String>[];
+    });
+    widget.onChanged(next);
   }
 
   void _addBlockRule() {
@@ -700,13 +722,23 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton(
-                      key: const Key('danmu-pending-auth-dismiss'),
-                      onPressed: _dismissPendingAuthBanner,
-                      child: const Text('无需认证，忽略提示'),
-                    ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      if (_appIdCtrl.text.trim().isNotEmpty &&
+                          _appSecretCtrl.text.trim().isNotEmpty)
+                        FilledButton.tonal(
+                          key: const Key('danmu-pending-auth-authorize'),
+                          onPressed: _authorizePendingOriginsWithLocalCreds,
+                          child: const Text('关联本机凭据'),
+                        ),
+                      const SizedBox(width: 8),
+                      TextButton(
+                        key: const Key('danmu-pending-auth-dismiss'),
+                        onPressed: _dismissPendingAuthBanner,
+                        child: const Text('无需认证，保持匿名'),
+                      ),
+                    ],
                   ),
                 ],
               ),

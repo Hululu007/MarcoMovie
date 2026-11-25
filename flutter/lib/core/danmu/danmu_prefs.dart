@@ -31,6 +31,7 @@ class DanmuSettings {
   final bool showBottom;
   final int maxRows;
   final List<String> blockRules;
+  final Set<String>? authorizedCredentialOrigins;
 
   const DanmuSettings({
     this.enabled = false,
@@ -47,6 +48,7 @@ class DanmuSettings {
     this.showBottom = true,
     this.maxRows = 14,
     this.blockRules = const <String>[],
+    this.authorizedCredentialOrigins,
   });
 
   /// HarmonyOS NEXT guard: always disabled on OHOS.
@@ -61,6 +63,7 @@ class DanmuSettings {
         multilineServerUrls: serverUrls,
         appId: appId,
         appSecret: appSecret,
+        authorizedCredentialOrigins: authorizedCredentialOrigins,
       );
 
   DanmuSettings copyWith({
@@ -78,6 +81,8 @@ class DanmuSettings {
     bool? showBottom,
     int? maxRows,
     List<String>? blockRules,
+    Set<String>? authorizedCredentialOrigins,
+    bool clearAuthorizedCredentialOrigins = false,
   }) {
     return DanmuSettings(
       enabled: enabled ?? this.enabled,
@@ -94,6 +99,9 @@ class DanmuSettings {
       showBottom: showBottom ?? this.showBottom,
       maxRows: clampMaxRows(maxRows ?? this.maxRows),
       blockRules: sanitizeBlockRules(blockRules ?? this.blockRules),
+      authorizedCredentialOrigins: clearAuthorizedCredentialOrigins
+          ? null
+          : (authorizedCredentialOrigins ?? this.authorizedCredentialOrigins),
     );
   }
 
@@ -174,6 +182,8 @@ class DanmuPrefs {
   static const String keySourcesAuthHints = 'danmu_sources_auth_hints';
   static const String keySourcesBaseSnapshot = 'danmu_sources_sync_base_v1';
   static const String keyPendingAuthOrigins = 'danmu_pending_auth_origins';
+  static const String keyAuthorizedCredentialOrigins =
+      'danmu_authorized_credential_origins';
 
   /// Optional listener invoked when user mutates danmu source addresses/order
   /// so WebDAV auto-sync can schedule a background sync automatically.
@@ -197,6 +207,35 @@ class DanmuPrefs {
     if (OhosRuntime.isOhos) return;
     final sp = prefs ?? await SharedPreferences.getInstance();
     await sp.setString(keyPendingAuthOrigins, '[]');
+  }
+
+  /// Explicitly authorizes [origins] on this device to receive local
+  /// `appId`/`appSecret` signature headers, removing them from pending auth.
+  static Future<Set<String>> authorizeOriginsForLocalCredentials(
+    Iterable<String> origins, {
+    SharedPreferences? prefs,
+  }) async {
+    if (OhosRuntime.isOhos) return const <String>{};
+    final sp = prefs ?? await SharedPreferences.getInstance();
+    final activeOrigins = DandanplayProvider.parseConfiguredOrigins(
+      sp.getString(keyServerUrls) ?? '',
+    ).toSet();
+    final nextAuthorized = <String>{
+      ...readAuthorizedCredentialOriginsSync(sp),
+      for (final raw in origins)
+        if (DandanplayProvider.normalizeOriginOrNull(raw) case final norm?)
+          if (activeOrigins.isEmpty || activeOrigins.contains(norm)) norm,
+    };
+    await sp.setString(
+      keyAuthorizedCredentialOrigins,
+      jsonEncode(nextAuthorized.toList(growable: false)),
+    );
+    final remainingPending = _readStringSetJson(sp, keyPendingAuthOrigins)
+        .where((u) => activeOrigins.contains(u) && !nextAuthorized.contains(u))
+        .toList(growable: false);
+    await sp.setString(keyPendingAuthOrigins, jsonEncode(remainingPending));
+    _syncUnauthorizedOriginsRegistry(sp);
+    return Set<String>.unmodifiable(nextAuthorized);
   }
 
   static List<String> _readStringSetJson(SharedPreferences sp, String key) {
@@ -223,6 +262,54 @@ class DanmuPrefs {
     return true;
   }
 
+  /// Reads the normalized endpoints explicitly authorized on THIS device to
+  /// receive local `appId` / `appSecret`.
+  static Set<String> readAuthorizedCredentialOriginsSync(SharedPreferences sp) {
+    if (OhosRuntime.isOhos) return const <String>{};
+    final appId = (sp.getString(keyAppId) ?? '').trim();
+    final appSecret = (sp.getString(keyAppSecret) ?? '').trim();
+    if (appId.isEmpty || appSecret.isEmpty) {
+      return const <String>{};
+    }
+    final activeOrigins = DandanplayProvider.parseConfiguredOrigins(
+      sp.getString(keyServerUrls) ?? '',
+    ).toSet();
+    if (sp.containsKey(keyAuthorizedCredentialOrigins)) {
+      return Set<String>.unmodifiable(
+        _readStringSetJson(sp, keyAuthorizedCredentialOrigins)
+            .map(DandanplayProvider.normalizeOriginOrNull)
+            .whereType<String>()
+            .where((u) => activeOrigins.contains(u)),
+      );
+    }
+    // Legacy migration: existing local credentials predate per-origin tracking;
+    // treat current active origins (excluding pending cloud-restored ones) as
+    // authorized on this device.
+    final pending = _readStringSetJson(sp, keyPendingAuthOrigins).toSet();
+    return Set<String>.unmodifiable(
+      activeOrigins.where((u) => !pending.contains(u)),
+    );
+  }
+
+  static void _syncUnauthorizedOriginsRegistry(SharedPreferences sp) {
+    if (OhosRuntime.isOhos) return;
+    final activeOrigins = DandanplayProvider.parseConfiguredOrigins(
+      sp.getString(keyServerUrls) ?? '',
+    );
+    final appId = (sp.getString(keyAppId) ?? '').trim();
+    final appSecret = (sp.getString(keyAppSecret) ?? '').trim();
+    if (appId.isEmpty || appSecret.isEmpty) {
+      DandanplayProvider.setLocallyUnauthorizedCredentialOrigins(
+        const <String>[],
+      );
+      return;
+    }
+    final authorized = readAuthorizedCredentialOriginsSync(sp);
+    DandanplayProvider.setLocallyUnauthorizedCredentialOrigins(
+      activeOrigins.where((u) => !authorized.contains(u)),
+    );
+  }
+
   static Future<List<String>> loadPendingAuthOrigins({
     SharedPreferences? prefs,
   }) async {
@@ -233,17 +320,13 @@ class DanmuPrefs {
 
   static List<String> readPendingAuthOriginsSync(SharedPreferences sp) {
     if (OhosRuntime.isOhos) return const <String>[];
-    final appId = (sp.getString(keyAppId) ?? '').trim();
-    final appSecret = (sp.getString(keyAppSecret) ?? '').trim();
-    if (appId.isNotEmpty && appSecret.isNotEmpty) {
-      return const <String>[];
-    }
     final activeOrigins = DandanplayProvider.parseConfiguredOrigins(
       sp.getString(keyServerUrls) ?? '',
     ).toSet();
+    final authorized = readAuthorizedCredentialOriginsSync(sp);
     return List<String>.unmodifiable(
       _readStringSetJson(sp, keyPendingAuthOrigins)
-          .where((u) => activeOrigins.contains(u)),
+          .where((u) => activeOrigins.contains(u) && !authorized.contains(u)),
     );
   }
 
@@ -251,6 +334,7 @@ class DanmuPrefs {
     DanmuSourceSyncDocument local,
     DanmuSourceSyncDocument? base,
     bool hasLocalCredentials,
+    Set<String> authorizedCredentialOrigins,
     List<String> pendingAuthOrigins,
   }) readSyncStateSync(SharedPreferences sp) {
     final rawUrls =
@@ -259,13 +343,14 @@ class DanmuPrefs {
     final appId = (sp.getString(keyAppId) ?? '').trim();
     final appSecret = (sp.getString(keyAppSecret) ?? '').trim();
     final hasCreds = appId.isNotEmpty && appSecret.isNotEmpty;
+    final authorized = readAuthorizedCredentialOriginsSync(sp);
 
     final authHints = _readStringSetJson(sp, keySourcesAuthHints).toSet();
     final entries = origins
         .map(
           (url) => DanmuSyncSourceEntry(
             url: url,
-            requiresAuth: hasCreds || authHints.contains(url),
+            requiresAuth: authorized.contains(url) || authHints.contains(url),
           ),
         )
         .toList(growable: false);
@@ -293,22 +378,48 @@ class DanmuPrefs {
       local: localDoc,
       base: baseDoc,
       hasLocalCredentials: hasCreds,
+      authorizedCredentialOrigins: authorized,
       pendingAuthOrigins: readPendingAuthOriginsSync(sp),
     );
   }
 
+  /// Advances ONLY the synced base snapshot after an in-flight upload finishes
+  /// while the user made newer local edits, so newer local edits are never
+  /// reverted and will merge cleanly on the follow-up pass.
+  static Future<void> updateSyncBaseSnapshotOnly(
+    DanmuSourceSyncDocument committedDoc, {
+    required SharedPreferences prefs,
+  }) async {
+    if (OhosRuntime.isOhos) return;
+    final normalized = committedDoc.copyWith(
+      initialized: true,
+      sources: DanmuSourceSyncDocument.sanitizeEntries(committedDoc.sources),
+    );
+    await prefs.setString(
+      keySourcesBaseSnapshot,
+      jsonEncode(normalized.toLocalSnapshotMap()),
+    );
+  }
+
   /// Applies a merged/restored [DanmuSourceSyncDocument] to [prefs] while
-  /// strictly preserving local device `appId` and `appSecret`.
+  /// strictly preserving local device `appId`, `appSecret`, and per-origin
+  /// local credential authorizations (newly restored endpoints are NEVER
+  /// auto-authorized to receive existing local credentials).
   static Future<void> applySyncedDocument(
     DanmuSourceSyncDocument doc, {
     required SharedPreferences prefs,
     required List<String> pendingAuthOrigins,
   }) async {
     if (OhosRuntime.isOhos) return;
+    final existingAuthorized = readAuthorizedCredentialOriginsSync(prefs);
     final normalized = doc.copyWith(
       initialized: true,
       sources: DanmuSourceSyncDocument.sanitizeEntries(doc.sources),
     );
+    final nextActiveSet = normalized.urls.toSet();
+    final retainedAuthorized = existingAuthorized
+        .where((u) => nextActiveSet.contains(u))
+        .toList(growable: false);
     await prefs.setString(keyServerUrls, normalized.toMultilineServerUrls());
     await prefs.setBool(keySourcesInitialized, true);
     await prefs.setInt(keySourcesUpdatedAt, normalized.updatedAt);
@@ -324,14 +435,25 @@ class DanmuPrefs {
       jsonEncode(normalized.toLocalSnapshotMap()),
     );
     await prefs.setString(
-      keyPendingAuthOrigins,
-      jsonEncode(pendingAuthOrigins),
+      keyAuthorizedCredentialOrigins,
+      jsonEncode(retainedAuthorized),
     );
+    final filteredPending = pendingAuthOrigins
+        .where((u) =>
+            nextActiveSet.contains(u) && !retainedAuthorized.contains(u))
+        .toList(growable: false);
+    await prefs.setString(
+      keyPendingAuthOrigins,
+      jsonEncode(filteredPending),
+    );
+    _syncUnauthorizedOriginsRegistry(prefs);
   }
 
   static Future<DanmuSettings> load({SharedPreferences? prefs}) async {
     if (OhosRuntime.isOhos) return const DanmuSettings();
     final sp = prefs ?? await SharedPreferences.getInstance();
+    final authorized = readAuthorizedCredentialOriginsSync(sp);
+    _syncUnauthorizedOriginsRegistry(sp);
     return DanmuSettings(
       enabled: sp.getBool(keyEnabled) ?? false,
       serverUrls:
@@ -355,6 +477,7 @@ class DanmuPrefs {
       blockRules: DanmuSettings.sanitizeBlockRules(
         sp.getStringList(keyBlockRules) ?? const <String>[],
       ),
+      authorizedCredentialOrigins: authorized,
     );
   }
 
@@ -362,6 +485,7 @@ class DanmuPrefs {
     DanmuSettings settings, {
     SharedPreferences? prefs,
     bool markExplicitSourcesEdit = false,
+    bool authorizeAllOrigins = false,
     bool triggerSync = true,
     int? nowMs,
   }) async {
@@ -370,12 +494,18 @@ class DanmuPrefs {
     final prevOrigins = DandanplayProvider.parseConfiguredOrigins(
       sp.getString(keyServerUrls) ?? '',
     );
+    final prevAppId = (sp.getString(keyAppId) ?? '').trim();
+    final prevAppSecret = (sp.getString(keyAppSecret) ?? '').trim();
+    final prevAuthorized = readAuthorizedCredentialOriginsSync(sp);
     final nextOrigins = DandanplayProvider.parseConfiguredOrigins(
       settings.serverUrls,
     );
+    final nextOriginSet = nextOrigins.toSet();
     final originsChanged = !_sameOriginOrder(prevOrigins, nextOrigins);
-    final hasCreds =
-        settings.appId.trim().isNotEmpty && settings.appSecret.trim().isNotEmpty;
+    final nextAppId = settings.appId.trim();
+    final nextAppSecret = settings.appSecret.trim();
+    final hasCreds = nextAppId.isNotEmpty && nextAppSecret.isNotEmpty;
+    final credsChanged = nextAppId != prevAppId || nextAppSecret != prevAppSecret;
     final prevAuthHints = _readStringSetJson(sp, keySourcesAuthHints).toSet();
 
     await sp.setBool(keyEnabled, settings.enabled);
@@ -405,23 +535,49 @@ class DanmuPrefs {
       DanmuSettings.sanitizeBlockRules(settings.blockRules),
     );
 
+    final Set<String> nextAuthorized;
+    if (!hasCreds) {
+      nextAuthorized = <String>{};
+    } else if (settings.authorizedCredentialOrigins != null &&
+        !authorizeAllOrigins &&
+        !credsChanged) {
+      nextAuthorized = <String>{
+        for (final u in settings.authorizedCredentialOrigins!)
+          if (nextOriginSet.contains(u)) u,
+        // Any origin freshly added locally by the user while credentials are set.
+        for (final u in nextOrigins)
+          if (!prevOrigins.contains(u)) u,
+      };
+    } else if (authorizeAllOrigins ||
+        credsChanged ||
+        !sp.containsKey(keyAuthorizedCredentialOrigins)) {
+      nextAuthorized = Set<String>.from(nextOrigins);
+    } else {
+      nextAuthorized = <String>{
+        for (final u in prevAuthorized)
+          if (nextOriginSet.contains(u)) u,
+        for (final u in nextOrigins)
+          if (!prevOrigins.contains(u)) u,
+      };
+    }
+    await sp.setString(
+      keyAuthorizedCredentialOrigins,
+      jsonEncode(nextAuthorized.toList(growable: false)),
+    );
+
     final nextAuthHints = <String>{
       for (final u in nextOrigins)
-        if (hasCreds || prevAuthHints.contains(u)) u,
+        if (nextAuthorized.contains(u) || prevAuthHints.contains(u)) u,
     };
     final authHintsChanged =
         nextAuthHints.length != prevAuthHints.length ||
             !nextAuthHints.containsAll(prevAuthHints);
 
-    if (hasCreds) {
-      await sp.setString(keyPendingAuthOrigins, '[]');
-    } else if (originsChanged) {
-      final activeSet = nextOrigins.toSet();
-      final filteredPending = _readStringSetJson(sp, keyPendingAuthOrigins)
-          .where((u) => activeSet.contains(u))
-          .toList(growable: false);
-      await sp.setString(keyPendingAuthOrigins, jsonEncode(filteredPending));
-    }
+    final filteredPending = _readStringSetJson(sp, keyPendingAuthOrigins)
+        .where((u) => nextOriginSet.contains(u) && !nextAuthorized.contains(u))
+        .toList(growable: false);
+    await sp.setString(keyPendingAuthOrigins, jsonEncode(filteredPending));
+    _syncUnauthorizedOriginsRegistry(sp);
 
     if (originsChanged || markExplicitSourcesEdit || authHintsChanged) {
       final ts = math.max(

@@ -26,6 +26,12 @@ class ContainerMetadataReader {
   static const int _idInfoTitle = 0x7BA9;
   static const int _idTags = 0x1254C367;
   static const int _idTag = 0x7373;
+  static const int _idTargets = 0x63C0;
+  static const int _idTargetTypeValue = 0x68CA;
+  static const int _idTagTrackUid = 0x63C5;
+  static const int _idTagEditionUid = 0x63C9;
+  static const int _idTagChapterUid = 0x63C4;
+  static const int _idTagAttachmentUid = 0x63C6;
   static const int _idSimpleTag = 0x67C8;
   static const int _idTagName = 0x45A3;
   static const int _idTagString = 0x4487;
@@ -371,12 +377,7 @@ class ContainerMetadataReader {
     }
   }
 
-  static void _parseTagChildren(
-    Uint8List buf,
-    int start,
-    int end,
-    Map<String, String> tags,
-  ) {
+  static bool _isSubFileTagTargets(Uint8List buf, int start, int end) {
     int pos = start;
     while (pos < end) {
       final hdr = _readEbmlHeader(buf, pos);
@@ -384,7 +385,53 @@ class ContainerMetadataReader {
       final dataStart = pos + hdr.headerLen;
       final dataEnd = dataStart + hdr.size;
       if (dataEnd > end) break;
-      if (hdr.id == _idSimpleTag) {
+      if (hdr.id == _idTagTrackUid ||
+          hdr.id == _idTagChapterUid ||
+          hdr.id == _idTagEditionUid ||
+          hdr.id == _idTagAttachmentUid) {
+        // Any explicit non-zero Track/Chapter/Edition/Attachment UID scopes
+        // this Matroska Tag to a specific stream or sub-entity (e.g. an audio
+        // track), NOT the whole file/episode.
+        int uid = 0;
+        for (int i = dataStart; i < dataEnd; i++) {
+          uid = (uid << 8) | buf[i];
+        }
+        if (uid != 0) return true;
+      } else if (hdr.id == _idTargetTypeValue && hdr.size > 0 && hdr.size <= 8) {
+        // Matroska TargetTypeValue: 50=MOVIE/EPISODE, 60=SEASON, 70=COLLECTION;
+        // values < 50 (e.g. 30=TRACK/CHAPTER, 20=SUBTRACK, 10=SHOT) are
+        // sub-file scopes and must not be promoted to whole-file episode tags.
+        int ttv = 0;
+        for (int i = dataStart; i < dataEnd; i++) {
+          ttv = (ttv << 8) | buf[i];
+        }
+        if (ttv > 0 && ttv < 50) return true;
+      }
+      pos = dataEnd;
+    }
+    return false;
+  }
+
+  static void _parseTagChildren(
+    Uint8List buf,
+    int start,
+    int end,
+    Map<String, String> tags,
+  ) {
+    final pendingSimpleTags = <({String name, String val})>[];
+    bool isSubFileScoped = false;
+    int pos = start;
+    while (pos < end) {
+      final hdr = _readEbmlHeader(buf, pos);
+      if (hdr == null || hdr.unknownSize) break;
+      final dataStart = pos + hdr.headerLen;
+      final dataEnd = dataStart + hdr.size;
+      if (dataEnd > end) break;
+      if (hdr.id == _idTargets) {
+        if (_isSubFileTagTargets(buf, dataStart, dataEnd)) {
+          isSubFileScoped = true;
+        }
+      } else if (hdr.id == _idSimpleTag) {
         String name = '';
         String val = '';
         int sp = dataStart;
@@ -409,11 +456,19 @@ class ContainerMetadataReader {
           sp = sEnd;
         }
         if (name.isNotEmpty && val.isNotEmpty) {
-          // Do not overwrite Info.Title unless empty; otherwise keep first tag.
-          tags.putIfAbsent(name, () => val);
+          pendingSimpleTags.add((name: name, val: val));
         }
       }
       pos = dataEnd;
+    }
+    if (isSubFileScoped) {
+      // Ignore track/chapter/attachment-scoped tags so audio/subtitle stream
+      // metadata never masquerades as whole-file season/episode tags.
+      return;
+    }
+    for (final st in pendingSimpleTags) {
+      // Do not overwrite Info.Title unless empty; otherwise keep first tag.
+      tags.putIfAbsent(st.name, () => st.val);
     }
   }
 

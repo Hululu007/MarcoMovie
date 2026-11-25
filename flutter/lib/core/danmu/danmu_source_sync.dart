@@ -147,19 +147,32 @@ class DanmuSourceSyncDocument {
     try {
       final decoded = jsonDecode(trimmed);
       if (decoded is! Map) return null;
-      final rawSources = decoded['sources'];
+
+      // Validate schemaVersion strictly: unknown or missing future versions
+      // (e.g. schemaVersion: 2) must be rejected so we never misread them as
+      // an empty source list and wipe local configuration.
+      final rawSchema = decoded['schemaVersion'];
+      if (rawSchema is! num || rawSchema.toInt() != currentSchemaVersion) {
+        return null;
+      }
+
+      // Require `sources` to be explicitly present as a List; missing or
+      // non-List `sources` is a malformed/incompatible document.
+      if (!decoded.containsKey('sources') || decoded['sources'] is! List) {
+        return null;
+      }
+      final rawSources = decoded['sources'] as List;
       final entries = <DanmuSyncSourceEntry>[];
-      if (rawSources is List) {
-        for (final item in rawSources) {
-          final parsed = DanmuSyncSourceEntry.tryFromJson(item);
-          if (parsed != null) entries.add(parsed);
-        }
+      for (final item in rawSources) {
+        final parsed = DanmuSyncSourceEntry.tryFromJson(item);
+        if (parsed != null) entries.add(parsed);
+      }
+      if (rawSources.isNotEmpty && entries.isEmpty) {
+        return null;
       }
       final updatedAt = (decoded['updatedAt'] as num?)?.toInt() ?? 0;
       final revision = (decoded['revision'] as num?)?.toInt() ?? 0;
       final clearedAt = (decoded['clearedAt'] as num?)?.toInt() ?? 0;
-      final schema = (decoded['schemaVersion'] as num?)?.toInt() ??
-          currentSchemaVersion;
       final initialized = treatAsRemote
           ? true
           : (decoded['initialized'] == true ||
@@ -167,7 +180,7 @@ class DanmuSourceSyncDocument {
               revision > 0 ||
               entries.isNotEmpty);
       return DanmuSourceSyncDocument(
-        schemaVersion: schema,
+        schemaVersion: currentSchemaVersion,
         updatedAt: math.max(0, updatedAt),
         revision: math.max(0, revision),
         clearedAt: math.max(0, clearedAt),
@@ -235,8 +248,17 @@ class DanmuSourceSyncMerger {
 
   static List<String> _computePendingAuthOrigins(
     DanmuSourceSyncDocument doc,
-    bool hasLocalCredentials,
-  ) {
+    bool hasLocalCredentials, {
+    Set<String>? authorizedCredentialOrigins,
+  }) {
+    if (authorizedCredentialOrigins != null) {
+      return List<String>.unmodifiable(
+        doc.sources
+            .where((s) =>
+                s.requiresAuth && !authorizedCredentialOrigins.contains(s.url))
+            .map((s) => s.url),
+      );
+    }
     if (hasLocalCredentials) return const <String>[];
     return List<String>.unmodifiable(
       doc.sources.where((s) => s.requiresAuth).map((s) => s.url),
@@ -248,6 +270,7 @@ class DanmuSourceSyncMerger {
     required DanmuSourceSyncDocument? base,
     required DanmuSourceSyncDocument? remote,
     required bool hasLocalCredentials,
+    Set<String>? authorizedCredentialOrigins,
     required int nowMs,
   }) {
     // Case 1: Remote sidecar file does not exist yet (404).
@@ -269,8 +292,11 @@ class DanmuSourceSyncMerger {
         merged: next,
         localChanged: false,
         needsUpload: true,
-        pendingAuthOrigins:
-            _computePendingAuthOrigins(next, hasLocalCredentials),
+        pendingAuthOrigins: _computePendingAuthOrigins(
+          next,
+          hasLocalCredentials,
+          authorizedCredentialOrigins: authorizedCredentialOrigins,
+        ),
       );
     }
 
@@ -281,8 +307,11 @@ class DanmuSourceSyncMerger {
         merged: restored,
         localChanged: restored.sources.isNotEmpty,
         needsUpload: false,
-        pendingAuthOrigins:
-            _computePendingAuthOrigins(restored, hasLocalCredentials),
+        pendingAuthOrigins: _computePendingAuthOrigins(
+          restored,
+          hasLocalCredentials,
+          authorizedCredentialOrigins: authorizedCredentialOrigins,
+        ),
       );
     }
 
@@ -297,8 +326,11 @@ class DanmuSourceSyncMerger {
         merged: converged,
         localChanged: false,
         needsUpload: false,
-        pendingAuthOrigins:
-            _computePendingAuthOrigins(converged, hasLocalCredentials),
+        pendingAuthOrigins: _computePendingAuthOrigins(
+          converged,
+          hasLocalCredentials,
+          authorizedCredentialOrigins: authorizedCredentialOrigins,
+        ),
       );
     }
 
@@ -311,8 +343,11 @@ class DanmuSourceSyncMerger {
         merged: applied,
         localChanged: !_sameUrls(local, applied) || !_sameSources(local, applied),
         needsUpload: false,
-        pendingAuthOrigins:
-            _computePendingAuthOrigins(applied, hasLocalCredentials),
+        pendingAuthOrigins: _computePendingAuthOrigins(
+          applied,
+          hasLocalCredentials,
+          authorizedCredentialOrigins: authorizedCredentialOrigins,
+        ),
       );
     }
 
@@ -331,8 +366,11 @@ class DanmuSourceSyncMerger {
         merged: pushed,
         localChanged: false,
         needsUpload: true,
-        pendingAuthOrigins:
-            _computePendingAuthOrigins(pushed, hasLocalCredentials),
+        pendingAuthOrigins: _computePendingAuthOrigins(
+          pushed,
+          hasLocalCredentials,
+          authorizedCredentialOrigins: authorizedCredentialOrigins,
+        ),
       );
     }
 
@@ -430,8 +468,11 @@ class DanmuSourceSyncMerger {
       merged: mergedDoc,
       localChanged: !_sameSources(local, mergedDoc),
       needsUpload: !_sameSources(remote, mergedDoc),
-      pendingAuthOrigins:
-          _computePendingAuthOrigins(mergedDoc, hasLocalCredentials),
+      pendingAuthOrigins: _computePendingAuthOrigins(
+        mergedDoc,
+        hasLocalCredentials,
+        authorizedCredentialOrigins: authorizedCredentialOrigins,
+      ),
     );
   }
 }

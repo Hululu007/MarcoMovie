@@ -940,6 +940,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     widget.storage.seriesScrapeRevision.addListener(
       _onPlayerSeriesScrapeRevision,
     );
+    if (!OhosRuntime.isOhos) {
+      widget.storage.danmuSourcesRevision.addListener(
+        _onDanmuSourcesRevisionChanged,
+      );
+    }
     IosLiquidGlassBridge.reduceTransparencyNotifier.addListener(
       _onReduceTransparencyChanged,
     );
@@ -2079,11 +2084,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     if (_autoNext) {
-      if (_episodeIndex < _currentLine.episodes.length - 1) {
+      final nextIdx = _adjacentVisibleEpisodeIndex(1);
+      if (nextIdx != null) {
         _stepEpisode(1);
       } else if (_repeatMode == 'all' && _currentLine.episodes.isNotEmpty) {
+        final order = _visibleOrderedEpisodeIndices();
+        final firstVisible = order.isNotEmpty ? order.first : 0;
         _saveProgress(immediate: true, syncImmediate: false);
-        setState(() => _episodeIndex = 0);
+        setState(() => _episodeIndex = firstVisible);
         _openCurrentEpisode(resumeMs: 0);
       }
     }
@@ -2190,7 +2198,11 @@ class _PlayerScreenState extends State<PlayerScreen>
               nextLine.episodes.any((e) => !e.isDirectPlayable)) {
             continue;
           }
-          final nextEpIdx = _matchEpisodeIndexInTargetLine(nextLineIdx);
+          final targetMatch = _resolveTargetLineEpisodeMatch(nextLineIdx);
+          final nextEpIdx = targetMatch.matchedIndex;
+          if (nextEpIdx == null) {
+            continue;
+          }
           final candidateEp = nextLine.episodes[nextEpIdx];
           if (!PlaybackRecoveryPolicy.isAutomaticLineCandidate(candidateEp)) {
             continue;
@@ -3481,8 +3493,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _stepEpisode(int delta) {
-    final next = _episodeIndex + delta;
-    if (next < 0 || next >= _currentLine.episodes.length) return;
+    final next = _adjacentVisibleEpisodeIndex(delta);
+    if (next == null || next < 0 || next >= _currentLine.episodes.length) {
+      return;
+    }
     _saveProgress(immediate: true, syncImmediate: false);
     _failedLinesForEpisode.clear();
     _failedLiveEpisodes.clear();
@@ -3609,9 +3623,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       await dyn.setProperty('vid', 'auto');
       await dyn.setProperty('audio-display', 'no');
-      if (_desktop && !OhosRuntime.isOhos) {
-        // Keep libass prepared so embedded ASS fonts load on file open and
-        // `sub-pos` can shift bottom ASS/PGS subtitles without moving top signs.
+      if (_isMacosPlayerPlatform) {
+        // Keep libass prepared on macOS so embedded ASS fonts load on file open
+        // and `sub-pos` can shift bottom ASS/PGS subtitles without moving top
+        // signs. Windows mpv and iOS mpv keep their original subtitle config.
         await dyn.setProperty('sub-ass', 'yes');
         await dyn.setProperty('sub-ass-override', 'yes');
         await dyn.setProperty('sub-pos', '$_lastAppliedMpvSubPos');
@@ -3890,6 +3905,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     widget.storage.seriesScrapeRevision.removeListener(
       _onPlayerSeriesScrapeRevision,
     );
+    if (!OhosRuntime.isOhos) {
+      widget.storage.danmuSourcesRevision.removeListener(
+        _onDanmuSourcesRevisionChanged,
+      );
+    }
     _castController.removeListener(_onCastStateChanged);
     _castController.dispose();
     _danmuMatchToken?.cancel();
@@ -4468,6 +4488,38 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  void _onDanmuSourcesRevisionChanged() {
+    if (!mounted || OhosRuntime.isOhos) return;
+    unawaited(_reloadDanmuSettingsFromStorage());
+  }
+
+  Future<void> _reloadDanmuSettingsFromStorage() async {
+    try {
+      final loaded = await DanmuPrefs.load();
+      if (!mounted) return;
+      final next = _danmuSettings.copyWith(
+        serverUrls: loaded.serverUrls,
+        appId: loaded.appId,
+        appSecret: loaded.appSecret,
+        authorizedCredentialOrigins: loaded.authorizedCredentialOrigins,
+      );
+      final serverChanged = next.serverUrls != _danmuSettings.serverUrls ||
+          next.appId != _danmuSettings.appId ||
+          next.appSecret != _danmuSettings.appSecret ||
+          next.authorizedCredentialOrigins !=
+              _danmuSettings.authorizedCredentialOrigins;
+      setState(() {
+        _danmuSettings = next;
+      });
+      if (serverChanged && widget.debugDanmuProvider == null) {
+        _rebuildDanmuPipeline();
+      }
+      if (!_isLiveStream && _danmuSettings.effectiveEnabled) {
+        _bindDanmuForCurrentEpisode();
+      }
+    } catch (_) {}
+  }
+
   void _reloadDanmuAfterCalibration() {
     if (OhosRuntime.isOhos || _isLiveStream) return;
     _danmuMatchToken?.cancel();
@@ -4476,13 +4528,49 @@ class _PlayerScreenState extends State<PlayerScreen>
     _danmuBoundForEpisode = false;
     _matchedDanmuCandidate = null;
     _pendingDanmuCandidates = const <DanmuCandidate>[];
-    final cache = _danmuCache;
-    if (cache != null) {
-      unawaited(cache.bindSession(''));
-    }
     if (_danmuSettings.effectiveEnabled) {
       _bindDanmuForCurrentEpisode();
+    } else {
+      final cache = _danmuCache;
+      if (cache != null) {
+        unawaited(cache.bindSession(''));
+      }
     }
+  }
+
+  List<int> _visibleOrderedEpisodeIndices() {
+    final count = _currentLine.episodes.length;
+    if (count == 0) return const <int>[];
+    if (_isLiveStream) {
+      return List<int>.generate(count, (i) => i, growable: false);
+    }
+    final override = widget.storage.getSeriesScrapeOverride(
+      widget.site.key,
+      widget.video.id,
+      isPrivate: widget.site.isEffectivelyPrivate,
+    );
+    final scrape = _scrapeLineEpisodesFor(_currentLine, override: override);
+    final sortByScraped =
+        override?.sortByScrapedEpisode ?? scrape.sourceOrderScrambled;
+    final hideSpecials = override?.hideSpecials ?? false;
+    return scrape.orderedIndices(
+      sortByScraped: sortByScraped,
+      hideSpecials: hideSpecials,
+    );
+  }
+
+  int? _adjacentVisibleEpisodeIndex(int delta) {
+    if (delta == 0) return null;
+    final order = _visibleOrderedEpisodeIndices();
+    if (order.isEmpty) return null;
+    final pos = order.indexOf(_episodeIndex);
+    if (pos >= 0) {
+      final targetPos = pos + delta;
+      if (targetPos < 0 || targetPos >= order.length) return null;
+      return order[targetPos];
+    }
+    if (delta > 0) return order.first;
+    return null;
   }
 
   LineEpisodeScrapeResult _scrapeLineEpisodesFor(
@@ -4516,29 +4604,97 @@ class _PlayerScreenState extends State<PlayerScreen>
     return scrape.infoForOriginalIndex(_episodeIndex);
   }
 
-  int _matchEpisodeIndexInTargetLine(int targetLineIndex) {
+  ({int? matchedIndex, bool seasonConflict, String conflictSummary})
+      _resolveTargetLineEpisodeMatch(int targetLineIndex) {
     final targetLine = _lines[targetLineIndex];
-    if (targetLine.episodes.isEmpty) return 0;
-    if (!_isLiveStream) {
-      final srcInfo = _currentScrapedEpisodeInfo();
-      if (srcInfo != null) {
-        final targetScrape = _scrapeLineEpisodesFor(targetLine);
-        final matched = SeriesScraper.matchEpisodeIndexInScrapedLine(
-          srcInfo,
-          targetScrape,
+    if (targetLine.episodes.isEmpty) {
+      return (matchedIndex: null, seasonConflict: false, conflictSummary: '');
+    }
+    if (_isLiveStream) {
+      return (
+        matchedIndex: CspBridge.matchEpisodeIndexInLine(
+          targetLine,
+          _currentEpisode.name,
+          _episodeIndex,
+        ),
+        seasonConflict: false,
+        conflictSummary: '',
+      );
+    }
+    final srcInfo = _currentScrapedEpisodeInfo();
+    final targetScrape = _scrapeLineEpisodesFor(targetLine);
+    if (srcInfo != null) {
+      final matched = SeriesScraper.matchEpisodeIndexInScrapedLine(
+        srcInfo,
+        targetScrape,
+      );
+      if (matched != null &&
+          matched >= 0 &&
+          matched < targetLine.episodes.length) {
+        return (
+          matchedIndex: matched,
+          seasonConflict: false,
+          conflictSummary: '',
         );
-        if (matched != null &&
-            matched >= 0 &&
-            matched < targetLine.episodes.length) {
-          return matched;
+      }
+      final srcSeason = srcInfo.seasonNumber;
+      final srcEp = srcInfo.resolvedEpisodeNumber;
+      if (!srcInfo.isSpecial && !srcInfo.needsConfirmation && srcEp != null) {
+        final targetHasOtherSeason = srcSeason != null &&
+            targetScrape.byOriginalIndex.any(
+              (c) =>
+                  !c.isSpecial &&
+                  c.seasonNumber != null &&
+                  c.seasonNumber != srcSeason,
+            );
+        final targetHasExplicitEpisodes = targetScrape.regularCount > 0;
+        if (targetHasOtherSeason ||
+            (srcSeason != null && targetHasExplicitEpisodes)) {
+          return (
+            matchedIndex: null,
+            seasonConflict: true,
+            conflictSummary:
+                '目标线路「${targetLine.name}」未找到 ${srcInfo.formattedSeasonEpisode}，请手动选集',
+          );
         }
       }
     }
-    return CspBridge.matchEpisodeIndexInLine(
-      targetLine,
-      _currentEpisode.name,
-      _episodeIndex,
+    return (
+      matchedIndex: CspBridge.matchEpisodeIndexInLine(
+        targetLine,
+        _currentEpisode.name,
+        _episodeIndex,
+      ),
+      seasonConflict: false,
+      conflictSummary: '',
     );
+  }
+
+  void _switchToLineWithConflictGuard(int targetLineIndex) {
+    if (targetLineIndex < 0 || targetLineIndex >= _lines.length) return;
+    final match = _resolveTargetLineEpisodeMatch(targetLineIndex);
+    if (match.matchedIndex == null) {
+      final msg = match.conflictSummary.isNotEmpty
+          ? match.conflictSummary
+          : '目标线路「${_lines[targetLineIndex].name}」未找到对应集数，请手动选集';
+      _showHud(msg);
+      _showEpisodesSheet(
+        initialLineIndex: targetLineIndex,
+        initialNotice: msg,
+      );
+      return;
+    }
+    _failedLinesForEpisode.clear();
+    _failedLiveEpisodes.clear();
+    final keepPos = _position.inMilliseconds >= 1000
+        ? _position.inMilliseconds
+        : _lastKnownPositionMs;
+    _saveProgress(immediate: true, syncImmediate: false);
+    setState(() {
+      _lineIndex = targetLineIndex;
+      _episodeIndex = match.matchedIndex!;
+    });
+    _openCurrentEpisode(resumeMs: keepPos);
   }
 
   void _probeCurrentEpisodeContainerTags(int session) {
@@ -4601,6 +4757,8 @@ class _PlayerScreenState extends State<PlayerScreen>
             beforeInfo?.seasonNumber != afterInfo?.seasonNumber ||
                 beforeInfo?.resolvedEpisodeNumber !=
                     afterInfo?.resolvedEpisodeNumber ||
+                beforeInfo?.recognizedWorkTitle !=
+                    afterInfo?.recognizedWorkTitle ||
                 beforeInfo?.status != afterInfo?.status;
         if (identityChanged && _danmuSettings.effectiveEnabled) {
           _reloadDanmuAfterCalibration();
@@ -4642,6 +4800,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     bool isMotionComic,
     SeriesScrapeOverride? override,
     ScrapedEpisodeInfo? episodeInfo,
+    EpisodeManualCalibration? manualCalibration,
     bool canAutoMatch,
   }) _resolveDanmuMatchContext() {
     final override = widget.storage.getSeriesScrapeOverride(
@@ -4649,19 +4808,33 @@ class _PlayerScreenState extends State<PlayerScreen>
       widget.video.id,
       isPrivate: widget.site.isEffectivelyPrivate,
     );
-    final effectiveTitle =
-        (override != null && override.effectiveDanmuTitle.isNotEmpty)
-            ? override.effectiveDanmuTitle
-            : widget.video.title;
+    final scrape = _scrapeLineEpisodesFor(_currentLine, override: override);
+    final epInfo = scrape.infoForOriginalIndex(_episodeIndex);
+    final stableKey = SeriesScraper.stableEpisodeKey(_currentEpisode);
+    final manualCalibration =
+        stableKey.isNotEmpty ? override?.episodeCalibrations[stableKey] : null;
+    // Propagate confirmed / container-recognized work title into the actual
+    // danmu query: per-episode user calibration > series user binding >
+    // container SHOW/SERIES/TVSH tag > catalog title.
+    final String effectiveTitle;
+    if (manualCalibration != null &&
+        manualCalibration.workTitle.trim().isNotEmpty) {
+      effectiveTitle = manualCalibration.workTitle.trim();
+    } else if (override != null && override.effectiveDanmuTitle.isNotEmpty) {
+      effectiveTitle = override.effectiveDanmuTitle;
+    } else if (epInfo != null &&
+        epInfo.recognizedWorkTitle.trim().isNotEmpty) {
+      effectiveTitle = epInfo.recognizedWorkTitle.trim();
+    } else {
+      effectiveTitle = widget.video.title;
+    }
     final isMotionComic = (override != null && override.hasWorkBinding)
         ? override.isMotionComic
         : SeriesScraper.isMotionComicText(
-            widget.video.title,
+            effectiveTitle,
             extraContext: '${widget.video.tag} ${widget.video.remarks}',
           );
     final episodeOffset = override?.episodeOffset ?? 0;
-    final scrape = _scrapeLineEpisodesFor(_currentLine, override: override);
-    final epInfo = scrape.infoForOriginalIndex(_episodeIndex);
     final int? scrapedEpNum = epInfo?.resolvedEpisodeNumber;
     final bool needsConfirmation = epInfo?.needsConfirmation ?? false;
     final bool isUnoverriddenSpecial =
@@ -4710,6 +4883,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       isMotionComic: isMotionComic,
       override: override,
       episodeInfo: epInfo,
+      manualCalibration: manualCalibration,
       canAutoMatch: canAutoMatch,
     );
   }
@@ -4765,7 +4939,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _manualBindDanmuCandidate(DanmuCandidate candidate) {
-    if (candidate.boundEpisodeId.trim().isEmpty) return;
+    final boundId = candidate.boundEpisodeId.trim();
+    if (boundId.isEmpty) return;
     if (_danmuProvider == null || _danmuCache == null) {
       _rebuildDanmuPipeline();
     }
@@ -4777,28 +4952,55 @@ class _PlayerScreenState extends State<PlayerScreen>
     _pendingDanmuCandidates = const <DanmuCandidate>[];
     unawaited(() async {
       try {
-        await cache.bindSession(candidate.boundEpisodeId);
+        await cache.bindSession(boundId);
         if (!mounted || gen != _danmuSessionGen) return;
         _danmuBoundForEpisode = true;
-        cache.onPlaybackTick(_position.inMilliseconds, playing: _playing);
+        final tickMs = _position.inMilliseconds > 0
+            ? _position.inMilliseconds
+            : (_pendingResumeMs > 0 ? _pendingResumeMs : _lastKnownPositionMs);
+        cache.onPlaybackTick(tickMs, playing: _playing);
         _showHud(
           '已切换弹幕：${candidate.animeTitle} ${candidate.episodeTitle}'.trim(),
         );
       } catch (_) {}
     }());
-    // Persist the chosen Dandanplay bangumi binding for future episodes in this series.
-    if (!widget.site.isEffectivelyPrivate &&
-        candidate.animeId.isNotEmpty &&
-        candidate.sourceOrigin.isNotEmpty) {
+    // Persist BOTH the per-episode manually chosen danmu binding (source +
+    // boundEpisodeId) keyed by stable file/item identity AND the series-level
+    // anime binding so saving, refreshing, or resuming keeps this exact choice.
+    if (!widget.site.isEffectivelyPrivate) {
       final existing = widget.storage.getSeriesScrapeOverride(
-        widget.site.key,
-        widget.video.id,
-        isPrivate: false,
+            widget.site.key,
+            widget.video.id,
+            isPrivate: false,
+          ) ??
+          const SeriesScrapeOverride();
+      final stableKey = SeriesScraper.stableEpisodeKey(_currentEpisode);
+      final nextCalibs = Map<String, EpisodeManualCalibration>.from(
+        existing.episodeCalibrations,
       );
-      final updated = (existing ?? const SeriesScrapeOverride()).copyWith(
-        danmuAnimeId: candidate.animeId,
-        danmuOrigin: candidate.sourceOrigin,
-        danmuTitleOverride: candidate.animeTitle,
+      if (stableKey.isNotEmpty) {
+        final prev =
+            nextCalibs[stableKey] ?? const EpisodeManualCalibration();
+        nextCalibs[stableKey] = prev.copyWith(
+          danmuBoundEpisodeId: boundId,
+          danmuSourceOrigin: candidate.sourceOrigin.trim(),
+          danmuAnimeId: candidate.animeId.trim(),
+          danmuAnimeTitle: candidate.animeTitle.trim(),
+          danmuEpisodeTitle: candidate.episodeTitle.trim(),
+          updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        );
+      }
+      final updated = existing.copyWith(
+        danmuAnimeId: candidate.animeId.isNotEmpty
+            ? candidate.animeId
+            : existing.danmuAnimeId,
+        danmuOrigin: candidate.sourceOrigin.isNotEmpty
+            ? candidate.sourceOrigin
+            : existing.danmuOrigin,
+        danmuTitleOverride: candidate.animeTitle.isNotEmpty
+            ? candidate.animeTitle
+            : existing.danmuTitleOverride,
+        episodeCalibrations: nextCalibs,
       );
       unawaited(
         widget.storage.saveSeriesScrapeOverride(
@@ -4862,6 +5064,45 @@ class _PlayerScreenState extends State<PlayerScreen>
     _activeDanmuEpisodeOffset = ctx.episodeOffset;
     _pendingDanmuCandidates = const <DanmuCandidate>[];
 
+    // Honor explicit per-episode manual danmu candidate choice across saves,
+    // refreshes, and app restarts, loading directly from current playback time.
+    final manualCalib = ctx.manualCalibration;
+    if (manualCalib != null && manualCalib.hasDanmuBinding) {
+      final savedOrigin = manualCalib.danmuSourceOrigin.trim();
+      final originAvailable = widget.debugDanmuProvider != null ||
+          savedOrigin.isEmpty ||
+          _danmuSettings.normalizedOrigins.contains(savedOrigin);
+      if (originAvailable) {
+        final manualCand = DanmuCandidate(
+          sourceOrigin: savedOrigin,
+          animeId: manualCalib.danmuAnimeId,
+          animeTitle: manualCalib.danmuAnimeTitle.isNotEmpty
+              ? manualCalib.danmuAnimeTitle
+              : ctx.effectiveTitle,
+          boundEpisodeId: manualCalib.danmuBoundEpisodeId,
+          episodeTitle: manualCalib.danmuEpisodeTitle,
+          confidence: 1.0,
+        );
+        unawaited(() async {
+          try {
+            await cache.bindSession(manualCand.boundEpisodeId);
+            if (!mounted || gen != _danmuSessionGen || token.isCancelled) return;
+            _matchedDanmuCandidate = manualCand;
+            _pendingDanmuCandidates = const <DanmuCandidate>[];
+            _danmuBoundForEpisode = true;
+            final tickMs = _position.inMilliseconds > 0
+                ? _position.inMilliseconds
+                : (_pendingResumeMs > 0
+                    ? _pendingResumeMs
+                    : _lastKnownPositionMs);
+            cache.onPlaybackTick(tickMs, playing: _playing);
+            if (mounted) setState(() {});
+          } catch (_) {}
+        }());
+        return;
+      }
+    }
+
     if (!ctx.canAutoMatch) {
       _matchedDanmuCandidate = null;
       _danmuBoundForEpisode = false;
@@ -4880,6 +5121,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (candidates.isEmpty) {
           _matchedDanmuCandidate = null;
           _danmuBoundForEpisode = false;
+          unawaited(cache.bindSession(''));
           return;
         }
         var best = candidates.first;
@@ -4888,13 +5130,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
         if (best.boundEpisodeId.trim().isEmpty ||
             best.confidence < DandanplayProvider.autoBindMinConfidence) {
-          // Server only returned neighbor/low-confidence candidates: do NOT
-          // silently bind a wrong episode; retain them for explicit user choice.
+          // Server only returned neighbor/unrelated/low-confidence candidates:
+          // do NOT silently bind a wrong episode; retain them for explicit user choice.
           _matchedDanmuCandidate = null;
           _danmuBoundForEpisode = false;
           _pendingDanmuCandidates = List<DanmuCandidate>.unmodifiable(
             candidates.where((c) => c.boundEpisodeId.trim().isNotEmpty),
           );
+          unawaited(cache.bindSession(''));
           if (mounted) setState(() {});
           return;
         }
@@ -5154,7 +5397,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   bool get _usesDesktopSubtitleHudLayout =>
-      _desktop && !OhosRuntime.shouldUseTvUi(widget.storage.tvUiMode);
+      _isMacosPlayerPlatform &&
+      !OhosRuntime.shouldUseTvUi(widget.storage.tvUiMode);
 
   bool get _isDesktopBottomControlsVisible =>
       _usesDesktopSubtitleHudLayout &&
@@ -5192,7 +5436,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _scheduleSyncNativeSubtitleState() {
-    if (_subtitleSyncScheduled || !mounted) return;
+    if (!_isMacosPlayerPlatform || _subtitleSyncScheduled || !mounted) return;
     _subtitleSyncScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _subtitleSyncScheduled = false;
@@ -5203,6 +5447,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _syncNativeSubtitleState() async {
     if (!mounted ||
+        !_isMacosPlayerPlatform ||
         OhosRuntime.isOhos ||
         _usingAvPlayer ||
         _videoKernel.mdkPlatform != null ||
@@ -5308,9 +5553,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final subtitleBottomPadding = _computeSubtitleBottomPadding(viewPadding);
     final subtitleAnimDuration =
         reduceMotion ? Duration.zero : const Duration(milliseconds: 200);
-    final showFlutterTextSubtitles =
-        _subtitleRenderMode != SubtitleRenderMode.mpvNativeAss &&
-            _subtitleRenderMode != SubtitleRenderMode.mpvNativeBitmap;
+    final showFlutterTextSubtitles = !_isMacosPlayerPlatform ||
+        (_subtitleRenderMode != SubtitleRenderMode.mpvNativeAss &&
+            _subtitleRenderMode != SubtitleRenderMode.mpvNativeBitmap);
     final subtitleOverlay = widget.debugSubtitleLayer ??
         _videoKernel.buildSubtitleOverlay(
           subtitleViewKey: _subtitleViewKey,
@@ -6283,13 +6528,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   },
                                   onSwitchDevice: () => _handleCastTap(null),
                                   onExitCast: _handleExitCast,
-                                  onPreviousEpisode: _episodeIndex > 0
-                                      ? () => _stepEpisode(-1)
-                                      : null,
-                                  onNextEpisode: _episodeIndex <
-                                          _currentLine.episodes.length - 1
-                                      ? () => _stepEpisode(1)
-                                      : null,
+                                  onPreviousEpisode:
+                                      _adjacentVisibleEpisodeIndex(-1) != null
+                                          ? () => _stepEpisode(-1)
+                                          : null,
+                                  onNextEpisode:
+                                      _adjacentVisibleEpisodeIndex(1) != null
+                                          ? () => _stepEpisode(1)
+                                          : null,
                                   onOpenEpisodes:
                                       _currentLine.episodes.length > 1
                                           ? _showEpisodesSheet
@@ -6651,13 +6897,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   },
                                   onSwitchDevice: () => _handleCastTap(null),
                                   onExitCast: _handleExitCast,
-                                  onPreviousEpisode: _episodeIndex > 0
-                                      ? () => _stepEpisode(-1)
-                                      : null,
-                                  onNextEpisode: _episodeIndex <
-                                          _currentLine.episodes.length - 1
-                                      ? () => _stepEpisode(1)
-                                      : null,
+                                  onPreviousEpisode:
+                                      _adjacentVisibleEpisodeIndex(-1) != null
+                                          ? () => _stepEpisode(-1)
+                                          : null,
+                                  onNextEpisode:
+                                      _adjacentVisibleEpisodeIndex(1) != null
+                                          ? () => _stepEpisode(1)
+                                          : null,
                                   onOpenEpisodes: _showEpisodesSheet,
                                   onOpenLines: _lines.length > 1
                                       ? _showLinesSheet
@@ -7073,18 +7320,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           onTap: () {
                             if (selected) return;
                             HapticFeedback.selectionClick();
-                            _failedLinesForEpisode.clear();
-                            final keepPos = _position.inMilliseconds >= 1000
-                                ? _position.inMilliseconds
-                                : _lastKnownPositionMs;
-                            _saveProgress(immediate: true, syncImmediate: false);
-                            final matchedEpIdx =
-                                _matchEpisodeIndexInTargetLine(idx);
-                            setState(() {
-                              _lineIndex = idx;
-                              _episodeIndex = matchedEpIdx;
-                            });
-                            _openCurrentEpisode(resumeMs: keepPos);
+                            _switchToLineWithConflictGuard(idx);
                           },
                           child: Container(
                             padding: const EdgeInsets.symmetric(
@@ -8240,8 +8476,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         _scheduleHide();
       },
       onMuteToggle: _toggleDesktopMute,
-      hasPrevEpisode: _episodeIndex > 0,
-      hasNextEpisode: _episodeIndex < _currentLine.episodes.length - 1,
+      hasPrevEpisode: _adjacentVisibleEpisodeIndex(-1) != null,
+      hasNextEpisode: _adjacentVisibleEpisodeIndex(1) != null,
       onPrevEpisode: () => _stepEpisode(-1),
       onNextEpisode: () => _stepEpisode(1),
       moreControlsOpen: _windowsMoreControls,
@@ -8359,8 +8595,8 @@ class _PlayerScreenState extends State<PlayerScreen>
               _scheduleHide();
             },
             onMuteToggle: _toggleDesktopMute,
-            hasPrevEpisode: _episodeIndex > 0,
-            hasNextEpisode: _episodeIndex < _currentLine.episodes.length - 1,
+            hasPrevEpisode: _adjacentVisibleEpisodeIndex(-1) != null,
+            hasNextEpisode: _adjacentVisibleEpisodeIndex(1) != null,
             onPrevEpisode: () => _stepEpisode(-1),
             onNextEpisode: () => _stepEpisode(1),
             moreControlsOpen: _windowsMoreControls,
@@ -8949,13 +9185,13 @@ class _PlayerScreenState extends State<PlayerScreen>
         () => _setScreenLocked(true),
         shortLabel: '锁定',
       ),
-      if (_episodeIndex > 0)
+      if (_adjacentVisibleEpisodeIndex(-1) != null)
         _PlayerAction(
           CupertinoIcons.backward_end_fill,
           live ? '上源' : '上集',
           () => _stepEpisode(-1),
         ),
-      if (_episodeIndex < _currentLine.episodes.length - 1)
+      if (_adjacentVisibleEpisodeIndex(1) != null)
         _PlayerAction(
           CupertinoIcons.forward_end_fill,
           live ? '下源' : '下集',
@@ -11472,18 +11708,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   return;
                 }
                 Navigator.of(ctx).pop();
-                _failedLinesForEpisode.clear();
-                _failedLiveEpisodes.clear();
-                final keepPos = _position.inMilliseconds >= 1000
-                    ? _position.inMilliseconds
-                    : _lastKnownPositionMs;
-                _saveProgress(immediate: true, syncImmediate: false);
-                final matchedEpIdx = _matchEpisodeIndexInTargetLine(i);
-                setState(() {
-                  _lineIndex = i;
-                  _episodeIndex = matchedEpIdx;
-                });
-                _openCurrentEpisode(resumeMs: keepPos);
+                _switchToLineWithConflictGuard(i);
               },
             );
             return lineReason != null
@@ -11512,7 +11737,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  void _showEpisodesSheet({Rect? anchorRect}) {
+  void _showEpisodesSheet({
+    Rect? anchorRect,
+    int? initialLineIndex,
+    String? initialNotice,
+  }) {
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
@@ -11532,14 +11761,18 @@ class _PlayerScreenState extends State<PlayerScreen>
             growable: false,
           );
     final canCalibrate = !_isLiveStream && !widget.site.isEffectivelyPrivate;
+    final startLineIndex = (initialLineIndex ?? _lineIndex)
+        .clamp(0, math.max(0, _lines.length - 1))
+        .toInt();
     Widget buildPicker(BuildContext ctx) => PlayerEpisodePickerSheet(
       lines: _lines,
-      initialLineIndex: _lineIndex,
+      initialLineIndex: startLineIndex,
       activeLineIndex: _lineIndex,
       activeEpisodeIndex: _episodeIndex,
       episodeUnavailableReason: episodeChecker,
       lineScrapeResults: scrapeResults,
       scrapeOverride: override,
+      initialNotice: initialNotice,
       onCalibrateCurrent: canCalibrate
           ? () {
               Navigator.of(ctx).pop();
@@ -11650,6 +11883,7 @@ class PlayerEpisodePickerSheet extends StatefulWidget {
   final String? Function(CmsEpisode episode)? episodeUnavailableReason;
   final List<LineEpisodeScrapeResult>? lineScrapeResults;
   final SeriesScrapeOverride? scrapeOverride;
+  final String? initialNotice;
   final VoidCallback? onCalibrateCurrent;
   final void Function(int lineIndex, int episodeIndex) onSelect;
 
@@ -11662,6 +11896,7 @@ class PlayerEpisodePickerSheet extends StatefulWidget {
     this.episodeUnavailableReason,
     this.lineScrapeResults,
     this.scrapeOverride,
+    this.initialNotice,
     this.onCalibrateCurrent,
     required this.onSelect,
   });
@@ -11695,6 +11930,7 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
         .clamp(0, math.max(0, widget.lines.length - 1))
         .toInt();
     _groupIndex = (widget.activeEpisodeIndex ~/ _groupSize);
+    _blockedEpisodeNotice = widget.initialNotice;
     _cachedLineBlockedReasons = _computeLineBlockedReasons();
   }
 

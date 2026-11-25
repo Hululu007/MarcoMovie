@@ -5232,16 +5232,43 @@ class StorageService {
       }
 
       final state = DanmuPrefs.readSyncStateSync(_prefs);
+      final startLocalRevision = state.local.revision;
+      final startLocalUpdatedAt = state.local.updatedAt;
       final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
       final mergeRes = DanmuSourceSyncMerger.merge(
         local: state.local,
         base: state.base,
         remote: remoteDoc,
         hasLocalCredentials: state.hasLocalCredentials,
+        authorizedCredentialOrigins: state.authorizedCredentialOrigins,
         nowMs: now,
       );
 
       if (!mergeRes.needsUpload) {
+        final latestState = DanmuPrefs.readSyncStateSync(_prefs);
+        final editedInFlight =
+            latestState.local.revision != startLocalRevision ||
+                latestState.local.updatedAt != startLocalUpdatedAt;
+        if (editedInFlight) {
+          if (remoteDoc != null) {
+            await DanmuPrefs.updateSyncBaseSnapshotOnly(
+              mergeRes.merged,
+              prefs: _prefs,
+            );
+          }
+          if (attempt < maxRetries) {
+            attempt++;
+            continue;
+          }
+          scheduleAutoWebdavSync();
+          return (
+            sourceCount: latestState.local.sources.length,
+            changed: false,
+            uploaded: false,
+            pendingAuthOrigins: latestState.pendingAuthOrigins,
+            targetUrl: targetUrl,
+          );
+        }
         if (remoteDoc != null || !mergeRes.merged.isFreshUninitialized) {
           await DanmuPrefs.applySyncedDocument(
             mergeRes.merged,
@@ -5284,7 +5311,6 @@ class StorageService {
           ifMatch = remoteEtag;
         }
       }
-      final usedConditional = ifMatch != null || ifNoneMatch != null;
 
       var putResp = await _putWebdavWithMkcolRetry(
         effectiveClient,
@@ -5321,7 +5347,11 @@ class StorageService {
           await Future<void>.delayed(Duration(milliseconds: jitterMs));
           continue;
         }
-        if (usedConditional) {
+        // Only fall back to unconditional PUT when the server does not support
+        // `If-None-Match: *` on a genuinely absent file (`fileAbsent`). For a
+        // real `If-Match` ETag conflict, NEVER drop preconditions and overwrite
+        // peer writes — preserve both server data and local pending edits.
+        if (ifNoneMatch != null && fileAbsent) {
           final fallbackResp = await _putWebdavWithMkcolRetry(
             effectiveClient,
             rawBaseUrl,
@@ -5334,6 +5364,11 @@ class StorageService {
             _noConditionalWriteHosts.add(hostKey);
           }
           putResp = fallbackResp;
+        } else {
+          const conflictMsg =
+              '弹幕源同步持续发生并发冲突（HTTP 412），已保留本机待同步修改与云端最新配置，请重试';
+          await _prefs.setString(keySyncDanmuLastStatus, conflictMsg);
+          throw const FormatException(conflictMsg);
         }
       }
 
@@ -5348,6 +5383,37 @@ class StorageService {
 
       if (absent412Fallback && hostKey.isNotEmpty) {
         _noConditionalWriteHosts.add(hostKey);
+      }
+
+      // Guard against local edits that occurred while PUT was in flight:
+      // NEVER revert newer local edits back to the uploaded snapshot. Advance
+      // only the synced base snapshot and run a follow-up sync pass so the
+      // newer edit converges to the server.
+      final postPutState = DanmuPrefs.readSyncStateSync(_prefs);
+      final editedDuringPut =
+          postPutState.local.revision != startLocalRevision ||
+              postPutState.local.updatedAt != startLocalUpdatedAt;
+      if (editedDuringPut) {
+        await DanmuPrefs.updateSyncBaseSnapshotOnly(
+          mergeRes.merged,
+          prefs: _prefs,
+        );
+        if (attempt < maxRetries) {
+          attempt++;
+          continue;
+        }
+        scheduleAutoWebdavSync();
+        await _prefs.setString(
+          keySyncDanmuLastStatus,
+          '弹幕源已保留上传期间的新编辑，待继续同步',
+        );
+        return (
+          sourceCount: postPutState.local.sources.length,
+          changed: false,
+          uploaded: true,
+          pendingAuthOrigins: postPutState.pendingAuthOrigins,
+          targetUrl: targetUrl,
+        );
       }
 
       await DanmuPrefs.applySyncedDocument(
@@ -5387,6 +5453,9 @@ class StorageService {
   syncDanmuSourcesWithWebdav({http.Client? client}) async {
     if (OhosRuntime.isOhos) {
       throw StateError('当前平台不支持弹幕源同步');
+    }
+    if (!webdavSyncDanmu) {
+      throw const FormatException('「同步弹幕源」已关闭，已停止读写弹幕源文件');
     }
     if (_syncInFlight) {
       throw StateError('正在同步中，请稍候');

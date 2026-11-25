@@ -41,6 +41,11 @@ class EpisodeManualCalibration {
   final int? episodeNumber;
   final bool isSpecial;
   final String workTitle;
+  final String danmuBoundEpisodeId;
+  final String danmuSourceOrigin;
+  final String danmuAnimeId;
+  final String danmuAnimeTitle;
+  final String danmuEpisodeTitle;
   final int updatedAtMs;
 
   const EpisodeManualCalibration({
@@ -48,14 +53,25 @@ class EpisodeManualCalibration {
     this.episodeNumber,
     this.isSpecial = false,
     this.workTitle = '',
+    this.danmuBoundEpisodeId = '',
+    this.danmuSourceOrigin = '',
+    this.danmuAnimeId = '',
+    this.danmuAnimeTitle = '',
+    this.danmuEpisodeTitle = '',
     this.updatedAtMs = 0,
   });
+
+  bool get hasEpisodeOverride =>
+      isSpecial || (episodeNumber != null && episodeNumber! > 0);
+
+  bool get hasDanmuBinding => danmuBoundEpisodeId.trim().isNotEmpty;
 
   bool get isEmpty =>
       !isSpecial &&
       (episodeNumber == null || episodeNumber! <= 0) &&
       (seasonNumber == null || seasonNumber! <= 0) &&
-      workTitle.trim().isEmpty;
+      workTitle.trim().isEmpty &&
+      danmuBoundEpisodeId.trim().isEmpty;
 
   EpisodeManualCalibration copyWith({
     int? seasonNumber,
@@ -64,6 +80,12 @@ class EpisodeManualCalibration {
     bool clearEpisodeNumber = false,
     bool? isSpecial,
     String? workTitle,
+    String? danmuBoundEpisodeId,
+    String? danmuSourceOrigin,
+    String? danmuAnimeId,
+    String? danmuAnimeTitle,
+    String? danmuEpisodeTitle,
+    bool clearDanmuBinding = false,
     int? updatedAtMs,
   }) {
     return EpisodeManualCalibration(
@@ -73,6 +95,19 @@ class EpisodeManualCalibration {
           clearEpisodeNumber ? null : (episodeNumber ?? this.episodeNumber),
       isSpecial: isSpecial ?? this.isSpecial,
       workTitle: workTitle ?? this.workTitle,
+      danmuBoundEpisodeId: clearDanmuBinding
+          ? ''
+          : (danmuBoundEpisodeId ?? this.danmuBoundEpisodeId),
+      danmuSourceOrigin: clearDanmuBinding
+          ? ''
+          : (danmuSourceOrigin ?? this.danmuSourceOrigin),
+      danmuAnimeId:
+          clearDanmuBinding ? '' : (danmuAnimeId ?? this.danmuAnimeId),
+      danmuAnimeTitle:
+          clearDanmuBinding ? '' : (danmuAnimeTitle ?? this.danmuAnimeTitle),
+      danmuEpisodeTitle: clearDanmuBinding
+          ? ''
+          : (danmuEpisodeTitle ?? this.danmuEpisodeTitle),
       updatedAtMs: updatedAtMs ?? this.updatedAtMs,
     );
   }
@@ -84,6 +119,15 @@ class EpisodeManualCalibration {
           'episodeNumber': episodeNumber,
         if (isSpecial) 'isSpecial': true,
         if (workTitle.trim().isNotEmpty) 'workTitle': workTitle.trim(),
+        if (danmuBoundEpisodeId.trim().isNotEmpty)
+          'danmuBoundEpisodeId': danmuBoundEpisodeId.trim(),
+        if (danmuSourceOrigin.trim().isNotEmpty)
+          'danmuSourceOrigin': danmuSourceOrigin.trim(),
+        if (danmuAnimeId.trim().isNotEmpty) 'danmuAnimeId': danmuAnimeId.trim(),
+        if (danmuAnimeTitle.trim().isNotEmpty)
+          'danmuAnimeTitle': danmuAnimeTitle.trim(),
+        if (danmuEpisodeTitle.trim().isNotEmpty)
+          'danmuEpisodeTitle': danmuEpisodeTitle.trim(),
         if (updatedAtMs > 0) 'updatedAtMs': updatedAtMs,
       };
 
@@ -97,6 +141,12 @@ class EpisodeManualCalibration {
       episodeNumber: e != null && e > 0 ? e : null,
       isSpecial: json['isSpecial'] == true,
       workTitle: (json['workTitle'] ?? '').toString().trim(),
+      danmuBoundEpisodeId:
+          (json['danmuBoundEpisodeId'] ?? '').toString().trim(),
+      danmuSourceOrigin: (json['danmuSourceOrigin'] ?? '').toString().trim(),
+      danmuAnimeId: (json['danmuAnimeId'] ?? '').toString().trim(),
+      danmuAnimeTitle: (json['danmuAnimeTitle'] ?? '').toString().trim(),
+      danmuEpisodeTitle: (json['danmuEpisodeTitle'] ?? '').toString().trim(),
       updatedAtMs: (json['updatedAtMs'] as num?)?.toInt() ?? 0,
     );
   }
@@ -997,23 +1047,59 @@ class SeriesScraper {
     return '第 $episodeNumber 集';
   }
 
+  static String _parentDirectoryOfPath(String rawPath) {
+    final norm = rawPath.trim().replaceAll('\\', '/');
+    if (norm.isEmpty) return '';
+    final slash = norm.lastIndexOf('/');
+    return slash > 0 ? norm.substring(0, slash) : '';
+  }
+
+  static String _basenameOfPath(String rawPath) {
+    final norm = rawPath.trim().replaceAll('\\', '/');
+    if (norm.isEmpty) return '';
+    final slash = norm.lastIndexOf('/');
+    return slash >= 0 ? norm.substring(slash + 1).trim() : norm;
+  }
+
   static String _extractOriginalFileName(CmsEpisode episode) {
     if (episode.originalFileName.trim().isNotEmpty) {
       return episode.originalFileName.trim();
+    }
+    for (final k in const ['fileName', 'filename', 'name']) {
+      final v = episode.playbackSession[k];
+      if (v is String && v.trim().isNotEmpty) {
+        return v.trim();
+      }
+    }
+    final sessionPath = episode.playbackSession['path'];
+    if (sessionPath is String && sessionPath.trim().isNotEmpty) {
+      final base = _basenameOfPath(sessionPath);
+      if (base.isNotEmpty) return base;
     }
     if (episode.isLocalFile) {
       final local =
           ContainerMetadataReader.resolveLocalFilePath(episode.url) ??
               episode.url.trim();
-      final norm = local.replaceAll('\\', '/');
-      final slash = norm.lastIndexOf('/');
-      final base = slash >= 0 ? norm.substring(slash + 1) : norm;
+      final base = _basenameOfPath(local);
       if (base.isNotEmpty) return base;
     }
-    if (episode.name.trim().isNotEmpty) {
+    final uri = Uri.tryParse(episode.url.trim());
+    if (uri != null) {
+      final qName = (uri.queryParameters['name'] ?? '').trim();
+      if (qName.isNotEmpty) return qName;
+      final qPath = (uri.queryParameters['path'] ?? '').trim();
+      if (qPath.isNotEmpty) {
+        final base = _basenameOfPath(qPath);
+        if (base.isNotEmpty) return base;
+      }
+      if (episode.nameIsGenerated && uri.pathSegments.isNotEmpty) {
+        final last = uri.pathSegments.last.trim();
+        if (last.isNotEmpty) return last;
+      }
+    }
+    if (!episode.nameIsGenerated && episode.name.trim().isNotEmpty) {
       return episode.name.trim();
     }
-    final uri = Uri.tryParse(episode.url.trim());
     if (uri != null && uri.pathSegments.isNotEmpty) {
       final last = uri.pathSegments.last.trim();
       if (last.isNotEmpty) return last;
@@ -1025,19 +1111,37 @@ class SeriesScraper {
     if (episode.directoryPath.trim().isNotEmpty) {
       return episode.directoryPath.trim();
     }
+    for (final k in const ['dir', 'directory', 'folder', 'parentPath']) {
+      final v = episode.playbackSession[k];
+      if (v is String && v.trim().isNotEmpty) {
+        return v.trim();
+      }
+    }
+    final sessionPath = episode.playbackSession['path'];
+    if (sessionPath is String && sessionPath.trim().isNotEmpty) {
+      final dir = _parentDirectoryOfPath(sessionPath);
+      if (dir.isNotEmpty) return dir;
+    }
     if (episode.isLocalFile) {
       final local =
           ContainerMetadataReader.resolveLocalFilePath(episode.url) ??
               episode.url.trim();
-      final norm = local.replaceAll('\\', '/');
-      final slash = norm.lastIndexOf('/');
-      return slash > 0 ? norm.substring(0, slash) : '';
+      return _parentDirectoryOfPath(local);
     }
     final uri = Uri.tryParse(episode.url.trim());
-    if (uri != null && uri.pathSegments.length > 1) {
-      return uri.pathSegments
-          .sublist(0, uri.pathSegments.length - 1)
-          .join('/');
+    if (uri != null) {
+      final qDir = (uri.queryParameters['dir'] ?? '').trim();
+      if (qDir.isNotEmpty) return qDir;
+      final qPath = (uri.queryParameters['path'] ?? '').trim();
+      if (qPath.isNotEmpty) {
+        final dir = _parentDirectoryOfPath(qPath);
+        if (dir.isNotEmpty) return dir;
+      }
+      if (uri.pathSegments.length > 1) {
+        return uri.pathSegments
+            .sublist(0, uri.pathSegments.length - 1)
+            .join('/');
+      }
     }
     return '';
   }
@@ -1323,6 +1427,8 @@ class SeriesScraper {
     String specialTag,
     String workTitle,
     String summary,
+    bool hasConflict,
+    List<String> conflictReasons,
   }) _parseContainerTagEvidence(
     Map<String, String> tags, {
     String seriesTitle = '',
@@ -1336,6 +1442,8 @@ class SeriesScraper {
         specialTag: '',
         workTitle: '',
         summary: '',
+        hasConflict: false,
+        conflictReasons: const <String>[],
       );
     }
     final norm = <String, String>{
@@ -1352,38 +1460,75 @@ class SeriesScraper {
     int? endEp;
     bool isSpecial = false;
     String specialTag = '';
+    bool hasConflict = false;
+    final conflictReasons = <String>[];
     final workTitle = (norm['show'] ?? norm['series'] ?? norm['tvsh'] ?? '').trim();
 
-    final textSources = <String>[
-      if ((norm['episode_id'] ?? '').isNotEmpty) norm['episode_id']!,
-      if ((norm['tven'] ?? '').isNotEmpty) norm['tven']!,
-      if ((norm['title'] ?? '').isNotEmpty) norm['title']!,
-      if ((norm['comment'] ?? '').isNotEmpty) norm['comment']!,
+    final textSources = <({String key, String value})>[
+      if ((norm['episode_id'] ?? '').isNotEmpty)
+        (key: 'episode_id', value: norm['episode_id']!),
+      if ((norm['tven'] ?? '').isNotEmpty) (key: 'tven', value: norm['tven']!),
+      if ((norm['title'] ?? '').isNotEmpty)
+        (key: 'title', value: norm['title']!),
+      if ((norm['comment'] ?? '').isNotEmpty)
+        (key: 'comment', value: norm['comment']!),
     ];
     String matchedText = '';
-    for (final txt in textSources) {
+    for (final src in textSources) {
+      final txt = src.value;
       final parsed = _parseNameSignals(txt, seriesTitle: seriesTitle);
-      if (parsed.isSpecial && ep == null) {
-        isSpecial = true;
-        specialTag = parsed.specialTag;
-        matchedText = txt;
-        break;
+      final strongMarker = parsed.hasExplicitMarker || parsed.confidence >= 0.90;
+      if (parsed.isSpecial) {
+        if (ep != null && ep > 0) {
+          hasConflict = true;
+          conflictReasons.add(
+            '文件内部标签 ${src.key}（「$txt」）标记为特别篇/预告，但 EPISODE 标签为第 $ep 集',
+          );
+        } else if (!isSpecial) {
+          isSpecial = true;
+          specialTag = parsed.specialTag;
+          if (matchedText.isEmpty) matchedText = txt;
+        }
+        continue;
       }
-      if (parsed.season != null && season == null) {
-        season = parsed.season;
-        if (matchedText.isEmpty) matchedText = txt;
+      if (parsed.season != null && parsed.season! > 0) {
+        if (season != null && season > 0 && season != parsed.season) {
+          hasConflict = true;
+          conflictReasons.add(
+            '文件内部标签季号冲突：标签写 S${season.toString().padLeft(2, '0')}，${src.key}（「$txt」）写 S${parsed.season!.toString().padLeft(2, '0')}',
+          );
+        } else if (season == null) {
+          season = parsed.season;
+          if (matchedText.isEmpty) matchedText = txt;
+        }
       }
-      if (parsed.ep != null && parsed.ep! > 0 && ep == null) {
-        ep = parsed.ep;
-        endEp = parsed.endEp;
-        matchedText = txt;
+      if (parsed.ep != null && parsed.ep! > 0) {
+        if (ep != null && ep > 0 && ep != parsed.ep && strongMarker) {
+          hasConflict = true;
+          conflictReasons.add(
+            '文件内部标签集号冲突：EPISODE 写第 $ep 集，${src.key}（「$txt」）写第 ${parsed.ep} 集',
+          );
+        } else if (isSpecial && strongMarker) {
+          hasConflict = true;
+          conflictReasons.add(
+            '文件内部标签正片/特别篇冲突：${src.key}（「$txt」）写第 ${parsed.ep} 集',
+          );
+        } else if (ep == null) {
+          ep = parsed.ep;
+          endEp = parsed.endEp;
+          if (matchedText.isEmpty) matchedText = txt;
+        }
       }
-      if (season != null && ep != null) break;
     }
 
     if (season == 0) {
-      isSpecial = true;
-      specialTag = specialTag.isNotEmpty ? specialTag : 'SP';
+      if (ep != null && ep > 0) {
+        hasConflict = true;
+        conflictReasons.add('文件内部标签季号为 0（特别篇），但集号为第 $ep 集');
+      } else {
+        isSpecial = true;
+        specialTag = specialTag.isNotEmpty ? specialTag : 'SP';
+      }
     }
 
     final summaryParts = <String>[];
@@ -1408,6 +1553,8 @@ class SeriesScraper {
       specialTag: specialTag,
       workTitle: workTitle,
       summary: summaryParts.join(' '),
+      hasConflict: hasConflict,
+      conflictReasons: List<String>.unmodifiable(conflictReasons),
     );
   }
 
@@ -1546,18 +1693,26 @@ class SeriesScraper {
       mergedTags,
       seriesTitle: seriesTitle,
     );
-    final bool hasTagEvidence =
-        tagEv.season != null || tagEv.ep != null || tagEv.isSpecial;
+    final bool hasTagEvidence = tagEv.season != null ||
+        tagEv.ep != null ||
+        tagEv.isSpecial ||
+        tagEv.hasConflict;
 
     // 3. Gather Priority 3 (directory & original filename signals).
+    // Never parse app-generated display labels (`episode.nameIsGenerated == true`,
+    // e.g. `第 1 集` synthesized for an unnamed CMS entry) as episode evidence.
     final int? dirSeason = _extractDirectorySeason(dirPath);
+    final String primaryNameSource = episode.nameIsGenerated
+        ? origFileName
+        : (episode.name.trim().isNotEmpty ? episode.name : origFileName);
     var fileSig = _parseNameSignals(
-      episode.name,
+      primaryNameSource,
       seriesTitle: seriesTitle,
       constantNumbers: constantNumbers,
       sharedPrefix: sharedPrefix,
     );
-    if (!fileSig.isSpecial &&
+    if (!episode.nameIsGenerated &&
+        !fileSig.isSpecial &&
         fileSig.ep == null &&
         fileSig.season == null &&
         origFileName.isNotEmpty &&
@@ -1609,8 +1764,8 @@ class SeriesScraper {
     }
 
     // 4. Conflict detection across explicit independent evidences.
-    bool conflict = false;
-    final conflictReasons = <String>[];
+    bool conflict = tagEv.hasConflict;
+    final conflictReasons = <String>[...tagEv.conflictReasons];
 
     // 4a. Structured source vs Container tags
     if (hasStructured && hasTagEvidence) {
@@ -1682,7 +1837,9 @@ class SeriesScraper {
     }
 
     final recognizedWork =
-        tagEv.workTitle.isNotEmpty ? tagEv.workTitle : seriesTitle;
+        (manualCalibration != null && manualCalibration.workTitle.trim().isNotEmpty)
+            ? manualCalibration.workTitle.trim()
+            : (tagEv.workTitle.isNotEmpty ? tagEv.workTitle : seriesTitle);
 
     if (conflict) {
       return ScrapedEpisodeInfo(
@@ -1894,10 +2051,17 @@ class SeriesScraper {
     // 1. Find shared prefix and numbers that appear in >= 80% of filenames
     // (e.g. franchise number `2` in `斗罗大陆2_01.mp4`, `斗罗大陆2_02.mp4`, ...).
     final strippedNames = episodes
-        .map((e) => _stripSeriesTitleFromEpisode(
-              _stripFileExtension(e.name.trim()),
-              seriesTitle,
-            ))
+        .map((e) {
+          final basis = e.nameIsGenerated
+              ? _extractOriginalFileName(e)
+              : (e.name.trim().isNotEmpty
+                  ? e.name.trim()
+                  : _extractOriginalFileName(e));
+          return _stripSeriesTitleFromEpisode(
+            _stripFileExtension(basis),
+            seriesTitle,
+          );
+        })
         .toList(growable: false);
 
     String sharedPrefix = '';

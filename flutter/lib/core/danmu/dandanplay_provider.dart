@@ -58,10 +58,42 @@ class DandanplayProvider implements DanmuProvider {
   final bool _ownsClient;
   final Map<String, int> _domainNextAllowedMs = <String, int>{};
 
+  /// Origins restored from cloud sync that have NOT yet been explicitly
+  /// authorized on this device to receive local `appId`/`appSecret`.
+  /// Kept in sync by [DanmuPrefs] so even providers instantiated directly with
+  /// saved global credentials never leak `X-AppId`/`X-Signature` to unapproved
+  /// cloud-restored endpoints.
+  static final Set<String> _locallyUnauthorizedCredentialOrigins = <String>{};
+
+  static void setLocallyUnauthorizedCredentialOrigins(
+    Iterable<String> origins,
+  ) {
+    _locallyUnauthorizedCredentialOrigins
+      ..clear()
+      ..addAll(origins.map(normalizeOriginOrNull).whereType<String>());
+  }
+
+  static void markOriginAuthorizedForLocalCredentials(String origin) {
+    final norm = normalizeOriginOrNull(origin);
+    if (norm != null) {
+      _locallyUnauthorizedCredentialOrigins.remove(norm);
+    }
+  }
+
+  static void markOriginUnauthorizedForLocalCredentials(String origin) {
+    final norm = normalizeOriginOrNull(origin);
+    if (norm != null) {
+      _locallyUnauthorizedCredentialOrigins.add(norm);
+    }
+  }
+
+  final Set<String>? authorizedCredentialOrigins;
+
   factory DandanplayProvider({
     String multilineServerUrls = defaultServerUrls,
     String appId = '',
     String appSecret = '',
+    Set<String>? authorizedCredentialOrigins,
     int maxConcurrency = defaultMaxConcurrency,
     int minRequestIntervalMs = defaultMinRequestIntervalMs,
     http.Client? client,
@@ -78,6 +110,13 @@ class DandanplayProvider implements DanmuProvider {
       multilineServerUrls: multilineServerUrls,
       appId: appId,
       appSecret: appSecret,
+      authorizedCredentialOrigins: authorizedCredentialOrigins == null
+          ? null
+          : Set<String>.unmodifiable(
+              authorizedCredentialOrigins
+                  .map(normalizeOriginOrNull)
+                  .whereType<String>(),
+            ),
       maxConcurrency: maxConcurrency,
       minRequestIntervalMs: minRequestIntervalMs,
       client: resolvedClient,
@@ -90,6 +129,7 @@ class DandanplayProvider implements DanmuProvider {
     required String multilineServerUrls,
     required String appId,
     required String appSecret,
+    required this.authorizedCredentialOrigins,
     required int maxConcurrency,
     required int minRequestIntervalMs,
     required http.Client client,
@@ -105,6 +145,15 @@ class DandanplayProvider implements DanmuProvider {
         _client = client,
         _ownedIoHttpClient = ownedIoHttpClient,
         _ownsClient = ownsClient;
+
+  bool _shouldSignOrigin(String originKey) {
+    if (appId.isEmpty || appSecret.isEmpty) return false;
+    final explicit = authorizedCredentialOrigins;
+    if (explicit != null) {
+      return explicit.contains(originKey);
+    }
+    return !_locallyUnauthorizedCredentialOrigins.contains(originKey);
+  }
 
   bool _closed = false;
 
@@ -471,7 +520,6 @@ class DandanplayProvider implements DanmuProvider {
     final targetEp = query.episodeIndex;
     if (targetEp <= 0) return eps;
     final scored = <DanmuCandidate>[];
-    int parsedCount = 0;
     for (int i = 0; i < eps.length; i++) {
       final c = eps[i];
       final scraped = SeriesScraper.scrapeEpisodeName(
@@ -484,20 +532,22 @@ class DandanplayProvider implements DanmuProvider {
           query.seasonNumber! > 0 &&
           candSeason != null &&
           candSeason != query.seasonNumber;
-      if (epNum != null) parsedCount++;
       double conf;
       if (seasonMismatch) {
         conf = 0.22;
-      } else if (epNum != null && !scraped.isSpecial) {
+      } else if (scraped.isSpecial) {
+        // Trailers / previews / SP must never auto-bind for regular episodes.
+        conf = 0.15;
+      } else if (epNum != null) {
         // Neighbor episodes stay strictly below autoBindMinConfidence (0.55)
         // so the player leaves selection to the user instead of silently
         // loading the wrong episode's danmu.
         conf = epNum == targetEp
             ? 1.0
             : (epNum == targetEp - 1 || epNum == targetEp + 1 ? 0.34 : 0.20);
-      } else if (i + 1 == targetEp && parsedCount == 0) {
-        conf = 0.88;
       } else {
+        // Never auto-bind by list position when episode titles have no
+        // parseable episode number; leave as a low-confidence candidate.
         conf = 0.20;
       }
       scored.add(
@@ -512,24 +562,6 @@ class DandanplayProvider implements DanmuProvider {
       );
     }
     scored.sort((a, b) => b.confidence.compareTo(a.confidence));
-    if (scored.first.confidence >= 0.85) {
-      return scored;
-    }
-    // Positional fallback if episode titles carry no parseable numbers
-    if (parsedCount == 0 && targetEp >= 1 && targetEp <= eps.length) {
-      final exact = eps[targetEp - 1];
-      return <DanmuCandidate>[
-        DanmuCandidate(
-          sourceOrigin: exact.sourceOrigin,
-          animeId: exact.animeId,
-          animeTitle: exact.animeTitle,
-          boundEpisodeId: exact.boundEpisodeId,
-          episodeTitle: exact.episodeTitle,
-          confidence: 0.92,
-        ),
-        ...eps.where((e) => e.boundEpisodeId != exact.boundEpisodeId),
-      ];
-    }
     return scored;
   }
 
@@ -574,6 +606,35 @@ class DandanplayProvider implements DanmuProvider {
     return combined;
   }
 
+  static Set<String> _titleOverlapTokens(String normalized) {
+    final out = <String>{};
+    if (normalized.isEmpty) return out;
+    final cjk = normalized.replaceAll(RegExp(r'[^\u4e00-\u9fff]'), '');
+    if (cjk.length >= 2) {
+      for (int i = 0; i < cjk.length - 1; i++) {
+        out.add(cjk.substring(i, i + 2));
+      }
+    } else if (cjk.length == 1) {
+      out.add(cjk);
+    }
+    for (final m in RegExp(r'[a-z0-9]{2,}').allMatches(normalized)) {
+      out.add(m.group(0)!);
+    }
+    return out;
+  }
+
+  static double _titleOverlapRatio(String normQ, String normA) {
+    final qTokens = _titleOverlapTokens(normQ);
+    final aTokens = _titleOverlapTokens(normA);
+    if (qTokens.isEmpty || aTokens.isEmpty) return 0.0;
+    int overlap = 0;
+    for (final t in qTokens) {
+      if (aTokens.contains(t)) overlap++;
+    }
+    final denom = math.min(qTokens.length, aTokens.length);
+    return denom > 0 ? overlap / denom : 0.0;
+  }
+
   static double _scoreCandidate(
     DanmuMatchQuery query, {
     required String animeTitle,
@@ -589,6 +650,7 @@ class DandanplayProvider implements DanmuProvider {
       score += 0.08;
     }
 
+    bool titleUnrelated = false;
     final normQ = SeriesScraper.normalizeWorkCoreTitle(query.title);
     final normA = SeriesScraper.normalizeWorkCoreTitle(animeTitle);
     if (normQ.isNotEmpty && normA.isNotEmpty) {
@@ -601,7 +663,13 @@ class DandanplayProvider implements DanmuProvider {
             !RegExp(r'\d').hasMatch(normA);
         score += bareRootHijack ? -0.22 : 0.06;
       } else {
-        score -= 0.14;
+        final overlap = _titleOverlapRatio(normQ, normA);
+        if (overlap >= 0.35) {
+          score -= 0.10;
+        } else {
+          titleUnrelated = true;
+          score -= 0.45;
+        }
       }
     }
 
@@ -667,6 +735,11 @@ class DandanplayProvider implements DanmuProvider {
       // Neighbor / wrong-episode candidates (e.g. E09/E11 for E10) never
       // auto-bind and are surfaced for explicit user choice.
       return math.min(score, 0.34).clamp(0.05, 0.34);
+    }
+    if (titleUnrelated) {
+      // Unrelated work returning the same season/episode must stay candidate-only
+      // (strictly below autoBindMinConfidence) so the user decides explicitly.
+      return math.min(score, 0.38).clamp(0.05, 0.38);
     }
     return score.clamp(0.05, 1.0);
   }
@@ -1248,7 +1321,7 @@ class DandanplayProvider implements DanmuProvider {
         ..headers['Accept'] = 'application/json, application/xml, text/xml, */*'
         ..headers['User-Agent'] = 'MarcoMovie-Danmu/1.0';
 
-      if (appId.isNotEmpty && appSecret.isNotEmpty) {
+      if (_shouldSignOrigin(originKey)) {
         final ts = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         req.headers['X-AppId'] = appId;
         req.headers['X-Timestamp'] = ts.toString();

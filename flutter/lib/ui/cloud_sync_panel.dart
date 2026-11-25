@@ -307,7 +307,12 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
   }
 
   Future<void> _handleRetryDanmuSync() async {
-    if (_syncingWebdav || _retryingDanmu) return;
+    if (_syncingWebdav ||
+        _retryingDanmu ||
+        !_syncDanmu ||
+        !widget.storage.webdavSyncDanmu) {
+      return;
+    }
     setState(() {
       _retryingDanmu = true;
     });
@@ -557,6 +562,8 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
 
   @override
   Widget build(BuildContext context) {
+    final isMacOs =
+        defaultTargetPlatform == TargetPlatform.macOS && !OhosRuntime.isOhos;
     final activeServer =
         (_lanServer != null && !_lanServer!.isExpired) ? _lanServer : null;
     final currentHost = _lanHosts.isNotEmpty
@@ -612,7 +619,8 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
             ),
           ),
         ],
-        if (_danmuFeedbackMessage != null &&
+        if (isMacOs &&
+            _danmuFeedbackMessage != null &&
             _danmuFeedbackMessage!.isNotEmpty) ...[
           const SizedBox(height: 10),
           Container(
@@ -643,7 +651,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                     height: 1.4,
                   ),
                 ),
-                if (_danmuFeedbackIsError) ...[
+                if (_danmuFeedbackIsError && _syncDanmu) ...[
                   const SizedBox(height: 8),
                   CupertinoButton(
                     key: const ValueKey('sync-retry-danmu-btn'),
@@ -669,7 +677,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
             ),
           ),
         ],
-        if (_pendingDanmuAuthOrigins.isNotEmpty) ...[
+        if (isMacOs && _pendingDanmuAuthOrigins.isNotEmpty) ...[
           const SizedBox(height: 10),
           Container(
             key: const ValueKey('sync-danmu-auth-prompt'),
@@ -729,15 +737,18 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         const SizedBox(height: 20),
         IosSettingsGroup(
           header: '同步范围与自动化',
-          footer:
-              '「同步弹幕源」可单独开启，使用同目录派生文件（如 family.json 对应 family.danmu.json），旧设备同步视频源时不会覆盖弹幕源；App ID / Secret 始终仅留在各自设备。',
+          footer: isMacOs
+              ? '「同步弹幕源」可单独开启，使用同目录派生文件（如 family.json 对应 family.danmu.json），旧设备同步视频源时不会覆盖弹幕源；App ID / Secret 始终仅留在各自设备。'
+              : '关闭「同时同步观看历史与收藏」后，可仅在家庭设备之间共享订阅源；或关闭订阅源同步，仅同步个人观看记录。',
           children: [
             IosSettingsSwitchRow(
               key: const ValueKey('sync-switch-auto'),
               icon: CupertinoIcons.arrow_2_circlepath,
               iconColor: AppleColors.systemGreen,
               title: '自动云同步',
-              subtitle: '启动时静默拉取最新进度，播放进度、收藏、订阅与弹幕源变更自动同步',
+              subtitle: isMacOs
+                  ? '启动时静默拉取最新进度，播放进度、收藏、订阅与弹幕源变更自动同步'
+                  : '启动时静默拉取最新进度，播放进度、收藏或订阅变更自动上传',
               value: _autoSync,
               onChanged: (v) async {
                 final prev = _autoSync;
@@ -750,7 +761,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                     auto: v,
                     syncSubs: _syncSubs,
                     syncHistory: _syncHistory,
-                    syncDanmu: _syncDanmu,
+                    syncDanmu: isMacOs ? _syncDanmu : false,
                   );
                   widget.onSynced?.call(subscriptionsChanged: false);
                 } catch (e) {
@@ -772,7 +783,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
               onChanged: (v) async {
                 setState(() => _syncSubs = v);
                 await widget.storage.setWebdavSyncSubs(v);
-                if (!v && !_syncHistory && !_syncDanmu) {
+                if (!v && !_syncHistory && !(isMacOs && _syncDanmu)) {
                   setState(() => _syncHistory = true);
                   await widget.storage.setWebdavSyncHistory(true);
                 }
@@ -789,14 +800,14 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
               onChanged: (v) async {
                 setState(() => _syncHistory = v);
                 await widget.storage.setWebdavSyncHistory(v);
-                if (!v && !_syncSubs && !_syncDanmu) {
+                if (!v && !_syncSubs && !(isMacOs && _syncDanmu)) {
                   setState(() => _syncSubs = true);
                   await widget.storage.setWebdavSyncSubs(true);
                 }
                 widget.onSynced?.call(subscriptionsChanged: false);
               },
             ),
-            if (!OhosRuntime.isOhos)
+            if (isMacOs)
               IosSettingsSwitchRow(
                 key: const ValueKey('sync-switch-danmu'),
                 icon: CupertinoIcons.chat_bubble_2_fill,
@@ -805,7 +816,13 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                 subtitle: '同步弹幕服务地址、端口、子路径与备用源顺序（可单独开启，不含本机 App ID / Secret）',
                 value: _syncDanmu,
                 onChanged: (v) async {
-                  setState(() => _syncDanmu = v);
+                  setState(() {
+                    _syncDanmu = v;
+                    if (!v) {
+                      _danmuFeedbackMessage = null;
+                      _danmuFeedbackIsError = false;
+                    }
+                  });
                   await widget.storage.setWebdavSyncDanmu(v);
                   if (!v && !_syncSubs && !_syncHistory) {
                     setState(() => _syncHistory = true);
@@ -819,8 +836,9 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         const SizedBox(height: 20),
         IosSettingsGroup(
           header: 'WebDAV 私有云同步（坚果云 / NAS / Alist / Nextcloud）',
-          footer:
-              '填写目录地址即可自动读写 marco-movie-sync.json；开启「同步弹幕源」时会在同目录生成派生文件（例如 family.json 对应 family.danmu.json）；坚果云等服务请使用「应用专用密码」。',
+          footer: isMacOs
+              ? '填写目录地址即可自动读写 marco-movie-sync.json；开启「同步弹幕源」时会在同目录生成派生文件（例如 family.json 对应 family.danmu.json）；坚果云等服务请使用「应用专用密码」。'
+              : '填写目录地址即可自动读写 marco-movie-sync.json；坚果云等服务请使用「应用专用密码」。',
           dividerIndent: 16,
           children: [
             _buildFieldRow(

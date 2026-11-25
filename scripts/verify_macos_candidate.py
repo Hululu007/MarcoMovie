@@ -794,10 +794,12 @@ def generate_subtitle_and_tag_samples(work: Path) -> tuple[Path, Path]:
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         "Style: Default,PingFang SC,40,&H0058EEFF,&H000000FF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,20,20,24,1\n"
-        "Style: TopSign,PingFang SC,34,&H00FFE500,&H000000FF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,8,20,20,22,1\n\n"
+        "Style: TopSign,PingFang SC,34,&H00FFE500,&H000000FF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,8,20,20,22,1\n"
+        "Style: TopSignCrop,PingFang SC,30,&H00FFE500,&H000000FF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,8,20,20,150,1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
         "Dialogue: 0,0:00:00.40,0:00:04.60,TopSign,,0,0,0,,{\\an8}ASS TOP SIGN (\\an8) - FIXED POSITION\n"
+        "Dialogue: 0,0:00:00.40,0:00:04.60,TopSignCrop,,0,0,0,,{\\an8}ASS TOP SIGN (CROP-SAFE \\an8) - FIXED\n"
         "Dialogue: 0,0:00:00.40,0:00:04.60,Default,,0,0,0,,ASS LINE 1: TWO-LINE BOTTOM SUBTITLE\\NASS LINE 2: LIFTS STRICTLY ABOVE CONTROLS\n",
         encoding="utf-8",
     )
@@ -1011,15 +1013,18 @@ def verify_unmodified_mpv_subtitles_and_tags(
         raise AssertionError(f"Expected S02E10 in clip-A.mkv Mpv.framework metadata output:\n{meta_proc.stdout}")
     print("UNMODIFIED_MPV_CONTAINER_TAG_S02E10=PASS", flush=True)
 
-    # Render 7 frames at exact t=2.0s from the SAME subtitle_verify.mkv
+    # Render 9 frames at exact t=2.0s from the SAME subtitle_verify.mkv
+    # including 2160x900 ultrawide BoxFit.cover crop (`sub-pos=78`).
     renders = [
         ("mpv_video_only.png", "no", "100"),
         ("mpv_ass_pos100.png", "2", "100"),
         ("mpv_ass_lifted_narrow.png", "2", "88"),
         ("mpv_ass_lifted_fullscreen.png", "2", "92"),
+        ("mpv_ass_lifted_crop_2160x900.png", "2", "78"),
         ("mpv_pgs_pos100.png", "3", "100"),
         ("mpv_pgs_lifted_narrow.png", "3", "88"),
         ("mpv_pgs_lifted_fullscreen.png", "3", "92"),
+        ("mpv_pgs_lifted_crop_2160x900.png", "3", "78"),
     ]
     out_frames_dir = (artifacts_dir / "mpv_frames") if artifacts_dir is not None else (work / "mpv_frames")
     out_frames_dir.mkdir(parents=True, exist_ok=True)
@@ -1075,14 +1080,20 @@ def verify_unmodified_mpv_subtitles_and_tags(
     ass_base = measure_ass("mpv_ass_pos100.png")
     ass_narrow = measure_ass("mpv_ass_lifted_narrow.png")
     ass_full = measure_ass("mpv_ass_lifted_fullscreen.png")
+    ass_crop = measure_ass("mpv_ass_lifted_crop_2160x900.png")
     pgs_base = measure_pgs("mpv_pgs_pos100.png")
     pgs_narrow = measure_pgs("mpv_pgs_lifted_narrow.png")
     pgs_full = measure_pgs("mpv_pgs_lifted_fullscreen.png")
+    pgs_crop = measure_pgs("mpv_pgs_lifted_crop_2160x900.png")
 
     print("MPV_SUBTITLE_PIXEL_METRICS=" + json.dumps(metrics, ensure_ascii=False), flush=True)
 
-    # 1. ASS top sign (\an8) MUST retain its exact original position!
-    for label, sample in (("narrow", ass_narrow), ("fullscreen", ass_full)):
+    # 1. ASS top sign (\an8) MUST retain its exact original position across contain & crop!
+    for label, sample in (
+        ("narrow", ass_narrow),
+        ("fullscreen", ass_full),
+        ("crop_2160x900", ass_crop),
+    ):
         if ass_base["top_sign_y_min"] is None or sample["top_sign_y_min"] is None:
             raise AssertionError(f"ASS top sign not detected in {label}: base={ass_base} sample={sample}")
         if (
@@ -1092,39 +1103,60 @@ def verify_unmodified_mpv_subtitles_and_tags(
             raise AssertionError(f"ASS \\an8 top sign shifted in {label}! base={ass_base} sample={sample}")
 
     # 2. ASS bottom 2-line dialogue MUST lift strictly above bottom HUD controls top edge!
-    if ass_base["bottom_sub_y_max"] is None or ass_narrow["bottom_sub_y_max"] is None or ass_full["bottom_sub_y_max"] is None:
-        raise AssertionError(f"ASS bottom dialogue not detected: {ass_base}, {ass_narrow}, {ass_full}")
+    if (
+        ass_base["bottom_sub_y_max"] is None
+        or ass_narrow["bottom_sub_y_max"] is None
+        or ass_full["bottom_sub_y_max"] is None
+        or ass_crop["bottom_sub_y_max"] is None
+    ):
+        raise AssertionError(f"ASS bottom dialogue not detected: {ass_base}, {ass_narrow}, {ass_full}, {ass_crop}")
     if int(ass_narrow["bottom_sub_y_max"]) >= int(ass_base["bottom_sub_y_max"]) - 40:
         raise AssertionError(f"ASS bottom subtitle did not lift enough in narrow: base={ass_base} narrow={ass_narrow}")
     if int(ass_full["bottom_sub_y_max"]) >= int(ass_base["bottom_sub_y_max"]) - 25:
         raise AssertionError(f"ASS bottom subtitle did not lift enough in fullscreen: base={ass_base} full={ass_full}")
+    if int(ass_crop["bottom_sub_y_max"]) >= int(ass_base["bottom_sub_y_max"]) - 110:
+        raise AssertionError(f"ASS bottom subtitle did not lift enough in 2160x900 crop: base={ass_base} crop={ass_crop}")
 
     # 3. Blu-ray PGS 2-line image subtitle MUST lift strictly above bottom HUD controls top edge!
-    if pgs_base["pgs_y_max"] is None or pgs_narrow["pgs_y_max"] is None or pgs_full["pgs_y_max"] is None:
-        raise AssertionError(f"PGS bitmap subtitle not detected: {pgs_base}, {pgs_narrow}, {pgs_full}")
+    if (
+        pgs_base["pgs_y_max"] is None
+        or pgs_narrow["pgs_y_max"] is None
+        or pgs_full["pgs_y_max"] is None
+        or pgs_crop["pgs_y_max"] is None
+    ):
+        raise AssertionError(f"PGS bitmap subtitle not detected: {pgs_base}, {pgs_narrow}, {pgs_full}, {pgs_crop}")
     if int(pgs_narrow["pgs_y_max"]) >= int(pgs_base["pgs_y_max"]) - 40:
         raise AssertionError(f"PGS bitmap subtitle did not lift enough in narrow: base={pgs_base} narrow={pgs_narrow}")
     if int(pgs_full["pgs_y_max"]) >= int(pgs_base["pgs_y_max"]) - 25:
         raise AssertionError(f"PGS bitmap subtitle did not lift enough in fullscreen: base={pgs_base} full={pgs_full}")
+    if int(pgs_crop["pgs_y_max"]) >= int(pgs_base["pgs_y_max"]) - 110:
+        raise AssertionError(f"PGS bitmap subtitle did not lift enough in 2160x900 crop: base={pgs_base} crop={pgs_crop}")
 
-    # Map video Y into 900x600 narrow & 1440x900 fullscreen screen coordinates to assert clearance above controls!
-    # 900x600: letterboxTop=46.875, scale=506.25/720, bottomControlsTop~=510.8
-    # 1440x900: letterboxTop=45.0, scale=810.0/720, bottomControlsTop~=808.5
+    # Map video Y into 900x600 narrow (contain), 1440x900 fullscreen (contain),
+    # and 2160x900 ultrawide crop (cover) screen coordinates to assert clearance above controls!
+    # 900x600 contain: letterboxTop=46.875, scale=506.25/720, bottomControlsTop~=510.8
+    # 1440x900 contain: letterboxTop=45.0, scale=810.0/720, bottomControlsTop~=808.5
+    # 2160x900 cover: fullTop=-157.5, scale=2160.0/1280.0=1.6875, bottomControlsTop~=814.0
     ass_narrow_screen_bottom = 46.875 + int(ass_narrow["bottom_sub_y_max"]) * (506.25 / 720.0)
     ass_full_screen_bottom = 45.0 + int(ass_full["bottom_sub_y_max"]) * (810.0 / 720.0)
+    ass_crop_screen_bottom = -157.5 + int(ass_crop["bottom_sub_y_max"]) * (2160.0 / 1280.0)
     pgs_narrow_screen_bottom = 46.875 + int(pgs_narrow["pgs_y_max"]) * (506.25 / 720.0)
     pgs_full_screen_bottom = 45.0 + int(pgs_full["pgs_y_max"]) * (810.0 / 720.0)
+    pgs_crop_screen_bottom = -157.5 + int(pgs_crop["pgs_y_max"]) * (2160.0 / 1280.0)
     metrics["screenClearance"] = {
         "narrow_controls_top_y": 510.8,
         "fullscreen_controls_top_y": 808.5,
+        "crop_2160x900_controls_top_y": 814.0,
         "ass_narrow_screen_bottom_y": round(ass_narrow_screen_bottom, 2),
         "ass_fullscreen_screen_bottom_y": round(ass_full_screen_bottom, 2),
+        "ass_crop_2160x900_screen_bottom_y": round(ass_crop_screen_bottom, 2),
         "pgs_narrow_screen_bottom_y": round(pgs_narrow_screen_bottom, 2),
         "pgs_fullscreen_screen_bottom_y": round(pgs_full_screen_bottom, 2),
+        "pgs_crop_2160x900_screen_bottom_y": round(pgs_crop_screen_bottom, 2),
     }
-    if ass_narrow_screen_bottom >= 510.0 or ass_full_screen_bottom >= 808.0:
+    if ass_narrow_screen_bottom >= 510.0 or ass_full_screen_bottom >= 808.0 or ass_crop_screen_bottom >= 814.0:
         raise AssertionError(f"ASS bottom subtitle overlaps controls: {metrics['screenClearance']}")
-    if pgs_narrow_screen_bottom >= 510.0 or pgs_full_screen_bottom >= 808.0:
+    if pgs_narrow_screen_bottom >= 510.0 or pgs_full_screen_bottom >= 808.0 or pgs_crop_screen_bottom >= 814.0:
         raise AssertionError(f"PGS bitmap subtitle overlaps controls: {metrics['screenClearance']}")
 
     if artifacts_dir is not None:
@@ -1138,8 +1170,10 @@ def verify_unmodified_mpv_subtitles_and_tags(
         f"ass_top_y={ass_base['top_sign_y_min']}..{ass_base['top_sign_y_max']} "
         f"ass_bot_narrow_screen_y={ass_narrow_screen_bottom:.1f}<510.8 "
         f"ass_bot_full_screen_y={ass_full_screen_bottom:.1f}<808.5 "
+        f"ass_bot_crop_screen_y={ass_crop_screen_bottom:.1f}<814.0 "
         f"pgs_narrow_screen_y={pgs_narrow_screen_bottom:.1f}<510.8 "
-        f"pgs_full_screen_y={pgs_full_screen_bottom:.1f}<808.5",
+        f"pgs_full_screen_y={pgs_full_screen_bottom:.1f}<808.5 "
+        f"pgs_crop_screen_y={pgs_crop_screen_bottom:.1f}<814.0",
         flush=True,
     )
 
