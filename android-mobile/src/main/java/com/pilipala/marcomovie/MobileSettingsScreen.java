@@ -454,7 +454,16 @@ final class MobileSettingsScreen {
                                                         shell,
                                                         MobileSettingsIndex.SUB_STORAGE,
                                                         "")),
-                                "ms-grp-7")));
+                                "ms-grp-7"),
+                        tagged(
+                                MobileSectionGroup.navRow(
+                                        a,
+                                        MobileIcons.IC_SPARKLE,
+                                        TINT_BLUE,
+                                        "联系与反馈作者",
+                                        MobileAuthorNotice.AUTHOR_SOCIAL_NAME,
+                                        () -> MobileAuthorNotice.showContactSheet(a)),
+                                "ms-grp-contact")));
     }
 
     // =========================================================================
@@ -2072,7 +2081,53 @@ final class MobileSettingsScreen {
                                                         shell, sv, tmdbKb, aiKb, mediaMb)),
                                 "ms-clear-caches")));
 
-        // Section ③: 诊断与关于
+        // Section ③: 联系与反馈作者
+        addSection(
+                a,
+                body,
+                "联系与反馈作者",
+                "各平台统一账号名："
+                        + MobileAuthorNotice.AUTHOR_SOCIAL_FULL
+                        + "。"
+                        + MobileAuthorNotice.OFFICIAL_DOWNLOAD_WARNING,
+                Arrays.<View>asList(
+                        tagged(
+                                MobileSectionGroup.navRow(
+                                        a,
+                                        MobileIcons.IC_SPARKLE,
+                                        TINT_BLUE,
+                                        "各社媒账号名",
+                                        MobileAuthorNotice.AUTHOR_SOCIAL_NAME,
+                                        () -> MobileAuthorNotice.showContactSheet(a)),
+                                "ms-author-social"),
+                        tagged(
+                                MobileSectionGroup.navRow(
+                                        a,
+                                        MobileIcons.IC_LINK,
+                                        TINT_TEAL,
+                                        "官网交流群",
+                                        "前往官网加群",
+                                        () ->
+                                                MobileAuthorNotice.openOfficialUrl(
+                                                        a,
+                                                        MobileAuthorNotice.OFFICIAL_GROUP_URL,
+                                                        "官网交流群")),
+                                "ms-official-group"),
+                        tagged(
+                                MobileSectionGroup.navRow(
+                                        a,
+                                        MobileIcons.IC_EXTERNAL,
+                                        TINT_GREEN,
+                                        "Marco 官网",
+                                        MobileAuthorNotice.OFFICIAL_SITE_DISPLAY,
+                                        () ->
+                                                MobileAuthorNotice.openOfficialUrl(
+                                                        a,
+                                                        MobileAuthorNotice.OFFICIAL_SITE_URL,
+                                                        "Marco 官网")),
+                                "ms-official-site")));
+
+        // Section ④: 诊断与关于
         int crashCount = CrashReportStore.loadReports(a.getFilesDir()).size();
         addSection(
                 a,

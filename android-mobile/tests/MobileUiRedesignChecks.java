@@ -1896,6 +1896,119 @@ public final class MobileUiRedesignChecks {
                 "Pillar 8 subscription guard: 2423 AES-CBC extensionless config decodes per-site JAR + Python sites, NativePythonEngine matches process bitness, and build_android_mobile builds & verifies bare libpython3.11.so link");
     }
 
+    private static void test9_AuthorFirstLaunchNoticeAndContact(Path root) throws Exception {
+        // 1. Canonical copy & official URL contract
+        check(
+                "PILIPALA来信".equals(MobileAuthorNotice.AUTHOR_SOCIAL_NAME)
+                        && MobileAuthorNotice.SOCIAL_PLATFORMS.length == 5
+                        && "小红书".equals(MobileAuthorNotice.SOCIAL_PLATFORMS[0])
+                        && "B站".equals(MobileAuthorNotice.SOCIAL_PLATFORMS[1])
+                        && "抖音".equals(MobileAuthorNotice.SOCIAL_PLATFORMS[2])
+                        && "公众号".equals(MobileAuthorNotice.SOCIAL_PLATFORMS[3])
+                        && "视频号".equals(MobileAuthorNotice.SOCIAL_PLATFORMS[4])
+                        && "marcotv.wlj9919.top".equals(MobileAuthorNotice.OFFICIAL_SITE_DISPLAY)
+                        && "https://marcotv.wlj9919.top"
+                                .equals(MobileAuthorNotice.OFFICIAL_SITE_URL)
+                        && "https://marcotv.wlj9919.top/movie/#group"
+                                .equals(MobileAuthorNotice.OFFICIAL_GROUP_URL)
+                        && MobileAuthorNotice.OFFICIAL_DOWNLOAD_WARNING.contains("下载软件请认准官网地址")
+                        && MobileAuthorNotice.OFFICIAL_DOWNLOAD_WARNING.contains("病毒"),
+                "Pillar 9 author notice: canonical social handle, 5 platforms, official site/group URLs, and anti-malware warning match spec");
+
+        // 2. Pure-JVM first-launch one-time Controller state machine
+        final java.util.Map<String, Integer> mem = new java.util.HashMap<>();
+        MobileAuthorNotice.Store store =
+                new MobileAuthorNotice.Store() {
+                    @Override
+                    public int getInt(String key, int defaultValue) {
+                        Integer v = mem.get(key);
+                        return v != null ? v : defaultValue;
+                    }
+
+                    @Override
+                    public void putInt(String key, int value) {
+                        mem.put(key, value);
+                    }
+                };
+        MobileAuthorNotice.Controller c1 = new MobileAuthorNotice.Controller(store);
+        check(
+                c1.shouldShow(false, false)
+                        && !c1.shouldShow(true, false)
+                        && !c1.shouldShow(false, true),
+                "Pillar 9 author notice: shows on fresh normal launch, suppressed in Privacy Space or when another blocking overlay is active");
+        c1.markShown();
+        check(
+                !c1.shouldShow(false, false)
+                        && store.getInt(MobileAuthorNotice.KEY_SEEN_VERSION, 0)
+                                == MobileAuthorNotice.CURRENT_VERSION
+                        && !new MobileAuthorNotice.Controller(store).shouldShow(false, false),
+                "Pillar 9 author notice: markShown persists device-local version and suppresses subsequent cold launches");
+
+        // 3. Single-shot dismiss continuation guard
+        final int[] count = {0};
+        Runnable once = MobileAuthorNotice.singleShot(() -> count[0]++);
+        once.run();
+        once.run();
+        once.run();
+        check(
+                count[0] == 1,
+                "Pillar 9 author notice: singleShot continuation executes strictly once across Back/scrim/button dismiss");
+
+        // 4. Strict official HTTPS URL whitelist
+        check(
+                MobileAuthorNotice.isTrustedOfficialUrl("https://marcotv.wlj9919.top")
+                        && MobileAuthorNotice.isTrustedOfficialUrl(
+                                "https://marcotv.wlj9919.top/movie/#group")
+                        && !MobileAuthorNotice.isTrustedOfficialUrl("http://marcotv.wlj9919.top")
+                        && !MobileAuthorNotice.isTrustedOfficialUrl(
+                                "https://marcotv.wlj9919.top.evil.test/")
+                        && !MobileAuthorNotice.isTrustedOfficialUrl("https://evil.example/")
+                        && !MobileAuthorNotice.isTrustedOfficialUrl(null)
+                        && !MobileAuthorNotice.isTrustedOfficialUrl(""),
+                "Pillar 9 author notice: isTrustedOfficialUrl permits only HTTPS marcotv.wlj9919.top paths");
+
+        // 5. Settings search index coverage for all social platforms & official group/site
+        String[] socialQueries = {"PILIPALA来信", "小红书", "B站", "抖音", "公众号", "视频号", "反馈"};
+        boolean allSocialHits = true;
+        for (String q : socialQueries) {
+            if (!hasHit(
+                    MobileSettingsIndex.search(q),
+                    MobileSettingsIndex.SUB_STORAGE,
+                    "ms-author-social")) {
+                allSocialHits = false;
+            }
+        }
+        check(
+                allSocialHits
+                        && hasHit(
+                                MobileSettingsIndex.search("交流群"),
+                                MobileSettingsIndex.SUB_STORAGE,
+                                "ms-official-group")
+                        && hasHit(
+                                MobileSettingsIndex.search("marcotv.wlj9919.top"),
+                                MobileSettingsIndex.SUB_STORAGE,
+                                "ms-official-site")
+                        && Prefs.KEYS.length == 46,
+                "Pillar 9 settings contact: search index resolves social handles, official group, and website while preserving Prefs.KEYS=46");
+
+        // 6. Source wiring checks across MainActivity, CrashReportDialog, and MobileSettingsScreen
+        String javaBase = "android-mobile/src/main/java/com/pilipala/marcomovie/";
+        String mainSrc = readUtf8(root, javaBase + "MainActivity.java");
+        String crashSrc = readUtf8(root, javaBase + "CrashReportDialog.java");
+        String settingsSrc = readUtf8(root, javaBase + "MobileSettingsScreen.java");
+        check(
+                mainSrc.contains("MobileAuthorNotice.shouldShowFirstLaunch(")
+                        && mainSrc.contains("MobileAuthorNotice.maybeShowFirstLaunch(")
+                        && mainSrc.contains("MobileAuthorNotice.dismissActive()")
+                        && crashSrc.contains("MobileAuthorNotice.isShowing()")
+                        && settingsSrc.contains("\"ms-grp-contact\"")
+                        && settingsSrc.contains("\"ms-author-social\"")
+                        && settingsSrc.contains("\"ms-official-group\"")
+                        && settingsSrc.contains("\"ms-official-site\"")
+                        && settingsSrc.contains("MobileAuthorNotice.showContactSheet("),
+                "Pillar 9 wiring: MainActivity first-launch/destroy, CrashReportDialog guard, and MobileSettingsScreen contact entries are all connected");
+    }
+
     public static void main(String[] args) throws Exception {
         Path root = args.length > 0 ? Paths.get(args[0]) : Paths.get(".");
         test1_MobileThemeAndPrefs(root);
@@ -1906,6 +2019,7 @@ public final class MobileUiRedesignChecks {
         test6_MobileMotionPhysicsAndBenchmark();
         test7_UxFirstPrinciplesStateLogic();
         test8_StaticUxHygieneAndReviewerGuards(root);
+        test9_AuthorFirstLaunchNoticeAndContact(root);
         System.out.println("MobileUiRedesignChecks OK (" + passed + " checks passed)");
     }
 }

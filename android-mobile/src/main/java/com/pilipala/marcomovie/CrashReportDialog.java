@@ -104,7 +104,8 @@ final class CrashReportDialog {
                                         || a.isDestroyed()
                                         || a.privateMode
                                         || promptedThisSession) return;
-                                if (a.appDialog != null && a.appDialog.isShowing()) return;
+                                if ((a.appDialog != null && a.appDialog.isShowing())
+                                        || MobileAuthorNotice.isShowing()) return;
                                 if (a.current != null && a.current.player) return;
                                 // Re-check eligibility off the UI thread in case manual Settings
                                 // review or clear ran during the startup delay.
@@ -120,8 +121,10 @@ final class CrashReportDialog {
                                                                 || a.isDestroyed()
                                                                 || a.privateMode
                                                                 || promptedThisSession) return;
-                                                        if (a.appDialog != null
-                                                                && a.appDialog.isShowing()) return;
+                                                        if ((a.appDialog != null
+                                                                        && a.appDialog.isShowing())
+                                                                || MobileAuthorNotice.isShowing())
+                                                            return;
                                                         if (a.current != null && a.current.player)
                                                             return;
                                                         if (renderReviewDialog(a, fresh, false)) {

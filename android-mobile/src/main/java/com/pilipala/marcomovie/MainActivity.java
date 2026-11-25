@@ -1508,6 +1508,20 @@ public final class MainActivity extends Activity {
                                     } else if (priorBootCrashes == 1) {
                                         toast("检测到上次异常退出，已自动清理临时缓存");
                                     } else if (!privateMode
+                                            && MobileAuthorNotice.shouldShowFirstLaunch(
+                                                    MainActivity.this)) {
+                                        MobileAuthorNotice.maybeShowFirstLaunch(
+                                                MainActivity.this,
+                                                () -> {
+                                                    if (!privateMode
+                                                            && OnboardingScreen.shouldShow(
+                                                                    MainActivity.this)) {
+                                                        showOnboarding(false);
+                                                    } else if (layoutIntro && isTvDevice()) {
+                                                        StartupIntro.show(MainActivity.this);
+                                                    }
+                                                });
+                                    } else if (!privateMode
                                             && OnboardingScreen.shouldShow(MainActivity.this)) {
                                         showOnboarding(false);
                                     } else if (layoutIntro && isTvDevice()) {
@@ -3908,6 +3922,7 @@ public final class MainActivity extends Activity {
             MobilePosterTransition.clearSavedState(this);
         }
         cancelActiveTransition();
+        MobileAuthorNotice.dismissActive();
         dismissOnboarding();
         clearPlaybackLoading();
         TvQrInputHelper.dismissActive();
