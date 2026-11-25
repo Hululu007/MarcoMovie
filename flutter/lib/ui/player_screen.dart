@@ -1112,10 +1112,60 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  void _armStartupWatchdog(int session) {
+    final hasFallback = _isLiveStream
+        ? (_currentLine.episodes.length > 1 &&
+            _failedLiveEpisodes.length <
+                math.min(_currentLine.episodes.length - 1, 8))
+        : (_nextFallbackQuality() != null ||
+            (PlaybackRecoveryPolicy.decide(
+                      episode: _currentEpisode,
+                      isTrial: false,
+                      hasNextQuality: false,
+                    ) ==
+                    PlaybackRecoveryDecision.alternateLine &&
+                _lines.length > 1 &&
+                _failedLinesForEpisode.length < 6));
+    _startup.waitForProgress(
+      () {
+        if (mounted && session == _playSession && _allowEvents) {
+          _failPlayback(TimeoutException('media startup'));
+          _changeMedia(
+            session,
+            () => _usingAvPlayer
+                ? (_iosAvPlayerController?.stop() ?? Future<void>.value())
+                : _player.stop(),
+          ).catchError((_) {});
+        }
+      },
+      hasFallback: hasFallback || (_isLiveStream && !_liveDirectFallbackTried),
+      startOffset: _pendingResumeMs > 0
+          ? Duration(milliseconds: _pendingResumeMs)
+          : Duration.zero,
+      timeoutOverride: _isLiveStream
+          ? Duration(seconds: !_liveDirectFallbackTried ? 7 : 8)
+          : null,
+    );
+  }
+
   void _markLiveVideoTrackDiscovered() {
     if (!_isLiveStream) return;
-    if (_liveStartupPhase != _LiveStartupPhase.videoFrameRendered) {
-      _liveStartupPhase = _LiveStartupPhase.awaitingVideoFrame;
+    if (_liveStartupPhase == _LiveStartupPhase.videoFrameRendered) return;
+    final wasAudioOnly =
+        _liveStartupPhase == _LiveStartupPhase.confirmedAudioOnly;
+    _liveStartupPhase = _LiveStartupPhase.awaitingVideoFrame;
+    if (wasAudioOnly) {
+      if (mounted && !_loading) {
+        setState(() {
+          _loading = true;
+        });
+      } else {
+        _loading = true;
+      }
+      if (_allowEvents && _matchesActiveMedia) {
+        _armStartupWatchdog(_playSession);
+        _startup.updateState(playing: _playing, buffering: _buffering);
+      }
     }
   }
 
@@ -1299,8 +1349,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (w == null || w <= 0 || w == _videoWidth) return;
       setState(() {
         _videoWidth = w;
-        if (_isLiveStream) _markLiveVideoTrackDiscovered();
       });
+      if (_isLiveStream) _markLiveVideoTrackDiscovered();
       if (_liveVoConfigured && _videoWidth > 0 && _videoHeight > 0) {
         _confirmLiveVideoOutput();
       }
@@ -1320,8 +1370,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (h == null || h <= 0 || h == _videoHeight) return;
       setState(() {
         _videoHeight = h;
-        if (_isLiveStream) _markLiveVideoTrackDiscovered();
       });
+      if (_isLiveStream) _markLiveVideoTrackDiscovered();
       if (_liveVoConfigured && _videoWidth > 0 && _videoHeight > 0) {
         _confirmLiveVideoOutput();
       }
@@ -1383,7 +1433,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (_isLiveStream) {
         final hasRealVideo = tracks.video.any((t) => _isRealTrackId(t.id));
         final hasRealAudio = tracks.audio.any((t) => _isRealTrackId(t.id));
-        if (hasRealVideo && _player.state.track.video.id.trim() != 'no') {
+        if (hasRealVideo) {
           _markLiveVideoTrackDiscovered();
         } else if (!hasRealVideo && hasRealAudio) {
           _markLiveTracksConfirmedAudioOnly();
@@ -2772,39 +2822,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _offlineHlsLease = pendingOfflineHlsLease;
         _blurayChapters = pendingBlurayChapters;
         _allowEvents = true;
-        final hasFallback = _isLiveStream
-            ? (_currentLine.episodes.length > 1 &&
-                _failedLiveEpisodes.length <
-                    math.min(_currentLine.episodes.length - 1, 8))
-            : (_nextFallbackQuality() != null ||
-                (PlaybackRecoveryPolicy.decide(
-                          episode: _currentEpisode,
-                          isTrial: false,
-                          hasNextQuality: false,
-                        ) ==
-                        PlaybackRecoveryDecision.alternateLine &&
-                    _lines.length > 1 &&
-                    _failedLinesForEpisode.length < 6));
-        _startup.waitForProgress(
-          () {
-            if (mounted && session == _playSession && _allowEvents) {
-              _failPlayback(TimeoutException('media startup'));
-              _changeMedia(
-                session,
-                () => _usingAvPlayer
-                    ? (_iosAvPlayerController?.stop() ?? Future<void>.value())
-                    : _player.stop(),
-              ).catchError((_) {});
-            }
-          },
-          hasFallback: hasFallback || (_isLiveStream && !_liveDirectFallbackTried),
-          startOffset: _pendingResumeMs > 0
-              ? Duration(milliseconds: _pendingResumeMs)
-              : Duration.zero,
-          timeoutOverride: _isLiveStream
-              ? Duration(seconds: !_liveDirectFallbackTried ? 7 : 8)
-              : null,
-        );
+        _armStartupWatchdog(session);
         _activeResolvedMediaUrl = effectiveOpenUrl;
         _activeResolvedHeaders = Map<String, String>.from(effectiveOpenHeaders);
         if (_castController.isCasting) {

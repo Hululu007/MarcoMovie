@@ -1326,6 +1326,286 @@ void main() {
     },
     timeout: const Timeout(Duration(seconds: 60)),
   );
+
+  test(
+    'HLS ordinary non-ranged audio segment rejects truncated HTTP 206 (188 bytes vs full Content-Range), recovers on retry after origin fix, and passes ffprobe offline with H.264+AAC',
+    () async {
+      final fixtureRoot = await Directory.systemTemp
+          .createTemp('marco-hls-nonranged206-test-');
+      addTearDown(() async {
+        for (final t in service.tasks) {
+          await service.remove(t.id);
+        }
+        await _safeDeleteDir(fixtureRoot);
+      });
+      PathProviderPlatform.instance = _IsolatedDownloadPaths(fixtureRoot);
+
+      final originDir = Directory('${fixtureRoot.path}/origin')
+        ..createSync(recursive: true);
+
+      if (hasFfmpeg) {
+        final vRes = Process.runSync('ffmpeg', [
+          '-y',
+          '-v',
+          'error',
+          '-f',
+          'lavfi',
+          '-i',
+          'color=c=0x43a047:s=160x90:r=25:d=2',
+          '-an',
+          '-c:v',
+          'libx264',
+          '-pix_fmt',
+          'yuv420p',
+          '-g',
+          '25',
+          '-keyint_min',
+          '25',
+          '-sc_threshold',
+          '0',
+          '-hls_time',
+          '1',
+          '-hls_playlist_type',
+          'vod',
+          '-hls_segment_filename',
+          '${originDir.path}/v_%03d.ts',
+          '${originDir.path}/video.m3u8',
+        ]);
+        expect(vRes.exitCode, 0, reason: '${vRes.stderr}');
+        final aRes = Process.runSync('ffmpeg', [
+          '-y',
+          '-v',
+          'error',
+          '-f',
+          'lavfi',
+          '-i',
+          'sine=frequency=523:sample_rate=48000:duration=2',
+          '-vn',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '64k',
+          '-hls_time',
+          '1',
+          '-hls_playlist_type',
+          'vod',
+          '-hls_segment_filename',
+          '${originDir.path}/a_%03d.ts',
+          '${originDir.path}/audio.m3u8',
+        ]);
+        expect(aRes.exitCode, 0, reason: '${aRes.stderr}');
+      } else {
+        List<int> makeTs(int packets, int fill) {
+          final out = List<int>.filled(packets * 188, fill);
+          for (var i = 0; i < packets; i++) {
+            out[i * 188] = 0x47;
+          }
+          return out;
+        }
+
+        File('${originDir.path}/v_000.ts').writeAsBytesSync(makeTs(6, 0x11));
+        File('${originDir.path}/v_001.ts').writeAsBytesSync(makeTs(6, 0x12));
+        File('${originDir.path}/a_000.ts').writeAsBytesSync(makeTs(55, 0x21));
+        File('${originDir.path}/a_001.ts').writeAsBytesSync(makeTs(55, 0x22));
+        File('${originDir.path}/video.m3u8').writeAsStringSync(
+          '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n'
+          '#EXTINF:1.0,\nv_000.ts\n#EXTINF:1.0,\nv_001.ts\n#EXT-X-ENDLIST\n',
+        );
+        File('${originDir.path}/audio.m3u8').writeAsStringSync(
+          '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n'
+          '#EXTINF:1.0,\na_000.ts\n#EXTINF:1.0,\na_001.ts\n#EXT-X-ENDLIST\n',
+        );
+      }
+
+      var chunkedRecovered = false;
+      var explicitRecovered = false;
+      final seenAudioRangeHeaders = <String?>[];
+
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((req) async {
+        final parts = req.uri.pathSegments;
+        if (parts.length < 2) {
+          req.response.statusCode = 404;
+          await req.response.close();
+          return;
+        }
+        final mode = parts.first;
+        final name = parts.last;
+        final res = req.response;
+
+        if (name == 'master.m3u8') {
+          res.statusCode = 200;
+          res.headers.contentType =
+              ContentType('application', 'vnd.apple.mpegurl');
+          res.write(
+            '#EXTM3U\n'
+            '#EXT-X-VERSION:3\n'
+            '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Main",LANGUAGE="zh",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=800000,AUDIO="aud"\n'
+            'video.m3u8\n',
+          );
+          await res.close();
+          return;
+        }
+
+        final f = File('${originDir.path}/$name');
+        if (!f.existsSync()) {
+          res.statusCode = 404;
+          await res.close();
+          return;
+        }
+        final bytes = await f.readAsBytes();
+        if (name.startsWith('a_') && name.endsWith('.ts')) {
+          seenAudioRangeHeaders.add(req.headers.value('range'));
+          expect(bytes.length, greaterThan(188));
+          if (mode == 'chunked206' && !chunkedRecovered) {
+            // Unrequested 206 declaring full Content-Range 0-(total-1)/total,
+            // chunked transfer (no Content-Length), but only 188 bytes sent!
+            res.statusCode = 206;
+            res.headers.chunkedTransferEncoding = true;
+            res.headers.contentType = ContentType('video', 'mp2t');
+            res.headers.set(
+              'content-range',
+              'bytes 0-${bytes.length - 1}/${bytes.length}',
+            );
+            res.add(bytes.sublist(0, 188));
+            await res.close();
+            return;
+          }
+          if (mode == 'explicit206' && !explicitRecovered) {
+            // Unrequested 206 declaring full Content-Range, Content-Length: 188,
+            // and 188 bytes sent.
+            res.statusCode = 206;
+            res.headers.contentType = ContentType('video', 'mp2t');
+            res.headers.set(
+              'content-range',
+              'bytes 0-${bytes.length - 1}/${bytes.length}',
+            );
+            res.contentLength = 188;
+            res.add(bytes.sublist(0, 188));
+            await res.close();
+            return;
+          }
+        }
+
+        res.statusCode = 200;
+        res.contentLength = bytes.length;
+        res.headers.contentType = name.endsWith('.m3u8')
+            ? ContentType('application', 'vnd.apple.mpegurl')
+            : ContentType('video', 'mp2t');
+        res.add(bytes);
+        await res.close();
+      });
+
+      final client = CmsClient();
+      await service.reloadFromDiskForTest(client);
+      final baseUrl = 'http://127.0.0.1:${server.port}';
+      final site = CmsSite(
+        key: 'nonranged-site',
+        name: '普通分片206验证站',
+        type: 1,
+        api: '$baseUrl/cms',
+      );
+
+      DownloadTask startMode(String mode) {
+        final video = CmsVideo(id: mode, title: mode);
+        final line = CmsLine(
+          name: '主线',
+          episodes: [
+            CmsEpisode(name: '第1集', url: '$baseUrl/$mode/master.m3u8'),
+          ],
+        );
+        service.enqueue(
+          site: site,
+          video: video,
+          line: line,
+          episodeIndexes: const [0],
+        );
+        return service.taskFor(site.key, mode, '主线', 0)!;
+      }
+
+      late DownloadTask chunkedTask;
+      late DownloadTask explicitTask;
+      await HttpOverrides.runWithHttpOverrides(() async {
+        // 1. Chunked truncated 206 on non-ranged audio segment MUST fail.
+        chunkedTask = startMode('chunked206');
+        await waitSettled(chunkedTask);
+        expect(chunkedTask.status, DownloadStatus.failed);
+        expect(chunkedTask.error, contains('独立音轨'));
+        expect(chunkedTask.error, contains('206'));
+        expect(chunkedTask.filePath, isEmpty);
+
+        // 2. Explicit short Content-Length 206 on non-ranged audio segment MUST fail.
+        explicitTask = startMode('explicit206');
+        await waitSettled(explicitTask);
+        expect(explicitTask.status, DownloadStatus.failed);
+        expect(explicitTask.error, contains('独立音轨'));
+        expect(explicitTask.error, contains('206'));
+        expect(explicitTask.filePath, isEmpty);
+
+        // Confirm ordinary audio requests carried NO Range header.
+        expect(seenAudioRangeHeaders, isNotEmpty);
+        expect(seenAudioRangeHeaders.every((h) => h == null), isTrue);
+
+        // 3. Origin recovers -> retrying the SAME tasks succeeds cleanly.
+        chunkedRecovered = true;
+        explicitRecovered = true;
+        service.resume(chunkedTask.id);
+        await waitSettled(chunkedTask);
+        expect(
+          chunkedTask.status,
+          DownloadStatus.completed,
+          reason: chunkedTask.error,
+        );
+        service.resume(explicitTask.id);
+        await waitSettled(explicitTask);
+        expect(
+          explicitTask.status,
+          DownloadStatus.completed,
+          reason: explicitTask.error,
+        );
+      }, _DirectLoopbackHttpOverrides());
+
+      // 4. Shut down origin completely -> offline bundle still probes H.264 + AAC!
+      await server.close(force: true);
+      for (final task in [chunkedTask, explicitTask]) {
+        expect(File(task.filePath).existsSync(), isTrue);
+        if (!hasFfmpeg) continue;
+        final lease = await OfflineHlsLease.open(task.filePath);
+        try {
+          final probe = await Process.run('ffprobe', [
+            '-v',
+            'error',
+            '-show_entries',
+            'stream=codec_name,codec_type',
+            '-of',
+            'json',
+            lease.url.toString(),
+          ]);
+          expect(probe.exitCode, 0, reason: '${probe.stderr}');
+          final decoded = jsonDecode(probe.stdout as String) as Map;
+          final streams =
+              (decoded['streams'] as List).cast<Map<String, dynamic>>();
+          expect(
+            streams.any(
+              (s) => s['codec_type'] == 'video' && s['codec_name'] == 'h264',
+            ),
+            isTrue,
+          );
+          expect(
+            streams.any(
+              (s) => s['codec_type'] == 'audio' && s['codec_name'] == 'aac',
+            ),
+            isTrue,
+          );
+        } finally {
+          await lease.close();
+        }
+      }
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
+  );
 }
 
 class _OfflineLeaseCaptureState extends Fake implements PlayerState {

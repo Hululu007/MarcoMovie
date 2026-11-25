@@ -633,6 +633,134 @@ void main() {
       },
     );
 
+    testWidgets(
+      'audio-only reported first for 400ms then tracks update to AAC+H.264 + dimensions with NO video output restores loading and triggers recovery',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final harness = await mountLive(tester);
+        final player = harness.player;
+        addTearDown(() async {
+          await harness.videoOutput.close();
+          await player.dispose();
+        });
+
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        expect(player.opened, hasLength(1));
+
+        // 1. Channel initially reports AAC audio-only and plays 400ms -> loading clears as audio-only.
+        player.stateImpl.tracksValue = Tracks(
+          video: [VideoTrack.auto(), VideoTrack.no()],
+          audio: [AudioTrack('1', 'AAC', 'zh', codec: 'aac')],
+        );
+        player.stateImpl.trackValue = Track(
+          video: VideoTrack.no(),
+          audio: AudioTrack('1', 'AAC', 'zh', codec: 'aac'),
+        );
+        player.streamImpl.tracksCtrl.add(player.stateImpl.tracksValue);
+        player.streamImpl.trackCtrl.add(player.stateImpl.trackValue);
+        player.streamImpl.playingCtrl.add(true);
+        player.streamImpl.bufferingCtrl.add(false);
+        player.streamImpl.positionCtrl.add(const Duration(milliseconds: 400));
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+
+        // 2. Track list updates to AAC + H.264 and reports 1920x1080 dimensions ->
+        //    MUST restore loading indicator and re-arm first-frame startup watchdog!
+        player.stateImpl.tracksValue = Tracks(
+          video: [VideoTrack('1', 'H264', 'und', codec: 'h264')],
+          audio: [AudioTrack('2', 'AAC', 'zh', codec: 'aac')],
+        );
+        player.streamImpl.tracksCtrl.add(player.stateImpl.tracksValue);
+        player.streamImpl.widthCtrl.add(1920);
+        player.streamImpl.heightCtrl.add(1080);
+        await tester.pump();
+        expect(
+          find.byKey(const Key('live-loading-indicator')),
+          findsOneWidget,
+          reason:
+              'Transitioning from confirmedAudioOnly to discovered H.264 track must restore loading',
+        );
+
+        // 3. 12 seconds of audio-only clock advancing with NO video output ->
+        //    MUST stay loading and trigger source failover recovery!
+        for (var sec = 1; sec <= 12; sec++) {
+          player.streamImpl.positionCtrl.add(Duration(seconds: sec));
+          await tester.pump(const Duration(seconds: 1));
+        }
+
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+        expect(
+          player.opened.length,
+          greaterThan(1),
+          reason:
+              'Audio-first -> late H.264 track black screen must re-arm watchdog and trigger recovery',
+        );
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+
+    testWidgets(
+      'audio-only reported first for 400ms then tracks update to AAC+H.264 and timely video output arrives clears loading and stays on original source',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final harness = await mountLive(tester);
+        final player = harness.player;
+        addTearDown(() async {
+          await harness.videoOutput.close();
+          await player.dispose();
+        });
+
+        expect(player.opened, hasLength(1));
+
+        // 1. Audio-only first for 400ms.
+        player.stateImpl.tracksValue = Tracks(
+          video: [VideoTrack.auto(), VideoTrack.no()],
+          audio: [AudioTrack('1', 'AAC', 'zh', codec: 'aac')],
+        );
+        player.stateImpl.trackValue = Track(
+          video: VideoTrack.no(),
+          audio: AudioTrack('1', 'AAC', 'zh', codec: 'aac'),
+        );
+        player.streamImpl.tracksCtrl.add(player.stateImpl.tracksValue);
+        player.streamImpl.trackCtrl.add(player.stateImpl.trackValue);
+        player.streamImpl.playingCtrl.add(true);
+        player.streamImpl.bufferingCtrl.add(false);
+        player.streamImpl.positionCtrl.add(const Duration(milliseconds: 400));
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+
+        // 2. Track list updates to AAC + H.264 + 1920x1080 -> restores loading and re-arms watchdog.
+        player.stateImpl.tracksValue = Tracks(
+          video: [VideoTrack('1', 'H264', 'und', codec: 'h264')],
+          audio: [AudioTrack('2', 'AAC', 'zh', codec: 'aac')],
+        );
+        player.streamImpl.tracksCtrl.add(player.stateImpl.tracksValue);
+        player.streamImpl.widthCtrl.add(1920);
+        player.streamImpl.heightCtrl.add(1080);
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsOneWidget);
+
+        // 3. Video frame renders timely after 1s -> clears loading and stays on original source for 12s!
+        await tester.pump(const Duration(seconds: 1));
+        harness.videoOutput.add(true);
+        player.streamImpl.positionCtrl.add(const Duration(seconds: 2));
+        await tester.pump();
+        expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+
+        for (var sec = 3; sec <= 12; sec++) {
+          player.streamImpl.positionCtrl.add(Duration(seconds: sec));
+          await tester.pump(const Duration(seconds: 1));
+          expect(find.byKey(const Key('live-loading-indicator')), findsNothing);
+          expect(player.opened, hasLength(1));
+        }
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+
     test(
       'real libmpv live playback observes native video output on H.264+AAC, switches across identical-resolution channels, and plays audio-only radio',
       () async {

@@ -2388,6 +2388,7 @@ class DownloadService extends ChangeNotifier {
     final isIdentityEncoding =
         contentEncoding.isEmpty || contentEncoding == 'identity';
     final declaredLength = response.contentLength;
+    int? expectedNonRanged206Length;
 
     if (byteRange != null) {
       if (byteRange.offset < 0 || byteRange.length <= 0) {
@@ -2453,9 +2454,19 @@ class DownloadService extends ChangeNotifier {
           respEnd == null ||
           respStart != 0 ||
           respTotal == null ||
+          respTotal <= 0 ||
           respEnd != respTotal - 1) {
         await response.drain<void>();
         throw _DownloadError('分片未请求范围却返回不完整 206 响应（$rawRange）');
+      }
+      expectedNonRanged206Length = respTotal;
+      if (isIdentityEncoding &&
+          declaredLength >= 0 &&
+          declaredLength != expectedNonRanged206Length) {
+        await response.drain<void>();
+        throw _DownloadError(
+          '分片未请求范围但 206 响应长度不完整（完整范围 $expectedNonRanged206Length 字节，声明 $declaredLength 字节）',
+        );
       }
     }
 
@@ -2474,6 +2485,12 @@ class DownloadService extends ChangeNotifier {
       throw _DownloadError(
         '分片传输不完整（期望 $declaredLength 字节，实收 ${bytes.length} 字节）',
         retryable: true,
+      );
+    }
+    if (expectedNonRanged206Length != null &&
+        bytes.length != expectedNonRanged206Length) {
+      throw _DownloadError(
+        '分片未请求范围但 206 实收字节不完整（完整范围 $expectedNonRanged206Length 字节，实收 ${bytes.length} 字节）',
       );
     }
     if (byteRange != null) {
