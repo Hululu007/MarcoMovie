@@ -17,6 +17,7 @@ import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/apple_theme.dart';
 import 'package:marco_movie/ui/danmu/danmu_layer.dart';
 import 'package:marco_movie/ui/detail_screen.dart';
+import 'package:marco_movie/ui/macos_official_notice.dart';
 import 'package:marco_movie/ui/player/desktop_player_hud.dart';
 import 'package:marco_movie/ui/player/player_hud_prefs.dart';
 import 'package:marco_movie/ui/player_screen.dart';
@@ -416,7 +417,12 @@ void main() {
       (tester) async {
         PosterLoader.clearCache();
         final videos = buildSampleVideos();
-        final storage = await initTestStorage();
+        final storage = await initTestStorage(
+          initialPrefs: const {
+            MacosOfficialNoticePrefs.acknowledgedVersionKey:
+                MacosOfficialNoticePrefs.currentVersion,
+          },
+        );
         await storage.saveConfig(
           jsonEncode({
             'sites': [
@@ -552,7 +558,12 @@ void main() {
       (tester) async {
         PosterLoader.clearCache();
         final videos = buildSampleVideos();
-        final storage = await initTestStorage();
+        final storage = await initTestStorage(
+          initialPrefs: const {
+            MacosOfficialNoticePrefs.acknowledgedVersionKey:
+                MacosOfficialNoticePrefs.currentVersion,
+          },
+        );
         await storage.saveConfig(
           jsonEncode({
             'sites': [
@@ -663,7 +674,12 @@ void main() {
       (tester) async {
         PosterLoader.clearCache();
         final videos = buildSampleVideos();
-        final storage = await initTestStorage();
+        final storage = await initTestStorage(
+          initialPrefs: const {
+            MacosOfficialNoticePrefs.acknowledgedVersionKey:
+                MacosOfficialNoticePrefs.currentVersion,
+          },
+        );
         await storage.saveConfig(
           jsonEncode({
             'sites': [
@@ -792,7 +808,12 @@ void main() {
         final video = buildSampleVideos().first;
         PosterLoader.seedMemoryForTest(video.poster, portraitPng);
 
-        final storage = await initTestStorage();
+        final storage = await initTestStorage(
+          initialPrefs: const {
+            MacosOfficialNoticePrefs.acknowledgedVersionKey:
+                MacosOfficialNoticePrefs.currentVersion,
+          },
+        );
         final candidate2024 = SeriesScrapeCandidate(
           source: 'douban',
           subjectId: 'db-2024',
@@ -985,7 +1006,12 @@ void main() {
         PosterLoader.clearCache();
         final video = buildSampleVideos().first;
         PosterLoader.seedMemoryForTest(video.poster, portraitPng);
-        final storage = await initTestStorage();
+        final storage = await initTestStorage(
+          initialPrefs: const {
+            MacosOfficialNoticePrefs.acknowledgedVersionKey:
+                MacosOfficialNoticePrefs.currentVersion,
+          },
+        );
 
         tester.view.devicePixelRatio = 1.0;
         tester.view.physicalSize = const Size(1280, 820);
@@ -1170,7 +1196,12 @@ void main() {
           tester.view.resetDevicePixelRatio();
         });
 
-        final storage = await initTestStorage();
+        final storage = await initTestStorage(
+          initialPrefs: const {
+            MacosOfficialNoticePrefs.acknowledgedVersionKey:
+                MacosOfficialNoticePrefs.currentVersion,
+          },
+        );
         final player = _MacFakePlayer();
         addTearDown(player.dispose);
         final anime4k = _FakeAnime4kController();

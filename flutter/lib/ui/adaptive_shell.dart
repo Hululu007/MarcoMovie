@@ -48,6 +48,7 @@ import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
 import 'live_station_badge.dart';
+import 'macos_official_notice.dart';
 import 'macos_update_sheet.dart';
 import 'motion/aurora_background.dart';
 import 'motion/ios27_springs.dart';
@@ -83,6 +84,10 @@ class AdaptiveShell extends StatefulWidget {
   final Future<void> Function(Duration timeout)? onFlushSyncForTest;
   @visibleForTesting
   final Duration? windowCloseTotalBudgetForTest;
+  @visibleForTesting
+  final Future<bool> Function(Uri uri)? onOpenExternalUrlForTest;
+  @visibleForTesting
+  final Future<void> Function(String text)? onCopyTextForTest;
 
   const AdaptiveShell({
     super.key,
@@ -95,6 +100,8 @@ class AdaptiveShell extends StatefulWidget {
     this.onFlushHistoryForTest,
     this.onFlushSyncForTest,
     this.windowCloseTotalBudgetForTest,
+    this.onOpenExternalUrlForTest,
+    this.onCopyTextForTest,
   });
 
   static const Duration defaultWindowCloseBudget =
@@ -326,6 +333,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   List<WatchHistoryEntry> _cachedWatchHistory = const [];
   bool _onboardingRouteOpen = false;
   bool _startupOnboardingChecked = false;
+  bool _startupOfficialNoticeChecked = false;
+  bool _officialNoticeDialogOpen = false;
   bool get _isMacOS =>
       !kIsWeb &&
       defaultTargetPlatform == TargetPlatform.macOS &&
@@ -422,9 +431,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
       unawaited(_initRootNativeTabChrome());
     }
-    if (!OhosRuntime.isOhos) {
-      unawaited(_maybeShowFirstLaunchOnboarding());
-    }
+    unawaited(_runStartupPrompts());
     if (!Platform.environment.containsKey('FLUTTER_TEST')) {
       unawaited(_runStartupWebdavSync());
     }
@@ -536,6 +543,41 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     } finally {
       _pushedRouteDepth = math.max(0, _pushedRouteDepth - 1);
       _syncRootTabVisibility(animated: true);
+    }
+  }
+
+  Future<void> _runStartupPrompts() async {
+    if (_isMacOS) {
+      await _maybeShowMacosFirstLaunchOfficialNotice();
+    }
+    if (!mounted || OhosRuntime.isOhos) return;
+    await _maybeShowFirstLaunchOnboarding();
+  }
+
+  Future<void> _maybeShowMacosFirstLaunchOfficialNotice() async {
+    if (_startupOfficialNoticeChecked || !_isMacOS || !mounted) return;
+    _startupOfficialNoticeChecked = true;
+    final prefs = await MacosOfficialNoticePrefs.load();
+    if (!mounted || !prefs.shouldShow(isMacosOverride: _isMacOS)) return;
+    final ready = Completer<void>();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!ready.isCompleted) ready.complete();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+    await ready.future;
+    if (!mounted || _officialNoticeDialogOpen) return;
+    _officialNoticeDialogOpen = true;
+    try {
+      final confirmed = await showMacosFirstLaunchOfficialNoticeDialog(
+        context,
+        onOpenUrl: widget.onOpenExternalUrlForTest,
+        onCopyText: widget.onCopyTextForTest,
+      );
+      if (confirmed == true) {
+        await prefs.markAcknowledged();
+      }
+    } finally {
+      _officialNoticeDialogOpen = false;
     }
   }
 
@@ -9995,6 +10037,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   Widget _buildSettingsQuickActionRow({
+    Key? key,
     required IconData icon,
     required Color iconBgColor,
     required String title,
@@ -10004,6 +10047,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     VoidCallback? onTap,
   }) {
     final rowContent = ConstrainedBox(
+      key: onTap == null ? key : null,
       constraints: const BoxConstraints(minHeight: 58),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
@@ -10103,6 +10147,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
     if (onTap == null) return rowContent;
     return Material(
+      key: key,
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
@@ -10306,10 +10351,71 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                 ],
               ),
+              if (_isMacOS) ...[
+                const SizedBox(height: 22),
+                AppleGroupedSection(
+                  key: const ValueKey('macos-settings-contact-section'),
+                  header: '联系与反馈作者',
+                  footer: MacosOfficialInfo.securityWarning,
+                  children: [
+                    _buildSettingsQuickActionRow(
+                      key: const ValueKey('macos-settings-contact-author'),
+                      icon: CupertinoIcons.bubble_left_bubble_right_fill,
+                      iconBgColor: AppleColors.systemPink,
+                      title: '联系反馈作者 · ${MacosOfficialInfo.authorSocialName}',
+                      subtitle:
+                          '${MacosOfficialInfo.socialPlatformsSummary}（全平台同名）',
+                      trailingText: '查看 / 复制',
+                      onTap: _showMacosAuthorContactSheet,
+                    ),
+                    _buildSettingsQuickActionRow(
+                      key: const ValueKey('macos-settings-official-group'),
+                      icon: CupertinoIcons.globe,
+                      iconBgColor: AppleColors.systemBlue,
+                      title: '官网交流群链接',
+                      subtitle:
+                          'Marco 官网：${MacosOfficialInfo.officialWebsiteDisplay}',
+                      trailingText: '打开官网',
+                      onTap: _openMacosOfficialWebsiteFromSettings,
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
       ),
+    );
+  }
+
+  void _showMacosAuthorContactSheet() {
+    showAppleModalSheet<void>(
+      context: context,
+      title: '联系与反馈作者',
+      builder: (_) => MacosAuthorContactSheet(
+        onOpenUrl: widget.onOpenExternalUrlForTest,
+        onCopyText: widget.onCopyTextForTest,
+      ),
+    );
+  }
+
+  Future<void> _openMacosOfficialWebsiteFromSettings() async {
+    final opened = await openMacosOfficialUrl(
+      MacosOfficialInfo.officialWebsiteUrl,
+      onOpenUrl: widget.onOpenExternalUrlForTest,
+    );
+    if (opened || !mounted) return;
+    if (widget.onCopyTextForTest != null) {
+      await widget.onCopyTextForTest!(MacosOfficialInfo.officialWebsiteUrl);
+    } else {
+      await Clipboard.setData(
+        const ClipboardData(text: MacosOfficialInfo.officialWebsiteUrl),
+      );
+    }
+    if (!mounted) return;
+    _showAppleNotice(
+      '已复制官网地址',
+      '请在浏览器中打开：${MacosOfficialInfo.officialWebsiteUrl}',
     );
   }
 
