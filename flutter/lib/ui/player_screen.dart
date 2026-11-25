@@ -492,7 +492,26 @@ class _PlayerScreenState extends State<PlayerScreen>
         (!_userPausedPlayback &&
             (_loading || _buffering) &&
             _playbackError.isEmpty);
-    return shouldPause ? _enginePause() : _enginePlay();
+    if (_usesOhosAvPlayer || _usingAvPlayer || _pausedEngineInvalidated) {
+      return shouldPause ? _enginePause() : _enginePlay();
+    }
+    if (shouldPause) {
+      _userPausedPlayback = true;
+      _startup.setUserPaused(true);
+      if (!_playing) return _player.pause();
+    } else {
+      _userPausedPlayback = false;
+      _startup.setUserPaused(false);
+      if (_hudText.startsWith('已暂停')) {
+        _hudTimer?.cancel();
+        if (mounted) {
+          setState(() => _hudText = '');
+        } else {
+          _hudText = '';
+        }
+      }
+    }
+    return _player.playOrPause();
   }
 
   bool get _usesOhosAvPlayer =>
