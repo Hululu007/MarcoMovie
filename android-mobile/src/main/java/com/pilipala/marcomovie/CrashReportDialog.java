@@ -7,6 +7,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -14,6 +15,7 @@ import android.widget.TextView;
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.common.BitMatrix;
 import com.google.zxing.qrcode.QRCodeWriter;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -47,15 +49,55 @@ final class CrashReportDialog {
         }
     }
 
-    /** Schedules a non-blocking crash-review prompt once per cold launch outside Privacy Space. */
+    /**
+     * Pure-JVM single-shot action state machine preventing double-tap duplicate uploads and
+     * ensuring every dismissal path (submit partial selection, ignore, clear, swipe/scrim/back)
+     * transitions deterministically.
+     */
+    static final class ReviewActionGuard {
+        private boolean locked;
+
+        boolean tryConsumeAction() {
+            if (locked) return false;
+            locked = true;
+            return true;
+        }
+
+        boolean isLocked() {
+            return locked;
+        }
+    }
+
+    /**
+     * Wraps a confirmation action (such as the empty-history "提交当前运行诊断" button) with a
+     * single-shot {@link ReviewActionGuard} so double-activation never triggers duplicate uploads.
+     */
+    static Runnable guardSingleShotConfirmAction(
+            final ReviewActionGuard guard, final Runnable action) {
+        return () -> {
+            if (guard != null && !guard.tryConsumeAction()) return;
+            if (action != null) action.run();
+        };
+    }
+
+    /**
+     * Schedules a quiet, non-nagging crash-review prompt once per cold launch outside Privacy
+     * Space, selecting strictly by per-report ID state ({@code !prompted && !dismissed &&
+     * !submitted}). Re-reads eligibility and persists prompted IDs off the main thread to avoid
+     * StrictMode disk I/O stalls on cold launch.
+     */
     static void maybePromptOnStartup(final MainActivity a) {
         if (a == null || a.privateMode || promptedThisSession) return;
         a.worker.execute(
                 () -> {
                     CrashReportStore.collectHistoricalExitReasons(a);
-                    final List<CrashReportStore.CrashReport> pending =
-                            CrashReportStore.loadUnsubmittedReports(a.getFilesDir());
-                    if (pending.isEmpty()) return;
+                    final long now = System.currentTimeMillis();
+                    final File filesDir = a.getFilesDir();
+                    final List<CrashReportStore.CrashReport> promptable =
+                            CrashReportStore.loadPromptableReports(filesDir, now);
+                    if (promptable.isEmpty()) {
+                        return;
+                    }
                     a.ui.postDelayed(
                             () -> {
                                 if (a.isFinishing()
@@ -64,10 +106,39 @@ final class CrashReportDialog {
                                         || promptedThisSession) return;
                                 if (a.appDialog != null && a.appDialog.isShowing()) return;
                                 if (a.current != null && a.current.player) return;
-                                promptedThisSession = true;
-                                show(a, false);
+                                // Re-check eligibility off the UI thread in case manual Settings
+                                // review or clear ran during the startup delay.
+                                a.worker.execute(
+                                        () -> {
+                                            final List<CrashReportStore.CrashReport> fresh =
+                                                    CrashReportStore.loadPromptableReports(
+                                                            filesDir, System.currentTimeMillis());
+                                            if (fresh.isEmpty()) return;
+                                            a.ui.post(
+                                                    () -> {
+                                                        if (a.isFinishing()
+                                                                || a.isDestroyed()
+                                                                || a.privateMode
+                                                                || promptedThisSession) return;
+                                                        if (a.appDialog != null
+                                                                && a.appDialog.isShowing()) return;
+                                                        if (a.current != null && a.current.player)
+                                                            return;
+                                                        if (renderReviewDialog(a, fresh, false)) {
+                                                            promptedThisSession = true;
+                                                            final List<CrashReportStore.CrashReport>
+                                                                    shown = new ArrayList<>(fresh);
+                                                            a.worker.execute(
+                                                                    () ->
+                                                                            CrashReportStore
+                                                                                    .markPrompted(
+                                                                                            filesDir,
+                                                                                            shown));
+                                                        }
+                                                    });
+                                        });
                             },
-                            1500L);
+                            1800L);
                 });
     }
 
@@ -90,32 +161,60 @@ final class CrashReportDialog {
                 });
     }
 
-    private static void renderReviewDialog(
+    private static void dismissAutoPromptReports(
+            final MainActivity a,
+            final List<CrashReportStore.CrashReport> reports,
+            final boolean showHintToast) {
+        if (a == null || reports == null || reports.isEmpty()) return;
+        final List<CrashReportStore.CrashReport> snapshot = new ArrayList<>(reports);
+        a.worker.execute(() -> CrashReportStore.markDismissed(a.getFilesDir(), snapshot));
+        if (showHintToast) {
+            a.toast("已忽略本次提醒，可随时在「设置 → 异常退出报告」查看");
+        }
+    }
+
+    private static boolean renderReviewDialog(
             final MainActivity a,
             final List<CrashReportStore.CrashReport> reports,
             final boolean manual) {
+        final boolean mobileUi = !a.isTvDevice();
+        final MobileTheme.Palette pal = mobileUi ? MobileTheme.of(a) : null;
         if (reports.isEmpty()) {
-            if (!manual) return;
+            if (!manual) return false;
+            final ReviewActionGuard emptyGuard = new ReviewActionGuard();
+            final Runnable submitDiagnostic =
+                    guardSingleShotConfirmAction(
+                            emptyGuard,
+                            () -> {
+                                List<CrashReportStore.CrashReport> single = new ArrayList<>();
+                                single.add(CrashReportStore.buildManualDiagnostic(a));
+                                startHybridSubmit(a, single, false);
+                            });
+            if (mobileUi) {
+                MobileBottomSheet.showConfirm(
+                        a,
+                        "崩溃日志与问题反馈",
+                        "本机暂未记录到未处理的应用闪退。如遇到画面异常、播放卡顿或解析问题，可导出当前脱敏运行日志并自动提交至 GitHub Issue。",
+                        "提交当前运行诊断",
+                        false,
+                        submitDiagnostic);
+                return true;
+            }
             new AppDialog.Builder(a)
                     .setTitle("崩溃日志与问题反馈")
                     .setMessage(
                             "本机暂未记录到未处理的应用闪退。\n\n如遇到画面异常、播放卡顿或解析问题，可点击下方按钮导出当前脱敏运行日志并自动提交至 GitHub Issue（失败时自动切换手机扫码提交）。")
-                    .setPositiveButton(
-                            "提交当前运行诊断",
-                            (d, w) -> {
-                                List<CrashReportStore.CrashReport> single = new ArrayList<>();
-                                single.add(CrashReportStore.buildManualDiagnostic(a));
-                                startHybridSubmit(a, single, false);
-                            })
+                    .setPositiveButton("提交当前运行诊断", (d, w) -> submitDiagnostic.run())
                     .setNegativeButton("关闭", null)
                     .show();
-            return;
+            return true;
         }
 
         final boolean[] selected = new boolean[reports.size()];
         int defaultSelected = 0;
         for (int i = 0; i < reports.size(); i++) {
-            boolean pick = !reports.get(i).submitted || (manual && i == 0);
+            CrashReportStore.CrashReport item = reports.get(i);
+            boolean pick = (!item.submitted && !item.dismissed) || (manual && i == 0);
             selected[i] = pick;
             if (pick) defaultSelected++;
         }
@@ -127,16 +226,17 @@ final class CrashReportDialog {
         TextView hint =
                 a.text(
                         manual
-                                ? "勾选要提交的脱敏日志（已自动隐藏片源地址、网盘凭证与隐私信息）。优先自动创建 GitHub Issue，失败时自动切换手机扫码。"
-                                : "检测到上次异常退出，已记录脱敏崩溃日志（不含片源链接与账号信息）。勾选后可一键提交给我们排查，失败时自动切换扫码导出。",
+                                ? "勾选要提交的脱敏日志（已自动隐藏片源地址、网盘凭证与隐私信息）。优先自动创建 GitHub Issue，失败时自动切换扫码。"
+                                : "检测到上次异常退出，已记录脱敏崩溃日志（不含片源链接与账号信息）。同一条记录仅提醒一次，关闭或忽略后不再重复打扰。",
                         12.5f,
-                        0xbce2e8f0);
+                        mobileUi ? pal.textSecondary : 0xbce2e8f0);
         hint.setLineSpacing(a.dp(2.5f), 1f);
         panel.addView(hint, new LinearLayout.LayoutParams(-1, -2));
         a.gap(panel, 10);
 
         ScrollView scroll = new ScrollView(a);
         scroll.setVerticalScrollBarEnabled(true);
+        final int accentColor = mobileUi ? pal.accent : 0xff34d399;
         LinearLayout listBox = a.vertical();
         final List<View> rowViews = new ArrayList<>();
         for (int i = 0; i < reports.size(); i++) {
@@ -146,10 +246,26 @@ final class CrashReportDialog {
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(a.dp(12), a.dp(9), a.dp(10), a.dp(9));
 
-            final TextView checkView = a.text(selected[idx] ? "☑" : "☐", 16f, 0xff34d399);
+            final TextView checkView = a.text(selected[idx] ? "☑" : "☐", 16f, accentColor);
             checkView.setTypeface(null, Typeface.BOLD);
             LinearLayout.LayoutParams checkLp = new LinearLayout.LayoutParams(a.dp(26), -2);
-            row.addView(checkView, checkLp);
+            if (!mobileUi) {
+                row.addView(checkView, checkLp);
+            }
+            final FrameLayout mobileCheckBox = mobileUi ? new FrameLayout(a) : null;
+            final MobileIcons.IconView mobileCheckIcon =
+                    mobileUi
+                            ? MobileIcons.create(a, MobileIcons.IC_CHECK, 13f, pal.accentOnFill)
+                            : null;
+            if (mobileUi) {
+                mobileCheckIcon.setStrokeWidthUnits(2.4f);
+                mobileCheckBox.addView(
+                        mobileCheckIcon,
+                        new FrameLayout.LayoutParams(a.dp(13), a.dp(13), Gravity.CENTER));
+                LinearLayout.LayoutParams mclp = new LinearLayout.LayoutParams(a.dp(20), a.dp(20));
+                mclp.rightMargin = a.dp(10);
+                row.addView(mobileCheckBox, mclp);
+            }
 
             LinearLayout copy = a.vertical();
             String statusTag =
@@ -157,12 +273,12 @@ final class CrashReportDialog {
                             ? (r.submittedIssueNumber > 0
                                     ? " [已提交 #" + r.submittedIssueNumber + "]"
                                     : " [已提交]")
-                            : "";
+                            : (r.dismissed ? " [已忽略]" : "");
             TextView titleTv =
                     a.text(
                             r.displayTime() + " · " + r.summary + statusTag,
                             13f,
-                            MainActivity.WHITE);
+                            mobileUi ? pal.textPrimary : MainActivity.WHITE);
             titleTv.setTypeface(null, Typeface.BOLD);
             titleTv.setSingleLine(true);
             titleTv.setEllipsize(TextUtils.TruncateAt.END);
@@ -179,7 +295,7 @@ final class CrashReportDialog {
                                     + r.sdkInt
                                     + ")",
                             11.5f,
-                            MainActivity.MUTED);
+                            mobileUi ? pal.textSecondary : MainActivity.MUTED);
             metaTv.setSingleLine(true);
             metaTv.setEllipsize(TextUtils.TruncateAt.END);
             metaTv.setPadding(0, a.dp(2), 0, 0);
@@ -200,13 +316,27 @@ final class CrashReportDialog {
                     () -> {
                         boolean focused = toggleBox.hasFocus();
                         boolean checked = selected[idx];
-                        checkView.setText(checked ? "☑" : "☐");
-                        checkView.setTextColor(checked ? 0xff34d399 : 0x88cbd5e1);
-                        GradientDrawable bg = a.bg(focused ? 0x3834d399 : 0x1a1e293b, 12);
-                        bg.setStroke(
-                                Math.max(1, a.dp(focused ? 1.5f : 0.8f)),
-                                focused ? 0xff6ee7b7 : (checked ? 0x5534d399 : 0x26ffffff));
-                        toggleBox.setBackground(bg);
+                        if (mobileUi) {
+                            if (checked) {
+                                mobileCheckBox.setBackground(a.bg(pal.accent, 6));
+                                mobileCheckIcon.setVisibility(View.VISIBLE);
+                            } else {
+                                GradientDrawable box = a.bg(Color.TRANSPARENT, 6);
+                                box.setStroke(Math.max(1, a.dp(1.5f)), pal.textTertiary);
+                                mobileCheckBox.setBackground(box);
+                                mobileCheckIcon.setVisibility(View.INVISIBLE);
+                            }
+                            toggleBox.setBackground(
+                                    a.bg(checked ? pal.pillSelectedFill : pal.bgSubtle, 12));
+                        } else {
+                            checkView.setText(checked ? "☑" : "☐");
+                            checkView.setTextColor(checked ? 0xff34d399 : 0x88cbd5e1);
+                            GradientDrawable bg = a.bg(focused ? 0x3834d399 : 0x1a1e293b, 12);
+                            bg.setStroke(
+                                    Math.max(1, a.dp(focused ? 1.5f : 0.8f)),
+                                    focused ? 0xff6ee7b7 : (checked ? 0x5534d399 : 0x26ffffff));
+                            toggleBox.setBackground(bg);
+                        }
                     };
             restyleRow.run();
             toggleBox.setOnFocusChangeListener((v, f) -> restyleRow.run());
@@ -214,9 +344,11 @@ final class CrashReportDialog {
                     v -> {
                         selected[idx] = !selected[idx];
                         restyleRow.run();
+                        if (mobileUi && selected[idx]) MobileMotion.popBounce(mobileCheckBox);
                     });
 
-            final TextView previewBtn = a.text("预览", 12f, MainActivity.WHITE);
+            final TextView previewBtn =
+                    a.text("预览", 12f, mobileUi ? pal.textPrimary : MainActivity.WHITE);
             previewBtn.setFocusable(true);
             previewBtn.setClickable(true);
             UiCompat.setDefaultFocusHighlightEnabled(previewBtn, false);
@@ -225,10 +357,15 @@ final class CrashReportDialog {
             final Runnable restylePreview =
                     () -> {
                         boolean f = previewBtn.hasFocus();
-                        GradientDrawable bg = a.bg(f ? 0xffffffff : 0x24ffffff, 10);
-                        bg.setStroke(Math.max(1, a.dp(0.8f)), f ? 0xffffffff : 0x33ffffff);
-                        previewBtn.setBackground(bg);
-                        previewBtn.setTextColor(f ? 0xff10141c : MainActivity.WHITE);
+                        if (mobileUi) {
+                            previewBtn.setBackground(a.bg(pal.bgSubtle, 10));
+                            previewBtn.setTextColor(pal.textPrimary);
+                        } else {
+                            GradientDrawable bg = a.bg(f ? 0xffffffff : 0x24ffffff, 10);
+                            bg.setStroke(Math.max(1, a.dp(0.8f)), f ? 0xffffffff : 0x33ffffff);
+                            previewBtn.setBackground(bg);
+                            previewBtn.setTextColor(f ? 0xff10141c : MainActivity.WHITE);
+                        }
                     };
             restylePreview.run();
             previewBtn.setOnFocusChangeListener((v, f) -> restylePreview.run());
@@ -236,11 +373,34 @@ final class CrashReportDialog {
                     v -> {
                         List<CrashReportStore.CrashReport> one = new ArrayList<>();
                         one.add(r);
-                        new AppDialog.Builder(a)
-                                .setTitle("脱敏日志预览")
-                                .setMessage(CrashReportStore.formatIssueMarkdown(one))
-                                .setPositiveButton("返回", null)
-                                .show();
+                        if (mobileUi) {
+                            ScrollView pvScroll = new ScrollView(a);
+                            TextView pvText =
+                                    a.text(
+                                            CrashReportStore.formatIssueMarkdown(one),
+                                            12f,
+                                            pal.textPrimary);
+                            pvText.setTypeface(Typeface.MONOSPACE);
+                            pvText.setTextIsSelectable(true);
+                            pvText.setLineSpacing(a.dp(2), 1f);
+                            pvText.setPadding(a.dp(12), a.dp(12), a.dp(12), a.dp(12));
+                            pvText.setBackground(MobileTheme.subtleBg(a, 14));
+                            pvScroll.addView(pvText, new LinearLayout.LayoutParams(-1, -2));
+                            MobileBottomSheet.showHandle(
+                                    a,
+                                    "脱敏日志预览",
+                                    r.displayTime() + " · " + r.kindLabel(),
+                                    null,
+                                    null,
+                                    pvScroll,
+                                    true);
+                        } else {
+                            new AppDialog.Builder(a)
+                                    .setTitle("脱敏日志预览")
+                                    .setMessage(CrashReportStore.formatIssueMarkdown(one))
+                                    .setPositiveButton("返回", null)
+                                    .show();
+                        }
                     });
 
             LinearLayout outerRow = a.row();
@@ -257,10 +417,133 @@ final class CrashReportDialog {
         }
         scroll.addView(listBox, new LinearLayout.LayoutParams(-1, -2));
         int maxListH =
-                Math.min(a.dp(230), Math.max(a.dp(130), Math.round(a.windowHeight() * 0.38f)));
+                Math.min(a.dp(240), Math.max(a.dp(130), Math.round(a.windowHeight() * 0.36f)));
         panel.addView(
                 scroll,
                 new LinearLayout.LayoutParams(-1, Math.min(maxListH, a.dp(reports.size() * 64))));
+
+        final ReviewActionGuard actionGuard = new ReviewActionGuard();
+
+        if (mobileUi) {
+            a.gap(panel, 14);
+            final MobileBottomSheet.SheetHandle[] handleRef = new MobileBottomSheet.SheetHandle[1];
+
+            final TextView submitBtn = a.text("提交所选日志", 14.5f, pal.accentOnFill);
+            submitBtn.setTypeface(null, Typeface.BOLD);
+            submitBtn.setGravity(Gravity.CENTER);
+            submitBtn.setMinimumHeight(a.dp(46));
+            submitBtn.setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(12));
+            submitBtn.setBackground(a.bg(pal.accent, 14));
+            MobileMotion.bindPress(submitBtn, 0.96f);
+
+            LinearLayout secondaryRow = a.row();
+            final TextView ignoreBtn = a.text(manual ? "关闭" : "不再提醒", 13.5f, pal.textPrimary);
+            ignoreBtn.setTypeface(null, Typeface.BOLD);
+            ignoreBtn.setGravity(Gravity.CENTER);
+            ignoreBtn.setMinimumHeight(a.dp(42));
+            ignoreBtn.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+            ignoreBtn.setBackground(MobileTheme.subtleBg(a, 12));
+            MobileMotion.bindPress(ignoreBtn, 0.96f);
+
+            final TextView clearBtn = a.text("清空记录", 13.5f, 0xFFEF4444);
+            clearBtn.setTypeface(null, Typeface.BOLD);
+            clearBtn.setGravity(Gravity.CENTER);
+            clearBtn.setMinimumHeight(a.dp(42));
+            clearBtn.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
+            clearBtn.setBackground(MobileTheme.subtleBg(a, 12));
+            MobileMotion.bindPress(clearBtn, 0.96f);
+
+            final Runnable disableButtons =
+                    () -> {
+                        submitBtn.setEnabled(false);
+                        submitBtn.setClickable(false);
+                        submitBtn.setAlpha(0.55f);
+                        ignoreBtn.setEnabled(false);
+                        ignoreBtn.setClickable(false);
+                        clearBtn.setEnabled(false);
+                        clearBtn.setClickable(false);
+                    };
+
+            submitBtn.setOnClickListener(
+                    v -> {
+                        if (actionGuard.isLocked()) return;
+                        List<CrashReportStore.CrashReport> chosen = new ArrayList<>();
+                        for (int i = 0; i < reports.size(); i++) {
+                            if (selected[i]) chosen.add(reports.get(i));
+                        }
+                        if (chosen.isEmpty()) {
+                            a.toast("请至少勾选一条日志");
+                            return;
+                        }
+                        if (!actionGuard.tryConsumeAction()) return;
+                        disableButtons.run();
+                        if (!manual) {
+                            // Unchecked items in the same startup prompt won't nag again either.
+                            List<CrashReportStore.CrashReport> unselected = new ArrayList<>();
+                            for (int i = 0; i < reports.size(); i++) {
+                                if (!selected[i]) unselected.add(reports.get(i));
+                            }
+                            if (!unselected.isEmpty()) {
+                                dismissAutoPromptReports(a, unselected, false);
+                            }
+                        }
+                        if (handleRef[0] != null) handleRef[0].dismiss();
+                        startHybridSubmit(a, chosen, true);
+                    });
+            panel.addView(submitBtn, new LinearLayout.LayoutParams(-1, -2));
+            a.gap(panel, 10);
+
+            ignoreBtn.setOnClickListener(
+                    v -> {
+                        if (!actionGuard.tryConsumeAction()) return;
+                        disableButtons.run();
+                        if (!manual) {
+                            dismissAutoPromptReports(a, reports, true);
+                        }
+                        if (handleRef[0] != null) handleRef[0].dismiss();
+                    });
+            LinearLayout.LayoutParams igLp = new LinearLayout.LayoutParams(0, -2, 1f);
+            igLp.rightMargin = a.dp(8);
+            secondaryRow.addView(ignoreBtn, igLp);
+
+            clearBtn.setOnClickListener(
+                    v -> {
+                        if (!actionGuard.tryConsumeAction()) return;
+                        disableButtons.run();
+                        CrashReportStore.clearAll(a.getFilesDir());
+                        a.toast("已清空本地崩溃日志");
+                        if (handleRef[0] != null) handleRef[0].dismiss();
+                    });
+            secondaryRow.addView(clearBtn, new LinearLayout.LayoutParams(0, -2, 1f));
+            panel.addView(secondaryRow, new LinearLayout.LayoutParams(-1, -2));
+
+            handleRef[0] =
+                    MobileBottomSheet.showHandle(
+                            a,
+                            manual ? "崩溃日志与问题反馈" : "上次异常退出",
+                            manual
+                                    ? ("共 " + reports.size() + " 条本地记录")
+                                    : ("发现 " + reports.size() + " 条新记录 · 仅本次提醒"),
+                            null,
+                            null,
+                            panel,
+                            true);
+            boolean showing =
+                    handleRef[0] != null
+                            && handleRef[0].dialog() != null
+                            && handleRef[0].dialog().isShowing();
+            if (handleRef[0] != null && handleRef[0].dialog() != null) {
+                handleRef[0]
+                        .dialog()
+                        .setOnDismissListener(
+                                d -> {
+                                    if (!manual && actionGuard.tryConsumeAction()) {
+                                        dismissAutoPromptReports(a, reports, false);
+                                    }
+                                });
+            }
+            return showing;
+        }
 
         AppDialog dialog =
                 new AppDialog.Builder(a)
@@ -269,6 +552,7 @@ final class CrashReportDialog {
                         .setPositiveButton(
                                 "提交所选日志",
                                 (d, w) -> {
+                                    if (actionGuard.isLocked()) return;
                                     List<CrashReportStore.CrashReport> chosen = new ArrayList<>();
                                     for (int i = 0; i < reports.size(); i++) {
                                         if (selected[i]) chosen.add(reports.get(i));
@@ -277,22 +561,48 @@ final class CrashReportDialog {
                                         a.toast("请至少勾选一条日志");
                                         return;
                                     }
+                                    if (!actionGuard.tryConsumeAction()) return;
+                                    if (!manual) {
+                                        List<CrashReportStore.CrashReport> unselected =
+                                                new ArrayList<>();
+                                        for (int i = 0; i < reports.size(); i++) {
+                                            if (!selected[i]) unselected.add(reports.get(i));
+                                        }
+                                        if (!unselected.isEmpty()) {
+                                            dismissAutoPromptReports(a, unselected, false);
+                                        }
+                                    }
                                     startHybridSubmit(a, chosen, true);
                                 })
                         .setNeutralButton(
                                 "清空记录",
                                 (d, w) -> {
+                                    if (!actionGuard.tryConsumeAction()) return;
                                     CrashReportStore.clearAll(a.getFilesDir());
                                     a.toast("已清空本地崩溃日志");
                                 })
-                        .setNegativeButton("暂不提交", null)
+                        .setNegativeButton(
+                                manual ? "关闭" : "不再提醒",
+                                (d, w) -> {
+                                    if (!actionGuard.tryConsumeAction()) return;
+                                    if (!manual) {
+                                        dismissAutoPromptReports(a, reports, true);
+                                    }
+                                })
                         .create();
+        dialog.setOnDismissListener(
+                d -> {
+                    if (!manual && actionGuard.tryConsumeAction()) {
+                        dismissAutoPromptReports(a, reports, false);
+                    }
+                });
         dialog.show();
         if (dialog.getButton(-1) != null) {
             dialog.getButton(-1).requestFocus();
         } else if (!rowViews.isEmpty()) {
             rowViews.get(0).requestFocus();
         }
+        return dialog.isShowing();
     }
 
     private static void startHybridSubmit(

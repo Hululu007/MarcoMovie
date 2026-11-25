@@ -43,6 +43,7 @@ final class CrashReportStore {
     static final int MAX_REPORTS = 5;
     static final int MAX_REPORT_BYTES = 60 * 1024;
     static final long MAX_AGE_MS = 14L * 24L * 60L * 60L * 1000L;
+    static final long PROMPT_MAX_AGE_MS = 72L * 60L * 60L * 1000L;
     static final int MAX_APPLOG_LINES = 80;
     static final int MAX_STACK_CHARS = 12_000;
     static final int MAX_GITHUB_URL_BODY_CHARS = 3400;
@@ -95,6 +96,8 @@ final class CrashReportStore {
         String stackTrace = "";
         String recentLogs = "";
         boolean submitted;
+        boolean dismissed;
+        boolean prompted;
         int submittedIssueNumber;
         String submittedIssueUrl = "";
 
@@ -121,6 +124,8 @@ final class CrashReportStore {
             o.put("stackTrace", stackTrace);
             o.put("recentLogs", recentLogs);
             o.put("submitted", submitted);
+            o.put("dismissed", dismissed);
+            o.put("prompted", prompted);
             o.put("submittedIssueNumber", submittedIssueNumber);
             o.put("submittedIssueUrl", submittedIssueUrl);
             return o;
@@ -150,6 +155,8 @@ final class CrashReportStore {
             r.stackTrace = o.optString("stackTrace", "");
             r.recentLogs = o.optString("recentLogs", "");
             r.submitted = o.optBoolean("submitted", false);
+            r.dismissed = o.optBoolean("dismissed", false);
+            r.prompted = o.optBoolean("prompted", false);
             r.submittedIssueNumber = o.optInt("submittedIssueNumber", 0);
             r.submittedIssueUrl = o.optString("submittedIssueUrl", "");
             return r.id.isEmpty() ? null : r;
@@ -368,6 +375,86 @@ final class CrashReportStore {
         }
     }
 
+    static final int IMPORTANCE_CACHED_THRESHOLD = 400;
+
+    /**
+     * Pure-JVM policy: only treat {@code REASON_LOW_MEMORY} as an actionable crash report when the
+     * process was actively visible or perceptible to the user ({@code importance <
+     * IMPORTANCE_CACHED (400)}). Background cached reclaims ({@code importance >= 400}) are normal
+     * Android OS memory management rather than user-facing crashes.
+     */
+    static boolean shouldRecordLowMemoryExit(int importance) {
+        return importance > 0 && importance < IMPORTANCE_CACHED_THRESHOLD;
+    }
+
+    /**
+     * Parses a positive integer {@code Importance:} value from an {@code ApplicationExitInfo} trace
+     * block, or returns {@code -1} when missing, malformed, or non-positive.
+     */
+    static int parseExitImportance(String stackTrace) {
+        if (stackTrace == null || stackTrace.isEmpty() || !stackTrace.contains("Importance:")) {
+            return -1;
+        }
+        for (String line : stackTrace.split("\\r?\\n")) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("Importance:")) {
+                try {
+                    int imp = Integer.parseInt(trimmed.substring("Importance:".length()).trim());
+                    return imp > 0 ? imp : -1;
+                } catch (NumberFormatException ignored) {
+                    return -1;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Returns {@code true} ONLY for confirmed background cached LMK reclaims (explicit valid {@code
+     * Importance >= 400}, no native trace, and not already submitted). Unknown-importance legacy
+     * LMK reports and submitted reports are NEVER deleted from disk.
+     */
+    static boolean isConfirmedBackgroundLowMemoryReport(CrashReport report) {
+        if (report == null || !KIND_LOW_MEMORY.equals(report.kind) || report.submitted) {
+            return false;
+        }
+        String trace = report.stackTrace == null ? "" : report.stackTrace;
+        if (trace.contains("--- Native/System Trace")) return false;
+        int imp = parseExitImportance(trace);
+        return imp >= IMPORTANCE_CACHED_THRESHOLD;
+    }
+
+    /**
+     * Returns {@code true} for legacy or malformed {@code low_memory} reports whose foreground vs.
+     * background importance cannot be determined (missing or invalid {@code Importance:}). These
+     * reports stay preserved in disk history and Settings, but do not auto-prompt on startup.
+     */
+    static boolean isUnknownImportanceLowMemoryReport(CrashReport report) {
+        if (report == null || !KIND_LOW_MEMORY.equals(report.kind)) return false;
+        String trace = report.stackTrace == null ? "" : report.stackTrace;
+        if (trace.contains("--- Native/System Trace")) return false;
+        return parseExitImportance(trace) <= 0;
+    }
+
+    /**
+     * Pure-JVM policy determining whether a single report may trigger a startup auto-prompt.
+     * Already-submitted, already-prompted, user-dismissed, manual diagnostic, confirmed-cached LMK,
+     * unknown-importance legacy LMK, or stale (>72h) reports never nag on startup (while remaining
+     * preserved in Settings → 历史异常退出报告 unless explicitly confirmed background-cached).
+     */
+    static boolean isPromptEligible(CrashReport report, long nowMs) {
+        if (report == null) return false;
+        if (report.submitted || report.dismissed || report.prompted) return false;
+        if (KIND_DIAGNOSTIC.equals(report.kind)) return false;
+        if (isConfirmedBackgroundLowMemoryReport(report)) return false;
+        if (isUnknownImportanceLowMemoryReport(report)) return false;
+        if (report.timestampMs > 0L && nowMs > 0L) {
+            long ageMs = nowMs - report.timestampMs;
+            if (ageMs > PROMPT_MAX_AGE_MS) return false;
+        }
+        return true;
+    }
+
     /**
      * On Android 11+ (API 30+), imports recent Native crashes / LMK OOM kills / ANRs from {@link
      * ActivityManager#getHistoricalProcessExitReasons} so even native/LMK exits (e.g. Android 14
@@ -402,10 +489,14 @@ final class CrashReportStore {
                 if (ts <= lastSeenTs) continue;
                 if (ts > newestTs) newestTs = ts;
                 int reason = info.getReason();
+                int importance = info.getImportance();
                 String kind;
                 if (reason == ApplicationExitInfo.REASON_CRASH_NATIVE) {
                     kind = KIND_NATIVE;
                 } else if (reason == ApplicationExitInfo.REASON_LOW_MEMORY) {
+                    if (!shouldRecordLowMemoryExit(importance)) {
+                        continue;
+                    }
                     kind = KIND_LOW_MEMORY;
                 } else if (reason == ApplicationExitInfo.REASON_ANR) {
                     kind = KIND_ANR;
@@ -438,6 +529,8 @@ final class CrashReportStore {
                 StringBuilder traceBuf = new StringBuilder();
                 traceBuf.append("ProcessExitReason: ")
                         .append(reason)
+                        .append("\nImportance: ")
+                        .append(importance)
                         .append("\nStatus/Signal: ")
                         .append(info.getStatus())
                         .append("\nPSS(KB): ")
@@ -608,6 +701,21 @@ final class CrashReportStore {
         return raw;
     }
 
+    private static File reportFileForId(File filesDir, String id) {
+        return new File(reportDir(filesDir), sanitizeFileName(id) + ".json");
+    }
+
+    private static CrashReport readReportFile(File f) {
+        if (f == null || !f.isFile()) return null;
+        try {
+            byte[] bytes = readAllBytes(f, MAX_REPORT_BYTES + 4096);
+            JSONObject obj = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            return CrashReport.fromJson(obj);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     static synchronized List<CrashReport> loadReports(File filesDir) {
         List<CrashReport> list = new ArrayList<>();
         if (filesDir == null) return list;
@@ -621,7 +729,13 @@ final class CrashReportStore {
                 byte[] bytes = readAllBytes(f, MAX_REPORT_BYTES + 4096);
                 JSONObject obj = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
                 CrashReport r = CrashReport.fromJson(obj);
-                if (r != null) list.add(r);
+                if (r != null) {
+                    if (isConfirmedBackgroundLowMemoryReport(r)) {
+                        f.delete();
+                        continue;
+                    }
+                    list.add(r);
+                }
             } catch (Exception ignored) {
                 f.delete();
             }
@@ -639,17 +753,77 @@ final class CrashReportStore {
         return out;
     }
 
+    static List<CrashReport> loadPromptableReports(File filesDir, long nowMs) {
+        List<CrashReport> all = loadReports(filesDir);
+        List<CrashReport> out = new ArrayList<>();
+        for (CrashReport r : all) {
+            if (isPromptEligible(r, nowMs)) out.add(r);
+        }
+        return out;
+    }
+
+    /**
+     * Marks reports as already surfaced in a startup prompt using atomic read-modify-write under
+     * lock. Skips reports already deleted on disk and preserves all other fields (such as {@code
+     * submitted} or {@code dismissed}).
+     */
+    static synchronized void markPrompted(File filesDir, List<CrashReport> reports) {
+        if (filesDir == null || reports == null) return;
+        for (CrashReport r : reports) {
+            if (r == null || r.id.isEmpty() || KIND_DIAGNOSTIC.equals(r.kind)) continue;
+            File target = reportFileForId(filesDir, r.id);
+            if (!target.isFile()) continue;
+            CrashReport disk = readReportFile(target);
+            if (disk == null) continue;
+            if (!disk.prompted) {
+                disk.prompted = true;
+                saveReport(filesDir, disk);
+            }
+            r.prompted = true;
+        }
+    }
+
+    /**
+     * Marks reports as user-dismissed using atomic read-modify-write under lock. Never resurrects
+     * deleted/cleared files and never clobbers newer {@code submitted} / issue fields written by
+     * concurrent submissions.
+     */
+    static synchronized void markDismissed(File filesDir, List<CrashReport> reports) {
+        if (filesDir == null || reports == null) return;
+        for (CrashReport r : reports) {
+            if (r == null || r.id.isEmpty() || KIND_DIAGNOSTIC.equals(r.kind)) continue;
+            File target = reportFileForId(filesDir, r.id);
+            if (!target.isFile()) continue;
+            CrashReport disk = readReportFile(target);
+            if (disk == null) continue;
+            if (!disk.dismissed || !disk.prompted) {
+                disk.dismissed = true;
+                disk.prompted = true;
+                saveReport(filesDir, disk);
+            }
+            r.dismissed = true;
+            r.prompted = true;
+        }
+    }
+
     static synchronized void markSubmitted(
             File filesDir, List<CrashReport> reports, int issueNumber, String issueUrl) {
         if (filesDir == null || reports == null) return;
         for (CrashReport r : reports) {
-            if (r == null || r.id.isEmpty()) continue;
+            if (r == null || r.id.isEmpty() || KIND_DIAGNOSTIC.equals(r.kind)) continue;
+            File target = reportFileForId(filesDir, r.id);
+            if (!target.isFile()) continue;
+            CrashReport disk = readReportFile(target);
+            if (disk == null) continue;
+            disk.submitted = true;
+            disk.prompted = true;
+            disk.submittedIssueNumber = issueNumber;
+            disk.submittedIssueUrl = issueUrl == null ? "" : issueUrl;
+            saveReport(filesDir, disk);
             r.submitted = true;
+            r.prompted = true;
             r.submittedIssueNumber = issueNumber;
-            r.submittedIssueUrl = issueUrl == null ? "" : issueUrl;
-            if (!KIND_DIAGNOSTIC.equals(r.kind)) {
-                saveReport(filesDir, r);
-            }
+            r.submittedIssueUrl = disk.submittedIssueUrl;
         }
     }
 

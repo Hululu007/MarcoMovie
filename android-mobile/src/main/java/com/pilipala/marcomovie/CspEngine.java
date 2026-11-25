@@ -20,9 +20,15 @@ import org.json.*;
 public final class CspEngine implements SourceEngine {
     static final int MAX_PLUGIN_BYTES = 64 * 1024 * 1024;
     private static final long MAX_NATIVE_EXTRACT_BYTES = 128L * 1024 * 1024;
-    static final Map<String, DexClassLoader> LOADERS = new HashMap<>();
+    static final Map<String, DexClassLoader> LOADERS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Object LOADER_LOCK = new Object();
     static final Set<ClassLoader> ALL_PLUGIN_LOADERS =
             Collections.synchronizedSet(new LinkedHashSet<>());
+    static final Map<ClassLoader, Set<ClassLoader>> OWNED_CHILD_LOADERS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    static final Set<ClassLoader> UNREADY_LOADERS =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
     static final Set<ClassLoader> INITIALIZED_PROXY_LOADERS =
             Collections.synchronizedSet(new LinkedHashSet<>());
     static volatile String activeJarDeclaration = "";
@@ -49,7 +55,7 @@ public final class CspEngine implements SourceEngine {
                 || "android.permission.MANAGE_EXTERNAL_STORAGE".equals(permission);
     }
 
-    static final class PluginApplication extends Application {
+    static class PluginApplication extends Application {
         final Application base;
 
         PluginApplication(Application base) {
@@ -96,6 +102,72 @@ public final class CspEngine implements SourceEngine {
                 return android.content.pm.PackageManager.PERMISSION_GRANTED;
             }
             return base.checkPermission(permission, pid, uid);
+        }
+    }
+
+    /**
+     * Per-plugin initialization Application wrapper that attributes lifecycle callbacks registered
+     * during a specific plugin's {@code Init.init()} or {@code spider.init()} directly to that
+     * plugin's root {@link ClassLoader}, eliminating cross-plugin attribution races under
+     * concurrent initialization.
+     */
+    static final class ScopedPluginApplication extends PluginApplication {
+        final ClassLoader ownerLoader;
+        final IdentityHashMap<Object, Integer> registeredCallbackCounts = new IdentityHashMap<>();
+        private volatile boolean trackingActive = true;
+
+        ScopedPluginApplication(Application base, ClassLoader ownerLoader) {
+            super(unwrapApplication(base));
+            this.ownerLoader = ownerLoader;
+        }
+
+        @Override
+        public void registerActivityLifecycleCallbacks(ActivityLifecycleCallbacks callback) {
+            if (callback != null && trackingActive) {
+                synchronized (registeredCallbackCounts) {
+                    if (trackingActive) {
+                        Integer prev = registeredCallbackCounts.get(callback);
+                        registeredCallbackCounts.put(callback, prev == null ? 1 : prev + 1);
+                    }
+                }
+            }
+            super.registerActivityLifecycleCallbacks(callback);
+        }
+
+        @Override
+        public void unregisterActivityLifecycleCallbacks(ActivityLifecycleCallbacks callback) {
+            if (callback != null) {
+                synchronized (registeredCallbackCounts) {
+                    Integer prev = registeredCallbackCounts.get(callback);
+                    if (prev != null) {
+                        if (prev <= 1) {
+                            registeredCallbackCounts.remove(callback);
+                        } else {
+                            registeredCallbackCounts.put(callback, prev - 1);
+                        }
+                    }
+                }
+            }
+            super.unregisterActivityLifecycleCallbacks(callback);
+        }
+
+        void finishTracking() {
+            trackingActive = false;
+            synchronized (registeredCallbackCounts) {
+                registeredCallbackCounts.clear();
+            }
+        }
+
+        int trackedCallbackCount() {
+            synchronized (registeredCallbackCounts) {
+                return registeredCallbackCounts.size();
+            }
+        }
+
+        List<Object> snapshotRegisteredCallbacks() {
+            synchronized (registeredCallbackCounts) {
+                return new ArrayList<>(registeredCallbackCounts.keySet());
+            }
         }
     }
 
@@ -213,14 +285,21 @@ public final class CspEngine implements SourceEngine {
             if (!(candidate instanceof Spider)) throw new IOException("插件父接口与当前宿主不兼容");
             spider = (Spider) candidate;
             spider.siteKey = site.key == null ? "" : site.key;
-            synchronized (pluginLock) {
-                try {
-                    spider.initApi(new com.github.catvod.crawler.SpiderApi());
-                } catch (Throwable ignored) {
+            ScopedPluginApplication spiderScopedApp =
+                    new ScopedPluginApplication(unwrapApplication(app), loader);
+            List<Object> beforeSpiderInit = lifecycleCallbacks(app);
+            try {
+                synchronized (pluginLock) {
+                    try {
+                        spider.initApi(new com.github.catvod.crawler.SpiderApi());
+                    } catch (Throwable ignored) {
+                    }
+                    spider.init(spiderScopedApp, site.ext == null ? "" : site.ext.toString());
                 }
-                spider.init(app, site.ext == null ? "" : site.ext.toString());
+                publishSpiderInitLoaders(loader, spider, spiderScopedApp, app, beforeSpiderInit);
+            } finally {
+                spiderScopedApp.finishTracking();
             }
-            collectPluginLoaders(loader, spider);
             syncPluginProxyPort(loader, ProxyAddress.port);
             syncPluginActivity(loader, MainActivity.activeActivity);
             diagnostic("loaded", className, null);
@@ -267,41 +346,333 @@ public final class CspEngine implements SourceEngine {
         }
     }
 
-    static synchronized DexClassLoader loader(Application app, File artifact, String sha)
-            throws Exception {
-        app = wrapPluginApplication(app);
-        DexClassLoader existing = LOADERS.get(sha);
-        if (existing != null) {
-            collectPluginLoaders(existing, null);
-            syncPluginActivity(existing, MainActivity.activeActivity);
-            return existing;
+    interface LoaderInitializer {
+        void initialize(ClassLoader loader) throws Exception;
+    }
+
+    static boolean isDescendantOf(ClassLoader candidate, ClassLoader ancestor) {
+        if (candidate == null || ancestor == null) return false;
+        for (ClassLoader cur = candidate; cur != null; cur = cur.getParent()) {
+            if (cur == ancestor) return true;
         }
-        File optimized = new File(app.getCodeCacheDir(), "csp-opt");
-        if (!optimized.exists() && !optimized.mkdirs()) throw new IOException("无法创建插件私有目录");
-        String librarySearchPath =
-                extractNativeLibraries(
-                        artifact,
-                        new File(app.getFilesDir(), "csp-lib/" + sha),
-                        android.os.Build.SUPPORTED_ABIS,
-                        isCurrentProcess64Bit());
-        DexClassLoader loader =
-                new DexClassLoader(
-                        artifact.getAbsolutePath(),
-                        optimized.getAbsolutePath(),
-                        librarySearchPath,
-                        app.getClassLoader());
-        ALL_PLUGIN_LOADERS.add(loader);
-        prepareHostStorage(app);
-        List<Object> before = lifecycleCallbacks(app);
-        loader.loadClass("com.github.catvod.spider.Init")
-                .getMethod("init", Context.class)
-                .invoke(null, app);
-        collectPluginLoaders(loader, null);
-        syncPluginProxyPort(loader, ProxyAddress.port);
-        replayForegroundActivity(app, before);
-        syncPluginActivity(loader, MainActivity.activeActivity);
-        LOADERS.put(sha, loader);
-        return loader;
+        return false;
+    }
+
+    static boolean isUnreadyLoader(ClassLoader cl) {
+        for (ClassLoader cur = cl; cur != null; cur = cur.getParent()) {
+            if (UNREADY_LOADERS.contains(cur)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isUnreadyOtherLoader(ClassLoader candidate, ClassLoader owner) {
+        for (ClassLoader cur = candidate; cur != null; cur = cur.getParent()) {
+            if (cur == owner) return false;
+            if (UNREADY_LOADERS.contains(cur)) return true;
+        }
+        return false;
+    }
+
+    private static boolean belongsToAnotherKnownPlugin(ClassLoader candidate, ClassLoader owner) {
+        if (candidate == null || candidate == owner) return false;
+        if (isUnreadyOtherLoader(candidate, owner)) return true;
+        for (ClassLoader other : LOADERS.values()) {
+            if (other != null && other != owner && isDescendantOf(candidate, other)) {
+                return true;
+            }
+        }
+        synchronized (ALL_PLUGIN_LOADERS) {
+            for (ClassLoader other : ALL_PLUGIN_LOADERS) {
+                if (other != null
+                        && other != owner
+                        && !isDescendantOf(other, owner)
+                        && isDescendantOf(candidate, other)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static void recordOwnedChildLoaders(ClassLoader owner, Collection<ClassLoader> children) {
+        if (owner == null || children == null || children.isEmpty()) return;
+        synchronized (OWNED_CHILD_LOADERS) {
+            Set<ClassLoader> owned = OWNED_CHILD_LOADERS.get(owner);
+            if (owned == null) {
+                owned = new LinkedHashSet<>();
+                OWNED_CHILD_LOADERS.put(owner, owned);
+            }
+            for (ClassLoader child : children) {
+                if (child != null
+                        && child != owner
+                        && !isUnreadyOtherLoader(child, owner)
+                        && !belongsToAnotherKnownPlugin(child, owner)) {
+                    owned.add(child);
+                }
+            }
+        }
+    }
+
+    private static boolean containsIdentity(List<Object> list, Object target) {
+        if (list == null) return false;
+        for (Object item : list) {
+            if (item == target) return true;
+        }
+        return false;
+    }
+
+    private static void extractCallbackClassLoaders(Object cb, Set<ClassLoader> out) {
+        if (cb == null) return;
+        ClassLoader cbCl = cb.getClass().getClassLoader();
+        if (cbCl instanceof dalvik.system.BaseDexClassLoader
+                && cbCl != CspEngine.class.getClassLoader()) {
+            out.add(cbCl);
+        }
+        for (Field f : cb.getClass().getDeclaredFields()) {
+            try {
+                f.setAccessible(true);
+                Object innerCb = f.get(cb);
+                if (innerCb != null) {
+                    ClassLoader icl = innerCb.getClass().getClassLoader();
+                    if (icl instanceof dalvik.system.BaseDexClassLoader
+                            && icl != CspEngine.class.getClassLoader()) {
+                        out.add(icl);
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /**
+     * Collects child {@link ClassLoader}s from lifecycle callbacks registered during {@code
+     * ownerLoader}'s initialization, strictly verifying plugin ownership so a concurrent plugin's
+     * child loader registered on the global {@link Application} can never be misattributed to
+     * {@code ownerLoader}.
+     */
+    static Set<ClassLoader> collectVerifiedOwnedCallbackLoaders(
+            ScopedPluginApplication scopedApp,
+            Application app,
+            List<Object> before,
+            ClassLoader ownerLoader,
+            Object spiderInstance) {
+        LinkedHashSet<ClassLoader> verified = new LinkedHashSet<>();
+        if (ownerLoader == null) return verified;
+
+        List<Object> currentAppCallbacks = app != null ? lifecycleCallbacks(app) : null;
+
+        // 1) Callbacks registered directly through this plugin's own ScopedPluginApplication are
+        // attributed to ownerLoader unless they were unregistered or belong to another plugin.
+        // Release temporary callback references immediately after snapshotting.
+        if (scopedApp != null && scopedApp.ownerLoader == ownerLoader) {
+            List<Object> scopedSnapshot;
+            try {
+                scopedSnapshot = scopedApp.snapshotRegisteredCallbacks();
+            } finally {
+                scopedApp.finishTracking();
+            }
+            LinkedHashSet<ClassLoader> scopedCandidates = new LinkedHashSet<>();
+            for (Object cb : scopedSnapshot) {
+                if (cb == null) continue;
+                if (currentAppCallbacks != null && !containsIdentity(currentAppCallbacks, cb)) {
+                    continue;
+                }
+                extractCallbackClassLoaders(cb, scopedCandidates);
+            }
+            for (ClassLoader cand : scopedCandidates) {
+                if (cand != null
+                        && cand != ownerLoader
+                        && !isUnreadyOtherLoader(cand, ownerLoader)
+                        && !belongsToAnotherKnownPlugin(cand, ownerLoader)) {
+                    verified.add(cand);
+                }
+            }
+        }
+
+        // 2) For callbacks added to the raw Application (e.g. if a plugin unwrapped base
+        // Application), accept ONLY loaders structurally owned by ownerLoader/spiderInstance
+        // (parent chain descendant or reachable from ownerLoader's Init / spiderInstance fields).
+        if (currentAppCallbacks != null && before != null && !currentAppCallbacks.isEmpty()) {
+            Set<ClassLoader> structural = collectPluginLoaders(ownerLoader, spiderInstance);
+            LinkedHashSet<ClassLoader> diffCandidates = new LinkedHashSet<>();
+            for (Object cb : currentAppCallbacks) {
+                if (cb == null || containsIdentity(before, cb)) continue;
+                extractCallbackClassLoaders(cb, diffCandidates);
+            }
+            for (ClassLoader cand : diffCandidates) {
+                if (cand == null
+                        || cand == ownerLoader
+                        || isUnreadyOtherLoader(cand, ownerLoader)
+                        || belongsToAnotherKnownPlugin(cand, ownerLoader)) {
+                    continue;
+                }
+                boolean owned = isDescendantOf(cand, ownerLoader);
+                if (!owned) {
+                    for (ClassLoader s : structural) {
+                        if (s != null && (cand == s || isDescendantOf(cand, s))) {
+                            owned = true;
+                            break;
+                        }
+                    }
+                }
+                if (owned) {
+                    verified.add(cand);
+                }
+            }
+        }
+        return verified;
+    }
+
+    /**
+     * Publishes verified child loaders discovered during a plugin site's {@code spider.init()}.
+     * Unrelated plugins' child loaders (e.g. from another plugin concurrently executing {@code
+     * Init.init()}) are rejected by ownership verification and never enter {@link
+     * #OWNED_CHILD_LOADERS} or {@link #ALL_PLUGIN_LOADERS}.
+     */
+    static Set<ClassLoader> publishSpiderInitLoaders(
+            ClassLoader rootLoader,
+            Object spiderInstance,
+            ScopedPluginApplication scopedApp,
+            Application app,
+            List<Object> beforeSpiderInit) {
+        Set<ClassLoader> verifiedCbLoaders =
+                collectVerifiedOwnedCallbackLoaders(
+                        scopedApp, app, beforeSpiderInit, rootLoader, spiderInstance);
+        recordOwnedChildLoaders(rootLoader, verifiedCbLoaders);
+        Set<ClassLoader> discovered = collectPluginLoaders(rootLoader, spiderInstance);
+        if (rootLoader != null && !isUnreadyLoader(rootLoader)) {
+            synchronized (ALL_PLUGIN_LOADERS) {
+                for (ClassLoader cl : discovered) {
+                    if (cl != null && !isUnreadyLoader(cl)) {
+                        ALL_PLUGIN_LOADERS.add(cl);
+                    }
+                }
+            }
+        }
+        return discovered;
+    }
+
+    /**
+     * Runs plugin initialization under {@code LOADER_LOCK} and publishes {@code loader} and its
+     * verified owned child loaders into the UI-visible ready sets ({@link #LOADERS} / {@link
+     * #ALL_PLUGIN_LOADERS}) ONLY after {@code initializer} completes without throwing. Failed or
+     * in-flight loaders (and their descendants) remain invisible to {@link #syncAllPluginActivities}.
+     */
+    static void initAndPublishReadyLoader(
+            String sha,
+            DexClassLoader dexLoader,
+            ClassLoader publishLoader,
+            LoaderInitializer initializer)
+            throws Exception {
+        if (publishLoader != null) {
+            UNREADY_LOADERS.add(publishLoader);
+        }
+        synchronized (LOADER_LOCK) {
+            boolean succeeded = false;
+            try {
+                initializer.initialize(publishLoader);
+                if (publishLoader != null) {
+                    UNREADY_LOADERS.remove(publishLoader);
+                }
+                Set<ClassLoader> ready = collectPluginLoaders(publishLoader, null);
+                synchronized (ALL_PLUGIN_LOADERS) {
+                    if (publishLoader != null) {
+                        ALL_PLUGIN_LOADERS.add(publishLoader);
+                    }
+                    for (ClassLoader cl : ready) {
+                        if (cl != null && !isUnreadyLoader(cl)) {
+                            ALL_PLUGIN_LOADERS.add(cl);
+                        }
+                    }
+                }
+                if (sha != null && dexLoader != null) {
+                    LOADERS.put(sha, dexLoader);
+                }
+                succeeded = true;
+            } finally {
+                if (!succeeded && publishLoader != null) {
+                    Set<ClassLoader> discardedChildren;
+                    synchronized (OWNED_CHILD_LOADERS) {
+                        discardedChildren = OWNED_CHILD_LOADERS.remove(publishLoader);
+                    }
+                    synchronized (ALL_PLUGIN_LOADERS) {
+                        ALL_PLUGIN_LOADERS.remove(publishLoader);
+                        if (discardedChildren != null) {
+                            ALL_PLUGIN_LOADERS.removeAll(discardedChildren);
+                        }
+                    }
+                    if (sha != null) {
+                        LOADERS.remove(sha);
+                    }
+                }
+            }
+        }
+    }
+
+    static List<ClassLoader> snapshotReadyPluginLoaders() {
+        LinkedHashSet<ClassLoader> snapshot = new LinkedHashSet<>(LOADERS.values());
+        synchronized (ALL_PLUGIN_LOADERS) {
+            snapshot.addAll(ALL_PLUGIN_LOADERS);
+        }
+        List<ClassLoader> out = new ArrayList<>(snapshot.size());
+        for (ClassLoader cl : snapshot) {
+            if (cl != null && !isUnreadyLoader(cl)) {
+                out.add(cl);
+            }
+        }
+        return out;
+    }
+
+    static DexClassLoader loader(Application app, File artifact, String sha) throws Exception {
+        synchronized (LOADER_LOCK) {
+            app = wrapPluginApplication(app);
+            DexClassLoader existing = LOADERS.get(sha);
+            if (existing != null) {
+                collectPluginLoaders(existing, null);
+                syncPluginActivity(existing, MainActivity.activeActivity);
+                return existing;
+            }
+            File optimized = new File(app.getCodeCacheDir(), "csp-opt");
+            if (!optimized.exists() && !optimized.mkdirs()) throw new IOException("无法创建插件私有目录");
+            String librarySearchPath =
+                    extractNativeLibraries(
+                            artifact,
+                            new File(app.getFilesDir(), "csp-lib/" + sha),
+                            android.os.Build.SUPPORTED_ABIS,
+                            isCurrentProcess64Bit());
+            final DexClassLoader loader =
+                    new DexClassLoader(
+                            artifact.getAbsolutePath(),
+                            optimized.getAbsolutePath(),
+                            librarySearchPath,
+                            app.getClassLoader());
+            final Application wrappedApp = app;
+            final ScopedPluginApplication initScopedApp =
+                    new ScopedPluginApplication(unwrapApplication(app), loader);
+            try {
+                initAndPublishReadyLoader(
+                        sha,
+                        loader,
+                        loader,
+                        cl -> {
+                            prepareHostStorage(wrappedApp);
+                            List<Object> before = lifecycleCallbacks(wrappedApp);
+                            cl.loadClass("com.github.catvod.spider.Init")
+                                    .getMethod("init", Context.class)
+                                    .invoke(null, initScopedApp);
+                            recordOwnedChildLoaders(
+                                    cl,
+                                    collectVerifiedOwnedCallbackLoaders(
+                                            initScopedApp, wrappedApp, before, cl, null));
+                            syncPluginProxyPort(cl, ProxyAddress.port);
+                            replayForegroundActivity(wrappedApp, before);
+                            syncPluginActivity(cl, MainActivity.activeActivity);
+                        });
+            } finally {
+                initScopedApp.finishTracking();
+            }
+            return loader;
+        }
     }
 
     static boolean isCurrentProcess64Bit() {
@@ -544,47 +915,47 @@ public final class CspEngine implements SourceEngine {
                 }
             }
         }
-        MainActivity active = MainActivity.activeActivity;
-        if (active != null) {
-            List<Object> cbs = lifecycleCallbacks(active.getApplication());
-            if (cbs != null) {
-                for (Object cb : cbs) {
-                    if (cb == null) continue;
-                    ClassLoader cbCl = cb.getClass().getClassLoader();
-                    if (cbCl instanceof dalvik.system.BaseDexClassLoader
-                            && cbCl != CspEngine.class.getClassLoader()) {
-                        found.add(cbCl);
-                    }
-                    for (Field f : cb.getClass().getDeclaredFields()) {
-                        try {
-                            f.setAccessible(true);
-                            Object innerCb = f.get(cb);
-                            if (innerCb != null) {
-                                ClassLoader icl = innerCb.getClass().getClassLoader();
-                                if (icl instanceof dalvik.system.BaseDexClassLoader
-                                        && icl != CspEngine.class.getClassLoader()) {
-                                    found.add(icl);
-                                }
-                            }
-                        } catch (Throwable ignored) {
+        if (rootLoader != null) {
+            synchronized (OWNED_CHILD_LOADERS) {
+                Set<ClassLoader> owned = OWNED_CHILD_LOADERS.get(rootLoader);
+                if (owned != null) {
+                    for (ClassLoader child : owned) {
+                        if (child != null && !isUnreadyOtherLoader(child, rootLoader)) {
+                            found.add(child);
                         }
                     }
                 }
             }
         }
-        ALL_PLUGIN_LOADERS.addAll(found);
+        // Never scan global Application.mActivityLifecycleCallbacks here: unrelated plugins that
+        // are still initializing or failed after registering callbacks must not be indirectly
+        // pulled into foreground activity/proxy sync.
+        if (found.size() > 1 || (found.size() == 1 && !found.contains(rootLoader))) {
+            Iterator<ClassLoader> it = found.iterator();
+            while (it.hasNext()) {
+                ClassLoader candidate = it.next();
+                if (candidate != rootLoader && isUnreadyOtherLoader(candidate, rootLoader)) {
+                    it.remove();
+                }
+            }
+        }
         return found;
     }
 
-    static synchronized void syncAllPluginActivities(android.app.Activity activity) {
+    /**
+     * Synchronizes the foreground Activity across all already-ready plugin ClassLoaders and their
+     * confirmed owned child loaders without contending on {@code LOADER_LOCK} or scanning global
+     * Application lifecycle callbacks.
+     */
+    static void syncAllPluginActivities(android.app.Activity activity) {
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
-        LinkedHashSet<ClassLoader> snapshot = new LinkedHashSet<>(LOADERS.values());
-        synchronized (ALL_PLUGIN_LOADERS) {
-            snapshot.addAll(ALL_PLUGIN_LOADERS);
-        }
-        for (ClassLoader loader : snapshot) {
-            syncPluginProxyPort(loader, ProxyAddress.port);
-            syncPluginActivity(loader, activity);
+        LinkedHashSet<ClassLoader> visited = new LinkedHashSet<>();
+        for (ClassLoader loader : snapshotReadyPluginLoaders()) {
+            for (ClassLoader cl : collectPluginLoaders(loader, null)) {
+                if (cl == null || isUnreadyLoader(cl) || !visited.add(cl)) continue;
+                syncSingleLoaderProxyPort(cl, ProxyAddress.port);
+                syncSingleLoaderActivity(cl, activity);
+            }
         }
     }
 
@@ -592,17 +963,22 @@ public final class CspEngine implements SourceEngine {
         if (loader == null || activity == null || activity.isFinishing() || activity.isDestroyed())
             return;
         for (ClassLoader cl : collectPluginLoaders(loader, null)) {
-            for (String initName :
-                    new String[] {
-                        "com.github.catvod.spider.Init",
-                        "com.github.catvod.spider.InitOrigin",
-                        "com.github.catvod.spider.AwInit"
-                    }) {
-                try {
-                    Class<?> initClass = Class.forName(initName, false, cl);
-                    syncSingleInitClass(initClass, activity);
-                } catch (Throwable ignored) {
-                }
+            syncSingleLoaderActivity(cl, activity);
+        }
+    }
+
+    private static void syncSingleLoaderActivity(ClassLoader cl, android.app.Activity activity) {
+        if (cl == null || activity == null) return;
+        for (String initName :
+                new String[] {
+                    "com.github.catvod.spider.Init",
+                    "com.github.catvod.spider.InitOrigin",
+                    "com.github.catvod.spider.AwInit"
+                }) {
+            try {
+                Class<?> initClass = Class.forName(initName, false, cl);
+                syncSingleInitClass(initClass, activity);
+            } catch (Throwable ignored) {
             }
         }
     }
@@ -723,27 +1099,32 @@ public final class CspEngine implements SourceEngine {
     static void syncPluginProxyPort(ClassLoader loader, int port) {
         if (loader == null || port <= 0) return;
         for (ClassLoader cl : collectPluginLoaders(loader, null)) {
-            for (String proxyClassName :
-                    new String[] {
-                        "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
-                    }) {
+            syncSingleLoaderProxyPort(cl, port);
+        }
+    }
+
+    private static void syncSingleLoaderProxyPort(ClassLoader cl, int port) {
+        if (cl == null || port <= 0) return;
+        for (String proxyClassName :
+                new String[] {
+                    "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
+                }) {
+            try {
+                Class<?> proxyClass = Class.forName(proxyClassName, false, cl);
                 try {
-                    Class<?> proxyClass = Class.forName(proxyClassName, false, cl);
-                    try {
-                        proxyClass.getMethod("set", int.class).invoke(null, port);
-                        continue;
-                    } catch (Throwable ignored) {
-                    }
-                    for (Field f : proxyClass.getDeclaredFields()) {
-                        if (Modifier.isStatic(f.getModifiers())
-                                && (f.getType() == int.class || f.getType() == Integer.class)
-                                && f.getName().toLowerCase(Locale.ROOT).contains("port")) {
-                            f.setAccessible(true);
-                            f.setInt(null, port);
-                        }
-                    }
+                    proxyClass.getMethod("set", int.class).invoke(null, port);
+                    continue;
                 } catch (Throwable ignored) {
                 }
+                for (Field f : proxyClass.getDeclaredFields()) {
+                    if (Modifier.isStatic(f.getModifiers())
+                            && (f.getType() == int.class || f.getType() == Integer.class)
+                            && f.getName().toLowerCase(Locale.ROOT).contains("port")) {
+                        f.setAccessible(true);
+                        f.setInt(null, port);
+                    }
+                }
+            } catch (Throwable ignored) {
             }
         }
     }
@@ -852,13 +1233,6 @@ public final class CspEngine implements SourceEngine {
 
     private static Application.ActivityLifecycleCallbacks wrapLifecycleCallback(
             final Application.ActivityLifecycleCallbacks delegate) {
-        if (delegate != null) {
-            ClassLoader dcl = delegate.getClass().getClassLoader();
-            if (dcl instanceof dalvik.system.BaseDexClassLoader
-                    && dcl != CspEngine.class.getClassLoader()) {
-                ALL_PLUGIN_LOADERS.add(dcl);
-            }
-        }
         return new Application.ActivityLifecycleCallbacks() {
             @Override
             public void onActivityCreated(android.app.Activity a, android.os.Bundle b) {

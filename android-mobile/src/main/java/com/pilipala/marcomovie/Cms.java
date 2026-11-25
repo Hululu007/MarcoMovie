@@ -39,6 +39,75 @@ public final class Cms {
                         t.setDaemon(true);
                         return t;
                     });
+    static final int MAX_DOH_RACE_THREADS = 12;
+    private static final Object DOH_RACE_CAPACITY_LOCK = new Object();
+    private static volatile long dohRaceSubmitWaitMsOverride = -1L;
+    private static volatile int directReadTimeoutMsOverride = 0;
+    private static volatile boolean failDirectInvalidHostsForTest = false;
+    private static final ThreadPoolExecutor DOH_RACE_EXECUTOR = createDohRaceExecutor();
+
+    private static void signalDohRaceCapacity() {
+        synchronized (DOH_RACE_CAPACITY_LOCK) {
+            DOH_RACE_CAPACITY_LOCK.notifyAll();
+        }
+    }
+
+    private static ThreadPoolExecutor createDohRaceExecutor() {
+        ThreadPoolExecutor exec =
+                new ThreadPoolExecutor(
+                        MAX_DOH_RACE_THREADS,
+                        MAX_DOH_RACE_THREADS,
+                        30L,
+                        TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<Runnable>(64),
+                        r -> {
+                            Thread t = new Thread(r, "cms-doh-race");
+                            t.setDaemon(true);
+                            return t;
+                        }) {
+                    @Override
+                    protected void beforeExecute(Thread t, Runnable r) {
+                        super.beforeExecute(t, r);
+                        signalDohRaceCapacity();
+                    }
+
+                    @Override
+                    protected void afterExecute(Runnable r, Throwable t) {
+                        super.afterExecute(r, t);
+                        signalDohRaceCapacity();
+                    }
+                };
+        exec.allowCoreThreadTimeOut(true);
+        return exec;
+    }
+
+    static int dohRacePoolMaxSize() {
+        return DOH_RACE_EXECUTOR.getMaximumPoolSize();
+    }
+
+    static int dohRacePoolActiveCount() {
+        return DOH_RACE_EXECUTOR.getActiveCount();
+    }
+
+    static int dohRaceQueueSize() {
+        return DOH_RACE_EXECUTOR.getQueue().size();
+    }
+
+    static ThreadPoolExecutor dohRaceExecutorForTest() {
+        return DOH_RACE_EXECUTOR;
+    }
+
+    static void setDohRaceSubmitWaitMsForTest(long waitMs) {
+        dohRaceSubmitWaitMsOverride = waitMs;
+    }
+
+    static void setDirectReadTimeoutMsForTest(int timeoutMs) {
+        directReadTimeoutMsOverride = timeoutMs;
+    }
+
+    static void setFailDirectInvalidHostsForTest(boolean enabled) {
+        failDirectInvalidHostsForTest = enabled;
+    }
 
     private static final class DohCacheEntry {
         final List<InetAddress> addresses;
@@ -60,6 +129,40 @@ public final class Cms {
 
     static void clearDohCacheForTest() {
         DOH_CACHE.clear();
+    }
+
+    /**
+     * Pure-JVM helper: deduplicates and bounds DoH-resolved candidate IPs (prioritizing distinct
+     * IPv4 addresses first) for concurrent Happy-Eyeballs racing when system DNS is poisoned or
+     * individual CDN edges suffer packet loss.
+     */
+    static List<InetAddress> selectDohRaceCandidates(List<InetAddress> resolved, int maxCount) {
+        if (resolved == null || resolved.isEmpty() || maxCount <= 0) {
+            return Collections.emptyList();
+        }
+        LinkedHashMap<String, InetAddress> uniqueV4 = new LinkedHashMap<>();
+        LinkedHashMap<String, InetAddress> uniqueV6 = new LinkedHashMap<>();
+        for (InetAddress addr : resolved) {
+            if (addr == null) continue;
+            String key = addr.getHostAddress();
+            if (key == null || key.isEmpty()) continue;
+            if (addr instanceof Inet6Address) {
+                if (!uniqueV6.containsKey(key)) uniqueV6.put(key, addr);
+            } else {
+                if (!uniqueV4.containsKey(key)) uniqueV4.put(key, addr);
+            }
+        }
+        List<InetAddress> out =
+                new ArrayList<>(Math.min(maxCount, uniqueV4.size() + uniqueV6.size()));
+        for (InetAddress addr : uniqueV4.values()) {
+            if (out.size() >= maxCount) return out;
+            out.add(addr);
+        }
+        for (InetAddress addr : uniqueV6.values()) {
+            if (out.size() >= maxCount) return out;
+            out.add(addr);
+        }
+        return out;
     }
 
     /**
@@ -295,7 +398,8 @@ public final class Cms {
                 description,
                 action,
                 tag,
-                doubanScore = "";
+                doubanScore = "",
+                doubanId = "";
         public final List<Line> lines = new ArrayList<>();
     }
 
@@ -838,8 +942,33 @@ public final class Cms {
         }
     }
 
+    /** Computes exact UTF-8 byte length without allocating a full byte[] copy for large payloads. */
+    public static int utf8ByteLength(String text) {
+        if (text == null) return 0;
+        int len = text.length();
+        int bytes = 0;
+        for (int i = 0; i < len; i++) {
+            char c = text.charAt(i);
+            if (c <= 0x7F) {
+                bytes += 1;
+            } else if (c <= 0x7FF) {
+                bytes += 2;
+            } else if (Character.isHighSurrogate(c)
+                    && i + 1 < len
+                    && Character.isLowSurrogate(text.charAt(i + 1))) {
+                bytes += 4;
+                i++;
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
+    }
+
     public static Config parseConfig(String text, String origin) throws Exception {
-        if (text == null || text.length() > MAX_JSON) throw new IOException("配置超过 16 MB 限制");
+        if (text == null || text.length() > MAX_JSON || utf8ByteLength(text) > MAX_JSON) {
+            throw new IOException("配置超过 16 MB 限制");
+        }
         String trimmed = text.trim().replaceFirst("^\\uFEFF", "");
         if (isHtml(trimmed)) {
             throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
@@ -1144,12 +1273,53 @@ public final class Cms {
         return true;
     }
 
+    private static boolean needsCommentOrTrailingCommaStrip(String source) {
+        int len = source.length();
+        boolean quoted = false, escaped = false;
+        for (int i = 0; i < len; i++) {
+            char ch = source.charAt(i);
+            if (quoted) {
+                if (escaped) {
+                    escaped = false;
+                } else if (ch == '\\') {
+                    escaped = true;
+                } else if (ch == '"') {
+                    quoted = false;
+                }
+                continue;
+            }
+            if (ch == '"') {
+                quoted = true;
+                continue;
+            }
+            if (ch == '/' && i + 1 < len) {
+                char next = source.charAt(i + 1);
+                if (next == '/' || next == '*') return true;
+            }
+            if (ch == ',') {
+                int j = i + 1;
+                while (j < len && Character.isWhitespace(source.charAt(j))) j++;
+                if (j < len && (source.charAt(j) == '}' || source.charAt(j) == ']')) {
+                    return true;
+                }
+                if (j > i + 1) {
+                    i = j - 1;
+                }
+            }
+        }
+        return false;
+    }
+
     public static String withoutComments(String source) throws IOException {
         if (source == null) return "";
         if (source.startsWith("\uFEFF")) source = source.substring(1);
-        StringBuilder clean = new StringBuilder();
+        if (!needsCommentOrTrailingCommaStrip(source)) {
+            return source;
+        }
+        int len = source.length();
+        StringBuilder clean = new StringBuilder(len);
         boolean quoted = false, escaped = false;
-        for (int i = 0; i < source.length(); i++) {
+        for (int i = 0; i < len; i++) {
             char ch = source.charAt(i);
             if (quoted) {
                 clean.append(ch);
@@ -1163,31 +1333,31 @@ public final class Cms {
                 clean.append(ch);
                 continue;
             }
-            if (ch == '/' && i + 1 < source.length() && source.charAt(i + 1) == '/') {
-                while (i < source.length() && source.charAt(i) != '\n') i++;
+            if (ch == '/' && i + 1 < len && source.charAt(i + 1) == '/') {
+                while (i < len && source.charAt(i) != '\n') i++;
                 clean.append('\n');
                 continue;
             }
-            if (ch == '/' && i + 1 < source.length() && source.charAt(i + 1) == '*') {
+            if (ch == '/' && i + 1 < len && source.charAt(i + 1) == '*') {
                 i += 2;
-                while (i + 1 < source.length()
-                        && !(source.charAt(i) == '*' && source.charAt(i + 1) == '/')) i++;
-                if (i + 1 >= source.length()) throw new IOException("配置注释没有结束");
+                while (i + 1 < len && !(source.charAt(i) == '*' && source.charAt(i + 1) == '/'))
+                    i++;
+                if (i + 1 >= len) throw new IOException("配置注释没有结束");
                 i++;
                 clean.append(' ');
                 continue;
             }
             clean.append(ch);
         }
-        // Strip trailing commas before '}' or ']' outside string literals
-        String noComments = clean.toString();
-        StringBuilder out = new StringBuilder(noComments.length());
+        // Strip trailing commas before '}' or ']' outside string literals in-place in clean
+        int cLen = clean.length();
+        int write = 0;
         quoted = false;
         escaped = false;
-        for (int i = 0; i < noComments.length(); i++) {
-            char ch = noComments.charAt(i);
+        for (int i = 0; i < cLen; i++) {
+            char ch = clean.charAt(i);
             if (quoted) {
-                out.append(ch);
+                clean.setCharAt(write++, ch);
                 if (escaped) escaped = false;
                 else if (ch == '\\') escaped = true;
                 else if (ch == '"') quoted = false;
@@ -1195,20 +1365,20 @@ public final class Cms {
             }
             if (ch == '"') {
                 quoted = true;
-                out.append(ch);
+                clean.setCharAt(write++, ch);
                 continue;
             }
             if (ch == ',') {
                 int j = i + 1;
-                while (j < noComments.length() && Character.isWhitespace(noComments.charAt(j))) j++;
-                if (j < noComments.length()
-                        && (noComments.charAt(j) == '}' || noComments.charAt(j) == ']')) {
+                while (j < cLen && Character.isWhitespace(clean.charAt(j))) j++;
+                if (j < cLen && (clean.charAt(j) == '}' || clean.charAt(j) == ']')) {
                     continue;
                 }
             }
-            out.append(ch);
+            clean.setCharAt(write++, ch);
         }
-        return out.toString();
+        clean.setLength(write);
+        return clean.toString();
     }
 
     public static String read(InputStream in, int limit) throws IOException {
@@ -1216,7 +1386,7 @@ public final class Cms {
         byte[] buf = new byte[8192];
         int n;
         while ((n = in.read(buf)) != -1) {
-            if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException();
+            RequestScope.checkCurrent();
             if (out.size() + n > limit) throw new IOException("响应超过大小限制");
             out.write(buf, 0, n);
         }
@@ -1659,17 +1829,375 @@ public final class Cms {
     }
 
     public static String fetch(String address, Map<String, String> headers) throws Exception {
-        return fetch(address, headers, null, USER_AGENT);
+        return fetchInternal(address, headers, null, USER_AGENT, false);
     }
 
     public static String fetch(
             String address, Map<String, String> headers, Map<String, String> form)
             throws Exception {
-        return fetch(address, headers, form, USER_AGENT);
+        return fetchInternal(address, headers, form, USER_AGENT, false);
+    }
+
+    /**
+     * Fetches a non-HTML resource (e.g. Python/JS spider script) where a 200 HTML interception page
+     * must be treated as a soft failure so alternate UAs or healthy DoH edges can win.
+     */
+    public static String fetchNonHtml(String address, Map<String, String> headers)
+            throws Exception {
+        return fetchInternal(address, headers, null, USER_AGENT, true);
+    }
+
+    private static final class DohRaceOutcome {
+        final String body;
+        final InetAddress winnerIp;
+        final boolean htmlBody;
+        final Exception error;
+
+        DohRaceOutcome(String body, InetAddress winnerIp, boolean htmlBody, Exception error) {
+            this.body = body;
+            this.winnerIp = winnerIp;
+            this.htmlBody = htmlBody;
+            this.error = error;
+        }
+    }
+
+    private static boolean isCancellationException(Throwable err, RequestScope parentScope) {
+        if (parentScope != null && parentScope.cancelled) return true;
+        return err instanceof InterruptedIOException && !(err instanceof SocketTimeoutException);
+    }
+
+    private static void rethrowIfNonRetryableOrFatalHttp(Exception err) throws Exception {
+        if (err instanceof NonRetryableFetchException) {
+            throw err;
+        }
+        if (err instanceof HttpStatusException && ((HttpStatusException) err).status != 403) {
+            throw err;
+        }
+    }
+
+    private static DohRaceOutcome extractRaceOutcome(
+            Future<DohRaceOutcome> done, RequestScope parentScope) throws Exception {
+        try {
+            return done.get();
+        } catch (ExecutionException ee) {
+            Throwable cause = ee.getCause();
+            if (isCancellationException(cause, parentScope)) {
+                throw cause instanceof InterruptedIOException
+                        ? (InterruptedIOException) cause
+                        : new InterruptedIOException("Request cancelled");
+            }
+            Exception err =
+                    cause instanceof Exception
+                            ? (Exception) cause
+                            : new IOException(String.valueOf(cause));
+            return new DohRaceOutcome(null, null, false, err);
+        }
+    }
+
+    /**
+     * Executes a DoH fallback attempt across deduplicated candidate IPs:
+     *
+     * <ul>
+     *   <li>When {@code body != null} (POST), NEVER sends duplicate request bodies concurrently;
+     *       tries candidates sequentially and stops retrying once request bytes have been written.
+     *   <li>When {@code body == null} (GET) and multiple IPs exist, races up to 4 IPs concurrently
+     *       (Happy Eyeballs) on the bounded {@link #DOH_RACE_EXECUTOR}, waiting boundedly and
+     *       cancellably if saturated rather than executing extra network I/O on the caller thread,
+     *       propagating outer {@link RequestScope} cancellation to every connection, and letting
+     *       healthy edges beat fast 5xx/HTML errors from degraded edges.
+     * </ul>
+     */
+    private static DohRaceOutcome raceDohAddresses(
+            final URL initialUrl,
+            final Map<String, String> headers,
+            final byte[] body,
+            final String effectiveUa,
+            final boolean forceUaOverride,
+            final List<InetAddress> dohAddrs,
+            final boolean rejectHtml,
+            final int connectTimeoutMs,
+            final int readTimeoutMs,
+            final boolean[] bodyWrittenOut)
+            throws Exception {
+        final RequestScope parentScope = RequestScope.current();
+        if (parentScope != null) parentScope.check();
+        if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+
+        List<InetAddress> candidates = selectDohRaceCandidates(dohAddrs, 4);
+        if (candidates.isEmpty()) {
+            return new DohRaceOutcome(null, null, false, null);
+        }
+
+        // Single IP or POST (non-idempotent body): run sequentially on caller thread so POST bodies
+        // are written at most once and single-IP error semantics match direct fetches exactly.
+        if (candidates.size() == 1 || body != null) {
+            boolean[] effectiveBodyWritten =
+                    bodyWrittenOut != null ? bodyWrittenOut : new boolean[] {false};
+            DohRaceOutcome fallbackHtmlOr403 = null;
+            Exception firstErr = null;
+            for (int idx = 0; idx < candidates.size(); idx++) {
+                if (parentScope != null) parentScope.check();
+                if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+                InetAddress candidateIp = candidates.get(idx);
+                try {
+                    String res =
+                            fetchOnce(
+                                    initialUrl,
+                                    headers,
+                                    body,
+                                    effectiveUa,
+                                    forceUaOverride,
+                                    true,
+                                    candidateIp,
+                                    connectTimeoutMs,
+                                    readTimeoutMs,
+                                    null,
+                                    effectiveBodyWritten,
+                                    rejectHtml);
+                    if (!rejectHtml || !isHtml(res)) {
+                        return new DohRaceOutcome(res, candidateIp, false, null);
+                    }
+                    if (fallbackHtmlOr403 == null) {
+                        fallbackHtmlOr403 = new DohRaceOutcome(res, candidateIp, true, null);
+                    }
+                    // For single-IP or after a POST body was written, stop immediately.
+                    if (candidates.size() == 1 || effectiveBodyWritten[0]) {
+                        return fallbackHtmlOr403;
+                    }
+                } catch (Exception e) {
+                    if (isCancellationException(e, parentScope)) {
+                        throw e instanceof InterruptedIOException
+                                ? (InterruptedIOException) e
+                                : new InterruptedIOException("Request cancelled");
+                    }
+                    if (effectiveBodyWritten[0]) {
+                        return new DohRaceOutcome(null, candidateIp, false, e);
+                    }
+                    rethrowIfNonRetryableOrFatalHttp(e);
+                    if (e instanceof HttpStatusException) {
+                        if (fallbackHtmlOr403 == null) {
+                            fallbackHtmlOr403 = new DohRaceOutcome(null, candidateIp, false, e);
+                        }
+                        if (candidates.size() == 1) {
+                            return fallbackHtmlOr403;
+                        }
+                        continue;
+                    }
+                    if (firstErr == null) firstErr = e;
+                }
+            }
+            if (fallbackHtmlOr403 != null) return fallbackHtmlOr403;
+            return new DohRaceOutcome(null, candidates.get(0), false, firstErr);
+        }
+
+        final RequestScope raceScope = new RequestScope();
+        final Thread callerThread = Thread.currentThread();
+        final java.util.concurrent.atomic.AtomicBoolean cancelledByParent =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        final Runnable onParentCancel =
+                () -> {
+                    cancelledByParent.set(true);
+                    raceScope.cancel();
+                    callerThread.interrupt();
+                    signalDohRaceCapacity();
+                };
+        if (parentScope != null) {
+            RequestScope.onCancel(onParentCancel);
+            if (parentScope.cancelled) {
+                RequestScope.offCancel(onParentCancel);
+                raceScope.cancel();
+                throw new InterruptedIOException("Request cancelled");
+            }
+        }
+
+        final LinkedBlockingQueue<FutureTask<DohRaceOutcome>> completedQueue =
+                new LinkedBlockingQueue<>();
+        final List<FutureTask<DohRaceOutcome>> futures = new ArrayList<>(candidates.size());
+        final long waitBudgetMs =
+                dohRaceSubmitWaitMsOverride >= 0L
+                        ? dohRaceSubmitWaitMsOverride
+                        : Math.min(connectTimeoutMs, 1500L);
+        final long submitDeadlineNs =
+                System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(waitBudgetMs);
+
+        DohRaceOutcome fallbackHtmlOr403 = null;
+        NonRetryableFetchException firstFatal = null;
+        HttpStatusException firstNon403Http = null;
+        Exception firstErr = null;
+        int collectedCount = 0;
+
+        try {
+            for (final InetAddress candidateIp : candidates) {
+                while (true) {
+                    if (parentScope != null) parentScope.check();
+                    if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+                    final FutureTask<DohRaceOutcome> task =
+                            new FutureTask<DohRaceOutcome>(
+                                    () ->
+                                            raceScope.call(
+                                                    () -> {
+                                                        try {
+                                                            String res =
+                                                                    fetchOnce(
+                                                                            initialUrl,
+                                                                            headers,
+                                                                            null,
+                                                                            effectiveUa,
+                                                                            forceUaOverride,
+                                                                            true,
+                                                                            candidateIp,
+                                                                            connectTimeoutMs,
+                                                                            readTimeoutMs,
+                                                                            parentScope,
+                                                                            null,
+                                                                            rejectHtml);
+                                                            return new DohRaceOutcome(
+                                                                    res,
+                                                                    candidateIp,
+                                                                    rejectHtml && isHtml(res),
+                                                                    null);
+                                                        } catch (Exception e) {
+                                                            return new DohRaceOutcome(
+                                                                    null, candidateIp, false, e);
+                                                        }
+                                                    })) {
+                                @Override
+                                protected void done() {
+                                    completedQueue.offer(this);
+                                }
+                            };
+                    try {
+                        DOH_RACE_EXECUTOR.execute(task);
+                        futures.add(task);
+                        break;
+                    } catch (RejectedExecutionException saturated) {
+                        // Never bypass the bounded pool by executing network I/O on the caller
+                        // thread. Reap any already-completed sibling first; otherwise wait
+                        // boundedly (and cancellably) for pool capacity, or fail with busy.
+                        while (collectedCount < futures.size()) {
+                            Future<DohRaceOutcome> early = completedQueue.poll();
+                            if (early == null) break;
+                            collectedCount++;
+                            DohRaceOutcome out = extractRaceOutcome(early, parentScope);
+                            if (out == null) continue;
+                            if (out.error == null) {
+                                if (!out.htmlBody) {
+                                    if (parentScope != null) parentScope.check();
+                                    return out;
+                                }
+                                if (fallbackHtmlOr403 == null) fallbackHtmlOr403 = out;
+                            } else if (isCancellationException(out.error, parentScope)) {
+                                throw out.error instanceof InterruptedIOException
+                                        ? (InterruptedIOException) out.error
+                                        : new InterruptedIOException("Request cancelled");
+                            } else if (out.error instanceof NonRetryableFetchException) {
+                                if (firstFatal == null)
+                                    firstFatal = (NonRetryableFetchException) out.error;
+                            } else if (out.error instanceof HttpStatusException) {
+                                HttpStatusException httpErr = (HttpStatusException) out.error;
+                                if (httpErr.status == 403) {
+                                    if (fallbackHtmlOr403 == null) fallbackHtmlOr403 = out;
+                                } else if (firstNon403Http == null) {
+                                    firstNon403Http = httpErr;
+                                }
+                            } else if (firstErr == null) {
+                                firstErr = out.error;
+                            }
+                        }
+                        long remainingNs = submitDeadlineNs - System.nanoTime();
+                        if (remainingNs <= 0L) {
+                            throw new NonRetryableFetchException("并发请求繁忙，请稍后重试");
+                        }
+                        long waitMs =
+                                Math.min(
+                                        50L,
+                                        Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remainingNs)));
+                        synchronized (DOH_RACE_CAPACITY_LOCK) {
+                            if (parentScope != null) parentScope.check();
+                            if (Thread.currentThread().isInterrupted()) {
+                                throw new InterruptedIOException();
+                            }
+                            DOH_RACE_CAPACITY_LOCK.wait(waitMs);
+                        }
+                    }
+                }
+            }
+
+            for (int i = collectedCount; i < futures.size(); i++) {
+                if (parentScope != null) parentScope.check();
+                if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+                Future<DohRaceOutcome> done = completedQueue.take();
+                if (parentScope != null) parentScope.check();
+                DohRaceOutcome out = extractRaceOutcome(done, parentScope);
+                if (out == null) continue;
+                if (out.error == null) {
+                    if (!out.htmlBody) {
+                        if (parentScope != null) parentScope.check();
+                        return out;
+                    }
+                    if (fallbackHtmlOr403 == null) fallbackHtmlOr403 = out;
+                    continue;
+                }
+                if (isCancellationException(out.error, parentScope)) {
+                    throw out.error instanceof InterruptedIOException
+                            ? (InterruptedIOException) out.error
+                            : new InterruptedIOException("Request cancelled");
+                }
+                // Let remaining in-flight candidates finish before failing on a single edge's
+                // 5xx/4xx/fatal redirect error so a healthy sibling IP can still win cleanly.
+                if (out.error instanceof NonRetryableFetchException) {
+                    if (firstFatal == null) firstFatal = (NonRetryableFetchException) out.error;
+                    continue;
+                }
+                if (out.error instanceof HttpStatusException) {
+                    HttpStatusException httpErr = (HttpStatusException) out.error;
+                    if (httpErr.status == 403) {
+                        if (fallbackHtmlOr403 == null) fallbackHtmlOr403 = out;
+                    } else if (firstNon403Http == null) {
+                        firstNon403Http = httpErr;
+                    }
+                    continue;
+                }
+                if (firstErr == null) firstErr = out.error;
+            }
+            if (parentScope != null) parentScope.check();
+            if (fallbackHtmlOr403 != null) return fallbackHtmlOr403;
+            if (firstFatal != null) throw firstFatal;
+            if (firstNon403Http != null) throw firstNon403Http;
+            return new DohRaceOutcome(null, null, false, firstErr);
+        } catch (InterruptedException ie) {
+            if (!cancelledByParent.get()) {
+                Thread.currentThread().interrupt();
+            }
+            throw new InterruptedIOException("Request cancelled");
+        } finally {
+            if (parentScope != null) {
+                RequestScope.offCancel(onParentCancel);
+            }
+            raceScope.cancel();
+            boolean removedOrCancelled = false;
+            for (FutureTask<DohRaceOutcome> f : futures) {
+                if (DOH_RACE_EXECUTOR.remove(f)) {
+                    removedOrCancelled = true;
+                }
+                if (f.cancel(true)) {
+                    removedOrCancelled = true;
+                }
+            }
+            if (removedOrCancelled) {
+                DOH_RACE_EXECUTOR.purge();
+                signalDohRaceCapacity();
+            }
+            if (cancelledByParent.get()) {
+                // Clear the self-injected interrupt used only to unblock wait()/take().
+                Thread.interrupted();
+            }
+        }
     }
 
     public static String fetchImport(String address) throws Exception {
         if (!isHttp(address)) throw new IOException("只支持 HTTP(S) 地址");
+        RequestScope.checkCurrent();
         URL initialUrl = new URL(normalizeHttp(address));
         Map<String, String> headers = new LinkedHashMap<>();
         if (initialUrl.getUserInfo() != null) {
@@ -1698,7 +2226,19 @@ public final class Cms {
                 throw e;
             }
             firstErr = e;
+        } catch (InterruptedIOException interrupted) {
+            if (!(interrupted instanceof SocketTimeoutException)
+                    || Thread.currentThread().isInterrupted()
+                    || (RequestScope.current() != null && RequestScope.current().cancelled)) {
+                throw interrupted;
+            }
+            List<InetAddress> dohAddrs = resolveViaDoh(initialUrl.getHost());
+            if (dohAddrs.isEmpty()) {
+                throw interrupted;
+            }
+            firstErr = interrupted;
         } catch (IOException transportErr) {
+            RequestScope.checkCurrent();
             List<InetAddress> dohAddrs = resolveViaDoh(initialUrl.getHost());
             if (dohAddrs.isEmpty()) {
                 throw transportErr;
@@ -1708,6 +2248,7 @@ public final class Cms {
         if (firstErr == null || firstErr instanceof HttpStatusException) {
             for (String ua :
                     new String[] {SAFARI_USER_AGENT, MOBILE_USER_AGENT, TVBOX_USER_AGENT}) {
+                RequestScope.checkCurrent();
                 try {
                     result = fetchOnce(initialUrl, headers, null, ua, true, false);
                     if (!isHtml(result)) {
@@ -1730,15 +2271,34 @@ public final class Cms {
         }
         List<InetAddress> dohAddrs = resolveViaDoh(initialUrl.getHost());
         if (!dohAddrs.isEmpty()) {
-            for (String ua :
-                    new String[] {
-                        USER_AGENT, SAFARI_USER_AGENT, MOBILE_USER_AGENT, TVBOX_USER_AGENT
-                    }) {
-                try {
-                    result = fetchOnce(initialUrl, headers, null, ua, true, true);
-                    if (!isHtml(result)) {
-                        return result;
+            // Concurrent Happy-Eyeballs race across up to 4 DoH IPs (2 attempts max on transient
+            // edge packet drops), retrying alternate UAs only if an IP returned HTTP 403 or HTML.
+            int maxRounds = dohAddrs.size() > 1 ? 2 : 1;
+            for (int round = 0; round < maxRounds; round++) {
+                RequestScope.checkCurrent();
+                if (round > 0) {
+                    try {
+                        Thread.sleep(250L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new InterruptedIOException();
                     }
+                    RequestScope.checkCurrent();
+                }
+                DohRaceOutcome raceOut;
+                try {
+                    raceOut =
+                            raceDohAddresses(
+                                    initialUrl,
+                                    headers,
+                                    null,
+                                    USER_AGENT,
+                                    true,
+                                    dohAddrs,
+                                    true,
+                                    round == 0 ? 6000 : 9000,
+                                    14000,
+                                    null);
                 } catch (NonRetryableFetchException fatal) {
                     if (fatal.getCause() instanceof IOException)
                         throw (IOException) fatal.getCause();
@@ -1746,11 +2306,61 @@ public final class Cms {
                 } catch (HttpStatusException e) {
                     if (e.status != 403) throw e;
                     firstErr = e;
-                } catch (IOException ignored) {
+                    break;
                 }
-            }
-            if (result != null && isHtml(result)) {
-                throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+                if (raceOut.error == null && !raceOut.htmlBody && raceOut.body != null) {
+                    return raceOut.body;
+                }
+                boolean is403 =
+                        raceOut.error instanceof HttpStatusException
+                                && ((HttpStatusException) raceOut.error).status == 403;
+                if (raceOut.htmlBody || is403) {
+                    if (raceOut.body != null) result = raceOut.body;
+                    if (raceOut.error != null) firstErr = raceOut.error;
+                    InetAddress reachableIp = raceOut.winnerIp;
+                    for (String ua :
+                            new String[] {SAFARI_USER_AGENT, MOBILE_USER_AGENT, TVBOX_USER_AGENT}) {
+                        RequestScope.checkCurrent();
+                        try {
+                            result =
+                                    fetchOnce(
+                                            initialUrl,
+                                            headers,
+                                            null,
+                                            ua,
+                                            true,
+                                            true,
+                                            reachableIp,
+                                            9000,
+                                            15000,
+                                            null,
+                                            null,
+                                            true);
+                            if (!isHtml(result)) {
+                                return result;
+                            }
+                        } catch (NonRetryableFetchException fatal) {
+                            if (fatal.getCause() instanceof IOException)
+                                throw (IOException) fatal.getCause();
+                            throw new IOException(fatal.getMessage());
+                        } catch (HttpStatusException e) {
+                            if (e.status != 403) throw e;
+                            firstErr = e;
+                        } catch (InterruptedIOException interrupted) {
+                            if (isCancellationException(interrupted, RequestScope.current())) {
+                                throw interrupted;
+                            }
+                        } catch (IOException ignored) {
+                        }
+                    }
+                    if (result != null && isHtml(result)) {
+                        throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+                    }
+                    break;
+                }
+                if (raceOut.error != null && firstErr == null) {
+                    firstErr = raceOut.error;
+                }
             }
         }
         if (firstErr != null) throw firstErr;
@@ -1881,7 +2491,18 @@ public final class Cms {
     public static String fetch(
             String address, Map<String, String> headers, Map<String, String> form, String defaultUa)
             throws Exception {
+        return fetchInternal(address, headers, form, defaultUa, false);
+    }
+
+    private static String fetchInternal(
+            String address,
+            Map<String, String> headers,
+            Map<String, String> form,
+            String defaultUa,
+            boolean rejectHtml)
+            throws Exception {
         if (!isHttp(address)) throw new IOException("只支持 HTTP(S) 地址");
+        RequestScope.checkCurrent();
         URL initialUrl = new URL(normalizeHttp(address));
         Map<String, String> baseForwarded = new LinkedHashMap<>();
         byte[] body = null;
@@ -1926,53 +2547,111 @@ public final class Cms {
         String primaryUa = callerUa != null ? callerUa : fallbackDefaultUa;
 
         Exception firstFailure;
+        boolean directGotHtml = false;
+        // Track whether a non-idempotent POST body has started transmission across direct, UA
+        // fallback, and DoH phases. Once true, never resend on 403 or post-send read failures.
+        final boolean[] bodyWritten = {false};
+        final int directReadTimeout =
+                directReadTimeoutMsOverride > 0 ? directReadTimeoutMsOverride : 18000;
         try {
-            return fetchOnce(initialUrl, baseForwarded, body, primaryUa, false, false);
+            String directRes =
+                    fetchOnce(
+                            initialUrl,
+                            baseForwarded,
+                            body,
+                            primaryUa,
+                            false,
+                            false,
+                            null,
+                            12000,
+                            directReadTimeout,
+                            null,
+                            bodyWritten,
+                            rejectHtml);
+            if (!rejectHtml || !isHtml(directRes)) {
+                return directRes;
+            }
+            directGotHtml = true;
+            firstFailure = new IOException("地址返回的是网页而不是脚本或配置（可能需要登录或被拦截）");
+            if (bodyWritten[0]) throw firstFailure;
         } catch (NonRetryableFetchException fatal) {
             if (fatal.getCause() instanceof IOException) throw (IOException) fatal.getCause();
             throw new IOException(fatal.getMessage());
         } catch (HttpStatusException httpErr) {
-            if (httpErr.status != 403) throw httpErr;
+            if (httpErr.status != 403 || bodyWritten[0]) throw httpErr;
             firstFailure = httpErr;
         } catch (InterruptedIOException interrupted) {
-            if (!(interrupted instanceof SocketTimeoutException)
-                    || Thread.currentThread().isInterrupted()) {
+            if (bodyWritten[0]
+                    || !(interrupted instanceof SocketTimeoutException)
+                    || Thread.currentThread().isInterrupted()
+                    || (RequestScope.current() != null && RequestScope.current().cancelled)) {
                 throw interrupted;
             }
             firstFailure = interrupted;
         } catch (IOException transportErr) {
-            if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+            RequestScope.checkCurrent();
+            if (bodyWritten[0]) throw transportErr;
             firstFailure = transportErr;
         }
 
         // Phase A: UA fallback (okhttp/3.15 -> Mobile Chrome UA -> TVBox UA -> Safari UA) when
-        // blocked (403) or reset after TCP handshake (skip if host failed DNS or refused TCP).
+        // blocked (403), HTML-intercepted (for rejectHtml callers), or reset after TCP handshake,
+        // strictly only when no request body has been transmitted.
         boolean tryUaFallback =
-                !(firstFailure instanceof UnknownHostException)
-                        && !(firstFailure instanceof ConnectException)
-                        && !(firstFailure instanceof SocketTimeoutException);
+                !bodyWritten[0]
+                        && (directGotHtml
+                                || (!(firstFailure instanceof UnknownHostException)
+                                        && !(firstFailure instanceof ConnectException)
+                                        && !(firstFailure instanceof SocketTimeoutException)));
         String[] fallbackUas = {MOBILE_USER_AGENT, TVBOX_USER_AGENT, SAFARI_USER_AGENT, USER_AGENT};
         if (tryUaFallback) {
             for (String candidateUa : fallbackUas) {
                 if (candidateUa.equals(primaryUa)) continue;
-                if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+                RequestScope.checkCurrent();
                 try {
-                    return fetchOnce(initialUrl, baseForwarded, body, candidateUa, true, false);
+                    String uaRes =
+                            fetchOnce(
+                                    initialUrl,
+                                    baseForwarded,
+                                    body,
+                                    candidateUa,
+                                    true,
+                                    false,
+                                    null,
+                                    12000,
+                                    directReadTimeout,
+                                    null,
+                                    bodyWritten,
+                                    rejectHtml);
+                    if (!rejectHtml || !isHtml(uaRes)) {
+                        return uaRes;
+                    }
+                    if (bodyWritten[0]) {
+                        throw new IOException("地址返回的是网页而不是脚本或配置（可能需要登录或被拦截）");
+                    }
                 } catch (NonRetryableFetchException fatal) {
                     if (fatal.getCause() instanceof IOException)
                         throw (IOException) fatal.getCause();
                     throw new IOException(fatal.getMessage());
                 } catch (HttpStatusException httpErr) {
-                    if (httpErr.status != 403) throw httpErr;
+                    if (httpErr.status != 403 || bodyWritten[0]) throw httpErr;
                     firstFailure = httpErr;
-                } catch (IOException ignored) {
-                    if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+                } catch (InterruptedIOException interrupted) {
+                    if (bodyWritten[0]
+                            || isCancellationException(interrupted, RequestScope.current())) {
+                        throw interrupted;
+                    }
+                } catch (IOException ioErr) {
+                    RequestScope.checkCurrent();
+                    if (bodyWritten[0]) throw ioErr;
                 }
             }
         }
 
         // Phase B: DoH resolution fallback against DNS pollution / blackhole / edge resets.
-        List<InetAddress> dohAddrs = resolveViaDoh(initialUrl.getHost());
+        // GET requests race up to 4 IPs concurrently; POST requests stay strictly single-write.
+        List<InetAddress> dohAddrs =
+                bodyWritten[0] ? Collections.emptyList() : resolveViaDoh(initialUrl.getHost());
         if (!dohAddrs.isEmpty()) {
             String[] dohUas =
                     primaryUa.equals(MOBILE_USER_AGENT)
@@ -1980,25 +2659,97 @@ public final class Cms {
                             : new String[] {
                                 primaryUa, MOBILE_USER_AGENT, TVBOX_USER_AGENT, SAFARI_USER_AGENT
                             };
-            for (String candidateUa : dohUas) {
-                if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
-                try {
-                    return fetchOnce(
-                            initialUrl,
-                            baseForwarded,
-                            body,
-                            candidateUa,
-                            !candidateUa.equals(primaryUa),
-                            true);
-                } catch (NonRetryableFetchException fatal) {
-                    if (fatal.getCause() instanceof IOException)
-                        throw (IOException) fatal.getCause();
-                    throw new IOException(fatal.getMessage());
-                } catch (HttpStatusException httpErr) {
-                    if (httpErr.status != 403) throw httpErr;
-                    firstFailure = httpErr;
-                } catch (IOException dohErr) {
-                    if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+            DohRaceOutcome raceOut;
+            try {
+                raceOut =
+                        raceDohAddresses(
+                                initialUrl,
+                                baseForwarded,
+                                body,
+                                primaryUa,
+                                false,
+                                dohAddrs,
+                                rejectHtml,
+                                dohAddrs.size() > 1 ? 6000 : 12000,
+                                directReadTimeout,
+                                bodyWritten);
+            } catch (NonRetryableFetchException fatal) {
+                if (fatal.getCause() instanceof IOException) throw (IOException) fatal.getCause();
+                throw new IOException(fatal.getMessage());
+            } catch (HttpStatusException httpErr) {
+                if (httpErr.status != 403 || bodyWritten[0]) throw httpErr;
+                firstFailure = httpErr;
+                raceOut = new DohRaceOutcome(null, null, false, httpErr);
+            }
+            if (raceOut.error == null && !raceOut.htmlBody && raceOut.body != null) {
+                return raceOut.body;
+            }
+            if (bodyWritten[0]) {
+                if (raceOut.error != null) {
+                    if (raceOut.error instanceof NonRetryableFetchException) {
+                        NonRetryableFetchException fatal =
+                                (NonRetryableFetchException) raceOut.error;
+                        if (fatal.getCause() instanceof IOException)
+                            throw (IOException) fatal.getCause();
+                        throw new IOException(fatal.getMessage());
+                    }
+                    throw raceOut.error;
+                }
+                if (raceOut.htmlBody) {
+                    throw new IOException("地址返回的是网页而不是脚本或配置（可能需要登录或被拦截）");
+                }
+                throw firstFailure;
+            }
+            boolean is403 =
+                    raceOut.error instanceof HttpStatusException
+                            && ((HttpStatusException) raceOut.error).status == 403;
+            if (raceOut.htmlBody || is403) {
+                if (raceOut.error != null) firstFailure = raceOut.error;
+                else if (raceOut.htmlBody) {
+                    firstFailure = new IOException("地址返回的是网页而不是脚本或配置（可能需要登录或被拦截）");
+                }
+                InetAddress reachableIp = raceOut.winnerIp;
+                for (int uIdx = 1; uIdx < dohUas.length; uIdx++) {
+                    if (bodyWritten[0]) break;
+                    String candidateUa = dohUas[uIdx];
+                    RequestScope.checkCurrent();
+                    try {
+                        String uaRes =
+                                fetchOnce(
+                                        initialUrl,
+                                        baseForwarded,
+                                        body,
+                                        candidateUa,
+                                        true,
+                                        true,
+                                        reachableIp,
+                                        9000,
+                                        directReadTimeout,
+                                        null,
+                                        bodyWritten,
+                                        rejectHtml);
+                        if (!rejectHtml || !isHtml(uaRes)) {
+                            return uaRes;
+                        }
+                        if (bodyWritten[0]) {
+                            throw new IOException("地址返回的是网页而不是脚本或配置（可能需要登录或被拦截）");
+                        }
+                    } catch (NonRetryableFetchException fatal) {
+                        if (fatal.getCause() instanceof IOException)
+                            throw (IOException) fatal.getCause();
+                        throw new IOException(fatal.getMessage());
+                    } catch (HttpStatusException httpErr) {
+                        if (httpErr.status != 403 || bodyWritten[0]) throw httpErr;
+                        firstFailure = httpErr;
+                    } catch (InterruptedIOException interrupted) {
+                        if (bodyWritten[0]
+                                || isCancellationException(interrupted, RequestScope.current())) {
+                            throw interrupted;
+                        }
+                    } catch (IOException dohErr) {
+                        RequestScope.checkCurrent();
+                        if (bodyWritten[0]) throw dohErr;
+                    }
                 }
             }
         }
@@ -2014,23 +2765,115 @@ public final class Cms {
             boolean forceUaOverride,
             boolean useDoh)
             throws Exception {
+        int readTimeout = directReadTimeoutMsOverride > 0 ? directReadTimeoutMsOverride : 18000;
+        return fetchOnce(
+                startUrl,
+                initialHeaders,
+                initialBody,
+                effectiveUa,
+                forceUaOverride,
+                useDoh,
+                null,
+                12000,
+                readTimeout,
+                null,
+                null,
+                false);
+    }
+
+    private static boolean isBodyAlreadyWritten(boolean[] bodyWrittenOut) {
+        return bodyWrittenOut != null && bodyWrittenOut.length > 0 && bodyWrittenOut[0];
+    }
+
+    private static boolean isRetryableCrossHostFatal(NonRetryableFetchException fatal) {
+        String msg = fatal != null ? fatal.getMessage() : null;
+        return msg != null && (msg.contains("重定向缺少地址") || msg.contains("重定向次数过多"));
+    }
+
+    private static String fetchOnce(
+            URL startUrl,
+            Map<String, String> initialHeaders,
+            byte[] initialBody,
+            String effectiveUa,
+            boolean forceUaOverride,
+            boolean useDoh,
+            InetAddress initialDohOverride,
+            int connectTimeoutMs,
+            int readTimeoutMs,
+            RequestScope extraParentScope,
+            boolean[] bodyWrittenOut,
+            boolean rejectHtml)
+            throws Exception {
+        return fetchFromHop(
+                startUrl,
+                initialHeaders,
+                initialBody,
+                new LinkedHashMap<String, RedirectCookie>(),
+                effectiveUa,
+                forceUaOverride,
+                useDoh,
+                initialDohOverride,
+                connectTimeoutMs,
+                readTimeoutMs,
+                extraParentScope,
+                bodyWrittenOut,
+                rejectHtml,
+                5);
+    }
+
+    /**
+     * Executes up to {@code remainingHops} HTTP hops. On a cross-host DoH redirect for an
+     * idempotent GET (never after a POST body has started sending), retains all candidate target
+     * IPs until a target node produces a final response satisfying the caller requirement — even if
+     * an earlier target IP redirects to a same-host login/HTML page, returns 5xx/4xx, returns a 302
+     * missing {@code Location}, or loops.
+     */
+    private static String fetchFromHop(
+            URL startUrl,
+            Map<String, String> initialHeaders,
+            byte[] initialBody,
+            Map<String, RedirectCookie> initialCookies,
+            String effectiveUa,
+            boolean forceUaOverride,
+            boolean useDoh,
+            InetAddress initialDohOverride,
+            int connectTimeoutMs,
+            int readTimeoutMs,
+            RequestScope extraParentScope,
+            boolean[] bodyWrittenOut,
+            boolean rejectHtml,
+            int remainingHops)
+            throws Exception {
         URL next = startUrl;
         Map<String, String> forwarded = new LinkedHashMap<>(initialHeaders);
         byte[] body = initialBody;
-        Map<String, RedirectCookie> redirectCookies = new LinkedHashMap<>();
+        Map<String, RedirectCookie> redirectCookies = new LinkedHashMap<>(initialCookies);
         boolean forceDirect = false;
-        for (int hop = 0; hop < 5; hop++) {
-            if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+        String pinnedDohHost =
+                initialDohOverride != null ? startUrl.getHost().toLowerCase(Locale.ROOT) : null;
+        InetAddress pinnedDohIp = initialDohOverride;
+
+        for (int hop = 0; hop < remainingHops; hop++) {
+            if (extraParentScope != null) extraParentScope.check();
+            RequestScope.checkCurrent();
             InetAddress dohOverride = null;
             if (useDoh) {
-                List<InetAddress> addrs = resolveViaDoh(next.getHost());
-                if (!addrs.isEmpty()) dohOverride = addrs.get(0);
+                String currentHost = next.getHost().toLowerCase(Locale.ROOT);
+                if (pinnedDohIp != null && currentHost.equals(pinnedDohHost)) {
+                    dohOverride = pinnedDohIp;
+                } else {
+                    List<InetAddress> hostAddrs =
+                            selectDohRaceCandidates(resolveViaDoh(next.getHost()), 4);
+                    if (!hostAddrs.isEmpty()) {
+                        dohOverride = hostAddrs.get(0);
+                    }
+                }
             }
             boolean canFallbackDirect =
                     !forceDirect && dohOverride == null && hasActiveHttpProxy(next);
             HttpURLConnection c = openConnectionWithOverride(next, dohOverride, forceDirect);
-            c.setConnectTimeout(12000);
-            c.setReadTimeout(18000);
+            c.setConnectTimeout(connectTimeoutMs);
+            c.setReadTimeout(readTimeoutMs);
             c.setInstanceFollowRedirects(false);
             c.setRequestProperty("User-Agent", effectiveUa != null ? effectiveUa : USER_AGENT);
             for (Map.Entry<String, String> e : forwarded.entrySet()) {
@@ -2040,8 +2883,10 @@ public final class Cms {
                 c.setRequestProperty("User-Agent", effectiveUa);
             }
             try {
+                if (extraParentScope != null) extraParentScope.attachConnection(c);
                 RequestScope.attach(c);
                 int status;
+                boolean wroteBodyThisAttempt = false;
                 try {
                     if (body != null) {
                         c.setRequestMethod("POST");
@@ -2049,44 +2894,41 @@ public final class Cms {
                         c.setRequestProperty(
                                 "Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
                         c.setFixedLengthStreamingMode(body.length);
+                        // Establish TCP/TLS handshake before flipping bodyWrittenOut so connect
+                        // failures never look like an already-delivered POST.
+                        c.connect();
+                        wroteBodyThisAttempt = true;
+                        if (bodyWrittenOut != null && bodyWrittenOut.length > 0) {
+                            bodyWrittenOut[0] = true;
+                        }
                         try (OutputStream output = c.getOutputStream()) {
                             output.write(body);
                         }
                     }
                     status = c.getResponseCode();
-                } catch (ConnectException | SocketTimeoutException proxyIo) {
-                    if (canFallbackDirect) {
+                } catch (IOException ioErr) {
+                    if (isCancellationException(ioErr, extraParentScope)
+                            || isCancellationException(ioErr, RequestScope.current())) {
+                        throw ioErr instanceof InterruptedIOException
+                                ? (InterruptedIOException) ioErr
+                                : new InterruptedIOException("Request cancelled");
+                    }
+                    if (!wroteBodyThisAttempt
+                            && canFallbackDirect
+                            && (ioErr instanceof ConnectException
+                                    || ioErr instanceof SocketTimeoutException)) {
                         forceDirect = true;
                         hop--;
                         continue;
                     }
-                    throw proxyIo;
+                    throw ioErr;
                 }
-                if (canFallbackDirect && (status == 502 || status == 503 || status == 504)) {
+                if (canFallbackDirect
+                        && !wroteBodyThisAttempt
+                        && (status == 502 || status == 503 || status == 504)) {
                     forceDirect = true;
                     hop--;
                     continue;
-                }
-                List<String> setCookies = c.getHeaderFields().get("Set-Cookie");
-                if (setCookies == null) {
-                    for (Map.Entry<String, List<String>> entry : c.getHeaderFields().entrySet()) {
-                        if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
-                            setCookies = entry.getValue();
-                            break;
-                        }
-                    }
-                }
-                List<RedirectCookie> newCookies = parseSetCookies(setCookies, next);
-                for (RedirectCookie cookie : newCookies) {
-                    redirectCookies.put(
-                            cookie.domain
-                                    + "|"
-                                    + cookie.hostOnly
-                                    + "|"
-                                    + cookie.path
-                                    + "|"
-                                    + cookie.name,
-                            cookie);
                 }
                 if (status == 301
                         || status == 302
@@ -2100,31 +2942,161 @@ public final class Cms {
                         throw new NonRetryableFetchException("不支持此重定向协议");
                     if (target.getUserInfo() != null)
                         throw new NonRetryableFetchException("来源重定向不能注入登录凭据");
+                    List<String> setCookies = c.getHeaderFields().get("Set-Cookie");
+                    if (setCookies == null) {
+                        for (Map.Entry<String, List<String>> entry :
+                                c.getHeaderFields().entrySet()) {
+                            if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
+                                setCookies = entry.getValue();
+                                break;
+                            }
+                        }
+                    }
+                    List<RedirectCookie> newCookies = parseSetCookies(setCookies, next);
+                    for (RedirectCookie cookie : newCookies) {
+                        redirectCookies.put(
+                                cookie.domain
+                                        + "|"
+                                        + cookie.hostOnly
+                                        + "|"
+                                        + cookie.path
+                                        + "|"
+                                        + cookie.name,
+                                cookie);
+                    }
+                    boolean sameHost = next.getHost().equalsIgnoreCase(target.getHost());
                     forwarded = inheritedHeaders(next.toString(), target.toString(), forwarded);
                     mergeRedirectCookies(forwarded, redirectCookies.values(), target);
                     if (status == 301 || status == 302 || status == 303) body = null;
+                    if (sameHost) {
+                        // Valid redirect on same host: keep using the responsive DoH IP.
+                        if (useDoh && dohOverride != null) {
+                            pinnedDohHost = next.getHost().toLowerCase(Locale.ROOT);
+                            pinnedDohIp = dohOverride;
+                        }
+                        next = target;
+                        continue;
+                    }
+                    // Cross-host redirect: verify remaining hop budget first.
+                    int nextRemainingHops = remainingHops - hop - 1;
+                    if (nextRemainingHops <= 0) {
+                        throw new NonRetryableFetchException("来源重定向次数过多");
+                    }
+                    if (useDoh && body == null && !isBodyAlreadyWritten(bodyWrittenOut)) {
+                        List<InetAddress> targetAddrs =
+                                selectDohRaceCandidates(resolveViaDoh(target.getHost()), 4);
+                        if (targetAddrs.size() > 1) {
+                            // Try each target-host candidate IP cleanly from the cross-host entry
+                            // point so a bad node (5xx, 302 missing Location, or same-host 302 to
+                            // login HTML) never masks a healthy backup IP on the target host.
+                            String htmlFallback = null;
+                            HttpStatusException first403 = null;
+                            NonRetryableFetchException firstFatal = null;
+                            HttpStatusException firstHttp = null;
+                            IOException firstIo = null;
+                            for (InetAddress targetIp : targetAddrs) {
+                                if (extraParentScope != null) extraParentScope.check();
+                                RequestScope.checkCurrent();
+                                try {
+                                    String candidateRes =
+                                            fetchFromHop(
+                                                    target,
+                                                    forwarded,
+                                                    null,
+                                                    redirectCookies,
+                                                    effectiveUa,
+                                                    forceUaOverride,
+                                                    true,
+                                                    targetIp,
+                                                    connectTimeoutMs,
+                                                    readTimeoutMs,
+                                                    extraParentScope,
+                                                    bodyWrittenOut,
+                                                    rejectHtml,
+                                                    nextRemainingHops);
+                                    if (!rejectHtml || !isHtml(candidateRes)) {
+                                        return candidateRes;
+                                    }
+                                    if (htmlFallback == null) htmlFallback = candidateRes;
+                                } catch (NonRetryableFetchException fatal) {
+                                    if (!isRetryableCrossHostFatal(fatal)) {
+                                        throw fatal;
+                                    }
+                                    if (firstFatal == null) firstFatal = fatal;
+                                } catch (HttpStatusException httpErr) {
+                                    if (httpErr.status == 403) {
+                                        if (first403 == null) first403 = httpErr;
+                                    } else if (firstHttp == null) {
+                                        firstHttp = httpErr;
+                                    }
+                                } catch (IOException ioErr) {
+                                    if (isCancellationException(ioErr, extraParentScope)
+                                            || isCancellationException(
+                                                    ioErr, RequestScope.current())) {
+                                        throw ioErr instanceof InterruptedIOException
+                                                ? (InterruptedIOException) ioErr
+                                                : new InterruptedIOException("Request cancelled");
+                                    }
+                                    if (firstIo == null) firstIo = ioErr;
+                                }
+                            }
+                            if (htmlFallback != null) return htmlFallback;
+                            if (first403 != null) throw first403;
+                            if (firstFatal != null) throw firstFatal;
+                            if (firstHttp != null) throw firstHttp;
+                            if (firstIo != null) throw firstIo;
+                            throw new IOException("目标节点均不可用");
+                        }
+                        if (targetAddrs.size() == 1) {
+                            pinnedDohHost = target.getHost().toLowerCase(Locale.ROOT);
+                            pinnedDohIp = targetAddrs.get(0);
+                        } else {
+                            pinnedDohHost = null;
+                            pinnedDohIp = null;
+                        }
+                    } else {
+                        pinnedDohHost = null;
+                        pinnedDohIp = null;
+                    }
                     next = target;
                     continue;
                 }
-                if (status < 200 || status >= 300) throw new HttpStatusException(status);
-                InputStream rawIn = c.getInputStream();
-                if ("gzip".equalsIgnoreCase(c.getContentEncoding())) {
-                    rawIn = new java.util.zip.GZIPInputStream(rawIn);
+                if (status < 200 || status >= 300) {
+                    throw new HttpStatusException(status);
                 }
-                try (InputStream input = rawIn) {
-                    try {
-                        return read(input, MAX_JSON);
-                    } catch (IOException payloadErr) {
-                        if (payloadErr.getMessage() != null
-                                && (payloadErr.getMessage().contains("大小限制")
-                                        || payloadErr.getMessage().contains("配置图片"))) {
-                            throw new NonRetryableFetchException(payloadErr);
-                        }
-                        throw payloadErr;
+                String responseBody;
+                try {
+                    InputStream rawIn = c.getInputStream();
+                    if ("gzip".equalsIgnoreCase(c.getContentEncoding())) {
+                        rawIn = new java.util.zip.GZIPInputStream(rawIn);
                     }
+                    try (InputStream input = rawIn) {
+                        try {
+                            responseBody = read(input, MAX_JSON);
+                        } catch (IOException payloadErr) {
+                            if (payloadErr.getMessage() != null
+                                    && (payloadErr.getMessage().contains("大小限制")
+                                            || payloadErr.getMessage().contains("配置图片"))) {
+                                throw new NonRetryableFetchException(payloadErr);
+                            }
+                            throw payloadErr;
+                        }
+                    }
+                } catch (NonRetryableFetchException fatalPayload) {
+                    throw fatalPayload;
+                } catch (IOException bodyErr) {
+                    if (isCancellationException(bodyErr, extraParentScope)
+                            || isCancellationException(bodyErr, RequestScope.current())) {
+                        throw bodyErr instanceof InterruptedIOException
+                                ? (InterruptedIOException) bodyErr
+                                : new InterruptedIOException("Request cancelled");
+                    }
+                    throw bodyErr;
                 }
+                return responseBody;
             } finally {
                 RequestScope.detach(c);
+                if (extraParentScope != null) extraParentScope.detachConnection(c);
                 c.disconnect();
             }
         }
@@ -2640,7 +3612,19 @@ public final class Cms {
         if (dbVal <= 0.0) {
             dbVal = parseValidDoubanScore(optSafeString(j, "vod_score", ""));
         }
+        if (dbVal <= 0.0) {
+            dbVal = parseValidDoubanScore(optSafeString(j, "douban_score", ""));
+        }
+        if (dbVal <= 0.0) {
+            dbVal = parseValidDoubanScore(optSafeString(j, "score", ""));
+        }
+        if (dbVal <= 0.0) {
+            dbVal = parseValidDoubanScore(optSafeString(j, "rating", optSafeString(j, "rate", "")));
+        }
         v.doubanScore = dbVal >= 2.0 ? String.format(java.util.Locale.US, "%.1f", dbVal) : "";
+        String rawDbId =
+                optSafeString(j, "vod_douban_id", optSafeString(j, "douban_id", "")).trim();
+        v.doubanId = rawDbId.matches("\\d{5,12}") ? rawDbId : "";
         v.description =
                 optSafeString(j, "vod_content", "")
                         .replaceAll("<[^>]*>", " ")
@@ -2859,6 +3843,12 @@ public final class Cms {
 
     private static HttpURLConnection openHttpConnection(URL url, boolean forceDirect)
             throws IOException {
+        if (failDirectInvalidHostsForTest
+                && (forceDirect || !hasActiveHttpProxy(url))
+                && url.getHost() != null
+                && url.getHost().toLowerCase(Locale.ROOT).endsWith(".invalid")) {
+            throw new UnknownHostException(url.getHost());
+        }
         if ("https".equalsIgnoreCase(url.getProtocol())) {
             ensureApi23RootTrust();
         }

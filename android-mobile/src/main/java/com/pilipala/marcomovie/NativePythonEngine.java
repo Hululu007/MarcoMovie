@@ -131,6 +131,46 @@ public final class NativePythonEngine implements SourceEngine {
         }
     }
 
+    /**
+     * Combines the runtime version hash with the running process ABI so switching between 32-bit
+     * and 64-bit processes on the same app version always re-extracts matching {@code lib-dynload}
+     * extensions instead of reusing incompatible ELF binaries.
+     */
+    static String cacheStamp(String runtimeVersion, String abi) {
+        String ver = runtimeVersion == null ? "" : runtimeVersion.trim();
+        String cleanAbi = abi == null ? "" : abi.trim();
+        return ver + ":" + cleanAbi;
+    }
+
+    static boolean hasDynloadExtensions(File dynloadDir) {
+        if (dynloadDir == null || !dynloadDir.isDirectory()) return false;
+        File[] files = dynloadDir.listFiles();
+        if (files == null) return false;
+        for (File f : files) {
+            if (f != null && f.isFile() && f.getName().endsWith(".so")) return true;
+        }
+        return false;
+    }
+
+    static boolean needsRuntimeExtract(
+            String currentStamp,
+            String expectedStamp,
+            File stdlibZip,
+            File cacert,
+            File runnerPy,
+            File dynloadDir) {
+        return expectedStamp == null
+                || expectedStamp.isEmpty()
+                || !expectedStamp.equals(currentStamp)
+                || stdlibZip == null
+                || !stdlibZip.isFile()
+                || cacert == null
+                || !cacert.isFile()
+                || runnerPy == null
+                || !runnerPy.isFile()
+                || !hasDynloadExtensions(dynloadDir);
+    }
+
     private static void ensureRuntimeInitialized(Application app) throws IOException {
         if (runtimeReady) return;
         synchronized (INIT_LOCK) {
@@ -138,28 +178,25 @@ public final class NativePythonEngine implements SourceEngine {
             File root = new File(app.getFilesDir(), "python311");
             File versionFile = new File(root, ".version");
             String expectedVersion = readAssetText(app, "python-native/runtime-version.txt").trim();
-            String currentVersion = versionFile.isFile() ? readFileText(versionFile).trim() : "";
+            String abi = chooseDynloadAbi(app);
+            String expectedStamp = cacheStamp(expectedVersion, abi);
+            String currentStamp = versionFile.isFile() ? readFileText(versionFile).trim() : "";
 
             File stdlibZip = new File(root, "stdlib-pyc.zip");
             File siteDir = new File(root, "site-packages");
             File dynloadDir = new File(root, "lib-dynload");
             File runnerDir = new File(root, "runner");
+            File runnerPy = new File(runnerDir, "android_runner.py");
             File cacert = new File(siteDir, "certifi/cacert.pem");
 
-            if (!expectedVersion.equals(currentVersion)
-                    || !stdlibZip.isFile()
-                    || !cacert.isFile()
-                    || !new File(runnerDir, "android_runner.py").isFile()) {
+            if (needsRuntimeExtract(
+                    currentStamp, expectedStamp, stdlibZip, cacert, runnerPy, dynloadDir)) {
                 deleteRecursive(root);
                 root.mkdirs();
                 copyAssetToFile(app, "python-native/stdlib-pyc.zip", stdlibZip);
                 extractAssetZip(app, "python-native/site-packages.zip", siteDir);
-                String abi = chooseDynloadAbi(app);
                 extractAssetZip(app, "python-native/lib-dynload-" + abi + ".zip", dynloadDir);
-                copyAssetToFile(
-                        app,
-                        "python-native/android_runner.py",
-                        new File(runnerDir, "android_runner.py"));
+                copyAssetToFile(app, "python-native/android_runner.py", runnerPy);
                 copyAssetToFile(
                         app, "python-native/base/spider.py", new File(runnerDir, "base/spider.py"));
                 File baseInit = new File(runnerDir, "base/__init__.py");
@@ -167,7 +204,7 @@ public final class NativePythonEngine implements SourceEngine {
                     baseInit.getParentFile().mkdirs();
                     writeBytes(baseInit, new byte[0]);
                 }
-                writeBytes(versionFile, expectedVersion.getBytes(StandardCharsets.UTF_8));
+                writeBytes(versionFile, expectedStamp.getBytes(StandardCharsets.UTF_8));
             }
 
             byte[] initResultBytes =
@@ -186,21 +223,34 @@ public final class NativePythonEngine implements SourceEngine {
         }
     }
 
-    private static String chooseDynloadAbi(Application app) {
-        String[] abis = Build.SUPPORTED_ABIS;
-        if (abis != null) {
-            for (String abi : abis) {
-                if ("arm64-v8a".equals(abi)
-                        && assetExists(app, "python-native/lib-dynload-arm64-v8a.zip")) {
-                    return "arm64-v8a";
-                }
-                if ("armeabi-v7a".equals(abi)
-                        && assetExists(app, "python-native/lib-dynload-armeabi-v7a.zip")) {
+    static String selectDynloadAbi(
+            String[] supportedAbis,
+            boolean process64Bit,
+            boolean hasArm64Asset,
+            boolean hasArm32Asset) {
+        // Always match the running process bitness (Process.is64Bit()), never a 64-bit SoC's
+        // Build.SUPPORTED_ABIS when running a 32-bit process, to avoid dlopen/SIGABRT mismatches.
+        if (process64Bit) {
+            if (hasArm64Asset) return "arm64-v8a";
+        } else {
+            if (hasArm32Asset) return "armeabi-v7a";
+        }
+        if (supportedAbis != null) {
+            for (String abi : supportedAbis) {
+                if ("arm64-v8a".equals(abi) && process64Bit && hasArm64Asset) return "arm64-v8a";
+                if ("armeabi-v7a".equals(abi) && !process64Bit && hasArm32Asset)
                     return "armeabi-v7a";
-                }
             }
         }
-        return "armeabi-v7a";
+        return process64Bit ? "arm64-v8a" : "armeabi-v7a";
+    }
+
+    private static String chooseDynloadAbi(Application app) {
+        return selectDynloadAbi(
+                Build.SUPPORTED_ABIS,
+                CspEngine.isCurrentProcess64Bit(),
+                assetExists(app, "python-native/lib-dynload-arm64-v8a.zip"),
+                assetExists(app, "python-native/lib-dynload-armeabi-v7a.zip"));
     }
 
     private static boolean assetExists(Application app, String path) {
@@ -233,13 +283,21 @@ public final class NativePythonEngine implements SourceEngine {
         throw new IOException("无法定位 Python 爬虫脚本地址");
     }
 
-    private static String downloadScript(
-            Application app, String siteKey, String url, Map<String, String> headers)
-            throws Exception {
-        String code = Cms.fetch(url, headers);
+    static String fetchScriptSource(String url, Map<String, String> headers) throws Exception {
+        String code = Cms.fetchNonHtml(url, headers);
         if (code == null || code.trim().isEmpty()) {
             throw new IOException("Python 爬虫脚本内容为空");
         }
+        if (Cms.isHtml(code)) {
+            throw new IOException("Python 爬虫脚本地址返回了网页而不是脚本（可能被拦截或需要登录）");
+        }
+        return code;
+    }
+
+    private static String downloadScript(
+            Application app, String siteKey, String url, Map<String, String> headers)
+            throws Exception {
+        String code = fetchScriptSource(url, headers);
         File dir = new File(app.getCacheDir(), "python-spiders/" + sha16(siteKey + ":" + url));
         dir.mkdirs();
         File target = new File(dir, "spider.py");

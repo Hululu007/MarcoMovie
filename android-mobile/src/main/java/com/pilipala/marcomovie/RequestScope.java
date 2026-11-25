@@ -76,22 +76,31 @@ final class RequestScope {
             throw new InterruptedIOException("Request cancelled");
     }
 
+    void attachConnection(HttpURLConnection connection) throws InterruptedIOException {
+        if (connection == null) return;
+        check();
+        connections.add(connection);
+        if (cancelled) {
+            connections.remove(connection);
+            CLOSER.execute(connection::disconnect);
+            throw new InterruptedIOException("Request cancelled");
+        }
+    }
+
+    void detachConnection(HttpURLConnection connection) {
+        if (connection != null) connections.remove(connection);
+    }
+
     static void attach(HttpURLConnection connection) throws InterruptedIOException {
         RequestScope scope = CURRENT.get();
         if (scope != null) {
-            scope.check();
-            scope.connections.add(connection);
-            if (scope.cancelled) {
-                scope.connections.remove(connection);
-                CLOSER.execute(connection::disconnect);
-                throw new InterruptedIOException("Request cancelled");
-            }
+            scope.attachConnection(connection);
         }
     }
 
     static void detach(HttpURLConnection connection) {
         RequestScope scope = CURRENT.get();
-        if (scope != null) scope.connections.remove(connection);
+        if (scope != null) scope.detachConnection(connection);
     }
 
     void cancel() {
