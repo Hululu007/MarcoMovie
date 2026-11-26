@@ -1,14 +1,14 @@
 # Generated Flutter / macOS runner, assets & build outputs
-.dart_tool/
-.flutter-plugins
-.flutter-plugins-dependencies
-assets/catpaw/
-assets/js-host/
-assets/logo_mark.png
-assets/python-host/*
-!assets/python-host/desktop_runner.py
-build/
-dist/
-macos/
-packages/quickjs_engine/native/build/
-pubspec_overrides.yaml
+/.dart_tool/
+/.flutter-plugins
+/.flutter-plugins-dependencies
+/assets/catpaw/
+/assets/js-host/
+/assets/logo_mark.png
+/assets/python-host/*
+!/assets/python-host/desktop_runner.py
+/build/
+/dist/
+/macos/
+/packages/quickjs_engine/native/build/
+/pubspec_overrides.yaml
