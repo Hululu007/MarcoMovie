@@ -69,9 +69,14 @@ class IosLiquidGlassBridge {
       ValueNotifier<bool>(false);
   static final ValueNotifier<bool> sceneActiveNotifier =
       ValueNotifier<bool>(true);
+  static final ValueNotifier<bool> thermalThrottledNotifier =
+      ValueNotifier<bool>(false);
+  static final ValueNotifier<int> majorVersionNotifier = ValueNotifier<int>(0);
   static bool _initialized = false;
   static bool? _testOverride;
   static bool? _testReduceTransparencyOverride;
+  static bool? _testThermalThrottledOverride;
+  static int? _testMajorVersionOverride;
   static bool _incomingHandlerInstalled = false;
   static bool _sheetPresentationInFlight = false;
   static final ValueNotifier<bool> activeSheetNotifier =
@@ -133,6 +138,26 @@ class IosLiquidGlassBridge {
     return reduceTransparencyNotifier.value;
   }
 
+  /// Mirrors iOS `ProcessInfo.processInfo.thermalState` (`.serious` / `.critical`)
+  /// so heavy optical blurs and animated shaders degrade gracefully before
+  /// thermal throttling turns into sustained overheating (e.g. iPad Pro 2020 on
+  /// iPadOS 15.4). Always `false` on non-iOS unless overridden in tests.
+  static bool get thermalThrottled {
+    if (_testThermalThrottledOverride != null) {
+      return _testThermalThrottledOverride!;
+    }
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return false;
+    return thermalThrottledNotifier.value;
+  }
+
+  /// Native iOS/iPadOS major OS version reported by `capabilities` (`0` when
+  /// unknown or on non-iOS).
+  static int get majorVersion {
+    if (_testMajorVersionOverride != null) return _testMajorVersionOverride!;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return 0;
+    return majorVersionNotifier.value;
+  }
+
   static void _ensureIncomingHandler() {
     if (_incomingHandlerInstalled) return;
     _incomingHandlerInstalled = true;
@@ -144,6 +169,10 @@ class IosLiquidGlassBridge {
       }
       if (call.method == 'sceneActivationChanged' && call.arguments is bool) {
         sceneActiveNotifier.value = call.arguments as bool;
+        return null;
+      }
+      if (call.method == 'thermalStateChanged' && call.arguments is bool) {
+        thermalThrottledNotifier.value = call.arguments as bool;
         return null;
       }
       if (call.method == 'rootTabSelected' && call.arguments is int) {
@@ -208,6 +237,8 @@ class IosLiquidGlassBridge {
       _initialized = true;
       available.value = false;
       reduceTransparencyNotifier.value = false;
+      thermalThrottledNotifier.value = false;
+      majorVersionNotifier.value = 0;
       return false;
     }
     try {
@@ -220,6 +251,12 @@ class IosLiquidGlassBridge {
       reduceTransparencyNotifier.value = result?['reduceTransparency'] == true;
       if (result?['sceneActive'] is bool) {
         sceneActiveNotifier.value = result?['sceneActive'] as bool;
+      }
+      if (result?['thermalThrottled'] is bool) {
+        thermalThrottledNotifier.value = result?['thermalThrottled'] as bool;
+      }
+      if (result?['majorVersion'] is num) {
+        majorVersionNotifier.value = (result?['majorVersion'] as num).toInt();
       }
       return supported;
     } on MissingPluginException {
@@ -247,6 +284,12 @@ class IosLiquidGlassBridge {
       );
       final reduced = result?['reduceTransparency'] == true;
       reduceTransparencyNotifier.value = reduced;
+      if (result?['thermalThrottled'] is bool) {
+        thermalThrottledNotifier.value = result?['thermalThrottled'] as bool;
+      }
+      if (result?['majorVersion'] is num) {
+        majorVersionNotifier.value = (result?['majorVersion'] as num).toInt();
+      }
       return reduced;
     } on MissingPluginException {
       return reduceTransparencyNotifier.value;
@@ -496,12 +539,16 @@ class IosLiquidGlassBridge {
     if (value == null) {
       _initialized = false;
       _testReduceTransparencyOverride = null;
+      _testThermalThrottledOverride = null;
+      _testMajorVersionOverride = null;
       _sheetPresentationInFlight = false;
       activeSheetNotifier.value = false;
       rootTabSuppressionCount.value = 0;
       IosRootTabNavigatorObserver.resetForTest();
       reduceTransparencyNotifier.value = false;
       sceneActiveNotifier.value = true;
+      thermalThrottledNotifier.value = false;
+      majorVersionNotifier.value = 0;
       _onRootTabSelected = null;
       _onRootTabSearch = null;
       _onRootTabScrollToTop = null;
@@ -514,6 +561,18 @@ class IosLiquidGlassBridge {
   static void setReduceTransparencyForTest(bool? value) {
     _testReduceTransparencyOverride = value;
     reduceTransparencyNotifier.value = value ?? false;
+  }
+
+  @visibleForTesting
+  static void setThermalThrottledForTest(bool? value) {
+    _testThermalThrottledOverride = value;
+    thermalThrottledNotifier.value = value ?? false;
+  }
+
+  @visibleForTesting
+  static void setMajorVersionForTest(int? value) {
+    _testMajorVersionOverride = value;
+    majorVersionNotifier.value = value ?? 0;
   }
 }
 

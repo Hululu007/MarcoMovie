@@ -5020,6 +5020,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         _mpvSubtitleAssInitialized = true;
       }
       if (_isIosPlayerPlatform) {
+        final bool iosLowPowerThermal =
+            _iosAvPlayerController?.thermalState.isThrottled == true ||
+            IosLiquidGlassBridge.thermalThrottled ||
+            (IosLiquidGlassBridge.majorVersion > 0 &&
+                IosLiquidGlassBridge.majorVersion < 16);
         await IosMpvProfile.applyToPlayer(
           _player,
           physicalMemoryBytes:
@@ -5029,6 +5034,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           hdrToneMapping: _iosHdrToneMapping,
           vocalLoudness: _vocalLoudness,
           hwdec: _hardwareDecoder(kernel),
+          lowPowerThermalMode: iosLowPowerThermal,
         );
       } else if (!_isWindowsPlayerPlatform &&
           _vocalLoudness != VocalLoudnessPreset.off) {
@@ -9591,21 +9597,23 @@ class _PlayerScreenState extends State<PlayerScreen>
               widget.video.title.trim().isNotEmpty)
             Positioned.fill(
               child: IgnorePointer(
-                child: Opacity(
-                  opacity: isDark ? 0.44 : 0.58,
-                  child: ImageFiltered(
-                    imageFilter: ImageFilter.blur(
-                      sigmaX: 44,
-                      sigmaY: 44,
-                      tileMode: TileMode.decal,
-                    ),
-                    child: PosterImage(
-                      url: widget.video.poster,
-                      title: widget.video.title,
-                      year: widget.video.year,
-                      fit: BoxFit.cover,
-                      forBackdrop: true,
-                      placeholder: const SizedBox.shrink(),
+                child: RepaintBoundary(
+                  child: Opacity(
+                    opacity: isDark ? 0.44 : 0.58,
+                    child: ImageFiltered(
+                      imageFilter: ImageFilter.blur(
+                        sigmaX: _isIosPlayerPlatform ? 22 : 44,
+                        sigmaY: _isIosPlayerPlatform ? 22 : 44,
+                        tileMode: TileMode.decal,
+                      ),
+                      child: PosterImage(
+                        url: widget.video.poster,
+                        title: widget.video.title,
+                        year: widget.video.year,
+                        fit: BoxFit.cover,
+                        forBackdrop: true,
+                        placeholder: const SizedBox.shrink(),
+                      ),
                     ),
                   ),
                 ),
@@ -9613,32 +9621,53 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
           Positioned.fill(
             child: IgnorePointer(
-              child: BackdropFilter(
-                filter: ImageFilter.blur(
-                  sigmaX: _storageReduceTransparency ? 0.0 : 28.0,
-                  sigmaY: _storageReduceTransparency ? 0.0 : 28.0,
-                ),
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: isDark
-                          ? const [
-                              Color(0xB8141720),
-                              Color(0xDC0E1018),
-                              Color(0xF0090A0F),
-                            ]
-                          : const [
-                              Color(0x88CED7E8),
-                              Color(0xB5D9DFEC),
-                              Color(0xD8E3E7F0),
-                            ],
-                      stops: const [0.0, 0.42, 1.0],
+              child: _isIosPlayerPlatform
+                  ? DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: isDark
+                              ? const [
+                                  Color(0xB8141720),
+                                  Color(0xDC0E1018),
+                                  Color(0xF0090A0F),
+                                ]
+                              : const [
+                                  Color(0x88CED7E8),
+                                  Color(0xB5D9DFEC),
+                                  Color(0xD8E3E7F0),
+                                ],
+                          stops: const [0.0, 0.42, 1.0],
+                        ),
+                      ),
+                    )
+                  : BackdropFilter(
+                      filter: ImageFilter.blur(
+                        sigmaX: _storageReduceTransparency ? 0.0 : 28.0,
+                        sigmaY: _storageReduceTransparency ? 0.0 : 28.0,
+                      ),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: isDark
+                                ? const [
+                                    Color(0xB8141720),
+                                    Color(0xDC0E1018),
+                                    Color(0xF0090A0F),
+                                  ]
+                                : const [
+                                    Color(0x88CED7E8),
+                                    Color(0xB5D9DFEC),
+                                    Color(0xD8E3E7F0),
+                                  ],
+                            stops: const [0.0, 0.42, 1.0],
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-              ),
             ),
           ),
           // Soft cinema-edge seam gradient from top 16:9 video frame into glass

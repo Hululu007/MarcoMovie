@@ -194,6 +194,7 @@ class IosMpvProfile {
     IosHdrToneMappingMode hdrToneMapping = IosHdrToneMappingMode.auto,
     VocalLoudnessPreset vocalLoudness = VocalLoudnessPreset.off,
     String hwdec = 'videotoolbox',
+    bool lowPowerThermalMode = false,
   }) {
     final tier = resolveBufferTier(
       physicalMemoryBytes: physicalMemoryBytes,
@@ -211,9 +212,10 @@ class IosMpvProfile {
       'hr-seek': 'yes',
       'sub-ass-override': 'scale',
       'tone-mapping': hdrToneMapping.mpvToneMapping,
-      'hdr-compute-peak': hdrToneMapping.computePeak,
+      'hdr-compute-peak': lowPowerThermalMode ? 'no' : hdrToneMapping.computePeak,
       'gamut-mapping-mode': 'perceptual',
-      'dither-depth': 'auto',
+      'dither-depth': lowPowerThermalMode ? 'no' : 'auto',
+      if (lowPowerThermalMode) 'video-sync': 'audio',
       'target-colorspace-hint': 'yes',
       ...buildVocalLoudnessProperties(vocalLoudness),
     };
@@ -238,6 +240,7 @@ class IosMpvProfile {
     IosHdrToneMappingMode hdrToneMapping = IosHdrToneMappingMode.auto,
     VocalLoudnessPreset vocalLoudness = VocalLoudnessPreset.off,
     String hwdec = 'videotoolbox',
+    bool lowPowerThermalMode = false,
     MpvPropertySetter? propertySetterOverride,
   }) async {
     final setter = propertySetterOverride ?? _resolveSetter(player);
@@ -249,6 +252,7 @@ class IosMpvProfile {
       hdrToneMapping: hdrToneMapping,
       vocalLoudness: vocalLoudness,
       hwdec: hwdec,
+      lowPowerThermalMode: lowPowerThermalMode,
     );
     for (final entry in props.entries) {
       try {

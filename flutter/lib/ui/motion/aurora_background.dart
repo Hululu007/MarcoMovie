@@ -9,6 +9,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import '../../core/ohos_runtime.dart';
+import '../ios_liquid_glass.dart';
 import 'motion_tokens.dart';
 
 /// Loads `shaders/aurora.frag`. Injectable for unit tests.
@@ -129,11 +130,13 @@ class AuroraBackground extends StatefulWidget {
     required bool isCurrentRoute,
     required bool lifecycleResumed,
     required double strength,
+    bool thermalThrottled = false,
   }) {
     return active &&
         !reduceMotion &&
         !isOhos &&
         !isWindowsStatic &&
+        !thermalThrottled &&
         tickerModeEnabled &&
         isCurrentRoute &&
         lifecycleResumed &&
@@ -181,6 +184,7 @@ class AuroraBackgroundState extends State<AuroraBackground>
   ui.FragmentProgram? _boundProgram;
   Duration? _lastTickElapsed;
   double _accumulatedSec = 0.0;
+  double _iosPendingFrameDtSec = 0.0;
   bool _lifecycleResumed = true;
   bool _tickerModeEnabled = true;
   bool _isCurrentRoute = true;
@@ -195,6 +199,16 @@ class AuroraBackgroundState extends State<AuroraBackground>
       !kIsWeb &&
       defaultTargetPlatform == TargetPlatform.windows;
 
+  bool get _isIosPlatform =>
+      !kIsWeb && !OhosRuntime.isOhos && defaultTargetPlatform == TargetPlatform.iOS;
+
+  bool get _isIosThermalThrottled =>
+      _isIosPlatform && IosLiquidGlassBridge.thermalThrottled;
+
+  /// Cap iOS aurora shader redraws to ~30 fps (vs 120Hz ProMotion) so slow
+  /// ambient waves stay silky while cutting GPU fragment work by 75%.
+  static const double _iosFrameIntervalSec = 1.0 / 30.0;
+
   @override
   void initState() {
     super.initState();
@@ -204,6 +218,7 @@ class AuroraBackgroundState extends State<AuroraBackground>
 
     _ticker = createTicker(_onTick);
     WidgetsBinding.instance.addObserver(this);
+    IosLiquidGlassBridge.thermalThrottledNotifier.addListener(_syncTicker);
     _initShader();
   }
 
@@ -298,15 +313,18 @@ class AuroraBackgroundState extends State<AuroraBackground>
           isCurrentRoute: _isCurrentRoute,
           lifecycleResumed: _lifecycleResumed,
           strength: widget.strength,
+          thermalThrottled: _isIosThermalThrottled,
         );
     if (run) {
       if (!_ticker.isActive) {
         _lastTickElapsed = null;
+        _iosPendingFrameDtSec = 0.0;
         _ticker.start();
       }
     } else if (_ticker.isActive) {
       _ticker.stop();
       _lastTickElapsed = null;
+      _iosPendingFrameDtSec = 0.0;
     }
   }
 
@@ -317,6 +335,16 @@ class AuroraBackgroundState extends State<AuroraBackground>
     final dtSec = (elapsed - prev).inMicroseconds / 1000000.0;
     if (dtSec <= 0.0) return;
     final clampedDt = math.min(dtSec, 0.1);
+    if (_isIosPlatform) {
+      _iosPendingFrameDtSec += clampedDt;
+      if (_iosPendingFrameDtSec < _iosFrameIntervalSec) return;
+      final stepDt = _iosPendingFrameDtSec;
+      _iosPendingFrameDtSec = 0.0;
+      _accumulatedSec =
+          MotionTokens.wrapAuroraElapsedSeconds(_accumulatedSec + stepDt);
+      _elapsedNotifier.value = _accumulatedSec;
+      return;
+    }
     _accumulatedSec =
         MotionTokens.wrapAuroraElapsedSeconds(_accumulatedSec + clampedDt);
     _elapsedNotifier.value = _accumulatedSec;
@@ -324,6 +352,7 @@ class AuroraBackgroundState extends State<AuroraBackground>
 
   @override
   void dispose() {
+    IosLiquidGlassBridge.thermalThrottledNotifier.removeListener(_syncTicker);
     WidgetsBinding.instance.removeObserver(this);
     _ticker.dispose();
     _elapsedNotifier.dispose();

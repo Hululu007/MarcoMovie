@@ -3578,8 +3578,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   Future<void> _openNativeFilterSheet() async {
+    final sanitizedCats = sanitizeIosFilterCategories(_categories);
     final subCats = CmsParser.subCategoriesForPrimaryTab(
-      _categories,
+      sanitizedCats,
       _primaryTab,
     );
     final existingNames = subCats.map((c) => c.name.trim()).toSet();
@@ -3587,13 +3588,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       for (final g in CmsParser.fallbackGenreTags)
         if (!existingNames.any((n) => n.contains(g))) g,
     ];
-    final cats = <IosNativeFilterCategory>[
+    final cats = sanitizeIosFilterChoices(<IosNativeFilterCategory>[
       const IosNativeFilterCategory(id: '', label: '全部', kind: 'all'),
       for (final c in subCats)
         IosNativeFilterCategory(id: c.id, label: c.name, kind: 'cat'),
       for (final g in extraGenres)
         IosNativeFilterCategory(id: g, label: g, kind: 'genre'),
-    ];
+    ]);
     final picked = IosLiquidGlassBridge.isAvailable
         ? await showAppleNativeFilterSheet(
             title: '片库筛选',
@@ -5445,7 +5446,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               children: [
                 if (_filterSubCategoryId.isNotEmpty)
                   _buildActiveFilterBadge(
-                    _categories
+                    (defaultTargetPlatform == TargetPlatform.iOS &&
+                                !OhosRuntime.isOhos
+                            ? sanitizeIosFilterCategories(_categories)
+                            : _categories)
                             .where((c) => c.id == _filterSubCategoryId)
                             .map((c) => c.name)
                             .firstOrNull ??

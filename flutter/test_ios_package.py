@@ -432,6 +432,39 @@ class DeploymentChecks(unittest.TestCase):
         self.assertIn('v.traitCollection.userInterfaceStyle == .dark', liquid_src)
         self.assertIn('win.traitCollection.userInterfaceStyle == .dark', liquid_src)
 
+    def test_ios_dock_context_menu_per_tab_preview_filter_sanitization_and_thermal_hook(self):
+        liquid_src = (
+            Path(__file__).resolve().parent / 'ios_native' / 'MarcoLiquidGlass.swift'
+        ).read_text(encoding='utf-8')
+
+        # 1. Dock long-press context menu targets individual tab's previewPillView
+        #    (never lifting the whole 4-tab capsule or anchoring on the far left).
+        capsule_start = liquid_src.index('final class MarcoNativeLiquidTabCapsuleView')
+        capsule_end = liquid_src.index('final class MarcoIos27PassthroughChromeView')
+        capsule_block = liquid_src[capsule_start:capsule_end]
+        self.assertIn('let previewPillView = UIView()', capsule_block)
+        self.assertIn('private func targetedPreview(for configuration: UIContextMenuConfiguration)', capsule_block)
+        self.assertIn('let targetView = slotViews[idx].previewPillView', capsule_block)
+        self.assertIn('UITargetedPreview(view: targetView, parameters: params)', capsule_block)
+        self.assertIn('highlightPreviewForItemWithIdentifier', capsule_block)
+        self.assertIn('dismissalPreviewForItemWithIdentifier', capsule_block)
+        self.assertIn('previewForHighlightingMenuWithConfiguration', capsule_block)
+        self.assertIn('previewForDismissingMenuWithConfiguration', capsule_block)
+        self.assertIn('scrubbingLensShadowView.layer.removeAllAnimations()', capsule_block)
+
+        # 2. Native filter sheet rejects empty/invisible/empty-id/duplicate options.
+        filter_start = liquid_src.index('final class MarcoNativeFilterSheetController')
+        filter_block = liquid_src[filter_start : filter_start + 5500]
+        self.assertIn('private static func cleanOptionLabel(', filter_block)
+        self.assertIn('guard !id.isEmpty, label != "全部", seenCatIds.insert(id).inserted else { continue }', filter_block)
+
+        # 3. Thermal pressure bridge for iPad Pro 2020 / iPadOS 15.4 & hot devices.
+        self.assertIn('static var isThermalThrottled: Bool', liquid_src)
+        self.assertIn('ProcessInfo.thermalStateDidChangeNotification', liquid_src)
+        self.assertIn('"thermalStateChanged"', liquid_src)
+        self.assertIn('"thermalThrottled": isThermalThrottled', liquid_src)
+        self.assertEqual(liquid_src.count('{'), liquid_src.count('}'))
+
     def test_ios_storyboards_and_controller_use_adaptive_system_background(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

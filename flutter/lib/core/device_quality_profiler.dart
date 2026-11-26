@@ -211,6 +211,18 @@ class DeviceQualityProfiler {
       'iPhone11,2': 'iPhone XS',
       'iPhone11,6': 'iPhone XS Max',
       'iPhone11,8': 'iPhone XR',
+      'iPad8,1': 'iPad Pro 11" (2018)',
+      'iPad8,2': 'iPad Pro 11" (2018)',
+      'iPad8,3': 'iPad Pro 11" (2018)',
+      'iPad8,4': 'iPad Pro 11" (2018)',
+      'iPad8,5': 'iPad Pro 12.9" (2018)',
+      'iPad8,6': 'iPad Pro 12.9" (2018)',
+      'iPad8,7': 'iPad Pro 12.9" (2018)',
+      'iPad8,8': 'iPad Pro 12.9" (2018)',
+      'iPad8,9': 'iPad Pro 11" (2020)',
+      'iPad8,10': 'iPad Pro 11" (2020)',
+      'iPad8,11': 'iPad Pro 12.9" (2020)',
+      'iPad8,12': 'iPad Pro 12.9" (2020)',
     };
     if (known.containsKey(id)) return known[id]!;
     final iphoneMatch = RegExp(r'^iPhone(\d+),').firstMatch(id);
@@ -262,7 +274,8 @@ class DeviceQualityProfiler {
     final bool anime4k = tier == DeviceHardwareTier.flagship &&
         !hw.lowPowerMode &&
         !hw.thermalState.isThrottled &&
-        (iphoneMajor == 0 || iphoneMajor >= 14);
+        (iphoneMajor == 0 || iphoneMajor >= 14) &&
+        (ipadMajor == 0 || ipadMajor >= 13);
     final String hdrMode;
     if (hw.potentialEdrHeadroom >= 1.5 || tier == DeviceHardwareTier.flagship) {
       hdrMode = IosHdrToneMappingMode.auto.id;

@@ -3985,59 +3985,90 @@ class _DetailScreenState extends State<DetailScreen> {
                           ),
                         ),
                         // Compact Progressive Frosted Glass Blur Transition strictly
-                        // behind the lower title / synopsis / play button overlap zone
+                        // behind the lower title / synopsis / play button overlap zone.
+                        // On iOS < 26, during iOS thermal throttling, or while the outer
+                        // scroll ImageFiltered blur is active, skip stacking a nested
+                        // ShaderMask + BackdropFilter saveLayer inside the outer blur.
                         Positioned(
                           top: posterWindowHeight * 0.58,
                           left: 0,
                           right: 0,
                           height: posterWindowHeight * 0.42,
-                          child: ShaderMask(
-                            blendMode: BlendMode.dstIn,
-                            shaderCallback: (rect) => const LinearGradient(
-                              begin: Alignment.topCenter,
-                              end: Alignment.bottomCenter,
-                              colors: [
-                                Color(0x00FFFFFF),
-                                Color(0x8CFFFFFF),
-                                Color(0xFFFFFFFF),
-                                Color(0x00FFFFFF),
-                              ],
-                              stops: [0.0, 0.36, 0.84, 1.0],
-                            ).createShader(rect),
-                            child: ClipRect(
-                              child: BackdropFilter(
-                                filter: ImageFilter.blur(
-                                  sigmaX: 6.5,
-                                  sigmaY: 6.5,
-                                  tileMode: TileMode.clamp,
-                                ),
-                                child: DecoratedBox(
+                          child: (!kIsWeb &&
+                                  !OhosRuntime.isOhos &&
+                                  defaultTargetPlatform == TargetPlatform.iOS &&
+                                  (!IosLiquidGlassBridge.isAvailable ||
+                                      IosLiquidGlassBridge.thermalThrottled ||
+                                      blurSigma > 0.5))
+                              ? DecoratedBox(
                                   decoration: BoxDecoration(
                                     gradient: LinearGradient(
                                       begin: Alignment.topCenter,
                                       end: Alignment.bottomCenter,
                                       colors: [
                                         bgColor.withValues(alpha: 0.0),
-                                        bgColor.withValues(alpha: 0.46),
-                                        bgColor.withValues(alpha: 0.86),
+                                        bgColor.withValues(alpha: 0.48),
+                                        bgColor.withValues(alpha: 0.88),
                                         bgColor,
                                       ],
                                       stops: const [0.0, 0.38, 0.76, 0.96],
                                     ),
                                   ),
+                                )
+                              : ShaderMask(
+                                  blendMode: BlendMode.dstIn,
+                                  shaderCallback: (rect) =>
+                                      const LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        colors: [
+                                          Color(0x00FFFFFF),
+                                          Color(0x8CFFFFFF),
+                                          Color(0xFFFFFFFF),
+                                          Color(0x00FFFFFF),
+                                        ],
+                                        stops: [0.0, 0.36, 0.84, 1.0],
+                                      ).createShader(rect),
+                                  child: ClipRect(
+                                    child: BackdropFilter(
+                                      filter: ImageFilter.blur(
+                                        sigmaX: 6.5,
+                                        sigmaY: 6.5,
+                                        tileMode: TileMode.clamp,
+                                      ),
+                                      child: DecoratedBox(
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            begin: Alignment.topCenter,
+                                            end: Alignment.bottomCenter,
+                                            colors: [
+                                              bgColor.withValues(alpha: 0.0),
+                                              bgColor.withValues(alpha: 0.46),
+                                              bgColor.withValues(alpha: 0.86),
+                                              bgColor,
+                                            ],
+                                            stops: const [0.0, 0.38, 0.76, 0.96],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ),
-                          ),
                         ),
                       ],
                     );
 
-                    if (blurSigma > 0.15) {
+                    final effectiveBlurSigma = (!kIsWeb &&
+                            !OhosRuntime.isOhos &&
+                            defaultTargetPlatform == TargetPlatform.iOS &&
+                            !IosLiquidGlassBridge.isAvailable)
+                        ? math.min(blurSigma, 18.0)
+                        : blurSigma;
+                    if (effectiveBlurSigma > 0.15) {
                       posterStack = ImageFiltered(
                         imageFilter: ImageFilter.blur(
-                          sigmaX: blurSigma,
-                          sigmaY: blurSigma,
+                          sigmaX: effectiveBlurSigma,
+                          sigmaY: effectiveBlurSigma,
                           tileMode: TileMode.clamp,
                         ),
                         child: posterStack,

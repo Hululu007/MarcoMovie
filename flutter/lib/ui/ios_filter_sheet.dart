@@ -4,10 +4,163 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/models.dart';
 import 'apple_theme.dart';
 import 'ios_liquid_glass.dart';
 import 'motion/ios27_springs.dart';
 import 'motion/motion_tokens.dart';
+
+final RegExp _iosFilterInvisibleChars = RegExp(
+  r'[\u0000-\u001F\u007F\u00AD\u200B-\u200F\u202A-\u202E\u2060\uFEFF]',
+);
+final RegExp _iosFilterMeaningfulChar = RegExp(
+  r'[A-Za-z0-9\u4E00-\u9FFF\u3400-\u4DBF\u3040-\u30FF\uAC00-\uD7AF]',
+);
+final RegExp _iosFilterBareOrdinal = RegExp(
+  r'^[\s()（）\[\]【】·\-_/]*([①-⑳⑴-⒇⒈-⒛❶-❿➀-➉➊-➓⓫-⓴])[\s()（）\[\]【】·\-_/]*$',
+);
+final RegExp _iosFilterBracketedSmallIndex = RegExp(
+  r'^[(（\[【]\s*([1-9]|1[0-9]|20)\s*[)）\]】]$',
+);
+final RegExp _iosFilterTrailingOrdinal = RegExp(
+  r'[\s·\-_/]*[①-⑳⑴-⒇⒈-⒛❶-❿➀-➉➊-➓⓫-⓴]+$',
+);
+
+String _cleanIosFilterLabel(String raw) {
+  return raw
+      .replaceAll(_iosFilterInvisibleChars, '')
+      .replaceAll('\u3000', ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+}
+
+/// Sanitizes upstream CMS categories for the iOS catalog filter sheet:
+/// 1. Drops blank, whitespace-only, zero-width, and pure-punctuation entries.
+/// 2. Reattaches bare continuation ordinal markers (`①`, `②`, `③`, ...) to
+///    their preceding category base name (`热门电影①`, `②`, `③` -> `热门电影①`,
+///    `热门电影②`, `热门电影③`; `好莱坞`, `①`, `②` -> `好莱坞`, `好莱坞①`, `好莱坞②`),
+///    and drops orphan ordinals that have no preceding base category.
+/// 3. Deduplicates category IDs so no duplicate or empty button can render.
+List<CmsCategory> sanitizeIosFilterCategories(List<CmsCategory> rawCategories) {
+  final out = <CmsCategory>[];
+  final seenIds = <String>{};
+  var currentBase = '';
+  for (final c in rawCategories) {
+    final id = c.id.trim();
+    final cleaned = _cleanIosFilterLabel(c.name);
+    if (id.isEmpty || cleaned.isEmpty) {
+      currentBase = '';
+      continue;
+    }
+    final bareOrdinal = _iosFilterBareOrdinal.firstMatch(cleaned);
+    final bracketIdx =
+        bareOrdinal == null ? _iosFilterBracketedSmallIndex.firstMatch(cleaned) : null;
+    if (bareOrdinal != null || bracketIdx != null) {
+      if (currentBase.isEmpty) {
+        continue;
+      }
+      final suffix = bareOrdinal != null
+          ? bareOrdinal.group(1)!
+          : '(${bracketIdx!.group(1)!})';
+      final resolved = '$currentBase$suffix';
+      if (seenIds.add(id)) {
+        out.add(CmsCategory(id: id, name: resolved, parentId: c.parentId));
+      }
+      continue;
+    }
+    if (!_iosFilterMeaningfulChar.hasMatch(cleaned)) {
+      currentBase = '';
+      continue;
+    }
+    final base = cleaned.replaceFirst(_iosFilterTrailingOrdinal, '').trim();
+    currentBase = _iosFilterMeaningfulChar.hasMatch(base) ? base : cleaned;
+    if (seenIds.add(id)) {
+      out.add(CmsCategory(id: id, name: cleaned, parentId: c.parentId));
+    }
+  }
+  return out;
+}
+
+/// Sanitizes already-built [IosNativeFilterCategory] options so neither the
+/// Flutter fallback sheet nor the native iOS sheet ever renders blank,
+/// punctuation-only, or duplicate-ID buttons.
+List<IosNativeFilterCategory> sanitizeIosFilterChoices(
+  List<IosNativeFilterCategory> rawChoices,
+) {
+  final out = <IosNativeFilterCategory>[];
+  var seenAll = false;
+  final seenCatIds = <String>{};
+  final seenGenres = <String>{};
+  var currentBase = '';
+  for (final choice in rawChoices) {
+    final id = choice.id.trim();
+    final kind = choice.kind.trim();
+    final cleaned = _cleanIosFilterLabel(choice.label);
+    if (cleaned.isEmpty) {
+      currentBase = '';
+      continue;
+    }
+    if (kind == 'all') {
+      if (!seenAll) {
+        seenAll = true;
+        out.add(IosNativeFilterCategory(id: '', label: cleaned, kind: 'all'));
+      }
+      currentBase = '';
+      continue;
+    }
+    final bareOrdinal = _iosFilterBareOrdinal.firstMatch(cleaned);
+    final bracketIdx =
+        bareOrdinal == null ? _iosFilterBracketedSmallIndex.firstMatch(cleaned) : null;
+    String resolvedLabel = cleaned;
+    if (bareOrdinal != null || bracketIdx != null) {
+      if (currentBase.isEmpty) continue;
+      final suffix = bareOrdinal != null
+          ? bareOrdinal.group(1)!
+          : '(${bracketIdx!.group(1)!})';
+      resolvedLabel = '$currentBase$suffix';
+    } else if (!_iosFilterMeaningfulChar.hasMatch(cleaned)) {
+      currentBase = '';
+      continue;
+    } else {
+      final base = cleaned.replaceFirst(_iosFilterTrailingOrdinal, '').trim();
+      currentBase = _iosFilterMeaningfulChar.hasMatch(base) ? base : cleaned;
+    }
+    if (kind == 'cat') {
+      if (id.isEmpty || resolvedLabel == '全部' || !seenCatIds.add(id)) continue;
+      out.add(
+        IosNativeFilterCategory(id: id, label: resolvedLabel, kind: 'cat'),
+      );
+    } else {
+      if (resolvedLabel == '全部' || !seenGenres.add(resolvedLabel)) continue;
+      out.add(
+        IosNativeFilterCategory(
+          id: id.isEmpty ? resolvedLabel : id,
+          label: resolvedLabel,
+          kind: 'genre',
+        ),
+      );
+    }
+  }
+  if (out.isEmpty) {
+    out.add(const IosNativeFilterCategory(id: '', label: '全部', kind: 'all'));
+  }
+  return out;
+}
+
+List<String> sanitizeIosFilterStringOptions(List<String> rawOptions) {
+  final out = <String>[];
+  final seen = <String>{};
+  for (final raw in rawOptions) {
+    final cleaned = _cleanIosFilterLabel(raw);
+    if (cleaned.isEmpty || !_iosFilterMeaningfulChar.hasMatch(cleaned)) {
+      continue;
+    }
+    if (seen.add(cleaned)) {
+      out.add(cleaned);
+    }
+  }
+  return out;
+}
 
 /// Computes the responsive equal-width column count for the iOS catalog filter
 /// option grid so narrow iPhones, large Dynamic Type scales, and iPad Split
@@ -149,8 +302,17 @@ class _IosCatalogFilterSheetBodyState extends State<IosCatalogFilterSheetBody> {
       _draftArea.isNotEmpty ||
       _draftYear.isNotEmpty;
 
+  List<IosNativeFilterCategory> get _sanitizedCategories =>
+      sanitizeIosFilterChoices(widget.categories);
+
+  List<String> get _sanitizedAreas =>
+      sanitizeIosFilterStringOptions(widget.areas);
+
+  List<String> get _sanitizedYears =>
+      sanitizeIosFilterStringOptions(widget.years);
+
   String get _summaryText => formatIosFilterSummary(
-        categories: widget.categories,
+        categories: _sanitizedCategories,
         selectedCategoryId: _draftCategoryId,
         selectedGenreLabel: _draftGenreLabel,
         selectedArea: _draftArea,
@@ -167,7 +329,7 @@ class _IosCatalogFilterSheetBodyState extends State<IosCatalogFilterSheetBody> {
     switch (dim) {
       case 0:
         if (_draftCategoryId.isNotEmpty) {
-          final matched = widget.categories.where(
+          final matched = _sanitizedCategories.where(
             (c) => c.kind == 'cat' && c.id == _draftCategoryId,
           );
           return matched.isNotEmpty ? matched.first.label : _draftCategoryId;
@@ -240,7 +402,7 @@ class _IosCatalogFilterSheetBodyState extends State<IosCatalogFilterSheetBody> {
     switch (_activeDimension) {
       case 0:
         return [
-          for (final c in widget.categories)
+          for (final c in _sanitizedCategories)
             _FilterOptionItem(
               keyValue: 'cat:${c.kind}:${c.id}:${c.label}',
               label: c.label,
@@ -254,7 +416,7 @@ class _IosCatalogFilterSheetBodyState extends State<IosCatalogFilterSheetBody> {
         ];
       case 1:
         return [
-          for (final a in widget.areas)
+          for (final a in _sanitizedAreas)
             _FilterOptionItem(
               keyValue: 'area:$a',
               label: a,
@@ -264,7 +426,7 @@ class _IosCatalogFilterSheetBodyState extends State<IosCatalogFilterSheetBody> {
         ];
       default:
         return [
-          for (final y in widget.years)
+          for (final y in _sanitizedYears)
             _FilterOptionItem(
               keyValue: 'year:$y',
               label: y,

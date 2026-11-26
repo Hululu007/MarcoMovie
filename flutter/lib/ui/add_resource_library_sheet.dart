@@ -1021,21 +1021,21 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
 
     return SingleChildScrollView(
       key: const ValueKey('add-resource-library-hub'),
-      padding: EdgeInsets.fromLTRB(20, 12, 20, safeBottom + 32),
+      padding: EdgeInsets.fromLTRB(16, 8, 16, safeBottom + 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (_bannerNotice != null && _noticeSectionIndex == null) ...[
             _buildInlineNoticeBanner(),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
           ],
           for (var sIdx = 0; sIdx < _sections.length; sIdx++) ...[
             _buildSectionBlock(context, _sections[sIdx], sectionIndex: sIdx),
             if (_bannerNotice != null && _noticeSectionIndex == sIdx) ...[
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               _buildInlineNoticeBanner(),
             ],
-            if (sIdx < _sections.length - 1) const SizedBox(height: 24),
+            if (sIdx < _sections.length - 1) const SizedBox(height: 14),
           ],
         ],
       ),
@@ -1082,12 +1082,12 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.only(bottom: 7),
           child: Text(
             section.title,
             style: TextStyle(
               color: palette.labelSecondary,
-              fontSize: 14,
+              fontSize: 13.5,
               fontWeight: FontWeight.w600,
               letterSpacing: 0.1,
             ),
@@ -1099,8 +1099,8 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
               availableWidth: constraints.maxWidth,
               textScale: textScale,
             );
-            const colGap = 14.0;
-            const rowGap = 16.0;
+            const colGap = 12.0;
+            const rowGap = 10.0;
             final rowCount = (section.tiles.length / cols).ceil();
             return Column(
               key: ValueKey('add-lib-section-$sectionIndex-cols-$cols'),
@@ -1108,31 +1108,33 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
               children: [
                 for (var r = 0; r < rowCount; r++) ...[
                   if (r > 0) const SizedBox(height: rowGap),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      for (var c = 0; c < cols; c++) ...[
-                        if (c > 0) const SizedBox(width: colGap),
-                        Expanded(
-                          child: (r * cols + c) < section.tiles.length
-                              ? _ResourceTileButton(
-                                  key: ValueKey(
-                                    'add-lib-tile-${section.tiles[r * cols + c].id.name}',
-                                  ),
-                                  tile: section.tiles[r * cols + c],
-                                  labelColor: palette.labelPrimary,
-                                  busy: _busyTileId ==
-                                      section.tiles[r * cols + c].id,
-                                  onTap: () => unawaited(
-                                    _handleTileTap(
-                                      section.tiles[r * cols + c].id,
+                  IntrinsicHeight(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (var c = 0; c < cols; c++) ...[
+                          if (c > 0) const SizedBox(width: colGap),
+                          Expanded(
+                            child: (r * cols + c) < section.tiles.length
+                                ? _ResourceTileButton(
+                                    key: ValueKey(
+                                      'add-lib-tile-${section.tiles[r * cols + c].id.name}',
                                     ),
-                                  ),
-                                )
-                              : const SizedBox.shrink(),
-                        ),
+                                    tile: section.tiles[r * cols + c],
+                                    labelColor: palette.labelPrimary,
+                                    busy: _busyTileId ==
+                                        section.tiles[r * cols + c].id,
+                                    onTap: () => unawaited(
+                                      _handleTileTap(
+                                        section.tiles[r * cols + c].id,
+                                      ),
+                                    ),
+                                  )
+                                : const SizedBox.shrink(),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ],
               ],
@@ -1182,6 +1184,13 @@ class _ResourceTileButtonState extends State<_ResourceTileButton> {
   @override
   Widget build(BuildContext context) {
     final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+    final isDark = ApplePalette.isDarkOf(context);
+    final cardFill = isDark
+        ? (_pressed ? const Color(0xFF28282C) : const Color(0xFF1C1C1F))
+        : (_pressed ? const Color(0xFFF1F3F8) : Colors.white);
+    final cardBorder = isDark
+        ? Colors.white.withValues(alpha: 0.08)
+        : Colors.black.withValues(alpha: 0.055);
     return Semantics(
       button: true,
       label: widget.tile.label,
@@ -1192,39 +1201,56 @@ class _ResourceTileButtonState extends State<_ResourceTileButton> {
         onTapCancel: () => setState(() => _pressed = false),
         onTap: widget.onTap,
         child: AnimatedScale(
-          scale: _pressed ? 0.94 : 1.0,
+          scale: _pressed ? 0.96 : 1.0,
           duration: reduceMotion
               ? const Duration(milliseconds: 60)
               : const Duration(milliseconds: 140),
           curve: Curves.easeOutCubic,
-          child: ConstrainedBox(
+          child: Container(
             constraints: const BoxConstraints(minWidth: 44, minHeight: 88),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+            decoration: BoxDecoration(
+              color: cardFill,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: cardBorder, width: 0.65),
+              boxShadow: isDark
+                  ? null
+                  : [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.04),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+            ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 Stack(
                   alignment: Alignment.center,
                   children: [
                     SizedBox(
-                      width: 64,
-                      height: 64,
+                      key: ValueKey('add-lib-icon-${widget.tile.id.name}'),
+                      width: 54,
+                      height: 54,
                       child: CustomPaint(
                         painter: _LibraryIconPainter(
                           id: widget.tile.id,
-                          pulse: 0.5,
-                          isDark: ApplePalette.isDarkOf(context),
-                          fontFamily: DefaultTextStyle.of(context).style.fontFamily,
+                          isDark: isDark,
+                          fontFamily:
+                              DefaultTextStyle.of(context).style.fontFamily,
                         ),
                       ),
                     ),
                     if (widget.busy)
                       Container(
-                        width: 64,
-                        height: 64,
+                        width: 49,
+                        height: 49,
                         decoration: BoxDecoration(
                           color: Colors.black.withValues(alpha: 0.36),
-                          borderRadius: BorderRadius.circular(16),
+                          borderRadius: BorderRadius.circular(13.0),
                         ),
                         child: const Center(
                           child: CupertinoActivityIndicator(
@@ -1234,16 +1260,16 @@ class _ResourceTileButtonState extends State<_ResourceTileButton> {
                       ),
                   ],
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 6),
                 Text(
                   widget.tile.label,
                   maxLines: 2,
                   softWrap: true,
                   overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.left,
+                  textAlign: TextAlign.center,
                   style: TextStyle(
                     color: widget.labelColor,
-                    fontSize: 13,
+                    fontSize: 12.5,
                     height: 1.25,
                     fontWeight: FontWeight.w600,
                     letterSpacing: -0.1,
@@ -1258,466 +1284,349 @@ class _ResourceTileButtonState extends State<_ResourceTileButton> {
   }
 }
 
-/// Bespoke animated vector icon painter matching Rex's crisp 3D translucent
-/// folder-cloud emblems, Emby diamond, Jellyfin gradient triangle, Plex badge,
-/// and cloud drive / subscription icons.
+/// Unified iOS squircle icon set: every resource library shares identical
+/// squircle geometry, gradient depth, specular sheen, inner rim, and vector
+/// stroke language, while each service has a distinct color palette and unique
+/// geometric emblem so no two icons look alike.
 class _LibraryIconPainter extends CustomPainter {
   final _LibraryTileId id;
-  final double pulse;
   final bool isDark;
   final String? fontFamily;
 
   const _LibraryIconPainter({
     required this.id,
-    required this.pulse,
     required this.isDark,
     this.fontFamily,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    final w = size.width;
-    final h = size.height;
     switch (id) {
-      case _LibraryTileId.webdav:
-        _paintCloudFolder(
-          canvas,
-          size,
-          topCloud: const Color(0xFF9FE3FF),
-          folderTop: const Color(0xFF3CB4FF),
-          folderBottom: const Color(0xFF007AFF),
-          glyph: 'DAV',
-        );
-        break;
-      case _LibraryTileId.smb:
-        _paintCloudFolder(
-          canvas,
-          size,
-          topCloud: const Color(0xFFB5E8FF),
-          folderTop: const Color(0xFF2EA7FF),
-          folderBottom: const Color(0xFF0A66E8),
-          glyph: 'SMB',
-        );
-        break;
-      case _LibraryTileId.localDevice:
-        _paintCloudFolder(
-          canvas,
-          size,
-          topCloud: const Color(0xFFA7F3D0),
-          folderTop: const Color(0xFF38BDF8),
-          folderBottom: const Color(0xFF0284C7),
-          glyph: 'iOS',
-        );
-        break;
-      case _LibraryTileId.localPack:
-        _paintRoundedBadge(
-          canvas,
-          size,
-          const [Color(0xFFFFB340), Color(0xFFF97316)],
-        );
-        _paintZipGlyph(canvas, size);
-        break;
       case _LibraryTileId.emby:
-        _paintEmbyIcon(canvas, size);
+        _paintUniformSquircle(
+          canvas,
+          size,
+          const [Color(0xFF4ADE80), Color(0xFF16A34A)],
+        );
+        _paintEmbyDiamondPlayGlyph(canvas, size);
         break;
       case _LibraryTileId.jellyfin:
-        _paintJellyfinIcon(canvas, size);
-        break;
-      case _LibraryTileId.plex:
-        _paintPlexIcon(canvas, size);
-        break;
-      case _LibraryTileId.alistNas:
-        _paintRoundedBadge(
+        _paintUniformSquircle(
           canvas,
           size,
-          const [Color(0xFF38BDF8), Color(0xFF1D4ED8)],
+          const [Color(0xFFA855F7), Color(0xFF6D28D9)],
+        );
+        _paintJellyfinPrismGlyph(canvas, size);
+        break;
+      case _LibraryTileId.plex:
+        _paintUniformSquircle(
+          canvas,
+          size,
+          const [Color(0xFF323540), Color(0xFF14151A)],
+        );
+        _paintPlexChevronGlyph(canvas, size);
+        break;
+      case _LibraryTileId.webdav:
+        _paintUniformSquircle(
+          canvas,
+          size,
+          const [Color(0xFF38BDF8), Color(0xFF0284C7)],
+        );
+        _paintWebDavGlobeGlyph(canvas, size);
+        break;
+      case _LibraryTileId.smb:
+        _paintUniformSquircle(
+          canvas,
+          size,
+          const [Color(0xFF4F46E5), Color(0xFF1E3A8A)],
+        );
+        _paintSmbLanShareGlyph(canvas, size);
+        break;
+      case _LibraryTileId.alistNas:
+        _paintUniformSquircle(
+          canvas,
+          size,
+          const [Color(0xFF2DD4BF), Color(0xFF0F766E)],
         );
         _paintServerRackGlyph(canvas, size);
         break;
-      case _LibraryTileId.manualInput:
-        _paintRoundedBadge(
-          canvas,
-          size,
-          const [Color(0xFF4F8BFF), Color(0xFF2563EB)],
-        );
-        _paintLinkGlyph(canvas, size);
-        break;
       case _LibraryTileId.quarkDrive:
-        _paintRoundedBadge(
+        _paintUniformSquircle(
           canvas,
           size,
-          const [Color(0xFF38BDF8), Color(0xFF2563EB)],
+          const [Color(0xFF60A5FA), Color(0xFF2563EB)],
         );
-        _paintQuarkOrbitGlyph(canvas, size, w, h);
+        _paintQuarkOrbitGlyph(canvas, size);
         break;
       case _LibraryTileId.ucDrive:
-        _paintRoundedBadge(
+        _paintUniformSquircle(
           canvas,
           size,
-          const [Color(0xFFFF9500), Color(0xFFFF5E00)],
+          const [Color(0xFFFB923C), Color(0xFFEA580C)],
         );
         _paintUcWaveGlyph(canvas, size);
         break;
       case _LibraryTileId.baiduDrive:
-        _paintRoundedBadge(
+        _paintUniformSquircle(
           canvas,
           size,
-          isDark
-              ? const [Color(0xFFFFFFFF), Color(0xFFEFF3F8)]
-              : const [Color(0xFFFFFFFF), Color(0xFFF3F6FB)],
-          borderColor: Colors.black.withValues(alpha: 0.08),
+          const [Color(0xFFFB7185), Color(0xFFE11D48)],
         );
-        _paintBaiduCloudGlyph(canvas, size);
+        _paintBaiduTrefoilGlyph(canvas, size);
         break;
       case _LibraryTileId.aliDrive:
-        _paintRoundedBadge(
+        _paintUniformSquircle(
           canvas,
           size,
-          const [Color(0xFF6366F1), Color(0xFF3B82F6)],
+          const [Color(0xFF818CF8), Color(0xFF4338CA)],
         );
-        _paintAliRibbonGlyph(canvas, size);
+        _paintAliCloudWingGlyph(canvas, size);
+        break;
+      case _LibraryTileId.localDevice:
+        _paintUniformSquircle(
+          canvas,
+          size,
+          const [Color(0xFF34D399), Color(0xFF059669)],
+        );
+        _paintLocalDeviceGlyph(canvas, size);
+        break;
+      case _LibraryTileId.manualInput:
+        _paintUniformSquircle(
+          canvas,
+          size,
+          const [Color(0xFFE879F9), Color(0xFFA21CAF)],
+        );
+        _paintLinkGlyph(canvas, size);
+        break;
+      case _LibraryTileId.localPack:
+        _paintUniformSquircle(
+          canvas,
+          size,
+          const [Color(0xFFFBBF24), Color(0xFFD97706)],
+        );
+        _paintZipGlyph(canvas, size);
         break;
     }
   }
 
-  void _paintRoundedBadge(
+  void _paintUniformSquircle(
     Canvas canvas,
     Size size,
-    List<Color> colors, {
-    Color? borderColor,
-  }) {
-    final rect = Rect.fromLTWH(4, 4, size.width - 8, size.height - 8);
-    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(14));
+    List<Color> colors,
+  ) {
+    final rect = Rect.fromLTWH(3, 3, size.width - 6, size.height - 6);
+    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(14.5));
     canvas.drawShadow(
       Path()..addRRect(rrect),
-      colors.last.withValues(alpha: 0.30),
-      6,
+      colors.last.withValues(alpha: isDark ? 0.42 : 0.28),
+      5.5,
       false,
     );
-    final paint = Paint()
+    final fillPaint = Paint()
       ..shader = LinearGradient(
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
         colors: colors,
       ).createShader(rect);
-    canvas.drawRRect(rrect, paint);
-    // Subtle animated specular sheen
+    canvas.drawRRect(rrect, fillPaint);
+
+    // Unified subtle top-left glass specular sheen
     final sheenPaint = Paint()
       ..shader = LinearGradient(
-        begin: Alignment(-1.0 + pulse * 0.6, -1.0),
-        end: Alignment(0.5 + pulse * 0.6, 0.8),
+        begin: Alignment.topLeft,
+        end: const Alignment(0.65, 0.75),
         colors: [
-          Colors.white.withValues(alpha: 0.28),
+          Colors.white.withValues(alpha: 0.26),
           Colors.white.withValues(alpha: 0.0),
         ],
       ).createShader(rect);
     canvas.drawRRect(rrect, sheenPaint);
-    if (borderColor != null) {
-      canvas.drawRRect(
-        rrect,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 0.8
-          ..color = borderColor,
-      );
-    }
-  }
 
-  void _paintCloudFolder(
-    Canvas canvas,
-    Size size, {
-    required Color topCloud,
-    required Color folderTop,
-    required Color folderBottom,
-    required String glyph,
-  }) {
-    final w = size.width;
-    final h = size.height;
-    // Soft translucent cloud silhouette behind the folder (Rex style)
-    final cloudPaint = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [
-          topCloud.withValues(alpha: 0.92),
-          folderTop.withValues(alpha: 0.62),
-        ],
-      ).createShader(Rect.fromLTWH(4, 6, w - 8, h * 0.65));
-    final cloudY = 2.0 - pulse * 1.4;
-    canvas.drawCircle(Offset(w * 0.50, h * 0.34 + cloudY), w * 0.24, cloudPaint);
-    canvas.drawCircle(Offset(w * 0.26, h * 0.44 + cloudY), w * 0.16, cloudPaint);
-    canvas.drawCircle(Offset(w * 0.74, h * 0.44 + cloudY), w * 0.16, cloudPaint);
-
-    // Front glossy 3D folder body
-    final folderRect = Rect.fromLTWH(w * 0.15, h * 0.40, w * 0.70, h * 0.46);
-    final folderRRect =
-        RRect.fromRectAndRadius(folderRect, const Radius.circular(8.5));
-    canvas.drawShadow(
-      Path()..addRRect(folderRRect),
-      folderBottom.withValues(alpha: 0.34),
-      5,
-      false,
-    );
-    final folderPaint = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [folderTop, folderBottom],
-      ).createShader(folderRect);
-    canvas.drawRRect(folderRRect, folderPaint);
-    // Folder tab notch
-    final tabRRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(w * 0.18, h * 0.34, w * 0.27, h * 0.11),
-      const Radius.circular(4),
-    );
-    canvas.drawRRect(tabRRect, Paint()..color = folderTop);
-    // Subtle top highlight stripe
+    // Unified crisp inner rim highlight
+    final rimRect = rect.deflate(0.45);
     canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(w * 0.21, h * 0.47, w * 0.58, 2.2),
-        const Radius.circular(2),
-      ),
-      Paint()..color = Colors.white.withValues(alpha: 0.42 + pulse * 0.18),
-    );
-    // Crisp protocol micro-tag
-    final tp = TextPainter(
-      text: TextSpan(
-        text: glyph,
-        style: TextStyle(
-          fontFamily: fontFamily,
-          color: Colors.white.withValues(alpha: 0.92),
-          fontSize: 9.2,
-          fontWeight: FontWeight.w800,
-          letterSpacing: 0.4,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    tp.paint(
-      canvas,
-      Offset((w - tp.width) * 0.5, folderRect.top + (folderRect.height - tp.height) * 0.58),
+      RRect.fromRectAndRadius(rimRect, const Radius.circular(14.0)),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.9
+        ..color = Colors.white.withValues(alpha: 0.22),
     );
   }
 
-  void _paintEmbyIcon(Canvas canvas, Size size) {
+  Paint _strokePaint({double width = 2.4, Color color = Colors.white}) => Paint()
+    ..color = color
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = width
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round;
+
+  void _paintEmbyDiamondPlayGlyph(Canvas canvas, Size size) {
     final cx = size.width * 0.5;
     final cy = size.height * 0.5;
-    final r = size.width * 0.39;
+    const r = 14.5;
     final diamond = Path()
       ..moveTo(cx, cy - r)
       ..lineTo(cx + r, cy)
       ..lineTo(cx, cy + r)
       ..lineTo(cx - r, cy)
       ..close();
-    canvas.drawShadow(diamond, const Color(0x6652B54B), 6, false);
     canvas.drawPath(
       diamond,
-      Paint()
-        ..shader = const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF66D15C), Color(0xFF3E9C38)],
-        ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: r)),
+      Paint()..color = Colors.white.withValues(alpha: 0.16),
     );
-    // Crisp white play triangle pulsing subtly
-    final s = 0.96 + pulse * 0.08;
+    canvas.drawPath(diamond, _strokePaint(width: 2.3));
     final play = Path()
-      ..moveTo(cx - 5.5 * s, cy - 8.5 * s)
-      ..lineTo(cx + 9.5 * s, cy)
-      ..lineTo(cx - 5.5 * s, cy + 8.5 * s)
+      ..moveTo(cx - 3.6, cy - 5.6)
+      ..lineTo(cx + 6.4, cy)
+      ..lineTo(cx - 3.6, cy + 5.6)
       ..close();
     canvas.drawPath(play, Paint()..color = Colors.white);
   }
 
-  void _paintJellyfinIcon(Canvas canvas, Size size) {
+  void _paintJellyfinPrismGlyph(Canvas canvas, Size size) {
     final cx = size.width * 0.5;
-    final cy = size.height * 0.52;
+    final cy = size.height * 0.51;
     final outer = Path()
-      ..moveTo(cx, size.height * 0.14)
-      ..cubicTo(
-        size.width * 0.68,
-        size.height * 0.14,
-        size.width * 0.88,
-        size.height * 0.66,
-        size.width * 0.80,
-        size.height * 0.78,
-      )
-      ..cubicTo(
-        size.width * 0.72,
-        size.height * 0.89,
-        size.width * 0.28,
-        size.height * 0.89,
-        size.width * 0.20,
-        size.height * 0.78,
-      )
-      ..cubicTo(
-        size.width * 0.12,
-        size.height * 0.66,
-        size.width * 0.32,
-        size.height * 0.14,
-        cx,
-        size.height * 0.14,
-      )
+      ..moveTo(cx, cy - 13.5)
+      ..cubicTo(cx + 6.5, cy - 13.5, cx + 15.5, cy + 4.5, cx + 12.2, cy + 9.5)
+      ..cubicTo(cx + 9.0, cy + 14.2, cx - 9.0, cy + 14.2, cx - 12.2, cy + 9.5)
+      ..cubicTo(cx - 15.5, cy + 4.5, cx - 6.5, cy - 13.5, cx, cy - 13.5)
       ..close();
-    canvas.drawShadow(outer, const Color(0x55AA5CC3), 6, false);
     canvas.drawPath(
       outer,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment(-0.8 + pulse * 0.4, -1.0),
-          end: Alignment(0.8, 1.0),
-          colors: const [Color(0xFFAA5CC3), Color(0xFF00A4DC)],
-        ).createShader(Rect.fromLTWH(0, 0, size.width, size.height)),
+      Paint()..color = Colors.white.withValues(alpha: 0.18),
     );
+    canvas.drawPath(outer, _strokePaint(width: 2.3));
     final inner = Path()
-      ..moveTo(cx, cy - 10)
-      ..lineTo(cx + 10.5, cy + 8)
-      ..lineTo(cx - 10.5, cy + 8)
+      ..moveTo(cx, cy - 5.2)
+      ..lineTo(cx + 5.8, cy + 5.2)
+      ..lineTo(cx - 5.8, cy + 5.2)
+      ..close();
+    canvas.drawPath(inner, Paint()..color = Colors.white);
+  }
+
+  void _paintPlexChevronGlyph(Canvas canvas, Size size) {
+    final cx = size.width * 0.5;
+    final cy = size.height * 0.5;
+    final chevron = Path()
+      ..moveTo(cx - 8.0, cy - 12.0)
+      ..lineTo(cx - 0.5, cy - 12.0)
+      ..lineTo(cx + 9.5, cy)
+      ..lineTo(cx - 0.5, cy + 12.0)
+      ..lineTo(cx - 8.0, cy + 12.0)
+      ..lineTo(cx + 2.0, cy)
       ..close();
     canvas.drawPath(
-      inner,
+      chevron,
       Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 3.2
-        ..strokeJoin = StrokeJoin.round
-        ..color = Colors.white.withValues(alpha: 0.92),
+        ..shader = const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFFFCD34D), Color(0xFFE5A00D)],
+        ).createShader(
+          Rect.fromCenter(center: Offset(cx, cy), width: 22, height: 26),
+        ),
     );
   }
 
-  void _paintPlexIcon(Canvas canvas, Size size) {
-    _paintRoundedBadge(
-      canvas,
-      size,
-      const [Color(0xFF1E1E24), Color(0xFF0A0A0E)],
+  void _paintWebDavGlobeGlyph(Canvas canvas, Size size) {
+    final cx = size.width * 0.5;
+    final cy = size.height * 0.5;
+    const r = 13.2;
+    final stroke = _strokePaint(width: 2.1);
+    canvas.drawCircle(Offset(cx, cy), r, stroke);
+    canvas.drawOval(
+      Rect.fromCenter(center: Offset(cx, cy), width: r * 1.05, height: r * 2.0),
+      stroke,
     );
-    final tp = TextPainter(
-      text: TextSpan(
-        children: [
-          TextSpan(
-            text: 'ple',
-            style: TextStyle(
-              fontFamily: fontFamily,
-              color: Colors.white,
-              fontSize: 16.5,
-              fontWeight: FontWeight.w800,
-              letterSpacing: -0.6,
-            ),
-          ),
-          TextSpan(
-            text: 'x',
-            style: TextStyle(
-              fontFamily: fontFamily,
-              color: const Color(0xFFE5A00D),
-              fontSize: 18,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-        ],
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    tp.paint(
-      canvas,
-      Offset(
-        (size.width - tp.width) * 0.5,
-        (size.height - tp.height) * 0.5,
-      ),
+    canvas.drawLine(
+      Offset(cx - r + 1.2, cy - 4.4),
+      Offset(cx + r - 1.2, cy - 4.4),
+      stroke,
     );
+    canvas.drawLine(
+      Offset(cx - r + 1.2, cy + 4.4),
+      Offset(cx + r - 1.2, cy + 4.4),
+      stroke,
+    );
+  }
+
+  void _paintSmbLanShareGlyph(Canvas canvas, Size size) {
+    final cx = size.width * 0.5;
+    final cy = size.height * 0.5;
+    final stroke = _strokePaint(width: 2.2);
+    // Shared folder body above a 3-node LAN bus
+    final folder = Path()
+      ..moveTo(cx - 12.0, cy - 10.5)
+      ..lineTo(cx - 3.5, cy - 10.5)
+      ..lineTo(cx - 0.8, cy - 7.5)
+      ..lineTo(cx + 12.0, cy - 7.5)
+      ..lineTo(cx + 12.0, cy + 3.5)
+      ..lineTo(cx - 12.0, cy + 3.5)
+      ..close();
+    canvas.drawPath(
+      folder,
+      Paint()..color = Colors.white.withValues(alpha: 0.20),
+    );
+    canvas.drawPath(folder, stroke);
+    // Vertical stem + LAN horizontal bus
+    canvas.drawLine(Offset(cx, cy + 3.5), Offset(cx, cy + 10.5), stroke);
+    canvas.drawLine(
+      Offset(cx - 11.5, cy + 10.5),
+      Offset(cx + 11.5, cy + 10.5),
+      stroke,
+    );
+    for (final dx in const [-10.0, 0.0, 10.0]) {
+      canvas.drawCircle(
+        Offset(cx + dx, cy + 10.5),
+        2.5,
+        Paint()..color = Colors.white,
+      );
+    }
   }
 
   void _paintServerRackGlyph(Canvas canvas, Size size) {
-    final p = Paint()
-      ..color = Colors.white.withValues(alpha: 0.94)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.2;
-    for (final y in [19.0, 30.0, 41.0]) {
+    final cx = size.width * 0.5;
+    final cy = size.height * 0.5;
+    final stroke = _strokePaint(width: 2.1);
+    for (final dy in const [-9.5, 0.0, 9.5]) {
       final r = RRect.fromRectAndRadius(
-        Rect.fromCenter(center: Offset(size.width * 0.5, y), width: 28, height: 8),
-        const Radius.circular(3),
+        Rect.fromCenter(center: Offset(cx, cy + dy), width: 26, height: 7.2),
+        const Radius.circular(3.0),
       );
-      canvas.drawRRect(r, p);
+      canvas.drawRRect(r, stroke);
       canvas.drawCircle(
-        Offset(size.width * 0.5 + 8.5, y),
-        1.6,
-        Paint()
-          ..color = Color.lerp(
-            const Color(0xFF86EFAC),
-            Colors.white,
-            pulse,
-          )!,
+        Offset(cx - 7.5, cy + dy),
+        1.5,
+        Paint()..color = Colors.white,
+      );
+      canvas.drawLine(
+        Offset(cx - 2.0, cy + dy),
+        Offset(cx + 8.0, cy + dy),
+        _strokePaint(width: 1.9, color: Colors.white.withValues(alpha: 0.85)),
       );
     }
   }
 
-  void _paintZipGlyph(Canvas canvas, Size size) {
-    final rect = RRect.fromRectAndRadius(
-      Rect.fromCenter(
-        center: Offset(size.width * 0.5, size.height * 0.5),
-        width: 24,
-        height: 28,
-      ),
-      const Radius.circular(5),
-    );
-    canvas.drawRRect(
-      rect,
-      Paint()
-        ..color = Colors.white.withValues(alpha: 0.92)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.4,
-    );
-    final teeth = Paint()..color = Colors.white;
-    for (var i = 0; i < 4; i++) {
-      final left = i.isEven ? -3.0 : 0.5;
-      canvas.drawRect(
-        Rect.fromLTWH(size.width * 0.5 + left, 20.0 + i * 5.0, 3.0, 3.0),
-        teeth,
-      );
-    }
-  }
-
-  void _paintLinkGlyph(Canvas canvas, Size size) {
-    final p = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.8
-      ..strokeCap = StrokeCap.round;
-    canvas.save();
-    canvas.translate(size.width * 0.5, size.height * 0.5);
-    canvas.rotate(-math.pi / 4 + (pulse - 0.5) * 0.12);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(-14, -5.5, 15, 11),
-        const Radius.circular(5.5),
-      ),
-      p,
-    );
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(-1, -5.5, 15, 11),
-        const Radius.circular(5.5),
-      ),
-      p,
-    );
-    canvas.restore();
-  }
-
-  void _paintQuarkOrbitGlyph(Canvas canvas, Size size, double w, double h) {
-    final cx = w * 0.5;
-    final cy = h * 0.5;
+  void _paintQuarkOrbitGlyph(Canvas canvas, Size size) {
+    final cx = size.width * 0.5;
+    final cy = size.height * 0.5;
     canvas.drawCircle(
       Offset(cx, cy),
-      8.5,
-      Paint()..color = Colors.white.withValues(alpha: 0.95),
+      6.4,
+      Paint()..color = Colors.white,
     );
     canvas.save();
     canvas.translate(cx, cy);
-    canvas.rotate(-0.45 + pulse * 0.25);
+    canvas.rotate(-0.48);
     canvas.drawOval(
-      Rect.fromCenter(center: Offset.zero, width: 34, height: 14),
-      Paint()
-        ..color = Colors.white.withValues(alpha: 0.82)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.4,
+      Rect.fromCenter(center: Offset.zero, width: 31, height: 12.5),
+      _strokePaint(width: 2.3),
+    );
+    canvas.drawCircle(
+      const Offset(13.2, -2.5),
+      2.3,
+      Paint()..color = Colors.white,
     );
     canvas.restore();
   }
@@ -1725,66 +1634,137 @@ class _LibraryIconPainter extends CustomPainter {
   void _paintUcWaveGlyph(Canvas canvas, Size size) {
     final cx = size.width * 0.5;
     final cy = size.height * 0.5;
-    final arcP = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.6
-      ..strokeCap = StrokeCap.round;
     canvas.drawArc(
-      Rect.fromCircle(center: Offset(cx, cy), radius: 13),
-      -math.pi * 0.8 + pulse * 0.25,
-      math.pi * 1.45,
+      Rect.fromCircle(center: Offset(cx, cy), radius: 12.2),
+      -math.pi * 0.72,
+      math.pi * 1.46,
       false,
-      arcP,
+      _strokePaint(width: 3.1),
+    );
+    canvas.drawArc(
+      Rect.fromCircle(center: Offset(cx + 1.0, cy), radius: 6.4),
+      -math.pi * 0.55,
+      math.pi * 1.15,
+      false,
+      _strokePaint(width: 2.4, color: Colors.white.withValues(alpha: 0.88)),
     );
     canvas.drawCircle(
-      Offset(cx + 2, cy),
-      4.5,
+      Offset(cx + 1.5, cy),
+      2.6,
       Paint()..color = Colors.white,
     );
   }
 
-  void _paintBaiduCloudGlyph(Canvas canvas, Size size) {
+  void _paintBaiduTrefoilGlyph(Canvas canvas, Size size) {
     final cx = size.width * 0.5;
-    final cy = size.height * 0.53;
-    final blueP = Paint()
-      ..color = const Color(0xFF06A7FF)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 4.2;
-    final redP = Paint()
-      ..color = const Color(0xFFFF4D6A)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 4.2;
-    canvas.drawCircle(Offset(cx - 7.5, cy + 4.5), 7.5, blueP);
-    canvas.drawCircle(Offset(cx + 7.5, cy + 4.5), 7.5, blueP);
-    canvas.drawCircle(Offset(cx, cy - 6.5 - pulse * 1.0), 7.5, redP);
+    final cy = size.height * 0.52;
+    final ring = _strokePaint(width: 2.8);
+    canvas.drawCircle(Offset(cx - 6.6, cy + 4.2), 6.2, ring);
+    canvas.drawCircle(Offset(cx + 6.6, cy + 4.2), 6.2, ring);
+    canvas.drawCircle(Offset(cx, cy - 5.8), 6.2, ring);
   }
 
-  void _paintAliRibbonGlyph(Canvas canvas, Size size) {
+  void _paintAliCloudWingGlyph(Canvas canvas, Size size) {
+    final cx = size.width * 0.5;
+    final cy = size.height * 0.52;
+    final cloud = Path()
+      ..moveTo(cx - 10.5, cy + 6.5)
+      ..lineTo(cx + 10.5, cy + 6.5)
+      ..cubicTo(cx + 15.5, cy + 6.5, cx + 16.0, cy - 1.5, cx + 10.8, cy - 2.6)
+      ..cubicTo(cx + 10.2, cy - 10.2, cx + 0.5, cy - 12.2, cx - 3.6, cy - 6.4)
+      ..cubicTo(cx - 8.5, cy - 8.2, cx - 14.5, cy - 3.0, cx - 13.8, cy + 2.2)
+      ..cubicTo(cx - 13.5, cy + 5.0, cx - 12.2, cy + 6.5, cx - 10.5, cy + 6.5)
+      ..close();
+    canvas.drawPath(
+      cloud,
+      Paint()..color = Colors.white.withValues(alpha: 0.18),
+    );
+    canvas.drawPath(cloud, _strokePaint(width: 2.3));
+    // Inner upward folded ribbon chevron distinguishing Ali Drive
+    final wing = Path()
+      ..moveTo(cx - 5.2, cy + 1.8)
+      ..lineTo(cx, cy - 3.4)
+      ..lineTo(cx + 5.2, cy + 1.8);
+    canvas.drawPath(wing, _strokePaint(width: 2.3));
+  }
+
+  void _paintLocalDeviceGlyph(Canvas canvas, Size size) {
     final cx = size.width * 0.5;
     final cy = size.height * 0.5;
-    final p = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.2
-      ..strokeJoin = StrokeJoin.round;
-    final path = Path()
-      ..moveTo(cx, cy - 13)
-      ..lineTo(cx + 13, cy + 10)
-      ..lineTo(cx - 13, cy + 10)
-      ..close();
-    canvas.drawPath(path, p);
-    canvas.drawCircle(
-      Offset(cx, cy + 2),
-      3.0 + pulse * 0.8,
-      Paint()..color = Colors.white,
+    final phoneRect = RRect.fromRectAndRadius(
+      Rect.fromCenter(center: Offset(cx, cy), width: 19, height: 29),
+      const Radius.circular(4.8),
     );
+    canvas.drawRRect(
+      phoneRect,
+      Paint()..color = Colors.white.withValues(alpha: 0.16),
+    );
+    canvas.drawRRect(phoneRect, _strokePaint(width: 2.2));
+    // Top speaker / Dynamic Island notch
+    canvas.drawLine(
+      Offset(cx - 3.2, cy - 10.4),
+      Offset(cx + 3.2, cy - 10.4),
+      _strokePaint(width: 2.0),
+    );
+    // Play triangle inside device screen
+    final play = Path()
+      ..moveTo(cx - 2.6, cy - 3.8)
+      ..lineTo(cx + 4.4, cy + 0.4)
+      ..lineTo(cx - 2.6, cy + 4.6)
+      ..close();
+    canvas.drawPath(play, Paint()..color = Colors.white);
+  }
+
+  void _paintLinkGlyph(Canvas canvas, Size size) {
+    final p = _strokePaint(width: 2.6);
+    canvas.save();
+    canvas.translate(size.width * 0.5, size.height * 0.5);
+    canvas.rotate(-math.pi / 4);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(-13, -5.0, 14, 10),
+        const Radius.circular(5.0),
+      ),
+      p,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(-1, -5.0, 14, 10),
+        const Radius.circular(5.0),
+      ),
+      p,
+    );
+    canvas.restore();
+  }
+
+  void _paintZipGlyph(Canvas canvas, Size size) {
+    final cx = size.width * 0.5;
+    final cy = size.height * 0.5;
+    final rect = RRect.fromRectAndRadius(
+      Rect.fromCenter(center: Offset(cx, cy), width: 22, height: 26),
+      const Radius.circular(4.8),
+    );
+    canvas.drawRRect(
+      rect,
+      Paint()..color = Colors.white.withValues(alpha: 0.16),
+    );
+    canvas.drawRRect(rect, _strokePaint(width: 2.2));
+    final teeth = Paint()..color = Colors.white;
+    for (var i = 0; i < 4; i++) {
+      final left = i.isEven ? -2.8 : 0.4;
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(cx + left, cy - 9.0 + i * 4.7, 2.8, 2.8),
+          const Radius.circular(0.8),
+        ),
+        teeth,
+      );
+    }
   }
 
   @override
   bool shouldRepaint(covariant _LibraryIconPainter oldDelegate) =>
       oldDelegate.id != id ||
-      (oldDelegate.pulse - pulse).abs() > 0.01 ||
       oldDelegate.isDark != isDark ||
       oldDelegate.fontFamily != fontFamily;
 }

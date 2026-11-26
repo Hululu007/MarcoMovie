@@ -10,7 +10,12 @@ import 'motion/motion_tokens.dart';
 import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, ValueListenable, defaultTargetPlatform, kIsWeb;
+    show
+        TargetPlatform,
+        ValueListenable,
+        defaultTargetPlatform,
+        kIsWeb,
+        visibleForTesting;
 import 'package:flutter/gestures.dart' show DragStartBehavior;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -776,7 +781,12 @@ List<double> _saturationMatrix(double s) {
 }
 
 /// Glasswork dark material filter, from glass.css: 2px blur, 160% saturation, 80% brightness.
-ImageFilter liquidGlassFilter({double blur = 2, double saturation = 1.6, double brightness = .8}) {
+ImageFilter liquidGlassFilter({
+  double blur = 2,
+  double saturation = 1.6,
+  double brightness = .8,
+  TileMode tileMode = TileMode.mirror,
+}) {
   final matrix = _saturationMatrix(saturation);
   for (var i = 0; i < 15; i++) { matrix[i] *= brightness; }
   return ImageFilter.compose(
@@ -784,7 +794,7 @@ ImageFilter liquidGlassFilter({double blur = 2, double saturation = 1.6, double 
     inner: ImageFilter.blur(
       sigmaX: blur,
       sigmaY: blur,
-      tileMode: TileMode.mirror,
+      tileMode: tileMode,
     ),
   );
 }
@@ -862,6 +872,15 @@ class _LiquidRimPainter extends CustomPainter {
       old.lightMode != lightMode;
 }
 
+bool _isIosPlatform() =>
+    !kIsWeb && !OhosRuntime.isOhos && defaultTargetPlatform == TargetPlatform.iOS;
+
+bool _isIosLegacyGlassActive() =>
+    _isIosPlatform() && !IosLiquidGlassBridge.isAvailable;
+
+bool _isIosThermalDegraded() =>
+    _isIosPlatform() && IosLiquidGlassBridge.thermalThrottled;
+
 bool _isSystemReduceTransparencyActive() =>
     !OhosRuntime.isOhos && IosLiquidGlassBridge.reduceTransparency;
 
@@ -890,11 +909,15 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
     GlassworkBackdrop.reduceTransparency,
     GlassworkBackdrop.intensity,
     IosLiquidGlassBridge.reduceTransparencyNotifier,
+    IosLiquidGlassBridge.available,
+    IosLiquidGlassBridge.thermalThrottledNotifier,
   ]);
   @override
   void initState() {
     super.initState();
     if (!_isWindowsDesktop &&
+        !_isIosLegacyGlassActive() &&
+        !_isIosThermalDegraded() &&
         !GlassworkBackdrop.reduceTransparency.value &&
         !_isSystemReduceTransparencyActive() &&
         ImageFilter.isShaderFilterSupported) {
@@ -932,8 +955,12 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
             MediaQuery.highContrastOf(context) ||
             MediaQuery.disableAnimationsOf(context);
         final winFastGlass = _isWindowsDesktop;
+        final iosLegacyGlass = _isIosLegacyGlassActive();
+        final iosThermalDegraded = _isIosThermalDegraded();
+        final disableLensShader =
+            winFastGlass || iosLegacyGlass || iosThermalDegraded;
         if (!opaque &&
-            !winFastGlass &&
+            !disableLensShader &&
             isDark &&
             _shader == null &&
             !_loadingLens &&
@@ -943,10 +970,11 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
         // Use true continuous optical blur + intensity-reactive translucency so
         // dragging the Liquid Glass slider from 0% to 100% produces an immediate,
         // clearly visible visual transformation in both Light and Dark themes.
-        // The dark lens shader is reserved for high-strength dark mode (>= 0.85)
-        // where its refractive rim shines without masking slider changes.
+        // The 54-tap dark lens shader is disabled on iOS < 26 (e.g. iPad Pro 2020
+        // on iPadOS 15.4) and during iOS thermal throttling to prevent Metal GPU
+        // overheating; elsewhere it stays reserved for high-strength dark mode.
         final useLensShader =
-            !winFastGlass && !opaque && isDark && _shader != null && strength >= 0.85;
+            !disableLensShader && !opaque && isDark && _shader != null && strength >= 0.85;
         final shader = useLensShader ? _shader : null;
         if (shader != null) {
           shader.setFloat(2, widget.radius);
@@ -955,11 +983,15 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
             MediaQuery.devicePixelRatioOf(context) * (0.45 + 1.25 * strength),
           );
         }
-        final blurSigma = 1.5 + 24.5 * strength;
+        // On iOS < 26 (iOS 14-25 fallback glass), cap Gaussian blur sigma to
+        // <= 10.0 with TileMode.clamp so 120Hz ProMotion iPads do not burn GPU
+        // fill-rate on 26pt mirror-tiled full-surface backdrop filters.
+        final blurSigma =
+            iosLegacyGlass ? (1.5 + 8.5 * strength) : (1.5 + 24.5 * strength);
         final Color veilColor;
         if (opaque) {
           veilColor = isDark ? const Color(0xF51E1E22) : const Color(0xFAFFFFFF);
-        } else if (winFastGlass) {
+        } else if (winFastGlass || iosThermalDegraded) {
           veilColor = isDark
               ? Color.fromRGBO(26, 28, 35, (0.93 - 0.34 * strength).clamp(0.55, 0.94))
               : Color.fromRGBO(255, 255, 255, (0.96 - 0.30 * strength).clamp(0.62, 0.96));
@@ -987,12 +1019,13 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
           );
         }
         return BackdropFilter(
-          enabled: !opaque && !winFastGlass,
+          enabled: !opaque && !winFastGlass && !iosThermalDegraded,
           filter: shader == null
               ? liquidGlassFilter(
                   blur: blurSigma,
                   saturation: isDark ? (1.05 + 0.85 * strength) : (1.08 + 0.45 * strength),
                   brightness: isDark ? (0.82 + 0.14 * strength) : 1.0,
+                  tileMode: iosLegacyGlass ? TileMode.clamp : TileMode.mirror,
                 )
               : ImageFilter.shader(shader),
           // Keep the child at the same element-tree depth when the async GPU
@@ -4113,43 +4146,64 @@ class AppleAmbientBackground extends StatefulWidget {
     this.animate = true,
   });
 
+  /// Pure policy predicate deciding whether the ambient breathing ticker should
+  /// run. Disabled on iOS/iPadOS so 120Hz ProMotion displays (notably iPad Pro
+  /// 2020 on iPadOS 15.4) never repaint behind floating `BackdropFilter` layers
+  /// while idle, and always paused in Light mode, background, occluded routes,
+  /// or Reduce Motion.
+  @visibleForTesting
+  static bool shouldAnimateBreath({
+    required bool useAuroraShader,
+    required bool animate,
+    required bool showAmbientArtwork,
+    required bool isWindowsDesktop,
+    required bool isIosPlatform,
+    required bool isDark,
+    required bool lifecycleResumed,
+    required bool isCurrentRoute,
+    required bool reduceMotion,
+    bool isFlutterTest = false,
+  }) {
+    if (useAuroraShader) return false;
+    if (!animate || !showAmbientArtwork) return false;
+    if (isWindowsDesktop || isIosPlatform) return false;
+    if (!isDark || !lifecycleResumed || !isCurrentRoute || reduceMotion) {
+      return false;
+    }
+    if (isFlutterTest) return false;
+    return true;
+  }
+
   @override
   State<AppleAmbientBackground> createState() => _AppleAmbientBackgroundState();
 }
 
 class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController _breathController;
+  bool _lifecycleResumed = true;
+  bool _isDark = true;
+  bool _isCurrentRoute = true;
+  bool _reduceMotion = false;
 
   bool get _useAuroraShader =>
       widget.preset == 'aurora' && !OhosRuntime.isOhos && !_isWindowsDesktop;
 
-  bool get _shouldAnimate {
-    if (_useAuroraShader) return false;
-    if (!widget.animate || !widget.showAmbientArtwork) return false;
-    if (_isWindowsDesktop) return false;
-    if (!kIsWeb && Platform.environment.containsKey('FLUTTER_TEST')) {
-      return false;
-    }
-    return true;
-  }
+  bool get _shouldAnimate => AppleAmbientBackground.shouldAnimateBreath(
+        useAuroraShader: _useAuroraShader,
+        animate: widget.animate,
+        showAmbientArtwork: widget.showAmbientArtwork,
+        isWindowsDesktop: _isWindowsDesktop,
+        isIosPlatform: _isIosPlatform(),
+        isDark: _isDark,
+        lifecycleResumed: _lifecycleResumed,
+        isCurrentRoute: _isCurrentRoute,
+        reduceMotion: _reduceMotion,
+        isFlutterTest:
+            !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST'),
+      );
 
-  @override
-  void initState() {
-    super.initState();
-    _breathController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 7800),
-      value: 0.45,
-    );
-    if (_shouldAnimate) {
-      _breathController.repeat(reverse: true);
-    }
-  }
-
-  @override
-  void didUpdateWidget(covariant AppleAmbientBackground oldWidget) {
-    super.didUpdateWidget(oldWidget);
+  void _syncBreathAnimation() {
     if (_shouldAnimate && !_breathController.isAnimating) {
       _breathController.repeat(reverse: true);
     } else if (!_shouldAnimate && _breathController.isAnimating) {
@@ -4159,7 +4213,45 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
   }
 
   @override
+  void initState() {
+    super.initState();
+    final initialState = WidgetsBinding.instance.lifecycleState;
+    _lifecycleResumed =
+        initialState == null || initialState == AppLifecycleState.resumed;
+    WidgetsBinding.instance.addObserver(this);
+    _breathController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 7800),
+      value: 0.45,
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final resumed = state == AppLifecycleState.resumed;
+    if (_lifecycleResumed == resumed) return;
+    _lifecycleResumed = resumed;
+    _syncBreathAnimation();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _isDark = ApplePalette.isDarkOf(context);
+    _isCurrentRoute = ModalRoute.of(context)?.isCurrent ?? true;
+    _reduceMotion = MediaQuery.disableAnimationsOf(context);
+    _syncBreathAnimation();
+  }
+
+  @override
+  void didUpdateWidget(covariant AppleAmbientBackground oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncBreathAnimation();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _breathController.dispose();
     super.dispose();
   }
@@ -4298,31 +4390,39 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
         if (widget.customWallpaper != null)
           Positioned.fill(
             child: IgnorePointer(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  ImageFiltered(
-                    imageFilter: ImageFilter.blur(
-                      sigmaX: (widget.blurSigma * 0.35).clamp(8.0, 36.0),
-                      sigmaY: (widget.blurSigma * 0.35).clamp(8.0, 36.0),
-                      tileMode: TileMode.decal,
+              child: RepaintBoundary(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ImageFiltered(
+                      imageFilter: ImageFilter.blur(
+                        sigmaX: (widget.blurSigma * 0.35).clamp(
+                          8.0,
+                          _isIosPlatform() ? 22.0 : 36.0,
+                        ),
+                        sigmaY: (widget.blurSigma * 0.35).clamp(
+                          8.0,
+                          _isIosPlatform() ? 22.0 : 36.0,
+                        ),
+                        tileMode: TileMode.decal,
+                      ),
+                      child: widget.customWallpaper,
                     ),
-                    child: widget.customWallpaper,
-                  ),
-                  const DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Color(0x7808090D),
-                          Color(0xA608090D),
-                          Color(0xCC050608),
-                        ],
+                    const DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Color(0x7808090D),
+                            Color(0xA608090D),
+                            Color(0xCC050608),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -4335,7 +4435,7 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
             child: IgnorePointer(
               child: RepaintBoundary(
                 child: ClipRect(
-                  child: _isWindowsDesktop
+                  child: (_isWindowsDesktop || _isIosPlatform())
                       ? Stack(
                           fit: StackFit.expand,
                           children: [

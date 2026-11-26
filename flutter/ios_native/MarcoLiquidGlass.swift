@@ -234,6 +234,11 @@ private enum MarcoLiquidGlassSupport {
     return UIAccessibility.isReduceTransparencyEnabled
   }
 
+  static var isThermalThrottled: Bool {
+    let state = ProcessInfo.processInfo.thermalState
+    return state == .serious || state == .critical
+  }
+
   static var majorOSVersion: Int {
     return ProcessInfo.processInfo.operatingSystemVersion.majorVersion
   }
@@ -345,6 +350,18 @@ private enum MarcoLiquidGlassSupport {
         }
       }
     )
+    accessibilityObservers.append(
+      center.addObserver(
+        forName: ProcessInfo.thermalStateDidChangeNotification,
+        object: nil,
+        queue: .main
+      ) { _ in
+        bridgeChannel?.invokeMethod(
+          "thermalStateChanged",
+          arguments: isThermalThrottled
+        )
+      }
+    )
   }
 
   static func showMenuAtRect(args: [String: Any], completion: @escaping FlutterResult) {
@@ -426,6 +443,7 @@ private enum MarcoLiquidGlassSupport {
           "sdk26": builtWithSDK26,
           "reduceTransparency": isReduceTransparencyEnabled,
           "sceneActive": isSceneActive,
+          "thermalThrottled": isThermalThrottled,
         ])
       case "configureRootTabChrome":
         guard isAvailable,
@@ -1871,19 +1889,81 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     )
   }
 
+  private static func cleanOptionLabel(_ raw: String) -> String {
+    let filteredScalars = raw.unicodeScalars.filter { scalar in
+      let v = scalar.value
+      if v <= 0x1F || v == 0x7F || v == 0xAD || v == 0x2060 || v == 0xFEFF {
+        return false
+      }
+      if (v >= 0x200B && v <= 0x200F) || (v >= 0x202A && v <= 0x202E) {
+        return false
+      }
+      return true
+    }
+    let normalized = String(String.UnicodeScalarView(filteredScalars))
+      .replacingOccurrences(of: "\u{3000}", with: " ")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalized.isEmpty else { return "" }
+    let hasMeaningfulChar = normalized.unicodeScalars.contains { scalar in
+      CharacterSet.alphanumerics.contains(scalar)
+        || (scalar.value >= 0x4E00 && scalar.value <= 0x9FFF)
+        || (scalar.value >= 0x3400 && scalar.value <= 0x4DBF)
+        || (scalar.value >= 0x3040 && scalar.value <= 0x30FF)
+        || (scalar.value >= 0xAC00 && scalar.value <= 0xD7AF)
+    }
+    return hasMeaningfulChar ? normalized : ""
+  }
+
   init(args: [String: Any], completion: @escaping FlutterResult) {
     let rawTitle = (args["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     self.sheetTitle = rawTitle.isEmpty ? "片库筛选" : rawTitle
     let rawCats = (args["categories"] as? [[String: Any]]) ?? []
-    self.categories = rawCats.map {
-      CategoryChoice(
-        id: ($0["id"] as? String) ?? "",
-        label: ($0["label"] as? String) ?? "",
-        kind: ($0["kind"] as? String) ?? "all"
-      )
+    var sanitizedCats: [CategoryChoice] = []
+    var seenAll = false
+    var seenCatIds = Set<String>()
+    var seenGenreLabels = Set<String>()
+    for raw in rawCats {
+      let kind = ((raw["kind"] as? String) ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
+      let id = ((raw["id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      let label = Self.cleanOptionLabel((raw["label"] as? String) ?? "")
+      guard !label.isEmpty else { continue }
+      switch kind {
+      case "all":
+        guard !seenAll else { continue }
+        seenAll = true
+        sanitizedCats.append(CategoryChoice(id: "", label: label, kind: "all"))
+      case "cat":
+        guard !id.isEmpty, label != "全部", seenCatIds.insert(id).inserted else { continue }
+        sanitizedCats.append(CategoryChoice(id: id, label: label, kind: "cat"))
+      default:
+        guard label != "全部", seenGenreLabels.insert(label).inserted else { continue }
+        sanitizedCats.append(CategoryChoice(id: id.isEmpty ? label : id, label: label, kind: "genre"))
+      }
     }
-    self.areas = (args["areas"] as? [String]) ?? []
-    self.years = (args["years"] as? [String]) ?? []
+    if sanitizedCats.isEmpty {
+      sanitizedCats.append(CategoryChoice(id: "", label: "全部", kind: "all"))
+    }
+    self.categories = sanitizedCats
+
+    var sanitizedAreas: [String] = []
+    var seenAreas = Set<String>()
+    for rawArea in (args["areas"] as? [String]) ?? [] {
+      let cleaned = Self.cleanOptionLabel(rawArea)
+      if !cleaned.isEmpty && seenAreas.insert(cleaned).inserted {
+        sanitizedAreas.append(cleaned)
+      }
+    }
+    self.areas = sanitizedAreas
+
+    var sanitizedYears: [String] = []
+    var seenYears = Set<String>()
+    for rawYear in (args["years"] as? [String]) ?? [] {
+      let cleaned = Self.cleanOptionLabel(rawYear)
+      if !cleaned.isEmpty && seenYears.insert(cleaned).inserted {
+        sanitizedYears.append(cleaned)
+      }
+    }
+    self.years = sanitizedYears
     self.selectedCategoryId = (args["selectedCategoryId"] as? String) ?? ""
     self.selectedGenreLabel = (args["selectedGenreLabel"] as? String) ?? ""
     self.selectedArea = (args["selectedArea"] as? String) ?? ""
@@ -3290,6 +3370,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
   }
 
   private final class SlotView: UIView {
+    let previewPillView = UIView()
     let iconView = MarcoAnimatedTabIconView()
     let titleLabel = UILabel()
     private let stack = UIStackView()
@@ -3299,6 +3380,12 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
       isUserInteractionEnabled = false
       isAccessibilityElement = true
       accessibilityTraits = .button
+
+      previewPillView.backgroundColor = .clear
+      previewPillView.isOpaque = false
+      previewPillView.isUserInteractionEnabled = false
+      previewPillView.translatesAutoresizingMaskIntoConstraints = false
+      addSubview(previewPillView)
 
       iconView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -3314,15 +3401,20 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
       stack.translatesAutoresizingMaskIntoConstraints = false
       stack.addArrangedSubview(iconView)
       stack.addArrangedSubview(titleLabel)
-      addSubview(stack)
+      previewPillView.addSubview(stack)
 
       NSLayoutConstraint.activate([
+        previewPillView.topAnchor.constraint(equalTo: topAnchor),
+        previewPillView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        previewPillView.leadingAnchor.constraint(equalTo: leadingAnchor),
+        previewPillView.trailingAnchor.constraint(equalTo: trailingAnchor),
+
         iconView.widthAnchor.constraint(equalToConstant: 24.0),
         iconView.heightAnchor.constraint(equalToConstant: 24.0),
-        stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-        stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-        stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4.0),
-        stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4.0),
+        stack.centerXAnchor.constraint(equalTo: previewPillView.centerXAnchor),
+        stack.centerYAnchor.constraint(equalTo: previewPillView.centerYAnchor),
+        stack.leadingAnchor.constraint(greaterThanOrEqualTo: previewPillView.leadingAnchor, constant: 4.0),
+        stack.trailingAnchor.constraint(lessThanOrEqualTo: previewPillView.trailingAnchor, constant: -4.0),
       ])
     }
 
@@ -3480,7 +3572,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
     _ interaction: UIContextMenuInteraction,
     configurationForMenuAtLocation location: CGPoint
   ) -> UIContextMenuConfiguration? {
-    guard !specs.isEmpty else { return nil }
+    guard !specs.isEmpty, !isHidden, alpha > 0.5 else { return nil }
     let (idx, _) = indexForX(location.x)
     guard idx >= 0, idx < specs.count else { return nil }
     let rawItems = specs[idx].menuItems
@@ -3488,12 +3580,14 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
     contextMenuActive = true
     if isScrubbing {
       isScrubbing = false
+      scrubCancelledByExit = false
       scrubContinuousSlot = nil
       lastScrubX = nil
       scrubVelocityX = 0
       highlightedIndex = selectedIndex
+      scrubbingLensShadowView.layer.removeAllAnimations()
       applySlotAppearances(activeIndex: selectedIndex)
-      positionLens(slotPosition: CGFloat(selectedIndex), animated: true, lifted: false)
+      positionLens(slotPosition: CGFloat(selectedIndex), animated: false, lifted: false)
     }
     return UIContextMenuConfiguration(identifier: NSNumber(value: idx), previewProvider: nil) { [weak self] _ in
       guard let self = self else { return nil }
@@ -3501,6 +3595,72 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
         self?.onTabMenuAction?(idx, actionId)
       }
     }
+  }
+
+  private func targetedPreview(for configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+    guard let num = configuration.identifier as? NSNumber else { return nil }
+    let idx = num.intValue
+    guard idx >= 0, idx < slotViews.count else { return nil }
+    let targetView = slotViews[idx].previewPillView
+    guard targetView.window != nil,
+          !isHidden,
+          alpha > 0.05,
+          targetView.bounds.width > 1.0,
+          targetView.bounds.height > 1.0 else {
+      return nil
+    }
+    let params = UIPreviewParameters()
+    let pillPath = UIBezierPath(
+      roundedRect: targetView.bounds,
+      cornerRadius: targetView.bounds.height * 0.5
+    )
+    params.visiblePath = pillPath
+    params.shadowPath = pillPath
+    let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
+    params.backgroundColor = dark
+      ? UIColor(red: 0.17, green: 0.18, blue: 0.21, alpha: 0.94)
+      : UIColor(white: 1.0, alpha: 0.95)
+    return UITargetedPreview(view: targetView, parameters: params)
+  }
+
+  @available(iOS 16.0, *)
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    configuration: UIContextMenuConfiguration,
+    highlightPreviewForItemWithIdentifier identifier: any NSCopying
+  ) -> UITargetedPreview? {
+    return targetedPreview(for: configuration)
+  }
+
+  @available(iOS 16.0, *)
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    configuration: UIContextMenuConfiguration,
+    dismissalPreviewForItemWithIdentifier identifier: any NSCopying
+  ) -> UITargetedPreview? {
+    return targetedPreview(for: configuration)
+  }
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    previewForHighlightingMenuWithConfiguration configuration: UIContextMenuConfiguration
+  ) -> UITargetedPreview? {
+    return targetedPreview(for: configuration)
+  }
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    previewForDismissingMenuWithConfiguration configuration: UIContextMenuConfiguration
+  ) -> UITargetedPreview? {
+    return targetedPreview(for: configuration)
+  }
+
+  func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    willDisplayMenuFor configuration: UIContextMenuConfiguration,
+    animator: UIContextMenuInteractionAnimating?
+  ) {
+    contextMenuActive = true
   }
 
   func contextMenuInteraction(
@@ -3741,6 +3901,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
     // Intentionally do NOT call super.touchesBegan: forwarding up the responder
     // chain leaks Dock taps directly into FlutterView behind the overlay.
     guard let touch = touches.first, !specs.isEmpty else { return }
+    contextMenuActive = false
     selectionFeedback.prepare()
     let pt = touch.location(in: self)
     let (idx, _) = indexForX(pt.x)
