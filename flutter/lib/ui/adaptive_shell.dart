@@ -1018,7 +1018,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     final isFreshInstall = prefs.doneVersion < OnboardingPrefs.currentVersion;
     if (isFreshInstall &&
-        !OhosRuntime.isOhos &&
         prefs.shouldShowOfficialChannelNotice() &&
         !_officialNoticeOpen) {
       final frameReady = Completer<void>();

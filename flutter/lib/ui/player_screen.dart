@@ -7248,7 +7248,76 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
           ),
         // Bubble-free loading indicator (zero white pill, clear of side lock button).
-        if (_loading || _buffering)
+        if (_useIos26PlayerChrome &&
+            widget.loadingIndicator == null &&
+            !_isLiveStream)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Center(
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    showPortraitCompanion ? 54 : 32,
+                    (_desktop &&
+                            _controlsVisible &&
+                            !_screenLocked &&
+                            !widget.embedded)
+                        ? 152
+                        : 0,
+                    showPortraitCompanion ? 54 : 32,
+                    0,
+                  ),
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 220),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    child: (_loading || _buffering)
+                        ? KeyedSubtree(
+                            key: const Key('player-loading-indicator'),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const BrandLogoLoader(
+                                  key: Key('player-brand-logo-loader'),
+                                  size: 22,
+                                ),
+                                const SizedBox(width: 9),
+                                Flexible(
+                                  child: Text(
+                                    '正在加载 ${_currentScrapedEpisode().compactLabel(singleItemMovie: _currentLine.episodes.length <= 1)}…',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Color(0xF5FFFFFF),
+                                      fontSize: 13.5,
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: 0.1,
+                                      shadows: [
+                                        Shadow(
+                                          color: Color(0xE0000000),
+                                          blurRadius: 8,
+                                          offset: Offset(0, 1.5),
+                                        ),
+                                        Shadow(
+                                          color: Color(0x9E000000),
+                                          blurRadius: 18,
+                                          offset: Offset(0, 2),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : const SizedBox.shrink(
+                            key: ValueKey<String>('player-loading-empty'),
+                          ),
+                  ),
+                ),
+              ),
+            ),
+          )
+        else if (_loading || _buffering)
           Positioned.fill(
             child: IgnorePointer(
               child: Center(
