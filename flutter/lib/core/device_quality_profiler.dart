@@ -271,11 +271,11 @@ class DeviceQualityProfiler {
 
     final bool largeBuffer =
         tier == DeviceHardwareTier.flagship && gb >= 5.5 && !hw.lowPowerMode;
-    final bool anime4k = tier == DeviceHardwareTier.flagship &&
-        !hw.lowPowerMode &&
-        !hw.thermalState.isThrottled &&
-        (iphoneMajor == 0 || iphoneMajor >= 14) &&
-        (ipadMajor == 0 || ipadMajor >= 13);
+    // Never auto-enable iOS Anime4K GLSL upscaling via hardware profiling:
+    // running a per-frame CNN shader on 1080p/4K video on flagship 120 Hz
+    // ProMotion iPhones (e.g. iPhone 17 Pro Max `iPhone18,2` on iOS 27.0)
+    // causes sustained GPU heat; keep iOS Anime4K strictly manual opt-in.
+    const bool anime4k = false;
     final String hdrMode;
     if (hw.potentialEdrHeadroom >= 1.5 || tier == DeviceHardwareTier.flagship) {
       hdrMode = IosHdrToneMappingMode.auto.id;

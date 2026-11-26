@@ -453,7 +453,7 @@ void main() {
         final recFlagship = await DeviceQualityProfiler.detectAndApply(storage);
         expect(recFlagship.tier, DeviceHardwareTier.flagship);
         expect(storage.iosLargeBufferEnabled, isTrue);
-        expect(storage.iosAnime4kLightweightEnabled, isTrue);
+        expect(storage.iosAnime4kLightweightEnabled, isFalse);
         expect(storage.preferredQuality, '4k_netdisk');
         expect(storage.iosHdrToneMappingMode, IosHdrToneMappingMode.auto.id);
 

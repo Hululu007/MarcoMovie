@@ -60,6 +60,10 @@ enum IosThermalState {
   bool get isThrottled =>
       this == IosThermalState.serious || this == IosThermalState.critical;
 
+  /// `true` once thermal pressure reaches `.fair` or higher so non-essential
+  /// GPU passes (e.g. libmpv `hdr-compute-peak` & dithering) can back off early.
+  bool get isElevated => code >= IosThermalState.fair.code;
+
   static IosThermalState fromWire(Object? raw) {
     if (raw is int) {
       for (final state in IosThermalState.values) {

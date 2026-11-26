@@ -239,6 +239,24 @@ private enum MarcoLiquidGlassSupport {
     return state == .serious || state == .critical
   }
 
+  /// Raw `ProcessInfo.thermalState` level for Flutter (`0` nominal, `1` fair,
+  /// `2` serious, `3` critical) so animated shaders and large blurs can back
+  /// off at `.fair`, before sustained heat builds up.
+  static var thermalLevelCode: Int {
+    switch ProcessInfo.processInfo.thermalState {
+    case .nominal:
+      return 0
+    case .fair:
+      return 1
+    case .serious:
+      return 2
+    case .critical:
+      return 3
+    @unknown default:
+      return 0
+    }
+  }
+
   static var majorOSVersion: Int {
     return ProcessInfo.processInfo.operatingSystemVersion.majorVersion
   }
@@ -360,6 +378,10 @@ private enum MarcoLiquidGlassSupport {
           "thermalStateChanged",
           arguments: isThermalThrottled
         )
+        bridgeChannel?.invokeMethod(
+          "thermalLevelChanged",
+          arguments: thermalLevelCode
+        )
       }
     )
   }
@@ -444,6 +466,7 @@ private enum MarcoLiquidGlassSupport {
           "reduceTransparency": isReduceTransparencyEnabled,
           "sceneActive": isSceneActive,
           "thermalThrottled": isThermalThrottled,
+          "thermalLevel": thermalLevelCode,
         ])
       case "configureRootTabChrome":
         guard isAvailable,
@@ -4169,6 +4192,22 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     NotificationCenter.default.removeObserver(self)
   }
 
+  override func willMove(toWindow newWindow: UIWindow?) {
+    super.willMove(toWindow: newWindow)
+    // Never leave a CADisplayLink ticking at 120 Hz for a dock that is no
+    // longer attached to a window: snap straight to the pending morph target.
+    if newWindow == nil, morphDisplayLink != nil {
+      let target = morphToProgress
+      stopMorphAnimation()
+      minimizeProgress = target
+      isMinimized = target >= 0.5
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      applyScrollMorph(progress: target)
+      CATransaction.commit()
+    }
+  }
+
   @available(*, unavailable)
   required init?(coder: NSCoder) {
     fatalError("init(coder:) has not been implemented")
@@ -4270,7 +4309,22 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
 
   @objc private func handleSceneActivationChanged() {
     let active = MarcoLiquidGlassSupport.isSceneActive
-    let targetAlpha: CGFloat = isChromeVisible ? (active ? 1.0 : 0.86) : 0.0
+    if !active, morphDisplayLink != nil {
+      let target = morphToProgress
+      stopMorphAnimation()
+      minimizeProgress = target
+      isMinimized = target >= 0.5
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      applyScrollMorph(progress: target)
+      CATransaction.commit()
+    }
+    guard isChromeVisible else {
+      self.alpha = 0.0
+      self.isHidden = true
+      return
+    }
+    let targetAlpha: CGFloat = active ? 1.0 : 0.86
     UIView.animate(withDuration: 0.18) {
       self.alpha = targetAlpha
     }
@@ -4361,7 +4415,13 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
   private func startMorphAnimation(to targetProgress: CGFloat, duration: CFTimeInterval = 0.26) {
     stopMorphAnimation()
     let clampedTarget = max(0.0, min(targetProgress, 1.0))
-    if UIAccessibility.isReduceMotionEnabled || abs(minimizeProgress - clampedTarget) <= 0.004 {
+    if UIAccessibility.isReduceMotionEnabled
+      || !isChromeVisible
+      || isHidden
+      || window == nil
+      || !MarcoLiquidGlassSupport.isSceneActive
+      || MarcoLiquidGlassSupport.isThermalThrottled
+      || abs(minimizeProgress - clampedTarget) <= 0.004 {
       minimizeProgress = clampedTarget
       isMinimized = clampedTarget >= 0.5
       CATransaction.begin()
@@ -4375,6 +4435,9 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
     morphDuration = max(0.12, duration)
     morphStartTime = CACurrentMediaTime()
     let link = CADisplayLink(target: self, selector: #selector(handleMorphDisplayLink(_:)))
+    if #available(iOS 15.0, *) {
+      link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+    }
     link.add(to: .main, forMode: .common)
     morphDisplayLink = link
   }
@@ -4479,6 +4542,19 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
   func setRootDockVisible(_ visible: Bool, animated: Bool) {
     isChromeVisible = visible
     isUserInteractionEnabled = visible
+    if !visible, morphDisplayLink != nil {
+      let target = morphToProgress
+      stopMorphAnimation()
+      minimizeProgress = target
+      isMinimized = target >= 0.5
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      applyScrollMorph(progress: target)
+      CATransaction.commit()
+    }
+    if visible {
+      self.isHidden = false
+    }
     let isTopWide = isRootHost && adaptiveTopOnWide && (bounds.width > bounds.height && bounds.width >= 600.0)
     let hiddenOffsetY: CGFloat = isTopWide ? -96.0 : 120.0
     let targetTransform = visible ? CGAffineTransform.identity : CGAffineTransform(translationX: 0.0, y: hiddenOffsetY)
@@ -4489,10 +4565,16 @@ private final class MarcoIos27DockChromeView: UIView, UITabBarDelegate {
       host.transform = targetTransform
       self.alpha = targetAlpha
     }
-    if animated {
-      MarcoLiquidGlassSupport.animateSpring(duration: 0.38, bounce: 0.16, animations: apply)
+    if animated && MarcoLiquidGlassSupport.isSceneActive {
+      MarcoLiquidGlassSupport.animateSpring(duration: 0.38, bounce: 0.16, animations: apply) { [weak self] in
+        guard let self = self, !self.isChromeVisible else { return }
+        self.isHidden = true
+      }
     } else {
       apply()
+      if !visible {
+        self.isHidden = true
+      }
     }
   }
 

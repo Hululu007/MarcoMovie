@@ -569,6 +569,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _wasAvPlaying = false;
   bool _wasAvBuffering = false;
   bool _wasAvCompleted = false;
+  bool _lastAppliedIosMpvLowPowerThermal = false;
+  int _lastRenderedPositionMs = -1;
+  bool _lastAvPipStarting = false;
+  bool _lastAvPipPossible = false;
+  bool _lastAvAirPlayActive = false;
   bool _userPausedPlayback = false;
   bool _pausedEngineInvalidated = false;
   bool _ohosRenderedFirstFrame = false;
@@ -1244,6 +1249,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     IosLiquidGlassBridge.activeSheetNotifier.addListener(
       _onPlayerOverlayStateChanged,
     );
+    IosLiquidGlassBridge.thermalThrottledNotifier.addListener(
+      _onIosThermalPressureChanged,
+    );
+    IosLiquidGlassBridge.thermalLevelNotifier.addListener(
+      _onIosThermalPressureChanged,
+    );
     activeIosGlassPopoverCount.addListener(_onPlayerOverlayStateChanged);
     activeAppleModalSheetCount.addListener(_onPlayerOverlayStateChanged);
     _clockText = _formatClockNow();
@@ -1311,6 +1322,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (!mounted) return;
           _syncMobileSystemBars(force: true);
           if (_controlsVisible) _scheduleHide();
+        }),
+      );
+      _iosAvSubscriptions.add(
+        avCtrl.onThermalStateChanged.listen((_) {
+          if (!mounted) return;
+          _onIosThermalPressureChanged();
         }),
       );
       unawaited(_initIosAvPlayerTelemetry());
@@ -1861,17 +1878,27 @@ class _PlayerScreenState extends State<PlayerScreen>
           !widget.embedded &&
           _hudPrefs.effectiveSlimProgress &&
           (_duration.inMilliseconds > 0 || _lastKnownDurationMs > 0);
-      final hudNeedsPositionTick =
-          (_controlsVisible && !_screenLocked) || slimBarVisible;
+      final hudNeedsPositionTick = IosMpvProfile.shouldRebuildPositionUi(
+        isIos: _isIosPlayerPlatform,
+        controlsVisible: _controlsVisible,
+        screenLocked: _screenLocked,
+        slimBarVisible: slimBarVisible,
+        isPipActive: false,
+        playing: _playing,
+        nowMs: nowMs,
+        lastUpdateMs: _lastPositionUiUpdateMs,
+        nextPositionMs: nextPos.inMilliseconds,
+        lastRenderedPositionMs: _lastRenderedPositionMs,
+        iosThermalElevated:
+            _isIosPlayerPlatform && IosLiquidGlassBridge.thermalElevated,
+      );
       final shouldRebuildUi =
           shouldClearLoading ||
           shouldClearStaleLiveBuffering ||
-          (hudNeedsPositionTick &&
-              !_isDraggingSeek &&
-              !_isSliderDragging &&
-              (nowMs - _lastPositionUiUpdateMs >= 250 || !_playing));
+          (hudNeedsPositionTick && !_isDraggingSeek && !_isSliderDragging);
       if (shouldRebuildUi) {
         _lastPositionUiUpdateMs = nowMs;
+        _lastRenderedPositionMs = nextPos.inMilliseconds;
         setState(() {
           _position = nextPos;
           if (shouldClearLoading) {
@@ -2606,6 +2633,19 @@ class _PlayerScreenState extends State<PlayerScreen>
     final ctrl = _iosAvPlayerController;
     if (!mounted || ctrl == null || !_usingAvPlayer || !_allowEvents) return;
 
+    final prevW = _videoWidth;
+    final prevH = _videoHeight;
+    final prevDurSec = _duration.inSeconds;
+    final prevLoading = _loading;
+    final prevStartedVod = _hasStartedVodPlayback;
+    final prevPlaying = _playing;
+    final prevBuffering = _buffering;
+    final prevCompleted = _wasAvCompleted;
+    final prevPipActive = _lastIosPipActive;
+    final prevPipStarting = _lastAvPipStarting;
+    final prevPipPossible = _lastAvPipPossible;
+    final prevAirPlay = _lastAvAirPlayActive;
+
     final nextW = ctrl.videoWidth;
     final nextH = ctrl.videoHeight;
     final nextPlaying = ctrl.playing;
@@ -2840,8 +2880,53 @@ class _PlayerScreenState extends State<PlayerScreen>
       _lastIosPipActive = ctrl.isPipActive;
       _syncMobileSystemBars(force: true);
     }
+    _lastAvPipStarting = ctrl.isPipStarting;
+    _lastAvPipPossible = ctrl.isPipPossible;
+    _lastAvAirPlayActive = ctrl.isAirPlayActive;
 
-    if (mounted) setState(() {});
+    final nonPositionVisualChanged = _videoWidth != prevW ||
+        _videoHeight != prevH ||
+        _duration.inSeconds != prevDurSec ||
+        _loading != prevLoading ||
+        _hasStartedVodPlayback != prevStartedVod ||
+        _playing != prevPlaying ||
+        _buffering != prevBuffering ||
+        _wasAvCompleted != prevCompleted ||
+        _lastIosPipActive != prevPipActive ||
+        _lastAvPipStarting != prevPipStarting ||
+        _lastAvPipPossible != prevPipPossible ||
+        _lastAvAirPlayActive != prevAirPlay;
+
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final slimBarVisible = _useEnhancedHud &&
+        !_controlsVisible &&
+        !_screenLocked &&
+        !_isLiveStream &&
+        !widget.embedded &&
+        _hudPrefs.effectiveSlimProgress &&
+        (_duration.inMilliseconds > 0 || _lastKnownDurationMs > 0);
+    final shouldRebuildPosition = !_isDraggingSeek &&
+        !_isSliderDragging &&
+        IosMpvProfile.shouldRebuildPositionUi(
+          isIos: true,
+          controlsVisible: _controlsVisible,
+          screenLocked: _screenLocked,
+          slimBarVisible: slimBarVisible,
+          isPipActive: ctrl.isPipActive,
+          playing: _playing,
+          nowMs: nowMs,
+          lastUpdateMs: _lastPositionUiUpdateMs,
+          nextPositionMs: _position.inMilliseconds,
+          lastRenderedPositionMs: _lastRenderedPositionMs,
+          iosThermalElevated:
+              ctrl.thermalState.isElevated || IosLiquidGlassBridge.thermalElevated,
+        );
+
+    if (mounted && (nonPositionVisualChanged || shouldRebuildPosition)) {
+      _lastPositionUiUpdateMs = nowMs;
+      _lastRenderedPositionMs = _position.inMilliseconds;
+      setState(() {});
+    }
   }
 
   static bool _isRtspFamilyUrl(String url) {
@@ -5021,10 +5106,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       if (_isIosPlayerPlatform) {
         final bool iosLowPowerThermal =
-            _iosAvPlayerController?.thermalState.isThrottled == true ||
-            IosLiquidGlassBridge.thermalThrottled ||
-            (IosLiquidGlassBridge.majorVersion > 0 &&
-                IosLiquidGlassBridge.majorVersion < 16);
+            IosMpvProfile.shouldUseLowPowerThermalMode(
+          avThermalState: _iosAvPlayerController?.thermalState,
+          bridgeThermalElevated: IosLiquidGlassBridge.thermalElevated,
+          iosMajorVersion: IosLiquidGlassBridge.majorVersion,
+        );
+        _lastAppliedIosMpvLowPowerThermal = iosLowPowerThermal;
         await IosMpvProfile.applyToPlayer(
           _player,
           physicalMemoryBytes:
@@ -5293,6 +5380,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     GlassworkBackdrop.intensity.removeListener(_onReduceTransparencyChanged);
     IosLiquidGlassBridge.activeSheetNotifier.removeListener(
       _onPlayerOverlayStateChanged,
+    );
+    IosLiquidGlassBridge.thermalThrottledNotifier.removeListener(
+      _onIosThermalPressureChanged,
+    );
+    IosLiquidGlassBridge.thermalLevelNotifier.removeListener(
+      _onIosThermalPressureChanged,
     );
     activeIosGlassPopoverCount.removeListener(_onPlayerOverlayStateChanged);
     activeAppleModalSheetCount.removeListener(_onPlayerOverlayStateChanged);
@@ -5820,6 +5913,51 @@ class _PlayerScreenState extends State<PlayerScreen>
     } catch (_) {}
   }
 
+  void _onIosThermalPressureChanged() {
+    if (!mounted || !_isIosPlayerPlatform || _playerDisposed) return;
+    final avThermal = _iosAvPlayerController?.thermalState;
+    final effectiveThermal = switch (IosLiquidGlassBridge.thermalLevel) {
+      >= 3 => IosThermalState.critical,
+      2 => IosThermalState.serious,
+      1 => IosThermalState.fair,
+      _ => avThermal ?? IosThermalState.nominal,
+    };
+    final resolvedThermal =
+        (avThermal != null && avThermal.code > effectiveThermal.code)
+            ? avThermal
+            : effectiveThermal;
+    if (resolvedThermal.isThrottled &&
+        _anime4kController.isIosLightweightAvailableForPlayer(_player)) {
+      unawaited(
+        _anime4kController.handleThermalState(_player, resolvedThermal),
+      );
+    }
+    if (!_usingAvPlayer) {
+      final nextLowPower = IosMpvProfile.shouldUseLowPowerThermalMode(
+        avThermalState: resolvedThermal,
+        bridgeThermalElevated: IosLiquidGlassBridge.thermalElevated,
+        iosMajorVersion: IosLiquidGlassBridge.majorVersion,
+      );
+      if (nextLowPower != _lastAppliedIosMpvLowPowerThermal) {
+        _lastAppliedIosMpvLowPowerThermal = nextLowPower;
+        unawaited(
+          IosMpvProfile.applyToPlayer(
+            _player,
+            physicalMemoryBytes:
+                _avPhysicalMemoryBytes ??
+                _iosAvPlayerController?.physicalMemoryBytes,
+            largeBuffer: _iosLargeBuffer || _playerKernel == 'mpv',
+            isLive: _isLiveStream,
+            hdrToneMapping: _iosHdrToneMapping,
+            vocalLoudness: _vocalLoudness,
+            hwdec: _hardwareDecoder(_playerKernel),
+            lowPowerThermalMode: nextLowPower,
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _initAnime4kAfterKernel() async {
     if (OhosRuntime.isOhos) return;
     final desktopAvail = _anime4kController.isAvailableForPlayer(_player);
@@ -5855,6 +5993,13 @@ class _PlayerScreenState extends State<PlayerScreen>
           await _anime4kController.handleThermalState(
             _player,
             avCtrl.thermalState,
+          );
+        } else if (IosLiquidGlassBridge.thermalThrottled) {
+          await _anime4kController.handleThermalState(
+            _player,
+            IosLiquidGlassBridge.thermalLevel >= 3
+                ? IosThermalState.critical
+                : IosThermalState.serious,
           );
         }
         _anime4kController.onThermalAutoDisabled = (state) {
