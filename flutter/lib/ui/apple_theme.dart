@@ -2508,6 +2508,10 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
       minTouchWidth: 44,
       minTouchHeight: 44,
       preferredAnchor: Alignment.topCenter,
+      // Long-pressing a Dock tab must not lift / float / scale the tab; only a
+      // subtle opacity highlight acknowledges the press before the menu opens.
+      pressedScale: 1.0,
+      pressedOpacity: 0.62,
       accessibilityLabel: item.$3,
       onTap: () => widget.onSelect(index),
       itemsBuilder: () => widget.tabMenuItemsBuilder!(index),

@@ -62,6 +62,13 @@ class IosPressSlideMenuAnchor extends StatefulWidget {
   final double minTouchHeight;
   final Alignment preferredAnchor;
 
+  /// Scale applied while the finger is down. Dock tabs pass `1.0` so a
+  /// long-press never makes the pressed tab float / pop (0.7.9 feedback).
+  final double pressedScale;
+
+  /// Optional opacity highlight while pressed (subtle press feedback).
+  final double? pressedOpacity;
+
   const IosPressSlideMenuAnchor({
     super.key,
     required this.child,
@@ -77,6 +84,8 @@ class IosPressSlideMenuAnchor extends StatefulWidget {
     this.minTouchWidth = 44,
     this.minTouchHeight = 44,
     this.preferredAnchor = Alignment.topRight,
+    this.pressedScale = 0.96,
+    this.pressedOpacity,
   });
 
   @override
@@ -610,12 +619,14 @@ class _IosPressSlideMenuAnchorState extends State<IosPressSlideMenuAnchor>
   @override
   Widget build(BuildContext context) {
     final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+    final pressedOpacity =
+        widget.pressedOpacity ?? (reduceMotion ? 0.72 : 1.0);
     Widget inner = AnimatedScale(
-      scale: (!reduceMotion && _anchorPressed) ? 0.96 : 1.0,
+      scale: (!reduceMotion && _anchorPressed) ? widget.pressedScale : 1.0,
       duration: MotionTokens.durationMicro,
       curve: MotionTokens.curveStandard,
       child: AnimatedOpacity(
-        opacity: (reduceMotion && _anchorPressed) ? 0.72 : 1.0,
+        opacity: _anchorPressed ? pressedOpacity : 1.0,
         duration: MotionTokens.durationMicro,
         child: ConstrainedBox(
           constraints: BoxConstraints(

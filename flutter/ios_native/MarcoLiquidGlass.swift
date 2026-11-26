@@ -3370,7 +3370,6 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
   }
 
   private final class SlotView: UIView {
-    let previewPillView = UIView()
     let iconView = MarcoAnimatedTabIconView()
     let titleLabel = UILabel()
     private let stack = UIStackView()
@@ -3380,12 +3379,6 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
       isUserInteractionEnabled = false
       isAccessibilityElement = true
       accessibilityTraits = .button
-
-      previewPillView.backgroundColor = .clear
-      previewPillView.isOpaque = false
-      previewPillView.isUserInteractionEnabled = false
-      previewPillView.translatesAutoresizingMaskIntoConstraints = false
-      addSubview(previewPillView)
 
       iconView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -3401,20 +3394,15 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
       stack.translatesAutoresizingMaskIntoConstraints = false
       stack.addArrangedSubview(iconView)
       stack.addArrangedSubview(titleLabel)
-      previewPillView.addSubview(stack)
+      addSubview(stack)
 
       NSLayoutConstraint.activate([
-        previewPillView.topAnchor.constraint(equalTo: topAnchor),
-        previewPillView.bottomAnchor.constraint(equalTo: bottomAnchor),
-        previewPillView.leadingAnchor.constraint(equalTo: leadingAnchor),
-        previewPillView.trailingAnchor.constraint(equalTo: trailingAnchor),
-
         iconView.widthAnchor.constraint(equalToConstant: 24.0),
         iconView.heightAnchor.constraint(equalToConstant: 24.0),
-        stack.centerXAnchor.constraint(equalTo: previewPillView.centerXAnchor),
-        stack.centerYAnchor.constraint(equalTo: previewPillView.centerYAnchor),
-        stack.leadingAnchor.constraint(greaterThanOrEqualTo: previewPillView.leadingAnchor, constant: 4.0),
-        stack.trailingAnchor.constraint(lessThanOrEqualTo: previewPillView.trailingAnchor, constant: -4.0),
+        stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+        stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4.0),
+        stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4.0),
       ])
     }
 
@@ -3457,6 +3445,13 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
   private var scrubVelocityX: CGFloat = 0
   private let selectionFeedback = UISelectionFeedbackGenerator()
   private var contextMenuActive: Bool = false
+  // 0.7.9: Dock long-press menus never lift / float the pressed tab. iOS 17.4+
+  // presents the tab UIMenu from an invisible ephemeral anchor button placed
+  // over the pressed slot (no context-menu preview at all); iOS 15–17.3 keeps
+  // UIContextMenuInteraction but targets an invisible 2pt dot so nothing lifts.
+  private var tabMenuLongPress: UILongPressGestureRecognizer?
+  private weak var tabMenuAnchorButton: UIButton?
+  private let legacyMenuAnchorDotView = UIView()
 
   var onSelect: ((Int) -> Void)?
   var onTabMenuAction: ((Int, String) -> Void)?
@@ -3564,9 +3559,142 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
       slotsStack.trailingAnchor.constraint(equalTo: effectView.contentView.trailingAnchor, constant: -4.0),
     ])
 
-    let contextMenu = UIContextMenuInteraction(delegate: self)
-    addInteraction(contextMenu)
+    if #available(iOS 17.4, *) {
+      // No UIContextMenuInteraction on iOS 17.4+: its targeted preview always
+      // lifts / floats the pressed tab (or the whole Dock). A plain long-press
+      // recognizer presents the tab's UIMenu from an invisible anchor button
+      // placed right over the pressed slot, so the Dock stays in place.
+      let longPress = UILongPressGestureRecognizer(
+        target: self,
+        action: #selector(handleTabMenuLongPress(_:))
+      )
+      longPress.minimumPressDuration = 0.4
+      longPress.allowableMovement = 12.0
+      longPress.cancelsTouchesInView = true
+      longPress.delaysTouchesBegan = false
+      longPress.delaysTouchesEnded = false
+      addGestureRecognizer(longPress)
+      tabMenuLongPress = longPress
+    } else {
+      legacyMenuAnchorDotView.backgroundColor = .clear
+      legacyMenuAnchorDotView.isOpaque = false
+      legacyMenuAnchorDotView.isUserInteractionEnabled = false
+      legacyMenuAnchorDotView.isAccessibilityElement = false
+      legacyMenuAnchorDotView.frame = CGRect(x: 0.0, y: 0.0, width: 2.0, height: 2.0)
+      addSubview(legacyMenuAnchorDotView)
+      let contextMenu = UIContextMenuInteraction(delegate: self)
+      addInteraction(contextMenu)
+    }
   }
+
+  // MARK: Dock tab long-press menu (no lift / no floating preview)
+
+  private func resetScrubbingForTabMenu() {
+    isScrubbing = false
+    scrubCancelledByExit = false
+    scrubContinuousSlot = nil
+    lastScrubX = nil
+    scrubVelocityX = 0
+    highlightedIndex = selectedIndex
+    scrubbingLensShadowView.layer.removeAllAnimations()
+    applySlotAppearances(activeIndex: selectedIndex)
+    positionLens(slotPosition: CGFloat(selectedIndex), animated: true, lifted: false)
+  }
+
+  private func tabMenuSlotRect(for idx: Int) -> CGRect? {
+    guard let metrics = lensMetrics(for: CGFloat(idx)) else { return nil }
+    return CGRect(
+      x: metrics.center.x - metrics.bounds.width * 0.5,
+      y: metrics.center.y - metrics.bounds.height * 0.5,
+      width: metrics.bounds.width,
+      height: metrics.bounds.height
+    )
+  }
+
+  private func tearDownTabMenuAnchor() {
+    if let btn = tabMenuAnchorButton {
+      btn.removeFromSuperview()
+    }
+    tabMenuAnchorButton = nil
+    contextMenuActive = false
+  }
+
+  override func willMove(toWindow newWindow: UIWindow?) {
+    super.willMove(toWindow: newWindow)
+    if newWindow == nil {
+      tearDownTabMenuAnchor()
+    }
+  }
+
+  override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+    let hit = super.hitTest(point, with: event)
+    // The ephemeral menu anchor must never swallow later Dock taps.
+    if let hit = hit, hit is MarcoEphemeralMenuAnchorButton {
+      return self
+    }
+    return hit
+  }
+
+  override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+    guard let longPress = tabMenuLongPress, gestureRecognizer === longPress else {
+      return super.gestureRecognizerShouldBegin(gestureRecognizer)
+    }
+    guard !specs.isEmpty, !isHidden, alpha > 0.5, window != nil else { return false }
+    let (idx, _) = indexForX(longPress.location(in: self).x)
+    guard idx >= 0, idx < specs.count else { return false }
+    return !specs[idx].menuItems.isEmpty
+  }
+
+  @objc private func handleTabMenuLongPress(_ gesture: UILongPressGestureRecognizer) {
+    guard gesture.state == .began else { return }
+    let (idx, _) = indexForX(gesture.location(in: self).x)
+    if #available(iOS 17.4, *) {
+      presentTabMenuAnchored(at: idx)
+    }
+  }
+
+  @available(iOS 17.4, *)
+  private func presentTabMenuAnchored(at idx: Int) {
+    guard idx >= 0, idx < specs.count, window != nil else { return }
+    let rawItems = specs[idx].menuItems
+    guard !rawItems.isEmpty, let slotRect = tabMenuSlotRect(for: idx) else { return }
+    tearDownTabMenuAnchor()
+    resetScrubbingForTabMenu()
+    guard let menu = MarcoLiquidGlassSupport.buildMenu(title: "", rawItems: rawItems, onSelect: { [weak self] actionId in
+      self?.onTabMenuAction?(idx, actionId)
+    }) else {
+      return
+    }
+    let anchorBtn = MarcoEphemeralMenuAnchorButton(type: .system)
+    anchorBtn.frame = slotRect
+    anchorBtn.backgroundColor = .clear
+    anchorBtn.tintColor = .clear
+    anchorBtn.alpha = 0.02
+    anchorBtn.isAccessibilityElement = false
+    anchorBtn.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    anchorBtn.menu = menu
+    anchorBtn.showsMenuAsPrimaryAction = true
+    anchorBtn.onMenuEnded = { [weak self, weak anchorBtn] in
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak anchorBtn] in
+        guard let self = self else {
+          anchorBtn?.removeFromSuperview()
+          return
+        }
+        if let btn = anchorBtn, self.tabMenuAnchorButton === btn {
+          self.tearDownTabMenuAnchor()
+        } else {
+          anchorBtn?.removeFromSuperview()
+        }
+      }
+    }
+    addSubview(anchorBtn)
+    tabMenuAnchorButton = anchorBtn
+    contextMenuActive = true
+    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    anchorBtn.performPrimaryAction()
+  }
+
+  // iOS 15–17.3 fallback: UIContextMenuInteraction with an invisible preview.
 
   func contextMenuInteraction(
     _ interaction: UIContextMenuInteraction,
@@ -3578,17 +3706,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
     let rawItems = specs[idx].menuItems
     guard !rawItems.isEmpty else { return nil }
     contextMenuActive = true
-    if isScrubbing {
-      isScrubbing = false
-      scrubCancelledByExit = false
-      scrubContinuousSlot = nil
-      lastScrubX = nil
-      scrubVelocityX = 0
-      highlightedIndex = selectedIndex
-      scrubbingLensShadowView.layer.removeAllAnimations()
-      applySlotAppearances(activeIndex: selectedIndex)
-      positionLens(slotPosition: CGFloat(selectedIndex), animated: false, lifted: false)
-    }
+    resetScrubbingForTabMenu()
     return UIContextMenuConfiguration(identifier: NSNumber(value: idx), previewProvider: nil) { [weak self] _ in
       guard let self = self else { return nil }
       return MarcoLiquidGlassSupport.buildMenu(title: "", rawItems: rawItems) { [weak self] actionId in
@@ -3597,30 +3715,19 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
     }
   }
 
-  private func targetedPreview(for configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
-    guard let num = configuration.identifier as? NSNumber else { return nil }
-    let idx = num.intValue
-    guard idx >= 0, idx < slotViews.count else { return nil }
-    let targetView = slotViews[idx].previewPillView
-    guard targetView.window != nil,
-          !isHidden,
-          alpha > 0.05,
-          targetView.bounds.width > 1.0,
-          targetView.bounds.height > 1.0 else {
-      return nil
+  private func invisibleTabMenuPreview(for configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+    guard let num = configuration.identifier as? NSNumber, window != nil else { return nil }
+    guard let slotRect = tabMenuSlotRect(for: num.intValue) else { return nil }
+    let dot = legacyMenuAnchorDotView
+    if dot.superview !== self {
+      addSubview(dot)
     }
+    dot.frame = CGRect(x: slotRect.midX - 1.0, y: slotRect.minY, width: 2.0, height: 2.0)
     let params = UIPreviewParameters()
-    let pillPath = UIBezierPath(
-      roundedRect: targetView.bounds,
-      cornerRadius: targetView.bounds.height * 0.5
-    )
-    params.visiblePath = pillPath
-    params.shadowPath = pillPath
-    let dark = MarcoLiquidGlassSupport.isEffectiveDark(for: self)
-    params.backgroundColor = dark
-      ? UIColor(red: 0.17, green: 0.18, blue: 0.21, alpha: 0.94)
-      : UIColor(white: 1.0, alpha: 0.95)
-    return UITargetedPreview(view: targetView, parameters: params)
+    params.backgroundColor = .clear
+    params.visiblePath = UIBezierPath(rect: dot.bounds)
+    params.shadowPath = UIBezierPath()
+    return UITargetedPreview(view: dot, parameters: params)
   }
 
   @available(iOS 16.0, *)
@@ -3629,7 +3736,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
     configuration: UIContextMenuConfiguration,
     highlightPreviewForItemWithIdentifier identifier: any NSCopying
   ) -> UITargetedPreview? {
-    return targetedPreview(for: configuration)
+    return invisibleTabMenuPreview(for: configuration)
   }
 
   @available(iOS 16.0, *)
@@ -3638,21 +3745,21 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
     configuration: UIContextMenuConfiguration,
     dismissalPreviewForItemWithIdentifier identifier: any NSCopying
   ) -> UITargetedPreview? {
-    return targetedPreview(for: configuration)
+    return invisibleTabMenuPreview(for: configuration)
   }
 
   func contextMenuInteraction(
     _ interaction: UIContextMenuInteraction,
     previewForHighlightingMenuWithConfiguration configuration: UIContextMenuConfiguration
   ) -> UITargetedPreview? {
-    return targetedPreview(for: configuration)
+    return invisibleTabMenuPreview(for: configuration)
   }
 
   func contextMenuInteraction(
     _ interaction: UIContextMenuInteraction,
     previewForDismissingMenuWithConfiguration configuration: UIContextMenuConfiguration
   ) -> UITargetedPreview? {
-    return targetedPreview(for: configuration)
+    return invisibleTabMenuPreview(for: configuration)
   }
 
   func contextMenuInteraction(
@@ -3901,6 +4008,10 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
     // Intentionally do NOT call super.touchesBegan: forwarding up the responder
     // chain leaks Dock taps directly into FlutterView behind the overlay.
     guard let touch = touches.first, !specs.isEmpty else { return }
+    if tabMenuAnchorButton != nil {
+      // A menu anchor that outlived its menu must never wedge later taps.
+      tearDownTabMenuAnchor()
+    }
     contextMenuActive = false
     selectionFeedback.prepare()
     let pt = touch.location(in: self)
