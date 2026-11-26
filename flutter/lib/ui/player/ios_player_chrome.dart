@@ -1334,52 +1334,6 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
         ),
       ),
       _IosDockAction(
-        key: const Key('ios-player-tracks-button'),
-        id: 'tracks',
-        anchorKey: _tracksAnchorKey,
-        icon: CupertinoIcons.captions_bubble_fill,
-        label: '音轨',
-        onTap: () => _triggerAnchored(
-          _tracksAnchorKey,
-          widget.onAudioSubtitleAnchoredTap,
-          widget.onAudioSubtitleTap,
-        ),
-      ),
-      if (widget.onVocalLoudnessTap != null ||
-          widget.onVocalLoudnessAnchoredTap != null)
-        _IosDockAction(
-          key: const Key('ios-player-loudness-button'),
-          id: 'loudness',
-          anchorKey: _loudnessAnchorKey,
-          icon: CupertinoIcons.waveform_path_ecg,
-          label: widget.vocalLoudnessLabel == '关闭'
-              ? '响度'
-              : widget.vocalLoudnessLabel,
-          active: widget.vocalLoudnessActive,
-          onTap: () => _triggerAnchored(
-            _loudnessAnchorKey,
-            widget.onVocalLoudnessAnchoredTap,
-            widget.onVocalLoudnessTap,
-          ),
-        ),
-      if (widget.onEngineSwitchTap != null ||
-          widget.onEngineSwitchAnchoredTap != null)
-        _IosDockAction(
-          key: const Key('ios-player-engine-button'),
-          id: 'engine',
-          anchorKey: _engineAnchorKey,
-          icon: widget.isAvPlayerActive
-              ? CupertinoIcons.play_rectangle_fill
-              : CupertinoIcons.gear_alt_fill,
-          label: widget.engineLabel,
-          active: widget.isAvPlayerActive,
-          onTap: () => _triggerAnchored(
-            _engineAnchorKey,
-            widget.onEngineSwitchAnchoredTap,
-            widget.onEngineSwitchTap,
-          ),
-        ),
-      _IosDockAction(
         key: const Key('player-fullscreen-toggle'),
         id: 'fullscreen',
         icon: widget.isLandscape
@@ -1397,7 +1351,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
         anchorKey: _moreAnchorKey,
         icon: CupertinoIcons.ellipsis,
         label: '更多',
-        active: widget.sleepTimerActive,
+        active: widget.sleepTimerActive || widget.vocalLoudnessActive,
         onTap: () => _triggerAnchored(
           _moreAnchorKey,
           widget.onMoreAnchoredTap,

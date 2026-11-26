@@ -2553,7 +2553,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
       key: ValueKey('dock-tab-menu-anchor-$index'),
       menuKey: ValueKey('dock-tab-menu-$index'),
       openOnTap: false,
-      menuWidth: 188,
+      menuWidth: 214,
       minTouchWidth: 44,
       minTouchHeight: 44,
       preferredAnchor: Alignment.topCenter,

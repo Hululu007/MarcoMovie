@@ -226,7 +226,10 @@ class _IosPressSlideMenuAnchorState extends State<IosPressSlideMenuAnchor>
 
     final safeTopEdge = safe.top + 8.0;
     final safeBottomEdge = screen.height - safe.bottom - 8.0;
-    final spaceAbove = math.max(0.0, (_anchorRect.top - 10.0) - safeTopEdge);
+    final upwardClearance =
+        widget.preferredAnchor == Alignment.topCenter ? 16.0 : 10.0;
+    final spaceAbove =
+        math.max(0.0, (_anchorRect.top - upwardClearance) - safeTopEdge);
     final spaceBelow = math.max(0.0, safeBottomEdge - (_anchorRect.bottom + 8.0));
     final openUpward = widget.preferredAnchor.y < 0
         ? (spaceAbove >= math.min(estRawH, 180.0) || spaceAbove >= spaceBelow)
@@ -236,7 +239,7 @@ class _IosPressSlideMenuAnchorState extends State<IosPressSlideMenuAnchor>
     final double? positionedBottom;
     final double availableMaxH;
     if (openUpward) {
-      final anchorBottomY = (_anchorRect.top - 10.0)
+      final anchorBottomY = (_anchorRect.top - upwardClearance)
           .clamp(safeTopEdge + 120.0, safeBottomEdge)
           .toDouble();
       positionedTop = null;

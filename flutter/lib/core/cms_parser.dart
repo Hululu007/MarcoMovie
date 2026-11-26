@@ -31,23 +31,32 @@ class CmsParser {
         .replaceAll('／', '/');
     if (s.isEmpty) return '';
     final explicitHttp = RegExp(
-      r'''https?://[^\s"'<>`|]+''',
+      r'''https?://[^\s"'<>`|，。；！？【】（）《》“”‘’、]+''',
       caseSensitive: false,
     ).firstMatch(s);
     if (explicitHttp != null) {
-      s = explicitHttp.group(0)!;
+      s = explicitHttp
+          .group(0)!
+          .replaceFirst(RegExp(r'[，。；！？）】》”’、]+$'), '');
     } else if (!s.startsWith('{') &&
         !s.startsWith('[') &&
         !s.startsWith('http://') &&
         !s.startsWith('https://') &&
         s.contains('.') &&
         !s.contains('\n')) {
-      final token = s.split(RegExp(r'\s+')).first;
+      final token = s
+          .split(RegExp(r'\s+'))
+          .first
+          .replaceFirst(RegExp(r'[，。；！？）】》”’、]+$'), '');
       s = ['http', '://', token].join();
     }
     return normalizeUrl(s);
   }
-  /// Normalizes an HTTP(S) URL including converting non-ASCII domain names (e.g. `肥猫.com`) to RFC 3492 Punycode.
+
+  /// Normalizes an HTTP(S) URL including converting non-ASCII domain names
+  /// (e.g. `肥猫.com`) to RFC 3492 Punycode, rewriting Gitee / GitHub `/blob/`
+  /// viewer links to raw file endpoints, and percent-encoding non-ASCII path
+  /// segments (such as `/聚合/api.json`) without double-encoding existing `%XX`.
   static String normalizeUrl(String rawUrl) {
     final trimmed = rawUrl.trim();
     if (trimmed.isEmpty) return '';
@@ -57,7 +66,7 @@ class CmsParser {
     if (schemeMatch == null) return trimmed;
     final scheme = schemeMatch.group(1)!.toLowerCase();
     final authority = schemeMatch.group(2)!;
-    final rest = schemeMatch.group(3) ?? '';
+    var rest = schemeMatch.group(3) ?? '';
     String userInfo = '';
     String hostPort = authority;
     final atIdx = authority.lastIndexOf('@');
@@ -75,7 +84,48 @@ class CmsParser {
       }
       host = _idnToAscii(host);
     }
-    return '$scheme://$userInfo$host$port$rest';
+    final lowerHost = host.toLowerCase();
+    if (lowerHost == 'gitee.com' && port.isEmpty) {
+      final blobMatch =
+          RegExp(r'^/([^/?#]+)/([^/?#]+)/blob/(.+)$').firstMatch(rest);
+      if (blobMatch != null) {
+        rest = '/${blobMatch.group(1)}/${blobMatch.group(2)}/raw/${blobMatch.group(3)}';
+      }
+    } else if (lowerHost == 'github.com' && port.isEmpty) {
+      final blobMatch =
+          RegExp(r'^/([^/?#]+)/([^/?#]+)/blob/(.+)$').firstMatch(rest);
+      if (blobMatch != null) {
+        host = 'raw.githubusercontent.com';
+        rest = '/${blobMatch.group(1)}/${blobMatch.group(2)}/${blobMatch.group(3)}';
+      }
+    }
+    final encodedRest = _encodeUriRestPreservingEscapes(rest);
+    return '$scheme://$userInfo$host$port$encodedRest';
+  }
+
+  static String _encodeUriRestPreservingEscapes(String rest) {
+    if (rest.isEmpty) return '';
+    var needsEncode = false;
+    for (final rune in rest.runes) {
+      if (rune >= 0x80 || rune <= 0x20 || rune == 0x7F) {
+        needsEncode = true;
+        break;
+      }
+    }
+    if (!needsEncode) return rest;
+    final sb = StringBuffer();
+    for (final rune in rest.runes) {
+      if (rune >= 0x80 || rune <= 0x20 || rune == 0x7F) {
+        final bytes = utf8.encode(String.fromCharCode(rune));
+        for (final b in bytes) {
+          sb.write('%');
+          sb.write(b.toRadixString(16).toUpperCase().padLeft(2, '0'));
+        }
+      } else {
+        sb.writeCharCode(rune);
+      }
+    }
+    return sb.toString();
   }
   static String _idnToAscii(String domain) {
     final normalized = domain

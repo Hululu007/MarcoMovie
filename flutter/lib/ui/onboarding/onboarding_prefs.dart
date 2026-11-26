@@ -1,4 +1,7 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
+import 'dart:io';
+
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/ohos_runtime.dart';
@@ -11,10 +14,14 @@ class OnboardingPrefs {
   static const String playHintDismissedKey = 'play_hint_dismissed';
   static const String officialChannelNoticeVersionKey =
       'official_channel_notice_version';
+  static const String lastSeenAppVersionKey = 'marco_last_seen_app_version';
 
   static const int currentVersion = 1;
   static const int currentOfficialChannelNoticeVersion = 1;
   static const int maxPlayHintShows = 3;
+
+  @visibleForTesting
+  static bool debugEnablePostUpdateAutoPopInTest = false;
 
   final SharedPreferences _prefs;
 
@@ -30,9 +37,48 @@ class OnboardingPrefs {
   int get officialChannelNoticeVersion =>
       _prefs.getInt(officialChannelNoticeVersionKey) ?? 0;
 
+  String get lastSeenAppVersion =>
+      (_prefs.getString(lastSeenAppVersionKey) ?? '').trim();
+
   int get playHintShownCount => _prefs.getInt(playHintShownCountKey) ?? 0;
 
   bool get playHintDismissed => _prefs.getBool(playHintDismissedKey) ?? false;
+
+  /// Returns `true` when [currentVersion] is a valid semantic version and the
+  /// user has not yet seen the post-update safety & sponsorship notice for it.
+  bool shouldShowPostUpdateNotice(String currentVersion) {
+    if (OhosRuntime.isOhos) return false;
+    final clean = currentVersion.trim();
+    if (!RegExp(r'^\d+\.\d+\.\d+$').hasMatch(clean)) return false;
+    final seen = lastSeenAppVersion;
+    if (seen == clean) return false;
+    if (seen.isNotEmpty) return true;
+    // When `seen` is empty:
+    // - Fresh installs have `officialChannelNoticeVersion == 0`, so the
+    //   initial official-channel notice handles first open and stamps `clean`.
+    // - Existing users upgrading from an earlier release have
+    //   `officialChannelNoticeVersion >= 1` and see this notice once.
+    if (officialChannelNoticeVersion < currentOfficialChannelNoticeVersion) {
+      return false;
+    }
+    final inFlutterTest =
+        !kIsWeb && Platform.environment.containsKey('FLUTTER_TEST');
+    if (inFlutterTest && !debugEnablePostUpdateAutoPopInTest) {
+      return false;
+    }
+    return true;
+  }
+
+  /// Persists acknowledgment of the post-update notice for [version].
+  Future<bool> markPostUpdateNoticeSeen(String version) async {
+    final clean = version.trim();
+    if (clean.isEmpty) return false;
+    try {
+      return await _prefs.setString(lastSeenAppVersionKey, clean);
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// Returns `true` when the first-launch official channel & author anti-tamper
   /// notice has not yet been acknowledged on this device.

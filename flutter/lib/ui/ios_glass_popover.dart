@@ -35,7 +35,7 @@ Future<T?> showIosGlassPopover<T>({
   required String title,
   required WidgetBuilder builder,
   double maxWidth = 306,
-  double maxHeight = 336,
+  double maxHeight = 468,
   bool forceDark = true,
   Widget? trailing,
   EdgeInsetsGeometry contentPadding = const EdgeInsets.fromLTRB(8, 4, 8, 8),
@@ -268,7 +268,7 @@ class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay>
     final maxAvailableH = showBelow ? spaceBelow : spaceAbove;
     final bubbleMaxH = math.min(
       maxHeight,
-      maxAvailableH.clamp(120.0, screen.height * 0.82),
+      maxAvailableH.clamp(120.0, screen.height * 0.86),
     );
 
     final rawLeft = anchor.center.dx - bubbleW / 2;

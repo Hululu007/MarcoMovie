@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart' show Colors, Material;
+import '../core/ai_lab_passcode.dart';
 import '../core/danmu/danmu_prefs.dart';
 import '../core/device_quality_profiler.dart';
 import '../core/ios_avplayer_controller.dart';
@@ -108,6 +109,14 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
     super.initState();
     _scrollController.addListener(_handleScroll);
     _searchFocusNode.addListener(_handleSearchFocus);
+    AiLabPasscodeStore.instance.addListener(_handlePasscodeStoreChanged);
+  }
+
+  void _handlePasscodeStoreChanged() {
+    if (mounted) {
+      _revision.value++;
+      setState(() {});
+    }
   }
 
   void _handleSearchFocus() {
@@ -127,6 +136,7 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
 
   @override
   void dispose() {
+    AiLabPasscodeStore.instance.removeListener(_handlePasscodeStoreChanged);
     _searchFocusNode.removeListener(_handleSearchFocus);
     _searchFocusNode.dispose();
     _scrollController.removeListener(_handleScroll);
@@ -532,21 +542,14 @@ class IosSettingsScaffold extends StatelessWidget {
           children: [
             DecoratedBox(
               decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: p.isDark
-                      ? const [
-                          Color(0xF008080A),
-                          Color(0xCC08080A),
-                          Color(0x0008080A),
-                        ]
-                      : const [
-                          Color(0xFAEDF0F5),
-                          Color(0xE8E9ECF2),
-                          Color(0x00E9ECF2),
-                        ],
-                  stops: const [0.0, 0.78, 1.0],
+                color: bgColor,
+                border: Border(
+                  bottom: BorderSide(
+                    color: p.isDark
+                        ? const Color(0x1FFFFFFF)
+                        : const Color(0x14000000),
+                    width: 0.5,
+                  ),
                 ),
               ),
               child: Padding(

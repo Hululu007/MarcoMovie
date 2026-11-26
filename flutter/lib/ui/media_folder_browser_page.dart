@@ -60,7 +60,8 @@ class _MediaFolderBrowserPageState extends State<MediaFolderBrowserPage> {
       !kIsWeb &&
       !OhosRuntime.isOhos &&
       defaultTargetPlatform == TargetPlatform.iOS &&
-      !widget.site.isEffectivelyPrivate;
+      !widget.site.isEffectivelyPrivate &&
+      AiService.instance.isLabUnlocked;
 
   @override
   void initState() {

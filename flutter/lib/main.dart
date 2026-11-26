@@ -17,6 +17,7 @@ import 'core/storage_service.dart';
 import 'core/video_kernel.dart';
 import 'ui/adaptive_shell.dart';
 import 'ui/apple_theme.dart';
+import 'ui/ios_launch_splash.dart';
 import 'ui/ios_liquid_glass.dart';
 import 'ui/tv/tv_living_room_shell.dart';
 import 'ui/windows_title_bar.dart';
@@ -97,14 +98,11 @@ Future<void> main() async {
     debugPrint('Uncaught platform error: $error');
     return true;
   };
-  if (!kIsWeb && Platform.isIOS) {
-    try {
-      await OhosRuntime.ensureInitialized()
-          .timeout(const Duration(seconds: 2));
-    } catch (e) {
-      debugPrint('OhosRuntime init skipped on iOS: $e');
-    }
-  } else {
+  // On iOS/iPadOS, never block `runApp` on an unused HarmonyOS probe channel:
+  // painting Frame 1 synchronously inside `didFinishLaunchingWithOptions`
+  // prevents iPadOS Home Screen icon-zoom transactions from stalling on an
+  // unpresented CAMetalLayer surface.
+  if (!kIsWeb && !Platform.isIOS) {
     await OhosRuntime.ensureInitialized();
   }
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
@@ -168,7 +166,8 @@ class MarcoBootstrapApp extends StatefulWidget {
   State<MarcoBootstrapApp> createState() => _MarcoBootstrapAppState();
 }
 
-class _MarcoBootstrapAppState extends State<MarcoBootstrapApp> {
+class _MarcoBootstrapAppState extends State<MarcoBootstrapApp>
+    with WidgetsBindingObserver {
   MarcoAppBootstrapResult? _ready;
   Object? _error;
   bool _timedOut = false;
@@ -178,10 +177,34 @@ class _MarcoBootstrapAppState extends State<MarcoBootstrapApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       MarcoLaunchDiagnostics.record('flutter_first_frame');
     });
     unawaited(_startBootstrap());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    // When iPadOS attaches/resizes the UIWindowScene after a Home Screen launch,
+    // force a fresh Flutter frame so the surface never remains blank.
+    WidgetsBinding.instance.scheduleFrame();
+    if (mounted && _ready == null) {
+      setState(() {});
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      WidgetsBinding.instance.scheduleFrame();
+    }
   }
 
   Future<void> _startBootstrap() async {
@@ -267,78 +290,95 @@ class _MarcoBootstrapAppState extends State<MarcoBootstrapApp> {
         isDark ? AppleColors.labelPrimary : ApplePalette.light.labelPrimary;
     final secondaryFg =
         isDark ? AppleColors.labelSecondary : ApplePalette.light.labelSecondary;
+    final isIosStyleLaunch = _isIosAppPlatform();
+    Widget buildStatusAccessory(BuildContext innerContext) {
+      if (_error == null) {
+        return CupertinoActivityIndicator(
+          key: const ValueKey('marco-bootstrap-spinner'),
+          animating: !View.of(innerContext)
+              .platformDispatcher
+              .accessibilityFeatures
+              .disableAnimations,
+          radius: isIosStyleLaunch ? 10 : 12,
+          color: secondaryFg,
+        );
+      }
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            _timedOut ? '初始化响应超时，请重试' : '初始化未完成，请重试',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: fg,
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              decoration: TextDecoration.none,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _timedOut
+                ? '本地存储或系统服务响应过慢（阶段：$_failedStage），点击重新加载即可恢复。'
+                : '$_error',
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: secondaryFg,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w400,
+              decoration: TextDecoration.none,
+            ),
+          ),
+          const SizedBox(height: 18),
+          CupertinoButton.filled(
+            key: const ValueKey('marco-bootstrap-retry'),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 24,
+              vertical: 10,
+            ),
+            onPressed: () => unawaited(_startBootstrap()),
+            child: const Text('重新加载'),
+          ),
+        ],
+      );
+    }
+
     return MediaQuery.fromView(
       view: View.of(context),
       child: Directionality(
         textDirection: TextDirection.ltr,
         child: Theme(
           data: isDark ? ThemeData.dark() : ThemeData.light(),
-          child: ColoredBox(
-            key: const ValueKey('marco-bootstrap-surface'),
-            color: bg,
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    MarcoBrandLogo(
-                      iconSize: 56,
-                      fontSize: 20,
-                      stacked: true,
-                      forceLightInk: isDark,
+          child: Builder(
+            builder: (innerContext) => ColoredBox(
+              key: const ValueKey('marco-bootstrap-surface'),
+              color: bg,
+              child: isIosStyleLaunch
+                  ? IosLaunchStageView(
+                      isDark: isDark,
+                      showWordmark: _error == null,
+                      bottomAccessory: buildStatusAccessory(innerContext),
+                    )
+                  : Center(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 32),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            MarcoBrandLogo(
+                              iconSize: 56,
+                              fontSize: 20,
+                              stacked: true,
+                              forceLightInk: isDark,
+                            ),
+                            const SizedBox(height: 22),
+                            buildStatusAccessory(innerContext),
+                          ],
+                        ),
+                      ),
                     ),
-                    const SizedBox(height: 22),
-                    if (_error == null)
-                      CupertinoActivityIndicator(
-                        key: const ValueKey('marco-bootstrap-spinner'),
-                        animating: !View.of(context)
-                            .platformDispatcher
-                            .accessibilityFeatures
-                            .disableAnimations,
-                        radius: 12,
-                        color: secondaryFg,
-                      )
-                    else ...[
-                      Text(
-                        _timedOut ? '初始化响应超时，请重试' : '初始化未完成，请重试',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: fg,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          decoration: TextDecoration.none,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        _timedOut
-                            ? '本地存储或系统服务响应过慢（阶段：$_failedStage），点击重新加载即可恢复。'
-                            : '$_error',
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: secondaryFg,
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w400,
-                          decoration: TextDecoration.none,
-                        ),
-                      ),
-                      const SizedBox(height: 18),
-                      CupertinoButton.filled(
-                        key: const ValueKey('marco-bootstrap-retry'),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 24,
-                          vertical: 10,
-                        ),
-                        onPressed: () => unawaited(_startBootstrap()),
-                        child: const Text('重新加载'),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
             ),
           ),
         ),
@@ -511,7 +551,9 @@ class _MarcoMovieAppState extends State<MarcoMovieApp> {
                     Platform.isWindows &&
                     !Platform.environment.containsKey('FLUTTER_TEST'))
                 ? WindowsImmersiveFrame(child: child)
-                : child;
+                : (_isIosAppPlatform()
+                    ? IosLaunchCurtainHost(child: child)
+                    : child);
             return AnnotatedRegion<SystemUiOverlayStyle>(
               value: overlayStyle,
               child: DefaultTextStyle.merge(

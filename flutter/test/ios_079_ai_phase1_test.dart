@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:marco_movie/core/ai_lab_passcode.dart';
 import 'package:marco_movie/core/ai_service.dart';
 import 'package:marco_movie/core/ai_title_cleaner.dart';
 import 'package:marco_movie/core/cms_client.dart';
@@ -70,8 +71,13 @@ class _AiSearchFixtureCmsClient extends CmsClient {
 }
 
 void main() {
-  setUp(() {
+  const permanentOfficialToken =
+      'MMAILAB1.eyJleHAiOjAsImlhdCI6MTc5NTcwNjIxOCwidGFnIjoiUElMSVBBTEEiLCJ2IjoxfQ.zjZybgCAGD8fCzajU1ls29fSxZiX6Bpo9XTrK06KQeuLw0DBSAmZiY6ouD_OCqoz4XKYMJL9XharsLBJ0yNmDg';
+
+  setUp(() async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
+    AiLabPasscodeStore.instance.resetForTest();
+    await AiLabPasscodeStore.instance.unlockWithPasscode(permanentOfficialToken);
     AiService.instance.resetForTest();
     AiTitleCleaner.instance.configureForTest(
       aiService: AiService.instance,
@@ -81,6 +87,7 @@ void main() {
   });
 
   tearDown(() {
+    AiLabPasscodeStore.instance.resetForTest();
     AiService.instance.resetForTest();
     AiTitleCleaner.instance.configureForTest(
       aiService: AiService.instance,

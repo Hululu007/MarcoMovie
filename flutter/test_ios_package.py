@@ -490,8 +490,12 @@ class DeploymentChecks(unittest.TestCase):
         menu_block = shell_src[menu_start : menu_start + 1600]
         self.assertIn('_handleRootNativeTabSelected(ownerTab);', menu_block)
         self.assertNotIn('_selectedTabIndexNotifier.value =', menu_block)
-        self.assertIn("'add_library' || 'netdisk_accounts' => 3,", shell_src)
-        self.assertIn("'top' => 0,", shell_src)
+        self.assertIn("'top' || 'search' || 'switch_source' || 'refresh_home' => 0,", shell_src)
+        owner_start = shell_src.index('static int? _dockMenuActionOwnerTab(String actionId)')
+        owner_block = shell_src[owner_start : owner_start + 700]
+        self.assertIn("'add_library'", owner_block)
+        self.assertIn("'netdisk_accounts'", owner_block)
+        self.assertIn("'ai_assistant' =>", owner_block)
 
         # 2. Native filter sheet rejects empty/invisible/empty-id/duplicate options.
         filter_start = liquid_src.index('final class MarcoNativeFilterSheetController')

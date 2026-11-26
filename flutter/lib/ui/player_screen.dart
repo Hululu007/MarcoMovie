@@ -10,6 +10,9 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart' show SubtitleViewState;
+import '../core/ai_lab_features.dart';
+import '../core/ai_lab_gate.dart';
+import '../core/ai_service.dart';
 import '../core/anime4k_controller.dart';
 import '../core/bluray_iso_proxy.dart';
 import '../core/cast_service.dart';
@@ -50,6 +53,7 @@ import 'danmu/danmu_layer.dart';
 import 'danmu/danmu_settings_sheet.dart';
 import 'episode_scrape_sheet.dart';
 import 'favorite_postcard_animation.dart';
+import 'ios_ai_lab_sheets.dart';
 import 'ios_glass_popover.dart';
 import 'ios_liquid_glass.dart';
 import 'live_station_badge.dart';
@@ -14020,6 +14024,17 @@ class _PlayerScreenState extends State<PlayerScreen>
         checked: _vocalLoudness != VocalLoudnessPreset.off,
         section: 0,
       ),
+      if (_isIosPlayerPlatform)
+        AppleNativePickerOption<String>(
+          value: 'engine_switch',
+          title: '播放内核：${_usingAvPlayer ? 'AVPlayer' : 'MPV'}',
+          subtitle: _usingAvPlayer
+              ? '系统硬解低功耗 · 点击切换至 MPV'
+              : '全格式软硬解增强 · 点击切换至 AVPlayer',
+          symbol: _usingAvPlayer ? 'play.rectangle.fill' : 'cpu',
+          checked: _usingAvPlayer,
+          section: 0,
+        ),
       if (_qualityChoices.length > 1)
         AppleNativePickerOption<String>(
           value: 'quality',
@@ -14121,6 +14136,47 @@ class _PlayerScreenState extends State<PlayerScreen>
         symbol: 'arrow.clockwise',
         section: 2,
       ),
+      if (_isIosPlayerPlatform &&
+          !widget.site.isEffectivelyPrivate &&
+          AiService.instance.isLabUnlocked) ...[
+        if (!live && AiService.instance.config.subtitleTranslateEnabled)
+          const AppleNativePickerOption<String>(
+            value: 'ai_subtitle_studio',
+            title: 'AI 字幕精译与双语对照',
+            subtitle: '上下文精翻、锁定角色译名与时间轴校准',
+            symbol: 'captions.bubble.fill',
+            section: 3,
+            sectionTitle: 'AI 实验室',
+          ),
+        if (!live && AiService.instance.config.spoilerFreeRecapEnabled)
+          AppleNativePickerOption<String>(
+            value: 'ai_episode_companion',
+            title: 'AI 防剧透前情提要与人物卡',
+            subtitle: '锁定截至第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集进度',
+            symbol: 'book.fill',
+            section: 3,
+            sectionTitle: 'AI 实验室',
+          ),
+        if (AiService.instance.config.smartDiagnosticsEnabled)
+          const AppleNativePickerOption<String>(
+            value: 'ai_diagnostics',
+            title: 'AI 播放与源智能排障',
+            subtitle: '脱敏分析卡顿、音画异常或加载失败',
+            symbol: 'wrench.and.screwdriver.fill',
+            section: 3,
+            sectionTitle: 'AI 实验室',
+          ),
+        if (!live)
+          for (final skill in AiService.instance.config.effectiveSkills
+              .where((s) => s.target.showsInPlayer))
+            AppleNativePickerOption<String>(
+              value: 'ai_skill:${skill.id}',
+              title: 'AI 技能：${skill.name}',
+              symbol: 'sparkles',
+              section: 3,
+              sectionTitle: 'AI 实验室',
+            ),
+      ],
     ];
 
     void handleAction(String action) {
@@ -14143,6 +14199,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           }());
         case 'vocal_loudness':
           _showVocalLoudnessSheet(anchorRect: anchorRect);
+        case 'engine_switch':
+          unawaited(_toggleIosEngine());
         case 'quality':
           unawaited(_showQualityChoices());
         case 'audio':
@@ -14179,6 +14237,88 @@ class _PlayerScreenState extends State<PlayerScreen>
             _seekPlayer(Duration.zero);
             _enginePlay();
             _showHud('已从头开始播放');
+          }
+        case 'ai_subtitle_studio':
+          unawaited(
+            showIosAiSubtitleStudioSheet(
+              context,
+              seriesTitle: widget.video.title,
+              episodeLabel: '第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集',
+              skipIntroSeconds: _skipIntroSec,
+              currentActiveCueLines: _player.state.subtitle,
+              onMountTranslatedSrt: (file, label) async {
+                if (_usingAvPlayer) {
+                  await _toggleIosEngine();
+                }
+                await _player.setSubtitleTrack(
+                  SubtitleTrack.uri(
+                    Uri.file(file.path).toString(),
+                    title: label,
+                  ),
+                );
+                _scheduleSyncNativeSubtitleState();
+                if (mounted) {
+                  _showHud('已挂载 $label');
+                }
+              },
+            ),
+          );
+        case 'ai_episode_companion':
+          unawaited(
+            showIosAiEpisodeCompanionSheet(
+              context,
+              title: widget.video.title,
+              year: widget.video.year,
+              currentEpisodeNumber:
+                  _currentScrapedEpisode().effectiveEpisodeNumber,
+              overview: widget.video.description,
+            ),
+          );
+        case 'ai_diagnostics':
+          unawaited(
+            showIosAiDiagnosticsSheet(
+              context,
+              rawErrorText: _playbackError.trim().isNotEmpty
+                  ? _playbackError
+                  : '播放流畅度与兼容性巡检',
+              engineName: _usingAvPlayer ? 'AVPlayer' : 'MPV',
+              mediaFormatHint: _currentScrapedEpisode().rawName,
+              hasBackupLines: _lines.length > 1,
+              onExecuteAction: (act) {
+                switch (act) {
+                  case AiDiagnosticActionId.switchToMpv:
+                    if (_usingAvPlayer) unawaited(_toggleIosEngine());
+                  case AiDiagnosticActionId.switchToAvPlayer:
+                    if (!_usingAvPlayer) unawaited(_toggleIosEngine());
+                  case AiDiagnosticActionId.enableVocalLoudness:
+                    _showVocalLoudnessSheet();
+                  case AiDiagnosticActionId.switchBackupLine:
+                    _showLinesSheet();
+                  case AiDiagnosticActionId.openEpisodeScrape:
+                    unawaited(_showEpisodeScrapeSheet());
+                }
+              },
+            ),
+          );
+        default:
+          if (action.startsWith('ai_skill:')) {
+            final skillId = action.substring('ai_skill:'.length);
+            final matched = AiService.instance.config.effectiveSkills
+                .where((s) => s.id == skillId)
+                .firstOrNull;
+            if (matched != null) {
+              unawaited(
+                showIosAiCustomSkillOutputSheet(
+                  context,
+                  skill: matched,
+                  title: widget.video.title,
+                  year: widget.video.year,
+                  episode: '第 ${_currentScrapedEpisode().effectiveEpisodeNumber} 集',
+                  overview: widget.video.description,
+                  subtitles: _player.state.subtitle.join('\n'),
+                ),
+              );
+            }
           }
       }
     }
@@ -14337,7 +14477,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         anchorRect: anchorRect,
         title: '播放选项',
         maxWidth: 304,
-        maxHeight: 336,
+        maxHeight: 488,
         forceDark: true,
         contentPadding: const EdgeInsets.fromLTRB(6, 2, 6, 6),
         builder: buildContent,

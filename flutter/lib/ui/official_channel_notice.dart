@@ -28,10 +28,29 @@ abstract final class OfficialChannelInfo {
   static const String officialWebsiteDisplay = 'marcotv.wlj9919.top';
   static const String officialWebsiteUrl = 'https://marcotv.wlj9919.top';
   static final Uri officialWebsiteUri = Uri.parse(officialWebsiteUrl);
+  static const String officialDonateUrl =
+      'https://marcotv.wlj9919.top/movie/#donate';
+  static final Uri officialDonateUri = Uri.parse(officialDonateUrl);
   static const String officialCommunityUrl = officialWebsiteUrl;
   static final Uri officialCommunityUri = officialWebsiteUri;
+  static const String marcoCommunityChannelName = 'Marco交流区';
+  static const String marcoCommunityChannelUrl =
+      'https://pd.qq.com/s/N45e3aaawv?b=9';
+  static final Uri marcoCommunityChannelUri =
+      Uri.parse(marcoCommunityChannelUrl);
   static const String antiTamperWarning =
       '下载软件请认准官网地址，以防不明渠道软件添加病毒等不良内容。';
+  static const String antiScamWarning =
+      'Marco Movie 永久免费、无广告、无会员与付费激活码。任何在闲鱼、电商平台或群聊收费售卖安装包、「内部版」或代配置的均为骗局，切勿付款受骗。';
+  static const String soleOfficialChannelNotice =
+      '官网 marcotv.wlj9919.top 与应用内「设置 → 关于与更新」为唯一官方更新渠道，请勿安装来路不明的第三方改包。';
+  static const String warmSponsorTitle = '深夜打磨 · 感恩同行';
+  static const String warmSponsorBody =
+      'Marco Movie 由独立开发者利用业余深夜一点点打磨而成，始终坚持纯粹免费、无广告、无商业套路。'
+      '如果它曾陪你度过一段松弛惬意的观影时光，欢迎量力前往官网请作者喝杯热茶，让这份热爱走得更远；'
+      '当然，你的每一次安心使用与口碑推荐，本身就是最珍贵的支持。';
+  static const String postUpdateSponsorBody =
+      '独立开发全凭热爱与大家的包容支撑至今。若新版本让你用得顺手舒心，不妨顺路前往官网捐赠区支持一杯热咖啡，全凭自愿，分文不取亦由衷感谢你的陪伴。';
 }
 
 /// Tri-state result of attempting to open an external official link with
@@ -775,6 +794,701 @@ class _OfficialChannelNoticeDialogState
                               style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 16.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Warm, non-intrusive developer gratitude & voluntary sponsorship card shown
+/// in Settings -> About & Update (`设置 → 关于与更新`) with a one-tap jump to
+/// the official website's `#donate` section.
+class IosSupportDeveloperCard extends StatefulWidget {
+  final Future<bool> Function(Uri uri)? urlOpener;
+
+  const IosSupportDeveloperCard({
+    super.key,
+    this.urlOpener,
+  });
+
+  @override
+  State<IosSupportDeveloperCard> createState() =>
+      _IosSupportDeveloperCardState();
+}
+
+class _IosSupportDeveloperCardState extends State<IosSupportDeveloperCard> {
+  bool _opening = false;
+  String? _feedback;
+
+  Future<void> _handleOpenDonate() async {
+    if (_opening) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _opening = true;
+      _feedback = null;
+    });
+    try {
+      final status = await openOfficialChannelUrl(
+        OfficialChannelInfo.officialDonateUri,
+        urlOpener: widget.urlOpener,
+      );
+      if (!mounted) return;
+      if (status == OfficialLinkOpenStatus.opened) {
+        setState(() {
+          _feedback = '正在前往官网捐赠支持区…';
+        });
+      } else if (status == OfficialLinkOpenStatus.copiedFallback) {
+        setState(() {
+          _feedback =
+              '已复制官网捐赠区链接，可在浏览器粘贴打开：${OfficialChannelInfo.officialDonateUrl}';
+        });
+      } else {
+        await showOfficialChannelManualCopyDialog(
+          context,
+          title: '官网捐赠支持地址',
+          message: '请复制下方地址在浏览器打开：',
+          selectableValue: OfficialChannelInfo.officialDonateUrl,
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _opening = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = ApplePalette.of(context);
+    final cardBg = p.isDark ? const Color(0xFF1C1C20) : Colors.white;
+    final borderCol = p.isDark
+        ? const Color(0x26FF6B8B)
+        : const Color(0x28FF2D55);
+    final accentWarm = p.isDark
+        ? const Color(0xFFFF6482)
+        : const Color(0xFFE11D48);
+
+    return DecoratedBox(
+      key: const ValueKey('ios-about-donate-card'),
+      decoration: ShapeDecoration(
+        color: cardBg,
+        shape: RoundedSuperellipseBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: BorderSide(color: borderCol, width: 0.8),
+        ),
+        shadows: [
+          if (!p.isDark)
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 16,
+              offset: const Offset(0, 6),
+            ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                DecoratedBox(
+                  decoration: ShapeDecoration(
+                    gradient: const LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [Color(0xFFFF5E7E), Color(0xFFFF8A5B)],
+                    ),
+                    shape: RoundedSuperellipseBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  child: const SizedBox(
+                    width: 34,
+                    height: 34,
+                    child: Icon(
+                      CupertinoIcons.heart_fill,
+                      color: Colors.white,
+                      size: 18,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        OfficialChannelInfo.warmSponsorTitle,
+                        style: TextStyle(
+                          color: p.labelPrimary,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: -0.2,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '全凭自愿 · 免费无广 · 不影响任何功能',
+                        style: TextStyle(
+                          color: p.labelSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              OfficialChannelInfo.warmSponsorBody,
+              style: TextStyle(
+                color: p.labelSecondary,
+                fontSize: 13.5,
+                height: 1.52,
+              ),
+            ),
+            if (_feedback != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                _feedback!,
+                key: const ValueKey('ios-about-donate-feedback'),
+                style: TextStyle(
+                  color: accentWarm,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+            const SizedBox(height: 14),
+            SizedBox(
+              height: 42,
+              child: CupertinoButton(
+                key: const ValueKey('ios-about-donate-jump-btn'),
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                color: accentWarm.withValues(alpha: p.isDark ? 0.18 : 0.11),
+                borderRadius: BorderRadius.circular(12),
+                onPressed: _opening ? null : _handleOpenDonate,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      CupertinoIcons.heart_circle_fill,
+                      color: accentWarm,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 7),
+                    Text(
+                      '前往官网捐赠区支持一杯热茶',
+                      style: TextStyle(
+                        color: accentWarm,
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      CupertinoIcons.arrow_up_right,
+                      color: accentWarm,
+                      size: 14,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Presents the one-time-per-version post-update notice dialog containing:
+/// 1. Anti-scam / never-pay warning (`谨防受骗`)
+/// 2. Official website as sole authentic update channel (`官网为唯一更新渠道`)
+/// 3. Sincere developer note & optional sponsorship link (`温情致谢与自愿赞助`).
+Future<bool> showPostUpdateWelcomeDialog(
+  BuildContext context, {
+  required String version,
+  Future<bool> Function(Uri uri)? urlOpener,
+  Future<bool> Function()? onConfirm,
+  bool barrierDismissible = false,
+}) async {
+  activeAppleModalSheetCount.value++;
+  try {
+    final result = await showCupertinoDialog<bool>(
+      context: context,
+      barrierDismissible: barrierDismissible,
+      builder: (dialogCtx) => PostUpdateWelcomeDialog(
+        version: version,
+        urlOpener: urlOpener,
+        barrierDismissible: barrierDismissible,
+        onConfirm: () async {
+          if (onConfirm != null) {
+            try {
+              await onConfirm();
+            } catch (e) {
+              debugPrint('PostUpdateWelcomeDialog persist failed: $e');
+            }
+          }
+          if (dialogCtx.mounted) {
+            Navigator.of(dialogCtx).pop(true);
+          }
+        },
+      ),
+    );
+    return result == true;
+  } finally {
+    if (activeAppleModalSheetCount.value > 0) {
+      activeAppleModalSheetCount.value--;
+    }
+  }
+}
+
+class PostUpdateWelcomeDialog extends StatefulWidget {
+  final String version;
+  final Future<bool> Function(Uri uri)? urlOpener;
+  final Future<void> Function()? onConfirm;
+  final bool barrierDismissible;
+
+  const PostUpdateWelcomeDialog({
+    super.key,
+    required this.version,
+    this.urlOpener,
+    this.onConfirm,
+    this.barrierDismissible = false,
+  });
+
+  @override
+  State<PostUpdateWelcomeDialog> createState() =>
+      _PostUpdateWelcomeDialogState();
+}
+
+class _PostUpdateWelcomeDialogState extends State<PostUpdateWelcomeDialog> {
+  String? _feedback;
+  bool _busy = false;
+  bool _dismissed = false;
+
+  @override
+  void dispose() {
+    _dismissed = true;
+    super.dispose();
+  }
+
+  Future<void> _openTarget(Uri uri, String label) async {
+    if (_busy || _dismissed) return;
+    HapticFeedback.selectionClick();
+    setState(() => _busy = true);
+    try {
+      final status = await openOfficialChannelUrl(
+        uri,
+        urlOpener: widget.urlOpener,
+        shouldFallbackCopy: () => mounted && !_dismissed,
+      );
+      if (!mounted || _dismissed) return;
+      setState(() {
+        if (status == OfficialLinkOpenStatus.opened) {
+          _feedback = '正在打开$label…';
+        } else if (status == OfficialLinkOpenStatus.copiedFallback) {
+          _feedback = '已复制$label链接：${uri.toString()}';
+        } else {
+          _feedback = '请访问官网：${OfficialChannelInfo.officialWebsiteDisplay}';
+        }
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _copyAuthor() async {
+    final ok = await copyOfficialChannelText(
+      OfficialChannelInfo.authorSocialName,
+    );
+    if (!mounted || _dismissed) return;
+    setState(() {
+      _feedback = ok
+          ? '已复制作者全网同名账号：${OfficialChannelInfo.authorSocialName}'
+          : '作者账号名：${OfficialChannelInfo.authorSocialName}';
+    });
+  }
+
+  Future<void> _confirm() async {
+    if (_dismissed) return;
+    _dismissed = true;
+    if (widget.onConfirm != null) {
+      await widget.onConfirm!();
+    } else if (mounted) {
+      Navigator.of(context).pop(true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = ApplePalette.of(context);
+    final media = MediaQuery.of(context);
+    final isCompact = media.size.width < 360;
+    final cardBg = p.isDark ? const Color(0xFF1C1C1E) : Colors.white;
+    final sectionBg =
+        p.isDark ? const Color(0xFF28282C) : const Color(0xFFF3F4F8);
+    final warmBg =
+        p.isDark ? const Color(0x24FF6482) : const Color(0x14E11D48);
+    final warmAccent =
+        p.isDark ? const Color(0xFFFF6482) : const Color(0xFFE11D48);
+    final warnBg =
+        p.isDark ? const Color(0x28FF9F0A) : const Color(0x16D97706);
+    final warnInk =
+        p.isDark ? const Color(0xFFFFD60A) : const Color(0xFFB45309);
+
+    return PopScope(
+      canPop: widget.barrierDismissible,
+      child: Center(
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: isCompact ? 14 : 22,
+            vertical: 20,
+          ),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: 430,
+              maxHeight: media.size.height * 0.88,
+            ),
+            child: Material(
+              key: const ValueKey('post-update-welcome-dialog'),
+              type: MaterialType.transparency,
+              child: DecoratedBox(
+                decoration: ShapeDecoration(
+                  color: cardBg,
+                  shape: RoundedSuperellipseBorder(
+                    borderRadius: BorderRadius.circular(26),
+                    side: BorderSide(
+                      color: p.isDark
+                          ? const Color(0x28FFFFFF)
+                          : const Color(0x16000000),
+                      width: 0.75,
+                    ),
+                  ),
+                  shadows: [
+                    BoxShadow(
+                      color: Colors.black
+                          .withValues(alpha: p.isDark ? 0.56 : 0.18),
+                      blurRadius: 32,
+                      offset: const Offset(0, 14),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(26),
+                  child: SingleChildScrollView(
+                    padding: EdgeInsets.fromLTRB(
+                      isCompact ? 16 : 22,
+                      22,
+                      isCompact ? 16 : 22,
+                      18,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                          children: [
+                            const MarcoBrandLogo(
+                              iconSize: 38,
+                              showWordmark: false,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    widget.version.trim().isEmpty
+                                        ? '欢迎使用新版 Marco Movie'
+                                        : '欢迎升级至 v${widget.version.trim()}',
+                                    style: TextStyle(
+                                      color: p.labelPrimary,
+                                      fontSize: 18.5,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: -0.3,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    '安全防骗提醒 · 官方渠道声明 · 开发者寄语',
+                                    style: TextStyle(
+                                      color: p.labelSecondary,
+                                      fontSize: 12.5,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 15),
+                        // 1. 谨防受骗
+                        DecoratedBox(
+                          decoration: ShapeDecoration(
+                            color: warnBg,
+                            shape: RoundedSuperellipseBorder(
+                              borderRadius: BorderRadius.circular(15),
+                              side: BorderSide(
+                                color: warnInk.withValues(alpha: 0.35),
+                                width: 0.7,
+                              ),
+                            ),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(13),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 1),
+                                  child: Icon(
+                                    CupertinoIcons.exclamationmark_shield_fill,
+                                    color: warnInk,
+                                    size: 18,
+                                  ),
+                                ),
+                                const SizedBox(width: 9),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        '谨防受骗 · 本软件永久免费',
+                                        style: TextStyle(
+                                          color: warnInk,
+                                          fontSize: 13.5,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        OfficialChannelInfo.antiScamWarning,
+                                        style: TextStyle(
+                                          color: warnInk.withValues(alpha: 0.92),
+                                          fontSize: 12.8,
+                                          height: 1.45,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        // 2. 官网为唯一更新渠道
+                        DecoratedBox(
+                          decoration: ShapeDecoration(
+                            color: sectionBg,
+                            shape: RoundedSuperellipseBorder(
+                              borderRadius: BorderRadius.circular(15),
+                            ),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(13),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      CupertinoIcons.checkmark_seal_fill,
+                                      color: p.systemBlue,
+                                      size: 16,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: Text(
+                                        '认准官网唯一更新渠道',
+                                        style: TextStyle(
+                                          color: p.labelPrimary,
+                                          fontSize: 13.5,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                    GestureDetector(
+                                      key: const ValueKey(
+                                        'post-update-copy-author-btn',
+                                      ),
+                                      onTap: _copyAuthor,
+                                      child: Text(
+                                        '复制 ${OfficialChannelInfo.authorSocialName}',
+                                        style: TextStyle(
+                                          color: p.systemBlue,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 5),
+                                Text(
+                                  OfficialChannelInfo.soleOfficialChannelNotice,
+                                  style: TextStyle(
+                                    color: p.labelSecondary,
+                                    fontSize: 12.8,
+                                    height: 1.45,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        // 3. 温情求赞助支持
+                        DecoratedBox(
+                          decoration: ShapeDecoration(
+                            color: warmBg,
+                            shape: RoundedSuperellipseBorder(
+                              borderRadius: BorderRadius.circular(15),
+                              side: BorderSide(
+                                color: warmAccent.withValues(alpha: 0.28),
+                                width: 0.7,
+                              ),
+                            ),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(13),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      CupertinoIcons.heart_fill,
+                                      color: warmAccent,
+                                      size: 15,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      OfficialChannelInfo.warmSponsorTitle,
+                                      style: TextStyle(
+                                        color: p.labelPrimary,
+                                        fontSize: 13.5,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 5),
+                                Text(
+                                  OfficialChannelInfo.postUpdateSponsorBody,
+                                  style: TextStyle(
+                                    color: p.labelSecondary,
+                                    fontSize: 12.8,
+                                    height: 1.46,
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: CupertinoButton(
+                                        key: const ValueKey(
+                                          'post-update-donate-btn',
+                                        ),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 7,
+                                        ),
+                                        minimumSize: const Size(44, 34),
+                                        color:
+                                            warmAccent.withValues(alpha: 0.16),
+                                        borderRadius: BorderRadius.circular(10),
+                                        onPressed: () => _openTarget(
+                                          OfficialChannelInfo.officialDonateUri,
+                                          '官网捐赠区',
+                                        ),
+                                        child: Text(
+                                          '前往官网捐赠支持',
+                                          style: TextStyle(
+                                            color: warmAccent,
+                                            fontSize: 12.8,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    CupertinoButton(
+                                      key: const ValueKey(
+                                        'post-update-website-btn',
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 12,
+                                        vertical: 7,
+                                      ),
+                                      minimumSize: const Size(44, 34),
+                                      color:
+                                          p.systemBlue.withValues(alpha: 0.13),
+                                      borderRadius: BorderRadius.circular(10),
+                                      onPressed: () => _openTarget(
+                                        OfficialChannelInfo.officialWebsiteUri,
+                                        'Marco 官网',
+                                      ),
+                                      child: Text(
+                                        '访问官网',
+                                        style: TextStyle(
+                                          color: p.systemBlue,
+                                          fontSize: 12.8,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (_feedback != null) ...[
+                          const SizedBox(height: 9),
+                          Text(
+                            _feedback!,
+                            key: const ValueKey('post-update-feedback'),
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: p.labelSecondary,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 16),
+                        SizedBox(
+                          height: 46,
+                          child: CupertinoButton(
+                            key: const ValueKey('post-update-confirm-btn'),
+                            padding: const EdgeInsets.symmetric(horizontal: 20),
+                            color: AppleColors.systemBlue,
+                            borderRadius: BorderRadius.circular(14),
+                            onPressed: _confirm,
+                            child: const Text(
+                              '知道了，开始观影',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
                                 fontWeight: FontWeight.w600,
                               ),
                             ),

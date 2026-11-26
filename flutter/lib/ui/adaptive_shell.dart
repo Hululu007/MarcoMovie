@@ -43,6 +43,7 @@ import '../core/windows_tray_service.dart';
 import '../core/windows_video_quality.dart';
 import '../core/wogg_source.dart';
 import 'apple_theme.dart';
+import 'ios_ai_lab_sheets.dart';
 import 'cloud_sync_panel.dart';
 import 'curated_discovery_section.dart';
 import 'detail_screen.dart';
@@ -376,48 +377,140 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ),
       ];
   List<IosNativeMenuItem> _buildDockTabNativeMenuItems(int tabIndex) {
+    final latestWatch =
+        (!_privateSessionUnlocked && _cachedWatchHistory.isNotEmpty)
+            ? _cachedWatchHistory.first
+            : null;
     return switch (tabIndex) {
-      0 => const <IosNativeMenuItem>[
-          IosNativeMenuItem(
+      0 => <IosNativeMenuItem>[
+          const IosNativeMenuItem(
+            id: 'search',
+            title: '搜索影片',
+            symbol: 'magnifyingglass',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
+            id: 'switch_source',
+            title: '切换片源',
+            symbol: 'arrow.triangle.2.circlepath',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
+            id: 'refresh_home',
+            title: '刷新主页',
+            symbol: 'arrow.clockwise',
+            section: 1,
+          ),
+          const IosNativeMenuItem(
             id: 'top',
             title: '回到顶部',
             symbol: 'arrow.up.to.line',
+            section: 1,
           ),
         ],
-      1 => const <IosNativeMenuItem>[
-          IosNativeMenuItem(
+      1 => <IosNativeMenuItem>[
+          const IosNativeMenuItem(
+            id: 'import_live',
+            title: '导入直播源',
+            symbol: 'plus.circle',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
             id: 'manage_live',
             title: '管理直播源',
             symbol: 'antenna.radiowaves.left.and.right',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
+            id: 'refresh_live',
+            title: '刷新频道列表',
+            symbol: 'arrow.clockwise',
+            section: 1,
+          ),
+          IosNativeMenuItem(
+            id: 'toggle_live_unreachable',
+            title: '隐藏失效频道',
+            symbol: _liveHideUnreachable ? 'eye.slash.fill' : 'eye.slash',
+            checked: _liveHideUnreachable,
+            section: 1,
           ),
         ],
       2 => <IosNativeMenuItem>[
+          if (latestWatch != null)
+            IosNativeMenuItem(
+              id: 'resume_latest',
+              title: '继续上次播放',
+              subtitle: latestWatch.title,
+              symbol: 'play.fill',
+              section: 0,
+            ),
           const IosNativeMenuItem(
             id: 'favorites',
             title: '收藏',
             symbol: 'heart.fill',
+            section: 1,
           ),
           if (!_privateSessionUnlocked)
             const IosNativeMenuItem(
               id: 'history',
               title: '观看历史',
               symbol: 'clock.fill',
+              section: 1,
             ),
+          const IosNativeMenuItem(
+            id: 'downloads',
+            title: '离线下载',
+            symbol: 'arrow.down.circle.fill',
+            section: 1,
+          ),
+          const IosNativeMenuItem(
+            id: 'lib_add_library',
+            title: '添加资源库',
+            symbol: 'plus.circle',
+            section: 2,
+          ),
         ],
-      3 => const <IosNativeMenuItem>[
-          IosNativeMenuItem(
+      3 => <IosNativeMenuItem>[
+          const IosNativeMenuItem(
             id: 'add_library',
             title: '添加资源库',
             symbol: 'plus.circle',
+            section: 0,
           ),
-          IosNativeMenuItem(
+          const IosNativeMenuItem(
+            id: 'manage_subscriptions',
+            title: '管理订阅',
+            symbol: 'square.stack.3d.up',
+            section: 0,
+          ),
+          const IosNativeMenuItem(
             id: 'netdisk_accounts',
             title: '网盘账号',
             symbol: 'cloud.fill',
+            section: 0,
           ),
+          if (!_privateSessionUnlocked)
+            const IosNativeMenuItem(
+              id: 'cloud_sync',
+              title: '多端同步',
+              symbol: 'icloud.and.arrow.up',
+              section: 1,
+            ),
+          if (isIosAiFeatureSupported && AiService.instance.isLabUnlocked)
+            const IosNativeMenuItem(
+              id: 'ai_assistant',
+              title: 'AI 观影实验室',
+              symbol: 'sparkles',
+              section: 1,
+            ),
         ],
       _ => const <IosNativeMenuItem>[],
     };
+  }
+
+  void _syncNativeDockMenuItemsIfMounted() {
+    if (!mounted || !_useRootNativeTabChrome) return;
+    unawaited(IosLiquidGlassBridge.updateRootTabItems(_buildIosNativeDockItems()));
   }
 
   List<IosSlideMenuAction> _buildDockTabSlideMenuActions(int tabIndex) =>
@@ -427,16 +520,31 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   /// page switch first moves the Dock selection to this tab so the native and
   /// Flutter Dock highlights always follow where the user actually lands.
   static int? _dockMenuActionOwnerTab(String actionId) => switch (actionId) {
-        'top' => 0,
-        'manage_live' => 1,
-        'favorites' || 'history' => 2,
-        'add_library' || 'netdisk_accounts' => 3,
+        'top' || 'search' || 'switch_source' || 'refresh_home' => 0,
+        'import_live' ||
+        'manage_live' ||
+        'refresh_live' ||
+        'toggle_live_unreachable' =>
+          1,
+        'resume_latest' ||
+        'favorites' ||
+        'history' ||
+        'downloads' ||
+        'lib_add_library' =>
+          2,
+        'add_library' ||
+        'manage_subscriptions' ||
+        'netdisk_accounts' ||
+        'cloud_sync' ||
+        'ai_assistant' =>
+          3,
         _ => null,
       };
 
   void _handleDockTabMenuAction(int tabIndex, String actionId) {
     if (!mounted) return;
-    if (actionId == 'history' && _privateSessionUnlocked) {
+    if ((actionId == 'history' || actionId == 'resume_latest') &&
+        _privateSessionUnlocked) {
       _showAppleNotice('隐私空间已开启', '隐私空间不记录也不展示普通观看历史。');
       return;
     }
@@ -446,6 +554,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _librarySegment = 0;
     } else if (actionId == 'history') {
       _librarySegment = 1;
+    } else if (actionId == 'downloads') {
+      _librarySegment = 2;
     }
     // Canonical selection path: pops Curated, updates `_tabIndex` /
     // `_selectedTabIndexNotifier`, pushes `setRootTabSelectedIndex` with a
@@ -455,14 +565,66 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       case 'top':
         _scrollHomeToTop();
         return;
+      case 'search':
+        _showGlobalSearchSheet();
+        return;
+      case 'switch_source':
+        _showSitePickerDialog();
+        return;
+      case 'refresh_home':
+        _loadSiteHome(bypassSnapshot: true);
+        return;
+      case 'import_live':
+        unawaited(_showStandaloneLiveImportSheet());
+        return;
       case 'manage_live':
         _showLiveSourceManagerSheet();
+        return;
+      case 'refresh_live':
+        if (_visibleLives.isNotEmpty) {
+          final idx = _selectedLiveSource.clamp(0, _visibleLives.length - 1);
+          unawaited(_loadLivePlaylist(idx, forceRefresh: true));
+        }
+        return;
+      case 'toggle_live_unreachable':
+        final next = !_liveHideUnreachable;
+        setState(() => _liveHideUnreachable = next);
+        unawaited(widget.storage.setLiveHideUnreachable(next));
+        _syncNativeDockMenuItemsIfMounted();
+        return;
+      case 'resume_latest':
+        if (_cachedWatchHistory.isNotEmpty) {
+          final latest = _cachedWatchHistory.first;
+          _openSyncedMediaEntry(
+            siteKey: latest.site,
+            videoId: latest.id,
+            title: latest.title,
+            poster: latest.poster,
+            remarks: latest.episode,
+          );
+        }
+        return;
+      case 'lib_add_library':
+        unawaited(_showImportConfigDialog(iosBackLabel: '片库'));
         return;
       case 'add_library':
         unawaited(_showImportConfigDialog(iosBackLabel: '设置'));
         return;
+      case 'manage_subscriptions':
+        unawaited(_showSubscriptionManagerSheet(iosBackLabel: '设置'));
+        return;
       case 'netdisk_accounts':
         _openConfigCenterPage(initialFocus: 'netdisk', iosBackLabel: '设置');
+        return;
+      case 'cloud_sync':
+        unawaited(_openCloudSyncCenter(iosBackLabel: '设置'));
+        return;
+      case 'ai_assistant':
+        unawaited(
+          _trackSecondaryRoute<void>(
+            () => pushIosAiSettingsPage(context, backLabel: '设置'),
+          ),
+        );
         return;
     }
   }
@@ -1043,6 +1205,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           urlOpener: widget.onOpenExternalUrlForTest,
           onConfirm: () async {
             persisted = await prefs.markOfficialChannelNoticeSeen();
+            if (_currentAppVersion != '读取中' && _currentAppVersion != '未知') {
+              await prefs.markPostUpdateNoticeSeen(_currentAppVersion);
+            }
             return persisted;
           },
         );
@@ -1577,8 +1742,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (mounted) {
       setState(() {
         _cachedWatchHistory = widget.storage.getWatchHistory();
-    _liveHideUnreachable = widget.storage.liveHideUnreachable;
+        _liveHideUnreachable = widget.storage.liveHideUnreachable;
       });
+      _syncNativeDockMenuItemsIfMounted();
     }
   }
   @override
@@ -1762,8 +1928,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _activeSite = availableSites.firstWhere(
         (s) => s.key == preferredKey,
         orElse: () => availableSites.firstWhere(
-          (s) => !CspBridge.isBannerNoticeSite(s),
-          orElse: () => availableSites.first,
+          CspBridge.isPrimaryPlayableVodSite,
+          orElse: () => availableSites.firstWhere(
+            (s) =>
+                !CspBridge.isBannerNoticeSite(s) &&
+                !CspBridge.isDoubanSearchUtilitySite(s),
+            orElse: () => availableSites.firstWhere(
+              (s) => !CspBridge.isBannerNoticeSite(s),
+              orElse: () => availableSites.first,
+            ),
+          ),
         ),
       );
       if (_privateSessionUnlocked) {
@@ -3276,14 +3450,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
       final merged = await widget.storage.upsertSubscriptions(entries);
       _reloadSavedConfig();
-      final totalSiteCount = merged?.publicSupportedSites.length ?? 0;
-      final availSiteCount = merged?.publicAvailableSiteCount ?? 0;
-      final liveCount = merged?.publicLives.length ?? 0;
-      _showAppleNotice(
-        '订阅导入成功',
-        '本次成功导入 ${entries.length} 个订阅源，当前 可用 $availSiteCount / 共 $totalSiteCount 个片源'
-        '${liveCount > 0 ? "、$liveCount 个直播源" : ""}。',
-      );
+      final limitation = (!kIsWeb && !Platform.isAndroid)
+          ? CspBridge.buildSubscriptionRuntimeLimitationNotice(entries)
+          : null;
+      if (limitation != null) {
+        _showAppleNotice(limitation.title, limitation.message);
+      } else {
+        final totalSiteCount = merged?.publicSupportedSites.length ?? 0;
+        final availSiteCount = merged?.publicAvailableSiteCount ?? 0;
+        final liveCount = merged?.publicLives.length ?? 0;
+        _showAppleNotice(
+          '订阅导入成功',
+          '本次成功导入 ${entries.length} 个订阅源，当前 可用 $availSiteCount / 共 $totalSiteCount 个片源'
+          '${liveCount > 0 ? "、$liveCount 个直播源" : ""}。',
+        );
+      }
     } catch (e) {
       _showImportConfigDialog(initialInput: text, initialError: '剪贴板内容未能直接导入：$e');
     }
@@ -11035,6 +11216,74 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
                 const SizedBox(width: 8),
                 if (!_privateSessionUnlocked && _librarySegment != 2)
+                if (isIosAiFeatureSupported &&
+                    !_privateSessionUnlocked &&
+                    AiService.instance.isLabUnlocked &&
+                    AiService.instance.config.moodCurationEnabled)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: CupertinoButton(
+                      key: const ValueKey('library-open-ai-sommelier'),
+                      padding: EdgeInsets.zero,
+                      minSize: 28,
+                      onPressed: () {
+                        final histTitles = widget.storage
+                            .getWatchHistory()
+                            .map((h) => h.title)
+                            .toList();
+                        final favTitles = widget.storage
+                            .getFavorites()
+                            .map((f) => f.title)
+                            .toList();
+                        final activeSite = _activeSite;
+                        final snap = <(CmsSite, CmsVideo)>[
+                          if (activeSite != null)
+                            for (final v in _homeVideos.take(40))
+                              (activeSite, v),
+                        ];
+                        unawaited(
+                          showIosAiMoodSommelierSheet(
+                            context,
+                            recentHistoryTitles: histTitles,
+                            favoriteTitles: favTitles,
+                            availableLibrarySnapshot: snap,
+                            onSelectPick: (pick) {
+                              if (pick.matchedSite != null &&
+                                  pick.matchedVideo != null) {
+                                _openVideoDetail(
+                                  pick.matchedSite!,
+                                  pick.matchedVideo!,
+                                );
+                              } else {
+                                _searchController.text = pick.title;
+                                _showGlobalSearchSheet();
+                                unawaited(_runGlobalSearch(pick.title));
+                              }
+                            },
+                          ),
+                        );
+                      },
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            CupertinoIcons.sparkles,
+                            color: AppleColors.systemPurple,
+                            size: 15,
+                          ),
+                          SizedBox(width: 4),
+                          Text(
+                            'AI 策展',
+                            style: TextStyle(
+                              color: AppleColors.systemPurple,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                   Padding(
                     padding: const EdgeInsets.only(right: 12),
                     child: CupertinoButton(
@@ -13111,23 +13360,55 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (isIosNative)
         SettingsPane(
           'ai',
-          'AI 助手',
-          '自备密钥开启自然语言找片与文件名智能清洗（本机钥匙串加密存储）',
-          CupertinoIcons.sparkles,
+          'AI 观影实验室',
+          AiService.instance.isLabUnlocked
+              ? (AiService.instance.activePasscodePayload?.summaryBadgeZh ??
+                  '已开启内测 · 智能双语字幕、防剧透导览与 AI 找片')
+              : '内测中 · 输入口令开启',
+          AiService.instance.isLabUnlocked
+              ? CupertinoIcons.sparkles
+              : CupertinoIcons.lock_shield_fill,
           AppleColors.systemPurple,
           sectionGroup: 'ia-general',
-          trailingText: AiService.instance.isConfigured ? '已启用' : '未配置',
-          keywords: const [
-            'AI 助手',
-            '大模型',
-            '自然语言找片',
-            'AI 找片',
-            '文件名智能清洗',
-            '标题智能清洗',
-          ],
+          trailingText: AiService.instance.statusSummaryZh,
+          keywords: AiService.instance.isLabUnlocked
+              ? const [
+                  'AI 观影实验室',
+                  'AI 实验室',
+                  'AI 助手',
+                  '内测',
+                  '口令',
+                  '大模型',
+                  '自然语言找片',
+                  'AI 找片',
+                  '文件名智能清洗',
+                  '标题智能清洗',
+                  'AI 字幕',
+                  '前情提要',
+                ]
+              : const [
+                  'AI 观影实验室',
+                  'AI 实验室',
+                  '内测',
+                  '口令',
+                ],
           onOpen: () => _trackSecondaryRoute<void>(
             () async {
-              await pushIosAiSettingsPage(context, backLabel: '设置');
+              if (!AiService.instance.isLabUnlocked) {
+                final unlocked = await showIosAiLabPasscodeSheet(
+                  context,
+                  urlLauncherOverride: widget.onOpenExternalUrlForTest,
+                );
+                _syncNativeDockMenuItemsIfMounted();
+                refresh();
+                if (!unlocked || !mounted) return;
+              }
+              await pushIosAiSettingsPage(
+                context,
+                backLabel: '设置',
+                urlLauncherOverride: widget.onOpenExternalUrlForTest,
+              );
+              _syncNativeDockMenuItemsIfMounted();
               refresh();
             },
           ),
@@ -13135,7 +13416,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       SettingsPane(
         'about',
         '关于与更新',
-        '版本与软件更新、新手引导、诊断日志、联系反馈（${OfficialChannelInfo.authorSocialName}）与官网交流群',
+        '版本与软件更新、支持开发者、新手引导、诊断日志与联系反馈（${OfficialChannelInfo.authorSocialName}）',
         CupertinoIcons.info_circle_fill,
         systemGray,
         sectionGroup: 'ia-general',
@@ -13144,6 +13425,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           '检查版本更新',
           '软件更新',
           '打开官方下载站',
+          '捐赠',
+          '赞助',
+          '支持开发者',
+          '打赏',
           '重新查看新手引导',
           '导出诊断日志包',
           '联系反馈作者',
@@ -13178,6 +13463,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             installedVersion: _currentAppVersion,
             embedded: true,
             autoCheck: false,
+          ),
+          const SizedBox(height: 20),
+          IosSupportDeveloperCard(
+            urlOpener: widget.onOpenExternalUrlForTest,
           ),
           const SizedBox(height: 24),
           IosSettingsGroup(
@@ -14517,10 +14806,46 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         setState(
           () => _currentAppVersion = version.isNotEmpty ? version : '未知',
         );
+        if (version.isNotEmpty &&
+            defaultTargetPlatform == TargetPlatform.iOS &&
+            !OhosRuntime.isOhos) {
+          unawaited(_maybeShowPostUpdateWelcomeIfNeeded(version));
+        }
       }
     } catch (_) {
       _installedVersionTimer?.cancel();
       if (mounted) setState(() => _currentAppVersion = '未知');
+    }
+  }
+
+  Future<void> _maybeShowPostUpdateWelcomeIfNeeded(String version) async {
+    try {
+      final prefs = await OnboardingPrefs.load();
+      if (!mounted || !prefs.shouldShowPostUpdateNotice(version)) return;
+      final frameReady = Completer<void>();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!frameReady.isCompleted) frameReady.complete();
+      });
+      await frameReady.future;
+      if (!mounted ||
+          _officialNoticeOpen ||
+          _onboardingRouteOpen ||
+          !prefs.shouldShowPostUpdateNotice(version)) {
+        return;
+      }
+      _officialNoticeOpen = true;
+      try {
+        await showPostUpdateWelcomeDialog(
+          context,
+          version: version,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          onConfirm: () => prefs.markPostUpdateNoticeSeen(version),
+        );
+      } finally {
+        _officialNoticeOpen = false;
+      }
+    } catch (e) {
+      debugPrint('PostUpdateWelcomeDialog skipped: $e');
     }
   }
 
@@ -17486,6 +17811,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             _privateSessionUnlocked = false;
           }
           _reloadSavedConfig();
+        },
+        onImportNotice: (title, message) {
+          if (mounted) {
+            _showAppleNotice(title, message);
+          }
         },
         onNeedsPrivacyPassword: () async {
           _showSetPrivacyPasswordDialog(

@@ -386,6 +386,49 @@ class IosLiquidGlassBridge {
     }
   }
 
+  /// Presents an in-app `SFSafariViewController` for OAuth PKCE sign-in so the
+  /// host app stays foreground-active while `localhost` loopback callback
+  /// completes, preserving system Safari cookies, Passkeys, and SSO.
+  static Future<bool> presentSafariAuth(String url) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return false;
+    try {
+      final res = await channel.invokeMethod<bool>(
+        'presentSafariAuth',
+        <String, dynamic>{'url': url},
+      );
+      return res == true;
+    } on MissingPluginException {
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Dismisses any active `SFSafariViewController` opened via [presentSafariAuth].
+  static Future<void> dismissSafariAuth() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return;
+    try {
+      await channel.invokeMethod<void>('dismissSafariAuth');
+    } on MissingPluginException {
+      // Host tests may not register native channel.
+    } catch (_) {}
+  }
+
+  /// Updates the native root Dock items & long-press `UIMenu` actions in-place.
+  static Future<void> updateRootTabItems(List<IosNativeDockItem> items) async {
+    if (!isAvailable || items.isEmpty) return;
+    try {
+      await channel.invokeMethod<void>(
+        'setRootTabItems',
+        <String, dynamic>{
+          'items': [for (final item in items) item.toMap()],
+        },
+      );
+    } on MissingPluginException {
+      // Host tests may not register native channel.
+    } catch (_) {}
+  }
+
   /// Fires tactile iOS haptic feedback for the favorite postcard shutter/arrival
   /// phases and returns the hardware Dynamic Island geometry when available.
   static Future<Map<String, dynamic>?> triggerFavoriteDynamicIslandFeedback(

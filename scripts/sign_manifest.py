@@ -232,6 +232,79 @@ def sign_manifest_file(manifest_path: Path, key_file: Path) -> str:
     return sig_b64
 
 
+AI_LAB_TOKEN_PREFIX = "MMAILAB1."
+AI_LAB_SIGN_DOMAIN = b"marco-ai-lab-v1:"
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(text: str) -> bytes:
+    padded = text + ("=" * ((4 - len(text) % 4) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def issue_ai_lab_token(
+    key_file: Path,
+    *,
+    days: int = 0,
+    tag: str = "beta",
+    plat: str = "all",
+    shared: bool = False,
+    exp_oauth: bool = False,
+    min_vc: int = 0,
+    now_epoch: int | None = None,
+) -> str:
+    """Issues an offline Ed25519-signed AI Lab unlock token (`MMAILAB1.<payload>.<sig>`)."""
+    import time as _time
+
+    seed = _read_32byte_key_file(key_file, "Private key")
+    iat = int(_time.time()) if now_epoch is None else int(now_epoch)
+    exp = 0 if days <= 0 else iat + int(days) * 86400
+    payload_obj: dict[str, object] = {
+        "exp": exp,
+        "iat": iat,
+        "plat": (plat or "all").strip().lower() or "all",
+        "shared": bool(shared),
+        "tag": tag.strip() or "beta",
+        "v": 1,
+    }
+    if exp_oauth:
+        payload_obj["exp_oauth"] = True
+    if int(min_vc) > 0:
+        payload_obj["min_vc"] = int(min_vc)
+    payload_bytes = canonicalize_json(payload_obj).encode("utf-8")
+    sig = sign(seed, AI_LAB_SIGN_DOMAIN + payload_bytes)
+    return f"{AI_LAB_TOKEN_PREFIX}{_b64url_encode(payload_bytes)}.{_b64url_encode(sig)}"
+
+
+def verify_ai_lab_token(token_text: str, pub: bytes, *, now_epoch: int | None = None) -> dict | None:
+    import re as _re
+    import time as _time
+
+    m = _re.search(r"MMAILAB1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)", token_text.strip())
+    if not m:
+        return None
+    try:
+        payload_bytes = _b64url_decode(m.group(1))
+        sig = _b64url_decode(m.group(2))
+        if len(sig) != 64:
+            return None
+        if not verify(pub, AI_LAB_SIGN_DOMAIN + payload_bytes, sig):
+            return None
+        claims = json.loads(payload_bytes.decode("utf-8"))
+        if not isinstance(claims, dict) or claims.get("v") != 1:
+            return None
+        exp = int(claims.get("exp", 0))
+        now_sec = int(_time.time()) if now_epoch is None else int(now_epoch)
+        if exp > 0 and now_sec > exp:
+            return None
+        return claims
+    except Exception:
+        return None
+
+
 def verify_manifest_file(manifest_path: Path, pub: bytes) -> bool:
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -284,6 +357,12 @@ def self_test() -> None:
             manifest_file, pub
         ), "Outer wrapper tampering unexpectedly passed"
 
+        tok = issue_ai_lab_token(key_file, days=30, tag="selftest", now_epoch=1700000000)
+        claims = verify_ai_lab_token(f"解锁口令：{tok}", pub, now_epoch=1700001000)
+        assert claims is not None and claims["tag"] == "selftest", "AI Lab token verify failed"
+        assert verify_ai_lab_token(tok, pub, now_epoch=1700000000 + 31 * 86400) is None, "Expired AI Lab token passed"
+        assert verify_ai_lab_token(tok[:-2] + "AA", pub, now_epoch=1700001000) is None, "Tampered AI Lab token passed"
+
     print("ALL ED25519 MANIFEST SELF-TESTS PASSED!")
 
 
@@ -330,6 +409,35 @@ def main():
         "--pub-key-file",
         help=f"Path to public key file (or set {PUBKEY_FILE_ENV})",
     )
+
+    ai_issue_cmd = sub.add_parser(
+        "issue-ai-lab-token",
+        help="Issue an offline Ed25519-signed AI Lab unlock passcode (MMAILAB1...)",
+    )
+    ai_issue_cmd.add_argument(
+        "-k",
+        "--key-file",
+        help=f"Path to offline Ed25519 private key seed file (or set {KEY_FILE_ENV})",
+    )
+    ai_issue_cmd.add_argument(
+        "--days",
+        type=int,
+        default=0,
+        help="Validity duration in days (0 = permanent passcode)",
+    )
+    ai_issue_cmd.add_argument(
+        "--tag",
+        default="PILIPALA",
+        help="Cohort or label embedded in signed claims",
+    )
+
+    ai_verify_cmd = sub.add_parser(
+        "verify-ai-lab-token",
+        help="Verify an offline Ed25519-signed AI Lab unlock passcode",
+    )
+    ai_verify_cmd.add_argument("token", help="MMAILAB1... passcode string")
+    ai_verify_cmd.add_argument("--pub-key", help="64-char hex Ed25519 public key")
+    ai_verify_cmd.add_argument("--pub-key-file", help="Path to Ed25519 public key file")
 
     args = parser.parse_args()
 
@@ -381,6 +489,29 @@ def main():
             print("PASS: Manifest Ed25519 signature is valid.")
             sys.exit(0)
         print("FAIL: Manifest Ed25519 signature is INVALID!", file=sys.stderr)
+        sys.exit(1)
+
+    if args.command == "issue-ai-lab-token":
+        try:
+            key_file = resolve_private_key_file(args.key_file)
+            tok = issue_ai_lab_token(key_file, days=args.days, tag=args.tag)
+            print(tok)
+            sys.exit(0)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    if args.command == "verify-ai-lab-token":
+        try:
+            pub = resolve_public_key_bytes(args.pub_key, args.pub_key_file)
+            claims = verify_ai_lab_token(args.token, pub)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if claims is not None:
+            print(f"PASS: Valid AI Lab token (claims={json.dumps(claims, ensure_ascii=False)})")
+            sys.exit(0)
+        print("FAIL: Invalid or expired AI Lab token!", file=sys.stderr)
         sys.exit(1)
 
     parser.print_help()

@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 
 import '../core/cms_client.dart';
 import '../core/cms_parser.dart';
+import '../core/csp_bridge.dart';
 import '../core/emby_library.dart';
 import '../core/media_library_connectors.dart';
 import '../core/models.dart';
@@ -139,6 +140,7 @@ class AddResourceLibraryView extends StatefulWidget {
   final String activeGroup;
   final VoidCallback? onOpenCatPawSettings;
   final VoidCallback onLibraryAdded;
+  final void Function(String title, String message)? onImportNotice;
   final Future<void> Function()? onNeedsPrivacyPassword;
 
   const AddResourceLibraryView({
@@ -153,6 +155,7 @@ class AddResourceLibraryView extends StatefulWidget {
     this.activeGroup = '',
     this.onOpenCatPawSettings,
     required this.onLibraryAdded,
+    this.onImportNotice,
     this.onNeedsPrivacyPassword,
   });
 
@@ -733,12 +736,21 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
                 isPrivate: effectivePrivate,
               );
               await widget.storage.upsertSubscriptions(entries);
+              final limitation = (!kIsWeb && !Platform.isAndroid)
+                  ? CspBridge.buildSubscriptionRuntimeLimitationNotice(entries)
+                  : null;
               if (ctx.mounted) Navigator.of(ctx).pop();
               widget.onLibraryAdded();
               if (effectivePrivate && !widget.storage.hasPrivacyPassword) {
                 await widget.onNeedsPrivacyPassword?.call();
               }
               if (mounted) Navigator.of(context).pop();
+              if (limitation != null) {
+                widget.onImportNotice?.call(
+                  limitation.title,
+                  limitation.message,
+                );
+              }
             } catch (e) {
               if (ctx.mounted) {
                 final detail = _cleanErrorText(e);

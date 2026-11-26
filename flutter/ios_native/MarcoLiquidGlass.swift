@@ -12,24 +12,41 @@ private enum MarcoLiquidGlassSupport {
   static let sceneActivationChangedNotification = Notification.Name("MarcoSceneActivationChanged")
   private static var accessibilityObservers: [NSObjectProtocol] = []
   private static var hiddenAirPlayPicker: AVRoutePickerView?
+  private static weak var activeSafariAuthController: SFSafariViewController?
   private static var activeMenuButtons: Set<ObjectIdentifier> = []
 
   /// Resolves the active UIWindow across UIScene / iPhone Duo fold-unfold / Split View
-  /// without touching the deprecated `UIScreen.main` global.
+  /// without touching the deprecated `UIScreen.main` global or accidentally selecting
+  /// a system `UITextEffectsWindow` during iPadOS Home Screen cold launch.
   static func activeWindow(for view: UIView? = nil) -> UIWindow? {
     if let win = view?.window {
       return win
     }
     let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-    let activeScene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
-    if let keyWin = activeScene?.windows.first(where: { $0.isKeyWindow }) {
+    let activeScene = scenes.first(where: { $0.activationState == .foregroundActive })
+      ?? scenes.first(where: { $0.activationState == .foregroundInactive })
+      ?? scenes.first
+    let isAppContentWindow: (UIWindow) -> Bool = { win in
+      !win.isHidden && win.windowLevel == .normal && win.rootViewController != nil
+    }
+    if let flutterKey = activeScene?.windows.first(where: { $0.isKeyWindow && $0.rootViewController is FlutterViewController }) {
+      return flutterKey
+    }
+    if let keyWin = activeScene?.windows.first(where: { $0.isKeyWindow && isAppContentWindow($0) }) {
       return keyWin
     }
-    if let anyKey = scenes.flatMap({ $0.windows }).first(where: { $0.isKeyWindow }) {
-      return anyKey
+    if let flutterWin = activeScene?.windows.first(where: { !$0.isHidden && $0.rootViewController is FlutterViewController }) {
+      return flutterWin
     }
-    return activeScene?.windows.first
-      ?? scenes.flatMap({ $0.windows }).first
+    if let anyFlutter = scenes.flatMap({ $0.windows }).first(where: { !$0.isHidden && $0.rootViewController is FlutterViewController }) {
+      return anyFlutter
+    }
+    if let delegateWin = UIApplication.shared.delegate?.window ?? nil, delegateWin.rootViewController != nil {
+      return delegateWin
+    }
+    return activeScene?.windows.first(where: isAppContentWindow)
+      ?? scenes.flatMap({ $0.windows }).first(where: isAppContentWindow)
+      ?? activeScene?.windows.first
       ?? (UIApplication.shared.delegate?.window ?? nil)
   }
 
@@ -612,6 +629,51 @@ private enum MarcoLiquidGlassSupport {
         DispatchQueue.main.async {
           presentNativeAirPlayPicker()
           result(true)
+        }
+      case "presentSafariAuth":
+        let args = (call.arguments as? [String: Any]) ?? [:]
+        let rawUrl = (args["url"] as? String) ?? ""
+        DispatchQueue.main.async {
+          guard let url = URL(string: rawUrl),
+                let scheme = url.scheme?.lowercased(),
+                (scheme == "https" || scheme == "http"),
+                let host = topPresenter() else {
+            result(false)
+            return
+          }
+          if let existing = activeSafariAuthController, existing.presentingViewController != nil {
+            existing.dismiss(animated: false, completion: nil)
+          }
+          let safari = SFSafariViewController(url: url)
+          safari.modalPresentationStyle = .pageSheet
+          activeSafariAuthController = safari
+          host.present(safari, animated: true)
+          result(true)
+        }
+      case "dismissSafariAuth":
+        DispatchQueue.main.async {
+          if let safari = activeSafariAuthController {
+            activeSafariAuthController = nil
+            if safari.presentingViewController != nil && !safari.isBeingDismissed {
+              safari.dismiss(animated: true) {
+                result(nil)
+              }
+              return
+            }
+          }
+          result(nil)
+        }
+      case "setRootTabItems":
+        guard isAvailable,
+              let args = call.arguments as? [String: Any],
+              let items = args["items"] as? [[String: Any]],
+              !items.isEmpty else {
+          result(nil)
+          return
+        }
+        DispatchQueue.main.async {
+          MarcoIos27RootTabChromeController.existingInstance?.updateItems(items)
+          result(nil)
         }
       case "triggerFavoriteDynamicIslandFeedback":
         let phase = (call.arguments as? String) ?? "shutter"
@@ -1243,7 +1305,7 @@ private final class MarcoNativeOptionSheetController: UIViewController,
       guard let self = self else { return }
       if self.isPopoverPresentation, let nav = self.navigationController {
         let maxW = min(Double(size.width) - 24.0, 306.0)
-        let maxH = min(Double(size.height) * 0.84, 380.0)
+        let maxH = min(Double(size.height) * 0.86, 496.0)
         nav.preferredContentSize = CGSize(
           width: max(236.0, min(Double(nav.preferredContentSize.width), maxW)),
           height: min(Double(nav.preferredContentSize.height), max(maxH, 160.0))
@@ -1290,7 +1352,7 @@ private final class MarcoNativeOptionSheetController: UIViewController,
       let subtitleRows = vc.sections.flatMap { $0.items }.filter { $0.subtitle != nil }.count
       let headerH = vc.sheetTitle.isEmpty ? 6.0 : 34.0
       let rawHeight = headerH + Double(itemCount) * 36.0 + Double(subtitleRows) * 11.0 + Double(sectionHeaderCount) * 22.0 + 10.0
-      let maxH = min(Double(host.view.bounds.height) * 0.84, 380.0)
+      let maxH = min(Double(host.view.bounds.height) * 0.86, 496.0)
       let maxW = min(Double(host.view.bounds.width) - 24.0, 306.0)
       nav.preferredContentSize = CGSize(
         width: max(240.0, maxW),
@@ -3689,12 +3751,27 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
       return
     }
     let anchorBtn = MarcoEphemeralMenuAnchorButton(type: .system)
-    anchorBtn.frame = slotRect
+    // Position the ephemeral 2pt anchor strictly ABOVE the top rim of the
+    // bottom Dock capsule (or below the top bar when docked at the top on wide
+    // landscape iPad) so UIKit UIMenu always pops upward above the Dock instead
+    // of aligning its bottom edge with slotRect.maxY and occluding the Dock.
+    let globalOriginY = convert(CGPoint.zero, to: nil).y
+    let anchorY: CGFloat = globalOriginY < 140.0 ? (bounds.height + 8.0) : -10.0
+    let anchorW: CGFloat = min(max(slotRect.width * 0.36, 16.0), 28.0)
+    anchorBtn.frame = CGRect(
+      x: slotRect.midX - anchorW * 0.5,
+      y: anchorY,
+      width: anchorW,
+      height: 2.0
+    )
     anchorBtn.backgroundColor = .clear
     anchorBtn.tintColor = .clear
     anchorBtn.alpha = 0.02
     anchorBtn.isAccessibilityElement = false
     anchorBtn.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    if #available(iOS 16.0, *) {
+      anchorBtn.preferredMenuElementOrder = .fixed
+    }
     anchorBtn.menu = menu
     anchorBtn.showsMenuAsPrimaryAction = true
     anchorBtn.onMenuEnded = { [weak self, weak anchorBtn] in
@@ -3745,7 +3822,9 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
     if dot.superview !== self {
       addSubview(dot)
     }
-    dot.frame = CGRect(x: slotRect.midX - 1.0, y: slotRect.minY, width: 2.0, height: 2.0)
+    let globalOriginY = convert(CGPoint.zero, to: nil).y
+    let dotY: CGFloat = globalOriginY < 140.0 ? (bounds.height + 8.0) : -10.0
+    dot.frame = CGRect(x: slotRect.midX - 1.0, y: dotY, width: 2.0, height: 2.0)
     let params = UIPreviewParameters()
     params.backgroundColor = .clear
     params.visiblePath = UIBezierPath(rect: dot.bounds)
@@ -5002,6 +5081,12 @@ private final class MarcoIos27RootTabChromeController: NSObject {
     guard MarcoLiquidGlassSupport.isAvailable, isConfigured, acceptEpoch(epoch) else { return }
     attachToRootIfNeeded()
     chromeView.setRootDockVisible(visible, animated: animated)
+  }
+
+  func updateItems(_ items: [[String: Any]]) {
+    guard MarcoLiquidGlassSupport.isAvailable, isConfigured, !items.isEmpty else { return }
+    attachToRootIfNeeded()
+    chromeView.setItems(items)
   }
 }
 

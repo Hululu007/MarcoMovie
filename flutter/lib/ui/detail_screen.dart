@@ -10,6 +10,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter/scheduler.dart' show SchedulerPhase;
 import 'package:flutter/services.dart' show HapticFeedback, SystemUiOverlayStyle;
+import '../core/ai_lab_features.dart';
+import '../core/ai_service.dart';
 import '../core/cms_client.dart';
 import '../core/cms_parser.dart';
 import '../core/csp_bridge.dart';
@@ -28,6 +30,7 @@ import 'cast_avatar_section.dart';
 import 'desktop_horizontal_scroller.dart';
 import 'episode_scrape_sheet.dart';
 import 'favorite_postcard_animation.dart';
+import 'ios_ai_lab_sheets.dart';
 import 'ios_liquid_glass.dart';
 import 'media_badge.dart';
 import 'motion/ios27_springs.dart';
@@ -153,19 +156,37 @@ class _OtherSourceResultsState extends State<_OtherSourceResults> {
 
   @override
   Widget build(BuildContext context) {
+    final useAiRank = !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        AiService.instance.isLabUnlocked &&
+        _matches.length > 1;
+    final ranked = useAiRank
+        ? AiLabService.rankCrossSourceMatches('', _matches)
+        : null;
+    final count = ranked?.length ?? _matches.length;
     return ListView.builder(
       shrinkWrap: true,
-      itemCount: _matches.length + (_done && _matches.isNotEmpty ? 0 : 1),
+      itemCount: count + (_done && count > 0 ? 0 : 1),
       itemBuilder: (context, index) {
-        if (index == _matches.length) {
+        if (index == count) {
           return Padding(padding: const EdgeInsets.all(20), child: Center(
             child: _done ? Text(_failed ? '搜索失败，可关闭后重试' : '已导入的可搜索片源没有返回匹配影片')
                 : const CupertinoActivityIndicator(),
           ));
         }
-        final (site, video) = _matches[index];
-        return ListTile(title: Text(video.title), subtitle: Text(
-          [site.name, video.year, video.remarks].where((s) => s.isNotEmpty).join(' · ')),
+        final site = ranked != null ? ranked[index].site : _matches[index].$1;
+        final video = ranked != null ? ranked[index].video : _matches[index].$2;
+        final badge = ranked != null ? ranked[index].badgeLabel : '';
+        return ListTile(
+          title: Text(video.title),
+          subtitle: Text(
+            [
+              if (badge.isNotEmpty) '✦ $badge',
+              site.name,
+              video.year,
+              video.remarks,
+            ].where((s) => s.isNotEmpty).join(' · '),
+          ),
           onTap: () => Navigator.of(context).pop((site, video)),
         );
       },
@@ -5352,6 +5373,77 @@ class _DetailScreenState extends State<DetailScreen> {
                 ),
               ),
             ),
+            if (_isIosDetail &&
+                !_activeSite.isEffectivelyPrivate &&
+                AiService.instance.isLabUnlocked) ...[
+              const SizedBox(width: 5),
+              GestureDetector(
+                key: const ValueKey('detail-ai-lab-button'),
+                onTap: () {
+                  final epNum = (currentActiveEpIdx != null
+                          ? currentActiveEpIdx + 1
+                          : 1) +
+                      _episodeScrapeOverride.episodeOffset;
+                  unawaited(
+                    showIosDetailAiLabSheet(
+                      context,
+                      title: _effectiveLookupTitle,
+                      year: _effectiveLookupYear,
+                      overview: _video.description,
+                      currentEpisodeNumber: epNum < 1 ? 1 : epNum,
+                      currentLineEpisodes: line.episodes,
+                      onApplyEpisodeOverride: (override, summary) async {
+                        await widget.storage.setEpisodeScrapeOverride(
+                          siteKey: _activeSite.key,
+                          videoId: _video.id,
+                          videoTitle: _video.title,
+                          override: override,
+                        );
+                        if (!mounted) return;
+                        setState(() {
+                          _episodeScrapeOverride = override;
+                          _selectedPage = 0;
+                        });
+                        _toast('AI 智能编排已生效：$summary');
+                      },
+                    ),
+                  );
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0x388B5CF6),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: const Color(0x88A78BFA),
+                      width: 0.6,
+                    ),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        CupertinoIcons.sparkles,
+                        color: Color(0xFFD8B4FE),
+                        size: 12,
+                      ),
+                      SizedBox(width: 3),
+                      Text(
+                        'AI',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(width: 5),
             GestureDetector(
               key: const ValueKey('detail-episode-sort-toggle'),

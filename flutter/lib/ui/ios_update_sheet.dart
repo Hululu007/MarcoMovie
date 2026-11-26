@@ -570,6 +570,12 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
               icon: CupertinoIcons.globe,
               onPressed: () =>
                   _open(Uri.parse('https://marcotv.wlj9919.top/movie/'))),
+          AppleCapsuleButton(
+              key: const ValueKey('ios-update-sheet-donate-btn'),
+              label: '支持开发者',
+              icon: CupertinoIcons.heart_fill,
+              onPressed: () =>
+                  _open(Uri.parse('https://marcotv.wlj9919.top/movie/#donate'))),
           if (release != null && !busy && (!_validVersion(_version) || _newer || _saved)) ...[
             AppleCapsuleButton(
                 label: _saved ? '检查已下载 IPA' : '仅下载 IPA',

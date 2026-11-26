@@ -746,7 +746,9 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
       <StreamSubscription<(CmsSite, List<CmsVideo>)>>[];
 
   bool _canUseIosAiSearch(bool isPrivate) =>
-      isIosAiFeatureSupported && !isPrivate;
+      isIosAiFeatureSupported &&
+      !isPrivate &&
+      AiService.instance.isLabUnlocked;
 
   @override
   void initState() {

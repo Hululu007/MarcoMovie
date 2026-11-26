@@ -57,9 +57,91 @@ class CspBridge {
     final name = site.name.trim();
     return lowerKey == 'cc' ||
         lowerKey == 'push_agent' ||
+        lowerApi == 'csp_about' ||
         lowerApi.startsWith('csp_push') ||
         name.contains('请勿信') ||
         isBannerNoticeSite(site);
+  }
+
+  /// Identifies auxiliary Douban group/search notice entries (e.g.
+  /// `csp_DoubanSearch` / `群...┃豆瓣搜索`) so primary `csp_Douban` or real VOD
+  /// sites are preferred when selecting the default Home source.
+  static bool isDoubanSearchUtilitySite(CmsSite site) {
+    final lowerApi = site.api.trim().toLowerCase();
+    final lowerKey = site.key.trim().toLowerCase();
+    return lowerApi == 'csp_doubansearch' ||
+        lowerKey.endsWith('_douban_search') ||
+        (isDoubanSite(site) &&
+            site.name.contains('群') &&
+            site.name.contains('搜索'));
+  }
+
+  /// True when [site] is a directly browseable & playable VOD/script/netdisk
+  /// source rather than a Douban recommendation list or utility entry.
+  static bool isPrimaryPlayableVodSite(CmsSite site) {
+    return site.supported &&
+        !isBannerNoticeSite(site) &&
+        !isPickerHiddenUtilitySite(site) &&
+        !isDoubanSite(site) &&
+        !isMyDriveSite(site);
+  }
+
+  /// Inspects newly imported subscriptions on non-Android platforms (iOS /
+  /// macOS / Windows) and returns a clear user-facing explanation when a
+  /// subscription consists primarily of custom/encrypted Android `spider.jar`
+  /// (`csp_*`) plugins that cannot execute inside Apple/desktop sandboxes.
+  static ({String title, String message})?
+      buildSubscriptionRuntimeLimitationNotice(
+    Iterable<SubscriptionEntry> entries,
+  ) {
+    int totalSites = 0;
+    int jarBlockedCount = 0;
+    int playableVodCount = 0;
+    int doubanCount = 0;
+    int liveCount = 0;
+    for (final entry in entries) {
+      if (entry.rawContent.trim().isEmpty) continue;
+      try {
+        final cfg = CmsParser.parseConfig(
+          entry.rawContent,
+          origin: entry.url,
+          defaultGroup: entry.group,
+          isPrivate: entry.isPrivate,
+          subscriptionId: entry.id,
+          defaultName: entry.name,
+        );
+        liveCount += cfg.lives.length;
+        for (final s in cfg.sites) {
+          if (isPickerHiddenUtilitySite(s)) continue;
+          totalSites++;
+          final status = s.capabilityStatus;
+          if (status == CmsSite.statusNeedsJar ||
+              status == CmsSite.statusAdapterMissing) {
+            jarBlockedCount++;
+          } else if (isPrimaryPlayableVodSite(s)) {
+            playableVodCount++;
+          } else if (s.supported && isDoubanSite(s)) {
+            doubanCount++;
+          }
+        }
+      } catch (_) {}
+    }
+    if (jarBlockedCount <= 0) return null;
+    if (playableVodCount > 0 && !(jarBlockedCount >= 5 && playableVodCount * 8 < jarBlockedCount)) {
+      return null;
+    }
+    final livePart = liveCount > 0 ? '与 $liveCount 个直播源' : '';
+    final usablePart = (liveCount > 0 || doubanCount > 0 || playableVodCount > 0)
+        ? '已识别的${playableVodCount > 0 ? " $playableVodCount 个兼容站点、" : ""}'
+            '${doubanCount > 0 ? "豆瓣片单" : ""}'
+            '${doubanCount > 0 && liveCount > 0 ? "与" : ""}'
+            '${liveCount > 0 ? "直播频道" : ""}可正常浏览；'
+        : '';
+    return (
+      title: '订阅已解析（含安卓插件限制）',
+      message: '共识别 $totalSites 个站点$livePart，其中 $jarBlockedCount 个点播站依赖专属加密 Android JAR 插件（spider.jar），'
+          'iOS 系统沙盒无法直接运行安卓字节码。${usablePart}如需完整点播体验，建议添加标准 VOD / JS / XBPQ 订阅或连接网盘 / Emby。',
+    );
   }
 
   static String? guardAdapterFor(CmsSite site) => site.type != 3 ? null : const {

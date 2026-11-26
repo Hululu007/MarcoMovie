@@ -29,6 +29,87 @@ IOS_NATIVE_CHANNEL_REGISTRAR_SWIFT = r'''
 
 private enum MarcoNativeChannelRegistrar {
   private static weak var primaryFlutterController: FlutterViewController?
+  private static var launchSceneObserversInstalled: Bool = false
+
+  /// Ensures the root `UIWindow` and `FlutterViewController` surface are bound
+  /// to the active `UIWindowScene`, sized to full scene bounds, and visible.
+  /// Fixes iPadOS Home Screen cold launch where SpringBoard's icon-zoom
+  /// transaction leaves an un-promoted legacy storyboard window black until a
+  /// Dock activation triggers scene layout.
+  static func reconcileLaunchWindowAndSurface(reason: String) {
+    let delegateWin = UIApplication.shared.delegate?.window ?? nil
+    let candidateWin = primaryFlutterController?.viewIfLoaded?.window ?? delegateWin
+    if #available(iOS 13.0, *) {
+      let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+      let targetScene = scenes.first(where: { $0.activationState == .foregroundActive })
+        ?? scenes.first(where: { $0.activationState == .foregroundInactive })
+        ?? scenes.first
+      if let win = candidateWin {
+        if win.windowScene == nil, let scene = targetScene {
+          win.windowScene = scene
+        }
+        if let sceneBounds = win.windowScene?.coordinateSpace.bounds,
+           sceneBounds.width > 0,
+           sceneBounds.height > 0,
+           (win.bounds.width <= 0 || win.bounds.height <= 0 ||
+            (win.bounds.width == 600 && win.bounds.height == 600 && sceneBounds != win.bounds)) {
+          win.frame = sceneBounds
+        }
+        win.backgroundColor = .systemBackground
+        if win.isHidden {
+          win.isHidden = false
+        }
+        let hasSceneKeyWindow = win.windowScene?.windows.contains(where: { $0.isKeyWindow }) ?? win.isKeyWindow
+        if !hasSceneKeyWindow {
+          win.makeKeyAndVisible()
+        }
+      }
+    } else if let win = candidateWin {
+      if win.isHidden {
+        win.isHidden = false
+      }
+      if !win.isKeyWindow {
+        win.makeKeyAndVisible()
+      }
+    }
+    if let fvc = primaryFlutterController ?? (candidateWin?.rootViewController as? FlutterViewController) {
+      if let win = fvc.viewIfLoaded?.window, win.bounds.width > 0, win.bounds.height > 0, fvc.view.frame != win.bounds {
+        fvc.view.frame = win.bounds
+      }
+      fvc.viewIfLoaded?.setNeedsLayout()
+      fvc.viewIfLoaded?.layoutIfNeeded()
+    }
+    NSLog("[MarcoLaunch] stage=reconcile_window reason=%@ hasWindow=%@", reason, candidateWin != nil ? "true" : "false")
+  }
+
+  private static func installLaunchLifecycleObserversIfNeeded() {
+    guard !launchSceneObserversInstalled else { return }
+    launchSceneObserversInstalled = true
+    let center = NotificationCenter.default
+    _ = center.addObserver(
+      forName: UIApplication.didBecomeActiveNotification,
+      object: nil,
+      queue: .main
+    ) { _ in
+      reconcileLaunchWindowAndSurface(reason: "app_did_become_active")
+    }
+    if #available(iOS 13.0, *) {
+      _ = center.addObserver(
+        forName: UIScene.willConnectNotification,
+        object: nil,
+        queue: .main
+      ) { _ in
+        reconcileLaunchWindowAndSurface(reason: "scene_will_connect")
+      }
+      _ = center.addObserver(
+        forName: UIScene.didActivateNotification,
+        object: nil,
+        queue: .main
+      ) { _ in
+        reconcileLaunchWindowAndSurface(reason: "scene_did_activate")
+      }
+    }
+  }
 
   private static func collectFlutterControllers(
     from root: UIViewController?,
@@ -136,6 +217,11 @@ private enum MarcoNativeChannelRegistrar {
       primaryFlutterController = vc
     } else if let matched = controllerMatching(messenger: messenger) {
       primaryFlutterController = matched
+    }
+    installLaunchLifecycleObserversIfNeeded()
+    reconcileLaunchWindowAndSurface(reason: "channel_register")
+    DispatchQueue.main.async {
+      reconcileLaunchWindowAndSurface(reason: "channel_register_next_runloop")
     }
     NSLog("[MarcoLaunch] stage=native_channels_registered hasVC=%@", primaryFlutterController != nil ? "true" : "false")
     let wakelockChannel = FlutterMethodChannel(name: "marco_movie/wakelock", binaryMessenger: messenger)
@@ -1639,26 +1725,43 @@ def _write_windows_ico(ico_path: Path, source_png: Path) -> None:
 
 
 def _install_ios_branded_launch_screen(ios_runner: Path, source_png: Path) -> None:
-    """Populate LaunchImage.imageset with the Marco Movie brand mark and ensure
-    LaunchScreen.storyboard uses adaptive background + centered brand icon so
-    fresh iPad / iPhone installs never show a pure-white blank launch screen."""
+    """Populate LaunchImage.imageset with the transparent RGBA Marco Movie
+    film-ribbon mark (`LOGO_MARK`, NEVER the opaque square `IOS_ICON`!) at
+    76/152/228 px (76x76 pt) so iPhone & iPad cold launch renders the pure
+    floating `M` mark with zero dark-gray square box."""
     launch_set = ios_runner / "Assets.xcassets" / "LaunchImage.imageset"
     if launch_set.exists() and source_png.exists():
+        pil_image_mod = None
+        try:
+            from PIL import Image as _PilImage
+            pil_image_mod = _PilImage
+        except Exception:
+            pil_image_mod = None
         sips = shutil.which("sips")
         for fname, px in (
-            ("LaunchImage.png", 120),
-            ("LaunchImage@2x.png", 240),
-            ("LaunchImage@3x.png", 360),
+            ("LaunchImage.png", 76),
+            ("LaunchImage@2x.png", 152),
+            ("LaunchImage@3x.png", 228),
         ):
             dest = launch_set / fname
-            shutil.copy2(source_png, dest)
-            if sips:
-                subprocess.run(
-                    [sips, "-z", str(px), str(px), str(dest)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
+            if pil_image_mod is not None:
+                with pil_image_mod.open(source_png) as img:
+                    rgba = img.convert("RGBA")
+                    resample = getattr(
+                        getattr(pil_image_mod, "Resampling", pil_image_mod),
+                        "LANCZOS",
+                    )
+                    resized = rgba.resize((px, px), resample)
+                    resized.save(dest, format="PNG")
+            else:
+                shutil.copy2(source_png, dest)
+                if sips:
+                    subprocess.run(
+                        [sips, "-s", "format", "png", "-z", str(px), str(px), str(dest)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
         contents_json = launch_set / "Contents.json"
         contents_json.write_text(
             json.dumps(
@@ -1679,12 +1782,29 @@ def _install_ios_branded_launch_screen(ios_runner: Path, source_png: Path) -> No
     if ios_launch_storyboard.exists():
         lsb_text = ios_launch_storyboard.read_text(encoding="utf-8")
         patched_lsb = _patch_ios_storyboard_adaptive_bg(lsb_text)
-        # Ensure centered LaunchImage renders cleanly at fixed 88x88 pt with
-        # aspectFit instead of stretching or showing a 1x1 blank placeholder.
+        # Ensure centered LaunchImage renders cleanly at fixed 76x76 pt with
+        # scaleAspectFit matching Flutter's `IosLaunchStageView` (`kIosLaunchMarkSize`).
         if 'image="LaunchImage"' in patched_lsb and 'contentMode="center"' in patched_lsb:
             patched_lsb = patched_lsb.replace(
                 'contentMode="center"',
                 'contentMode="scaleAspectFit"',
+            )
+        patched_lsb = re.sub(
+            r'<image\s+name="LaunchImage"\s+width="[^"]+"\s+height="[^"]+"\s*/>',
+            '<image name="LaunchImage" width="76" height="76"/>',
+            patched_lsb,
+        )
+        if 'id="YRO-k0-Ey4"' in patched_lsb and 'id="marco-launch-w"' not in patched_lsb:
+            patched_lsb = re.sub(
+                r'(<imageView\b[^>]*\bid="YRO-k0-Ey4"[^>]*>)\s*(</imageView>)',
+                r'\1\n'
+                r'                                <constraints>\n'
+                r'                                    <constraint firstAttribute="width" constant="76" id="marco-launch-w"/>\n'
+                r'                                    <constraint firstAttribute="height" constant="76" id="marco-launch-h"/>\n'
+                r'                                </constraints>\n'
+                r'                            \2',
+                patched_lsb,
+                count=1,
             )
         if patched_lsb != lsb_text:
             ios_launch_storyboard.write_text(patched_lsb, encoding="utf-8")
@@ -1802,12 +1922,14 @@ final class MarcoFlutterViewController: FlutterViewController {
     if #available(iOS 13.0, *) {
       view.window?.backgroundColor = .systemBackground
     }
+    MarcoNativeChannelRegistrar.reconcileLaunchWindowAndSurface(reason: "vc_will_appear")
     refreshSystemChromeAppearance()
   }
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     NSLog("[MarcoLaunch] stage=native_vc_view_did_appear bounds=%@ safeArea=%@", NSCoder.string(for: view.bounds), NSCoder.string(for: view.safeAreaInsets))
+    MarcoNativeChannelRegistrar.reconcileLaunchWindowAndSurface(reason: "vc_did_appear")
     refreshSystemChromeAppearance()
     MarcoNativeChannelRegistrar.reconcileOrientationMonitoring(for: self)
   }
@@ -2089,6 +2211,7 @@ def _ensure_ios_appdelegate_imports(ad_text: str) -> tuple[str, bool]:
         "import AVFoundation",
         "import AVKit",
         "import MediaPlayer",
+        "import SafariServices",
         "import WebKit",
     )
     # Remove any standalone generator-managed framework imports so they are
@@ -4257,7 +4380,7 @@ def main() -> None:
                 ios_storyboard.write_text(sb_text, encoding="utf-8")
         _install_ios_branded_launch_screen(
             ios_runner,
-            IOS_ICON if IOS_ICON.exists() else (OPAQUE_ICON if OPAQUE_ICON.exists() else LOGO_MARK),
+            LOGO_MARK if LOGO_MARK.exists() else (IOS_ICON if IOS_ICON.exists() else OPAQUE_ICON),
         )
         ios_app_delegate = ios_runner / "AppDelegate.swift"
         if ios_app_delegate.exists():
