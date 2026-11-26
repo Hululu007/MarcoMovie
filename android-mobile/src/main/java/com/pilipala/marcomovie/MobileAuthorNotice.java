@@ -6,6 +6,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -22,30 +23,42 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * First-launch official channel &amp; anti-malware security notice plus Settings author contact /
- * community feedback sheet for Android Mobile / Tablet.
+ * Per-install &amp; per-update official channel, anti-scam security &amp; voluntary donation notice
+ * plus Settings author contact / community channel / donation sheet for Android Mobile / Tablet.
  *
- * <p>Persists its one-time seen version in device-local {@link #PREFS_FILE} outside {@link
- * Prefs#KEYS} so backup/sync schema invariants remain strictly unchanged.
+ * <p>Persists its seen app {@code versionCode} in device-local {@link #PREFS_FILE} outside {@link
+ * Prefs#KEYS} so backup/sync schema invariants remain strictly unchanged, while automatically
+ * reminding the user once after every version upgrade.
  */
 final class MobileAuthorNotice {
     static final String PREFS_FILE = "marco_first_launch_notice";
     static final String KEY_SEEN_VERSION = "first_launch_notice_version";
-    static final int CURRENT_VERSION = 1;
+    static final String KEY_SEEN_APP_VERSION_CODE = "notice_seen_app_version_code";
+    static final int CURRENT_VERSION = 2;
 
     static final String AUTHOR_SOCIAL_NAME = "PILIPALA来信";
     static final String[] SOCIAL_PLATFORMS = {"小红书", "B站", "抖音", "公众号", "视频号"};
     static final String AUTHOR_SOCIAL_FULL = "PILIPALA来信（小红书、B站、抖音、公众号、视频号）";
     static final String OFFICIAL_SITE_DISPLAY = "marcotv.wlj9919.top";
     static final String OFFICIAL_SITE_URL = "https://marcotv.wlj9919.top";
-    static final String OFFICIAL_GROUP_DISPLAY = "marcotv.wlj9919.top/movie/#group";
-    static final String OFFICIAL_GROUP_URL = "https://marcotv.wlj9919.top/movie/#group";
-    static final String OFFICIAL_DOWNLOAD_WARNING = "下载软件请认准官网地址，以防不明渠道软件添加病毒等不良内容。";
+    static final String OFFICIAL_DONATE_DISPLAY = "marcotv.wlj9919.top/movie/#donate";
+    static final String OFFICIAL_DONATE_URL = "https://marcotv.wlj9919.top/movie/#donate";
+    static final String OFFICIAL_CHANNEL_NAME = "Marco交流区";
+    static final String OFFICIAL_CHANNEL_URL = "https://pd.qq.com/s/N45e3aaawv?b=9";
+    static final String OFFICIAL_DOWNLOAD_WARNING =
+            "Marco Movie 是完全免费软件，官网（marcotv.wlj9919.top）为唯一官方更新与下载渠道。请勿轻信任何付费代购、收费群或不明渠道安装包，谨防受骗与恶意篡改病毒风险。";
+    static final String DONATE_TITLE = "捐赠支持 · 请作者喝杯咖啡";
+    static final String DONATE_SUBTITLE = "永久免费 · 自愿随心 · 不影响任何功能";
+    static final String DONATE_MESSAGE =
+            "Marco Movie 永久免费、无广告、无会员限制，由作者利用业余时间独立开发与多端维护。如果你觉得它让日常追剧看片顺手了一点，欢迎前往官网捐赠区请作者喝杯咖啡；不捐赠也完全享有全部功能，你的每一次使用和反馈都同样珍贵。";
+    static final String DONATE_NOTICE_COMPACT =
+            "软件永久免费、无广告无付费墙，由作者业余时间独立维护。如果这次更新让你觉得顺手，欢迎去官网捐赠区请作者喝杯咖啡，支持项目持续迭代；不捐赠也享有全部功能。";
 
     private static final int TINT_BLUE = 0xFF0A84FF;
     private static final int TINT_TEAL = 0xFF06B6D4;
     private static final int TINT_GREEN = 0xFF34C759;
     private static final int TINT_AMBER = 0xFFF59E0B;
+    private static final int TINT_ROSE = 0xFFEC4899;
 
     private static Dialog activeDialog;
 
@@ -78,15 +91,31 @@ final class MobileAuthorNotice {
     }
 
     /**
-     * Pure-JVM state controller governing first-launch presentation, Privacy Space suppression,
-     * one-time persistence, and single-shot post-dismiss continuation.
+     * Pure-JVM state controller governing first-launch and per-update presentation, Privacy Space
+     * suppression, per-version persistence, and single-shot post-dismiss continuation.
      */
     static final class Controller {
         private final Store store;
+        private final int targetVersionCode;
         private boolean shownThisSession;
 
         Controller(Store store) {
+            this(store, CURRENT_VERSION);
+        }
+
+        Controller(Store store, int currentAppVersionCode) {
             this.store = store;
+            this.targetVersionCode = Math.max(CURRENT_VERSION, currentAppVersionCode);
+        }
+
+        int targetVersionCode() {
+            return targetVersionCode;
+        }
+
+        boolean isUpgradeNotice() {
+            if (store == null) return false;
+            return store.getInt(KEY_SEEN_APP_VERSION_CODE, 0) > 0
+                    || store.getInt(KEY_SEEN_VERSION, 0) > 0;
         }
 
         boolean shouldShow(boolean privateMode, boolean hasBlockingOverlay) {
@@ -96,13 +125,18 @@ final class MobileAuthorNotice {
             if (store == null) {
                 return false;
             }
-            return store.getInt(KEY_SEEN_VERSION, 0) < CURRENT_VERSION;
+            return store.getInt(KEY_SEEN_APP_VERSION_CODE, 0) < targetVersionCode;
         }
 
         void markShown() {
             shownThisSession = true;
-            if (store != null && store.getInt(KEY_SEEN_VERSION, 0) < CURRENT_VERSION) {
-                store.putInt(KEY_SEEN_VERSION, CURRENT_VERSION);
+            if (store != null) {
+                if (store.getInt(KEY_SEEN_VERSION, 0) < CURRENT_VERSION) {
+                    store.putInt(KEY_SEEN_VERSION, CURRENT_VERSION);
+                }
+                if (store.getInt(KEY_SEEN_APP_VERSION_CODE, 0) < targetVersionCode) {
+                    store.putInt(KEY_SEEN_APP_VERSION_CODE, targetVersionCode);
+                }
             }
         }
     }
@@ -117,16 +151,53 @@ final class MobileAuthorNotice {
         };
     }
 
-    /** Pure-JVM URL whitelist verifying only official Marco HTTPS URLs are opened. */
+    /**
+     * Pure-JVM URL whitelist verifying only official Marco HTTPS URLs and the exact Tencent
+     * community channel URL are opened.
+     */
     static boolean isTrustedOfficialUrl(String url) {
         if (url == null) return false;
         String trimmed = url.trim();
-        return trimmed.equals(OFFICIAL_SITE_URL) || trimmed.startsWith(OFFICIAL_SITE_URL + "/");
+        return trimmed.equals(OFFICIAL_SITE_URL)
+                || trimmed.startsWith(OFFICIAL_SITE_URL + "/")
+                || trimmed.equals(OFFICIAL_CHANNEL_URL);
+    }
+
+    @SuppressWarnings("deprecation")
+    static int installedVersionCode(Context context) {
+        if (context == null) return CURRENT_VERSION;
+        try {
+            PackageInfo info =
+                    context.getApplicationContext()
+                            .getPackageManager()
+                            .getPackageInfo(context.getPackageName(), 0);
+            if (info != null && info.versionCode > 0) {
+                return info.versionCode;
+            }
+        } catch (Throwable ignored) {
+        }
+        return CURRENT_VERSION;
+    }
+
+    static String installedVersionName(Context context) {
+        if (context == null) return "";
+        try {
+            PackageInfo info =
+                    context.getApplicationContext()
+                            .getPackageManager()
+                            .getPackageInfo(context.getPackageName(), 0);
+            if (info != null && info.versionName != null) {
+                return info.versionName.trim();
+            }
+        } catch (Throwable ignored) {
+        }
+        return "";
     }
 
     static boolean shouldShowFirstLaunch(Context context) {
         if (context == null) return false;
-        return new Controller(new SharedPrefsStore(context)).shouldShow(false, false);
+        return new Controller(new SharedPrefsStore(context), installedVersionCode(context))
+                .shouldShow(false, false);
     }
 
     static boolean isShowing() {
@@ -149,9 +220,9 @@ final class MobileAuthorNotice {
     }
 
     /**
-     * Shows the one-time first-launch official channel &amp; safety popup if unseen on this
-     * installation. Runs {@code onAfterDismiss} exactly once after the popup closes (or
-     * immediately if skipped / unable to display).
+     * Shows the official channel, anti-scam &amp; voluntary donation popup once on fresh install and
+     * once after every version upgrade. Runs {@code onAfterDismiss} exactly once after the popup
+     * closes (or immediately if skipped / unable to display).
      */
     static boolean maybeShowFirstLaunch(final MainActivity a, final Runnable onAfterDismiss) {
         final Runnable continueOnce = singleShot(onAfterDismiss);
@@ -162,10 +233,26 @@ final class MobileAuthorNotice {
                 (a.appDialog != null && a.appDialog.isShowing())
                         || isShowing()
                         || (a.current != null && a.current.player);
-        final Controller controller = new Controller(new SharedPrefsStore(a));
+        final Controller controller =
+                new Controller(new SharedPrefsStore(a), installedVersionCode(a));
         if (!controller.shouldShow(a.privateMode, blocked)) {
             continueOnce.run();
             return false;
+        }
+        final boolean isUpgrade = controller.isUpgradeNotice();
+        final String verName = installedVersionName(a);
+        final String sheetTitle = isUpgrade ? "版本更新与官方渠道提示" : "官方渠道与安全提示";
+        final String sheetSubtitle;
+        if (isUpgrade) {
+            sheetSubtitle =
+                    verName.isEmpty()
+                            ? "已更新至新版本 · 官网为唯一更新渠道，免费软件谨防受骗"
+                            : ("已更新至 v" + verName + " · 官网为唯一更新渠道，谨防受骗");
+        } else {
+            sheetSubtitle =
+                    verName.isEmpty()
+                            ? "感谢安装 Marco Movie · 免费软件，请认准官方唯一渠道"
+                            : ("欢迎使用 Marco Movie v" + verName + " · 免费软件，请认准官网");
         }
 
         final MobileTheme.Palette p = MobileTheme.of(a);
@@ -174,16 +261,20 @@ final class MobileAuthorNotice {
         LinearLayout content = a.vertical();
         content.setPadding(0, a.dp(2), 0, a.dp(4));
 
-        // 1. Author social handles card
+        // 1. Official site + anti-scam warning card (prominent at top after update)
+        content.addView(
+                buildOfficialSecurityCard(a, p, true), new LinearLayout.LayoutParams(-1, -2));
+        a.gap(content, 12);
+
+        // 2. Author social handles card
         content.addView(buildAuthorSocialCard(a, p), new LinearLayout.LayoutParams(-1, -2));
         a.gap(content, 12);
 
-        // 2. Official site + anti-malware warning card
-        content.addView(
-                buildOfficialSecurityCard(a, p, true), new LinearLayout.LayoutParams(-1, -2));
+        // 3. Natural, low-pressure voluntary donation card
+        content.addView(buildDonationCard(a, p, true), new LinearLayout.LayoutParams(-1, -2));
         a.gap(content, 16);
 
-        // 3. Primary high-contrast acknowledge button
+        // 4. Primary high-contrast acknowledge button
         TextView confirmBtn = a.text("我知道了，开始使用", 15.5f, Color.WHITE);
         confirmBtn.setTypeface(null, Typeface.BOLD);
         confirmBtn.setGravity(Gravity.CENTER);
@@ -200,7 +291,7 @@ final class MobileAuthorNotice {
         content.addView(confirmBtn, new LinearLayout.LayoutParams(-1, -2));
         a.gap(content, 10);
 
-        // 4. Secondary quick links row (official website & community group)
+        // 5. Secondary quick links row (official website & official Tencent channel)
         LinearLayout quickRow = a.row();
         quickRow.setGravity(Gravity.CENTER);
         TextView siteLink = buildSecondaryPill(a, p, "访问 Marco 官网");
@@ -209,14 +300,14 @@ final class MobileAuthorNotice {
         slp.rightMargin = a.dp(8);
         quickRow.addView(siteLink, slp);
 
-        TextView groupLink = buildSecondaryPill(a, p, "前往官网交流群");
-        groupLink.setOnClickListener(v -> openOfficialUrl(a, OFFICIAL_GROUP_URL, "官网交流群"));
-        quickRow.addView(groupLink, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView channelLink = buildSecondaryPill(a, p, "加入官方交流频道");
+        channelLink.setOnClickListener(v -> openOfficialUrl(a, OFFICIAL_CHANNEL_URL, "官网交流频道"));
+        quickRow.addView(channelLink, new LinearLayout.LayoutParams(0, -2, 1f));
         content.addView(quickRow, new LinearLayout.LayoutParams(-1, -2));
 
         MobileBottomSheet.SheetHandle handle =
                 MobileBottomSheet.showHandle(
-                        a, "官方渠道与安全提示", "感谢安装 Marco Movie · 请认准官方发布信息", null, null, content, true);
+                        a, sheetTitle, sheetSubtitle, null, null, content, true);
         handleRef[0] = handle;
         final Dialog dlg = handle.dialog();
         if (dlg == null) {
@@ -239,8 +330,8 @@ final class MobileAuthorNotice {
     }
 
     /**
-     * Opens the Settings "联系与反馈作者" sheet displaying all author social media handles, official
-     * website, community group link, and anti-malware security reminder.
+     * Opens the Settings "联系与反馈作者" sheet displaying author social handles, official website,
+     * Tencent exchange channel, anti-scam reminder, and voluntary donation support card.
      */
     static void showContactSheet(final MainActivity a) {
         if (isActivityGone(a)) return;
@@ -249,24 +340,24 @@ final class MobileAuthorNotice {
         LinearLayout content = a.vertical();
         content.setPadding(0, a.dp(2), 0, a.dp(4));
 
-        // Author social handles card with 1-tap copy
+        // 1. Author social handles card with 1-tap copy
         content.addView(buildAuthorSocialCard(a, p), new LinearLayout.LayoutParams(-1, -2));
         a.gap(content, 12);
 
-        // Official website & community group actions
+        // 2. Official website & Tencent exchange channel actions
         LinearLayout officialGroup =
                 MobileSectionGroup.create(
                         a,
-                        "官网与交流群",
+                        "官网与交流频道",
                         OFFICIAL_DOWNLOAD_WARNING,
                         Arrays.<View>asList(
                                 MobileSectionGroup.navRow(
                                         a,
                                         MobileIcons.IC_LINK,
                                         TINT_TEAL,
-                                        "官网交流群",
-                                        "前往加群",
-                                        () -> openOfficialUrl(a, OFFICIAL_GROUP_URL, "官网交流群")),
+                                        "官网交流频道",
+                                        OFFICIAL_CHANNEL_NAME,
+                                        () -> openOfficialUrl(a, OFFICIAL_CHANNEL_URL, "官网交流频道")),
                                 MobileSectionGroup.navRow(
                                         a,
                                         MobileIcons.IC_EXTERNAL,
@@ -278,14 +369,86 @@ final class MobileAuthorNotice {
                                         a,
                                         MobileIcons.IC_CLIPBOARD,
                                         TINT_BLUE,
-                                        "复制官网交流群链接",
+                                        "复制官网交流频道链接",
                                         "复制",
                                         p.accent,
-                                        () -> copyToClipboard(a, "官网交流群链接", OFFICIAL_GROUP_URL))));
+                                        () ->
+                                                copyToClipboard(
+                                                        a, "官网交流频道链接", OFFICIAL_CHANNEL_URL))));
         content.addView(officialGroup, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(content, 12);
+
+        // 3. Natural voluntary donation support section
+        content.addView(buildDonationCard(a, p, false), new LinearLayout.LayoutParams(-1, -2));
 
         MobileBottomSheet.showHandle(
-                a, "联系与反馈作者", "各平台统一账号名 · 欢迎在社媒或交流群反馈建议", null, null, content, true);
+                a, "联系与反馈作者", "各平台统一账号名 · 欢迎在社媒或交流频道反馈建议", null, null, content, true);
+    }
+
+    private static LinearLayout buildDonationCard(
+            final MainActivity a, final MobileTheme.Palette p, boolean compact) {
+        LinearLayout card = a.vertical();
+        card.setPadding(a.dp(14), a.dp(14), a.dp(14), a.dp(14));
+        GradientDrawable cardBg = new GradientDrawable();
+        cardBg.setColor(p.isDark ? 0x1CEC4899 : 0x10EC4899);
+        cardBg.setCornerRadius(a.dp(16));
+        cardBg.setStroke(MobileTheme.hairlinePx(a), p.isDark ? 0x44EC4899 : 0x33EC4899);
+        card.setBackground(cardBg);
+
+        LinearLayout headRow = a.row();
+        headRow.setGravity(Gravity.CENTER_VERTICAL);
+        FrameLayout badge = MobileIcons.badge(a, MobileIcons.IC_HEART_FILLED, TINT_ROSE, 28, 15);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(a.dp(28), a.dp(28));
+        blp.rightMargin = a.dp(10);
+        headRow.addView(badge, blp);
+
+        LinearLayout titleCol = a.vertical();
+        TextView title = a.text(DONATE_TITLE, 14.5f, p.textPrimary);
+        title.setTypeface(null, Typeface.BOLD);
+        titleCol.addView(title);
+        TextView sub = a.text(DONATE_SUBTITLE, 12f, p.textSecondary);
+        titleCol.addView(sub);
+        headRow.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
+        card.addView(headRow, new LinearLayout.LayoutParams(-1, -2));
+
+        a.gap(card, 10);
+
+        TextView desc =
+                a.text(compact ? DONATE_NOTICE_COMPACT : DONATE_MESSAGE, 13f, p.textPrimary);
+        desc.setLineSpacing(a.dp(3.5f), 1f);
+        card.addView(desc, new LinearLayout.LayoutParams(-1, -2));
+
+        a.gap(card, 12);
+
+        LinearLayout actionRow = a.row();
+        actionRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView donateBtn = a.text("前往官网捐赠区", 13.5f, Color.WHITE);
+        donateBtn.setTypeface(null, Typeface.BOLD);
+        donateBtn.setGravity(Gravity.CENTER);
+        donateBtn.setMinimumHeight(a.dp(40));
+        donateBtn.setPadding(a.dp(16), a.dp(9), a.dp(16), a.dp(9));
+        donateBtn.setBackground(a.bg(TINT_ROSE, 12));
+        MobileMotion.bindPress(donateBtn, 0.96f);
+        donateBtn.setOnClickListener(v -> openOfficialUrl(a, OFFICIAL_DONATE_URL, "官网捐赠区"));
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(0, -2, 1f);
+        actionRow.addView(donateBtn, dlp);
+
+        if (!compact) {
+            TextView copyBtn = a.text("复制链接", 13f, p.textSecondary);
+            copyBtn.setTypeface(null, Typeface.BOLD);
+            copyBtn.setGravity(Gravity.CENTER);
+            copyBtn.setMinimumHeight(a.dp(40));
+            copyBtn.setPadding(a.dp(14), a.dp(9), a.dp(14), a.dp(9));
+            copyBtn.setBackground(MobileTheme.cardBg(a, 12));
+            MobileMotion.bindPress(copyBtn, 0.95f);
+            copyBtn.setOnClickListener(v -> copyToClipboard(a, "官网捐赠区链接", OFFICIAL_DONATE_URL));
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
+            clp.leftMargin = a.dp(8);
+            actionRow.addView(copyBtn, clp);
+        }
+
+        card.addView(actionRow, new LinearLayout.LayoutParams(-1, -2));
+        return card;
     }
 
     private static LinearLayout buildAuthorSocialCard(
@@ -368,7 +531,7 @@ final class MobileAuthorNotice {
         siteRow.addView(badge, blp);
 
         LinearLayout siteCol = a.vertical();
-        TextView siteLabel = a.text("Marco 官网", 12.5f, p.textSecondary);
+        TextView siteLabel = a.text("Marco 官网（唯一官方更新渠道）", 12.5f, p.textSecondary);
         siteCol.addView(siteLabel);
         TextView siteUrl = a.text(OFFICIAL_SITE_DISPLAY, 15.5f, p.accent);
         siteUrl.setTypeface(null, Typeface.BOLD);

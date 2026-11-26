@@ -235,16 +235,22 @@ final class MobileSettingsIndex {
                 "作者 反馈 联系 社媒 PILIPALA来信 pilipala 小红书 B站 哔哩哔哩 抖音 公众号 视频号");
         add(
                 SUB_STORAGE,
-                "ms-official-group",
+                "ms-official-channel",
                 "存储、备份与关于",
-                "官网交流群",
-                "交流群 QQ群 社区 反馈 讨论 官网 链接 group marcotv");
+                "官网交流频道（Marco交流区）",
+                "交流频道 腾讯频道 Marco交流区 交流群 社区 反馈 讨论 官网 频道 pd.qq");
         add(
                 SUB_STORAGE,
                 "ms-official-site",
                 "存储、备份与关于",
                 "Marco 官网（marcotv.wlj9919.top）",
-                "官网 官方 下载 防伪 网址 marcotv.wlj9919.top 安全 病毒");
+                "官网 官方 下载 防伪 唯一 更新 免费 受骗 网址 marcotv.wlj9919.top 安全 病毒");
+        add(
+                SUB_STORAGE,
+                "ms-official-donate",
+                "存储、备份与关于",
+                "捐赠支持（官网捐赠区）",
+                "捐赠 赞赏 打赏 支持 咖啡 免费 开源 作者 官网 donate sponsor");
         add(SUB_STORAGE, "ms-updates", "存储、备份与关于", "检查软件更新（手机端通道）", "更新 升级 版本 android-mobile");
         add(SUB_STORAGE, "ms-crash-reports", "存储、备份与关于", "查看历史异常退出报告", "闪退 崩溃 crash 报告");
         add(SUB_STORAGE, "ms-logs", "存储、备份与关于", "查看运行诊断日志", "日志 报错 调试 诊断");

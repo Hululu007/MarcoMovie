@@ -2149,14 +2149,14 @@ final class MobileSettingsScreen {
                                         a,
                                         MobileIcons.IC_LINK,
                                         TINT_TEAL,
-                                        "官网交流群",
-                                        "前往官网加群",
+                                        "官网交流频道",
+                                        MobileAuthorNotice.OFFICIAL_CHANNEL_NAME,
                                         () ->
                                                 MobileAuthorNotice.openOfficialUrl(
                                                         a,
-                                                        MobileAuthorNotice.OFFICIAL_GROUP_URL,
-                                                        "官网交流群")),
-                                "ms-official-group"),
+                                                        MobileAuthorNotice.OFFICIAL_CHANNEL_URL,
+                                                        "官网交流频道")),
+                                "ms-official-channel"),
                         tagged(
                                 MobileSectionGroup.navRow(
                                         a,
@@ -2169,7 +2169,20 @@ final class MobileSettingsScreen {
                                                         a,
                                                         MobileAuthorNotice.OFFICIAL_SITE_URL,
                                                         "Marco 官网")),
-                                "ms-official-site")));
+                                "ms-official-site"),
+                        tagged(
+                                MobileSectionGroup.navRow(
+                                        a,
+                                        MobileIcons.IC_HEART_FILLED,
+                                        TINT_ROSE,
+                                        "捐赠支持",
+                                        "请作者喝杯咖啡",
+                                        () ->
+                                                MobileAuthorNotice.openOfficialUrl(
+                                                        a,
+                                                        MobileAuthorNotice.OFFICIAL_DONATE_URL,
+                                                        "官网捐赠区")),
+                                "ms-official-donate")));
 
         // Section ④: 诊断与关于
         int crashCount = CrashReportStore.loadReports(a.getFilesDir()).size();
