@@ -7,6 +7,8 @@ import '../core/models.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
 import 'ios_liquid_glass.dart';
+import 'motion/ios27_springs.dart';
+import 'motion/motion_tokens.dart';
 import 'poster_expand_route.dart';
 import 'poster_image.dart';
 
@@ -54,6 +56,7 @@ class CuratedDiscoverySection extends StatefulWidget {
   final List<String>? visibleSectionIds;
   final Color? headerInkOverride;
   final Color? secondaryInkOverride;
+  final IosCuratedDockHost? dockHost;
 
   static const List<String> defaultDiscoverySectionIds = <String>[
     StorageService.homeSectionWidescreenRadar,
@@ -73,6 +76,7 @@ class CuratedDiscoverySection extends StatefulWidget {
     this.visibleSectionIds,
     this.headerInkOverride,
     this.secondaryInkOverride,
+    this.dockHost,
   });
 
   @override
@@ -160,10 +164,20 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
   }) {
     HapticFeedback.mediumImpact();
     final items = customItems ?? _itemsFor(spec.id);
-    Navigator.of(context).push(
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final dockHost = widget.dockHost;
+    dockHost?.onCuratedEnter();
+    final routeFuture = Navigator.of(context).push<void>(
       PageRouteBuilder<void>(
-        transitionDuration: const Duration(milliseconds: 260),
-        reverseTransitionDuration: const Duration(milliseconds: 220),
+        settings: const RouteSettings(
+          name: IosRootTabNavigatorObserver.curatedRouteName,
+        ),
+        transitionDuration: reduceMotion
+            ? Ios27ConcentricGeometry.reducedMotionDuration
+            : MotionTokens.durationTransitionEnter,
+        reverseTransitionDuration: reduceMotion
+            ? Ios27ConcentricGeometry.reducedMotionDuration
+            : MotionTokens.durationStandard,
         pageBuilder: (_, __, ___) => _CuratedGravityWallPage(
           title: customTitle ?? spec.title,
           subtitle: spec.subtitle,
@@ -173,18 +187,31 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
           initialEntranceStyle: entranceStyle,
           onOpenVideo: widget.onOpenVideo,
           onOpenVideoFromCard: widget.onOpenVideoFromCard,
+          dockHost: dockHost,
         ),
-        transitionsBuilder: (_, animation, __, child) {
+        transitionsBuilder: (routeCtx, animation, __, child) {
+          final isReduced = MediaQuery.disableAnimationsOf(routeCtx);
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: isReduced ? Curves.linear : Ios27Spring.smooth.curve,
+            reverseCurve: isReduced ? Curves.linear : MotionTokens.curveAccelerate,
+          );
+          if (isReduced) {
+            return FadeTransition(opacity: curved, child: child);
+          }
           return FadeTransition(
-            opacity: CurvedAnimation(
-              parent: animation,
-              curve: Curves.easeOutCubic,
+            opacity: curved,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.965, end: 1.0).animate(curved),
+              child: child,
             ),
-            child: child,
           );
         },
       ),
     );
+    routeFuture.whenComplete(() {
+      dockHost?.onCuratedExit();
+    });
   }
 
   Widget? _buildDiscoverySlot(String sectionId, ApplePalette palette) {
@@ -2154,6 +2181,7 @@ class _CuratedGravityWallPage extends StatefulWidget {
   final CuratedWallEntranceStyle initialEntranceStyle;
   final ValueChanged<CmsVideo> onOpenVideo;
   final CuratedCardOpenCallback? onOpenVideoFromCard;
+  final IosCuratedDockHost? dockHost;
 
   const _CuratedGravityWallPage({
     required this.title,
@@ -2164,6 +2192,7 @@ class _CuratedGravityWallPage extends StatefulWidget {
     this.initialEntranceStyle = CuratedWallEntranceStyle.blackHoleVortex,
     required this.onOpenVideo,
     this.onOpenVideoFromCard,
+    this.dockHost,
   });
 
   @override
@@ -2180,6 +2209,7 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
   bool _playedHaptic2 = false;
   bool _playedHaptic3 = false;
   bool _initialized = false;
+  bool _userInteracted = false;
 
   static const int _maxAnimatedCards = 12;
   static const List<double> _stackAngles = [
@@ -2214,8 +2244,19 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
     _activeStyle = widget.initialEntranceStyle;
     _ctrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1320),
+      duration: const Duration(milliseconds: 1450),
     )..addListener(_handleAnimationTick);
+  }
+
+  void _finishEntranceForInteraction() {
+    if (_userInteracted && _ctrl.value >= 0.999) return;
+    _userInteracted = true;
+    if (_ctrl.value < 1.0) {
+      _ctrl.value = 1.0;
+    }
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   @override
@@ -2332,19 +2373,29 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
                 animation: _ctrl,
                 builder: (context, gridChild) {
                   final v = _ctrl.value;
-                  final gridOpacity =
-                      v >= 0.86 ? ((v - 0.86) / 0.14).clamp(0.0, 1.0) : 0.0;
-                  final overlayVisible = v < 0.995;
+                  final gridOpacity = _userInteracted
+                      ? 1.0
+                      : (v >= 0.86
+                          ? ((v - 0.86) / 0.14).clamp(0.0, 1.0)
+                          : 0.0);
+                  final overlayVisible = !_userInteracted && v < 0.995;
 
                   return Stack(
                     key: Key('curated-wall-style-${_activeStyle.name}'),
                     fit: StackFit.expand,
                     children: [
-                      IgnorePointer(
-                        ignoring: v < 0.92,
-                        child: Opacity(
-                          opacity: gridOpacity,
-                          child: gridChild,
+                      Listener(
+                        behavior: HitTestBehavior.translucent,
+                        onPointerDown: (_) => _finishEntranceForInteraction(),
+                        child: NotificationListener<ScrollStartNotification>(
+                          onNotification: (_) {
+                            _finishEntranceForInteraction();
+                            return false;
+                          },
+                          child: Opacity(
+                            opacity: gridOpacity,
+                            child: gridChild,
+                          ),
                         ),
                       ),
                       if (overlayVisible)
@@ -2567,6 +2618,49 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
               ),
             ),
           ),
+          // 4. iOS Flutter-fallback collapsed Logo overlay when native root
+          //    chrome is inactive (iOS 14–25 / non-iOS26). Shares the exact
+          //    same dock state machine, scroll morph progress, and menu actions
+          //    while leaving the former full-bar area 100% click-through.
+          if (widget.dockHost != null)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: AnimatedBuilder(
+                animation: Listenable.merge([
+                  widget.dockHost!.useNativeRootChrome,
+                  widget.dockHost!.visibleOnCurated,
+                  widget.dockHost!.selectedTabIndex,
+                ]),
+                builder: (ctx, _) {
+                  final host = widget.dockHost!;
+                  final isCurrent = ModalRoute.of(ctx)?.isCurrent ?? true;
+                  final showFallbackDock =
+                      !host.useNativeRootChrome.value &&
+                      host.visibleOnCurated.value &&
+                      isCurrent;
+                  if (!showFallbackDock) {
+                    return const SizedBox.shrink();
+                  }
+                  return Center(
+                    heightFactor: 1,
+                    child: AppleLiquidGlassDock(
+                      key: const ValueKey('curated-fallback-dock'),
+                      selectedIndex: host.selectedTabIndex.value,
+                      onSelect: host.onSelectTab,
+                      isLandscape: false,
+                      items: host.items,
+                      onSearch: host.onSearch,
+                      onScrollToTop: host.onScrollToTop,
+                      collapsed: true,
+                      forceFlutterFallback: true,
+                      scrollProgress: host.progress,
+                    ),
+                  );
+                },
+              ),
+            ),
         ],
       ),
     );

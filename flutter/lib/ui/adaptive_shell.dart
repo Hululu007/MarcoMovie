@@ -22,6 +22,7 @@ import '../core/config_center_bridge.dart';
 import '../core/app_update.dart';
 import '../core/csp_bridge.dart';
 import '../core/curated_discovery.dart';
+import '../core/launch_diagnostics.dart';
 import '../core/device_quality_profiler.dart';
 import '../core/desktop_webview_js_bridge.dart';
 import '../core/download_service.dart';
@@ -43,16 +44,20 @@ import 'apple_theme.dart';
 import 'cloud_sync_panel.dart';
 import 'curated_discovery_section.dart';
 import 'detail_screen.dart';
+import 'ios_filter_sheet.dart';
 import 'ios_glass_popover.dart' show activeIosGlassPopoverCount;
 import 'ios_liquid_glass.dart';
+import 'ios_press_slide_menu.dart';
 import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
 import 'live_station_badge.dart';
+import 'media_folder_browser_page.dart';
 import 'motion/aurora_background.dart';
 import 'motion/ios27_springs.dart';
 import 'motion/player_enter_transition.dart';
 import 'netdisk_sheet.dart';
+import 'official_channel_notice.dart';
 import 'onboarding/onboarding_prefs.dart';
 import 'onboarding/onboarding_screen.dart';
 import 'player_screen.dart';
@@ -83,6 +88,8 @@ class AdaptiveShell extends StatefulWidget {
   final Future<void> Function(Duration timeout)? onFlushSyncForTest;
   @visibleForTesting
   final Duration? windowCloseTotalBudgetForTest;
+  @visibleForTesting
+  final Future<bool> Function(Uri uri)? onOpenExternalUrlForTest;
 
   const AdaptiveShell({
     super.key,
@@ -95,6 +102,7 @@ class AdaptiveShell extends StatefulWidget {
     this.onFlushHistoryForTest,
     this.onFlushSyncForTest,
     this.windowCloseTotalBudgetForTest,
+    this.onOpenExternalUrlForTest,
   });
 
   static const Duration defaultWindowCloseBudget =
@@ -193,7 +201,7 @@ class AdaptiveShell extends StatefulWidget {
   State<AdaptiveShell> createState() => _AdaptiveShellState();
 }
 class _AdaptiveShellState extends State<AdaptiveShell>
-    with WindowListener, WidgetsBindingObserver {
+    with WindowListener, WidgetsBindingObserver, TickerProviderStateMixin {
   bool _windowListenerAttached = false;
   bool _isClosingWindow = false;
   Future<void>? _closingHistoryFlush;
@@ -281,39 +289,270 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   // Favorites / History segmented index
   int _librarySegment = 0;
   bool _dockCollapsed = false;
+  bool _dockStableCollapsed = false;
+  bool _homeUserDragging = false;
   final ValueNotifier<double> _dockScrollProgress = ValueNotifier<double>(0.0);
+  final ValueNotifier<bool> _iosHomeStatusBarDark = ValueNotifier<bool>(false);
+  final ValueNotifier<double> _iosHomeTopScrimOpacity =
+      ValueNotifier<double>(0.0);
+  final ValueNotifier<double> _iosHeroOverscroll = ValueNotifier<double>(0.0);
+  final ValueNotifier<double> _rexBackdropScrollOffset =
+      ValueNotifier<double>(0.0);
+  final ValueNotifier<double> _rexCardInkScrollOffset =
+      ValueNotifier<double>(0.0);
+  double _lastIosHeroHeight = 460.0;
+  OverlayEntry? _undoHistoryOverlayEntry;
+  Timer? _undoHistoryTimer;
+  bool get _isIosNativeFlow =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      !OhosRuntime.isOhos;
+  final ValueNotifier<bool> _useRootNativeTabChromeNotifier =
+      ValueNotifier<bool>(false);
+  final ValueNotifier<bool> _curatedDockVisibleNotifier =
+      ValueNotifier<bool>(false);
+  final ValueNotifier<int> _selectedTabIndexNotifier = ValueNotifier<int>(0);
+  late final AnimationController _dockMorphCtrl;
+  double _dockMorphFrom = 0.0;
+  double _dockMorphTo = 0.0;
+  int _dockMorphAnimToken = 0;
+  int _dockEpoch = 0;
+  IosDockOwner _dockOwner = IosDockOwner.home;
+  int _curatedRouteDepth = 0;
   bool _useRootNativeTabChrome = false;
   int _pushedRouteDepth = 0;
   bool _settingsSecondaryRouteActive = false;
   double _lastReportedDockProgress = 0.0;
   bool _lastReportedDockVisible = true;
   bool _sceneActive = true;
-  static const List<IosNativeDockItem> _iosNativeDockItems = <IosNativeDockItem>[
-    IosNativeDockItem(
-      label: '主页',
-      symbol: 'house',
-      selectedSymbol: 'house.fill',
-      kind: 'home',
+  static const List<(IconData, IconData, String)> _iosDockFallbackItems =
+      <(IconData, IconData, String)>[
+    (CupertinoIcons.house, CupertinoIcons.house_fill, '主页'),
+    (CupertinoIcons.tv, CupertinoIcons.tv_fill, '直播'),
+    (
+      CupertinoIcons.rectangle_stack,
+      CupertinoIcons.rectangle_stack_fill,
+      '片库',
     ),
-    IosNativeDockItem(
-      label: '直播',
-      symbol: 'play.tv',
-      selectedSymbol: 'play.tv.fill',
-      kind: 'live',
-    ),
-    IosNativeDockItem(
-      label: '片库',
-      symbol: 'rectangle.stack',
-      selectedSymbol: 'rectangle.stack.fill',
-      kind: 'library',
-    ),
-    IosNativeDockItem(
-      label: '设置',
-      symbol: 'gearshape',
-      selectedSymbol: 'gearshape.fill',
-      kind: 'settings',
-    ),
+    (CupertinoIcons.gear_alt, CupertinoIcons.gear_alt_fill, '设置'),
   ];
+  List<IosNativeDockItem> _buildIosNativeDockItems() => <IosNativeDockItem>[
+        IosNativeDockItem(
+          label: '主页',
+          symbol: 'house',
+          selectedSymbol: 'house.fill',
+          kind: 'home',
+          menuItems: _buildDockTabNativeMenuItems(0),
+        ),
+        IosNativeDockItem(
+          label: '直播',
+          symbol: 'play.tv',
+          selectedSymbol: 'play.tv.fill',
+          kind: 'live',
+          menuItems: _buildDockTabNativeMenuItems(1),
+        ),
+        IosNativeDockItem(
+          label: '片库',
+          symbol: 'rectangle.stack',
+          selectedSymbol: 'rectangle.stack.fill',
+          kind: 'library',
+          menuItems: _buildDockTabNativeMenuItems(2),
+        ),
+        IosNativeDockItem(
+          label: '设置',
+          symbol: 'gearshape',
+          selectedSymbol: 'gearshape.fill',
+          kind: 'settings',
+          menuItems: _buildDockTabNativeMenuItems(3),
+        ),
+      ];
+  List<IosNativeMenuItem> _buildDockTabNativeMenuItems(int tabIndex) {
+    return switch (tabIndex) {
+      0 => const <IosNativeMenuItem>[
+          IosNativeMenuItem(
+            id: 'top',
+            title: '回到顶部',
+            symbol: 'arrow.up.to.line',
+          ),
+        ],
+      1 => const <IosNativeMenuItem>[
+          IosNativeMenuItem(
+            id: 'manage_live',
+            title: '管理直播源',
+            symbol: 'antenna.radiowaves.left.and.right',
+          ),
+        ],
+      2 => <IosNativeMenuItem>[
+          const IosNativeMenuItem(
+            id: 'favorites',
+            title: '收藏',
+            symbol: 'heart.fill',
+          ),
+          if (!_privateSessionUnlocked)
+            const IosNativeMenuItem(
+              id: 'history',
+              title: '观看历史',
+              symbol: 'clock.fill',
+            ),
+        ],
+      3 => const <IosNativeMenuItem>[
+          IosNativeMenuItem(
+            id: 'add_library',
+            title: '添加资源库',
+            symbol: 'plus.circle',
+          ),
+          IosNativeMenuItem(
+            id: 'netdisk_accounts',
+            title: '网盘账号',
+            symbol: 'cloud.fill',
+          ),
+        ],
+      _ => const <IosNativeMenuItem>[],
+    };
+  }
+
+  List<IosSlideMenuAction> _buildDockTabSlideMenuActions(int tabIndex) =>
+      iosSlideActionsFromNativeMenu(_buildDockTabNativeMenuItems(tabIndex));
+
+  void _handleDockTabMenuAction(int tabIndex, String actionId) {
+    if (!mounted) return;
+    if (_curatedRouteDepth > 0 ||
+        IosRootTabNavigatorObserver.topRouteIsCurated.value) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+    }
+    switch (actionId) {
+      case 'top':
+        _scrollHomeToTop();
+        return;
+      case 'manage_live':
+        setState(() {
+          _tabIndex = 1;
+          _selectedTabIndexNotifier.value = 1;
+        });
+        _reconcileDockOwnership(animated: true);
+        _showLiveSourceManagerSheet();
+        return;
+      case 'favorites':
+        setState(() {
+          _tabIndex = 2;
+          _selectedTabIndexNotifier.value = 2;
+          _librarySegment = 0;
+        });
+        _reconcileDockOwnership(animated: true);
+        return;
+      case 'history':
+        if (_privateSessionUnlocked) {
+          _showAppleNotice('隐私空间已开启', '隐私空间不记录也不展示普通观看历史。');
+          return;
+        }
+        setState(() {
+          _tabIndex = 2;
+          _selectedTabIndexNotifier.value = 2;
+          _librarySegment = 1;
+        });
+        _reconcileDockOwnership(animated: true);
+        return;
+      case 'add_library':
+        unawaited(_showImportConfigDialog(iosBackLabel: '设置'));
+        return;
+      case 'netdisk_accounts':
+        _openConfigCenterPage(initialFocus: 'netdisk', iosBackLabel: '设置');
+        return;
+    }
+  }
+
+  void _openConfigCenterPage({
+    String initialFocus = 'overview',
+    String iosBackLabel = '主页',
+  }) {
+    final allSites = _config?.publicSupportedSites ?? const <CmsSite>[];
+    unawaited(
+      _trackSecondaryRoute<void>(
+        () => showNetdiskAccountSheet(
+          context,
+          widget.storage,
+          iosBackLabel: iosBackLabel,
+          initialFocus: initialFocus,
+          sites: allSites,
+          activeGroup: _activeSite?.group ?? '',
+          onOpenCatPawSettings:
+              allSites.any((s) => s.isCatPaw) ? _showCatPawSettings : null,
+          onOpenAddLibrary: () => _showImportConfigDialog(iosBackLabel: '配置中心'),
+          onOpenSubscriptionManager: () =>
+              _showSubscriptionManagerSheet(iosBackLabel: '配置中心'),
+          onOpenLibrarySubscription: (sub) {
+            final match = _visibleSupportedSites.where(
+              (s) =>
+                  s.subscriptionId == sub.id ||
+                  s.api.trim() == sub.url.trim() ||
+                  s.name.trim() == sub.name.trim(),
+            );
+            if (match.isNotEmpty) {
+              _selectSiteDirect(match.first);
+            }
+          },
+          onRemoveLibrarySubscription: (sub) async {
+            await widget.storage.removeSubscription(sub.id);
+            if (mounted) _reloadSavedConfig();
+          },
+          onChanged: () {
+            if (mounted) setState(() {});
+          },
+        ),
+      ),
+    );
+  }
+
+  List<IosNativeMenuItem> _buildHomeConfigCenterMenuItems() {
+    return const <IosNativeMenuItem>[
+      IosNativeMenuItem(
+        id: 'add_library',
+        title: '添加资源库',
+        symbol: 'plus.circle',
+        section: 0,
+      ),
+      IosNativeMenuItem(
+        id: 'manage_subscriptions',
+        title: '管理订阅',
+        symbol: 'square.stack.3d.up',
+        section: 0,
+      ),
+      IosNativeMenuItem(
+        id: 'netdisk_accounts',
+        title: '网盘账号',
+        symbol: 'cloud.fill',
+        section: 0,
+      ),
+    ];
+  }
+
+  void _onHomeConfigCenterMenuSelected(String id) {
+    if (!mounted) return;
+    switch (id) {
+      case 'add_library':
+        unawaited(_showImportConfigDialog(iosBackLabel: '主页'));
+        return;
+      case 'manage_subscriptions':
+        unawaited(_showSubscriptionManagerSheet(iosBackLabel: '主页'));
+        return;
+      case 'netdisk_accounts':
+        _openConfigCenterPage(initialFocus: 'netdisk', iosBackLabel: '主页');
+        return;
+    }
+  }
+
+  IosCuratedDockHost get _curatedDockHost => IosCuratedDockHost(
+        progress: _dockScrollProgress,
+        useNativeRootChrome: _useRootNativeTabChromeNotifier,
+        visibleOnCurated: _curatedDockVisibleNotifier,
+        selectedTabIndex: _selectedTabIndexNotifier,
+        items: _iosDockFallbackItems,
+        onSelectTab: _handleRootNativeTabSelected,
+        onSearch: _showGlobalSearchSheet,
+        onScrollToTop: _scrollHomeToTop,
+        onCuratedEnter: _onCuratedRouteEntered,
+        onCuratedExit: _onCuratedRouteExited,
+      );
   // Scroll controllers (inline shell views only; sheets own their own)
   final ScrollController _homeScrollController = ScrollController();
   final ScrollController _windowsDiscoverScrollController = ScrollController();
@@ -328,6 +567,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   final Set<String> _expandedSettings = <String>{};
   List<WatchHistoryEntry> _cachedWatchHistory = const [];
   bool _onboardingRouteOpen = false;
+  bool _officialNoticeOpen = false;
+  bool _copyingAuthorSocialName = false;
+  int _authorSocialCopyToken = 0;
+  BuildContext? _authorSocialOriginContext;
+  ModalRoute<dynamic>? _authorSocialOriginRoute;
+  int? _authorSocialOriginTabIndex;
+  bool _openingOfficialCommunityLink = false;
+  int _officialCommunityActionToken = 0;
+  BuildContext? _officialCommunityOriginContext;
+  ModalRoute<dynamic>? _officialCommunityOriginRoute;
+  int? _officialCommunityOriginTabIndex;
   bool _startupOnboardingChecked = false;
   bool get _isMacOS => !kIsWeb && Platform.isMacOS;
   CmsFilter get _currentFilter => CmsFilter(
@@ -356,6 +606,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _dockMorphCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 240),
+    )..addListener(_onDockMorphTick);
     _homeScrollController.addListener(_onHomeScroll);
     PosterLoader.cacheRevision.addListener(_onPosterCacheUpdated);
     _cachedWatchHistory = widget.storage.getWatchHistory();
@@ -424,6 +678,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     IosRootTabNavigatorObserver.secondaryRouteDepth.addListener(
       _onRootOverlayVisibilityChanged,
     );
+    IosRootTabNavigatorObserver.topRouteIsCurated.addListener(
+      _onRootOverlayVisibilityChanged,
+    );
     activeAppleModalSheetCount.addListener(_onRootOverlayVisibilityChanged);
     activeIosGlassPopoverCount.addListener(_onRootOverlayVisibilityChanged);
     if (!kIsWeb &&
@@ -436,9 +693,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
       unawaited(_initRootNativeTabChrome());
     }
-    if (!OhosRuntime.isOhos) {
-      unawaited(_maybeShowFirstLaunchOnboarding());
-    }
+    unawaited(_runFirstLaunchPrompts());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        MarcoLaunchDiagnostics.record(
+          'shell_interactive',
+          'subs=${widget.storage.getSubscriptions().length}',
+        );
+      }
+    });
     if (!Platform.environment.containsKey('FLUTTER_TEST')) {
       unawaited(_runStartupWebdavSync());
     }
@@ -456,26 +719,35 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (_useRootNativeTabChrome) {
         setState(() => _useRootNativeTabChrome = false);
       }
+      _useRootNativeTabChromeNotifier.value = false;
       return;
     }
-    final safeIdx = _tabIndex.clamp(0, _iosNativeDockItems.length - 1);
+    final items = _buildIosNativeDockItems();
+    final safeIdx = _tabIndex.clamp(0, items.length - 1);
+    final owner = _computeDockOwner();
+    _dockOwner = owner;
+    final epoch = ++_dockEpoch;
     final configured = await IosLiquidGlassBridge.configureRootTabChrome(
-      items: _iosNativeDockItems,
+      items: items,
       selectedIndex: safeIdx,
       showSearch: true,
-      visible: _computeRootTabShouldBeVisible(),
-      minimized: _dockCollapsed && safeIdx == 0,
+      visible: owner != IosDockOwner.hidden,
+      minimized: owner == IosDockOwner.curated || (_dockCollapsed && safeIdx == 0),
       adaptiveTopOnWide: true,
+      epoch: epoch,
       onSelect: _handleRootNativeTabSelected,
       onSearch: _showGlobalSearchSheet,
       onScrollToTop: _scrollHomeToTop,
+      onTabMenuAction: _handleDockTabMenuAction,
     );
     if (!mounted) return;
+    _useRootNativeTabChromeNotifier.value = configured;
     if (configured != _useRootNativeTabChrome) {
       setState(() => _useRootNativeTabChrome = configured);
     }
     if (configured) {
-      _lastReportedDockVisible = _computeRootTabShouldBeVisible();
+      _lastReportedDockVisible = owner != IosDockOwner.hidden;
+      _reconcileDockOwnership(animated: false);
     }
   }
 
@@ -484,6 +756,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (IosLiquidGlassBridge.isAvailable && !_useRootNativeTabChrome) {
       unawaited(_initRootNativeTabChrome());
     } else if (!IosLiquidGlassBridge.isAvailable && _useRootNativeTabChrome) {
+      _useRootNativeTabChromeNotifier.value = false;
       setState(() => _useRootNativeTabChrome = false);
     }
   }
@@ -498,51 +771,186 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
   void _onRootOverlayVisibilityChanged() {
     if (!mounted) return;
-    _syncRootTabVisibility(animated: true);
+    _reconcileDockOwnership(animated: true);
+  }
+
+  void _onCuratedRouteEntered() {
+    if (!mounted) return;
+    _curatedRouteDepth++;
+    _homeUserDragging = false;
+    _reconcileDockOwnership(animated: true);
+  }
+
+  void _onCuratedRouteExited() {
+    if (!mounted) return;
+    _curatedRouteDepth = math.max(0, _curatedRouteDepth - 1);
+    _reconcileDockOwnership(animated: true);
+  }
+
+  void _onDockMorphTick() {
+    if (!mounted) return;
+    final eased = Curves.easeOutCubic.transform(_dockMorphCtrl.value);
+    final nextP = (_dockMorphFrom + (_dockMorphTo - _dockMorphFrom) * eased)
+        .clamp(0.0, 1.0);
+    _dockScrollProgress.value = nextP;
+    _dockCollapsed = nextP >= 0.5;
+  }
+
+  void _animateDockProgressTo(
+    double target, {
+    required bool animated,
+    required int epoch,
+  }) {
+    final clampedTarget = target.clamp(0.0, 1.0);
+    final token = ++_dockMorphAnimToken;
+    _dockMorphCtrl.stop();
+    final current = _dockScrollProgress.value.clamp(0.0, 1.0);
+    final reduceMotion = mounted && MediaQuery.disableAnimationsOf(context);
+    _dockCollapsed = clampedTarget >= 0.5;
+    if (!animated || reduceMotion || (current - clampedTarget).abs() <= 0.004) {
+      _dockScrollProgress.value = clampedTarget;
+    } else {
+      _dockMorphFrom = current;
+      _dockMorphTo = clampedTarget;
+      _dockMorphCtrl.value = 0.0;
+      unawaited(
+        _dockMorphCtrl.forward().whenComplete(() {
+          if (!mounted || token != _dockMorphAnimToken) return;
+          _dockScrollProgress.value = clampedTarget;
+          _dockCollapsed = clampedTarget >= 0.5;
+        }),
+      );
+    }
+    if (_useRootNativeTabChrome) {
+      _lastReportedDockProgress = clampedTarget;
+      unawaited(
+        IosLiquidGlassBridge.setRootTabMinimized(
+          clampedTarget >= 0.5,
+          animated: animated && !reduceMotion,
+          epoch: epoch,
+        ),
+      );
+    }
+  }
+
+  double _stableHomeDockTargetForOffset(double offset, {bool useHysteresis = false}) {
+    if (offset <= 12.0) return 0.0;
+    if (offset >= 152.0) return 1.0;
+    final progress = ((offset - 12.0) / 140.0).clamp(0.0, 1.0);
+    final threshold = useHysteresis
+        ? (_dockStableCollapsed ? 0.44 : 0.56)
+        : 0.5;
+    return progress >= threshold ? 1.0 : 0.0;
+  }
+
+  void _settleHomeDockToStableEndpoint({bool animated = true}) {
+    if (!mounted || _dockOwner != IosDockOwner.home || _tabIndex != 0) return;
+    final offset =
+        _homeScrollController.hasClients ? _homeScrollController.offset : 0.0;
+    final target = _stableHomeDockTargetForOffset(offset, useHysteresis: true);
+    _dockStableCollapsed = target >= 0.5;
+    final epoch = ++_dockEpoch;
+    _animateDockProgressTo(target, animated: animated, epoch: epoch);
   }
 
   void _handleRootNativeTabSelected(int index) {
     if (!mounted) return;
-    final clamped = index.clamp(0, _iosNativeDockItems.length - 1);
-    final nextProgress = clamped == 0 && _homeScrollController.hasClients
-        ? ((_homeScrollController.offset - 12.0) / 140.0).clamp(0.0, 1.0)
+    final items = _buildIosNativeDockItems();
+    final clamped = index.clamp(0, items.length - 1);
+    final wasInCurated = _curatedRouteDepth > 0 ||
+        IosRootTabNavigatorObserver.topRouteIsCurated.value ||
+        IosRootTabNavigatorObserver.curatedRouteDepth.value > 0;
+    if (wasInCurated) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      _curatedRouteDepth = 0;
+    }
+    final homeOffset =
+        _homeScrollController.hasClients ? _homeScrollController.offset : 0.0;
+    final targetProgress = clamped == 0
+        ? _stableHomeDockTargetForOffset(homeOffset)
         : 0.0;
+    _dockStableCollapsed = clamped == 0 && targetProgress >= 0.5;
     setState(() {
       _tabIndex = clamped;
-      _dockCollapsed = nextProgress >= 0.5;
+      _dockCollapsed = targetProgress >= 0.5;
     });
-    _dockScrollProgress.value = nextProgress;
+    _selectedTabIndexNotifier.value = clamped;
+    final epoch = ++_dockEpoch;
     if (_useRootNativeTabChrome) {
-      unawaited(IosLiquidGlassBridge.setRootTabSelectedIndex(clamped));
-      _lastReportedDockProgress = nextProgress;
-      if (clamped != 0) {
-        unawaited(
-          IosLiquidGlassBridge.setRootTabMinimized(false, animated: true),
-        );
-      } else {
-        unawaited(
-          IosLiquidGlassBridge.setRootTabMinimized(
-            nextProgress >= 0.5,
-            animated: false,
-            progress: nextProgress,
-          ),
-        );
-      }
+      unawaited(
+        IosLiquidGlassBridge.setRootTabSelectedIndex(clamped, epoch: epoch),
+      );
+    }
+    _dockOwner = _computeDockOwner();
+    _curatedDockVisibleNotifier.value = _dockOwner == IosDockOwner.curated;
+    _syncRootTabVisibility(animated: true, forceEpoch: epoch);
+    if (_dockOwner == IosDockOwner.home || _dockOwner == IosDockOwner.rootTab) {
+      _animateDockProgressTo(targetProgress, animated: true, epoch: ++_dockEpoch);
     }
   }
 
-  bool _computeRootTabShouldBeVisible() {
-    return !_privacyPortalAnimating &&
-        _pushedRouteDepth == 0 &&
-        !_settingsSecondaryRouteActive &&
-        IosLiquidGlassBridge.rootTabSuppressionCount.value == 0 &&
-        IosRootTabNavigatorObserver.secondaryRouteDepth.value == 0 &&
-        activeAppleModalSheetCount.value == 0 &&
-        activeIosGlassPopoverCount.value == 0 &&
-        !IosLiquidGlassBridge.activeSheetNotifier.value;
+  IosDockOwner _computeDockOwner() {
+    if (_privacyPortalAnimating ||
+        _settingsSecondaryRouteActive ||
+        IosLiquidGlassBridge.rootTabSuppressionCount.value > 0 ||
+        activeAppleModalSheetCount.value > 0 ||
+        activeIosGlassPopoverCount.value > 0 ||
+        IosLiquidGlassBridge.activeSheetNotifier.value) {
+      return IosDockOwner.hidden;
+    }
+    final obsDepth = IosRootTabNavigatorObserver.secondaryRouteDepth.value;
+    final obsTopCurated = IosRootTabNavigatorObserver.topRouteIsCurated.value;
+    final obsCuratedDepth = IosRootTabNavigatorObserver.curatedRouteDepth.value;
+    final nonCuratedPushed =
+        _pushedRouteDepth > 0 || (obsDepth > 0 && !obsTopCurated);
+    if (nonCuratedPushed) {
+      return IosDockOwner.hidden;
+    }
+    if (_curatedRouteDepth > 0 || obsTopCurated || obsCuratedDepth > 0) {
+      return IosDockOwner.curated;
+    }
+    return _tabIndex == 0 ? IosDockOwner.home : IosDockOwner.rootTab;
   }
 
-  void _syncRootTabVisibility({bool animated = true}) {
+  bool _computeRootTabShouldBeVisible() =>
+      _computeDockOwner() != IosDockOwner.hidden;
+
+  void _reconcileDockOwnership({bool animated = true}) {
+    final prevOwner = _dockOwner;
+    final nextOwner = _computeDockOwner();
+    _dockOwner = nextOwner;
+    _curatedDockVisibleNotifier.value = nextOwner == IosDockOwner.curated;
+    final epoch = ++_dockEpoch;
+    _syncRootTabVisibility(animated: animated, forceEpoch: epoch);
+
+    if (nextOwner == IosDockOwner.hidden) {
+      _homeUserDragging = false;
+      _dockMorphAnimToken++;
+      _dockMorphCtrl.stop();
+      return;
+    }
+    if (nextOwner == IosDockOwner.curated) {
+      _homeUserDragging = false;
+      _animateDockProgressTo(1.0, animated: animated, epoch: ++_dockEpoch);
+      return;
+    }
+    if (nextOwner == IosDockOwner.rootTab) {
+      _homeUserDragging = false;
+      _dockStableCollapsed = false;
+      _animateDockProgressTo(0.0, animated: animated, epoch: ++_dockEpoch);
+      return;
+    }
+    // nextOwner == IosDockOwner.home
+    if (prevOwner != IosDockOwner.home) {
+      final offset =
+          _homeScrollController.hasClients ? _homeScrollController.offset : 0.0;
+      final target = _stableHomeDockTargetForOffset(offset);
+      _dockStableCollapsed = target >= 0.5;
+      _animateDockProgressTo(target, animated: animated, epoch: ++_dockEpoch);
+    }
+  }
+
+  void _syncRootTabVisibility({bool animated = true, int? forceEpoch}) {
     if (!_useRootNativeTabChrome) return;
     final shouldBeVisible = _computeRootTabShouldBeVisible();
     if (shouldBeVisible != _lastReportedDockVisible) {
@@ -551,6 +959,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         IosLiquidGlassBridge.setRootTabVisible(
           shouldBeVisible,
           animated: animated,
+          epoch: forceEpoch ?? ++_dockEpoch,
         ),
       );
     }
@@ -558,36 +967,260 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
   Future<T?> _trackSecondaryRoute<T>(Future<T?> Function() pushFn) async {
     _pushedRouteDepth++;
-    _syncRootTabVisibility(animated: true);
+    _reconcileDockOwnership(animated: true);
     try {
       return await pushFn();
     } finally {
       _pushedRouteDepth = math.max(0, _pushedRouteDepth - 1);
-      _syncRootTabVisibility(animated: true);
+      if (mounted) {
+        _reconcileDockOwnership(animated: true);
+      }
     }
   }
 
-  Future<void> _maybeShowFirstLaunchOnboarding() async {
-    if (_startupOnboardingChecked || OhosRuntime.isOhos || !mounted) return;
+  Future<void> _runFirstLaunchPrompts() async {
+    if (_startupOnboardingChecked || !mounted) return;
     _startupOnboardingChecked = true;
-    // Only launch first-run guide on fresh installs without existing configs
-    // (never hijack corruption recovery alerts).
+    // Only launch first-run prompts on fresh installs without existing configs
+    // (never hijack corruption recovery alerts or upgraded installations).
     if (_config != null ||
         widget.storage.getSubscriptions().isNotEmpty ||
-        widget.storage.isSubscriptionsCorrupted) {
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
       return;
     }
-    final prefs = await OnboardingPrefs.load();
-    if (!mounted || !prefs.shouldShowOnboarding()) return;
+    final OnboardingPrefs prefs;
+    try {
+      prefs = await OnboardingPrefs.load().timeout(const Duration(seconds: 3));
+    } catch (e) {
+      debugPrint('OnboardingPrefs load skipped on cold launch: $e');
+      return;
+    }
+    if (!mounted) return;
     if (_config != null ||
         widget.storage.getSubscriptions().isNotEmpty ||
-        widget.storage.isSubscriptionsCorrupted) {
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    final isFreshInstall = prefs.doneVersion < OnboardingPrefs.currentVersion;
+    if (isFreshInstall &&
+        prefs.shouldShowOfficialChannelNotice() &&
+        !_officialNoticeOpen) {
+      final frameReady = Completer<void>();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!frameReady.isCompleted) frameReady.complete();
+      });
+      await frameReady.future;
+      if (!mounted ||
+          _officialNoticeOpen ||
+          _config != null ||
+          widget.storage.getSubscriptions().isNotEmpty ||
+          widget.storage.isSubscriptionsCorrupted ||
+          widget.storage.isHistoryCorrupted) {
+        return;
+      }
+      _officialNoticeOpen = true;
+      var acknowledged = false;
+      var persisted = false;
+      try {
+        acknowledged = await showOfficialChannelNoticeDialog(
+          context,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          onConfirm: () async {
+            persisted = await prefs.markOfficialChannelNoticeSeen();
+            return persisted;
+          },
+        );
+      } finally {
+        _officialNoticeOpen = false;
+      }
+      if (acknowledged && !persisted) {
+        debugPrint(
+          'OfficialChannelNotice: acknowledged for current session; preference write did not persist.',
+        );
+      }
+      if (!mounted || !acknowledged) return;
+    }
+    if (OhosRuntime.isOhos || !prefs.shouldShowOnboarding()) return;
+    if (_config != null ||
+        widget.storage.getSubscriptions().isNotEmpty ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _onboardingRouteOpen) return;
       unawaited(_openOnboardingRoute(preloadedPrefs: prefs));
     });
+  }
+
+  bool _isSettingsOriginActive(
+    BuildContext originContext,
+    ModalRoute<dynamic>? originRoute,
+    int originTabIndex,
+  ) {
+    if (!mounted || !originContext.mounted) return false;
+    if (_tabIndex != originTabIndex) return false;
+    if (originRoute != null && !originRoute.isCurrent) return false;
+    return true;
+  }
+
+  Future<void> _copyAuthorSocialName({BuildContext? originContext}) async {
+    final targetContext = originContext ?? context;
+    if (_copyingAuthorSocialName &&
+        _authorSocialOriginContext != null &&
+        _authorSocialOriginTabIndex != null &&
+        _isSettingsOriginActive(
+          _authorSocialOriginContext!,
+          _authorSocialOriginRoute,
+          _authorSocialOriginTabIndex!,
+        )) {
+      return;
+    }
+    final token = ++_authorSocialCopyToken;
+    final originRoute = ModalRoute.of(targetContext);
+    final originTabIndex = _tabIndex;
+    _copyingAuthorSocialName = true;
+    _authorSocialOriginContext = targetContext;
+    _authorSocialOriginRoute = originRoute;
+    _authorSocialOriginTabIndex = originTabIndex;
+    beginExplicitOfficialClipboardCopy();
+    try {
+      final copied = await copyOfficialChannelText(
+        OfficialChannelInfo.authorSocialName,
+      );
+      if (token != _authorSocialCopyToken ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      if (copied) {
+        await showAppleNativeAlert(
+          targetContext,
+          title: '已复制作者社媒账号名',
+          message:
+              '账号名：${OfficialChannelInfo.authorSocialName}\n支持平台：${OfficialChannelInfo.socialPlatformsDisplay}。',
+          actions: const [
+            AppleNativeAlertAction(id: 'ok', title: '好', isDefault: true),
+          ],
+        );
+        return;
+      }
+      await showOfficialChannelManualCopyDialog(
+        targetContext,
+        title: '复制失败，请手动选取',
+        message:
+            '当前无法写入系统剪贴板，请手动选取以下作者社媒账号名（${OfficialChannelInfo.socialPlatformsDisplay}）：',
+        selectableValue: OfficialChannelInfo.authorSocialName,
+      );
+    } finally {
+      if (token == _authorSocialCopyToken) {
+        _copyingAuthorSocialName = false;
+        _authorSocialOriginContext = null;
+        _authorSocialOriginRoute = null;
+        _authorSocialOriginTabIndex = null;
+      }
+    }
+  }
+
+  Future<void> _openOfficialCommunityLink({BuildContext? originContext}) async {
+    final targetContext = originContext ?? context;
+    if (_openingOfficialCommunityLink &&
+        _officialCommunityOriginContext != null &&
+        _officialCommunityOriginTabIndex != null &&
+        _isSettingsOriginActive(
+          _officialCommunityOriginContext!,
+          _officialCommunityOriginRoute,
+          _officialCommunityOriginTabIndex!,
+        )) {
+      return;
+    }
+    final token = ++_officialCommunityActionToken;
+    final originRoute = ModalRoute.of(targetContext);
+    final originTabIndex = _tabIndex;
+    final startClipboardEpoch = officialExplicitClipboardEpoch;
+    _openingOfficialCommunityLink = true;
+    _officialCommunityOriginContext = targetContext;
+    _officialCommunityOriginRoute = originRoute;
+    _officialCommunityOriginTabIndex = originTabIndex;
+    try {
+      final opened = await launchExternalOfficialUrl(
+        OfficialChannelInfo.officialCommunityUri,
+        urlOpener: widget.onOpenExternalUrlForTest,
+      );
+      if (opened) {
+        return;
+      }
+      // Validate origin, action token, and clipboard epoch BEFORE any fallback
+      // clipboard write so an abandoned or superseded link request never
+      // overwrites a newer explicit copy (staying on page or after re-entry).
+      if (token != _officialCommunityActionToken ||
+          officialExplicitClipboardEpoch != startClipboardEpoch ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      final copied = await copyOfficialChannelText(
+        OfficialChannelInfo.officialCommunityUrl,
+      );
+      if (token != _officialCommunityActionToken ||
+          officialExplicitClipboardEpoch != startClipboardEpoch ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      if (copied) {
+        await showAppleNativeAlert(
+          targetContext,
+          title: '已复制官网交流群链接',
+          message: '请在浏览器中打开：${OfficialChannelInfo.officialCommunityUrl}',
+          actions: const [
+            AppleNativeAlertAction(id: 'ok', title: '好', isDefault: true),
+          ],
+        );
+        return;
+      }
+      await showOfficialChannelManualCopyDialog(
+        targetContext,
+        title: '无法自动打开或复制链接',
+        message: '请手动选取以下官网交流群地址，并在浏览器中打开：',
+        selectableValue: OfficialChannelInfo.officialCommunityUrl,
+      );
+    } finally {
+      if (token == _officialCommunityActionToken) {
+        _openingOfficialCommunityLink = false;
+        _officialCommunityOriginContext = null;
+        _officialCommunityOriginRoute = null;
+        _officialCommunityOriginTabIndex = null;
+      }
+    }
+  }
+
+  Future<void> _openOfficialNoticeDialogFromSettings() async {
+    if (!mounted || _officialNoticeOpen) return;
+    _officialNoticeOpen = true;
+    try {
+      await showOfficialChannelNoticeDialog(
+        context,
+        urlOpener: widget.onOpenExternalUrlForTest,
+        barrierDismissible: true,
+      );
+    } finally {
+      _officialNoticeOpen = false;
+    }
   }
 
   Future<void> _openOnboardingRoute({
@@ -981,6 +1614,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     IosRootTabNavigatorObserver.secondaryRouteDepth.removeListener(
       _onRootOverlayVisibilityChanged,
     );
+    IosRootTabNavigatorObserver.topRouteIsCurated.removeListener(
+      _onRootOverlayVisibilityChanged,
+    );
     activeAppleModalSheetCount.removeListener(_onRootOverlayVisibilityChanged);
     activeIosGlassPopoverCount.removeListener(_onRootOverlayVisibilityChanged);
     if (_useRootNativeTabChrome) {
@@ -1032,7 +1668,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _searchStateRevision.dispose();
     _liveSearchController.dispose();
     _homeScrollController.removeListener(_onHomeScroll);
+    _dockMorphCtrl.removeListener(_onDockMorphTick);
+    _dockMorphCtrl.dispose();
     _dockScrollProgress.dispose();
+    _iosHomeStatusBarDark.dispose();
+    _iosHomeTopScrimOpacity.dispose();
+    _iosHeroOverscroll.dispose();
+    _rexBackdropScrollOffset.dispose();
+    _rexCardInkScrollOffset.dispose();
+    _dismissUndoHistoryBanner();
+    _useRootNativeTabChromeNotifier.dispose();
+    _curatedDockVisibleNotifier.dispose();
+    _selectedTabIndexNotifier.dispose();
     PosterLoader.cacheRevision.removeListener(_onPosterCacheUpdated);
     _homeScrollController.dispose();
     _windowsDiscoverScrollController.dispose();
@@ -1263,12 +1910,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
   static const double _kRexAuraTopExtend = 280.0;
   static const double _kRexAuraSolidPastHero = 42.0;
-
-  double _currentHomeScrollOffset() {
-    return _homeScrollController.positions.length == 1
-        ? _homeScrollController.offset
-        : 0.0;
-  }
 
   /// Smooth scroll-driven transition factor (`0.0` at top = full-screen Hero
   /// atmosphere rendered all the way to the bottom edge like Rex; `1.0` once
@@ -1750,7 +2391,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       return;
     }
     if (_primaryTab == tabKey) {
-      setState(() => _filterExpanded = !_filterExpanded);
+      if (defaultTargetPlatform == TargetPlatform.iOS && !OhosRuntime.isOhos) {
+        unawaited(_openNativeFilterSheet());
+      } else {
+        setState(() => _filterExpanded = !_filterExpanded);
+      }
       return;
     }
     final resolved = CmsParser.resolvePrimaryTabCategory(_categories, tabKey);
@@ -2304,6 +2949,26 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _showAppleNotice(site.name, site.unsupportedReason);
       return;
     }
+    if (video.tag == 'media-folder' || video.id.startsWith('mmfolder://')) {
+      unawaited(
+        _trackSecondaryRoute<void>(
+          () => Navigator.of(context).push<void>(
+            buildApplePageRoute<void>(
+              builder: (_) => MediaFolderBrowserPage(
+                site: site,
+                client: widget.client,
+                storage: widget.storage,
+                folderId: video.id,
+                folderTitle: video.title,
+                backLabel: site.name,
+                onOpenVideo: (s, v) => _openVideoDetail(s, v),
+              ),
+            ),
+          ),
+        ),
+      );
+      return;
+    }
     if (video.id.startsWith('netdisk_qr:')) {
       final driveKey = video.id.substring('netdisk_qr:'.length).trim();
       unawaited(
@@ -2402,7 +3067,178 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       ),
     );
   }
+
+  Future<bool> _confirmIosDestructiveAction(
+    BuildContext dialogContext, {
+    required String title,
+    required String message,
+    required String confirmLabel,
+  }) async {
+    if (!dialogContext.mounted) return false;
+    final choice = await showAppleNativeAlert(
+      dialogContext,
+      title: title,
+      message: message,
+      actions: [
+        const AppleNativeAlertAction(
+          id: 'cancel',
+          title: '取消',
+          isCancel: true,
+        ),
+        AppleNativeAlertAction(
+          id: 'confirm',
+          title: confirmLabel,
+          isDestructive: true,
+        ),
+      ],
+    );
+    return choice == 'confirm';
+  }
+
+  void _dismissUndoHistoryBanner() {
+    _undoHistoryTimer?.cancel();
+    _undoHistoryTimer = null;
+    try {
+      _undoHistoryOverlayEntry?.remove();
+    } catch (_) {}
+    _undoHistoryOverlayEntry = null;
+  }
+
+  void _showIosUndoHistoryBanner(
+    BuildContext hostContext,
+    WatchHistoryEntry entry, {
+    VoidCallback? onRestored,
+  }) {
+    if (!_isIosNativeFlow || !mounted) return;
+    _dismissUndoHistoryBanner();
+    final overlay = Overlay.maybeOf(hostContext, rootOverlay: true) ??
+        Overlay.maybeOf(context, rootOverlay: true);
+    if (overlay == null) return;
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final isDark = ApplePalette.isDarkOf(context);
+    late OverlayEntry bannerEntry;
+    bannerEntry = OverlayEntry(
+      builder: (overlayCtx) => Positioned(
+        left: 16,
+        right: 16,
+        bottom: bottomInset + 92,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                key: const ValueKey('ios-undo-history-banner'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? const Color(0xF022242C)
+                      : const Color(0xF21C1D22),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.14),
+                    width: 0.6,
+                  ),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x40000000),
+                      blurRadius: 18,
+                      offset: Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '已删除「${entry.title}」',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    CupertinoButton(
+                      key: const ValueKey('ios-undo-history-action'),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      minimumSize: const Size(32, 32),
+                      onPressed: () async {
+                        _dismissUndoHistoryBanner();
+                        await widget.storage.restoreWatchHistoryEntry(entry);
+                        if (!mounted) return;
+                        onRestored?.call();
+                        setState(() {});
+                      },
+                      child: const Text(
+                        '撤销',
+                        style: TextStyle(
+                          color: AppleColors.systemBlue,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    _undoHistoryOverlayEntry = bannerEntry;
+    overlay.insert(bannerEntry);
+    _undoHistoryTimer = Timer(const Duration(seconds: 3), () {
+      if (_undoHistoryOverlayEntry == bannerEntry) {
+        _dismissUndoHistoryBanner();
+      }
+    });
+  }
+
+  void _updateHomeScrollVisualNotifiers(double offset) {
+    final heroH = _lastIosHeroHeight > 0 ? _lastIosHeroHeight : 460.0;
+    final nextDarkStatus = offset >= heroH * 0.42;
+    if (_iosHomeStatusBarDark.value != nextDarkStatus) {
+      _iosHomeStatusBarDark.value = nextDarkStatus;
+    }
+    final nextScrim = ((offset - 18.0) / 150.0).clamp(0.0, 1.0);
+    if ((nextScrim - _iosHomeTopScrimOpacity.value).abs() >= 0.015 ||
+        (nextScrim == 0.0 && _iosHomeTopScrimOpacity.value != 0.0) ||
+        (nextScrim == 1.0 && _iosHomeTopScrimOpacity.value != 1.0)) {
+      _iosHomeTopScrimOpacity.value = nextScrim;
+    }
+    final nextOverscroll = math.max(0.0, -offset);
+    if ((nextOverscroll - _iosHeroOverscroll.value).abs() >= 0.25 ||
+        (nextOverscroll == 0.0 && _iosHeroOverscroll.value != 0.0)) {
+      _iosHeroOverscroll.value = nextOverscroll;
+    }
+    final maxBackdropOffset = heroH + 380.0;
+    final nextBackdrop = offset.clamp(-400.0, maxBackdropOffset).toDouble();
+    if (_rexBackdropScrollOffset.value != nextBackdrop) {
+      _rexBackdropScrollOffset.value = nextBackdrop;
+    }
+    final cardFade = _rexHeroScrollFadeForOffset(offset, heroH);
+    final settledSentinel = heroH + 100.0;
+    final nextCardOffset = cardFade >= 0.999 ? settledSentinel : offset;
+    if (_rexCardInkScrollOffset.value != nextCardOffset) {
+      _rexCardInkScrollOffset.value = nextCardOffset;
+    }
+  }
   Future<void> _quickImportFromClipboard() async {
+    if (defaultTargetPlatform == TargetPlatform.iOS && !OhosRuntime.isOhos) {
+      await _showImportConfigDialog();
+      return;
+    }
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = (data?.text ?? '').trim();
     if (text.isEmpty) {
@@ -2434,13 +3270,35 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
   void _onHomeScroll() {
-    if (!_homeScrollController.hasClients || _tabIndex != 0) return;
+    if (_homeScrollController.positions.length == 1) {
+      _updateHomeScrollVisualNotifiers(_homeScrollController.offset);
+    }
+    if (!_homeScrollController.hasClients ||
+        _tabIndex != 0 ||
+        _dockOwner != IosDockOwner.home) {
+      return;
+    }
     final offset = _homeScrollController.offset;
+    // If the user is not dragging and a settle animation is in progress, let
+    // the settle animation finish unless the scroll has already crossed an
+    // outer boundary (top <= 12 or fully scrolled >= 152).
+    if (!_homeUserDragging && _dockMorphCtrl.isAnimating) {
+      if (offset > 12.0 && offset < 152.0) {
+        return;
+      }
+      _dockMorphAnimToken++;
+      _dockMorphCtrl.stop();
+    }
     // Strictly linear progress in [0.0, 1.0] across 140pt of downward scroll.
     // Driven without calling setState() on the full shell tree so scrolling
     // stays locked at 60/120fps with zero frame drops or snap jumps.
     final progress = ((offset - 12.0) / 140.0).clamp(0.0, 1.0);
     _dockCollapsed = progress >= 0.5;
+    if (progress <= 0.001) {
+      _dockStableCollapsed = false;
+    } else if (progress >= 0.999) {
+      _dockStableCollapsed = true;
+    }
     if ((_dockScrollProgress.value - progress).abs() >= 0.002 ||
         (progress == 0.0 && _dockScrollProgress.value != 0.0) ||
         (progress == 1.0 && _dockScrollProgress.value != 1.0)) {
@@ -2456,6 +3314,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             _dockCollapsed,
             animated: false,
             progress: progress,
+            epoch: ++_dockEpoch,
           ),
         );
       }
@@ -2463,6 +3322,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   void _scrollHomeToTop() {
+    if (!mounted) return;
+    final wasInCurated = _curatedRouteDepth > 0 ||
+        IosRootTabNavigatorObserver.topRouteIsCurated.value ||
+        IosRootTabNavigatorObserver.curatedRouteDepth.value > 0;
+    if (wasInCurated) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      _curatedRouteDepth = 0;
+    }
+    if (_tabIndex != 0) {
+      setState(() => _tabIndex = 0);
+      _selectedTabIndexNotifier.value = 0;
+      if (_useRootNativeTabChrome) {
+        unawaited(
+          IosLiquidGlassBridge.setRootTabSelectedIndex(0, epoch: ++_dockEpoch),
+        );
+      }
+    }
+    _dockOwner = _computeDockOwner();
+    _curatedDockVisibleNotifier.value = _dockOwner == IosDockOwner.curated;
+    _dockStableCollapsed = false;
+    _homeUserDragging = false;
+    _syncRootTabVisibility(animated: true, forceEpoch: ++_dockEpoch);
     if (_homeScrollController.hasClients) {
       final useSpring = !isWindowsDesktopUi && !OhosRuntime.isOhos;
       unawaited(
@@ -2474,25 +3355,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           curve: Curves.easeOutCubic,
         ),
       );
-      if (_homeScrollController.offset <= 1.0) {
-        _dockCollapsed = false;
-        _dockScrollProgress.value = 0.0;
-        if (_useRootNativeTabChrome) {
-          _lastReportedDockProgress = 0.0;
-          unawaited(
-            IosLiquidGlassBridge.setRootTabMinimized(false, animated: true),
-          );
-        }
-      }
+      _animateDockProgressTo(0.0, animated: true, epoch: ++_dockEpoch);
     } else {
-      _dockCollapsed = false;
-      _dockScrollProgress.value = 0.0;
-      if (_useRootNativeTabChrome) {
-        _lastReportedDockProgress = 0.0;
-        unawaited(
-          IosLiquidGlassBridge.setRootTabMinimized(false, animated: true),
-        );
-      }
+      _animateDockProgressTo(0.0, animated: true, epoch: ++_dockEpoch);
     }
   }
 
@@ -2562,7 +3427,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
 
-  List<IosNativeMenuItem> _buildHomeSourceMenuItems() {
+  List<IosNativeMenuItem> _buildHomeSourceMenuItems({
+    bool currentGroupOnly = true,
+  }) {
     final inPrivacyMode = _privateSessionUnlocked;
     final rawSupported = inPrivacyMode
         ? (_config?.privateSupportedSites ?? const <CmsSite>[])
@@ -2589,8 +3456,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final activeKey = _activeSite?.key ?? '';
     final defaultGroupName = inPrivacyMode ? '隐私分组' : '默认分组';
 
-    // Include ALL available routes (no 20-item cap); group into native inline
-    // sections when routes span multiple groups so long menus stay easy to scan.
     final orderedSites = <CmsSite>[];
     final seenKeys = <String>{};
     if (_activeSite != null &&
@@ -2609,55 +3474,39 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       final g = s.group.trim().isEmpty ? defaultGroupName : s.group.trim();
       groupBuckets.putIfAbsent(g, () => <CmsSite>[]).add(s);
     }
-    final useGroupSections = groupBuckets.length > 1;
-    final unsupportedCount = filtered.length - availableOnly.length;
+
+    final activeGroupName = (_activeSite?.group.trim().isNotEmpty ?? false)
+        ? _activeSite!.group.trim()
+        : (groupBuckets.isNotEmpty ? groupBuckets.keys.first : defaultGroupName);
+    final scopedSites = currentGroupOnly && groupBuckets.length > 1
+        ? (groupBuckets[activeGroupName] ?? orderedSites)
+        : orderedSites;
 
     final items = <IosNativeMenuItem>[
       IosNativeMenuItem(
         id: '__all__',
-        title: inPrivacyMode ? '搜索与管理隐私片源…' : '搜索与管理全部片源…',
-        subtitle: unsupportedCount > 0
-            ? '可用 ${availableOnly.length} / 共 ${filtered.length} 条（已自动过滤未适配）'
-            : '共 ${orderedSites.length} 条可用线路',
-        symbol: 'magnifyingglass',
+        title: inPrivacyMode ? '管理隐私片源' : '管理片源',
+        subtitle: '查看全部 ${orderedSites.length} 条线路',
+        symbol: 'slider.horizontal.3',
         section: 0,
       ),
     ];
 
-    if (useGroupSections) {
-      var sectionIdx = 1;
-      for (final entry in groupBuckets.entries) {
-        final groupTitle = '${entry.key} (${entry.value.length})';
-        for (final s in entry.value) {
-          items.add(
-            IosNativeMenuItem(
-              id: 'site:${s.key}',
-              title: s.name,
-              symbol: (!inPrivacyMode && s.key == prefKey)
-                  ? 'star.fill'
-                  : (inPrivacyMode ? 'lock.shield' : 'play.tv'),
-              checked: s.key == activeKey,
-              section: sectionIdx,
-              sectionTitle: groupTitle,
-            ),
-          );
-        }
-        sectionIdx++;
-      }
-    } else {
-      for (final s in orderedSites) {
-        items.add(
-          IosNativeMenuItem(
-            id: 'site:${s.key}',
-            title: s.name,
-            symbol: (!inPrivacyMode && s.key == prefKey)
-                ? 'star.fill'
-                : (inPrivacyMode ? 'lock.shield' : 'play.tv'),
-            checked: s.key == activeKey,
-            section: 1,
-          ),
-        );
-      }
+    final groupTitle =
+        '$activeGroupName (${scopedSites.length})';
+    for (final s in scopedSites) {
+      items.add(
+        IosNativeMenuItem(
+          id: 'site:${s.key}',
+          title: s.name,
+          symbol: (!inPrivacyMode && s.key == prefKey)
+              ? 'star.fill'
+              : (inPrivacyMode ? 'lock.shield' : 'play.tv'),
+          checked: s.key == activeKey,
+          section: 1,
+          sectionTitle: groupBuckets.length > 1 ? groupTitle : null,
+        ),
+      );
     }
     return items;
   }
@@ -2727,16 +3576,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       for (final g in extraGenres)
         IosNativeFilterCategory(id: g, label: g, kind: 'genre'),
     ];
-    final picked = await showAppleNativeFilterSheet(
-      title: '多维片库筛选',
-      categories: cats,
-      selectedCategoryId: _filterSubCategoryId,
-      selectedGenreLabel: _filterGenreLabel,
-      areas: CmsParser.filterAreas,
-      selectedArea: _filterArea,
-      years: CmsParser.filterYears,
-      selectedYear: _filterYear,
-    );
+    final picked = IosLiquidGlassBridge.isAvailable
+        ? await showAppleNativeFilterSheet(
+            title: '片库筛选',
+            categories: cats,
+            selectedCategoryId: _filterSubCategoryId,
+            selectedGenreLabel: _filterGenreLabel,
+            areas: CmsParser.filterAreas,
+            selectedArea: _filterArea,
+            years: CmsParser.filterYears,
+            selectedYear: _filterYear,
+          )
+        : await showIosCatalogFilterSheet(
+            context: context,
+            title: '片库筛选',
+            categories: cats,
+            selectedCategoryId: _filterSubCategoryId,
+            selectedGenreLabel: _filterGenreLabel,
+            areas: CmsParser.filterAreas,
+            selectedArea: _filterArea,
+            years: CmsParser.filterYears,
+            selectedYear: _filterYear,
+          );
     if (picked == null || !mounted) return;
     final changed = picked.categoryId != _filterSubCategoryId ||
         picked.genreLabel != _filterGenreLabel ||
@@ -2772,42 +3633,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final size = MediaQuery.sizeOf(context);
     final useSidebar =
         _isDesktop ? (size.width >= 700) : (size.width > size.height);
-    const dockItems = <(IconData, IconData, String)>[
-      (CupertinoIcons.house, CupertinoIcons.house_fill, '主页'),
-      (CupertinoIcons.tv, CupertinoIcons.tv_fill, '直播'),
-      (
-        CupertinoIcons.rectangle_stack,
-        CupertinoIcons.rectangle_stack_fill,
-        '片库',
-      ),
-      (CupertinoIcons.gear_alt, CupertinoIcons.gear_alt_fill, '设置'),
-    ];
-    const nativeDockItems = <IosNativeDockItem>[
-      IosNativeDockItem(
-        label: '主页',
-        symbol: 'house',
-        selectedSymbol: 'house.fill',
-        kind: 'home',
-      ),
-      IosNativeDockItem(
-        label: '直播',
-        symbol: 'play.tv',
-        selectedSymbol: 'play.tv.fill',
-        kind: 'live',
-      ),
-      IosNativeDockItem(
-        label: '片库',
-        symbol: 'rectangle.stack',
-        selectedSymbol: 'rectangle.stack.fill',
-        kind: 'library',
-      ),
-      IosNativeDockItem(
-        label: '设置',
-        symbol: 'gearshape',
-        selectedSymbol: 'gearshape.fill',
-        kind: 'settings',
-      ),
-    ];
+    const dockItems = _iosDockFallbackItems;
+    final nativeDockItems = _buildIosNativeDockItems();
     final safeTabIndex = _tabIndex.clamp(0, dockItems.length - 1);
     final Widget activePage = switch (safeTabIndex) {
       1 => _buildLiveTab(context, useSidebar: useSidebar),
@@ -2871,22 +3698,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               heightFactor: 1,
               child: AppleLiquidGlassDock(
                 selectedIndex: safeTabIndex,
-                onSelect: (i) {
-                  final nextP = i == 0 && _homeScrollController.hasClients
-                      ? ((_homeScrollController.offset - 12.0) / 140.0)
-                          .clamp(0.0, 1.0)
-                      : 0.0;
-                  _dockScrollProgress.value = nextP;
-                  setState(() {
-                    _tabIndex = i;
-                    _dockCollapsed = nextP >= 0.5;
-                  });
-                },
+                onSelect: _handleRootNativeTabSelected,
                 isLandscape: false,
                 items: dockItems,
                 nativeItems: nativeDockItems,
                 onSearch: _showGlobalSearchSheet,
                 onScrollToTop: _scrollHomeToTop,
+                tabMenuItemsBuilder: _buildDockTabSlideMenuActions,
+                onTabMenuAction: _handleDockTabMenuAction,
                 hidden: _privacyPortalAnimating,
                 collapsed: _dockCollapsed && safeTabIndex == 0,
                 scrollProgress: safeTabIndex == 0 ? _dockScrollProgress : null,
@@ -2948,11 +3767,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               child: Center(
                 child: AppleLiquidGlassDock(
                   selectedIndex: safeTabIndex,
-                  onSelect: (i) => setState(() => _tabIndex = i),
+                  onSelect: _handleRootNativeTabSelected,
                   isLandscape: true,
                   items: dockItems,
                   nativeItems: nativeDockItems,
                   onSearch: _showGlobalSearchSheet,
+                  onScrollToTop: _scrollHomeToTop,
+                  tabMenuItemsBuilder: _buildDockTabSlideMenuActions,
+                  onTabMenuAction: _handleDockTabMenuAction,
                   hidden: _privacyPortalAnimating,
                 ),
               ),
@@ -3028,6 +3850,81 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           final double sourceMaxW = viewport.isCompactSplit
               ? (depots.isEmpty ? 156.0 : 126.0)
               : (compactHeader ? (depots.isEmpty ? 204.0 : 168.0) : 228.0);
+          final isIosPlatform =
+              defaultTargetPlatform == TargetPlatform.iOS &&
+                  !OhosRuntime.isOhos;
+          final depotMenuItems =
+              depots.isNotEmpty ? _buildHomeDepotMenuItems(depots) : const <IosNativeMenuItem>[];
+          final sourceMenuItems = _buildHomeSourceMenuItems(currentGroupOnly: true);
+          void handleDepotMenuSelection(String id) {
+            if (id == '__manage__') {
+              _showDepotPickerDialog();
+              return;
+            }
+            if (id.startsWith('depot:')) {
+              final idx = int.tryParse(id.substring(6));
+              if (idx != null && idx >= 0 && idx < depots.length) {
+                unawaited(_switchToDepotDirect(depots[idx]));
+              }
+            }
+          }
+          final Widget depotFallbackButton = isIosPlatform
+              ? IosPressSlideMenuAnchor(
+                  key: const ValueKey('home-depot-button'),
+                  openOnTap: false,
+                  onTap: _showDepotPickerDialog,
+                  itemsBuilder: () =>
+                      iosSlideActionsFromNativeMenu(depotMenuItems),
+                  onSelected: handleDepotMenuSelection,
+                  accessibilityLabel:
+                      depotLabel.isEmpty ? '切换仓库' : '切换仓库 $depotLabel',
+                  menuKey: const ValueKey('home-depot-longpress-menu'),
+                  minTouchWidth: 44,
+                  minTouchHeight: 44,
+                  child: _buildHeaderCapsule(
+                    compact: compactHeader,
+                    icon: CupertinoIcons.archivebox_fill,
+                    label: depotLabel,
+                    onTap: () {},
+                    absorbTap: false,
+                  ),
+                )
+              : _buildHeaderCapsule(
+                  compact: compactHeader,
+                  icon: CupertinoIcons.archivebox_fill,
+                  label: depotLabel,
+                  onTap: _showDepotPickerDialog,
+                );
+          final Widget sourceFallbackButton = isIosPlatform
+              ? IosPressSlideMenuAnchor(
+                  key: const ValueKey('home-source-button'),
+                  openOnTap: false,
+                  onTap: _showSitePickerDialog,
+                  itemsBuilder: () =>
+                      iosSlideActionsFromNativeMenu(sourceMenuItems),
+                  onSelected: _onHomeSourceMenuSelected,
+                  accessibilityLabel: '切换片源 $sourceLabel',
+                  menuKey: const ValueKey('home-source-longpress-menu'),
+                  minTouchWidth: 44,
+                  minTouchHeight: 44,
+                  child: _buildHeaderCapsule(
+                    compact: compactHeader,
+                    icon: _privateSessionUnlocked
+                        ? CupertinoIcons.lock_shield_fill
+                        : CupertinoIcons.layers_alt_fill,
+                    label: sourceLabel,
+                    onTap: () {},
+                    absorbTap: false,
+                  ),
+                )
+              : _buildHeaderCapsule(
+                  compact: compactHeader,
+                  icon: _privateSessionUnlocked
+                      ? CupertinoIcons.lock_shield_fill
+                      : CupertinoIcons.layers_alt_fill,
+                  label: sourceLabel,
+                  onTap: _showSitePickerDialog,
+                );
           final sourceControls = Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
@@ -3043,28 +3940,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     height: 36,
                     width: compactHeader ? 36 : null,
                     maxWidth: 148,
-                    accessibilityLabel: depotLabel.isEmpty ? '切换仓库' : depotLabel,
+                    accessibilityLabel:
+                        depotLabel.isEmpty ? '切换仓库' : '切换仓库 $depotLabel',
                     menuTitle: '切换多仓子仓库',
-                    menuItems: _buildHomeDepotMenuItems(depots),
-                    onMenuSelected: (id) {
-                      if (id == '__manage__') {
-                        _showDepotPickerDialog();
-                        return;
-                      }
-                      if (id.startsWith('depot:')) {
-                        final idx = int.tryParse(id.substring(6));
-                        if (idx != null && idx >= 0 && idx < depots.length) {
-                          unawaited(_switchToDepotDirect(depots[idx]));
-                        }
-                      }
-                    },
+                    menuItems: depotMenuItems,
+                    menuAsPrimaryAction: false,
+                    onMenuSelected: handleDepotMenuSelection,
                     onTap: _showDepotPickerDialog,
-                    fallback: _buildHeaderCapsule(
-                      compact: compactHeader,
-                      icon: CupertinoIcons.archivebox_fill,
-                      label: depotLabel,
-                      onTap: _showDepotPickerDialog,
-                    ),
+                    fallback: depotFallbackButton,
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -3083,17 +3966,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   maxWidth: sourceMaxW,
                   accessibilityLabel: '切换片源 $sourceLabel',
                   menuTitle: _privateSessionUnlocked ? '隐私片源' : '切换片源',
-                  menuItems: _buildHomeSourceMenuItems(),
+                  menuItems: sourceMenuItems,
+                  menuAsPrimaryAction: false,
                   onMenuSelected: _onHomeSourceMenuSelected,
                   onTap: _showSitePickerDialog,
-                  fallback: _buildHeaderCapsule(
-                    compact: compactHeader,
-                    icon: _privateSessionUnlocked
-                        ? CupertinoIcons.lock_shield_fill
-                        : CupertinoIcons.layers_alt_fill,
-                    label: sourceLabel,
-                    onTap: _showSitePickerDialog,
-                  ),
+                  fallback: sourceFallbackButton,
                 ),
               ),
             ],
@@ -3118,6 +3995,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             overImmersiveHero: showIosImmersiveHero,
           );
           final iosHeroHeight = viewport.iosHomeHeroHeight(maxH);
+          final heroHeightChanged =
+              (_lastIosHeroHeight - iosHeroHeight).abs() >= 0.5;
+          _lastIosHeroHeight = iosHeroHeight;
+          if (_homeScrollController.positions.length == 1) {
+            final currentOffset = _homeScrollController.offset;
+            final desiredDarkStatus = currentOffset >= iosHeroHeight * 0.42;
+            if (heroHeightChanged ||
+                desiredDarkStatus != _iosHomeStatusBarDark.value) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted || _homeScrollController.positions.length != 1) {
+                  return;
+                }
+                _updateHomeScrollVisualNotifiers(_homeScrollController.offset);
+              });
+            }
+          }
 
           List<Widget> buildSourceCatalogSlivers({int? rexSectionSlotIndex}) {
             final useRexCardInk =
@@ -3212,73 +4105,75 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         final cardKey =
                             'vcard_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_';
                         final row = index ~/ crossAxisCount;
-                        return AnimatedBuilder(
+                        return RepaintBoundary(
                           key: ValueKey(cardKey),
-                          animation: Listenable.merge([
-                            _iosHeroPageController,
-                            _homeScrollController,
-                          ]),
-                          builder: (cardCtx, _) {
-                            final rawOffset = _currentHomeScrollOffset();
-                            final scrollFade = _rexHeroScrollFadeForOffset(
-                              rawOffset,
-                              iosHeroHeight,
-                            );
-                            if (scrollFade >= 0.999) {
+                          child: AnimatedBuilder(
+                            animation: Listenable.merge([
+                              _iosHeroPageController,
+                              _rexCardInkScrollOffset,
+                            ]),
+                            builder: (cardCtx, _) {
+                              final rawOffset = _rexCardInkScrollOffset.value;
+                              final scrollFade = _rexHeroScrollFadeForOffset(
+                                rawOffset,
+                                iosHeroHeight,
+                              );
+                              if (scrollFade >= 0.999) {
+                                return _buildVideoCard(
+                                  site,
+                                  video,
+                                  includeOuterKey: false,
+                                );
+                              }
+                              final palette = ApplePalette.of(cardCtx);
+                              final liveAtmo = _resolveLiveRexHeroAtmo(
+                                heroCandidates,
+                                palette,
+                              );
+                              final scrollDown = math.max(0.0, rawOffset);
+                              final titleContentY = iosHeroHeight +
+                                  rexSectionSlotIndex * 235.0 +
+                                  104.0 +
+                                  row * (tileHeight + 16.0) +
+                                  tileHeight -
+                                  28.0;
+                              final subContentY = titleContentY + 16.0;
+                              final titleY =
+                                  (titleContentY - scrollDown).clamp(0.0, maxH);
+                              final subY =
+                                  (subContentY - scrollDown).clamp(0.0, maxH);
+                              final titleBg = _sampleRexBackdropColorAtY(
+                                viewportY: titleY,
+                                viewportHeight: maxH,
+                                heroHeight: iosHeroHeight,
+                                scrollOffset: rawOffset,
+                                liveAtmo: liveAtmo,
+                                palette: palette,
+                              );
+                              final subBg = _sampleRexBackdropColorAtY(
+                                viewportY: subY,
+                                viewportHeight: maxH,
+                                heroHeight: iosHeroHeight,
+                                scrollOffset: rawOffset,
+                                liveAtmo: liveAtmo,
+                                palette: palette,
+                              );
+                              final inks = _resolveRexInksForBackdropBand(
+                                hysteresisSlotKey:
+                                    1000 + rexSectionSlotIndex * 100 + row,
+                                primaryBg: titleBg,
+                                secondaryBg: subBg,
+                                palette: palette,
+                              );
                               return _buildVideoCard(
                                 site,
                                 video,
                                 includeOuterKey: false,
+                                titleColorOverride: inks.primary,
+                                subtitleColorOverride: inks.secondary,
                               );
-                            }
-                            final palette = ApplePalette.of(cardCtx);
-                            final liveAtmo = _resolveLiveRexHeroAtmo(
-                              heroCandidates,
-                              palette,
-                            );
-                            final scrollDown = math.max(0.0, rawOffset);
-                            final titleContentY = iosHeroHeight +
-                                rexSectionSlotIndex * 235.0 +
-                                104.0 +
-                                row * (tileHeight + 16.0) +
-                                tileHeight -
-                                28.0;
-                            final subContentY = titleContentY + 16.0;
-                            final titleY =
-                                (titleContentY - scrollDown).clamp(0.0, maxH);
-                            final subY =
-                                (subContentY - scrollDown).clamp(0.0, maxH);
-                            final titleBg = _sampleRexBackdropColorAtY(
-                              viewportY: titleY,
-                              viewportHeight: maxH,
-                              heroHeight: iosHeroHeight,
-                              scrollOffset: rawOffset,
-                              liveAtmo: liveAtmo,
-                              palette: palette,
-                            );
-                            final subBg = _sampleRexBackdropColorAtY(
-                              viewportY: subY,
-                              viewportHeight: maxH,
-                              heroHeight: iosHeroHeight,
-                              scrollOffset: rawOffset,
-                              liveAtmo: liveAtmo,
-                              palette: palette,
-                            );
-                            final inks = _resolveRexInksForBackdropBand(
-                              hysteresisSlotKey:
-                                  1000 + rexSectionSlotIndex * 100 + row,
-                              primaryBg: titleBg,
-                              secondaryBg: subBg,
-                              palette: palette,
-                            );
-                            return _buildVideoCard(
-                              site,
-                              video,
-                              includeOuterKey: false,
-                              titleColorOverride: inks.primary,
-                              subtitleColorOverride: inks.secondary,
-                            );
-                          },
+                            },
+                          ),
                         );
                       },
                       childCount: _homeVideos.length,
@@ -3393,11 +4288,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               return AnimatedBuilder(
                 animation: Listenable.merge([
                   _iosHeroPageController,
-                  _homeScrollController,
+                  _rexCardInkScrollOffset,
                 ]),
                 builder: (context, _) {
                   final palette = ApplePalette.of(context);
-                  final rawOffset = _currentHomeScrollOffset();
+                  final rawOffset = _rexCardInkScrollOffset.value;
                   final scrollFade =
                       _rexHeroScrollFadeForOffset(rawOffset, iosHeroHeight);
                   if (scrollFade >= 0.999) {
@@ -3467,6 +4362,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 !Platform.environment.containsKey('FLUTTER_TEST'),
                             headerInkOverride: headerInk,
                             secondaryInkOverride: secondaryInk,
+                            dockHost: defaultTargetPlatform == TargetPlatform.iOS &&
+                                    !OhosRuntime.isOhos
+                                ? _curatedDockHost
+                                : null,
                             onOpenVideo: (video) => _openVideoDetail(
                               CuratedDiscoveryService.curatedSiteSentinel,
                               video,
@@ -3687,6 +4586,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     .any((s) => s.searchable),
                             loadLive:
                                 !Platform.environment.containsKey('FLUTTER_TEST'),
+                            dockHost: defaultTargetPlatform == TargetPlatform.iOS &&
+                                    !OhosRuntime.isOhos
+                                ? _curatedDockHost
+                                : null,
                             onOpenVideo: (video) => _openVideoDetail(
                               CuratedDiscoveryService.curatedSiteSentinel,
                               video,
@@ -3731,6 +4634,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                   .any((s) => s.searchable),
                           loadLive:
                               !Platform.environment.containsKey('FLUTTER_TEST'),
+                          dockHost: defaultTargetPlatform == TargetPlatform.iOS &&
+                                  !OhosRuntime.isOhos
+                              ? _curatedDockHost
+                              : null,
                           onOpenVideo: (video) => _openVideoDetail(
                             CuratedDiscoveryService.curatedSiteSentinel,
                             video,
@@ -3753,6 +4660,27 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             );
           final autoPagingScrollView = NotificationListener<ScrollNotification>(
             onNotification: (notification) {
+              if (notification.depth == 0 &&
+                  notification.metrics.axis == Axis.vertical &&
+                  _dockOwner == IosDockOwner.home &&
+                  _tabIndex == 0 &&
+                  defaultTargetPlatform == TargetPlatform.iOS &&
+                  !OhosRuntime.isOhos) {
+                if (notification is ScrollStartNotification) {
+                  if (notification.dragDetails != null) {
+                    _homeUserDragging = true;
+                    _dockMorphAnimToken++;
+                    _dockMorphCtrl.stop();
+                  }
+                } else if (notification is ScrollUpdateNotification) {
+                  if (notification.dragDetails != null) {
+                    _homeUserDragging = true;
+                  }
+                } else if (notification is ScrollEndNotification) {
+                  _homeUserDragging = false;
+                  _settleHomeDockToStableEndpoint(animated: true);
+                }
+              }
               if (showIosImmersiveHero &&
                   notification.metrics.axis == Axis.vertical) {
                 final overscroll = -notification.metrics.pixels;
@@ -3858,18 +4786,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               if (showIosImmersiveHero)
                 Positioned.fill(
                   child: IgnorePointer(
-                    child: AnimatedBuilder(
-                      animation: Listenable.merge([
-                        _homeScrollController,
-                        _iosHeroPageController,
-                      ]),
-                      builder: (context, _) {
-                        final palette = ApplePalette.of(context);
-                        final liveAtmo = _resolveLiveRexHeroAtmo(
-                          heroCandidates,
-                          palette,
-                        );
-                        final rawOffset = _currentHomeScrollOffset();
+                    child: RepaintBoundary(
+                      child: AnimatedBuilder(
+                        animation: Listenable.merge([
+                          _rexBackdropScrollOffset,
+                          _iosHeroPageController,
+                        ]),
+                        builder: (context, _) {
+                          final palette = ApplePalette.of(context);
+                          final liveAtmo = _resolveLiveRexHeroAtmo(
+                            heroCandidates,
+                            palette,
+                          );
+                          final rawOffset = _rexBackdropScrollOffset.value;
                         final scrollDown = math.max(0.0, rawOffset);
                         final metrics = _computeRexBackdropMetrics(
                           liveAtmo: liveAtmo,
@@ -3942,6 +4871,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         );
                       },
                     ),
+                    ),
                   ),
                 ),
               maskedScroll,
@@ -3952,15 +4882,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   right: 0,
                   height: topSafePad + 54,
                   child: IgnorePointer(
-                    child: AnimatedBuilder(
-                      animation: _homeScrollController,
-                      builder: (context, child) {
-                        final offset =
-                            _homeScrollController.positions.length == 1
-                                ? _homeScrollController.offset
-                                : 0.0;
-                        final scrimOpacity =
-                            ((offset - 18.0) / 150.0).clamp(0.0, 1.0);
+                    child: ValueListenableBuilder<double>(
+                      valueListenable: _iosHomeTopScrimOpacity,
+                      builder: (context, scrimOpacity, child) {
                         if (scrimOpacity <= 0.01) {
                           return const SizedBox.shrink();
                         }
@@ -3991,16 +4915,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             return homeStack;
           }
           final isDarkHome = ApplePalette.isDarkOf(context);
-          return AnimatedBuilder(
-            animation: _homeScrollController,
+          return ValueListenableBuilder<bool>(
+            valueListenable: _iosHomeStatusBarDark,
             child: homeStack,
-            builder: (context, child) {
-              final offset = _homeScrollController.positions.length == 1
-                  ? _homeScrollController.offset
-                  : 0.0;
+            builder: (context, pastHeroThreshold, child) {
               // Keep iOS status bar light over the dark immersive Hero poster,
               // flipping to dark in Light Mode once scrolled into light shelves.
-              final overlayStyle = (isDarkHome || offset < iosHeroHeight * 0.42)
+              final overlayStyle = (isDarkHome || !pastHeroThreshold)
                   ? SystemUiOverlayStyle.light
                   : SystemUiOverlayStyle.dark;
               return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -4096,28 +5017,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         const SizedBox(width: 6),
         Builder(
           builder: (context) {
+            final isIosPlatform =
+                defaultTargetPlatform == TargetPlatform.iOS &&
+                    !OhosRuntime.isOhos;
             final loggedCount = NetdiskService.drives
                 .where((d) => widget.storage.isNetdiskLoggedIn(d.key))
                 .length;
             void openNetdisk() {
-              final allSites = _config?.publicSupportedSites ?? const <CmsSite>[];
-              unawaited(
-                _trackSecondaryRoute<void>(
-                  () => showNetdiskAccountSheet(
-                    context,
-                    widget.storage,
-                    sites: allSites,
-                    activeGroup: _activeSite?.group ?? '',
-                    onOpenCatPawSettings: allSites.any((s) => s.isCatPaw)
-                        ? _showCatPawSettings
-                        : null,
-                    onChanged: () {
-                      if (mounted) setState(() {});
-                    },
-                  ),
-                ),
-              );
+              _openConfigCenterPage(iosBackLabel: '主页');
             }
+            final configMenuItems = _buildHomeConfigCenterMenuItems();
             final netdiskLabel = compactHeader
                 ? ''
                 : (loggedCount > 0 ? '配置 · $loggedCount' : '配置中心');
@@ -4166,13 +5075,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     onTap: openNetdisk,
                     child: netdiskGlass,
                   )
-                : Ios27Pressable(
-                    key: const ValueKey('home-netdisk-button'),
-                    pressedScale: Ios27Spring.pressSwellScale,
-                    borderRadius: 999,
-                    onTap: openNetdisk,
-                    child: netdiskGlass,
-                  );
+                : isIosPlatform
+                    ? IosPressSlideMenuAnchor(
+                        key: const ValueKey('home-netdisk-button'),
+                        openOnTap: false,
+                        onTap: openNetdisk,
+                        itemsBuilder: () =>
+                            iosSlideActionsFromNativeMenu(configMenuItems),
+                        onSelected: _onHomeConfigCenterMenuSelected,
+                        accessibilityLabel: '配置中心',
+                        menuKey: const ValueKey(
+                          'home-config-center-longpress-menu',
+                        ),
+                        minTouchWidth: 44,
+                        minTouchHeight: 44,
+                        child: netdiskGlass,
+                      )
+                    : Ios27Pressable(
+                        key: const ValueKey('home-netdisk-button'),
+                        pressedScale: Ios27Spring.pressSwellScale,
+                        borderRadius: 999,
+                        onTap: openNetdisk,
+                        child: netdiskGlass,
+                      );
             return IosNativeGlassButton(
               style: compactHeader ? 'circle' : 'capsule',
               symbol: loggedCount > 0 ? 'cloud.fill' : 'qrcode.viewfinder',
@@ -4188,6 +5113,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               height: 36,
               maxWidth: 124,
               accessibilityLabel: '配置中心',
+              menuTitle: '配置中心',
+              menuItems: configMenuItems,
+              menuAsPrimaryAction: false,
+              onMenuSelected: _onHomeConfigCenterMenuSelected,
               onTap: openNetdisk,
               fallback: fallback,
             );
@@ -4388,44 +5317,74 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 maxWidth: 108,
                 accessibilityLabel: '片库筛选',
                 onTap: () => unawaited(_openNativeFilterSheet()),
-                fallback: GestureDetector(
-                  key: const ValueKey('home-filter-button'),
-                  onTap: () =>
-                      setState(() => _filterExpanded = !_filterExpanded),
-                  child: LiquidGlass(
-                    height: 36,
-                    borderRadius: 999,
-                    elevated: false,
-                    rimStrength:
-                        (_filterExpanded || activeFilterCount > 0) ? 1.05 : 0.88,
-                    tint: (_filterExpanded || activeFilterCount > 0)
-                        ? const Color(0xCC0A84FF)
-                        : const Color(0x241E1E24),
-                    padding: const EdgeInsets.symmetric(horizontal: 13),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          CupertinoIcons.slider_horizontal_3,
-                          size: 14,
-                          color: (_filterExpanded || activeFilterCount > 0)
-                              ? Colors.white
-                              : ApplePalette.of(context).labelPrimary,
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          activeFilterCount > 0
-                              ? '筛选 · $activeFilterCount'
-                              : '筛选',
-                          style: TextStyle(
-                            color: (_filterExpanded || activeFilterCount > 0)
-                                ? Colors.white
-                                : ApplePalette.of(context).labelPrimary,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
+                fallback: Semantics(
+                  button: true,
+                  label: '片库筛选',
+                  child: GestureDetector(
+                    key: const ValueKey('home-filter-button'),
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      if (defaultTargetPlatform == TargetPlatform.iOS &&
+                          !OhosRuntime.isOhos) {
+                        unawaited(_openNativeFilterSheet());
+                      } else {
+                        setState(() => _filterExpanded = !_filterExpanded);
+                      }
+                    },
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        minHeight: defaultTargetPlatform == TargetPlatform.iOS
+                            ? 44
+                            : 36,
+                        minWidth: defaultTargetPlatform == TargetPlatform.iOS
+                            ? 44
+                            : 0,
+                      ),
+                      child: Align(
+                        alignment: Alignment.center,
+                        widthFactor: 1.0,
+                        child: LiquidGlass(
+                          height: 36,
+                          borderRadius: 999,
+                          elevated: false,
+                          rimStrength:
+                              (_filterExpanded || activeFilterCount > 0)
+                                  ? 1.05
+                                  : 0.88,
+                          tint: (_filterExpanded || activeFilterCount > 0)
+                              ? const Color(0xCC0A84FF)
+                              : const Color(0x241E1E24),
+                          padding: const EdgeInsets.symmetric(horizontal: 13),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                CupertinoIcons.slider_horizontal_3,
+                                size: 14,
+                                color:
+                                    (_filterExpanded || activeFilterCount > 0)
+                                        ? Colors.white
+                                        : ApplePalette.of(context).labelPrimary,
+                              ),
+                              const SizedBox(width: 5),
+                              Text(
+                                activeFilterCount > 0
+                                    ? '筛选 · $activeFilterCount'
+                                    : '筛选',
+                                style: TextStyle(
+                                  color:
+                                      (_filterExpanded || activeFilterCount > 0)
+                                          ? Colors.white
+                                          : ApplePalette.of(context)
+                                              .labelPrimary,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -4577,24 +5536,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       key: const ValueKey('ios-home-immersive-hero'),
       height: heroHeight,
       width: double.infinity,
-      child: AnimatedBuilder(
-        animation: _homeScrollController,
-        builder: (context, _) {
-          final rawOffset = _homeScrollController.positions.length == 1
-              ? _homeScrollController.offset
-              : 0.0;
-          final overscroll = math.max(0.0, -rawOffset);
+      child: ValueListenableBuilder<double>(
+        valueListenable: _iosHeroOverscroll,
+        builder: (context, overscroll, _) {
           final stretchedHeight = heroHeight + overscroll;
-          final activeLiveEdgeColor = _computeRexBackdropMetrics(
-            liveAtmo: activeAtmo,
-            palette: palette,
-            heroHeight: heroHeight,
-            scrollOffset: rawOffset,
-          ).liveEdgeColor;
-          final activeUseLight =
-              _useLightInkForHeroAtmo(activeLiveEdgeColor, isDark);
-          final activeDotInk =
-              activeUseLight ? Colors.white : const Color(0xFF141821);
           final stretchScale =
               (1.0 + (overscroll / math.max(heroHeight, 1.0)) * 0.68)
                   .clamp(1.0, 1.44);
@@ -4738,7 +5683,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                   child: AnimatedBuilder(
                                     animation: Listenable.merge([
                                       _iosHeroPageController,
-                                      _homeScrollController,
+                                      _rexBackdropScrollOffset,
                                     ]),
                                     builder: (context, _) {
                                       final liveAtmo = _resolveLiveRexHeroAtmo(
@@ -4751,7 +5696,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                         palette: palette,
                                         heroHeight: heroHeight,
                                         scrollOffset:
-                                            _currentHomeScrollOffset(),
+                                            _rexBackdropScrollOffset.value,
                                       ).liveEdgeColor;
                                       return DecoratedBox(
                                         key: const ValueKey(
@@ -4813,7 +5758,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 child: AnimatedBuilder(
                                   animation: Listenable.merge([
                                     _iosHeroPageController,
-                                    _homeScrollController,
+                                    _rexBackdropScrollOffset,
                                   ]),
                                   builder: (context, _) {
                                     final liveAtmo = _resolveLiveRexHeroAtmo(
@@ -4825,7 +5770,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                       liveAtmo: liveAtmo,
                                       palette: palette,
                                       heroHeight: heroHeight,
-                                      scrollOffset: _currentHomeScrollOffset(),
+                                      scrollOffset:
+                                          _rexBackdropScrollOffset.value,
                                     ).liveEdgeColor;
                                     final hasLoadedPoster =
                                         _iosHeroAmbientColors
@@ -5230,28 +6176,50 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   bottom: isShortHero ? 10 : 12,
                   child: IgnorePointer(
                     child: buildHeroChromeFade(
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          for (int i = 0; i < featuredList.length; i++)
-                            AnimatedContainer(
-                              duration: (isWindowsDesktopUi || OhosRuntime.isOhos)
-                                  ? const Duration(milliseconds: 220)
-                                  : Ios27Spring.snappy.nominalDuration,
-                              curve: (isWindowsDesktopUi || OhosRuntime.isOhos)
-                                  ? Curves.easeOutCubic
-                                  : Ios27Spring.snappy.curve,
-                              margin: const EdgeInsets.symmetric(horizontal: 3),
-                              width: i == activeIdx ? 18 : 5.5,
-                              height: 5.5,
-                              decoration: BoxDecoration(
-                                color: i == activeIdx
-                                    ? activeDotInk
-                                    : activeDotInk.withValues(alpha: 0.36),
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                            ),
-                        ],
+                      child: ValueListenableBuilder<double>(
+                        valueListenable: _rexCardInkScrollOffset,
+                        builder: (context, cardOffset, _) {
+                          final activeLiveEdgeColor =
+                              _computeRexBackdropMetrics(
+                            liveAtmo: activeAtmo,
+                            palette: palette,
+                            heroHeight: heroHeight,
+                            scrollOffset: cardOffset,
+                          ).liveEdgeColor;
+                          final activeUseLight = _useLightInkForHeroAtmo(
+                            activeLiveEdgeColor,
+                            isDark,
+                          );
+                          final activeDotInk = activeUseLight
+                              ? Colors.white
+                              : const Color(0xFF141821);
+                          return Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              for (int i = 0; i < featuredList.length; i++)
+                                AnimatedContainer(
+                                  duration: (isWindowsDesktopUi ||
+                                          OhosRuntime.isOhos)
+                                      ? const Duration(milliseconds: 220)
+                                      : Ios27Spring.snappy.nominalDuration,
+                                  curve: (isWindowsDesktopUi ||
+                                          OhosRuntime.isOhos)
+                                      ? Curves.easeOutCubic
+                                      : Ios27Spring.snappy.curve,
+                                  margin:
+                                      const EdgeInsets.symmetric(horizontal: 3),
+                                  width: i == activeIdx ? 18 : 5.5,
+                                  height: 5.5,
+                                  decoration: BoxDecoration(
+                                    color: i == activeIdx
+                                        ? activeDotInk
+                                        : activeDotInk.withValues(alpha: 0.36),
+                                    borderRadius: BorderRadius.circular(999),
+                                  ),
+                                ),
+                            ],
+                          );
+                        },
                       ),
                     ),
                   ),
@@ -5312,15 +6280,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       onPressed: () => _showImportConfigDialog(),
                     ),
                   ),
-                  const SizedBox(height: 10),
-                  SizedBox(
-                    width: double.infinity,
-                    child: AppleCapsuleButton(
-                      label: '一键粘贴剪贴板并导入',
-                      icon: CupertinoIcons.doc_on_clipboard_fill,
-                      onPressed: _quickImportFromClipboard,
+                  if (defaultTargetPlatform != TargetPlatform.iOS ||
+                      OhosRuntime.isOhos) ...[
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: AppleCapsuleButton(
+                        label: '一键粘贴剪贴板并导入',
+                        icon: CupertinoIcons.doc_on_clipboard_fill,
+                        onPressed: _quickImportFromClipboard,
+                      ),
                     ),
-                  ),
+                  ],
                   const SizedBox(height: 10),
                   SizedBox(
                     width: double.infinity,
@@ -5513,54 +6484,57 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     bool compact = false,
     required String label,
     required VoidCallback onTap,
+    bool absorbTap = true,
   }) {
     final palette = ApplePalette.of(context);
+    final pill = ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 176),
+      child: LiquidGlass(
+        borderRadius: 999,
+        elevated: false,
+        rimStrength: 0.9,
+        tint: palette.isDark
+            ? const Color(0x281E1E24)
+            : const Color(0xCCFFFFFF),
+        padding: EdgeInsets.symmetric(
+          horizontal: compact ? 8 : 12,
+          vertical: 8.5,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!compact || label.isEmpty)
+              Icon(icon, color: palette.labelSecondary, size: 13.5),
+            if (!compact) const SizedBox(width: 5),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: palette.labelPrimary,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (!compact) const SizedBox(width: 4),
+            if (!compact)
+              Icon(
+                CupertinoIcons.chevron_down,
+                color: palette.labelSecondary,
+                size: 11.5,
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!absorbTap) return pill;
     return ApplePressableScale(
       pressedScale: 0.93,
       pressedOpacity: 0.86,
       onTap: onTap,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 176),
-        child: LiquidGlass(
-          borderRadius: 999,
-          elevated: false,
-          rimStrength: 0.9,
-          tint: palette.isDark
-              ? const Color(0x281E1E24)
-              : const Color(0xCCFFFFFF),
-          padding: EdgeInsets.symmetric(
-            horizontal: compact ? 8 : 12,
-            vertical: 8.5,
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (!compact || label.isEmpty)
-                Icon(icon, color: palette.labelSecondary, size: 13.5),
-              if (!compact) const SizedBox(width: 5),
-              Flexible(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: palette.labelPrimary,
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              if (!compact) const SizedBox(width: 4),
-              if (!compact)
-                Icon(
-                  CupertinoIcons.chevron_down,
-                  color: palette.labelSecondary,
-                  size: 11.5,
-                ),
-            ],
-          ),
-        ),
-      ),
+      child: pill,
     );
   }
   Widget _buildHeroShowcaseCard(
@@ -5994,9 +6968,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               for (final genre in extraGenres)
                 _buildMiniFilterChip(
                   label: genre,
-                  selected: _filterGenreLabel == genre,
+                  selected: _filterSubCategoryId.isEmpty &&
+                      _filterGenreLabel == genre,
                   onTap: () {
                     setState(() {
+                      _filterSubCategoryId = '';
                       _filterGenreLabel =
                           _filterGenreLabel == genre ? '' : genre;
                     });
@@ -9334,6 +10310,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         padding: const EdgeInsets.symmetric(horizontal: 8),
         minSize: 28,
         onPressed: () async {
+          if (widget.storage.getWatchHistory().isEmpty) {
+            if (context.mounted) Navigator.of(context).pop();
+            return;
+          }
+          if (_isIosNativeFlow) {
+            final ok = await _confirmIosDestructiveAction(
+              context,
+              title: '清空全部观看历史？',
+              message: '清空后将移除所有观看进度，收藏片单与订阅配置会保留。',
+              confirmLabel: '清空全部',
+            );
+            if (!ok || !mounted) return;
+          }
           await widget.storage.clearWatchHistory();
           if (mounted) setState(() {});
           if (context.mounted) Navigator.of(context).pop();
@@ -9416,6 +10405,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       );
                       setSheetState(() {});
                       if (mounted) setState(() {});
+                      _showIosUndoHistoryBanner(
+                        ctx,
+                        h,
+                        onRestored: () {
+                          if (ctx.mounted) setSheetState(() {});
+                        },
+                      );
                     },
                   );
                 },
@@ -9518,8 +10514,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     padding: EdgeInsets.zero,
                     minSize: 28,
                     onPressed: () async {
+                      if (_isIosNativeFlow) {
+                        final ok = await _confirmIosDestructiveAction(
+                          context,
+                          title: '清空全部观看历史？',
+                          message: '清空后将移除所有观看进度，收藏片单与订阅配置会保留。',
+                          confirmLabel: '清空记录',
+                        );
+                        if (!ok || !mounted) return;
+                      }
                       await widget.storage.clearWatchHistory();
-                      setState(() {});
+                      if (mounted) setState(() {});
                     },
                     child: const Text(
                       '清空记录',
@@ -9755,6 +10760,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                       h.id,
                                     );
                                     if (mounted) setState(() {});
+                                    if (ctx.mounted) {
+                                      _showIosUndoHistoryBanner(ctx, h);
+                                    }
                                   },
                                 );
                               },
@@ -10120,6 +11128,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   Widget _buildSettingsQuickActionRow({
+    Key? key,
     required IconData icon,
     required Color iconBgColor,
     required String title,
@@ -10129,6 +11138,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     VoidCallback? onTap,
   }) {
     final rowContent = ConstrainedBox(
+      key: onTap == null ? key : null,
       constraints: const BoxConstraints(minHeight: 58),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
@@ -10230,6 +11240,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     return Material(
       color: Colors.transparent,
       child: InkWell(
+        key: key,
         onTap: onTap,
         highlightColor: Colors.white.withValues(alpha: 0.08),
         splashColor: Colors.white.withValues(alpha: 0.04),
@@ -10438,6 +11449,47 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       trailingText: '重看',
                       onTap: () => _openOnboardingRoute(isReplay: true),
                     ),
+                ],
+              ),
+              const SizedBox(height: 22),
+              AppleGroupedSection(
+                header: '联系反馈与官方交流',
+                footer: OfficialChannelInfo.antiTamperWarning,
+                children: [
+                  Builder(
+                    builder: (rowCtx) => _buildSettingsQuickActionRow(
+                      key: const ValueKey('settings-author-socials'),
+                      icon: CupertinoIcons.person_crop_circle_badge_checkmark,
+                      iconBgColor: AppleColors.systemPink,
+                      title: '联系反馈作者（各社媒账号名）',
+                      subtitle: OfficialChannelInfo.authorSocialSummary,
+                      trailingText: '复制',
+                      onTap: () =>
+                          _copyAuthorSocialName(originContext: rowCtx),
+                    ),
+                  ),
+                  Builder(
+                    builder: (rowCtx) => _buildSettingsQuickActionRow(
+                      key: const ValueKey('settings-official-community'),
+                      icon: CupertinoIcons.chat_bubble_2_fill,
+                      iconBgColor: AppleColors.systemGreen,
+                      title: '官网交流群',
+                      subtitle: OfficialChannelInfo.officialCommunityUrl,
+                      trailingText: '打开官网',
+                      onTap: () =>
+                          _openOfficialCommunityLink(originContext: rowCtx),
+                    ),
+                  ),
+                  _buildSettingsQuickActionRow(
+                    key: const ValueKey('settings-official-notice'),
+                    icon: CupertinoIcons.shield_lefthalf_fill,
+                    iconBgColor: AppleColors.systemOrange,
+                    title: '官方渠道安全声明',
+                    subtitle:
+                        '认准 Marco 官网 ${OfficialChannelInfo.officialWebsiteDisplay}',
+                    trailingText: '查看',
+                    onTap: _openOfficialNoticeDialogFromSettings,
+                  ),
                 ],
               ),
             ],
@@ -11010,7 +12062,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'episodes',
             '倍速与选集',
-            '起播倍速、剧集排序、连播与时钟显示',
+            (!kIsWeb &&
+                    defaultTargetPlatform == TargetPlatform.iOS &&
+                    !OhosRuntime.isOhos)
+                ? '起播倍速、连播与时钟显示'
+                : '起播倍速、剧集排序、连播与时钟显示',
             CupertinoIcons.speedometer,
             AppleColors.systemOrange,
             trailingText: speedLabel,
@@ -11027,12 +12083,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ],
                 storage.setPlaySpeed,
               ),
-              choices(
-                '剧集排序',
-                storage.episodesDescending,
-                const [(false, '正序'), (true, '倒序')],
-                storage.setEpisodesDescending,
-              ),
+              if (kIsWeb ||
+                  defaultTargetPlatform != TargetPlatform.iOS ||
+                  OhosRuntime.isOhos)
+                choices(
+                  '剧集排序',
+                  storage.episodesDescending,
+                  const [(false, '正序'), (true, '倒序')],
+                  storage.setEpisodesDescending,
+                ),
               IosSettingsGroup(
                 header: '连续播放与时钟',
                 children: [
@@ -11317,7 +12376,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       SettingsPane(
         'about',
         '关于与更新',
-        '版本信息、更新检查与脱敏诊断日志',
+        '版本信息、联系反馈（${OfficialChannelInfo.authorSocialName}）、官网交流群与更新检查',
         CupertinoIcons.info_circle_fill,
         AppleColors.systemIndigo,
         sectionGroup: 'about',
@@ -11354,6 +12413,48 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   showChevron: true,
                   onTap: () => _openOnboardingRoute(isReplay: true),
                 ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          IosSettingsGroup(
+            header: '联系反馈与官方交流',
+            footer: OfficialChannelInfo.antiTamperWarning,
+            dividerIndent: 18,
+            children: [
+              Builder(
+                builder: (rowCtx) => IosSettingsRow(
+                  key: const ValueKey('ios-settings-author-socials'),
+                  icon: CupertinoIcons.person_crop_circle_badge_checkmark,
+                  iconColor: AppleColors.systemPink,
+                  title: '联系反馈作者（各社媒账号名）',
+                  subtitle: OfficialChannelInfo.authorSocialSummary,
+                  subtitleMaxLines: 2,
+                  trailingText: '复制',
+                  onTap: () => _copyAuthorSocialName(originContext: rowCtx),
+                ),
+              ),
+              Builder(
+                builder: (rowCtx) => IosSettingsRow(
+                  key: const ValueKey('ios-settings-official-community'),
+                  icon: CupertinoIcons.chat_bubble_2_fill,
+                  iconColor: AppleColors.systemGreen,
+                  title: '官网交流群',
+                  subtitle: OfficialChannelInfo.officialCommunityUrl,
+                  showChevron: true,
+                  onTap: () =>
+                      _openOfficialCommunityLink(originContext: rowCtx),
+                ),
+              ),
+              IosSettingsRow(
+                key: const ValueKey('ios-settings-official-notice'),
+                icon: CupertinoIcons.shield_lefthalf_fill,
+                iconColor: AppleColors.systemOrange,
+                title: '官方渠道安全声明',
+                subtitle:
+                    '认准官网 ${OfficialChannelInfo.officialWebsiteDisplay}',
+                showChevron: true,
+                onTap: _openOfficialNoticeDialogFromSettings,
+              ),
             ],
           ),
           const SizedBox(height: 24),
@@ -12987,7 +14088,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Apple 影院级预设背景',
+                  defaultTargetPlatform == TargetPlatform.iOS
+                      ? '预设背景'
+                      : 'Apple 影院级预设背景',
                   style: TextStyle(
                     color: ApplePalette.of(context).labelSecondary,
                     fontSize: 12.5,
@@ -13238,7 +14341,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                   SizedBox(height: 6),
                   Text(
-                    '支持同时导入多个 VOD / M3U / JSON 订阅地址，或一键从剪贴板读取并按分组归类管理。',
+                    isIos
+                        ? '支持同时导入多个 VOD / M3U / JSON 订阅地址，并按分组归类管理。'
+                        : '支持同时导入多个 VOD / M3U / JSON 订阅地址，或一键从剪贴板读取并按分组归类管理。',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: ApplePalette.of(context).labelSecondary,
@@ -13268,20 +14373,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           }
                         },
                       ),
-                      AppleCapsuleButton(
-                        label: '从剪贴板导入',
-                        icon: CupertinoIcons.doc_on_clipboard,
-                        compact: true,
-                        onPressed: () async {
-                          if (isIos) {
-                            await _quickImportFromClipboard();
-                            if (ctx.mounted) setSheetState(() {});
-                          } else {
+                      if (!isIos)
+                        AppleCapsuleButton(
+                          label: '从剪贴板导入',
+                          icon: CupertinoIcons.doc_on_clipboard,
+                          compact: true,
+                          onPressed: () async {
                             Navigator.of(ctx).pop();
                             _quickImportFromClipboard();
-                          }
-                        },
-                      ),
+                          },
+                        ),
                     ],
                   ),
                 ],
@@ -13298,7 +14399,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             children: [
               if (isIos) ...[
                 IosSettingsGroup(
-                  header: '快捷导入',
+                  header: '添加订阅',
                   children: [
                     IosSettingsRow(
                       icon: CupertinoIcons.plus_app_fill,
@@ -13307,16 +14408,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       showChevron: true,
                       onTap: () async {
                         await _showImportConfigDialog(iosBackLabel: '订阅管理');
-                        if (ctx.mounted) setSheetState(() {});
-                      },
-                    ),
-                    IosSettingsRow(
-                      icon: CupertinoIcons.doc_on_clipboard_fill,
-                      iconColor: AppleColors.systemTeal,
-                      title: '从剪贴板快速导入',
-                      showChevron: true,
-                      onTap: () async {
-                        await _quickImportFromClipboard();
                         if (ctx.mounted) setSheetState(() {});
                       },
                     ),
@@ -13408,6 +14499,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             padding: const EdgeInsets.only(left: 6),
                             minSize: 28,
                             onPressed: () async {
+                              if (_isIosNativeFlow) {
+                                final ok = await _confirmIosDestructiveAction(
+                                  ctx,
+                                  title: '删除订阅「${sub.name}」？',
+                                  message:
+                                      '删除后将移除该订阅下的片源与直播频道，已保存的收藏与观看历史会保留。',
+                                  confirmLabel: '删除',
+                                );
+                                if (!ok || !mounted) return;
+                              }
                               try {
                                 await widget.storage.removeSubscription(sub.id);
                                 if (!mounted) return;
@@ -15774,7 +16875,7 @@ class _IosBackupRestorePanelState extends State<_IosBackupRestorePanel> {
                   if (!mounted) return;
                   setState(() => _errorText = null);
                   widget.onRestored();
-                  widget.onNotice('恢复成功', '已从备份文本恢复订阅源、收藏与偏好设置。');
+                  widget.onNotice('恢复成功', '已从备份文本恢复订阅源、收藏、观看历史与偏好设置。');
                 } catch (e) {
                   if (mounted) {
                     setState(() => _errorText = '恢复备份失败：$e');

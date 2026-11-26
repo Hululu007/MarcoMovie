@@ -363,10 +363,10 @@ void main() {
         await tester.pump(const Duration(milliseconds: 900));
 
         expect(find.byKey(const ValueKey('add-resource-library-hub')), findsOneWidget);
-        expect(find.text('文件系统'), findsOneWidget);
         expect(find.text('媒体服务器'), findsOneWidget);
-        expect(find.text('订阅与手动导入'), findsOneWidget);
-        expect(find.text('网盘与云库'), findsOneWidget);
+        expect(find.text('网络存储'), findsOneWidget);
+        expect(find.text('个人网盘'), findsOneWidget);
+        expect(find.text('本机与订阅'), findsOneWidget);
         expect(find.byKey(const ValueKey('add-lib-tile-webdav')), findsOneWidget);
         expect(find.byKey(const ValueKey('add-lib-tile-smb')), findsOneWidget);
         expect(find.byKey(const ValueKey('add-lib-tile-emby')), findsOneWidget);
@@ -374,6 +374,7 @@ void main() {
         expect(find.byKey(const ValueKey('add-lib-tile-plex')), findsOneWidget);
         expect(find.byKey(const ValueKey('add-lib-tile-alistNas')), findsOneWidget);
         expect(find.byKey(const ValueKey('add-lib-tile-manualInput')), findsOneWidget);
+        expect(find.text('剪贴板快导'), findsNothing);
 
         // Open manual subscription form and verify crisp group pill buttons
         await tester.tap(find.byKey(const ValueKey('add-lib-tile-manualInput')));

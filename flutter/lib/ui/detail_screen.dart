@@ -5,8 +5,9 @@ import 'dart:ui' show ImageFilter;
 import 'dart:ui' as ui show FragmentProgram, Image;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, visibleForTesting;
+    show TargetPlatform, defaultTargetPlatform, kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter/scheduler.dart' show SchedulerPhase;
 import 'package:flutter/services.dart' show HapticFeedback, SystemUiOverlayStyle;
 import '../core/cms_client.dart';
@@ -61,6 +62,16 @@ class DetailScreen extends StatefulWidget {
     int resumeMs,
   )? debugPlayerBuilder;
   @visibleForTesting
+  final Widget Function(
+    BuildContext context,
+    CmsSite site,
+    CmsVideo video,
+    int lineIndex,
+    int episodeIndex,
+    int resumeMs,
+    ValueChanged<PlayerPlaybackConfirmation> onPlaybackConfirmed,
+  )? debugPlayerWithConfirmationBuilder;
+  @visibleForTesting
   final BackdropImageCapturer? debugTransitionCapturer;
   @visibleForTesting
   final ui.FragmentProgram? debugTransitionShaderProgram;
@@ -73,6 +84,7 @@ class DetailScreen extends StatefulWidget {
     required this.client,
     required this.storage,
     this.debugPlayerBuilder,
+    this.debugPlayerWithConfirmationBuilder,
     this.debugTransitionCapturer,
     this.debugTransitionShaderProgram,
     this.debugOnTransitionModeResolved,
@@ -204,6 +216,57 @@ class _DetailScreenState extends State<DetailScreen> {
   final ScrollController _quickEpisodesScrollController = ScrollController();
   final ScrollController _previewCardsScrollController = ScrollController();
   final ScrollController _pageRangeScrollController = ScrollController();
+
+  // iOS episode strip state: strictly separates confirmed playing episode from
+  // user's temporary browsing selection and guards two-row identity sync.
+  // Backed by a ValueNotifier so tapping a circle or scrubbing cards only
+  // rebuilds the affected circle/card border instead of the entire DetailScreen.
+  PlayerPlaybackConfirmation? _confirmedPlayback;
+  final ValueNotifier<
+      ({
+        String lineId,
+        String lineName,
+        String episodeUrl,
+        String episodeName,
+        int originalIndex,
+      })?> _browsingEpisodeNotifier = ValueNotifier(null);
+  ({
+    String lineId,
+    String lineName,
+    String episodeUrl,
+    String episodeName,
+    int originalIndex,
+  })? get _browsingEpisode => _browsingEpisodeNotifier.value;
+  set _browsingEpisode(
+    ({
+      String lineId,
+      String lineName,
+      String episodeUrl,
+      String episodeName,
+      int originalIndex,
+    })? value,
+  ) {
+    _browsingEpisodeNotifier.value = value;
+  }
+  int _programmaticCardScrollGuard = 0;
+  final Map<int, GlobalKey> _circleSlotKeys = <int, GlobalKey>{};
+  bool _pendingPostPopSync = false;
+  WatchHistoryEntry? _bookmarkBeforeLastPlayer;
+  PlayerPlaybackConfirmation? _confirmedBeforeLastPlayer;
+
+  bool get _isIosDetail =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      !OhosRuntime.isOhos;
+
+  static const double _kEpisodeCardWidth = 226.0;
+  static const double _kEpisodeCardGap = 14.0;
+  static const double _kEpisodeCardStride = _kEpisodeCardWidth + _kEpisodeCardGap;
+  static const double _kEpisodeCircleMinWidth = 44.0;
+  static const double _kEpisodeCircleGap = 8.0;
+  static const double _kEpisodeCircleApproxStride =
+      _kEpisodeCircleMinWidth + _kEpisodeCircleGap;
+  bool _initialEpisodeAligned = false;
   Color? _posterAmbientColor;
   String _externalSynopsis = '';
   double? _resolvedDoubanScore;
@@ -343,7 +406,7 @@ class _DetailScreenState extends State<DetailScreen> {
         video: _detailSeedVideo,
       ),
     ];
-    _descending = widget.storage.episodesDescending;
+    _descending = _isIosDetail ? false : widget.storage.episodesDescending;
     if (!OhosRuntime.isOhos) {
       unawaited(MediaBadges.ensureInitialized().then((_) {
         if (mounted) setState(() {});
@@ -481,6 +544,7 @@ class _DetailScreenState extends State<DetailScreen> {
     _scrollOffset.dispose();
     _pullOverscroll.dispose();
     _pullRefreshPhase.dispose();
+    _browsingEpisodeNotifier.dispose();
     _seasonsScrollController.dispose();
     _quickEpisodesScrollController.dispose();
     _previewCardsScrollController.dispose();
@@ -489,7 +553,19 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   void _onWatchHistoryChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    if (_isIosDetail && _pendingPostPopSync) {
+      final synced = _syncAfterPlayerReturn(
+        bookmarkBefore: _bookmarkBeforeLastPlayer,
+        confirmedBefore: _confirmedBeforeLastPlayer,
+      );
+      if (synced) {
+        _bookmarkBeforeLastPlayer = _findBookmark();
+        _confirmedBeforeLastPlayer = _confirmedPlayback;
+        return;
+      }
+    }
+    setState(() {});
   }
 
   void _cancelDetailWork() {
@@ -712,6 +788,7 @@ class _DetailScreenState extends State<DetailScreen> {
     _manualLineSelection = _captureLineIdentity(_video.lines, index);
     _selectedPage = 0;
     _selectedInLineSeason = null;
+    _browsingEpisode = null;
   }
 
   int? _matchPlayableLineByName(
@@ -1088,11 +1165,27 @@ class _DetailScreenState extends State<DetailScreen> {
       } else {
         final immediateBookmark = _findBookmark(targetVideo);
         if (immediateBookmark != null) {
-          final found = _matchPlayableLineByName(
-            targetVideo.lines,
-            immediateBookmark.line,
-            siteOverride: targetSite,
-          );
+          final strictLine = _isIosDetail
+              ? _matchLineIndexStrict(
+                  targetVideo.lines,
+                  lineId: immediateBookmark.lineId,
+                  lineName: immediateBookmark.line,
+                  episodeUrl: immediateBookmark.effectiveMediaId,
+                  episodeName: immediateBookmark.episode,
+                )
+              : null;
+          final found = (strictLine != null &&
+                  _lineUnavailableReason(
+                        targetVideo.lines[strictLine],
+                        siteOverride: targetSite,
+                      ) ==
+                      null)
+              ? strictLine
+              : _matchPlayableLineByName(
+                  targetVideo.lines,
+                  immediateBookmark.line,
+                  siteOverride: targetSite,
+                );
           initialImmediateLine = found ??
               _pickRecommendedPlayableLineIndex(
                 targetVideo.lines,
@@ -1106,16 +1199,37 @@ class _DetailScreenState extends State<DetailScreen> {
         }
       }
     }
+    int? immediateAlignSlot;
     setState(() {
       _loading = !(showImmediately || keepExistingVisible);
       if (!forceRefresh && showImmediately) {
         _selectedLine = initialImmediateLine;
+        if (_isIosDetail &&
+            _browsingEpisode == null &&
+            targetVideo.lines.isNotEmpty) {
+          final safeLine =
+              initialImmediateLine.clamp(0, targetVideo.lines.length - 1);
+          final target = _resolveSeasonPageAndSlotForPlayedEpisode(
+            video: targetVideo,
+            lineIdx: safeLine,
+            bookmark: _findBookmark(targetVideo),
+          );
+          if (target != null) {
+            _selectedInLineSeason = target.inLineSeason;
+            _selectedPage = target.page;
+            immediateAlignSlot = target.slotInPage;
+          }
+        }
       }
       _error = null;
       _errorCause = null;
       _curatedUnavailableMessage = null;
       _discoveringSeasons = false;
     });
+    if (_isIosDetail && immediateAlignSlot != null && !_initialEpisodeAligned) {
+      _initialEpisodeAligned = true;
+      _scheduleAlignEpisodeStripsToSlot(immediateAlignSlot!, animate: false);
+    }
     if (CuratedDiscoveryService.isCuratedSite(targetSite)) {
       await _resolveCuratedFromUserSources(
         targetVideo: targetVideo,
@@ -1198,11 +1312,27 @@ class _DetailScreenState extends State<DetailScreen> {
           }
           final bookmark = _findBookmark(detailed);
           if (bookmark != null) {
-            final found = _matchPlayableLineByName(
-              detailed.lines,
-              bookmark.line,
-              siteOverride: owner,
-            );
+            final strictLine = _isIosDetail
+                ? _matchLineIndexStrict(
+                    detailed.lines,
+                    lineId: bookmark.lineId,
+                    lineName: bookmark.line,
+                    episodeUrl: bookmark.effectiveMediaId,
+                    episodeName: bookmark.episode,
+                  )
+                : null;
+            final found = (strictLine != null &&
+                    _lineUnavailableReason(
+                          detailed.lines[strictLine],
+                          siteOverride: owner,
+                        ) ==
+                        null)
+                ? strictLine
+                : _matchPlayableLineByName(
+                    detailed.lines,
+                    bookmark.line,
+                    siteOverride: owner,
+                  );
             initialLine = found ??
                 _pickRecommendedPlayableLineIndex(
                   detailed.lines,
@@ -1220,11 +1350,40 @@ class _DetailScreenState extends State<DetailScreen> {
           _manualLineSelection!.videoId == detailed.id) {
         _manualLineSelection = null;
       }
+      int? alignedSlotAfterLoad;
       setState(() {
         _video = detailed;
         _selectedLine = initialLine;
         _loading = false;
+        if (_isIosDetail &&
+            !forceRefresh &&
+            _browsingEpisode == null &&
+            detailed.lines.isNotEmpty) {
+          final safeLine = initialLine.clamp(0, detailed.lines.length - 1);
+          final initLine = detailed.lines[safeLine];
+          final target = _resolveSeasonPageAndSlotForPlayedEpisode(
+            video: detailed,
+            lineIdx: safeLine,
+            bookmark: _findBookmark(detailed),
+          );
+          if (target != null) {
+            _selectedInLineSeason = target.inLineSeason;
+            _selectedPage = target.page;
+            alignedSlotAfterLoad = target.slotInPage;
+          } else {
+            // Keep selected page valid for active line if episode count shrank
+            final initActive = _activeEpisodeIndicesFor(initLine);
+            final maxPage = initActive.isEmpty
+                ? 0
+                : (initActive.length - 1) ~/ CmsParser.episodePageSize;
+            if (_selectedPage > maxPage) _selectedPage = maxPage;
+          }
+        }
       });
+      if (_isIosDetail && alignedSlotAfterLoad != null && !_initialEpisodeAligned) {
+        _initialEpisodeAligned = true;
+        _scheduleAlignEpisodeStripsToSlot(alignedSlotAfterLoad!, animate: false);
+      }
       if (manualSelectionLost) {
         _toast('原播放线路已变更或下架，请重新选择');
       }
@@ -1570,6 +1729,11 @@ class _DetailScreenState extends State<DetailScreen> {
       _manualLineSelection = null;
       _selectedPage = 0;
       _selectedInLineSeason = null;
+      _browsingEpisode = null;
+      _confirmedPlayback = null;
+      if (_isIosDetail) {
+        _descending = false;
+      }
       _externalSynopsis = '';
       _seedCachedExternalFields();
       _isFavorite = widget.storage.isFavorite(
@@ -1799,8 +1963,550 @@ class _DetailScreenState extends State<DetailScreen> {
     return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
+  void _handlePlayerPlaybackConfirmed(PlayerPlaybackConfirmation info) {
+    if (!mounted) return;
+    if (info.siteKey != _activeSite.key || info.videoId != _video.id) return;
+    setState(() {
+      _confirmedPlayback = info;
+      _browsingEpisode = null;
+    });
+  }
+
+  /// Strictly resolves the unique line index in [lines] that matches an episode
+  /// record. Prefers stable [lineId], then exact [episodeUrl], and only falls
+  /// back to [lineName] when that label is unique across [lines]. Returns `null`
+  /// when ambiguous or missing (never guesses across duplicate-named lines).
+  int? _matchLineIndexStrict(
+    List<CmsLine> lines, {
+    required String lineId,
+    required String lineName,
+    required String episodeUrl,
+    required String episodeName,
+  }) {
+    if (lines.isEmpty) return null;
+    final cleanId = lineId.trim();
+    final cleanUrl = episodeUrl.trim();
+    final cleanName = lineName.trim();
+
+    if (cleanId.isNotEmpty) {
+      final idMatches = <int>[
+        for (int i = 0; i < lines.length; i++)
+          if (lines[i].id.trim() == cleanId) i,
+      ];
+      if (idMatches.length == 1) return idMatches.first;
+      if (idMatches.length > 1 && cleanUrl.isNotEmpty) {
+        final narrowed = idMatches
+            .where((i) => lines[i].episodes.any((e) =>
+                WatchHistoryEntry.matchesEpisodeUrl(cleanUrl, e.url)))
+            .toList();
+        if (narrowed.length == 1) return narrowed.first;
+      }
+      return null;
+    }
+
+    if (cleanUrl.isNotEmpty) {
+      final urlMatches = <int>[
+        for (int i = 0; i < lines.length; i++)
+          if ((cleanName.isEmpty || lines[i].name.trim() == cleanName) &&
+              lines[i].episodes.any((e) =>
+                  WatchHistoryEntry.matchesEpisodeUrl(cleanUrl, e.url)))
+            i,
+      ];
+      if (urlMatches.length == 1) return urlMatches.first;
+      return null;
+    }
+
+    if (cleanName.isEmpty) return null;
+    final nameMatches = <int>[
+      for (int i = 0; i < lines.length; i++)
+        if (lines[i].name.trim() == cleanName) i,
+    ];
+    // Legacy bookmark without lineId/episodeUrl: ONLY unambiguous if the line
+    // name itself is unique within this video. Duplicate-named lines cannot be
+    // disambiguated safely, so return null instead of guessing.
+    if (nameMatches.length == 1) return nameMatches.first;
+    return null;
+  }
+
+  /// Strictly resolves an episode raw index within [line] without guessing:
+  /// - When [episodeUrl] is present, matches ONLY by exact URL (if the played
+  ///   file was deleted on refresh, NEVER falls back to another file with the
+  ///   same display name!).
+  /// - When [episodeUrl] is absent (legacy bookmark), matches by [episodeName]
+  ///   ONLY if that name is unique within [line].
+  /// - Never guesses from a bare index when identity is missing or ambiguous.
+  int? _matchEpisodeIndexStrict(
+    CmsLine line,
+    Set<int> activeSet, {
+    required String episodeUrl,
+    required String episodeName,
+    int? preferredIndex,
+  }) {
+    final cleanUrl = episodeUrl.trim();
+    final cleanName = episodeName.trim();
+
+    if (cleanUrl.isNotEmpty) {
+      final urlMatches = <int>[
+        for (int i = 0; i < line.episodes.length; i++)
+          if (WatchHistoryEntry.matchesEpisodeUrl(cleanUrl, line.episodes[i].url)) i,
+      ];
+      if (urlMatches.isEmpty) return null;
+      if (urlMatches.length == 1) {
+        return activeSet.contains(urlMatches.first) ? urlMatches.first : null;
+      }
+      if (preferredIndex != null &&
+          urlMatches.contains(preferredIndex) &&
+          activeSet.contains(preferredIndex) &&
+          (cleanName.isEmpty ||
+              line.episodes[preferredIndex].name.trim() == cleanName)) {
+        return preferredIndex;
+      }
+      if (cleanName.isNotEmpty) {
+        final narrowed = urlMatches
+            .where((i) => line.episodes[i].name.trim() == cleanName)
+            .toList();
+        if (narrowed.length == 1 && activeSet.contains(narrowed.first)) {
+          return narrowed.first;
+        }
+      }
+      return null;
+    }
+
+    if (cleanName.isNotEmpty) {
+      final nameMatches = <int>[
+        for (int i = 0; i < line.episodes.length; i++)
+          if (line.episodes[i].name.trim() == cleanName) i,
+      ];
+      if (nameMatches.length == 1 && activeSet.contains(nameMatches.first)) {
+        return nameMatches.first;
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  /// Resolves the confirmed actually-playing episode raw index within [line],
+  /// matching strictly by stable line + file identity without guessing across
+  /// duplicate-named lines or duplicate-named files.
+  int? _resolvePlayedEpisodeIndexForLine(
+    CmsLine line,
+    int lineIdx,
+    List<int> activeIndices,
+    WatchHistoryEntry? bookmark, {
+    CmsVideo? video,
+  }) {
+    final targetVideo = video ?? _video;
+    final lines = targetVideo.lines;
+    final activeSet = activeIndices.toSet();
+
+    // 1. Prefer live confirmed playback from PlayerScreen in this Detail session
+    final confirmed = _confirmedPlayback;
+    if (confirmed != null &&
+        confirmed.siteKey == _activeSite.key &&
+        confirmed.videoId == _video.id) {
+      final matchedLine = _matchLineIndexStrict(
+        lines,
+        lineId: confirmed.lineId,
+        lineName: confirmed.lineName,
+        episodeUrl: confirmed.episodeUrl,
+        episodeName: confirmed.episodeName,
+      );
+      if (matchedLine != lineIdx) return null;
+      return _matchEpisodeIndexStrict(
+        line,
+        activeSet,
+        episodeUrl: confirmed.episodeUrl,
+        episodeName: confirmed.episodeName,
+        preferredIndex: confirmed.episodeIndex,
+      );
+    }
+
+    // 2. Otherwise match persisted WatchHistory bookmark strictly by identity
+    if (bookmark == null) return null;
+    final target = _iosBookmarkTarget(targetVideo, bookmark);
+    return target != null && target.$1 == lineIdx && activeSet.contains(target.$2)
+        ? target.$2
+        : null;
+  }
+
+  (int, int)? _iosBookmarkTarget(CmsVideo video, WatchHistoryEntry bookmark) =>
+      WoggSource.supports(_activeSite)
+          ? WoggSource.resolveCachedBookmarkTarget(_activeSite, video, bookmark)
+          : resolveIosWatchHistoryTarget(video, bookmark);
+
+  /// Resolves the season, pagination page, and page-local slot for the played
+  /// episode on [lines[lineIdx]] so initial load / resume / sort toggle brings
+  /// the exact circle and card into viewport automatically.
+  ({int? inLineSeason, int page, int slotInPage, int rawIdx})?
+      _resolveSeasonPageAndSlotForPlayedEpisode({
+    required CmsVideo video,
+    required int lineIdx,
+    required WatchHistoryEntry? bookmark,
+    bool? descendingOverride,
+  }) {
+    if (lineIdx < 0 || lineIdx >= video.lines.length) return null;
+    final line = video.lines[lineIdx];
+    final descending = descendingOverride ?? _descending;
+    final inLineSeasons = CmsParser.extractInLineSeasons(line.episodes);
+    final playedRawIdx = _resolvePlayedEpisodeIndexForLine(
+      line,
+      lineIdx,
+      List.generate(line.episodes.length, (i) => i),
+      bookmark,
+      video: video,
+    );
+    if (playedRawIdx == null) return null;
+    final resolvedSeason = inLineSeasons
+        .where((season) => season.episodeIndexes.contains(playedRawIdx))
+        .firstOrNull?.seasonNumber;
+    final activeIndices = _activeEpisodeIndicesFor(line, seasonNumber: resolvedSeason);
+    final posInActive = activeIndices.indexOf(playedRawIdx);
+    if (posInActive < 0) return null;
+    final total = activeIndices.length;
+    final visualIdx = descending ? (total - 1 - posInActive) : posInActive;
+    return (
+      inLineSeason: resolvedSeason,
+      page: visualIdx ~/ CmsParser.episodePageSize,
+      slotInPage: visualIdx % CmsParser.episodePageSize,
+      rawIdx: playedRawIdx,
+    );
+  }
+
+  /// Resolves the temporary browsing episode raw index within [line] by
+  /// strict line + episode identity.
+  int? _resolveBrowsingEpisodeIndexForLine(
+    CmsLine line,
+    int lineIdx,
+    List<int> activeIndices,
+  ) {
+    final b = _browsingEpisode;
+    if (b == null) return null;
+    final matchedLine = _matchLineIndexStrict(
+      _video.lines,
+      lineId: b.lineId,
+      lineName: b.lineName,
+      episodeUrl: b.episodeUrl,
+      episodeName: b.episodeName,
+    );
+    if (matchedLine != lineIdx) return null;
+    return _matchEpisodeIndexStrict(
+      line,
+      activeIndices.toSet(),
+      episodeUrl: b.episodeUrl,
+      episodeName: b.episodeName,
+      preferredIndex: b.originalIndex,
+    );
+  }
+
+  /// Scrolls ONLY the horizontal episode cards strip so the card at page-local
+  /// [slotIdx] is cleanly visible, without triggering playback or vertical scroll.
+  void _scrollEpisodeCardsToSlot(int slotIdx, {bool animate = true}) {
+    if (!_previewCardsScrollController.hasClients) return;
+    final pos = _previewCardsScrollController.position;
+    final desired = (slotIdx * _kEpisodeCardStride)
+        .clamp(pos.minScrollExtent, pos.maxScrollExtent);
+    if ((pos.pixels - desired).abs() < 1.0) return;
+    _programmaticCardScrollGuard++;
+    if (!animate) {
+      _previewCardsScrollController.jumpTo(desired);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_programmaticCardScrollGuard > 0) _programmaticCardScrollGuard--;
+      });
+      return;
+    }
+    unawaited(
+      _previewCardsScrollController
+          .animateTo(
+            desired,
+            duration: const Duration(milliseconds: 240),
+            curve: Curves.easeOutCubic,
+          )
+          .whenComplete(() {
+        if (_programmaticCardScrollGuard > 0) _programmaticCardScrollGuard--;
+      }),
+    );
+  }
+
+  /// Computes the exact horizontal offset inside `_quickEpisodesScrollController`
+  /// to center [slotIdx] WITHOUT ever calling `Scrollable.ensureVisible` (which
+  /// could scroll ancestor vertical scroll views).
+  double? _exactHorizontalCircleOffset(int slotIdx) {
+    if (!_quickEpisodesScrollController.hasClients) return null;
+    final ctx = _circleSlotKeys[slotIdx]?.currentContext;
+    if (ctx == null || !ctx.mounted) return null;
+    final ro = ctx.findRenderObject();
+    if (ro == null || !ro.attached) return null;
+    final viewport = RenderAbstractViewport.maybeOf(ro);
+    if (viewport == null) return null;
+    final pos = _quickEpisodesScrollController.position;
+    return viewport
+        .getOffsetToReveal(ro, 0.5)
+        .offset
+        .clamp(pos.minScrollExtent, pos.maxScrollExtent);
+  }
+
+  /// Ensures the top circle at page-local [slotIdx] is centered inside the
+  /// horizontal quick-episode strip ONLY (never moving the outer vertical page).
+  void _ensureEpisodeCircleSlotVisible(int slotIdx, {bool animate = true}) {
+    if (!_quickEpisodesScrollController.hasClients) return;
+    final pos = _quickEpisodesScrollController.position;
+    final exact = _exactHorizontalCircleOffset(slotIdx);
+    if (exact != null) {
+      if ((pos.pixels - exact).abs() < 1.0) return;
+      if (animate) {
+        unawaited(
+          _quickEpisodesScrollController.animateTo(
+            exact,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      } else {
+        _quickEpisodesScrollController.jumpTo(exact);
+      }
+      return;
+    }
+    final approx = (slotIdx * _kEpisodeCircleApproxStride -
+            pos.viewportDimension * 0.45)
+        .clamp(pos.minScrollExtent, pos.maxScrollExtent);
+    if (animate) {
+      unawaited(
+        _quickEpisodesScrollController
+            .animateTo(
+              approx,
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+            )
+            .whenComplete(() {
+          if (!mounted || !_quickEpisodesScrollController.hasClients) return;
+          final refined = _exactHorizontalCircleOffset(slotIdx);
+          if (refined != null &&
+              (_quickEpisodesScrollController.position.pixels - refined).abs() >=
+                  1.0) {
+            unawaited(
+              _quickEpisodesScrollController.animateTo(
+                refined,
+                duration: const Duration(milliseconds: 140),
+                curve: Curves.easeOutCubic,
+              ),
+            );
+          }
+        }),
+      );
+    } else {
+      _quickEpisodesScrollController.jumpTo(approx);
+      // After jumping to approximate offset and building the target circle,
+      // refine horizontally to pixel-exact center in the very next frame.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_quickEpisodesScrollController.hasClients) return;
+        final refined = _exactHorizontalCircleOffset(slotIdx);
+        if (refined != null &&
+            (_quickEpisodesScrollController.position.pixels - refined).abs() >=
+                1.0) {
+          _quickEpisodesScrollController.jumpTo(refined);
+        }
+      });
+    }
+  }
+
+  void _scheduleAlignEpisodeStripsToSlot(int slotInPage, {bool animate = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_quickEpisodesScrollController.hasClients ||
+          !_previewCardsScrollController.hasClients) {
+        // Retry once more after layout completes (e.g. first build after loading).
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _ensureEpisodeCircleSlotVisible(slotInPage, animate: animate);
+          _scrollEpisodeCardsToSlot(slotInPage, animate: animate);
+        });
+        return;
+      }
+      _ensureEpisodeCircleSlotVisible(slotInPage, animate: animate);
+      _scrollEpisodeCardsToSlot(slotInPage, animate: animate);
+    });
+  }
+
+  /// Called when the horizontal episode-cards strip finishes scrolling by user
+  /// gesture: maps the primarily visible card back to its actual episode and
+  /// ensures the matching top number circle stays visible.
+  void _handleEpisodeCardsScrollSettled({
+    required CmsLine line,
+    required List<int> activeIndices,
+    required int pageStart,
+    required int pageLen,
+  }) {
+    if (!mounted ||
+        !_isIosDetail ||
+        _programmaticCardScrollGuard > 0 ||
+        pageLen <= 0 ||
+        !_previewCardsScrollController.hasClients) {
+      return;
+    }
+    _pendingPostPopSync = false;
+    final pos = _previewCardsScrollController.position;
+    final int slotIdx;
+    if (pos.pixels <= pos.minScrollExtent + 12.0) {
+      slotIdx = 0;
+    } else if (pos.maxScrollExtent - pos.pixels <= 12.0) {
+      slotIdx = pageLen - 1;
+    } else {
+      slotIdx = ((pos.pixels + pos.viewportDimension * 0.25) /
+              _kEpisodeCardStride)
+          .floor()
+          .clamp(0, pageLen - 1);
+    }
+    final total = activeIndices.length;
+    final visualIdx = pageStart + slotIdx;
+    if (visualIdx < 0 || visualIdx >= total) return;
+    final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
+    final originalIdx = activeIndices[posIdx];
+    final ep = line.episodes[originalIdx];
+    final nextBrowsing = (
+      lineId: line.id,
+      lineName: line.name,
+      episodeUrl: ep.url,
+      episodeName: ep.name,
+      originalIndex: originalIdx,
+    );
+    if (_browsingEpisode?.episodeUrl != nextBrowsing.episodeUrl ||
+        _browsingEpisode?.episodeName != nextBrowsing.episodeName ||
+        _browsingEpisode?.lineName != nextBrowsing.lineName) {
+      // Update only the localized episode circle / card border listeners without
+      // triggering a full DetailScreen rebuild during horizontal scrolling.
+      _browsingEpisode = nextBrowsing;
+    }
+    _ensureEpisodeCircleSlotVisible(slotIdx);
+  }
+
+  /// Synchronizes Detail page's active line, pagination range (including
+  /// 50/51 & 100/101 boundaries), and two-row scroll visibility to the newly
+  /// confirmed playing episode after returning from Player — while preserving
+  /// the page's temporary [_descending] sort order.
+  /// Returns `true` if a confirmed or bookmark change was applied.
+  bool _syncAfterPlayerReturn({
+    required WatchHistoryEntry? bookmarkBefore,
+    required PlayerPlaybackConfirmation? confirmedBefore,
+  }) {
+    if (!mounted || _video.lines.isEmpty) return false;
+    final bookmarkAfter = _findBookmark();
+    final confirmedAfter = _confirmedPlayback;
+    final confirmedChanged = confirmedAfter != null &&
+        (confirmedBefore == null ||
+            confirmedAfter.lineName != confirmedBefore.lineName ||
+            confirmedAfter.episodeUrl != confirmedBefore.episodeUrl ||
+            confirmedAfter.episodeName != confirmedBefore.episodeName ||
+            confirmedAfter.episodeIndex != confirmedBefore.episodeIndex);
+    final bookmarkChanged = bookmarkAfter != null &&
+        (bookmarkBefore == null ||
+            bookmarkAfter.line != bookmarkBefore.line ||
+            bookmarkAfter.episode != bookmarkBefore.episode ||
+            bookmarkAfter.index != bookmarkBefore.index ||
+            bookmarkAfter.updated != bookmarkBefore.updated);
+
+    if (!confirmedChanged && !bookmarkChanged) {
+      // Playback failed or exited without starting -> preserve existing playing
+      // marker, temporary sort, and browsing scroll untouched.
+      setState(() {});
+      return false;
+    }
+    if (bookmarkChanged && !confirmedChanged) {
+      _confirmedPlayback = null;
+    }
+
+    // If playback happened on another line, switch to that line strictly by identity.
+    var targetLineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
+    final effectiveConfirmed = _confirmedPlayback;
+    final playedLineName =
+        effectiveConfirmed?.lineName ?? bookmarkAfter?.line ?? '';
+    final playedLineId =
+        effectiveConfirmed?.lineId ?? bookmarkAfter?.lineId ?? '';
+    final playedEpUrl =
+        effectiveConfirmed?.episodeUrl ?? bookmarkAfter?.effectiveMediaId ?? '';
+    final playedEpName =
+        effectiveConfirmed?.episodeName ?? bookmarkAfter?.episode ?? '';
+    if (playedLineId.trim().isNotEmpty ||
+        playedEpUrl.trim().isNotEmpty ||
+        playedLineName.trim().isNotEmpty) {
+      final matchedLine = _matchLineIndexStrict(
+        _video.lines,
+        lineId: playedLineId,
+        lineName: playedLineName,
+        episodeUrl: playedEpUrl,
+        episodeName: playedEpName,
+      );
+      if (matchedLine != null) {
+        targetLineIdx = matchedLine;
+      }
+    }
+    final line = _video.lines[targetLineIdx];
+    var targetInLineSeason = _selectedInLineSeason;
+    var activeIndices = _activeEpisodeIndicesFor(line);
+    var playedRawIdx = _resolvePlayedEpisodeIndexForLine(
+      line,
+      targetLineIdx,
+      activeIndices,
+      bookmarkAfter,
+    );
+    if (playedRawIdx == null) {
+      final inLineSeasons = CmsParser.extractInLineSeasons(line.episodes);
+      if (inLineSeasons.length >= 2) {
+        for (final season in inLineSeasons) {
+          final candidate = _resolvePlayedEpisodeIndexForLine(
+            line,
+            targetLineIdx,
+            season.episodeIndexes,
+            bookmarkAfter,
+          );
+          if (candidate != null) {
+            targetInLineSeason = season.seasonNumber;
+            activeIndices = _activeEpisodeIndicesFor(
+              line,
+              seasonNumber: season.seasonNumber,
+            );
+            playedRawIdx = candidate;
+            break;
+          }
+        }
+      }
+    }
+    if (playedRawIdx == null) {
+      setState(() {});
+      return false;
+    }
+
+    final posInActive = activeIndices.indexOf(playedRawIdx);
+    if (posInActive < 0) {
+      setState(() {});
+      return false;
+    }
+    final total = activeIndices.length;
+    final visualIdx = _descending ? (total - 1 - posInActive) : posInActive;
+    final targetPage = visualIdx ~/ CmsParser.episodePageSize;
+    final slotInPage = visualIdx % CmsParser.episodePageSize;
+    final playedEp = line.episodes[playedRawIdx];
+
+    setState(() {
+      _selectedLine = targetLineIdx;
+      _selectedInLineSeason = targetInLineSeason;
+      _selectedPage = targetPage;
+      _browsingEpisode = (
+        lineId: line.id,
+        lineName: line.name,
+        episodeUrl: playedEp.url,
+        episodeName: playedEp.name,
+        originalIndex: playedRawIdx!,
+      );
+    });
+    _scheduleAlignEpisodeStripsToSlot(slotInPage, animate: false);
+    return true;
+  }
+
   Future<void> _openPlayer(int lineIdx, int epIdx, {int? resumeMs}) async {
     if (_loading || _video.lines.isEmpty) return;
+    final bookmarkBeforeOpen = _findBookmark();
+    final confirmedBeforeOpen = _confirmedPlayback;
     final targetSite = _activeSite;
     final targetVideo = _video;
     final safeLine = lineIdx.clamp(0, _video.lines.length - 1);
@@ -1837,7 +2543,16 @@ class _DetailScreenState extends State<DetailScreen> {
             : null;
         final matches = WoggSource.supports(_activeSite)
             ? target?.$1 == safeLine && target?.$2 == safeEp
-            : (bm.line == line.name && bm.index == safeEp) || bm.episode == ep.name;
+            : (_isIosDetail
+                ? _resolvePlayedEpisodeIndexForLine(
+                      line,
+                      safeLine,
+                      List<int>.generate(line.episodes.length, (i) => i),
+                      bm,
+                    ) ==
+                    safeEp
+                : (bm.line == line.name && bm.index == safeEp) ||
+                    bm.episode == ep.name);
         if (matches) {
           effectiveResumeMs = bm.resumePosition;
         }
@@ -1845,6 +2560,18 @@ class _DetailScreenState extends State<DetailScreen> {
     }
     if (!mounted) return;
     Widget buildPlayer(BuildContext routeCtx) {
+      final debugWithConfirm = widget.debugPlayerWithConfirmationBuilder;
+      if (debugWithConfirm != null) {
+        return debugWithConfirm(
+          routeCtx,
+          targetSite,
+          targetVideo,
+          safeLine,
+          safeEp,
+          effectiveResumeMs,
+          _handlePlayerPlaybackConfirmed,
+        );
+      }
       final debugBuilder = widget.debugPlayerBuilder;
       if (debugBuilder != null) {
         return debugBuilder(
@@ -1863,6 +2590,7 @@ class _DetailScreenState extends State<DetailScreen> {
         initialEpisodeIndex: safeEp,
         initialPositionMs: effectiveResumeMs,
         storage: widget.storage,
+        onPlaybackConfirmed: _handlePlayerPlaybackConfirmed,
       );
     }
 
@@ -1919,14 +2647,30 @@ class _DetailScreenState extends State<DetailScreen> {
         }
       }
     }
-    if (mounted) setState(() {});
+    if (mounted) {
+      if (_isIosDetail) {
+        _bookmarkBeforeLastPlayer = bookmarkBeforeOpen;
+        _confirmedBeforeLastPlayer = confirmedBeforeOpen;
+        _syncAfterPlayerReturn(
+          bookmarkBefore: bookmarkBeforeOpen,
+          confirmedBefore: confirmedBeforeOpen,
+        );
+        // Keep post-pop sync active for a deferred PlayerScreen.dispose() flush
+        // (e.g. interactive swipe-back after auto-next); cleared on next manual tap/scroll.
+        _bookmarkBeforeLastPlayer = _findBookmark();
+        _confirmedBeforeLastPlayer = _confirmedPlayback;
+        _pendingPostPopSync = true;
+      } else {
+        setState(() {});
+      }
+    }
   }
 
-  List<int> _activeEpisodeIndicesFor(CmsLine line) {
+  List<int> _activeEpisodeIndicesFor(CmsLine line, {int? seasonNumber}) {
     final scraped = _scrapeLine(line);
     final inLine = CmsParser.extractInLineSeasons(line.episodes);
     if (inLine.length >= 2) {
-      final activeNum = _selectedInLineSeason ?? inLine.first.seasonNumber;
+      final activeNum = seasonNumber ?? _selectedInLineSeason ?? inLine.first.seasonNumber;
       List<int> seasonIndices = inLine.first.episodeIndexes;
       for (final s in inLine) {
         if (s.seasonNumber == activeNum) {
@@ -1946,17 +2690,24 @@ class _DetailScreenState extends State<DetailScreen> {
 
   void _playPrimaryAction(WatchHistoryEntry? bookmark) {
     if (_loading || _video.lines.isEmpty) return;
-    if (bookmark != null && WoggSource.supports(_activeSite)) {
-      final target = WoggSource.resolveCachedBookmarkTarget(_activeSite, _video, bookmark);
-      if (target == null || target.$1 != _selectedLine) {
-        _toast('原观看文件或线路已变更，请重新选择剧集');
+    final safeSelected = _selectedLine.clamp(0, _video.lines.length - 1);
+    if (bookmark != null && (WoggSource.supports(_activeSite) || _isIosDetail)) {
+      final target = _iosBookmarkTarget(_video, bookmark);
+      if (target == null) {
+        _toast('原观看文件或线路已变更，请在下方重新选择剧集');
         return;
       }
-      _openPlayer(target.$1, target.$2, resumeMs: bookmark.resumePosition);
+      if (target.$1 == safeSelected) {
+        _openPlayer(target.$1, target.$2, resumeMs: bookmark.resumePosition);
+        return;
+      }
+      // User explicitly switched to another line: start that line from its first episode.
+      final indices = _activeEpisodeIndicesFor(_video.lines[safeSelected]);
+      final firstEpIdx = indices.isNotEmpty ? indices.first : 0;
+      _openPlayer(safeSelected, firstEpIdx, resumeMs: 0);
       return;
     }
     if (bookmark != null) {
-      final safeSelected = _selectedLine.clamp(0, _video.lines.length - 1);
       final lineIdx = _video.lines[safeSelected].name == bookmark.line
           ? safeSelected
           : (() {
@@ -1977,7 +2728,7 @@ class _DetailScreenState extends State<DetailScreen> {
         resumeMs: bookmark.resumePosition,
       );
     } else {
-      final lineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
+      final lineIdx = safeSelected;
       final indices = _activeEpisodeIndicesFor(_video.lines[lineIdx]);
       final firstEpIdx = indices.isNotEmpty ? indices.first : 0;
       _openPlayer(lineIdx, firstEpIdx, resumeMs: 0);
@@ -2402,6 +3153,14 @@ class _DetailScreenState extends State<DetailScreen> {
     final scraped = _scrapeLine(line);
     final activeIndices = _activeEpisodeIndicesFor(line);
     final total = activeIndices.length;
+    final playedEpIdx = _isIosDetail
+        ? _resolvePlayedEpisodeIndexForLine(
+            line,
+            safeLineIdx,
+            activeIndices,
+            bookmark,
+          )
+        : null;
     showIos27LiquidSheet<void>(
       context: context,
       title: '全部剧集 · ${_currentSeasonLabel(line)} · ${line.name} ($total)',
@@ -2423,9 +3182,11 @@ class _DetailScreenState extends State<DetailScreen> {
           final unavailReason = _episodeUnavailableReason(ep);
           final isUnavailable = unavailReason != null;
           final isBookmarked = !isUnavailable &&
-              bookmark != null &&
-              bookmark.line == line.name &&
-              bookmark.index == originalIdx;
+              (_isIosDetail
+                  ? (playedEpIdx != null && playedEpIdx == originalIdx)
+                  : (bookmark != null &&
+                      bookmark.line == line.name &&
+                      bookmark.index == originalIdx));
           final cellLabel = epInfo != null
               ? epInfo.compactLabel(
                   isVariety: _isVarietyShow,
@@ -3817,10 +4578,20 @@ class _DetailScreenState extends State<DetailScreen> {
   Widget _buildPortraitActionRow(WatchHistoryEntry? bookmark) {
     final hasLines = !_loading && _video.lines.any((l) => l.episodes.isNotEmpty);
     final curatedBlocked = _curatedUnavailableMessage != null && !hasLines;
-    final selectedBookmark = hasLines &&
-            bookmark?.line ==
-                _video.lines[_selectedLine.clamp(0, _video.lines.length - 1)].name
-        ? bookmark
+    final safeLineIdx = hasLines ? _selectedLine.clamp(0, _video.lines.length - 1) : 0;
+    final bool useStrictBookmark = _isIosDetail || WoggSource.supports(_activeSite);
+    final (int, int)? strictTarget =
+        hasLines && bookmark != null && useStrictBookmark
+            ? _iosBookmarkTarget(_video, bookmark)
+            : null;
+    final bool bookmarkMissingOnStrict =
+        hasLines && bookmark != null && useStrictBookmark && strictTarget == null;
+    final WatchHistoryEntry? selectedBookmark = hasLines && bookmark != null
+        ? (useStrictBookmark
+            ? (strictTarget != null && strictTarget.$1 == safeLineIdx
+                ? bookmark
+                : null)
+            : (bookmark.line == _video.lines[safeLineIdx].name ? bookmark : null))
         : null;
     String playLabel = CuratedDiscoveryService.isCuratedSite(_activeSite)
         ? '正在匹配已添加片源…'
@@ -3829,15 +4600,20 @@ class _DetailScreenState extends State<DetailScreen> {
       playLabel = '暂无片源资源 · 无法播放';
     } else if (!_loading && !hasLines) {
       playLabel = '搜索其他片源';
+    } else if (bookmarkMissingOnStrict) {
+      playLabel = '原文件已变更 · 重新选集';
     } else if (selectedBookmark != null) {
-      final (cleanEp, _) =
-          _parseEpisodeDisplay(selectedBookmark.episode, selectedBookmark.index + 1);
+      final matchedEp = strictTarget != null
+          ? _video.lines[strictTarget.$1].episodes[strictTarget.$2]
+          : null;
+      final epName = matchedEp?.name ?? selectedBookmark.episode;
+      final epNum = (strictTarget?.$2 ?? selectedBookmark.index) + 1;
+      final (cleanEp, _) = _parseEpisodeDisplay(epName, epNum);
       final resumeMs = selectedBookmark.resumePosition;
       playLabel = resumeMs > 0
           ? '播放 · $cleanEp · 续播 ${_formatBookmarkTime(resumeMs)}'
           : '播放 · $cleanEp';
     } else if (hasLines) {
-      final safeLineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
       final line = _video.lines[safeLineIdx];
       final indices = _activeEpisodeIndicesFor(line);
       if (indices.isNotEmpty) {
@@ -3854,7 +4630,7 @@ class _DetailScreenState extends State<DetailScreen> {
       pressedScale: Ios27Spring.pressSwellScale,
       borderRadius: 999,
       onTap: hasLines
-          ? () => _playPrimaryAction(selectedBookmark)
+          ? () => _playPrimaryAction(useStrictBookmark ? bookmark : selectedBookmark)
           : (_loading || curatedBlocked ? null : _searchOtherSources),
       child: Container(
         height: 48,
@@ -3962,10 +4738,16 @@ class _DetailScreenState extends State<DetailScreen> {
     final safePage = _selectedPage.clamp(0, pageCount > 0 ? pageCount - 1 : 0);
     final start = safePage * CmsParser.episodePageSize;
     final end = (start + CmsParser.episodePageSize).clamp(0, total);
-    final currentActiveEpIdx =
-        (bookmark != null && bookmark.line == line.name)
+    final int? currentActiveEpIdx = _isIosDetail
+        ? _resolvePlayedEpisodeIndexForLine(
+            line,
+            safeLineIdx,
+            activeIndices,
+            bookmark,
+          )
+        : ((bookmark != null && bookmark.line == line.name)
             ? bookmark.index.clamp(0, line.episodes.length - 1)
-            : (activeIndices.isNotEmpty ? activeIndices.first : 0);
+            : (activeIndices.isNotEmpty ? activeIndices.first : 0));
     final seasonLabel = _currentSeasonLabel(line);
     final totalSeasons =
         hasInLineSeasons ? inLineSeasons.length : _relatedSeasons.length;
@@ -4106,13 +4888,57 @@ class _DetailScreenState extends State<DetailScreen> {
             ),
             const SizedBox(width: 5),
             GestureDetector(
+              key: const ValueKey('detail-episode-sort-toggle'),
               onTap: () {
                 final next = !_descending;
-                widget.storage.setEpisodesDescending(next);
+                if (!_isIosDetail) {
+                  widget.storage.setEpisodesDescending(next);
+                  setState(() {
+                    _descending = next;
+                    _selectedPage = 0;
+                  });
+                  return;
+                }
+                // Preserve the active browsing or playing episode across sort
+                // inversion: compute its target season, 50-item page, and
+                // page-local slot so both top circles and bottom cards land on
+                // the episode immediately without manual pagination/scrolling.
+                var nextSeason = _selectedInLineSeason;
+                var nextPage = 0;
+                var nextSlot = 0;
+                final liveBrowsingIdx = _resolveBrowsingEpisodeIndexForLine(
+                  line,
+                  safeLineIdx,
+                  activeIndices,
+                );
+                final anchorRawIdx = liveBrowsingIdx ?? currentActiveEpIdx;
+                if (anchorRawIdx != null) {
+                  final posInActive = activeIndices.indexOf(anchorRawIdx);
+                  if (posInActive >= 0 && total > 0) {
+                    final visualIdx =
+                        next ? (total - 1 - posInActive) : posInActive;
+                    nextPage = visualIdx ~/ CmsParser.episodePageSize;
+                    nextSlot = visualIdx % CmsParser.episodePageSize;
+                  }
+                } else {
+                  final resolved = _resolveSeasonPageAndSlotForPlayedEpisode(
+                    video: _video,
+                    lineIdx: safeLineIdx,
+                    bookmark: bookmark,
+                    descendingOverride: next,
+                  );
+                  if (resolved != null) {
+                    nextSeason = resolved.inLineSeason;
+                    nextPage = resolved.page;
+                    nextSlot = resolved.slotInPage;
+                  }
+                }
                 setState(() {
                   _descending = next;
-                  _selectedPage = 0;
+                  _selectedInLineSeason = nextSeason;
+                  _selectedPage = nextPage;
                 });
+                _scheduleAlignEpisodeStripsToSlot(nextSlot, animate: false);
               },
               child: Container(
                 padding: const EdgeInsets.symmetric(
@@ -4327,60 +5153,139 @@ class _DetailScreenState extends State<DetailScreen> {
 
         // 2. Quick Episode Number Strip (12 13 14 [15] 16 17 ...)
         SizedBox(
-          height: 30,
+          key: const ValueKey('detail-quick-episodes-strip'),
+          height: _isIosDetail ? 38 : 30,
           child: DesktopHorizontalScroller(
             controller: _quickEpisodesScrollController,
             child: ListView.separated(
+              key: ValueKey(
+                'detail-quick-episodes-list-$safeLineIdx-$safePage-$_descending',
+              ),
               controller: _quickEpisodesScrollController,
               scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(
+                parent: AlwaysScrollableScrollPhysics(),
+              ),
               itemCount: end - start,
-              separatorBuilder: (_, __) => const SizedBox(width: 7),
+              separatorBuilder: (_, __) =>
+                  SizedBox(width: _isIosDetail ? _kEpisodeCircleGap : 7),
               itemBuilder: (ctx, idx) {
               final visualIdx = start + idx;
               final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
               final originalIdx = activeIndices[posIdx];
+              final ep = line.episodes[originalIdx];
               final epInfo = scraped.infoForRawIndex(originalIdx);
-              final unavailReason =
-                  _episodeUnavailableReason(line.episodes[originalIdx]);
+              final unavailReason = _episodeUnavailableReason(ep);
               final isUnavailable = unavailReason != null;
-              final isCurrent = !isUnavailable && originalIdx == currentActiveEpIdx;
-              final pill = Ios27Pressable(
-                pressedScale: Ios27Spring.pressSwellScale,
-                borderRadius: 999,
-                onTap: () => _openPlayer(safeLineIdx, originalIdx),
-                child: AnimatedContainer(
-                  duration: Ios27ConcentricGeometry.isReduceMotion(ctx)
+              final isCurrent = !isUnavailable &&
+                  currentActiveEpIdx != null &&
+                  originalIdx == currentActiveEpIdx;
+              final labelText = epInfo?.shortPillLabel ?? '${posIdx + 1}';
+
+              Widget buildCircleBox(BuildContext boxCtx, bool isBrowsingOnly) {
+                final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(boxCtx);
+                return AnimatedContainer(
+                  key: ValueKey('ep_circle_box_${safeLineIdx}_$originalIdx'),
+                  duration: reduceMotion
                       ? Ios27ConcentricGeometry.reducedMotionDuration
                       : Ios27Spring.snappy.nominalDuration,
-                  curve: Ios27Spring.snappy.curve,
-                  constraints: const BoxConstraints(minWidth: 34),
+                  curve: reduceMotion ? Curves.linear : Ios27Spring.snappy.curve,
+                  constraints: BoxConstraints(
+                    minWidth: _isIosDetail ? _kEpisodeCircleMinWidth : 34,
+                    minHeight: _isIosDetail ? 34 : 30,
+                  ),
                   padding: const EdgeInsets.symmetric(horizontal: 10),
                   decoration: BoxDecoration(
                     color: isCurrent
                         ? Colors.white
-                        : const Color(0x24FFFFFF),
+                        : (isBrowsingOnly
+                            ? const Color(0x36FFFFFF)
+                            : const Color(0x24FFFFFF)),
                     borderRadius: BorderRadius.circular(999),
                     border: isCurrent
                         ? null
                         : Border.all(
-                            color: const Color(0x28FFFFFF),
-                            width: 0.5,
+                            color: isBrowsingOnly
+                                ? Colors.white
+                                : const Color(0x28FFFFFF),
+                            width: isBrowsingOnly ? 1.8 : 0.6,
                           ),
                   ),
                   alignment: Alignment.center,
                   child: Text(
-                    epInfo?.shortPillLabel ?? '${posIdx + 1}',
+                    labelText,
                     style: TextStyle(
                       color: isCurrent
                           ? const Color(0xFF121215)
-                          : const Color(0xD9FFFFFF),
+                          : (isBrowsingOnly
+                              ? Colors.white
+                              : const Color(0xD9FFFFFF)),
                       fontSize: 12.5,
-                      fontWeight:
-                          isCurrent ? FontWeight.w800 : FontWeight.w600,
+                      fontWeight: (isCurrent || isBrowsingOnly)
+                          ? FontWeight.w800
+                          : FontWeight.w600,
                     ),
                   ),
-                ),
-              );
+                );
+              }
+
+              final Widget pill;
+              if (_isIosDetail) {
+                final slotKey = _circleSlotKeys.putIfAbsent(idx, GlobalKey.new);
+                pill = KeyedSubtree(
+                  key: slotKey,
+                  child: ValueListenableBuilder(
+                    valueListenable: _browsingEpisodeNotifier,
+                    builder: (boxCtx, _, __) {
+                      final liveBrowsingIdx = _resolveBrowsingEpisodeIndexForLine(
+                        line,
+                        safeLineIdx,
+                        activeIndices,
+                      );
+                      final isBrowsingOnly = !isCurrent &&
+                          liveBrowsingIdx != null &&
+                          originalIdx == liveBrowsingIdx;
+                      return Semantics(
+                        button: true,
+                        selected: isCurrent,
+                        label: isCurrent
+                            ? '第$labelText集，正在播放'
+                            : (isBrowsingOnly
+                                ? '第$labelText集，当前预览'
+                                : '定位到第$labelText集卡片'),
+                        child: GestureDetector(
+                          key: ValueKey('ep_circle_${safeLineIdx}_$originalIdx'),
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {
+                            HapticFeedback.selectionClick();
+                            _pendingPostPopSync = false;
+                            _browsingEpisode = (
+                              lineId: line.id,
+                              lineName: line.name,
+                              episodeUrl: ep.url,
+                              episodeName: ep.name,
+                              originalIndex: originalIdx,
+                            );
+                            _scrollEpisodeCardsToSlot(idx);
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 2),
+                            child: buildCircleBox(boxCtx, isBrowsingOnly),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                );
+              } else {
+                pill = Ios27Pressable(
+                  key: ValueKey('ep_circle_${safeLineIdx}_$originalIdx'),
+                  pressedScale: Ios27Spring.pressSwellScale,
+                  borderRadius: 999,
+                  onTap: () => _openPlayer(safeLineIdx, originalIdx),
+                  child: buildCircleBox(ctx, false),
+                );
+              }
               return isUnavailable ? Opacity(opacity: 0.45, child: pill) : pill;
             },
           ),
@@ -4391,16 +5296,35 @@ class _DetailScreenState extends State<DetailScreen> {
         // 3. Horizontal 16:9 Landscape Episode Preview Cards with Authentic Scene Stills
         //    and Authentic Per-Episode Plot Synopsis
         SizedBox(
+          key: const ValueKey('detail-episode-cards-strip'),
           height: anyHasSummary ? 222 : 186,
           child: DesktopHorizontalScroller(
             controller: _previewCardsScrollController,
-            child: ListView.separated(
-              controller: _previewCardsScrollController,
-              scrollDirection: Axis.horizontal,
-              physics: const BouncingScrollPhysics(),
-              itemCount: end - start,
-              separatorBuilder: (_, __) => const SizedBox(width: 14),
-              itemBuilder: (ctx, idx) {
+            child: NotificationListener<ScrollEndNotification>(
+              onNotification: (notification) {
+                if (notification.metrics.axis == Axis.horizontal) {
+                  _handleEpisodeCardsScrollSettled(
+                    line: line,
+                    activeIndices: activeIndices,
+                    pageStart: start,
+                    pageLen: end - start,
+                  );
+                }
+                return false;
+              },
+              child: ListView.separated(
+                key: ValueKey(
+                  'detail-episode-cards-list-$safeLineIdx-$safePage-$_descending',
+                ),
+                controller: _previewCardsScrollController,
+                scrollDirection: Axis.horizontal,
+                physics: const BouncingScrollPhysics(
+                  parent: AlwaysScrollableScrollPhysics(),
+                ),
+                itemCount: end - start,
+                separatorBuilder: (_, __) =>
+                    const SizedBox(width: _kEpisodeCardGap),
+                itemBuilder: (ctx, idx) {
               final visualIdx = start + idx;
               final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
               final originalIdx = activeIndices[posIdx];
@@ -4409,7 +5333,9 @@ class _DetailScreenState extends State<DetailScreen> {
               final epNum = epInfo?.effectiveEpisodeNumber ?? (posIdx + 1);
               final unavailReason = _episodeUnavailableReason(ep);
               final isUnavailable = unavailReason != null;
-              final isCurrent = !isUnavailable && originalIdx == currentActiveEpIdx;
+              final isCurrent = !isUnavailable &&
+                  currentActiveEpIdx != null &&
+                  originalIdx == currentActiveEpIdx;
               final (cleanTitle, parsedBadge) =
                   _parseEpisodeDisplay(ep.name, epNum);
               final specBadge = isUnavailable
@@ -4436,9 +5362,10 @@ class _DetailScreenState extends State<DetailScreen> {
                 scrapedInfo: epInfo,
               );
 
-              final card = GestureDetector(
-                key: ValueKey('ep_card_${safeLineIdx}_$originalIdx'),
-                onTap: () => _openPlayer(safeLineIdx, originalIdx),
+              final card = RepaintBoundary(
+                child: GestureDetector(
+                  key: ValueKey('ep_card_${safeLineIdx}_$originalIdx'),
+                  onTap: () => _openPlayer(safeLineIdx, originalIdx),
                 child: SizedBox(
                   width: 226,
                   child: Column(
@@ -4572,19 +5499,40 @@ class _DetailScreenState extends State<DetailScreen> {
                                     ],
                                   ),
                                 ),
-                                // Foreground rounded border overlay (never shrinks or insets the image)
+                                // Foreground rounded border overlay (localized rebuild via ValueListenableBuilder)
                                 Positioned.fill(
                                   child: IgnorePointer(
-                                    child: DecoratedBox(
-                                      decoration: BoxDecoration(
-                                        borderRadius: BorderRadius.circular(14),
-                                        border: Border.all(
-                                          color: isCurrent
-                                              ? Colors.white
-                                              : const Color(0x33FFFFFF),
-                                          width: isCurrent ? 2.0 : 0.7,
-                                        ),
-                                      ),
+                                    child: ValueListenableBuilder(
+                                      valueListenable: _browsingEpisodeNotifier,
+                                      builder: (_, __, ___) {
+                                        final liveBrowsingIdx = _isIosDetail
+                                            ? _resolveBrowsingEpisodeIndexForLine(
+                                                line,
+                                                safeLineIdx,
+                                                activeIndices,
+                                              )
+                                            : null;
+                                        final liveBrowsing = _isIosDetail &&
+                                            !isCurrent &&
+                                            liveBrowsingIdx != null &&
+                                            originalIdx == liveBrowsingIdx;
+                                        return DecoratedBox(
+                                          decoration: BoxDecoration(
+                                            borderRadius:
+                                                BorderRadius.circular(14),
+                                            border: Border.all(
+                                              color: isCurrent
+                                                  ? Colors.white
+                                                  : (liveBrowsing
+                                                      ? const Color(0xB3FFFFFF)
+                                                      : const Color(0x33FFFFFF)),
+                                              width: isCurrent
+                                                  ? 2.0
+                                                  : (liveBrowsing ? 1.5 : 0.7),
+                                            ),
+                                          ),
+                                        );
+                                      },
                                     ),
                                   ),
                                 ),
@@ -4632,14 +5580,16 @@ class _DetailScreenState extends State<DetailScreen> {
                     ],
                   ),
                 ),
+                ),
               );
               return isUnavailable ? Opacity(opacity: 0.48, child: card) : card;
             },
           ),
         ),
+        ),
       ),
 
-        // 4. Range Capsules (1 · 50, 51 · 100 ...)
+        // 4. Range Capsules (1 · 50, 51 · 100 ...; reversed when descending)
         if (pageCount > 1) ...[
           const SizedBox(height: 12),
           SizedBox(
@@ -4655,9 +5605,32 @@ class _DetailScreenState extends State<DetailScreen> {
                 final pStart = p * CmsParser.episodePageSize + 1;
                 final pEnd =
                     ((p + 1) * CmsParser.episodePageSize).clamp(1, total);
+                final rangeLabel = _descending
+                    ? '${total - pStart + 1} · ${math.max(1, total - pEnd + 1)}'
+                    : '$pStart · $pEnd';
                 final selected = p == safePage;
                 return GestureDetector(
-                  onTap: () => setState(() => _selectedPage = p),
+                  key: ValueKey('ep_page_pill_$p'),
+                  onTap: () {
+                    setState(() => _selectedPage = p);
+                    if (_isIosDetail) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!mounted) return;
+                        if (_quickEpisodesScrollController.hasClients) {
+                          _quickEpisodesScrollController.jumpTo(0.0);
+                        }
+                        if (_previewCardsScrollController.hasClients) {
+                          _programmaticCardScrollGuard++;
+                          _previewCardsScrollController.jumpTo(0.0);
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (_programmaticCardScrollGuard > 0) {
+                              _programmaticCardScrollGuard--;
+                            }
+                          });
+                        }
+                      });
+                    }
+                  },
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 15,
@@ -4669,7 +5642,7 @@ class _DetailScreenState extends State<DetailScreen> {
                     ),
                     alignment: Alignment.center,
                     child: Text(
-                      '$pStart · $pEnd',
+                      rangeLabel,
                       style: TextStyle(
                         color: selected
                             ? const Color(0xFF121215)

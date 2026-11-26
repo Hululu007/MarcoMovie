@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'dart:ui';
 import '../core/ohos_runtime.dart';
 import 'ios_liquid_glass.dart';
+import 'ios_press_slide_menu.dart';
 import 'motion/aurora_background.dart';
 import 'motion/ios27_springs.dart';
 import 'motion/motion_tokens.dart';
@@ -1469,8 +1470,11 @@ class AppleLiquidGlassDock extends StatefulWidget {
   final List<IosNativeDockItem>? nativeItems;
   final VoidCallback? onSearch;
   final VoidCallback? onScrollToTop;
+  final List<IosSlideMenuAction> Function(int tabIndex)? tabMenuItemsBuilder;
+  final void Function(int tabIndex, String actionId)? onTabMenuAction;
   final bool hidden;
   final bool collapsed;
+  final bool forceFlutterFallback;
   final ValueListenable<double>? scrollProgress;
 
   const AppleLiquidGlassDock({
@@ -1482,8 +1486,11 @@ class AppleLiquidGlassDock extends StatefulWidget {
     this.nativeItems,
     this.onSearch,
     this.onScrollToTop,
+    this.tabMenuItemsBuilder,
+    this.onTabMenuAction,
     this.hidden = false,
     this.collapsed = false,
+    this.forceFlutterFallback = false,
     this.scrollProgress,
   });
 
@@ -1557,7 +1564,8 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
 
     return IosNativeRouteGate(
       builder: (context, nativeActive) {
-        final useNativeIos26 = nativeActive &&
+        final useNativeIos26 = !widget.forceFlutterFallback &&
+            nativeActive &&
             !widget.isLandscape &&
             widget.nativeItems != null &&
             widget.nativeItems!.isNotEmpty;
@@ -1570,6 +1578,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
               onSelect: widget.onSelect,
               onSearch: widget.onSearch,
               onScrollToTop: widget.onScrollToTop,
+              onTabMenuAction: widget.onTabMenuAction,
               showSearch: widget.onSearch != null,
               hidden: widget.hidden,
               collapsed: widget.collapsed,
@@ -1582,7 +1591,8 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
         // render a pixel-matched, zero-BackdropFilter placeholder identical in
         // geometry & visual style to MarcoDockContainerView so there is zero
         // size jump or legacy-style flash.
-        if (IosLiquidGlassBridge.isAvailable &&
+        if (!widget.forceFlutterFallback &&
+            IosLiquidGlassBridge.isAvailable &&
             !widget.isLandscape &&
             widget.nativeItems != null &&
             widget.nativeItems!.isNotEmpty) {
@@ -1877,6 +1887,53 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
     );
   }
 
+  List<IosSlideMenuAction> _buildLogoMenuActions() {
+    final actions = <IosSlideMenuAction>[];
+    if (widget.onSearch != null) {
+      actions.add(
+        const IosSlideMenuAction(
+          id: 'search',
+          title: '搜索影片',
+          icon: CupertinoIcons.search,
+          section: 0,
+        ),
+      );
+    }
+    for (var i = 0; i < widget.items.length; i++) {
+      actions.add(
+        IosSlideMenuAction(
+          id: 'tab:$i',
+          title: widget.items[i].$3,
+          icon: i == _safeIndex ? widget.items[i].$2 : widget.items[i].$1,
+          selected: i == _safeIndex,
+          section: 1,
+        ),
+      );
+    }
+    if (widget.onScrollToTop != null) {
+      actions.add(
+        const IosSlideMenuAction(
+          id: 'top',
+          title: '回到顶部',
+          icon: CupertinoIcons.arrow_up_to_line,
+          section: 2,
+        ),
+      );
+    }
+    return actions;
+  }
+
+  void _handleLogoMenuSelection(String chosen) {
+    if (chosen == 'search') {
+      widget.onSearch?.call();
+    } else if (chosen == 'top') {
+      widget.onScrollToTop?.call();
+    } else if (chosen.startsWith('tab:')) {
+      final idx = int.tryParse(chosen.substring(4));
+      if (idx != null) widget.onSelect(idx);
+    }
+  }
+
   Widget _buildCollapsedLogoButton(BuildContext context, {double? barH}) {
     final size = barH ??
         (AppleLiquidGlassDock._itemH + AppleLiquidGlassDock._pad * 2);
@@ -1894,10 +1951,17 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           child: Align(
             alignment: Alignment.centerRight,
             heightFactor: 1,
-            child: GestureDetector(
+            child: IosPressSlideMenuAnchor(
               key: const ValueKey('dock-collapsed-logo-button'),
-              behavior: HitTestBehavior.opaque,
-              onTap: () => _showFallbackCollapsedBubble(context),
+              menuKey: const ValueKey('dock-collapsed-bubble-menu'),
+              openOnTap: true,
+              menuWidth: 184,
+              minTouchWidth: math.max(44.0, size),
+              minTouchHeight: math.max(44.0, size),
+              preferredAnchor: Alignment.topRight,
+              accessibilityLabel: '快捷导航',
+              itemsBuilder: _buildLogoMenuActions,
+              onSelected: _handleLogoMenuSelection,
               child: RepaintBoundary(
                 child: LiquidGlass(
                   width: size,
@@ -1920,159 +1984,6 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           ),
         );
       },
-    );
-  }
-
-  Future<void> _showFallbackCollapsedBubble(BuildContext context) async {
-    HapticFeedback.lightImpact();
-    final safeBottom = MediaQuery.paddingOf(context).bottom;
-    final dockBottom =
-        safeBottom > 0 ? math.max(safeBottom - 14.0, 10.0) : 12.0;
-    final bottomOffset = dockBottom + 62.0 + 12.0;
-    final chosen = await showGeneralDialog<String>(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: '关闭快捷导航',
-      barrierColor: const Color(0x28000000),
-      transitionDuration: const Duration(milliseconds: 220),
-      pageBuilder: (dialogCtx, _, __) {
-        return Stack(
-          children: [
-            Positioned(
-              right: 16,
-              bottom: bottomOffset,
-              child: Material(
-                type: MaterialType.transparency,
-                child: LiquidGlass(
-                  key: const ValueKey('dock-collapsed-bubble-menu'),
-                  width: 176,
-                  borderRadius: 24,
-                  tint: ApplePalette.isDarkOf(dialogCtx)
-                      ? const Color(0xA616161C)
-                      : const Color(0xF0FFFFFF),
-                  padding: const EdgeInsets.symmetric(vertical: 6),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (widget.onSearch != null) ...[
-                        _bubbleMenuRow(
-                          icon: CupertinoIcons.search,
-                          label: '搜索影片',
-                          selected: false,
-                          onTap: () => Navigator.of(dialogCtx).pop('search'),
-                        ),
-                        Divider(
-                          height: 1,
-                          thickness: 0.5,
-                          color: ApplePalette.of(dialogCtx).separator,
-                        ),
-                      ],
-                      for (var i = 0; i < widget.items.length; i++)
-                        _bubbleMenuRow(
-                          icon: i == _safeIndex
-                              ? widget.items[i].$2
-                              : widget.items[i].$1,
-                          label: widget.items[i].$3,
-                          selected: i == _safeIndex,
-                          onTap: () => Navigator.of(dialogCtx).pop('tab:$i'),
-                        ),
-                      if (widget.onScrollToTop != null) ...[
-                        Divider(
-                          height: 1,
-                          thickness: 0.5,
-                          color: ApplePalette.of(dialogCtx).separator,
-                        ),
-                        _bubbleMenuRow(
-                          icon: CupertinoIcons.arrow_up_to_line,
-                          label: '回到顶部',
-                          selected: false,
-                          onTap: () => Navigator.of(dialogCtx).pop('top'),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        );
-      },
-      transitionBuilder: (dialogContext, anim, __, child) {
-        if (Ios27ConcentricGeometry.isReduceMotion(dialogContext)) {
-          return FadeTransition(opacity: anim, child: child);
-        }
-        final curved = CurvedAnimation(
-          parent: anim,
-          curve: Ios27Spring.bouncy.curve,
-          reverseCurve: Ios27Spring.smooth.curve.flipped,
-        );
-        return FadeTransition(
-          opacity: CurvedAnimation(
-            parent: anim,
-            curve: Ios27Spring.smooth.curve,
-          ),
-          child: ScaleTransition(
-            scale: Tween<double>(begin: 0.86, end: 1.0).animate(curved),
-            alignment: Alignment.bottomRight,
-            child: child,
-          ),
-        );
-      },
-    );
-    if (chosen == null) return;
-    if (chosen == 'search') {
-      widget.onSearch?.call();
-    } else if (chosen == 'top') {
-      widget.onScrollToTop?.call();
-    } else if (chosen.startsWith('tab:')) {
-      final idx = int.tryParse(chosen.substring(4));
-      if (idx != null) widget.onSelect(idx);
-    }
-  }
-
-  Widget _bubbleMenuRow({
-    required IconData icon,
-    required String label,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    final palette = ApplePalette.of(context);
-    final fg = selected
-        ? (palette.isDark ? Colors.white : palette.systemBlue)
-        : palette.labelPrimary;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              size: 18,
-              color: fg,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                label,
-                style: TextStyle(
-                  color: fg,
-                  fontSize: 14,
-                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                ),
-              ),
-            ),
-            if (selected)
-              Icon(
-                CupertinoIcons.checkmark_alt,
-                size: 15,
-                color: fg,
-              ),
-          ],
-        ),
-      ),
     );
   }
 
@@ -2129,11 +2040,18 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
         final tabScaleY = (1.0 - 0.62 * p).clamp(0.28, 1.0);
         final tabOpacity = (1.0 - p * 1.15).clamp(0.0, 1.0);
 
-        final spinScale = 1.0 - 0.08 * math.sin(p * math.pi);
-        final searchAngle = p * math.pi;
-        final logoAngle = (p - 1.0) * math.pi;
-        final searchOpacity = ((0.62 - p) / 0.28).clamp(0.0, 1.0);
-        final logoOpacity = ((p - 0.34) / 0.28).clamp(0.0, 1.0);
+        final settledCollapsed = p >= 0.995;
+        final settledExpanded = p <= 0.005;
+        final spinScale = (settledCollapsed || settledExpanded)
+            ? 1.0
+            : (1.0 - 0.08 * math.sin(p * math.pi));
+        final searchAngle = settledExpanded ? 0.0 : p * math.pi;
+        final logoAngle = settledCollapsed ? 0.0 : (p - 1.0) * math.pi;
+        final searchOpacity =
+            settledCollapsed ? 0.0 : ((0.62 - p) / 0.28).clamp(0.0, 1.0);
+        final logoOpacity =
+            settledCollapsed ? 1.0 : ((p - 0.34) / 0.28).clamp(0.0, 1.0);
+        final effectiveTabOpacity = settledCollapsed ? 0.0 : tabOpacity;
         final isLogoActive = p >= 0.5;
         final isDark = ApplePalette.isDarkOf(context);
 
@@ -2220,62 +2138,78 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           ),
         );
 
-        final morphCircle = GestureDetector(
-          key: isLogoActive
-              ? const ValueKey('dock-collapsed-logo-button')
-              : const ValueKey('home-search-button'),
-          behavior: HitTestBehavior.opaque,
-          onTap: isLogoActive
-              ? () => _showFallbackCollapsedBubble(context)
-              : widget.onSearch!,
-          onHorizontalDragStart: (_) {},
-          onVerticalDragStart: (_) {},
-          child: RepaintBoundary(
-            child: Transform.scale(
-              scale: spinScale,
-              child: LiquidGlass(
-                width: barH,
-                height: barH,
-                borderRadius: barH * 0.5,
-                tint: isDark
-                    ? const Color(0x56161414)
-                    : const Color(0xD8FFFFFF),
-                blur: 20,
-                saturation: 1.8,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    if (searchOpacity > 0.01)
-                      Opacity(
-                        opacity: searchOpacity,
-                        child: Transform.rotate(
-                          angle: searchAngle,
-                          child: Icon(
-                            CupertinoIcons.search,
-                            size: 22,
-                            color: isDark
-                                ? Colors.white
-                                : const Color(0xFF14161C),
-                          ),
+        final morphCircleVisual = RepaintBoundary(
+          child: Transform.scale(
+            scale: spinScale,
+            child: LiquidGlass(
+              width: barH,
+              height: barH,
+              borderRadius: barH * 0.5,
+              tint: isDark
+                  ? const Color(0x56161414)
+                  : const Color(0xD8FFFFFF),
+              blur: 20,
+              saturation: 1.8,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  if (searchOpacity > 0.01)
+                    Opacity(
+                      opacity: searchOpacity,
+                      child: Transform.rotate(
+                        angle: searchAngle,
+                        child: Icon(
+                          CupertinoIcons.search,
+                          size: 22,
+                          color: isDark
+                              ? Colors.white
+                              : const Color(0xFF14161C),
                         ),
                       ),
-                    if (logoOpacity > 0.01)
-                      Opacity(
-                        opacity: logoOpacity,
-                        child: Transform.rotate(
-                          angle: logoAngle,
-                          child: const MarcoBrandLogo(
-                            iconSize: 32,
-                            showWordmark: false,
-                          ),
+                    ),
+                  if (logoOpacity > 0.01)
+                    Opacity(
+                      opacity: logoOpacity,
+                      child: Transform.rotate(
+                        angle: logoAngle,
+                        child: const MarcoBrandLogo(
+                          iconSize: 32,
+                          showWordmark: false,
                         ),
                       ),
-                  ],
-                ),
+                    ),
+                ],
               ),
             ),
           ),
         );
+
+        final Widget morphCircle = isLogoActive
+            ? IosPressSlideMenuAnchor(
+                key: const ValueKey('dock-collapsed-logo-button'),
+                menuKey: const ValueKey('dock-collapsed-bubble-menu'),
+                openOnTap: true,
+                menuWidth: 184,
+                minTouchWidth: math.max(44.0, barH),
+                minTouchHeight: math.max(44.0, barH),
+                preferredAnchor: Alignment.topRight,
+                accessibilityLabel: '快捷导航',
+                itemsBuilder: _buildLogoMenuActions,
+                onSelected: _handleLogoMenuSelection,
+                child: morphCircleVisual,
+              )
+            : Semantics(
+                button: true,
+                label: '搜索',
+                child: GestureDetector(
+                  key: const ValueKey('home-search-button'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: widget.onSearch!,
+                  onHorizontalDragStart: (_) {},
+                  onVerticalDragStart: (_) {},
+                  child: morphCircleVisual,
+                ),
+              );
 
         return SizedBox(
           width: totalRowW,
@@ -2283,7 +2217,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           child: Stack(
             clipBehavior: Clip.none,
             children: [
-              if (tabOpacity > 0.005)
+              if (effectiveTabOpacity > 0.005)
                 Positioned(
                   left: 0,
                   top: 0,
@@ -2292,7 +2226,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
                   child: IgnorePointer(
                     ignoring: p >= 0.35,
                     child: Opacity(
-                      opacity: tabOpacity,
+                      opacity: effectiveTabOpacity,
                       child: Transform.translate(
                         offset: Offset(tabTx, 0),
                         child: Transform.scale(
@@ -2509,7 +2443,11 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             index < widget.nativeItems!.length
         ? widget.nativeItems![index].kind
         : null;
-    return _DockItem(
+    final hasLongPressMenu = !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        widget.tabMenuItemsBuilder != null &&
+        widget.onTabMenuAction != null;
+    final dockItem = _DockItem(
       icon: item.$1,
       selectedIcon: item.$2,
       label: item.$3,
@@ -2519,7 +2457,29 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
         icon: item.$1,
       ),
       selected: index == activeIdx,
+      onTap: hasLongPressMenu ? null : () => widget.onSelect(index),
+    );
+    if (!hasLongPressMenu) {
+      return Semantics(
+        button: true,
+        selected: index == activeIdx,
+        label: item.$3,
+        child: dockItem,
+      );
+    }
+    return IosPressSlideMenuAnchor(
+      key: ValueKey('dock-tab-menu-anchor-$index'),
+      menuKey: ValueKey('dock-tab-menu-$index'),
+      openOnTap: false,
+      menuWidth: 188,
+      minTouchWidth: 44,
+      minTouchHeight: 44,
+      preferredAnchor: Alignment.topCenter,
+      accessibilityLabel: item.$3,
       onTap: () => widget.onSelect(index),
+      itemsBuilder: () => widget.tabMenuItemsBuilder!(index),
+      onSelected: (actionId) => widget.onTabMenuAction!(index, actionId),
+      child: dockItem,
     );
   }
 }
@@ -2537,29 +2497,33 @@ class _DockSearchCircleButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = ApplePalette.of(context);
-    return Ios27Pressable(
-      key: const ValueKey('home-search-button'),
-      pressedScale: Ios27Spring.pressSwellScale,
-      borderRadius: size * 0.5,
-      onTap: () {
-        HapticFeedback.lightImpact();
-        onTap();
-      },
-      child: RepaintBoundary(
-        child: LiquidGlass(
-          width: size,
-          height: size,
-          borderRadius: size * 0.5,
-          tint: palette.isDark
-              ? const Color(0x56161414)
-              : const Color(0xD8FFFFFF),
-          blur: 20,
-          saturation: 1.8,
-          child: Center(
-            child: Icon(
-              CupertinoIcons.search,
-              size: 22,
-              color: palette.labelPrimary,
+    return Semantics(
+      button: true,
+      label: '搜索',
+      child: Ios27Pressable(
+        key: const ValueKey('home-search-button'),
+        pressedScale: Ios27Spring.pressSwellScale,
+        borderRadius: size * 0.5,
+        onTap: () {
+          HapticFeedback.lightImpact();
+          onTap();
+        },
+        child: RepaintBoundary(
+          child: LiquidGlass(
+            width: size,
+            height: size,
+            borderRadius: size * 0.5,
+            tint: palette.isDark
+                ? const Color(0x56161414)
+                : const Color(0xD8FFFFFF),
+            blur: 20,
+            saturation: 1.8,
+            child: Center(
+              child: Icon(
+                CupertinoIcons.search,
+                size: 22,
+                color: palette.labelPrimary,
+              ),
             ),
           ),
         ),
@@ -2813,14 +2777,14 @@ class _DockItem extends StatefulWidget {
   final String label;
   final MarcoDockIconKind? kind;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   const _DockItem({
     required this.icon,
     required this.selectedIcon,
     required this.label,
     required this.kind,
     required this.selected,
-    required this.onTap,
+    this.onTap,
   });
   @override
   State<_DockItem> createState() => _DockItemState();
@@ -2843,6 +2807,40 @@ class _DockItemState extends State<_DockItem> {
         : (selected
             ? AppleColors.systemBlue
             : const Color(0xFF1A1A1A).withValues(alpha: 0.82));
+    final content = Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        MarcoAnimatedDockIcon(
+          kind: widget.kind,
+          fallbackIcon: selected ? widget.selectedIcon : widget.icon,
+          selected: selected,
+          size: 24,
+          pulseTick: _pulseTick,
+        ),
+        const SizedBox(height: 2.5),
+        AnimatedDefaultTextStyle(
+          duration: duration,
+          curve: Ios27Spring.snappy.curve,
+          style: DefaultTextStyle.of(context).style.merge(
+            TextStyle(
+              color: labelColor,
+              fontSize: 10.5,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              letterSpacing: 0.1,
+            ),
+          ),
+          child: Text(
+            widget.label,
+            maxLines: 1,
+            overflow: TextOverflow.clip,
+            textScaler: TextScaler.noScaling,
+          ),
+        ),
+      ],
+    );
+    if (widget.onTap == null) {
+      return content;
+    }
     return Ios27Pressable(
       pressedScale: Ios27Spring.pressSwellScale,
       borderRadius: 24,
@@ -2851,39 +2849,9 @@ class _DockItemState extends State<_DockItem> {
         if (selected) {
           setState(() => _pulseTick++);
         }
-        widget.onTap();
+        widget.onTap!();
       },
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          MarcoAnimatedDockIcon(
-            kind: widget.kind,
-            fallbackIcon: selected ? widget.selectedIcon : widget.icon,
-            selected: selected,
-            size: 24,
-            pulseTick: _pulseTick,
-          ),
-          const SizedBox(height: 2.5),
-          AnimatedDefaultTextStyle(
-            duration: duration,
-            curve: Ios27Spring.snappy.curve,
-            style: DefaultTextStyle.of(context).style.merge(
-              TextStyle(
-                color: labelColor,
-                fontSize: 10.5,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                letterSpacing: 0.1,
-              ),
-            ),
-            child: Text(
-              widget.label,
-              maxLines: 1,
-              overflow: TextOverflow.clip,
-              textScaler: TextScaler.noScaling,
-            ),
-          ),
-        ],
-      ),
+      child: content,
     );
   }
 }

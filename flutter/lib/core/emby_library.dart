@@ -57,6 +57,13 @@ class EmbyLibrary {
     if (user is! String || user.isEmpty || token is! String || token.isEmpty) {
       throw const FormatException('Emby 没有返回有效账户');
     }
+    // Verify the authenticated user can actually read media library views before
+    // persisting the library entry (catches 403/disabled/unauthorized accounts).
+    final authed = EmbyLibrary._(base, user, token, device);
+    final views = await authed._api('/Users/$user/Views');
+    if (views['Items'] is! List) {
+      throw StateError('Emby 未返回有效媒体库目录，请检查当前账号的媒体库访问权限');
+    }
     final key = sha256.convert(utf8.encode('$base\n$user')).toString();
     final name = 'Emby · ${username.trim()}';
     final api = '$prefix$key';

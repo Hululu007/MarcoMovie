@@ -117,13 +117,19 @@ class WoggSource {
     final candidate = candidates.single;
     final providers =
         candidate.episodes.map((episode) => episode.cloudProvider).toSet();
+    final mediaId = bookmark.effectiveMediaId;
+    final matchedEpisodeCount = mediaId.isNotEmpty
+        ? candidate.episodes
+            .where((episode) =>
+                WatchHistoryEntry.matchesEpisodeUrl(mediaId, episode.url))
+            .length
+        : candidate.episodes
+            .where((episode) => episode.name == bookmark.episode)
+            .length;
     if (providers.length != 1 ||
         providers.contains(null) ||
         providers.single == oldProviders.single ||
-        candidate.episodes
-                .where((episode) => episode.name == bookmark.episode)
-                .length !=
-            1) {
+        matchedEpisodeCount != 1) {
       return bookmark;
     }
     final claimed = _labelProviders(candidate.name);
@@ -137,7 +143,9 @@ class WoggSource {
       title: bookmark.title,
       poster: bookmark.poster,
       line: candidate.name,
+      lineId: candidate.id.isNotEmpty ? candidate.id : bookmark.lineId,
       episode: bookmark.episode,
+      episodeMediaId: bookmark.episodeMediaId,
       index: bookmark.index,
       position: bookmark.position,
       duration: bookmark.duration,
@@ -155,6 +163,9 @@ class WoggSource {
       return null;
     }
     final normalized = normalizeCachedBookmark(site, video, bookmark);
+    if (normalized.effectiveMediaId.isNotEmpty) {
+      return resolveIosWatchHistoryTarget(video, normalized);
+    }
     if (normalized.episode.trim().isEmpty) return null;
     final lines =
         video.lines.indexed.where((entry) => entry.$2.name == normalized.line);

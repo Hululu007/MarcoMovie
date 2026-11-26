@@ -265,25 +265,45 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
         final width = constraints.maxWidth;
         final isCompactWidth = width < 440;
         final isUltraCompact = width < 340;
+        final mediaPadding = MediaQuery.paddingOf(context);
+        final mediaViewPadding = MediaQuery.viewPaddingOf(context);
+        final gestureInsets = MediaQuery.systemGestureInsetsOf(context);
+        final screenSize = MediaQuery.sizeOf(context);
+        final isPadLike = screenSize.shortestSide >= 600 ||
+            (screenSize.height >= 900 && screenSize.width >= 300);
+
+        // Always respect live safe areas (both padding and viewPadding) so
+        // transient iPad status bars, multitasking "..." pills, and bottom
+        // Home indicators never overlap interactive controls.
+        final liveTopSafe = math.max(mediaPadding.top, mediaViewPadding.top);
+        final liveBottomSafe = math.max(
+          math.max(mediaPadding.bottom, mediaViewPadding.bottom),
+          gestureInsets.bottom,
+        );
+        final liveLeftSafe = math.max(mediaPadding.left, mediaViewPadding.left);
+        final liveRightSafe =
+            math.max(mediaPadding.right, mediaViewPadding.right);
+
         final horizInset =
             widget.isLandscape ? 18.0 : (isUltraCompact ? 10.0 : 14.0);
-        final topInset = widget.isLandscape ? 10.0 : 10.0;
-        final safeBottom = MediaQuery.paddingOf(context).bottom;
-        final bottomInset = widget.isLandscape
-            ? math.max(5.0, safeBottom * 0.28)
-            : math.max(10.0, safeBottom * 0.55);
+        final topInset = liveTopSafe > 0
+            ? liveTopSafe + (widget.isLandscape ? 8.0 : 10.0)
+            : (isPadLike ? 34.0 : 10.0);
+        final bottomInset = liveBottomSafe > 0
+            ? liveBottomSafe + (widget.isLandscape ? 8.0 : 10.0)
+            : (isPadLike ? 24.0 : (widget.isLandscape ? 8.0 : 10.0));
 
         return SizedBox.expand(
           child: Stack(
             fit: StackFit.expand,
             children: [
               // Subtle cinema gradient scrims for guaranteed typography legibility.
-              const Positioned(
+              Positioned(
                 top: 0,
                 left: 0,
                 right: 0,
-                height: 98,
-                child: IgnorePointer(
+                height: topInset + 88.0,
+                child: const IgnorePointer(
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
@@ -295,12 +315,12 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                   ),
                 ),
               ),
-              const Positioned(
+              Positioned(
                 bottom: 0,
                 left: 0,
                 right: 0,
-                height: 126,
-                child: IgnorePointer(
+                height: bottomInset + 118.0,
+                child: const IgnorePointer(
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
@@ -313,8 +333,11 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                 ),
               ),
 
-              SafeArea(
-                bottom: false,
+              Padding(
+                padding: EdgeInsets.only(
+                  left: liveLeftSafe,
+                  right: liveRightSafe,
+                ),
                 child: Stack(
                   key: const Key('ios-player-chrome-root'),
                   fit: StackFit.expand,
@@ -324,12 +347,16 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                     //    Center: title + compact micro spec badges (never stretched!)
                     //    Right: Cast / Favorite / Download / More
                     Positioned(
+                      key: const Key('ios-player-top-header-box'),
                       left: horizInset,
                       right: horizInset,
                       top: topInset,
                       child: _buildTopSpatialHeader(
                         context,
-                        width: width,
+                        width: math.max(
+                          200.0,
+                          width - liveLeftSafe - liveRightSafe,
+                        ),
                         isCompactWidth: isCompactWidth,
                         isUltraCompact: isUltraCompact,
                         ios26Visual: ios26Visual,
@@ -366,6 +393,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                     // 4. Unified Compact Bottom Liquid Glass Deck (Req 2)
                     //    Progress bar + primary toolbar fused into ONE low-height capsule.
                     Positioned(
+                      key: const Key('ios-player-bottom-deck-box'),
                       left: horizInset,
                       right: horizInset,
                       bottom: bottomInset,
@@ -375,7 +403,10 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                             maxWidth: widget.isLandscape ? 736.0 : 560.0,
                           ),
                           child: _buildUnifiedBottomDeck(
-                            width: width,
+                            width: math.max(
+                              200.0,
+                              width - liveLeftSafe - liveRightSafe,
+                            ),
                             ios26Visual: ios26Visual,
                             reduceTransparency: reduceTransparency,
                             reduceMotion: reduceMotion,
@@ -475,15 +506,44 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(
-                    widget.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                    ),
+                  child: Row(
+                    children: [
+                      if (widget.isLive) ...[
+                        Container(
+                          key: const Key('ios-portrait-live-badge'),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5.5,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppleColors.systemRed,
+                            borderRadius: BorderRadius.circular(5),
+                          ),
+                          child: const Text(
+                            'LIVE',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.4,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                      Expanded(
+                        child: Text(
+                          widget.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -609,16 +669,16 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                       ),
                     )
                   else
-                    const Expanded(
+                    Expanded(
                       child: Row(
                         children: [
-                          Icon(
+                          const Icon(
                             CupertinoIcons.dot_radiowaves_left_right,
                             color: AppleColors.systemRed,
                             size: 14,
                           ),
-                          SizedBox(width: 5),
-                          Text(
+                          const SizedBox(width: 5),
+                          const Text(
                             '正在直播',
                             style: TextStyle(
                               color: Colors.white,
@@ -626,6 +686,31 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
                               fontWeight: FontWeight.w600,
                             ),
                           ),
+                          if (widget.episodeName.trim().isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            Flexible(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 7,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.16),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  widget.episodeName.trim(),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Color(0xEBFFFFFF),
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -918,9 +1003,14 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
           icon: widget.isPipActive
               ? CupertinoIcons.rectangle_fill_on_rectangle_fill
               : CupertinoIcons.rectangle_on_rectangle,
+          iconWidget: _IosPipIcon(
+            size: iconSize + 1.5,
+            color: widget.isPipActive ? Colors.white : AppleColors.labelPrimary,
+            active: widget.isPipActive,
+          ),
           active: widget.isPipActive,
           activeTint: AppleColors.systemBlue,
-          semanticLabel: '画中画',
+          semanticLabel: widget.isPipActive ? '退出画中画' : '画中画',
           ios26Visual: ios26Visual,
           reduceTransparency: reduceTransparency,
           reduceMotion: reduceMotion,
@@ -1026,6 +1116,7 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
     required double size,
     required double iconSize,
     required IconData icon,
+    Widget? iconWidget,
     required bool active,
     required Color activeTint,
     required String semanticLabel,
@@ -1054,11 +1145,12 @@ class _IosPlayerChromeState extends State<IosPlayerChrome> {
             child: Stack(
               alignment: Alignment.center,
               children: [
-                Icon(
-                  icon,
-                  color: active ? Colors.white : AppleColors.labelPrimary,
-                  size: iconSize,
-                ),
+                iconWidget ??
+                    Icon(
+                      icon,
+                      color: active ? Colors.white : AppleColors.labelPrimary,
+                      size: iconSize,
+                    ),
                 if (showDot)
                   Positioned(
                     right: 7,
@@ -2299,4 +2391,110 @@ class _IosSpatialGlassSurface extends StatelessWidget {
       stops: [0.0, 0.52, 1.0],
     );
   }
+}
+
+/// Crisp Apple-style Picture-in-Picture glyph (rounded viewport + inset
+/// floating mini-window in bottom-right corner).
+class _IosPipIcon extends StatelessWidget {
+  final double size;
+  final Color color;
+  final bool active;
+
+  const _IosPipIcon({
+    required this.size,
+    required this.color,
+    this.active = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: CustomPaint(
+        painter: _IosPipIconPainter(color: color, active: active),
+      ),
+    );
+  }
+}
+
+class _IosPipIconPainter extends CustomPainter {
+  final Color color;
+  final bool active;
+
+  const _IosPipIconPainter({required this.color, required this.active});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final strokeW = (size.width * 0.095).clamp(1.3, 2.0);
+    final outerRect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(
+        strokeW * 0.5,
+        size.height * 0.14,
+        size.width - strokeW,
+        size.height * 0.72,
+      ),
+      Radius.circular(size.width * 0.18),
+    );
+    final strokePaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeW
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    canvas.drawRRect(outerRect, strokePaint);
+
+    final insetW = size.width * 0.44;
+    final insetH = size.height * 0.32;
+    final insetRect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(
+        size.width - strokeW * 1.4 - insetW,
+        size.height * 0.86 - strokeW * 1.4 - insetH,
+        insetW,
+        insetH,
+      ),
+      Radius.circular(size.width * 0.10),
+    );
+    final fillPaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    canvas.drawRRect(insetRect, fillPaint);
+
+    // Directional enter/exit micro-arrow in the upper-left area
+    final arrowStart = active
+        ? Offset(size.width * 0.42, size.height * 0.46)
+        : Offset(size.width * 0.24, size.height * 0.30);
+    final arrowEnd = active
+        ? Offset(size.width * 0.24, size.height * 0.30)
+        : Offset(size.width * 0.42, size.height * 0.46);
+    canvas.drawLine(arrowStart, arrowEnd, strokePaint);
+    final head = strokeW * 1.5;
+    if (active) {
+      canvas.drawLine(
+        arrowEnd,
+        Offset(arrowEnd.dx + head, arrowEnd.dy),
+        strokePaint,
+      );
+      canvas.drawLine(
+        arrowEnd,
+        Offset(arrowEnd.dx, arrowEnd.dy + head),
+        strokePaint,
+      );
+    } else {
+      canvas.drawLine(
+        arrowEnd,
+        Offset(arrowEnd.dx - head, arrowEnd.dy),
+        strokePaint,
+      );
+      canvas.drawLine(
+        arrowEnd,
+        Offset(arrowEnd.dx, arrowEnd.dy - head),
+        strokePaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _IosPipIconPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.active != active;
 }

@@ -1846,6 +1846,42 @@ extension _WindowsShell on _AdaptiveShellState {
                 icon: CupertinoIcons.sparkles,
                 onTap: () => _openOnboardingRoute(isReplay: true)),
         ]),
+        const SizedBox(height: 22),
+        WinSettingsGroup(
+          header: '联系反馈与官方交流',
+          footer: OfficialChannelInfo.antiTamperWarning,
+          children: [
+            Builder(
+              builder: (rowCtx) => WinSettingsRow(
+                key: const ValueKey('windows-settings-author-socials'),
+                title: '联系反馈作者（各社媒账号名）',
+                subtitle: OfficialChannelInfo.authorSocialSummary,
+                value: '复制',
+                icon: CupertinoIcons.person_crop_circle_badge_checkmark,
+                onTap: () => _copyAuthorSocialName(originContext: rowCtx),
+              ),
+            ),
+            Builder(
+              builder: (rowCtx) => WinSettingsRow(
+                key: const ValueKey('windows-settings-official-community'),
+                title: '官网交流群',
+                subtitle: OfficialChannelInfo.officialCommunityUrl,
+                value: '打开官网',
+                icon: CupertinoIcons.chat_bubble_2_fill,
+                onTap: () => _openOfficialCommunityLink(originContext: rowCtx),
+              ),
+            ),
+            WinSettingsRow(
+              key: const ValueKey('windows-settings-official-notice'),
+              title: '官方渠道安全声明',
+              subtitle:
+                  '认准 Marco 官网 ${OfficialChannelInfo.officialWebsiteDisplay}',
+              value: '查看',
+              icon: CupertinoIcons.shield_lefthalf_fill,
+              onTap: _openOfficialNoticeDialogFromSettings,
+            ),
+          ],
+        ),
       ]);
     if (_windowsSettings == '内容来源')
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

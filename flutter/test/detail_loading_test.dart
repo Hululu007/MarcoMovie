@@ -301,8 +301,12 @@ void main() {
         expect(targetDetailRequests, 2);
         expect(find.text('2'), findsOneWidget);
 
-        // Tap episode 2 and verify playback receives episode 2 URL.
+        // On iOS, tapping episode number circle 2 only scrolls to card 2
+        // (0 player launches); tapping episode card 2 starts playback.
         await tester.tap(find.text('2'));
+        await tester.pumpAndSettle();
+        expect(playedUrls, isEmpty);
+        await tester.tap(find.byKey(const ValueKey('ep_card_0_1')));
         await tester.pumpAndSettle();
         expect(playedUrls.last, 'https://media.example/ep2.m3u8');
 

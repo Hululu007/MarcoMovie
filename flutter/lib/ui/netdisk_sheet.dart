@@ -42,6 +42,11 @@ Future<void> showNetdiskAccountSheet(
   List<CmsSite> sites = const <CmsSite>[],
   String activeGroup = '',
   VoidCallback? onOpenCatPawSettings,
+  Future<void> Function()? onOpenAddLibrary,
+  Future<void> Function()? onOpenSubscriptionManager,
+  void Function(SubscriptionEntry sub)? onOpenLibrarySubscription,
+  Future<void> Function(SubscriptionEntry sub)? onRemoveLibrarySubscription,
+  String initialFocus = 'overview',
 }) async {
   if (usesWindowsAppearance(context)) {
     await Navigator.of(context).push<void>(buildApplePageRoute<void>(
@@ -71,6 +76,11 @@ Future<void> showNetdiskAccountSheet(
           sites: sites,
           activeGroup: activeGroup,
           onOpenCatPawSettings: onOpenCatPawSettings,
+          onOpenAddLibrary: onOpenAddLibrary,
+          onOpenSubscriptionManager: onOpenSubscriptionManager,
+          onOpenLibrarySubscription: onOpenLibrarySubscription,
+          onRemoveLibrarySubscription: onRemoveLibrarySubscription,
+          initialFocus: initialFocus,
         ),
       ),
     );
@@ -101,6 +111,11 @@ class _NetdiskAccountSheet extends StatefulWidget {
   final List<CmsSite> sites;
   final String activeGroup;
   final VoidCallback? onOpenCatPawSettings;
+  final Future<void> Function()? onOpenAddLibrary;
+  final Future<void> Function()? onOpenSubscriptionManager;
+  final void Function(SubscriptionEntry sub)? onOpenLibrarySubscription;
+  final Future<void> Function(SubscriptionEntry sub)? onRemoveLibrarySubscription;
+  final String initialFocus;
 
   const _NetdiskAccountSheet({
     required this.storage,
@@ -112,6 +127,11 @@ class _NetdiskAccountSheet extends StatefulWidget {
     this.sites = const <CmsSite>[],
     this.activeGroup = '',
     this.onOpenCatPawSettings,
+    this.onOpenAddLibrary,
+    this.onOpenSubscriptionManager,
+    this.onOpenLibrarySubscription,
+    this.onRemoveLibrarySubscription,
+    this.initialFocus = 'overview',
   });
 
   @override
@@ -925,6 +945,13 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
       ),
     );
 
+    final showUnifiedManagement = widget.embedInIosScaffold &&
+        (widget.onOpenAddLibrary != null ||
+            widget.onOpenSubscriptionManager != null);
+    final Widget? unifiedManagementCard = showUnifiedManagement
+        ? _buildIosUnifiedManagementCard(palette)
+        : null;
+
     final scrollList = RepaintBoundary(
       child: SingleChildScrollView(
         padding: EdgeInsets.fromLTRB(
@@ -936,6 +963,11 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (unifiedManagementCard != null &&
+                widget.initialFocus != 'netdisk') ...[
+              unifiedManagementCard,
+              const SizedBox(height: 14),
+            ],
             bannerCard,
             const SizedBox(height: 14),
             // Active QR Code Scanner Box if a drive is selected
@@ -949,6 +981,11 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                 _buildDriveTile(NetdiskService.drives[i]),
                 const SizedBox(height: 10),
               ],
+            if (unifiedManagementCard != null &&
+                widget.initialFocus == 'netdisk') ...[
+              const SizedBox(height: 4),
+              unifiedManagementCard,
+            ],
           ],
         ),
       ),
@@ -1009,8 +1046,275 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
     return bodyContent;
   }
 
+  static bool _isResourceLibrarySub(SubscriptionEntry sub) {
+    final u = sub.url.trim().toLowerCase();
+    final id = sub.id.trim().toLowerCase();
+    final fmt = sub.format.trim().toLowerCase();
+    return u.startsWith('emby://') ||
+        u.startsWith('jellyfin://') ||
+        u.startsWith('plex://') ||
+        u.startsWith('webdav') ||
+        u.startsWith('alist://') ||
+        u.startsWith('smb') ||
+        u.startsWith('local') ||
+        u.startsWith('cloudlib://') ||
+        id.startsWith('emby_') ||
+        id.startsWith('jellyfin_') ||
+        id.startsWith('plex_') ||
+        id.startsWith('webdavlib_') ||
+        id.startsWith('alist_') ||
+        id.startsWith('smbnas_') ||
+        id.startsWith('localfile_') ||
+        id.startsWith('cloudlib_') ||
+        const {
+          'emby',
+          'jellyfin',
+          'plex',
+          'webdav',
+          'alist',
+          'smb',
+          'local',
+          'clouddrive',
+        }.contains(fmt);
+  }
+
+  static String _resourceLibraryBadge(SubscriptionEntry sub) {
+    final id = sub.id.trim().toLowerCase();
+    final fmt = sub.format.trim().toLowerCase();
+    if (id.startsWith('emby_') || fmt == 'emby') return 'Emby';
+    if (id.startsWith('jellyfin_') || fmt == 'jellyfin') return 'Jellyfin';
+    if (id.startsWith('plex_') || fmt == 'plex') return 'Plex';
+    if (id.startsWith('webdavlib_') || fmt == 'webdav') return 'WebDAV';
+    if (id.startsWith('alist_') || fmt == 'alist') return 'AList / OpenList';
+    if (id.startsWith('smbnas_') || fmt == 'smb') return 'SMB';
+    if (id.startsWith('localfile_') || fmt == 'local') return '当前设备';
+    if (id.startsWith('cloudlib_') || fmt == 'clouddrive') return '个人网盘';
+    return '资源库';
+  }
+
+  Widget _buildIosUnifiedManagementCard(ApplePalette palette) {
+    final subs = widget.storage.getSubscriptions();
+    final libraries = subs.where(_isResourceLibrarySub).toList();
+    final feedSubs = subs.where((s) => !_isResourceLibrarySub(s)).toList();
+    final groupSet = <String>{
+      for (final s in subs)
+        if (s.group.trim().isNotEmpty) s.group.trim(),
+    };
+
+    return AppleSettingsGlassCard(
+      key: const ValueKey('config-center-unified-management-card'),
+      padding: const EdgeInsets.fromLTRB(15, 14, 15, 14),
+      borderRadius: BorderRadius.circular(18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                CupertinoIcons.square_grid_2x2_fill,
+                color: AppleColors.systemBlue,
+                size: 18,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '资源库与订阅管理',
+                  style: TextStyle(
+                    color: palette.labelPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '已添加 ${libraries.length} 个资源库 · ${feedSubs.length} 条订阅${groupSet.isNotEmpty ? '（${groupSet.length} 个分组）' : ''}',
+            style: TextStyle(
+              color: palette.labelSecondary,
+              fontSize: 12.5,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (widget.onOpenAddLibrary != null)
+                AppleCapsuleButton(
+                  key: const ValueKey('config-center-add-library-btn'),
+                  icon: CupertinoIcons.plus_circle_fill,
+                  label: '添加资源库',
+                  primary: true,
+                  compact: true,
+                  useBackdrop: false,
+                  onPressed: () async {
+                    await widget.onOpenAddLibrary!.call();
+                    if (mounted) setState(() {});
+                  },
+                ),
+              if (widget.onOpenSubscriptionManager != null)
+                AppleCapsuleButton(
+                  key: const ValueKey('config-center-manage-subs-btn'),
+                  icon: CupertinoIcons.square_stack_3d_up_fill,
+                  label: '管理订阅与分组',
+                  compact: true,
+                  useBackdrop: false,
+                  onPressed: () async {
+                    await widget.onOpenSubscriptionManager!.call();
+                    if (mounted) setState(() {});
+                  },
+                ),
+            ],
+          ),
+          if (libraries.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Text(
+              '已添加资源库',
+              style: TextStyle(
+                color: palette.labelSecondary,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 6),
+            for (final lib in libraries)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 11,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: palette.isDark
+                        ? Colors.white.withValues(alpha: 0.06)
+                        : Colors.black.withValues(alpha: 0.04),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: widget.onOpenLibrarySubscription == null
+                              ? null
+                              : () {
+                                  Navigator.of(context).pop();
+                                  widget.onOpenLibrarySubscription!(lib);
+                                },
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                lib.name.trim().isEmpty
+                                    ? _resourceLibraryBadge(lib)
+                                    : lib.name.trim(),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: palette.labelPrimary,
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                _resourceLibraryBadge(lib),
+                                style: TextStyle(
+                                  color: palette.labelSecondary,
+                                  fontSize: 11.5,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      if (widget.onOpenLibrarySubscription != null)
+                        Semantics(
+                          button: true,
+                          label: '打开 ${lib.name}',
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () {
+                              Navigator.of(context).pop();
+                              widget.onOpenLibrarySubscription!(lib);
+                            },
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 6,
+                              ),
+                              child: Text(
+                                '打开',
+                                style: TextStyle(
+                                  color: AppleColors.systemBlue,
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (widget.onRemoveLibrarySubscription != null)
+                        Semantics(
+                          button: true,
+                          label: '移除 ${lib.name}',
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () async {
+                              final confirmed = await showCupertinoDialog<bool>(
+                                context: context,
+                                builder: (dialogCtx) => CupertinoAlertDialog(
+                                  title: Text('移除「${lib.name}」？'),
+                                  content: const Text(
+                                    '移除后可随时重新添加，本地收藏与观看历史不受影响。',
+                                  ),
+                                  actions: [
+                                    CupertinoDialogAction(
+                                      onPressed: () =>
+                                          Navigator.of(dialogCtx).pop(false),
+                                      child: const Text('取消'),
+                                    ),
+                                    CupertinoDialogAction(
+                                      isDestructiveAction: true,
+                                      onPressed: () =>
+                                          Navigator.of(dialogCtx).pop(true),
+                                      child: const Text('移除'),
+                                    ),
+                                  ],
+                                ),
+                              );
+                              if (confirmed != true || !mounted) return;
+                              await widget.onRemoveLibrarySubscription!(lib);
+                              if (mounted) setState(() {});
+                            },
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 6,
+                              ),
+                              child: Icon(
+                                CupertinoIcons.trash,
+                                size: 15,
+                                color: AppleColors.systemRed,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _buildFallbackDriveSegments() {
-    const labels = ['全部', '夸克', 'UC', '百度', '阿狸'];
+    const labels = ['全部', '夸克', 'UC', '百度', '阿里'];
     final palette = ApplePalette.of(context);
     final isDark = palette.isDark;
     return Container(

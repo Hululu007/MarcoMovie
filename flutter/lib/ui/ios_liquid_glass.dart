@@ -15,6 +15,50 @@ import 'package:flutter/services.dart';
 /// On iOS 15–18, macOS, Windows, Android, HarmonyOS, and widget tests,
 /// [isAvailable] resolves to `false` and every widget / presenter seamlessly
 /// renders its high-fidelity Flutter fallback.
+/// Identifies which foreground route currently owns the iOS Dock appearance.
+enum IosDockOwner {
+  /// Root Home tab (index 0): tracks drag morphing and settles to 0.0 or 1.0.
+  home,
+
+  /// Non-Home root tabs (Live / Library / Settings): expanded full bar (0.0).
+  rootTab,
+
+  /// Curated collection page: visible, locked to upright collapsed Logo (1.0).
+  curated,
+
+  /// Secondary detail, player, search, settings subpage, or modal overlay.
+  hidden,
+}
+
+/// Shared Dock bridge passed down from [AdaptiveShell] to Curated collection
+/// pages so both native iOS 26+ chrome and iOS 14–25 Flutter fallback share one
+/// single state machine, scroll morph progress, and action dispatch table.
+class IosCuratedDockHost {
+  final ValueListenable<double> progress;
+  final ValueListenable<bool> useNativeRootChrome;
+  final ValueListenable<bool> visibleOnCurated;
+  final ValueListenable<int> selectedTabIndex;
+  final List<(IconData, IconData, String)> items;
+  final ValueChanged<int> onSelectTab;
+  final VoidCallback onSearch;
+  final VoidCallback onScrollToTop;
+  final VoidCallback onCuratedEnter;
+  final VoidCallback onCuratedExit;
+
+  const IosCuratedDockHost({
+    required this.progress,
+    required this.useNativeRootChrome,
+    required this.visibleOnCurated,
+    required this.selectedTabIndex,
+    required this.items,
+    required this.onSelectTab,
+    required this.onSearch,
+    required this.onScrollToTop,
+    required this.onCuratedEnter,
+    required this.onCuratedExit,
+  });
+}
+
 class IosLiquidGlassBridge {
   static const MethodChannel channel = MethodChannel(
     'marco_movie/ios_liquid_glass',
@@ -38,6 +82,7 @@ class IosLiquidGlassBridge {
   static ValueChanged<int>? _onRootTabSelected;
   static VoidCallback? _onRootTabSearch;
   static VoidCallback? _onRootTabScrollToTop;
+  static void Function(int tabIndex, String actionId)? _onRootTabMenuAction;
 
   static bool get isSceneActive => sceneActiveNotifier.value;
 
@@ -111,6 +156,15 @@ class IosLiquidGlassBridge {
       }
       if (call.method == 'rootTabScrollToTop') {
         _onRootTabScrollToTop?.call();
+        return null;
+      }
+      if (call.method == 'rootTabMenuAction' && call.arguments is Map) {
+        final args = Map<String, dynamic>.from(call.arguments as Map);
+        final tabIdx = args['tabIndex'];
+        final actionId = args['actionId'];
+        if (tabIdx is int && actionId is String) {
+          _onRootTabMenuAction?.call(tabIdx, actionId);
+        }
         return null;
       }
       if (call.method == 'privacyPinCallback' && call.arguments is Map) {
@@ -304,14 +358,17 @@ class IosLiquidGlassBridge {
     bool visible = true,
     bool minimized = false,
     bool adaptiveTopOnWide = true,
+    int? epoch,
     ValueChanged<int>? onSelect,
     VoidCallback? onSearch,
     VoidCallback? onScrollToTop,
+    void Function(int tabIndex, String actionId)? onTabMenuAction,
   }) async {
     _ensureIncomingHandler();
     _onRootTabSelected = onSelect;
     _onRootTabSearch = onSearch;
     _onRootTabScrollToTop = onScrollToTop;
+    _onRootTabMenuAction = onTabMenuAction;
     if (!isAvailable) return false;
     try {
       final res = await channel.invokeMethod<bool>(
@@ -323,6 +380,7 @@ class IosLiquidGlassBridge {
           'visible': visible,
           'minimized': minimized,
           'adaptiveTopOnWide': adaptiveTopOnWide,
+          if (epoch != null) 'epoch': epoch,
         },
       );
       return res == true;
@@ -337,12 +395,17 @@ class IosLiquidGlassBridge {
   static Future<void> setRootTabSelectedIndex(
     int index, {
     bool animated = true,
+    int? epoch,
   }) async {
     if (!isAvailable) return;
     try {
       await channel.invokeMethod<void>(
         'setRootTabSelectedIndex',
-        <String, dynamic>{'index': index, 'animated': animated},
+        <String, dynamic>{
+          'index': index,
+          'animated': animated,
+          if (epoch != null) 'epoch': epoch,
+        },
       );
     } on MissingPluginException {
       // Host tests may not register native channel.
@@ -356,6 +419,7 @@ class IosLiquidGlassBridge {
     bool minimized, {
     bool animated = true,
     double? progress,
+    int? epoch,
   }) async {
     if (!isAvailable) return;
     try {
@@ -365,6 +429,7 @@ class IosLiquidGlassBridge {
           'minimized': minimized,
           'animated': animated,
           if (progress != null) 'progress': progress.clamp(0.0, 1.0),
+          if (epoch != null) 'epoch': epoch,
         },
       );
     } on MissingPluginException {
@@ -377,12 +442,17 @@ class IosLiquidGlassBridge {
   static Future<void> setRootTabVisible(
     bool visible, {
     bool animated = true,
+    int? epoch,
   }) async {
     if (!isAvailable) return;
     try {
       await channel.invokeMethod<void>(
         'setRootTabVisible',
-        <String, dynamic>{'visible': visible, 'animated': animated},
+        <String, dynamic>{
+          'visible': visible,
+          'animated': animated,
+          if (epoch != null) 'epoch': epoch,
+        },
       );
     } on MissingPluginException {
       // Host tests may not register native channel.
@@ -435,6 +505,7 @@ class IosLiquidGlassBridge {
       _onRootTabSelected = null;
       _onRootTabSearch = null;
       _onRootTabScrollToTop = null;
+      _onRootTabMenuAction = null;
       _pinCallbacks.clear();
     }
   }
@@ -449,20 +520,38 @@ class IosLiquidGlassBridge {
 /// Observes the root [Navigator] so any pushed non-root route (fullscreen video
 /// playback, detail page, onboarding, modal route, etc.) automatically hides
 /// the root native iOS tab chrome even if a caller pushes directly without
-/// `_trackSecondaryRoute`.
+/// `_trackSecondaryRoute`, while Curated collection pages (`curatedRouteName`)
+/// keep the collapsed Logo button active until covered by another route.
 class IosRootTabNavigatorObserver extends NavigatorObserver {
+  static const String curatedRouteName = '/ios/curated-wall';
   static final ValueNotifier<int> secondaryRouteDepth = ValueNotifier<int>(0);
-  final Set<Route<dynamic>> _trackedSecondaryRoutes = <Route<dynamic>>{};
+  static final ValueNotifier<bool> topRouteIsCurated = ValueNotifier<bool>(false);
+  static final ValueNotifier<int> curatedRouteDepth = ValueNotifier<int>(0);
+  final List<Route<dynamic>> _secondaryStack = <Route<dynamic>>[];
 
   @visibleForTesting
   static void resetForTest() {
     secondaryRouteDepth.value = 0;
+    topRouteIsCurated.value = false;
+    curatedRouteDepth.value = 0;
   }
 
+  static bool isCuratedRoute(Route<dynamic>? route) =>
+      route?.settings.name == curatedRouteName;
+
   void _syncDepth() {
-    final next = _trackedSecondaryRoutes.length;
-    if (secondaryRouteDepth.value != next) {
-      secondaryRouteDepth.value = next;
+    final nextDepth = _secondaryStack.length;
+    final nextCuratedDepth = _secondaryStack.where(isCuratedRoute).length;
+    final nextTopCurated =
+        _secondaryStack.isNotEmpty && isCuratedRoute(_secondaryStack.last);
+    if (curatedRouteDepth.value != nextCuratedDepth) {
+      curatedRouteDepth.value = nextCuratedDepth;
+    }
+    if (topRouteIsCurated.value != nextTopCurated) {
+      topRouteIsCurated.value = nextTopCurated;
+    }
+    if (secondaryRouteDepth.value != nextDepth) {
+      secondaryRouteDepth.value = nextDepth;
     }
   }
 
@@ -472,32 +561,38 @@ class IosRootTabNavigatorObserver extends NavigatorObserver {
   @override
   void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
     if (_isSecondaryRoute(route)) {
-      _trackedSecondaryRoutes.add(route);
+      _secondaryStack.remove(route);
+      _secondaryStack.add(route);
       _syncDepth();
     }
   }
 
   @override
   void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    if (_trackedSecondaryRoutes.remove(route)) {
+    if (_secondaryStack.remove(route)) {
       _syncDepth();
     }
   }
 
   @override
   void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    if (_trackedSecondaryRoutes.remove(route)) {
+    if (_secondaryStack.remove(route)) {
       _syncDepth();
     }
   }
 
   @override
   void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
-    if (oldRoute != null) {
-      _trackedSecondaryRoutes.remove(oldRoute);
-    }
-    if (_isSecondaryRoute(newRoute)) {
-      _trackedSecondaryRoutes.add(newRoute!);
+    final oldIdx = oldRoute != null ? _secondaryStack.indexOf(oldRoute) : -1;
+    if (oldIdx >= 0) {
+      if (_isSecondaryRoute(newRoute)) {
+        _secondaryStack[oldIdx] = newRoute!;
+      } else {
+        _secondaryStack.removeAt(oldIdx);
+      }
+    } else if (_isSecondaryRoute(newRoute)) {
+      _secondaryStack.remove(newRoute);
+      _secondaryStack.add(newRoute!);
     }
     _syncDepth();
   }
@@ -604,12 +699,14 @@ class IosNativeDockItem {
   final String symbol;
   final String? selectedSymbol;
   final String? kind;
+  final List<IosNativeMenuItem>? menuItems;
 
   const IosNativeDockItem({
     required this.label,
     required this.symbol,
     this.selectedSymbol,
     this.kind,
+    this.menuItems,
   });
 
   Map<String, dynamic> toMap() => <String, dynamic>{
@@ -617,6 +714,8 @@ class IosNativeDockItem {
         'symbol': symbol,
         'selectedSymbol': selectedSymbol ?? symbol,
         if (kind != null && kind!.isNotEmpty) 'kind': kind,
+        if (menuItems != null && menuItems!.isNotEmpty)
+          'menuItems': [for (final m in menuItems!) m.toMap()],
       };
 }
 
@@ -689,6 +788,7 @@ class IosNativeDockView extends StatefulWidget {
   final ValueChanged<int> onSelect;
   final VoidCallback? onSearch;
   final VoidCallback? onScrollToTop;
+  final void Function(int tabIndex, String actionId)? onTabMenuAction;
   final bool showSearch;
   final bool hidden;
   final bool collapsed;
@@ -701,6 +801,7 @@ class IosNativeDockView extends StatefulWidget {
     required this.onSelect,
     this.onSearch,
     this.onScrollToTop,
+    this.onTabMenuAction,
     this.showSearch = true,
     this.hidden = false,
     this.collapsed = false,
@@ -744,6 +845,13 @@ class _IosNativeDockViewState extends State<IosNativeDockView> {
         widget.onSearch?.call();
       } else if (call.method == 'onScrollToTop') {
         widget.onScrollToTop?.call();
+      } else if (call.method == 'onTabMenuAction' && call.arguments is Map) {
+        final args = Map<String, dynamic>.from(call.arguments as Map);
+        final tabIdx = args['tabIndex'];
+        final actionId = args['actionId'];
+        if (tabIdx is int && actionId is String) {
+          widget.onTabMenuAction?.call(tabIdx, actionId);
+        }
       }
     });
   }
@@ -841,6 +949,7 @@ class IosNativeGlassButton extends StatefulWidget {
   final double height;
   final String menuTitle;
   final List<IosNativeMenuItem>? menuItems;
+  final bool menuAsPrimaryAction;
   final ValueChanged<String>? onMenuSelected;
   final VoidCallback onTap;
   final Widget fallback;
@@ -862,6 +971,7 @@ class IosNativeGlassButton extends StatefulWidget {
     this.height = 40,
     this.menuTitle = '',
     this.menuItems,
+    this.menuAsPrimaryAction = true,
     this.onMenuSelected,
     required this.onTap,
     required this.fallback,
@@ -900,8 +1010,10 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
           'tintColor': widget.tintColor!.toARGB32(),
         'accessibilityLabel': widget.accessibilityLabel ?? widget.label,
         if (widget.menuTitle.isNotEmpty) 'menuTitle': widget.menuTitle,
-        if (widget.menuItems != null && widget.menuItems!.isNotEmpty)
+        if (widget.menuItems != null && widget.menuItems!.isNotEmpty) ...{
           'menuItems': [for (final item in widget.menuItems!) item.toMap()],
+          'menuAsPrimaryAction': widget.menuAsPrimaryAction,
+        },
         if (initialWidth != null) 'initialWidth': initialWidth,
         'initialHeight': widget.height,
       };
@@ -948,6 +1060,7 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
         oldWidget.prominent != widget.prominent ||
         oldWidget.accessibilityLabel != widget.accessibilityLabel ||
         oldWidget.menuTitle != widget.menuTitle ||
+        oldWidget.menuAsPrimaryAction != widget.menuAsPrimaryAction ||
         !listEquals(oldWidget.menuItems, widget.menuItems)) {
       unawaited(_safeUpdate(ch));
     }
@@ -1924,7 +2037,7 @@ class IosNativeFilterResult {
 /// sheet (`类别 / 地区 / 年份`), returning the chosen filter values or `null`
 /// when unavailable.
 Future<IosNativeFilterResult?> showAppleNativeFilterSheet({
-  String title = '多维片库筛选',
+  String title = '片库筛选',
   required List<IosNativeFilterCategory> categories,
   required String selectedCategoryId,
   required String selectedGenreLabel,

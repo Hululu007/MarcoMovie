@@ -9,8 +9,11 @@ class OnboardingPrefs {
   static const String doneVersionKey = 'onboarding_done_version';
   static const String playHintShownCountKey = 'play_hint_shown_count';
   static const String playHintDismissedKey = 'play_hint_dismissed';
+  static const String officialChannelNoticeVersionKey =
+      'official_channel_notice_version';
 
   static const int currentVersion = 1;
+  static const int currentOfficialChannelNoticeVersion = 1;
   static const int maxPlayHintShows = 3;
 
   final SharedPreferences _prefs;
@@ -24,9 +27,40 @@ class OnboardingPrefs {
 
   int get doneVersion => _prefs.getInt(doneVersionKey) ?? 0;
 
+  int get officialChannelNoticeVersion =>
+      _prefs.getInt(officialChannelNoticeVersionKey) ?? 0;
+
   int get playHintShownCount => _prefs.getInt(playHintShownCountKey) ?? 0;
 
   bool get playHintDismissed => _prefs.getBool(playHintDismissedKey) ?? false;
+
+  /// Returns `true` when the first-launch official channel & author anti-tamper
+  /// notice has not yet been acknowledged on this device.
+  bool shouldShowOfficialChannelNotice() {
+    return officialChannelNoticeVersion < currentOfficialChannelNoticeVersion;
+  }
+
+  /// Persists acknowledgment of the first-launch official channel notice.
+  /// Returns `true` ONLY when the underlying preference store confirms the
+  /// write succeeded; on `false` or exception, reconciles the in-memory cache
+  /// with the backing store so subsequent reads agree with persisted storage.
+  Future<bool> markOfficialChannelNoticeSeen() async {
+    try {
+      final saved = await _prefs.setInt(
+        officialChannelNoticeVersionKey,
+        currentOfficialChannelNoticeVersion,
+      );
+      if (saved) return true;
+    } catch (_) {
+      // Fall through to cache reconciliation below.
+    }
+    try {
+      await _prefs.reload();
+    } catch (_) {
+      // Reload also failed; never masquerade an unconfirmed write as persisted.
+    }
+    return false;
+  }
 
   /// Returns `true` only when onboarding has not completed the current version
   /// and the device is NOT HarmonyOS NEXT (`!OhosRuntime.isOhos`).

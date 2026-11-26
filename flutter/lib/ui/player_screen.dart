@@ -27,6 +27,7 @@ import '../core/ios_avplayer_controller.dart';
 import '../core/ios_mpv_profile.dart';
 import '../core/local_media_proxy.dart';
 import '../core/models.dart';
+import '../core/smb2_client.dart';
 import '../core/playback_recovery_policy.dart';
 import '../core/playback_startup.dart';
 import '../core/playback_wakelock.dart';
@@ -77,6 +78,32 @@ import 'windows_title_bar.dart';
 /// - Desktop HUD preserving Windows `winFastGlass` blur-free panels
 /// - Reserved Wave 2 slots for `DanmuLayer`, `FirstPlayGestureHint`, and
 ///   `BrandLogoLoader`.
+/// Confirmed playback identity emitted by [PlayerScreen] only AFTER actual
+/// media playback starts (or switches/auto-advances and starts). Failed opens
+/// never emit this so Detail screens never prematurely move the active-episode
+/// marker.
+class PlayerPlaybackConfirmation {
+  final String siteKey;
+  final String videoId;
+  final int lineIndex;
+  final String lineId;
+  final String lineName;
+  final int episodeIndex;
+  final String episodeName;
+  final String episodeUrl;
+
+  const PlayerPlaybackConfirmation({
+    required this.siteKey,
+    required this.videoId,
+    required this.lineIndex,
+    required this.lineId,
+    required this.lineName,
+    required this.episodeIndex,
+    required this.episodeName,
+    required this.episodeUrl,
+  });
+}
+
 class PlayerScreen extends StatefulWidget {
   final CmsSite site;
   final CmsVideo video;
@@ -100,8 +127,11 @@ class PlayerScreen extends StatefulWidget {
   final bool danmuEnabled;
   final VoidCallback? onToggleDanmu;
   final VoidCallback? onOpenDanmuSettings;
+  final ValueChanged<PlayerPlaybackConfirmation>? onPlaybackConfirmed;
   @visibleForTesting
   final Player? debugPlayer;
+  @visibleForTesting
+  final IosAvPlayerController? debugIosAvPlayerController;
   @visibleForTesting
   final Widget? debugVideoSurface;
   @visibleForTesting
@@ -139,7 +169,9 @@ class PlayerScreen extends StatefulWidget {
     this.danmuEnabled = false,
     this.onToggleDanmu,
     this.onOpenDanmuSettings,
+    this.onPlaybackConfirmed,
     this.debugPlayer,
+    this.debugIosAvPlayerController,
     this.debugVideoSurface,
     this.debugSubtitleLayer,
     this.debugHudPrefs,
@@ -297,6 +329,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Completer<void>? _sourceAbort;
   final _cloudMedia = PlayerCloudMediaSession();
   final _localMedia = PlayerLocalMediaSession();
+  SmbMediaStreamProxy? _smbStreamProxy;
   final _startup = PlaybackStartup();
   final _tvSeek = TvRemoteSeekController();
   final GlobalKey _playerStageKey = GlobalKey();
@@ -312,8 +345,57 @@ class _PlayerScreenState extends State<PlayerScreen>
       !kIsWeb &&
       defaultTargetPlatform == TargetPlatform.iOS &&
       !OhosRuntime.isOhos &&
-      !widget.embedded &&
-      !_isLiveStream;
+      !widget.embedded;
+
+  bool _shouldShowPortraitCompanion(Size? size) {
+    if (!_useIosPortraitCompanionMode || size == null) return false;
+    if (size.height <= size.width) return false;
+    // Live TV uses top mini-window + channel/line companion in portrait across
+    // both iPhone and iPad portrait so users never face a giant black screen.
+    // VOD keeps iPad portrait fullscreen while using portrait companion on iPhone.
+    return _isLiveStream || size.shortestSide < 600;
+  }
+
+  double _iosDeviceVolume = 0.5;
+  double _iosConfirmedDeviceVolume = 0.5;
+  bool _iosDeviceVolumeSynced = false;
+  bool _iosVolumeReadInFlight = false;
+  bool _iosPendingVolumeDragActive = false;
+  double _iosPendingVolumeDragDelta = 0.0;
+  double? _iosFsmVolumeBaseline;
+  double? _iosLegacyVolumeBaseline;
+  double? _iosPendingSystemVolume;
+  bool _iosSystemVolumeFlushing = false;
+  int? _pendingAutoStartPipSession;
+  int? _pendingAutoStartPipMediaId;
+  int? _cancelStartingPipSession;
+  int? _cancelStartingPipMediaId;
+  int _iosPipRequestGen = 0;
+  bool _iosPipRefreshInFlight = false;
+  bool _sessionForceAvPlayerForPip = false;
+  Timer? _pendingPipTimeoutTimer;
+  int _avClockAnchorMs = 0;
+  int? _avObservedPlayingMinPosMs;
+  int? _avPendingSeekTargetMs;
+  int _avPendingSeekGen = 0;
+  bool _avDispatchingSeek = false;
+  int _avLastProcessedClockSeq = 0;
+  int? _avLastProcessedClockMediaId;
+  final ValueNotifier<String> _liveCompanionGroupNotifier =
+      ValueNotifier<String>('');
+  final ValueNotifier<String> _liveCompanionQueryNotifier =
+      ValueNotifier<String>('');
+  final TextEditingController _liveCompanionSearchCtrl =
+      TextEditingController();
+
+  bool get _hasPendingAutoStartPip =>
+      _pendingAutoStartPipSession != null &&
+      _pendingAutoStartPipSession == _playSession;
+
+  IosPlaybackEngineMode get _effectiveIosEngineMode =>
+      _sessionForceAvPlayerForPip
+          ? IosPlaybackEngineMode.avPlayer
+          : _iosEngineMode;
   late final PlayerHudPrefs _hudPrefs;
   late final bool _ownsHudPrefs;
   late final PlayerGestureStateMachine _gestureFsm;
@@ -412,8 +494,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       !OhosRuntime.isOhos;
   bool get _canUseIosAvPlayerEngine =>
       _isIosPlayerPlatform &&
-      widget.debugPlayer == null &&
-      widget.debugVideoSurface == null;
+      (widget.debugIosAvPlayerController != null ||
+          (widget.debugPlayer == null && widget.debugVideoSurface == null));
   IosAvPlayerController? _iosAvPlayerController;
   IosPlaybackEngineMode _iosEngineMode = IosPlaybackEngineMode.avPlayer;
   IosHdrToneMappingMode _iosHdrToneMapping = IosHdrToneMappingMode.auto;
@@ -738,6 +820,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     _gestureTickTimer = null;
     _verticalHudClearTimer?.cancel();
     _verticalHudClearTimer = null;
+    _iosPendingVolumeDragActive = false;
+    _iosPendingVolumeDragDelta = 0.0;
+    _iosFsmVolumeBaseline = null;
+    _iosLegacyVolumeBaseline = null;
     if (reason != GestureInterruptReason.multiTouch) {
       _globalActivePointers.clear();
     }
@@ -800,7 +886,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         logical == _activeQualityLogicalUrl;
   }
   bool get _matchesActiveMedia {
-    if (_usingAvPlayer) return _allowEvents;
+    if (_usingAvPlayer) return false;
     if (_activeMediaUri.isEmpty) return false;
     final playlist = _player.state.playlist;
     if (playlist.medias.isEmpty) return _allowEvents;
@@ -812,6 +898,39 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _introSkippedForSession = false;
   bool _outroSkippedForSession = false;
   bool _userSelectedQuality = false;
+  bool _lastIosPipActive = false;
+  bool _currentEpisodePlaybackConfirmed = false;
+  int _confirmedPlaybackSession = -1;
+  int _episodeResumeAnchorMs = 0;
+  ({bool wantLandscape, int expiresAtMs})? _pendingIosOrientationFeedback;
+
+  void _markCurrentEpisodePlaybackConfirmed() {
+    if (_isLiveStream) return;
+    final alreadyForSession =
+        _currentEpisodePlaybackConfirmed &&
+        _confirmedPlaybackSession == _playSession;
+    _currentEpisodePlaybackConfirmed = true;
+    _confirmedPlaybackSession = _playSession;
+    if (alreadyForSession) return;
+    final line = _currentLine;
+    final ep = _currentEpisode;
+    widget.onPlaybackConfirmed?.call(
+      PlayerPlaybackConfirmation(
+        siteKey: widget.site.key,
+        videoId: widget.video.id,
+        lineIndex: _lineIndex,
+        lineId: line.id,
+        lineName: line.name,
+        episodeIndex: _episodeIndex,
+        episodeName: ep.name,
+        episodeUrl: ep.url,
+      ),
+    );
+    if (!_initialHistoryRecorded) {
+      _initialHistoryRecorded = true;
+      unawaited(_saveProgress(immediate: true, syncImmediate: false));
+    }
+  }
   final List<int> _midPlaybackStallEpochsMs = <int>[];
   Timer? _midPlaybackStallTimer;
   int _lastPointerScheduleMs = 0;
@@ -985,10 +1104,26 @@ class _PlayerScreenState extends State<PlayerScreen>
       widget.video.id,
       forPrivate: widget.site.isEffectivelyPrivate,
     );
+    _liveCompanionGroupNotifier.value = widget.initialLiveChannel?.group ?? '';
     if (_canUseIosAvPlayerEngine) {
-      final avCtrl = IosAvPlayerController();
+      final avCtrl = widget.debugIosAvPlayerController ?? IosAvPlayerController();
       _iosAvPlayerController = avCtrl;
       avCtrl.addListener(_onIosAvPlayerChanged);
+      _iosAvSubscriptions.add(
+        avCtrl.onSystemVolumeChanged.listen((vol) {
+          if (!mounted) return;
+          _applyObservedIosSystemVolume(vol);
+        }),
+      );
+      _iosAvSubscriptions.add(
+        avCtrl.onPipError.listen((errorMsg) {
+          if (!mounted) return;
+          _clearPendingAutoStartPip();
+          final detail = errorMsg.trim().isNotEmpty ? errorMsg.trim() : '系统暂不允许开启画中画';
+          _showHud('画中画开启失败：$detail');
+          setState(() {});
+        }),
+      );
       _iosAvSubscriptions.add(
         avCtrl.onFallbackToMpvRequested.listen((event) {
           if (!mounted ||
@@ -1008,11 +1143,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         }),
       );
       unawaited(_initIosAvPlayerTelemetry());
+    } else if (_isIosPlayerPlatform) {
+      unawaited(_primeIosSystemVolume());
     }
-    if (!_desktop &&
-        !widget.embedded &&
-        defaultTargetPlatform == TargetPlatform.iOS &&
-        !OhosRuntime.isOhos) {
+    if (_shouldMonitorIosPhysicalOrientation) {
       unawaited(
         _mobileChrome.setOrientationMonitoring(
           true,
@@ -1147,7 +1281,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           : _position;
       if (pos.inMilliseconds >= 1000) {
         _lastKnownPositionMs = pos.inMilliseconds;
-        if (!_initialHistoryRecorded) {
+        if (_playing &&
+            !_buffering &&
+            pos.inMilliseconds > _episodeResumeAnchorMs + 250) {
+          _markCurrentEpisodePlaybackConfirmed();
+        }
+        if (_currentEpisodePlaybackConfirmed && !_initialHistoryRecorded) {
           _initialHistoryRecorded = true;
           unawaited(_saveProgress());
         }
@@ -1289,6 +1428,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             }
           }
         });
+        if (playing && !_buffering) {
+          _markCurrentEpisodePlaybackConfirmed();
+        }
         if (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled) {
           _danmuCache?.onPlaybackTick(
             _position.inMilliseconds,
@@ -1326,6 +1468,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         setState(() => _buffering = buffering);
         if (!buffering) {
           _midPlaybackStallTimer?.cancel();
+          if (_playing) {
+            _markCurrentEpisodePlaybackConfirmed();
+          }
           if (_isLiveStream && _playing && _videoWidth > 0 && _videoHeight > 0) {
             _startup.cancel();
           }
@@ -1426,15 +1571,307 @@ class _PlayerScreenState extends State<PlayerScreen>
     _syncMobileSystemBars();
   }
 
+  bool get _shouldMonitorIosPhysicalOrientation =>
+      !_desktop &&
+      !widget.embedded &&
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      !OhosRuntime.isOhos;
+
   @override
   void didUpdateWidget(covariant PlayerScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!oldWidget.embedded && widget.embedded) {
       _suspendSkipCountdown();
       _cancelTransientInteractions(GestureInterruptReason.pipEntered);
+      unawaited(_mobileChrome.setOrientationMonitoring(false));
     } else if (oldWidget.embedded && !widget.embedded) {
       _maybeEvaluateSkipTriggers();
+      if (_shouldMonitorIosPhysicalOrientation) {
+        unawaited(
+          _mobileChrome.setOrientationMonitoring(
+            true,
+            onPhysicalOrientation: _handlePhysicalOrientation,
+          ),
+        );
+      }
     }
+  }
+
+  void _applyObservedIosSystemVolume(double rawVol) {
+    final vol = rawVol.clamp(0.0, 1.0);
+    final wasSynced = _iosDeviceVolumeSynced;
+    _iosDeviceVolumeSynced = true;
+    // Always record the latest hardware-confirmed volume even while a drag is
+    // still held so lifting the finger or starting the next drag never reuses
+    // an unconfirmed preview value.
+    _iosConfirmedDeviceVolume = vol;
+    if (_iosPendingVolumeDragActive) {
+      final pendingDelta = _iosPendingVolumeDragDelta;
+      _iosPendingVolumeDragActive = false;
+      _iosPendingVolumeDragDelta = 0.0;
+      final target = (vol + pendingDelta).clamp(0.0, 1.0);
+      _iosDeviceVolume = target;
+      if (_isVerticalDragging && !_isDraggingLeftBrightness) {
+        _iosFsmVolumeBaseline = vol;
+        _iosLegacyVolumeBaseline = vol;
+        _verticalDragStartValue = vol;
+      }
+      _pushIosSystemVolume(target);
+      if (mounted) {
+        setState(() {
+          _hudText = '设备音量 ${(target * 100.0).round()}%';
+        });
+        if (!_isVerticalDragging) {
+          _scheduleVerticalHudClear();
+        }
+      }
+      return;
+    }
+    if (!wasSynced || !(_isVerticalDragging && !_isDraggingLeftBrightness)) {
+      _iosDeviceVolume = vol;
+      if (mounted && _hudText.startsWith('设备音量 ')) {
+        setState(() {
+          _hudText = '设备音量 ${(vol * 100.0).round()}%';
+        });
+      }
+    }
+  }
+
+  Future<void> _primeIosSystemVolume() async {
+    if (!_isIosPlayerPlatform || !mounted || _iosVolumeReadInFlight) return;
+    _iosVolumeReadInFlight = true;
+    try {
+      final vol = _iosAvPlayerController != null
+          ? await _iosAvPlayerController!.getSystemVolume()
+          : await IosAvPlayerController.readDefaultSystemVolume();
+      if (!mounted || vol == null) return;
+      _applyObservedIosSystemVolume(vol);
+    } finally {
+      _iosVolumeReadInFlight = false;
+    }
+  }
+
+  void _pushIosSystemVolume(double volume01) {
+    final clamped = volume01.clamp(0.0, 1.0);
+    _iosPendingSystemVolume = clamped;
+    if (_iosSystemVolumeFlushing) return;
+    _iosSystemVolumeFlushing = true;
+    unawaited(() async {
+      try {
+        while (mounted && _iosPendingSystemVolume != null) {
+          final target = _iosPendingSystemVolume!;
+          _iosPendingSystemVolume = null;
+          final res = _iosAvPlayerController != null
+              ? await _iosAvPlayerController!.setSystemVolumeDetailed(target)
+              : await IosAvPlayerController.writeDefaultSystemVolumeDetailed(
+                  target,
+                );
+          if (!mounted) return;
+          if (!res.applied) {
+            final confirmed = res.observedVolume ?? res.confirmedVolume;
+            if (confirmed != null) {
+              _iosConfirmedDeviceVolume = confirmed;
+              _iosDeviceVolume = confirmed;
+              _iosDeviceVolumeSynced = true;
+              if (_iosPendingSystemVolume == null) {
+                setState(() {
+                  _hudText = '设备音量 ${(confirmed * 100.0).round()}%';
+                });
+                if (!_isVerticalDragging) _scheduleVerticalHudClear();
+              }
+            } else if (_iosPendingSystemVolume == null) {
+              setState(() => _hudText = '系统音量暂不可调');
+              if (!_isVerticalDragging) _scheduleVerticalHudClear();
+            }
+          } else {
+            if (res.observedVolume != null) {
+              _iosConfirmedDeviceVolume = res.observedVolume!;
+              _iosDeviceVolumeSynced = true;
+            } else if (res.confirmedVolume != null) {
+              _iosConfirmedDeviceVolume = res.confirmedVolume!;
+              _iosDeviceVolumeSynced = true;
+            }
+            if (_iosPendingSystemVolume == null &&
+                !(_isVerticalDragging && !_isDraggingLeftBrightness)) {
+              _iosDeviceVolume = _iosConfirmedDeviceVolume;
+            }
+          }
+        }
+      } finally {
+        _iosSystemVolumeFlushing = false;
+      }
+    }());
+  }
+
+  void _clearPendingAutoStartPip() {
+    _iosPipRequestGen++;
+    _iosPipRefreshInFlight = false;
+    _pendingAutoStartPipSession = null;
+    _pendingAutoStartPipMediaId = null;
+    _cancelStartingPipSession = null;
+    _cancelStartingPipMediaId = null;
+    _pendingPipTimeoutTimer?.cancel();
+    _pendingPipTimeoutTimer = null;
+  }
+
+  void _armPendingAutoStartPip({int? session, int? mediaId}) {
+    final boundSession = session ?? _playSession;
+    _pendingAutoStartPipSession = boundSession;
+    _pendingAutoStartPipMediaId = mediaId;
+    _pendingPipTimeoutTimer?.cancel();
+    _pendingPipTimeoutTimer = Timer(const Duration(seconds: 6), () {
+      if (!mounted || _pendingAutoStartPipSession != boundSession) return;
+      _clearPendingAutoStartPip();
+      if (_usingAvPlayer &&
+          !(_iosAvPlayerController?.isPipActive ?? false) &&
+          !(_iosAvPlayerController?.isPipStarting ?? false)) {
+        _showHud('画中画暂不可用，请确认视频已正常播放');
+      }
+    });
+  }
+
+  Future<void> _submitIosPipStart(
+    IosAvPlayerController avCtrl, {
+    required int session,
+    required int requestGen,
+    int? mediaId,
+  }) async {
+    final started = await avCtrl.startPip();
+    if (!mounted ||
+        !_usingAvPlayer ||
+        !identical(_iosAvPlayerController, avCtrl) ||
+        session != _playSession ||
+        requestGen != _iosPipRequestGen) {
+      return;
+    }
+    if (mediaId != null && avCtrl.currentMediaId != mediaId) return;
+    if (!started) {
+      if (!avCtrl.isPipPossible || _loading || _buffering) {
+        _armPendingAutoStartPip(session: session, mediaId: avCtrl.currentMediaId);
+      } else {
+        final err = avCtrl.lastPipError?.trim() ?? '';
+        _showHud(
+          err.isNotEmpty ? '画中画开启失败：$err' : '画中画暂不可用，请确认视频已开始播放',
+        );
+      }
+    }
+  }
+
+  Future<void> _handleIosPipTap() async {
+    if (!_isIosPlayerPlatform || !mounted) return;
+    final avCtrl = _iosAvPlayerController;
+    if (_usingAvPlayer && avCtrl != null) {
+      if (avCtrl.isPipActive) {
+        _clearPendingAutoStartPip();
+        await avCtrl.stopPip();
+        return;
+      }
+      if (avCtrl.isPipStarting) {
+        // Native has already accepted startPictureInPicture() and is inside the
+        // willStart -> didStart transition. Do NOT issue a duplicate startPip();
+        // record cancellation intent so we call stopPip() at the earliest moment
+        // iOS allows (upon didStart, or immediately if native already activated).
+        _iosPipRequestGen++;
+        _iosPipRefreshInFlight = false;
+        _pendingAutoStartPipSession = null;
+        _pendingAutoStartPipMediaId = null;
+        _pendingPipTimeoutTimer?.cancel();
+        _pendingPipTimeoutTimer = null;
+        _cancelStartingPipSession = _playSession;
+        _cancelStartingPipMediaId = avCtrl.currentMediaId;
+        _showHud('正在取消画中画…');
+        if (mounted) setState(() {});
+        return;
+      }
+      if (_hasPendingAutoStartPip || _iosPipRefreshInFlight) {
+        _clearPendingAutoStartPip();
+        _showHud('已取消画中画准备');
+        return;
+      }
+      _cancelStartingPipSession = null;
+      _cancelStartingPipMediaId = null;
+      // Bind this PiP request to the active playback session, controller, media
+      // item, and generation BEFORE any async capability refresh so switching
+      // episodes/channels/lines or cancelling while refreshTelemetry() is
+      // suspended can never leak startPip() onto a newer item.
+      final tapCtrl = avCtrl;
+      final tapSession = _playSession;
+      final tapMediaId = tapCtrl.currentMediaId;
+      final tapGen = ++_iosPipRequestGen;
+      bool isStaleRequest() =>
+          !mounted ||
+          !_usingAvPlayer ||
+          !identical(_iosAvPlayerController, tapCtrl) ||
+          tapSession != _playSession ||
+          tapGen != _iosPipRequestGen ||
+          (tapMediaId != null && tapCtrl.currentMediaId != tapMediaId);
+
+      if (!tapCtrl.isPipSupported) {
+        _iosPipRefreshInFlight = true;
+        try {
+          await tapCtrl.refreshTelemetry();
+        } finally {
+          if (tapGen == _iosPipRequestGen) {
+            _iosPipRefreshInFlight = false;
+          }
+        }
+        if (isStaleRequest()) return;
+      }
+      if (!tapCtrl.isPipSupported) {
+        _showHud('当前设备不支持系统画中画');
+        return;
+      }
+      final started = await tapCtrl.startPip();
+      if (isStaleRequest()) return;
+      if (started) {
+        _clearPendingAutoStartPip();
+        return;
+      }
+      if (_loading || _buffering || !tapCtrl.isPipPossible) {
+        _armPendingAutoStartPip(session: tapSession, mediaId: tapMediaId);
+        _showHud('正在准备画中画，缓冲就绪后将自动开启…');
+      } else {
+        final err = tapCtrl.lastPipError?.trim() ?? '';
+        _showHud(
+          err.isNotEmpty ? '画中画开启失败：$err' : '画中画暂不可用，请确认视频已开始播放',
+        );
+      }
+      return;
+    }
+
+    // Currently playing on MPV: temporarily switch THIS playback session to
+    // AVPlayer when compatible so Picture-in-Picture works in one tap without
+    // overwriting the user's saved global MPV engine preference.
+    if (avCtrl == null) {
+      _showHud('当前播放会话暂不支持系统画中画');
+      return;
+    }
+    if (_lastAvExternalAudioUrl.isNotEmpty) {
+      _showHud('当前片源包含独立外挂音轨，需使用 MPV 解码，暂不支持画中画');
+      return;
+    }
+    final precheck = IosAvPlayerController.checkUrlCompatibility(
+      _activeStreamUrl,
+      episodeName: _currentEpisode.name,
+      lineName: _currentLine.name,
+    );
+    if (!precheck.supported) {
+      _showHud('当前流格式仅支持 MPV 解码，暂不支持系统画中画');
+      return;
+    }
+    final keepPos = _isLiveStream
+        ? 0
+        : (_position.inMilliseconds >= 1000
+            ? _position.inMilliseconds
+            : _lastKnownPositionMs);
+    setState(() => _sessionForceAvPlayerForPip = true);
+    _showHud('正在临时切换原生内核以开启画中画…');
+    unawaited(
+      _openCurrentEpisode(
+        resumeMs: keepPos,
+        armPendingPipForThisSession: true,
+      ),
+    );
   }
 
   Future<void> _initIosAvPlayerTelemetry() async {
@@ -1442,6 +1879,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (ctrl == null || !mounted) return;
     await ctrl.initialize();
     if (!mounted) return;
+    if (ctrl.hasSystemVolume) {
+      _applyObservedIosSystemVolume(ctrl.systemVolume);
+    } else {
+      unawaited(_primeIosSystemVolume());
+    }
     final memBytes = ctrl.physicalMemoryBytes;
     if (memBytes > 0 && memBytes != _avPhysicalMemoryBytes) {
       _avPhysicalMemoryBytes = memBytes;
@@ -1452,6 +1894,92 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     }
     if (mounted) setState(() {});
+  }
+
+  void _dispatchAvSeek(
+    IosAvPlayerController ctrl,
+    int targetMs, {
+    bool showResumeHudOnSuccess = false,
+    bool saveProgressOnSuccess = false,
+  }) {
+    final clampedMs = math.max(0, targetMs);
+    final seekSession = _playSession;
+    final seekMediaId = ctrl.currentMediaId;
+    final seekGen = ++_avPendingSeekGen;
+    if (!_currentEpisodePlaybackConfirmed) {
+      _avClockAnchorMs = math.max(_avClockAnchorMs, clampedMs);
+      _avObservedPlayingMinPosMs = null;
+      _avPendingSeekTargetMs = clampedMs > 0 ? clampedMs : null;
+    }
+    _avDispatchingSeek = true;
+    late final Future<bool> seekFuture;
+    try {
+      seekFuture = ctrl.seek(Duration(milliseconds: clampedMs));
+    } finally {
+      _avDispatchingSeek = false;
+    }
+    unawaited(
+      seekFuture.then((finished) {
+        if (!mounted ||
+            !_usingAvPlayer ||
+            !identical(_iosAvPlayerController, ctrl) ||
+            seekSession != _playSession ||
+            (seekMediaId != null && ctrl.currentMediaId != seekMediaId)) {
+          return;
+        }
+        final isLatest = seekGen == _avPendingSeekGen;
+        final confirmedMs = ctrl.confirmedPosition?.inMilliseconds;
+        // Once no seek remains in flight, sync displayed position and history
+        // cache directly from `IosAvPlayerController`'s single resolved state—
+        // including when an earlier seek succeeds AFTER a newer seek already
+        // failed.
+        if (!ctrl.hasInFlightSeek) {
+          _lastKnownPositionMs = confirmedMs ?? 0;
+          if (!_isDraggingSeek &&
+              !_isSliderDragging &&
+              _position != ctrl.position) {
+            setState(() => _position = ctrl.position);
+          }
+        }
+        if (finished) {
+          if (!isLatest) {
+            return;
+          }
+          _lastKnownPositionMs = confirmedMs ?? clampedMs;
+          if (showResumeHudOnSuccess && clampedMs > 0) {
+            _showHud(
+              '已为您续播至 ${_formatDuration(Duration(milliseconds: clampedMs))}',
+            );
+          }
+          if (saveProgressOnSuccess) {
+            unawaited(_saveProgress(immediate: true, triggerSync: false));
+          }
+          return;
+        }
+        if (!isLatest) {
+          return;
+        }
+        // Native explicitly rejected/cancelled the latest seek: never show a
+        // resume success toast, and re-anchor playback confirmation if not yet
+        // confirmed.
+        final nativeSample =
+            ctrl.nativePositionSampleMediaId == ctrl.currentMediaId
+                ? ctrl.nativePositionSample
+                : null;
+        if (_currentEpisodePlaybackConfirmed) {
+          return;
+        }
+        _avPendingSeekTargetMs = null;
+        if (ctrl.playing && !ctrl.buffering && nativeSample != null) {
+          final curMs = nativeSample.inMilliseconds;
+          _avClockAnchorMs = curMs;
+          _avObservedPlayingMinPosMs = curMs;
+        } else {
+          _avClockAnchorMs = 0;
+          _avObservedPlayingMinPosMs = null;
+        }
+      }),
+    );
   }
 
   void _onIosAvPlayerChanged() {
@@ -1494,38 +2022,97 @@ class _PlayerScreenState extends State<PlayerScreen>
           : nextPos;
     }
 
-    if (nextPos.inMilliseconds >= 1000) {
-      _lastKnownPositionMs = nextPos.inMilliseconds;
-      if (!_initialHistoryRecorded) {
-        _initialHistoryRecorded = true;
-        unawaited(_saveProgress());
-      }
-    }
-
-    if (nextReady || nextPlaying || nextPos > Duration.zero || nextDur > Duration.zero) {
-      if (_loading) _loading = false;
-      if (!OhosRuntime.isOhos &&
-          !_hasStartedVodPlayback &&
-          !_isLiveStream &&
-          !widget.embedded &&
-          nextPos > Duration.zero) {
-        _hasStartedVodPlayback = true;
-      }
-    }
-
     if (!_isLiveStream && nextDur > Duration.zero && _pendingResumeMs > 0) {
       final maxSeek = math.max(0, nextDur.inMilliseconds - 2000);
       final targetMs = _pendingResumeMs.clamp(0, maxSeek);
       _pendingResumeMs = 0;
       _introSkippedForSession = true;
       if (targetMs > 0) {
-        _lastKnownPositionMs = targetMs;
         _startup.reanchor(Duration(milliseconds: targetMs));
         _position = Duration(milliseconds: targetMs);
-        unawaited(ctrl.seek(Duration(milliseconds: targetMs)));
-        _showHud(
-          '已为您续播至 ${_formatDuration(Duration(milliseconds: targetMs))}',
-        );
+        _dispatchAvSeek(ctrl, targetMs, showResumeHudOnSuccess: true);
+      } else {
+        _avPendingSeekGen++;
+        _avClockAnchorMs = 0;
+        _avObservedPlayingMinPosMs = null;
+        _avPendingSeekTargetMs = null;
+      }
+    }
+
+    // AVPlayer confirmation MUST wait for genuine native media clock samples
+    // (`ready` / `playbackState` / `progress` / `completed`) matching the
+    // active mediaId while playing (`nextPlaying && !nextBuffering`).
+    // Non-clock notifications (such as `pipStateChanged`, `systemVolumeChanged`,
+    // `airPlayStateChanged`, or optimistic `seek()` display position updates)
+    // NEVER advance confirmation state or consume a pending seek landing.
+    final nativeSample = ctrl.nativePositionSample;
+    final nativeSampleMediaId = ctrl.nativePositionSampleMediaId;
+    final nativeSampleSeq = ctrl.nativePositionSampleSeq;
+    final hasFreshNativeClockSample =
+        nativeSample != null &&
+        nativeSampleMediaId == ctrl.currentMediaId &&
+        (nativeSampleSeq != _avLastProcessedClockSeq ||
+            nativeSampleMediaId != _avLastProcessedClockMediaId);
+    if (hasFreshNativeClockSample) {
+      _avLastProcessedClockSeq = nativeSampleSeq;
+      _avLastProcessedClockMediaId = nativeSampleMediaId;
+    }
+
+    if (!_avDispatchingSeek &&
+        hasFreshNativeClockSample &&
+        nextPlaying &&
+        !nextBuffering) {
+      final posMs = nativeSample.inMilliseconds;
+      final pendingSeekTarget = _avPendingSeekTargetMs;
+      if (pendingSeekTarget != null) {
+        // Keyframe-snapped seek tolerance: at most 1500ms or 25% of target,
+        // and ALWAYS strictly >= 1ms when target > 0 so pre-seek 0ms ticks
+        // can NEVER consume a short resume seek (e.g. 1000ms -> floor 750ms).
+        final toleranceMs = math.min(1500, (pendingSeekTarget * 0.25).round());
+        final landingFloorMs = math.max(1, pendingSeekTarget - toleranceMs);
+        if (posMs >= landingFloorMs) {
+          _avPendingSeekTargetMs = null;
+          _avClockAnchorMs = math.max(_avClockAnchorMs, posMs);
+          _avObservedPlayingMinPosMs = posMs;
+        }
+      } else {
+        final advancedPastAnchor = posMs > _avClockAnchorMs;
+        final advancedDuringPlaying =
+            _avObservedPlayingMinPosMs != null &&
+            posMs > _avObservedPlayingMinPosMs!;
+        if (_avObservedPlayingMinPosMs == null ||
+            posMs < _avObservedPlayingMinPosMs!) {
+          _avObservedPlayingMinPosMs = posMs;
+        }
+        if (advancedPastAnchor || advancedDuringPlaying) {
+          _markCurrentEpisodePlaybackConfirmed();
+        }
+      }
+    }
+
+    // Never let an unconfirmed optimistic seek target dirty `_lastKnownPositionMs`
+    // or trigger initial history recording; rely solely on confirmed native clock
+    // samples or accepted seek targets.
+    final confirmedPosMs = ctrl.confirmedPosition?.inMilliseconds;
+    if (!ctrl.hasInFlightSeek && confirmedPosMs != null && confirmedPosMs >= 1000) {
+      _lastKnownPositionMs = confirmedPosMs;
+      if (_currentEpisodePlaybackConfirmed && !_initialHistoryRecorded) {
+        _initialHistoryRecorded = true;
+        unawaited(_saveProgress());
+      }
+    }
+
+    if (nextReady || nextPlaying || nextPos > Duration.zero || nextDur > Duration.zero) {
+      if (_loading && (nextPlaying || !nextBuffering)) {
+        _loading = false;
+      }
+      if (!OhosRuntime.isOhos &&
+          !_hasStartedVodPlayback &&
+          !_isLiveStream &&
+          !widget.embedded &&
+          nextPlaying &&
+          nextPos > Duration.zero) {
+        _hasStartedVodPlayback = true;
       }
     }
 
@@ -1537,6 +2124,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (nextPlaying != _wasAvPlaying) {
       _wasAvPlaying = nextPlaying;
       PlaybackWakelock.setEnabled(nextPlaying);
+      unawaited(ctrl.setAutoPip(nextPlaying));
       if (!nextPlaying) {
         _suspendSkipCountdown();
         _saveProgress(immediate: true, syncImmediate: false);
@@ -1547,6 +2135,41 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (nextPlaying || _position > Duration.zero) {
         _embySession?.update(_position.inMilliseconds, !nextPlaying, force: true);
       }
+    }
+
+    final currentMediaId = ctrl.currentMediaId;
+    if (_cancelStartingPipSession == _playSession &&
+        (_cancelStartingPipMediaId == null ||
+            _cancelStartingPipMediaId == currentMediaId)) {
+      if (ctrl.isPipActive) {
+        _cancelStartingPipSession = null;
+        _cancelStartingPipMediaId = null;
+        unawaited(ctrl.stopPip());
+        _showHud('已取消画中画');
+      } else if (!ctrl.isPipStarting) {
+        _cancelStartingPipSession = null;
+        _cancelStartingPipMediaId = null;
+      }
+    }
+    final pendingMediaMatches = _pendingAutoStartPipMediaId == null ||
+        _pendingAutoStartPipMediaId == currentMediaId;
+    if (_hasPendingAutoStartPip &&
+        pendingMediaMatches &&
+        !ctrl.isPipActive &&
+        !ctrl.isPipStarting &&
+        ctrl.isPipSupported &&
+        ctrl.isPipPossible) {
+      final activeSession = _playSession;
+      _clearPendingAutoStartPip();
+      final reqGen = _iosPipRequestGen;
+      unawaited(
+        _submitIosPipStart(
+          ctrl,
+          session: activeSession,
+          requestGen: reqGen,
+          mediaId: currentMediaId,
+        ),
+      );
     }
 
     if (nextBuffering != _wasAvBuffering) {
@@ -1573,6 +2196,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       _handleEpisodeEnd();
     } else if (!nextCompleted) {
       _wasAvCompleted = false;
+    }
+
+    if (ctrl.isPipActive != _lastIosPipActive) {
+      _lastIosPipActive = ctrl.isPipActive;
+      _syncMobileSystemBars(force: true);
     }
 
     if (mounted) setState(() {});
@@ -1663,6 +2291,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     _fallbackInFlight = true;
+    _clearPendingAutoStartPip();
+    _sessionForceAvPlayerForPip = false;
     final resumeMs = event.positionMs > 0
         ? event.positionMs
         : (_position.inMilliseconds > 0
@@ -1707,6 +2337,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       });
     } finally {
       _fallbackInFlight = false;
+      if (mounted) {
+        _lastIosPipActive = false;
+        _syncMobileSystemBars(force: true);
+      }
     }
   }
 
@@ -1734,10 +2368,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     final keepPos = _position.inMilliseconds >= 1000
         ? _position.inMilliseconds
         : _lastKnownPositionMs;
-    setState(() => _iosEngineMode = nextMode);
+    _clearPendingAutoStartPip();
+    setState(() {
+      _sessionForceAvPlayerForPip = false;
+      _iosEngineMode = nextMode;
+    });
     await widget.storage.setIosPlaybackEngineMode(nextMode.id);
     if (!mounted) return;
     _showHud('已切换至 ${nextMode.labelZh}');
+    _syncMobileSystemBars(force: true);
     unawaited(_openCurrentEpisode(resumeMs: keepPos));
   }
 
@@ -1849,9 +2488,48 @@ class _PlayerScreenState extends State<PlayerScreen>
     final size = MediaQuery.maybeSizeOf(context);
     final isLandscape = size != null && size.width > size.height;
     final isTablet = size != null && size.shortestSide >= 600;
-    final immersive =
-        _screenLocked || !_controlsVisible || isLandscape || isTablet;
+    final isPipActive =
+        _usingAvPlayer && (_iosAvPlayerController?.isPipActive ?? false);
+    final showPortraitCompanion = _shouldShowPortraitCompanion(size);
+    final isFullscreen =
+        !widget.embedded && !isPipActive && !showPortraitCompanion;
+    final immersive = isFullscreen &&
+        (_screenLocked || !_controlsVisible || isLandscape || isTablet);
     unawaited(_mobileChrome.setImmersive(immersive, force: force));
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    if (!mounted || _desktop || widget.embedded) return;
+    if (_shouldMonitorIosPhysicalOrientation && _appInForeground) {
+      unawaited(
+        _mobileChrome.retryOrientationMonitoringIfNeeded(resetBackoff: true),
+      );
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _syncMobileSystemBars(force: true);
+      final pending = _pendingIosOrientationFeedback;
+      if (pending != null && _isIosPlayerPlatform) {
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        if (nowMs > pending.expiresAtMs) {
+          _pendingIosOrientationFeedback = null;
+        } else {
+          final nextSize = MediaQuery.maybeSizeOf(context);
+          if (nextSize != null) {
+            final nowLandscape = nextSize.width > nextSize.height;
+            if (nowLandscape == pending.wantLandscape) {
+              _pendingIosOrientationFeedback = null;
+              _showHud(
+                nowLandscape ? '已切换为全屏横屏观看' : '已切换为竖屏观看',
+              );
+              _scheduleHide();
+            }
+          }
+        }
+      }
+    });
   }
 
   @override
@@ -1861,6 +2539,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
       _appInForeground = false;
+      _mobileChrome.pauseOrientationMonitoringRetry();
       _suspendSkipCountdown();
       _cancelTransientInteractions(GestureInterruptReason.lifecyclePause);
       if (state == AppLifecycleState.paused ||
@@ -1870,35 +2549,39 @@ class _PlayerScreenState extends State<PlayerScreen>
         widget.storage.scheduleAutoWebdavSync(immediate: true);
       }
     } else if (state == AppLifecycleState.resumed) {
+      final wasInactive = !_appInForeground;
       _appInForeground = true;
       unawaited(IosLiquidGlassBridge.refreshReduceTransparency());
       _syncMobileSystemBars(force: true);
+      if (_shouldMonitorIosPhysicalOrientation) {
+        unawaited(
+          _mobileChrome.retryOrientationMonitoringIfNeeded(
+            resetBackoff: true,
+            forceHostReconcile: wasInactive,
+          ),
+        );
+      }
       _maybeEvaluateSkipTriggers();
     }
   }
 
-  int _lookupSavedResumeForCurrentEpisode() {
-    if (widget.site.isEffectivelyPrivate) return 0;
+  WatchHistoryEntry? _historyForCurrentEpisode() {
+    if (widget.site.isEffectivelyPrivate) return null;
     for (final entry in widget.storage.getWatchHistory()) {
-      if (entry.site == widget.site.key && entry.id == widget.video.id) {
-        final target = WoggSource.supports(widget.site)
-            ? WoggSource.resolveCachedBookmarkTarget(widget.site,
-                CmsVideo(id: widget.video.id, title: widget.video.title, lines: _lines), entry)
-            : null;
-        final matches = WoggSource.supports(widget.site)
-            ? target?.$1 == _lineIndex && target?.$2 == _episodeIndex
-            : (entry.line == _currentLine.name && entry.index == _episodeIndex) ||
-                entry.episode == _currentEpisode.name;
-        if (matches) {
-          if (entry.duration > 0) {
-            _lastKnownDurationMs = entry.duration;
-          }
-          return entry.resumePosition;
-        }
-        break;
+      if (entry.site != widget.site.key || entry.id != widget.video.id) continue;
+      final wogg = WoggSource.supports(widget.site);
+      if (wogg || _isIosPlayerPlatform) {
+        final video = CmsVideo(id: widget.video.id, title: widget.video.title, lines: _lines);
+        final target = wogg
+            ? WoggSource.resolveCachedBookmarkTarget(widget.site, video, entry)
+            : resolveIosWatchHistoryTarget(video, entry);
+        return target == (_lineIndex, _episodeIndex) ? entry : null;
       }
+      if ((entry.line == _currentLine.name && entry.index == _episodeIndex) ||
+          entry.episode == _currentEpisode.name) return entry;
+      break;
     }
-    return 0;
+    return null;
   }
 
   void _handleEpisodeEnd() {
@@ -2187,6 +2870,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         return;
       }
     }
+    _clearPendingAutoStartPip();
     setState(() {
       _allowEvents = false;
       _allowHistory = false;
@@ -2230,8 +2914,26 @@ class _PlayerScreenState extends State<PlayerScreen>
     bool forceLiveLocalProxy = false,
     bool useAlternateLiveUa = false,
     bool preferUdpRtsp = false,
+    bool armPendingPipForThisSession = false,
   }) async {
     _startup.reset();
+    _currentEpisodePlaybackConfirmed = false;
+    _confirmedPlaybackSession = -1;
+    _initialHistoryRecorded = false;
+    _avPendingSeekGen++;
+    _avClockAnchorMs = 0;
+    _avObservedPlayingMinPosMs = null;
+    _avPendingSeekTargetMs = null;
+    _avLastProcessedClockSeq = 0;
+    _avLastProcessedClockMediaId = null;
+    if (!armPendingPipForThisSession) {
+      _clearPendingAutoStartPip();
+      _sessionForceAvPlayerForPip = false;
+    }
+    if (quality == null) {
+      _lastKnownPositionMs = 0;
+      _lastKnownDurationMs = 0;
+    }
     if (!bypassLocalProxy &&
         !forceLiveLocalProxy &&
         !useAlternateLiveUa &&
@@ -2259,6 +2961,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         ? _sourceAbort!
         : (_sourceAbort = Completer<void>());
     final session = ++_playSession;
+    if (armPendingPipForThisSession) {
+      _armPendingAutoStartPip(session: session, mediaId: null);
+    }
     if (quality == null) {
       _qualityChoices = const [];
       _failedQualityUrls.clear();
@@ -2272,6 +2977,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       final previousIsoLease = _blurayIsoLease;
       _blurayIsoLease = null;
+      final previousSmbProxy = _smbStreamProxy;
+      _smbStreamProxy = null;
       _blurayChapters = const [];
       await _playerConfiguration;
       await _changeMedia(session, () async {
@@ -2283,21 +2990,24 @@ class _PlayerScreenState extends State<PlayerScreen>
         await _cloudMedia.releaseUnless(qualityLease);
         await _localMedia.releaseUnless(null);
         await previousIsoLease?.close();
+        await previousSmbProxy?.close();
       });
     } catch (_) {
       if (session == _playSession) _failPlayback();
       return;
     }
     if (!mounted || session != _playSession) return;
-    final effectiveResumeMs = _isLiveStream
-        ? 0
-        : (resumeMs != null && resumeMs > 0)
-            ? resumeMs
-            : (resumeMs == null ? _lookupSavedResumeForCurrentEpisode() : 0);
+    final history = _isLiveStream ? null : _historyForCurrentEpisode();
+    final effectiveResumeMs = _isLiveStream ? 0 : (resumeMs ?? history?.resumePosition ?? 0);
     _pendingResumeMs = effectiveResumeMs > 0 ? effectiveResumeMs : 0;
+    _episodeResumeAnchorMs = _pendingResumeMs;
+    _avClockAnchorMs = _pendingResumeMs;
+    _avObservedPlayingMinPosMs = null;
+    _avPendingSeekTargetMs = _pendingResumeMs > 0 ? _pendingResumeMs : null;
     _lastKnownPositionMs = _pendingResumeMs;
-    _lastKnownDurationMs = 0;
-    if (!_isLiveStream) _lookupSavedResumeForCurrentEpisode();
+    _lastKnownDurationMs = history?.duration ?? 0;
+    _currentEpisodePlaybackConfirmed = false;
+    _confirmedPlaybackSession = -1;
     _introSkippedForSession = _pendingResumeMs > 0;
     _outroSkippedForSession = false;
     _initialHistoryRecorded = false;
@@ -2536,10 +3246,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       _activeMediaUri = Media(effectiveOpenUrl).uri;
       _lastAvExternalAudioUrl = effectiveAudioUrl;
 
+      final pendingSmbRaw = resolvedEpisode.playbackSession['smbStreamProxy'];
+      final pendingSmbProxy =
+          pendingSmbRaw is SmbMediaStreamProxy ? pendingSmbRaw : null;
       await _changeMedia(session, () async {
         _cloudMedia.adopt(pendingLease);
         _localMedia.adopt(pendingLocalLease);
         _blurayIsoLease = pendingBlurayLease;
+        _smbStreamProxy = pendingSmbProxy;
         _blurayChapters = pendingBlurayChapters;
         _allowEvents = true;
         final hasFallback = _isLiveStream
@@ -2592,7 +3306,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         var openedWithAvPlayer = false;
         if (_canUseIosAvPlayerEngine &&
             avCtrl != null &&
-            _iosEngineMode == IosPlaybackEngineMode.avPlayer &&
+            _effectiveIosEngineMode == IosPlaybackEngineMode.avPlayer &&
             effectiveAudioUrl.isEmpty &&
             !_castController.isCasting) {
           final precheck = IosAvPlayerController.checkUrlCompatibility(
@@ -2602,10 +3316,20 @@ class _PlayerScreenState extends State<PlayerScreen>
           );
           if (precheck.supported) {
             await avCtrl.setVideoGravity(_avGravityForFit(_fit));
+            final openStart = baseMedia.start ?? Duration.zero;
+            _avClockAnchorMs =
+                math.max(_avClockAnchorMs, openStart.inMilliseconds);
+            _avObservedPlayingMinPosMs = null;
+            if (openStart.inMilliseconds > 0) {
+              _avPendingSeekTargetMs = math.max(
+                _avPendingSeekTargetMs ?? 0,
+                openStart.inMilliseconds,
+              );
+            }
             openedWithAvPlayer = await avCtrl.open(
               effectiveOpenUrl,
               headers: effectiveOpenHeaders,
-              startPosition: baseMedia.start ?? Duration.zero,
+              startPosition: openStart,
               autoPlay: !_castController.isCasting,
               episodeName: _currentEpisode.name,
               lineName: _currentLine.name,
@@ -2617,6 +3341,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
 
         if (openedWithAvPlayer && avCtrl != null) {
+          if (_pendingAutoStartPipSession == session) {
+            _pendingAutoStartPipMediaId = avCtrl.currentMediaId;
+          }
           if (mounted) {
             setState(() {
               _usingAvPlayer = true;
@@ -2628,6 +3355,10 @@ class _PlayerScreenState extends State<PlayerScreen>
             _usingAvPlayer = true;
           }
         } else {
+          if (_pendingAutoStartPipSession == session) {
+            _clearPendingAutoStartPip();
+          }
+          _sessionForceAvPlayerForPip = false;
           if (mounted && _usingAvPlayer) {
             setState(() => _usingAvPlayer = false);
           } else {
@@ -2681,6 +3412,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     return '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
   }
 
+  int? _confirmedAvPositionMsOrNull() =>
+      _iosAvPlayerController?.confirmedPosition?.inMilliseconds;
+
   Future<void> _saveProgress({
     bool completed = false,
     bool immediate = false,
@@ -2693,19 +3427,39 @@ class _PlayerScreenState extends State<PlayerScreen>
         widget.site.isEffectivelyPrivate) {
       return;
     }
-    final livePosMs = _position.inMilliseconds;
+    if (!_currentEpisodePlaybackConfirmed) {
+      return;
+    }
+    final avConfirmedPosMs =
+        _usingAvPlayer ? _confirmedAvPositionMsOrNull() : null;
+    final avSeekInFlight = _iosAvPlayerController?.hasInFlightSeek ?? false;
+    // On AVPlayer, scrubber, ±15s, and route/widget exit all share the latest
+    // confirmed position resolved by `IosAvPlayerController` (never an
+    // unconfirmed optimistic target).
+    final livePosMs = _usingAvPlayer
+        ? (avConfirmedPosMs ??
+              (avSeekInFlight
+                  ? _lastKnownPositionMs
+                  : _position.inMilliseconds))
+        : _position.inMilliseconds;
     final effectiveDurMs = _duration.inMilliseconds > 0
         ? _duration.inMilliseconds
         : _lastKnownDurationMs;
     final rawPosMs = _pendingResumeMs > 0
         ? _pendingResumeMs
-        : (livePosMs >= 1000
-              ? livePosMs
-              : (_lastKnownPositionMs > 0 ? _lastKnownPositionMs : livePosMs));
+        : (_usingAvPlayer && avConfirmedPosMs != null
+              ? avConfirmedPosMs
+              : (livePosMs >= 1000
+                    ? livePosMs
+                    : (_lastKnownPositionMs > 0
+                          ? _lastKnownPositionMs
+                          : livePosMs)));
     final effectivePosMs = completed
         ? (effectiveDurMs > 0 ? effectiveDurMs : math.max(1000, rawPosMs))
         : rawPosMs;
-    if (effectiveDurMs <= 0 && effectivePosMs <= 0) {
+    if (!_currentEpisodePlaybackConfirmed &&
+        effectiveDurMs <= 0 &&
+        effectivePosMs <= 0) {
       return;
     }
     var resolvedPoster = widget.video.poster.trim();
@@ -2728,7 +3482,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         title: widget.video.title,
         poster: resolvedPoster,
         line: _currentLine.name,
+        lineId: _currentLine.id,
         episode: _currentEpisode.name,
+        episodeMediaId: WatchHistoryEntry.mediaIdentityForUrl(_currentEpisode.url),
         index: _episodeIndex,
         position: effectivePosMs,
         duration: effectiveDurMs,
@@ -3026,11 +3782,22 @@ class _PlayerScreenState extends State<PlayerScreen>
     final size = MediaQuery.maybeSizeOf(context);
     if (size == null) return;
     final currentlyLandscape = size.width > size.height;
+    final isIos = _isIosPlayerPlatform;
     if ((orientation == 'landscapeLeft' || orientation == 'landscapeRight') &&
         !currentlyLandscape) {
-      unawaited(_mobileChrome.setLandscape(true));
+      if (isIos) {
+        unawaited(_mobileChrome.setOrientation(true));
+        _syncMobileSystemBars(force: true);
+      } else {
+        unawaited(_mobileChrome.setLandscape(true));
+      }
     } else if (orientation == 'portrait' && currentlyLandscape) {
-      unawaited(_mobileChrome.setLandscape(false));
+      if (isIos) {
+        unawaited(_mobileChrome.setOrientation(false));
+        _syncMobileSystemBars(force: true);
+      } else {
+        unawaited(_mobileChrome.setLandscape(false));
+      }
     }
   }
 
@@ -3047,13 +3814,42 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     final size = MediaQuery.sizeOf(context);
     final currentlyLandscape = size.width > size.height;
+    final isIos = _isIosPlayerPlatform;
     _lastManualOrientationMs = DateTime.now().millisecondsSinceEpoch;
     try {
+      if (isIos) {
+        final wantLandscape = !currentlyLandscape;
+        _pendingIosOrientationFeedback = (
+          wantLandscape: wantLandscape,
+          expiresAtMs: DateTime.now().millisecondsSinceEpoch + 900,
+        );
+        final applied = await _mobileChrome.setOrientation(wantLandscape);
+        if (!mounted) return;
+        _syncMobileSystemBars(force: true);
+        if (!applied) {
+          _pendingIosOrientationFeedback = null;
+          return;
+        }
+        // Only show orientation-changed feedback if the actual window geometry
+        // changed (checked here and on subsequent `didChangeMetrics`). In iPad
+        // Split View / Stage Manager where iPadOS ignores rotation requests,
+        // never display a false "已切换为全屏横屏观看" banner.
+        final afterSize = MediaQuery.maybeSizeOf(context);
+        if (afterSize != null &&
+            (afterSize.width > afterSize.height) == wantLandscape) {
+          _pendingIosOrientationFeedback = null;
+          _showHud(wantLandscape ? '已切换为全屏横屏观看' : '已切换为竖屏观看');
+        }
+        _scheduleHide();
+        return;
+      }
       final applied = await _mobileChrome.setLandscape(!currentlyLandscape);
-      if (!mounted || !applied) return;
+      if (!mounted) return;
+      if (!applied) return;
       _showHud(currentlyLandscape ? '已切换为竖屏观看' : '已切换为全屏横屏观看');
       _scheduleHide();
     } catch (error) {
+      _pendingIosOrientationFeedback = null;
       _windowError(error);
     }
   }
@@ -3315,13 +4111,19 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _seekRelative(int seconds) {
     if (_duration.inMilliseconds <= 0) return;
-    final targetMs = (_position.inMilliseconds + seconds * 1000).clamp(
+    final avCtrl = _usingAvPlayer ? _iosAvPlayerController : null;
+    final baseMs = (avCtrl != null && !avCtrl.hasInFlightSeek)
+        ? (avCtrl.confirmedPosition?.inMilliseconds ?? _position.inMilliseconds)
+        : _position.inMilliseconds;
+    final targetMs = (baseMs + seconds * 1000).clamp(
       0,
       _duration.inMilliseconds,
     );
     setState(() => _position = Duration(milliseconds: targetMs));
-    _seekPlayer(Duration(milliseconds: targetMs));
-    _saveProgress(immediate: true, triggerSync: false);
+    _seekPlayer(
+      Duration(milliseconds: targetMs),
+      saveProgressOnSuccess: true,
+    );
     _showHud(
       '${seconds >= 0 ? "快进" : "快退"} ${_formatDuration(Duration(milliseconds: targetMs))}',
     );
@@ -3675,6 +4477,16 @@ class _PlayerScreenState extends State<PlayerScreen>
     _gestureTickTimer?.cancel();
     _desktopKeyTickTimer?.cancel();
     _verticalHudClearTimer?.cancel();
+    _clearPendingAutoStartPip();
+    _liveCompanionGroupNotifier.dispose();
+    _liveCompanionQueryNotifier.dispose();
+    _liveCompanionSearchCtrl.dispose();
+    if (_isIosPlayerPlatform) {
+      unawaited(
+        _iosAvPlayerController?.detachSystemVolume() ??
+            IosAvPlayerController.detachDefaultSystemVolume(),
+      );
+    }
     IosLiquidGlassBridge.reduceTransparencyNotifier.removeListener(
       _onReduceTransparencyChanged,
     );
@@ -3724,6 +4536,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     _anime4kController.removeListener(_onHudSubstateChanged);
     final anime4kController = _anime4kController;
     final ownsAnime4kController = _ownsAnime4kController;
+    final embyStopPosMs = _usingAvPlayer
+        ? (_confirmedAvPositionMsOrNull() ?? _lastKnownPositionMs)
+        : _position.inMilliseconds;
+    // Save confirmed playback progress BEFORE detaching `_iosAvPlayerController`
+    // so exit-before-seek-reply always reads the live confirmed native clock.
+    _saveProgress(immediate: true);
     for (final sub in _iosAvSubscriptions) {
       unawaited(sub.cancel());
     }
@@ -3750,10 +4568,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _hudUnmountTimer?.cancel();
     _historyTimer?.cancel();
     _clockTimer?.cancel();
-    _saveProgress(immediate: true);
     widget.storage.flushPendingHistory();
     widget.storage.scheduleAutoWebdavSync(immediate: true);
-    _embySession?.stop(_position.inMilliseconds);
+    _embySession?.stop(embyStopPosMs);
     _embySession = null;
     _mobileChrome.close().catchError((Object error) {
       debugPrint('Player system UI restore failed: $error');
@@ -3769,6 +4586,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     final localLease = _localMedia.detach();
     final blurayIsoLease = _blurayIsoLease;
     _blurayIsoLease = null;
+    final smbStreamProxy = _smbStreamProxy;
+    _smbStreamProxy = null;
     _blurayChapters = const [];
     _mediaChanges.whenComplete(() async {
       try {
@@ -3786,7 +4605,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             anime4kController.dispose();
           }
         }
-        iosAvPlayerController?.dispose();
+        if (widget.debugIosAvPlayerController == null) {
+          iosAvPlayerController?.dispose();
+        }
         await _player.dispose();
       } finally {
         try {
@@ -3798,7 +4619,11 @@ class _PlayerScreenState extends State<PlayerScreen>
             try {
               await blurayIsoLease?.close();
             } finally {
-              releaseSource?.call();
+              try {
+                await smbStreamProxy?.close();
+              } finally {
+                releaseSource?.call();
+              }
             }
           }
         }
@@ -3836,8 +4661,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                 (_position.inMilliseconds + event.deltaSec * 1000)
                     .clamp(0, effectiveDurMs);
             setState(() => _position = Duration(milliseconds: targetMs));
-            _seekPlayer(Duration(milliseconds: targetMs));
-            unawaited(_saveProgress(immediate: true, triggerSync: false));
+            _seekPlayer(
+              Duration(milliseconds: targetMs),
+              saveProgressOnSuccess: true,
+            );
             final sign = event.totalAccumulatedSec >= 0 ? '+' : '';
             _showHud(
               '${event.totalAccumulatedSec >= 0 ? "快进" : "快退"} $sign${event.totalAccumulatedSec}s · ${_formatDuration(Duration(milliseconds: targetMs))}',
@@ -3872,8 +4699,10 @@ class _PlayerScreenState extends State<PlayerScreen>
             _position = Duration(milliseconds: targetMs);
             _hudText = '';
           });
-          _seekPlayer(Duration(milliseconds: targetMs));
-          unawaited(_saveProgress(immediate: true, triggerSync: false));
+          _seekPlayer(
+            Duration(milliseconds: targetMs),
+            saveProgressOnSuccess: true,
+          );
           _scheduleHide();
         case HorizontalSeekCancelEvent():
           setState(() {
@@ -3884,6 +4713,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _verticalHudClearTimer?.cancel();
           setState(() {
             _isVerticalDragging = true;
+            _isDraggingLeftBrightness = true;
             _playerBrightness = event.brightness;
             _hudText = '亮度 ${(event.brightness * 100).round()}%';
           });
@@ -3892,14 +4722,51 @@ class _PlayerScreenState extends State<PlayerScreen>
           _scheduleVerticalHudClear();
         case VerticalVolumeUpdateEvent():
           _verticalHudClearTimer?.cancel();
-          final nextVol = (event.volume * 100.0).clamp(0.0, 100.0);
-          _engineSetVolume100(nextVol);
-          setState(() {
-            _isVerticalDragging = true;
-            _hudText = '音量 ${nextVol.round()}%';
-          });
+          if (_isIosPlayerPlatform) {
+            if (!_iosDeviceVolumeSynced) {
+              _iosPendingVolumeDragActive = true;
+              _iosPendingVolumeDragDelta = event.delta;
+              unawaited(_primeIosSystemVolume());
+              setState(() {
+                _isVerticalDragging = true;
+                _isDraggingLeftBrightness = false;
+                _hudText = '正在同步设备音量…';
+              });
+            } else {
+              final baseline = _iosFsmVolumeBaseline;
+              final nextRatio = baseline != null
+                  ? (baseline + event.delta).clamp(0.0, 1.0)
+                  : event.volume.clamp(0.0, 1.0);
+              _iosDeviceVolume = nextRatio;
+              _pushIosSystemVolume(nextRatio);
+              setState(() {
+                _isVerticalDragging = true;
+                _isDraggingLeftBrightness = false;
+                _hudText = '设备音量 ${(nextRatio * 100.0).round()}%';
+              });
+            }
+          } else {
+            final nextRatio = event.volume.clamp(0.0, 1.0);
+            final nextVol = nextRatio * 100.0;
+            _engineSetVolume100(nextVol);
+            setState(() {
+              _isVerticalDragging = true;
+              _isDraggingLeftBrightness = false;
+              _hudText = '音量 ${nextVol.round()}%';
+            });
+          }
         case VerticalVolumeEndEvent():
           _isVerticalDragging = false;
+          _iosFsmVolumeBaseline = null;
+          if (_isIosPlayerPlatform && _iosDeviceVolumeSynced) {
+            _iosDeviceVolume = _iosConfirmedDeviceVolume;
+            if (_hudText.startsWith('设备音量 ')) {
+              setState(() {
+                _hudText =
+                    '设备音量 ${(_iosConfirmedDeviceVolume * 100.0).round()}%';
+              });
+            }
+          }
           _scheduleVerticalHudClear();
         case SpeedBoostStartEvent():
           if (event.haptic) HapticFeedback.selectionClick();
@@ -4057,8 +4924,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       _isDraggingSeek = false;
       _position = Duration(milliseconds: targetMs);
     });
-    _seekPlayer(Duration(milliseconds: targetMs));
-    unawaited(_saveProgress(immediate: true, triggerSync: false));
+    _seekPlayer(
+      Duration(milliseconds: targetMs),
+      saveProgressOnSuccess: true,
+    );
     final fmt = _formatDuration(Duration(milliseconds: targetMs));
     _showHud(
       wasHold ? '跳转至 $fmt' : '${dir >= 0 ? "快进" : "快退"} $fmt',
@@ -4110,13 +4979,23 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
-  void _seekPlayer(Duration target) {
+  void _seekPlayer(Duration target, {bool saveProgressOnSuccess = false}) {
     final clampedMs = math.max(0, target.inMilliseconds);
     final clamped = Duration(milliseconds: clampedMs);
     if (_usingAvPlayer) {
-      unawaited(_iosAvPlayerController?.seek(clamped));
+      final avCtrl = _iosAvPlayerController;
+      if (avCtrl != null) {
+        _dispatchAvSeek(
+          avCtrl,
+          clampedMs,
+          saveProgressOnSuccess: saveProgressOnSuccess,
+        );
+      }
     } else {
       _player.seek(clamped);
+      if (saveProgressOnSuccess) {
+        unawaited(_saveProgress(immediate: true, triggerSync: false));
+      }
     }
     if (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled) {
       _danmuCache?.onSeekChanged(clampedMs);
@@ -4519,9 +5398,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final systemGestureInsets = MediaQuery.systemGestureInsetsOf(context);
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
-    final showPortraitCompanion = _useIosPortraitCompanionMode &&
-        screenSize.height > screenSize.width &&
-        screenSize.shortestSide < 600;
+    final showPortraitCompanion = _shouldShowPortraitCompanion(screenSize);
     final effectiveReduceTransparency = _isEffectiveReduceTransparency(context);
     final effectiveDurMs = _duration.inMilliseconds > 0
         ? _duration.inMilliseconds
@@ -4532,16 +5409,22 @@ class _PlayerScreenState extends State<PlayerScreen>
     // visible so PlayerSpeedCapsule / SleepTimerWarningBanner never overlap
     // IosPlayerChrome's top bar or title capsule.
     final bool topBarVisible = _controlsVisible && !_screenLocked;
+    final bool isPadLikeOverlay = _isIosPlayerPlatform &&
+        (screenSize.shortestSide >= 600 ||
+            (screenSize.height >= 900 && screenSize.width >= 300));
+    final double effectiveTopOverlaySafe = isPadLikeOverlay
+        ? math.max(viewPadding.top, 28.0)
+        : viewPadding.top;
     final double topOverlayOffset = topBarVisible
         ? (_useIos26PlayerChrome
-            ? viewPadding.top +
+            ? effectiveTopOverlaySafe +
                 (isLandscape ? 12.0 : 10.0) +
                 (screenSize.width < 440 ? 96.0 : 76.0) +
                 8.0
             : (_desktop && !widget.embedded
-                ? math.max(16.0, viewPadding.top + 84.0)
-                : math.max(16.0, viewPadding.top + 76.0)))
-        : math.max(16.0, viewPadding.top + 16.0);
+                ? math.max(16.0, effectiveTopOverlaySafe + 84.0)
+                : math.max(16.0, effectiveTopOverlaySafe + 76.0)))
+        : math.max(16.0, effectiveTopOverlaySafe + 16.0);
 
     final subtitleOverlay =
         widget.debugSubtitleLayer ?? _videoKernel.buildSubtitleOverlay();
@@ -4626,7 +5509,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           desktopPreview == null)
                       ? Text(
                           _hudText,
-                          key: ValueKey<String>('player-hud-toast:$_hudText'),
+                          key: const ValueKey<String>('player-hud-toast:visible'),
                           maxLines: 2,
                           textAlign: TextAlign.center,
                           overflow: TextOverflow.ellipsis,
@@ -4749,6 +5632,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                 _cancelTransientInteractions(GestureInterruptReason.multiTouch);
                 return;
               }
+              if (_isIosPlayerPlatform) {
+                if (_iosDeviceVolumeSynced) {
+                  _iosDeviceVolume = _iosConfirmedDeviceVolume;
+                  _iosFsmVolumeBaseline =
+                      _iosConfirmedDeviceVolume.clamp(0.0, 1.0);
+                } else {
+                  _iosFsmVolumeBaseline = null;
+                  unawaited(_primeIosSystemVolume());
+                }
+              }
               final ctx = TouchPointerContext(
                 pointerId: event.pointer,
                 x: event.localPosition.dx,
@@ -4774,7 +5667,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                 positionMs: _position.inMilliseconds,
                 userNormalSpeed: _normalSpeed,
                 brightness: _playerBrightness,
-                volume: (_engineVolume100 / 100.0).clamp(0.0, 1.0),
+                volume: _isIosPlayerPlatform
+                    ? _iosDeviceVolume.clamp(0.0, 1.0)
+                    : (_engineVolume100 / 100.0).clamp(0.0, 1.0),
                 isTouchPointer: event.kind == PointerDeviceKind.touch ||
                     event.kind == PointerDeviceKind.stylus,
               );
@@ -4899,8 +5794,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                       _position = Duration(milliseconds: targetMs);
                       _hudText = '';
                     });
-                    _seekPlayer(Duration(milliseconds: targetMs));
-                    _saveProgress(immediate: true, triggerSync: false);
+                    _seekPlayer(
+                      Duration(milliseconds: targetMs),
+                      saveProgressOnSuccess: true,
+                    );
                     _scheduleHide();
                   },
             onHorizontalDragCancel: _screenLocked
@@ -4920,9 +5817,22 @@ class _PlayerScreenState extends State<PlayerScreen>
                     _isDraggingLeftBrightness =
                         details.localPosition.dx < width / 2;
                     _verticalDragStartY = details.localPosition.dy;
-                    _verticalDragStartValue = _isDraggingLeftBrightness
-                        ? _playerBrightness
-                        : (_engineVolume100 / 100.0).clamp(0.0, 1.0);
+                    if (_isDraggingLeftBrightness) {
+                      _verticalDragStartValue = _playerBrightness;
+                    } else if (_isIosPlayerPlatform) {
+                      if (_iosDeviceVolumeSynced) {
+                        _iosDeviceVolume = _iosConfirmedDeviceVolume;
+                        _iosLegacyVolumeBaseline = _iosConfirmedDeviceVolume;
+                        _verticalDragStartValue = _iosConfirmedDeviceVolume;
+                      } else {
+                        _iosLegacyVolumeBaseline = null;
+                        _verticalDragStartValue = _iosConfirmedDeviceVolume;
+                        unawaited(_primeIosSystemVolume());
+                      }
+                    } else {
+                      _verticalDragStartValue =
+                          (_engineVolume100 / 100.0).clamp(0.0, 1.0);
+                    }
                   },
             onVerticalDragUpdate: (_desktop || _screenLocked)
                 ? null
@@ -4939,6 +5849,24 @@ class _PlayerScreenState extends State<PlayerScreen>
                         _playerBrightness = nextBrightness;
                         _hudText = '亮度 ${(nextBrightness * 100).round()}%';
                       });
+                    } else if (_isIosPlayerPlatform) {
+                      if (!_iosDeviceVolumeSynced) {
+                        _iosPendingVolumeDragActive = true;
+                        _iosPendingVolumeDragDelta = delta;
+                        unawaited(_primeIosSystemVolume());
+                        setState(() {
+                          _hudText = '正在同步设备音量…';
+                        });
+                      } else {
+                        final base =
+                            _iosLegacyVolumeBaseline ?? _verticalDragStartValue;
+                        final nextVolRatio = (base + delta).clamp(0.0, 1.0);
+                        _iosDeviceVolume = nextVolRatio;
+                        _pushIosSystemVolume(nextVolRatio);
+                        setState(() {
+                          _hudText = '设备音量 ${(nextVolRatio * 100).round()}%';
+                        });
+                      }
                     } else {
                       final nextVolRatio =
                           (_verticalDragStartValue + delta).clamp(0.0, 1.0);
@@ -4954,12 +5882,28 @@ class _PlayerScreenState extends State<PlayerScreen>
                 : (_) {
                     if (!_isVerticalDragging) return;
                     _isVerticalDragging = false;
+                    _iosLegacyVolumeBaseline = null;
+                    if (_isIosPlayerPlatform && _iosDeviceVolumeSynced) {
+                      _iosDeviceVolume = _iosConfirmedDeviceVolume;
+                      if (_hudText.startsWith('设备音量 ')) {
+                        setState(() {
+                          _hudText =
+                              '设备音量 ${(_iosConfirmedDeviceVolume * 100.0).round()}%';
+                        });
+                      }
+                    }
                     _scheduleVerticalHudClear();
                   },
             onVerticalDragCancel: (_desktop || _screenLocked)
                 ? null
                 : () {
                     if (!_isVerticalDragging) return;
+                    _iosLegacyVolumeBaseline = null;
+                    _iosPendingVolumeDragActive = false;
+                    _iosPendingVolumeDragDelta = 0.0;
+                    if (_isIosPlayerPlatform && _iosDeviceVolumeSynced) {
+                      _iosDeviceVolume = _iosConfirmedDeviceVolume;
+                    }
                     setState(() {
                       _isVerticalDragging = false;
                       _hudText = '';
@@ -4973,6 +5917,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) {
           _cancelTransientInteractions(GestureInterruptReason.backExit);
+          unawaited(_mobileChrome.setOrientationMonitoring(false));
           unawaited(_saveProgress(immediate: true));
           return;
         }
@@ -5282,7 +6227,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                               360.0,
                             ),
                           )
-                        : screenSize.width * 9 / 16,
+                        : math.min(
+                            screenSize.width * 9 / 16,
+                            math.max(
+                              200.0,
+                              (screenSize.height - viewPadding.top) * 0.42,
+                            ),
+                          ),
                     child: Theme(
                       data: Theme.of(context).copyWith(
                         brightness: Brightness.dark,
@@ -5843,10 +6794,924 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  /// Apple-native iOS / iPadOS Live TV portrait companion panel rendered below
+  /// the top 16:9 live player box: active station header, quick live actions
+  /// (PiP / Cast / Engine / Reconnect), 1-tap signal line switcher, and inline
+  /// searchable multi-group channel browser for zero-flash channel zapping.
+  Widget _buildIosLivePortraitCompanionSheet(BuildContext context) {
+    final palette = ApplePalette.of(context);
+    final isDark = palette.isDark;
+    final episodes = _currentLine.episodes;
+    final activeCh = _activeLiveChannel ??
+        LiveChannel(
+          name: _displayTitle,
+          group: _currentLine.name.trim().isNotEmpty
+              ? _currentLine.name.trim()
+              : '直播频道',
+          urls: [for (final e in episodes) e.url],
+        );
+    final activeName = activeCh.name;
+    final activeGroup = activeCh.group;
+    final groups =
+        widget.liveGroups.where((g) => g.channels.isNotEmpty).toList();
+    final totalChannels = groups.fold<int>(0, (sum, g) => sum + g.channels.length);
+
+    final isPipActive =
+        _usingAvPlayer && (_iosAvPlayerController?.isPipActive ?? false);
+    final statusColor = _playbackError.isNotEmpty
+        ? AppleColors.systemOrange
+        : (_loading || _buffering
+            ? AppleColors.systemBlue
+            : (_playing ? AppleColors.systemRed : palette.labelTertiary));
+    final statusLabel = _playbackError.isNotEmpty
+        ? '连接异常'
+        : (_loading
+            ? '正在连接'
+            : (_buffering
+                ? '缓冲中'
+                : (_playing ? '正在直播' : '已暂停')));
+    final activeLatency = LiveHealthVisual.badgeText(activeCh);
+
+    final glassCardBg = isDark
+        ? Colors.white.withValues(alpha: 0.075)
+        : Colors.white.withValues(alpha: 0.78);
+    final glassCardBorder = isDark
+        ? Colors.white.withValues(alpha: 0.14)
+        : Colors.black.withValues(alpha: 0.06);
+
+    final bottomPad = math.max(24.0, MediaQuery.paddingOf(context).bottom + 18.0);
+
+    return ClipRect(
+      key: const Key('ios-live-portrait-companion-sheet'),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: isDark
+                    ? const [
+                        Color(0xFF171B26),
+                        Color(0xFF0F1219),
+                        Color(0xFF090B10),
+                      ]
+                    : const [
+                        Color(0xFFE7ECF6),
+                        Color(0xFFF1F4FA),
+                        Color(0xFFF5F7FC),
+                      ],
+              ),
+            ),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 22,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: isDark ? 0.36 : 0.14),
+                      Colors.transparent,
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          LayoutBuilder(
+            builder: (ctx, sheetBox) {
+              final textScale =
+                  MediaQuery.textScalerOf(ctx).scale(14.0) / 14.0;
+              final contentWidth = math.max(200.0, sheetBox.maxWidth - 32.0);
+              final cols = contentWidth >= 660
+                  ? 3
+                  : (contentWidth >= 320 && textScale <= 1.35 ? 2 : 1);
+              return ListenableBuilder(
+                listenable: Listenable.merge(<Listenable>[
+                  _liveCompanionGroupNotifier,
+                  _liveCompanionQueryNotifier,
+                ]),
+                builder: (ctx, _) {
+                  final rawGroup = _liveCompanionGroupNotifier.value;
+                  final effectiveGroupName = rawGroup.isNotEmpty &&
+                          groups.any((g) => g.name == rawGroup)
+                      ? rawGroup
+                      : (groups.any((g) => g.name == activeGroup)
+                          ? activeGroup
+                          : (groups.isNotEmpty ? groups.first.name : activeGroup));
+                  final selectedGroupIdx = groups.isEmpty
+                      ? 0
+                      : math.max(
+                          0,
+                          groups.indexWhere((g) => g.name == effectiveGroupName),
+                        );
+                  final query =
+                      _liveCompanionQueryNotifier.value.trim().toLowerCase();
+                  final visibleChannels = groups.isEmpty
+                      ? const <LiveChannel>[]
+                      : (query.isNotEmpty
+                          ? [
+                              for (final g in groups)
+                                for (final ch in g.channels)
+                                  if (ch.name.toLowerCase().contains(query) ||
+                                      g.name.toLowerCase().contains(query))
+                                    ch,
+                            ]
+                          : groups[selectedGroupIdx].channels);
+                  final rowCount = (visibleChannels.length / cols).ceil();
+
+                  return CustomScrollView(
+                    slivers: [
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                        sliver: SliverToBoxAdapter(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+              // 1. Active Channel Header Card
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: glassCardBg,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: glassCardBorder, width: 0.8),
+                  boxShadow: isDark
+                      ? null
+                      : [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.045),
+                            blurRadius: 14,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                ),
+                child: Builder(
+                  builder: (_) {
+                    final compactHeader =
+                        contentWidth < 340 || textScale >= 1.35;
+                    final statusBadge = Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: 0.16),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: statusColor,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              statusLabel,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: statusColor,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                    final metaWrap = Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        statusBadge,
+                        if (activeGroup.isNotEmpty)
+                          Text(
+                            activeGroup,
+                            style: TextStyle(
+                              color: palette.labelSecondary,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        Text(
+                          '· ${_usingAvPlayer ? "AVPlayer" : "MPV"}',
+                          style: TextStyle(
+                            color: palette.labelTertiary,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (activeLatency != null)
+                          Text(
+                            '· $activeLatency',
+                            style: TextStyle(
+                              color: palette.labelTertiary,
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                      ],
+                    );
+                    final fullscreenButton = GestureDetector(
+                      key: const Key('ios-portrait-companion-fullscreen-btn'),
+                      onTap: _toggleOrientation,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 11,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: palette.accent.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              CupertinoIcons.fullscreen,
+                              size: 13,
+                              color: palette.accent,
+                            ),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                '全屏',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: palette.accent,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (compactHeader) ...[
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              LiveStationBadge(
+                                channel: activeCh,
+                                size: 46,
+                                radius: 12,
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  activeName,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: palette.labelPrimary,
+                                    fontSize: 19,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: -0.35,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            width: double.infinity,
+                            child: Wrap(
+                              spacing: 8,
+                              runSpacing: 6,
+                              alignment: WrapAlignment.spaceBetween,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: [
+                                metaWrap,
+                                fullscreenButton,
+                              ],
+                            ),
+                          ),
+                        ] else
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              LiveStationBadge(
+                                channel: activeCh,
+                                size: 46,
+                                radius: 12,
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      activeName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: palette.labelPrimary,
+                                        fontSize: 19,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: -0.35,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 5),
+                                    metaWrap,
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              fullscreenButton,
+                            ],
+                          ),
+                        if (_fusedSpecBadges.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          InlineSpecBadgeRow(
+                            badges: _fusedSpecBadges,
+                            expanded: true,
+                            concentric: true,
+                            reduceTransparency: _storageReduceTransparency,
+                          ),
+                        ],
+                      ],
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // 2. Quick Live Actions Bar (PiP / Cast / Engine / Reconnect)
+              if (contentWidth < 340 || textScale >= 1.35)
+                Column(
+                  children: [
+                    Row(
+                      children: [
+                        _CompanionActionChip(
+                          key: const Key('ios-live-companion-pip-btn'),
+                          icon: isPipActive
+                              ? CupertinoIcons.rectangle_fill_on_rectangle_fill
+                              : CupertinoIcons.rectangle_on_rectangle,
+                          label: isPipActive ? '画中画中' : '画中画',
+                          active: isPipActive,
+                          activeColor: palette.accent,
+                          palette: palette,
+                          onTap: () => unawaited(_handleIosPipTap()),
+                        ),
+                        const SizedBox(width: 8),
+                        _CompanionActionChip(
+                          key: const Key('ios-live-companion-cast-btn'),
+                          icon: CupertinoIcons.tv,
+                          label: _castController.isCasting ? '投屏中' : '投屏',
+                          active: _castController.isCasting,
+                          activeColor: palette.accent,
+                          palette: palette,
+                          onTap: () => _handleCastTap(null),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        _CompanionActionChip(
+                          key: const Key('ios-live-companion-engine-btn'),
+                          icon: CupertinoIcons.bolt_fill,
+                          label: _usingAvPlayer ? 'AVPlayer' : 'MPV',
+                          active: _usingAvPlayer,
+                          activeColor: palette.accent,
+                          palette: palette,
+                          onTap: () => unawaited(_toggleIosEngine()),
+                        ),
+                        const SizedBox(width: 8),
+                        _CompanionActionChip(
+                          key: const Key('ios-live-companion-reload-btn'),
+                          icon: CupertinoIcons.refresh,
+                          label: '重连',
+                          palette: palette,
+                          onTap: () {
+                            _showHud('正在重新连接 $activeName…');
+                            unawaited(_openCurrentEpisode(resumeMs: 0));
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                )
+              else
+                Row(
+                  children: [
+                    _CompanionActionChip(
+                      key: const Key('ios-live-companion-pip-btn'),
+                      icon: isPipActive
+                          ? CupertinoIcons.rectangle_fill_on_rectangle_fill
+                          : CupertinoIcons.rectangle_on_rectangle,
+                      label: isPipActive ? '画中画中' : '画中画',
+                      active: isPipActive,
+                      activeColor: palette.accent,
+                      palette: palette,
+                      onTap: () => unawaited(_handleIosPipTap()),
+                    ),
+                    const SizedBox(width: 8),
+                    _CompanionActionChip(
+                      key: const Key('ios-live-companion-cast-btn'),
+                      icon: CupertinoIcons.tv,
+                      label: _castController.isCasting ? '投屏中' : '投屏',
+                      active: _castController.isCasting,
+                      activeColor: palette.accent,
+                      palette: palette,
+                      onTap: () => _handleCastTap(null),
+                    ),
+                    const SizedBox(width: 8),
+                    _CompanionActionChip(
+                      key: const Key('ios-live-companion-engine-btn'),
+                      icon: CupertinoIcons.bolt_fill,
+                      label: _usingAvPlayer ? 'AVPlayer' : 'MPV',
+                      active: _usingAvPlayer,
+                      activeColor: palette.accent,
+                      palette: palette,
+                      onTap: () => unawaited(_toggleIosEngine()),
+                    ),
+                    const SizedBox(width: 8),
+                    _CompanionActionChip(
+                      key: const Key('ios-live-companion-reload-btn'),
+                      icon: CupertinoIcons.refresh,
+                      label: '重连',
+                      palette: palette,
+                      onTap: () {
+                        _showHud('正在重新连接 $activeName…');
+                        unawaited(_openCurrentEpisode(resumeMs: 0));
+                      },
+                    ),
+                  ],
+                ),
+
+              // 3. Signal Lines Switcher (1-tap live line switch)
+              if (episodes.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                  decoration: BoxDecoration(
+                    color: glassCardBg,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: glassCardBorder, width: 0.8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        width: double.infinity,
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          alignment: WrapAlignment.spaceBetween,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  CupertinoIcons.antenna_radiowaves_left_right,
+                                  size: 15,
+                                  color: palette.accent,
+                                ),
+                                const SizedBox(width: 6),
+                                Flexible(
+                                  child: Text(
+                                    '信号线路',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: palette.labelPrimary,
+                                      fontSize: 14.5,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Text(
+                              '当前 ${_episodeIndex + 1}/${episodes.length}',
+                              style: TextStyle(
+                                color: palette.labelTertiary,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        height: math.max(36.0, 20.0 * textScale + 18.0),
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: episodes.length,
+                          separatorBuilder: (_, __) => const SizedBox(width: 8),
+                          itemBuilder: (_, idx) {
+                            final selected = idx == _episodeIndex;
+                            final rawName = episodes[idx].name.trim();
+                            final lineLabel = rawName.isNotEmpty
+                                ? rawName
+                                : '线路 ${idx + 1}';
+                            return Semantics(
+                              button: true,
+                              selected: selected,
+                              label: '切换直播$lineLabel',
+                              child: GestureDetector(
+                                key: ValueKey('ios-live-line-chip-$idx'),
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () {
+                                  if (selected) return;
+                                  HapticFeedback.selectionClick();
+                                  setState(() => _episodeIndex = idx);
+                                  _showHud('已切换至 $lineLabel');
+                                  unawaited(_openCurrentEpisode(resumeMs: 0));
+                                },
+                                child: AnimatedContainer(
+                                  duration: MediaQuery.disableAnimationsOf(context)
+                                      ? Duration.zero
+                                      : const Duration(milliseconds: 160),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 13,
+                                    vertical: 7,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: selected
+                                        ? palette.accent
+                                        : (isDark
+                                            ? Colors.white.withValues(alpha: 0.08)
+                                            : Colors.black.withValues(alpha: 0.05)),
+                                    borderRadius: BorderRadius.circular(11),
+                                    border: Border.all(
+                                      color: selected
+                                          ? palette.accent
+                                          : glassCardBorder,
+                                      width: 0.8,
+                                    ),
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Text(
+                                    lineLabel,
+                                    style: TextStyle(
+                                      color: selected
+                                          ? Colors.white
+                                          : palette.labelPrimary,
+                                      fontSize: 12.5,
+                                      fontWeight: selected
+                                          ? FontWeight.w700
+                                          : FontWeight.w500,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+
+              // 4. Inline Searchable Live Channel Browser (lazy SliverList)
+              if (groups.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 2,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      '频道列表',
+                      style: TextStyle(
+                        color: palette.labelPrimary,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    Text(
+                      '共 $totalChannels 台',
+                      style: TextStyle(
+                        color: palette.labelTertiary,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                CupertinoSearchTextField(
+                  key: const Key('ios-live-companion-search'),
+                  controller: _liveCompanionSearchCtrl,
+                  placeholder: '搜索频道名或分组…',
+                  style: TextStyle(
+                    color: palette.labelPrimary,
+                    fontSize: 14,
+                  ),
+                  placeholderStyle: TextStyle(
+                    color: palette.labelTertiary,
+                    fontSize: 13.5,
+                  ),
+                  backgroundColor: isDark
+                      ? Colors.white.withValues(alpha: 0.09)
+                      : Colors.white.withValues(alpha: 0.86),
+                  onChanged: (v) => _liveCompanionQueryNotifier.value = v,
+                ),
+                if (query.isEmpty && groups.length > 1) ...[
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    height: math.max(34.0, 19.0 * textScale + 16.0),
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: groups.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 8),
+                      itemBuilder: (_, idx) {
+                        final g = groups[idx];
+                        final sel = idx == selectedGroupIdx;
+                        return GestureDetector(
+                          key: ValueKey('ios-live-group-pill-$idx'),
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {
+                            HapticFeedback.selectionClick();
+                            _liveCompanionGroupNotifier.value = g.name;
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: sel
+                                  ? palette.accent
+                                  : (isDark
+                                      ? Colors.white.withValues(alpha: 0.08)
+                                      : Colors.white.withValues(alpha: 0.72)),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                color: sel ? palette.accent : glassCardBorder,
+                                width: 0.7,
+                              ),
+                            ),
+                            alignment: Alignment.center,
+                            child: Text(
+                              '${g.name} (${g.channels.length})',
+                              style: TextStyle(
+                                color: sel
+                                    ? Colors.white
+                                    : palette.labelSecondary,
+                                fontSize: 12,
+                                fontWeight:
+                                    sel ? FontWeight.w700 : FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                if (visibleChannels.isEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 28,
+                    ),
+                    decoration: BoxDecoration(
+                      color: glassCardBg,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: glassCardBorder, width: 0.8),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      '未找到匹配的直播频道',
+                      style: TextStyle(
+                        color: palette.labelSecondary,
+                        fontSize: 13.5,
+                      ),
+                    ),
+                  ),
+              ] else ...[
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: glassCardBg,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: glassCardBorder, width: 0.8),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        CupertinoIcons.info_circle,
+                        size: 17,
+                        color: palette.labelSecondary,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          '右侧上下滑动可直接调节设备音量，点击上方「画中画」或「全屏」可随时切换观看模式。',
+                          style: TextStyle(
+                            color: palette.labelSecondary,
+                            fontSize: 12.5,
+                            height: 1.4,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                      if (groups.isNotEmpty && visibleChannels.isNotEmpty)
+                        SliverPadding(
+                          padding: EdgeInsets.fromLTRB(16, 0, 16, bottomPad),
+                          sliver: SliverList.builder(
+                            itemCount: rowCount,
+                            itemBuilder: (_, r) {
+                              const spacing = 10.0;
+                              return Padding(
+                                padding: EdgeInsets.only(
+                                  bottom: r < rowCount - 1 ? spacing : 0,
+                                ),
+                                child: Row(
+                                  children: [
+                                    for (var c = 0; c < cols; c++) ...[
+                                      if (c > 0) const SizedBox(width: spacing),
+                                      Expanded(
+                                        child: (r * cols + c) < visibleChannels.length
+                                            ? () {
+                                                final ch =
+                                                    visibleChannels[r * cols + c];
+                                                final isCurrent =
+                                                    ch.name == activeName &&
+                                                        ch.group == activeGroup;
+                                                final lat =
+                                                    LiveHealthVisual.badgeText(ch);
+                                                return RepaintBoundary(
+                                                  child: GestureDetector(
+                                                    key: ValueKey(
+                                                      'ios-live-channel-card-${ch.group}-${ch.name}',
+                                                    ),
+                                                    behavior:
+                                                        HitTestBehavior.opaque,
+                                                    onTap: () {
+                                                      HapticFeedback
+                                                          .selectionClick();
+                                                      _switchLiveChannel(ch);
+                                                    },
+                                                    child: Container(
+                                                      padding:
+                                                          const EdgeInsets.symmetric(
+                                                        horizontal: 10,
+                                                        vertical: 9,
+                                                      ),
+                                                      decoration: BoxDecoration(
+                                                        color: isCurrent
+                                                            ? palette.accent
+                                                                .withValues(
+                                                                  alpha: isDark
+                                                                      ? 0.22
+                                                                      : 0.13,
+                                                                )
+                                                            : glassCardBg,
+                                                        borderRadius:
+                                                            BorderRadius.circular(
+                                                          14,
+                                                        ),
+                                                        border: Border.all(
+                                                          color: isCurrent
+                                                              ? palette.accent
+                                                              : glassCardBorder,
+                                                          width: isCurrent
+                                                              ? 1.2
+                                                              : 0.75,
+                                                        ),
+                                                      ),
+                                                      child: Row(
+                                                        children: [
+                                                          LiveStationBadge(
+                                                            channel: ch,
+                                                            size: 36,
+                                                            radius: 9,
+                                                          ),
+                                                          const SizedBox(width: 9),
+                                                          Expanded(
+                                                            child: Column(
+                                                              crossAxisAlignment:
+                                                                  CrossAxisAlignment
+                                                                      .start,
+                                                              mainAxisSize:
+                                                                  MainAxisSize.min,
+                                                              children: [
+                                                                Text(
+                                                                  ch.name,
+                                                                  maxLines: 1,
+                                                                  overflow:
+                                                                      TextOverflow
+                                                                          .ellipsis,
+                                                                  style: TextStyle(
+                                                                    color: isCurrent
+                                                                        ? palette
+                                                                            .accent
+                                                                        : palette
+                                                                            .labelPrimary,
+                                                                    fontSize: 13.5,
+                                                                    fontWeight: isCurrent
+                                                                        ? FontWeight
+                                                                            .w700
+                                                                        : FontWeight
+                                                                            .w600,
+                                                                  ),
+                                                                ),
+                                                                const SizedBox(
+                                                                  height: 2,
+                                                                ),
+                                                                Text(
+                                                                  [
+                                                                    '${ch.urls.length} 路信号',
+                                                                    if (lat != null)
+                                                                      lat,
+                                                                  ].join(' · '),
+                                                                  maxLines: 1,
+                                                                  overflow:
+                                                                      TextOverflow
+                                                                          .ellipsis,
+                                                                  style: TextStyle(
+                                                                    color: palette
+                                                                        .labelTertiary,
+                                                                    fontSize: 11,
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .w500,
+                                                                  ),
+                                                                ),
+                                                              ],
+                                                            ),
+                                                          ),
+                                                          if (isCurrent) ...[
+                                                            const SizedBox(width: 4),
+                                                            Icon(
+                                                              CupertinoIcons
+                                                                  .waveform,
+                                                              size: 14,
+                                                              color: palette.accent,
+                                                            ),
+                                                          ],
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  ),
+                                                );
+                                              }()
+                                            : const SizedBox.shrink(),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                        )
+                      else
+                        SliverToBoxAdapter(
+                          child: SizedBox(height: bottomPad),
+                        ),
+                    ],
+                  );
+                },
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Tencent-Video-style iOS portrait companion sheet below the top 16:9
   /// cinema player box (title, synopsis, circular actor avatars, quick actions,
   /// line selector, and episode grid).
   Widget _buildIosPortraitCompanionSheet(BuildContext context) {
+    if (_isLiveStream) {
+      return _buildIosLivePortraitCompanionSheet(context);
+    }
     final palette = ApplePalette.of(context);
     final episodes = _currentLine.episodes;
     final metaParts = <String>[
@@ -6077,7 +7942,24 @@ class _PlayerScreenState extends State<PlayerScreen>
                       palette: palette,
                       onTap: () => unawaited(_handleFavoriteTap(null)),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
+                    _CompanionActionChip(
+                      key: const Key('ios-vod-companion-pip-btn'),
+                      icon: (_usingAvPlayer &&
+                              (_iosAvPlayerController?.isPipActive ?? false))
+                          ? CupertinoIcons.rectangle_fill_on_rectangle_fill
+                          : CupertinoIcons.rectangle_on_rectangle,
+                      label: (_usingAvPlayer &&
+                              (_iosAvPlayerController?.isPipActive ?? false))
+                          ? '画中画中'
+                          : '画中画',
+                      active: _usingAvPlayer &&
+                          (_iosAvPlayerController?.isPipActive ?? false),
+                      activeColor: palette.accent,
+                      palette: palette,
+                      onTap: () => unawaited(_handleIosPipTap()),
+                    ),
+                    const SizedBox(width: 6),
                     _CompanionActionChip(
                       icon: CupertinoIcons.tv,
                       label: _castController.isCasting ? '投屏中' : '投屏',
@@ -6086,14 +7968,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                       palette: palette,
                       onTap: () => _handleCastTap(null),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                     _CompanionActionChip(
                       icon: CupertinoIcons.arrow_down_circle,
                       label: '下载',
                       palette: palette,
                       onTap: () => _handleDownloadTap(null),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                     _CompanionActionChip(
                       icon: CupertinoIcons.speedometer,
                       label: IosPlayerChrome.formatSpeedBadge(
@@ -6693,14 +8575,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                 currentDownload.status == DownloadStatus.completed),
         storageReduceTransparency: _storageReduceTransparency,
         isPipSupported:
-            _usingAvPlayer && (_iosAvPlayerController?.isPipSupported ?? false),
+            _isIosPlayerPlatform &&
+            (_iosAvPlayerController?.isPipSupported ?? false),
         isPipActive:
             _usingAvPlayer && (_iosAvPlayerController?.isPipActive ?? false),
-        onPipTap: () {
-          final avCtrl = _iosAvPlayerController;
-          if (!_usingAvPlayer || avCtrl == null) return;
-          unawaited(avCtrl.isPipActive ? avCtrl.stopPip() : avCtrl.startPip());
-        },
+        onPipTap: _isIosPlayerPlatform
+            ? () => unawaited(_handleIosPipTap())
+            : null,
         engineLabel: _usingAvPlayer ? 'AVPlayer' : 'MPV',
         isAvPlayerActive: _usingAvPlayer,
         onEngineSwitchTap: _isIosPlayerPlatform
@@ -6752,8 +8633,10 @@ class _PlayerScreenState extends State<PlayerScreen>
             _isSliderDragging = false;
             _position = Duration(milliseconds: targetMs);
           });
-          _seekPlayer(Duration(milliseconds: targetMs));
-          unawaited(_saveProgress(immediate: true, triggerSync: false));
+          _seekPlayer(
+            Duration(milliseconds: targetMs),
+            saveProgressOnSuccess: true,
+          );
           _scheduleHide();
         },
         onScrubCancel: () {
@@ -7038,12 +8921,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                               _isSliderDragging = false;
                               _position = Duration(milliseconds: targetMs);
                             });
-                            _seekPlayer(Duration(milliseconds: targetMs));
-                            unawaited(
-                              _saveProgress(
-                                immediate: true,
-                                triggerSync: false,
-                              ),
+                            _seekPlayer(
+                              Duration(milliseconds: targetMs),
+                              saveProgressOnSuccess: true,
                             );
                             if (_desktop) {
                               _restorePlayerFocusIfCurrent();
@@ -7939,9 +9819,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                             _isSliderDragging = false;
                             _position = Duration(milliseconds: targetMs);
                           });
-                          _seekPlayer(Duration(milliseconds: targetMs));
-                          unawaited(
-                            _saveProgress(immediate: true, triggerSync: false),
+                          _seekPlayer(
+                            Duration(milliseconds: targetMs),
+                            saveProgressOnSuccess: true,
                           );
                           if (_desktop) {
                             _restorePlayerFocusIfCurrent();
@@ -10199,10 +12079,12 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _switchLiveChannel(LiveChannel channel, {int lineIdx = 0}) {
     if (!mounted || channel.episodes.isEmpty) return;
+    _clearPendingAutoStartPip();
     _failedLinesForEpisode.clear();
     _failedLiveEpisodes.clear();
     _liveDirectFallbackTried = false;
     _lastLiveUpstreamStatus = null;
+    _liveCompanionGroupNotifier.value = channel.group;
     setState(() {
       _activeLiveChannel = channel;
       _lines = [CmsLine(name: channel.group, episodes: channel.episodes)];
@@ -10940,7 +12822,11 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
               const SizedBox(width: 6),
             ],
               GestureDetector(
-                onTap: () => setState(() => _descending = !_descending),
+                key: const ValueKey('player-episodes-sort-toggle'),
+                onTap: () => setState(() {
+                  _descending = !_descending;
+                  _groupIndex = 0;
+                }),
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 11,
@@ -10993,6 +12879,9 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                 children: List.generate(groupCount, (g) {
                   final gStart = g * _groupSize + 1;
                   final gEnd = math.min((g + 1) * _groupSize, total);
+                  final rangeText = _descending
+                      ? '${total - gStart + 1}-${total - gEnd + 1}'
+                      : '$gStart-$gEnd';
                   final active = g == safeGroup;
                   return Padding(
                     padding: const EdgeInsets.only(right: 7),
@@ -11017,7 +12906,7 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                           ),
                         ),
                         child: Text(
-                          '$gStart-$gEnd',
+                          rangeText,
                           style: TextStyle(
                             color: active
                                 ? const Color(0xFF64B5FF)
@@ -11335,6 +13224,7 @@ class _CompanionActionChip extends StatelessWidget {
   final VoidCallback onTap;
 
   const _CompanionActionChip({
+    super.key,
     required this.icon,
     required this.label,
     this.active = false,
@@ -11356,8 +13246,8 @@ class _CompanionActionChip extends StatelessWidget {
         },
         behavior: HitTestBehavior.opaque,
         child: Container(
-          height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
+          constraints: const BoxConstraints(minHeight: 36),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
             color: active
                 ? color.withValues(alpha: palette.isDark ? 0.22 : 0.16)

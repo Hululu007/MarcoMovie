@@ -4,13 +4,16 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
+import 'smb2_client.dart';
 
 /// Unified external media library protocol dispatcher supporting Jellyfin, Plex,
-/// WebDAV media folders, AList/OpenList NAS, SMB/NAS shares, and local device
-/// media collections alongside [EmbyLibrary].
+/// WebDAV media folders, AList/OpenList NAS, pure SMB2 / NAS shares, and
+/// persistent on-device local media collections alongside [EmbyLibrary].
 class ExternalMediaLibrary {
   static const String jellyfinPrefix = 'jellyfin://account/';
   static const String plexPrefix = 'plex://account/';
@@ -18,6 +21,7 @@ class ExternalMediaLibrary {
   static const String alistPrefix = 'alist://account/';
   static const String smbPrefix = 'smbnas://account/';
   static const String localPrefix = 'localfile://account/';
+  static const String folderTag = 'media-folder';
 
   static const Set<String> _videoExtensions = <String>{
     '.mp4',
@@ -42,12 +46,31 @@ class ExternalMediaLibrary {
   }
 
   static String cleanMediaTitle(String fileName) {
-    final trimmed = Uri.decodeComponent(fileName).split('/').last.trim();
+    String decoded;
+    try {
+      decoded = Uri.decodeComponent(fileName);
+    } catch (_) {
+      decoded = fileName;
+    }
+    final trimmed = decoded.split(RegExp(r'[/\\]')).last.trim();
     final dot = trimmed.lastIndexOf('.');
-    if (dot > 0 && _videoExtensions.contains(trimmed.substring(dot).toLowerCase())) {
+    if (dot > 0 &&
+        _videoExtensions.contains(trimmed.substring(dot).toLowerCase())) {
       return trimmed.substring(0, dot).trim();
     }
     return trimmed;
+  }
+
+  static String encodeFolderId(String target) =>
+      Uri(scheme: 'mmfolder', host: 'open', queryParameters: {'id': target})
+          .toString();
+
+  static String decodeFolderId(String raw) {
+    final uri = Uri.tryParse(raw);
+    if (uri != null && uri.scheme == 'mmfolder') {
+      return uri.queryParameters['id'] ?? '';
+    }
+    return raw;
   }
 
   static bool isSupportedSite(CmsSite site) =>
@@ -225,7 +248,8 @@ class JellyfinLibrary {
   }) async {
     final base = ExternalMediaLibrary._validateHttpBase(address, 'Jellyfin');
     final prefs = await SharedPreferences.getInstance();
-    final device = prefs.getString('jellyfin.device') ?? ExternalMediaLibrary._nonce();
+    final device =
+        prefs.getString('jellyfin.device') ?? ExternalMediaLibrary._nonce();
     await prefs.setString('jellyfin.device', device);
     final authClient = JellyfinLibrary._(base, '', '', device, '');
     final json = await authClient._api(
@@ -238,6 +262,12 @@ class JellyfinLibrary {
       throw const FormatException('Jellyfin 没有返回有效账户令牌');
     }
     final key = sha256.convert(utf8.encode('jf|$base|$user')).toString();
+    // Verify real library access before saving the library entry.
+    final verified = JellyfinLibrary._(base, user, token, device, key);
+    final views = await verified._api('/Users/$user/Views');
+    if (views['Items'] is! List) {
+      throw StateError('Jellyfin 未返回有效媒体库目录，请检查该账号的库访问权限');
+    }
     final name = 'Jellyfin · ${username.trim()}';
     await prefs.setString(
       'jellyfin.account.$key',
@@ -269,8 +299,8 @@ class JellyfinLibrary {
       openByKey(site.api.substring(ExternalMediaLibrary.jellyfinPrefix.length));
 
   static Future<JellyfinLibrary> openByKey(String key) async {
-    final raw =
-        (await SharedPreferences.getInstance()).getString('jellyfin.account.$key');
+    final raw = (await SharedPreferences.getInstance())
+        .getString('jellyfin.account.$key');
     if (raw == null) throw StateError('请在本机重新登录 Jellyfin');
     final map = jsonDecode(raw) as Map<String, dynamic>;
     return JellyfinLibrary._(
@@ -298,10 +328,11 @@ class JellyfinLibrary {
         body == null ? 'GET' : 'POST',
         _url(path, params),
       );
-      req.headers.set(
-        'X-Emby-Authorization',
-        'MediaBrowser Client="Marco Movie", Device="${Platform.operatingSystem}", DeviceId="$device", Version="1"',
-      );
+      req.followRedirects = false;
+      final authHeader =
+          'MediaBrowser Client="Marco Movie", Device="${Platform.operatingSystem}", DeviceId="$device", Version="1"${token.isNotEmpty ? ', Token="$token"' : ''}';
+      req.headers.set('Authorization', authHeader);
+      req.headers.set('X-Emby-Authorization', authHeader);
       if (token.isNotEmpty) {
         req.headers.set('X-Emby-Token', token);
       }
@@ -311,7 +342,7 @@ class JellyfinLibrary {
       }
       final resp = await req.close();
       if (resp.statusCode == 401 || resp.statusCode == 403) {
-        throw StateError('Jellyfin 拒绝访问，请检查账号或重新登录');
+        throw StateError('Jellyfin 拒绝访问，请检查账号密码或媒体库权限');
       }
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
         throw HttpException('Jellyfin HTTP ${resp.statusCode}');
@@ -323,9 +354,12 @@ class JellyfinLibrary {
         }
         bytes.addAll(chunk);
       }
-      return bytes.isEmpty
-          ? <String, dynamic>{}
-          : jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+      if (bytes.isEmpty) return <String, dynamic>{};
+      final decoded = jsonDecode(utf8.decode(bytes));
+      if (decoded is! Map) {
+        throw const FormatException('Jellyfin 未返回有效 JSON 数据');
+      }
+      return Map<String, dynamic>.from(decoded);
     } finally {
       deadline.cancel();
       client.close(force: true);
@@ -419,11 +453,23 @@ class JellyfinLibrary {
     }
 
     if (item['Type'] == 'Series') {
-      final j = await _api(
-        '/Shows/$id/Episodes',
-        params: {'UserId': user, 'Fields': 'MediaSources', 'Limit': '400'},
-      );
-      (j['Items'] as List? ?? const []).whereType<Map>().forEach(add);
+      var start = 0;
+      while (start < 10000) {
+        final j = await _api(
+          '/Shows/$id/Episodes',
+          params: {
+            'UserId': user,
+            'Fields': 'MediaSources',
+            'Limit': '200',
+            'StartIndex': '$start',
+          },
+        );
+        final rows = (j['Items'] as List? ?? const []).whereType<Map>().toList();
+        rows.forEach(add);
+        start += rows.length;
+        final total = (j['TotalRecordCount'] as num?)?.toInt() ?? start;
+        if (rows.isEmpty || start >= total) break;
+      }
     } else {
       add(item);
     }
@@ -436,16 +482,60 @@ class JellyfinLibrary {
     final p = Uri.parse(episode.url).queryParameters;
     final id = p['id'] ?? '';
     final sid = p['source'] ?? id;
+    if (id.isEmpty) throw const FormatException('Jellyfin 媒体编号缺失');
+    final authHeader =
+        'MediaBrowser Client="Marco Movie", Device="${Platform.operatingSystem}", DeviceId="$device", Version="1", Token="$token"';
+    final headers = <String, String>{
+      'X-Emby-Token': token,
+      'Authorization': authHeader,
+    };
+    try {
+      final info = await _api(
+        '/Items/$id/PlaybackInfo',
+        body: {
+          'UserId': user,
+          if (sid.isNotEmpty) 'MediaSourceId': sid,
+          'IsPlayback': true,
+          'EnableDirectPlay': false,
+          'EnableDirectStream': true,
+          'EnableTranscoding': true,
+        },
+      );
+      final sources = (info['MediaSources'] as List? ?? const [])
+          .whereType<Map>()
+          .toList();
+      final chosen = sources
+              .where((s) => s['Id']?.toString() == sid)
+              .firstOrNull ??
+          (sources.isNotEmpty ? sources.first : null);
+      final session = info['PlaySessionId']?.toString() ?? '';
+      if (chosen != null) {
+        final direct = chosen['SupportsDirectStream'] == true ||
+            chosen['SupportsDirectPlay'] == true;
+        final transcode = chosen['TranscodingUrl']?.toString() ?? '';
+        if (!direct && transcode.isNotEmpty) {
+          final uri = Uri.parse('${base.toString()}/').resolve(transcode);
+          return CmsEpisode(name: episode.name, url: uri.toString(), headers: headers);
+        }
+        final stream = _url('/Videos/$id/stream', {
+          'Static': 'true',
+          'MediaSourceId': chosen['Id']?.toString() ?? sid,
+          if (session.isNotEmpty) 'PlaySessionId': session,
+          'DeviceId': device,
+        });
+        return CmsEpisode(name: episode.name, url: stream.toString(), headers: headers);
+      }
+    } on StateError {
+      rethrow;
+    } catch (_) {
+      // Fall back to direct stream URL if server does not expose PlaybackInfo.
+    }
     final stream = _url('/Videos/$id/stream', {
       'Static': 'true',
       'MediaSourceId': sid,
       'DeviceId': device,
     });
-    return CmsEpisode(
-      name: episode.name,
-      url: stream.toString(),
-      headers: {'X-Emby-Token': token},
-    );
+    return CmsEpisode(name: episode.name, url: stream.toString(), headers: headers);
   }
 }
 
@@ -470,9 +560,14 @@ class PlexLibrary {
       throw const FormatException('请填写 X-Plex-Token');
     }
     final probe = PlexLibrary._(base, cleanToken, '');
-    await probe._api('/library/sections');
+    final sections = await probe._api('/library/sections');
+    if (sections['MediaContainer'] is! Map) {
+      throw const FormatException('该地址未返回有效的 Plex MediaContainer 响应，请检查服务器地址');
+    }
     final key = sha256.convert(utf8.encode('plex|$base|$cleanToken')).toString();
-    final name = label.trim().isNotEmpty ? 'Plex · ${label.trim()}' : 'Plex · ${base.host}';
+    final name = label.trim().isNotEmpty
+        ? 'Plex · ${label.trim()}'
+        : 'Plex · ${base.host}';
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
       'plex.account.$key',
@@ -522,11 +617,12 @@ class PlexLibrary {
         Timer(const Duration(seconds: 15), () => client.close(force: true));
     try {
       final req = await client.getUrl(_url(path, params));
+      req.followRedirects = false;
       req.headers.set('Accept', 'application/json');
       req.headers.set('X-Plex-Token', token);
       final resp = await req.close();
       if (resp.statusCode == 401 || resp.statusCode == 403) {
-        throw StateError('Plex Token 无效或已被拒绝');
+        throw StateError('Plex Token 无效或无权访问该媒体库');
       }
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
         throw HttpException('Plex HTTP ${resp.statusCode}');
@@ -538,9 +634,12 @@ class PlexLibrary {
         }
         bytes.addAll(chunk);
       }
-      return bytes.isEmpty
-          ? <String, dynamic>{}
-          : jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+      if (bytes.isEmpty) return <String, dynamic>{};
+      final decoded = jsonDecode(utf8.decode(bytes));
+      if (decoded is! Map) {
+        throw const FormatException('Plex 返回的数据格式无效');
+      }
+      return Map<String, dynamic>.from(decoded);
     } finally {
       deadline.cancel();
       client.close(force: true);
@@ -580,8 +679,14 @@ class PlexLibrary {
             ))
         .where((c) => c.id.isNotEmpty)
         .toList();
-    final firstId = dirs.isNotEmpty ? dirs.first.id : '';
-    return (dirs, firstId.isEmpty ? const CmsListing() : await list(firstId, '', 1));
+    if (dirs.isEmpty) return (dirs, const CmsListing());
+    for (final dir in dirs) {
+      final listing = await list(dir.id, '', 1);
+      if (listing.videos.isNotEmpty) {
+        return (dirs, listing);
+      }
+    }
+    return (dirs, const CmsListing());
   }
 
   Future<CmsListing> list(String sectionId, String query, int page) async {
@@ -679,6 +784,10 @@ class PlexLibrary {
 }
 
 /// Real WebDAV PROPFIND media library connector (`webdavlib://account/<key>`).
+///
+/// Enforces RFC 4918 Multi-Status (`207` / `<multistatus>`) validation so HTML
+/// login pages returning `HTTP 200` fail with a clear protocol error instead of
+/// silently masquerading as an empty WebDAV directory.
 class WebDavMediaLibrary {
   final Uri base;
   final String username;
@@ -706,8 +815,9 @@ class WebDavMediaLibrary {
     final key = sha256
         .convert(utf8.encode('webdavlib|$base|${username.trim()}'))
         .toString();
-    final name =
-        label.trim().isNotEmpty ? 'WebDAV · ${label.trim()}' : 'WebDAV · ${base.host}';
+    final name = label.trim().isNotEmpty
+        ? 'WebDAV · ${label.trim()}'
+        : 'WebDAV · ${base.host}';
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
       'webdavlib.account.$key',
@@ -747,6 +857,18 @@ class WebDavMediaLibrary {
     );
   }
 
+  static final RegExp _multistatusRe = RegExp(
+    r'<(?:\w+:)?multistatus\b',
+    caseSensitive: false,
+  );
+  static final RegExp _htmlDocRe = RegExp(
+    r'<!doctype\s+html|<html\b|<head\b|<body\b',
+    caseSensitive: false,
+  );
+
+  static bool isValidPropfindXml(String body) =>
+      _multistatusRe.hasMatch(body) && !_htmlDocRe.hasMatch(body);
+
   static List<({String href, String displayName, bool isDir})> parsePropfindXml(
     String xml,
     Uri requestUri,
@@ -768,22 +890,35 @@ class WebDavMediaLibrary {
       r'<(?:\w+:)?collection\b[^>]*/?>',
       caseSensitive: false,
     );
-    final reqPath = requestUri.path.replaceFirst(RegExp(r'/+$'), '');
+    final reqPath = _normalizedPath(requestUri.path);
     for (final m in responseRe.allMatches(xml)) {
       final block = m.group(1) ?? '';
       final rawHref = hrefRe.firstMatch(block)?.group(1)?.trim() ?? '';
       if (rawHref.isEmpty) continue;
       final resolved = requestUri.resolve(rawHref);
-      final cleanPath = resolved.path.replaceFirst(RegExp(r'/+$'), '');
+      final cleanPath = _normalizedPath(resolved.path);
       if (cleanPath == reqPath) continue;
       final isDir = collectionRe.hasMatch(block) || rawHref.endsWith('/');
       final disp = displayRe.firstMatch(block)?.group(1)?.trim() ?? '';
       final seg = cleanPath.split('/').where((s) => s.isNotEmpty).toList();
-      final fallbackName = seg.isEmpty ? cleanPath : Uri.decodeComponent(seg.last);
+      final fallbackName = seg.isEmpty ? cleanPath : _safeDecode(seg.last);
       final name = disp.isNotEmpty ? disp : fallbackName;
       results.add((href: resolved.toString(), displayName: name, isDir: isDir));
     }
     return results;
+  }
+
+  static String _normalizedPath(String raw) {
+    final trimmed = raw.replaceFirst(RegExp(r'/+$'), '');
+    return _safeDecode(trimmed);
+  }
+
+  static String _safeDecode(String raw) {
+    try {
+      return Uri.decodeComponent(raw);
+    } catch (_) {
+      return raw;
+    }
   }
 
   Future<List<({String href, String displayName, bool isDir})>> _propfind(
@@ -793,13 +928,24 @@ class WebDavMediaLibrary {
     final deadline =
         Timer(const Duration(seconds: 15), () => client.close(force: true));
     try {
-      final target = uri.path.endsWith('/') ? uri : uri.replace(path: '${uri.path}/');
+      final target =
+          uri.path.endsWith('/') ? uri : uri.replace(path: '${uri.path}/');
       final req = await client.openUrl('PROPFIND', target);
+      req.followRedirects = false;
       req.headers.set('Depth', '1');
+      req.headers.set('Accept', 'application/xml, text/xml');
       _authHeaders.forEach((k, v) => req.headers.set(k, v));
       final resp = await req.close();
       if (resp.statusCode == 401 || resp.statusCode == 403) {
         throw StateError('WebDAV 认证失败，请检查账号和密码');
+      }
+      if (resp.statusCode == 405) {
+        throw const FormatException('该地址不支持 WebDAV PROPFIND 协议（HTTP 405），请确认 WebDAV 路径');
+      }
+      if (resp.statusCode >= 300 && resp.statusCode < 400) {
+        throw FormatException(
+          'WebDAV 地址发生了重定向（HTTP ${resp.statusCode}），可能是网页登录跳转，请填写正确的 WebDAV 目录地址',
+        );
       }
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
         throw HttpException('WebDAV HTTP ${resp.statusCode}');
@@ -809,11 +955,53 @@ class WebDavMediaLibrary {
         if (bytes.length + chunk.length > 4 * 1024 * 1024) break;
         bytes.addAll(chunk);
       }
-      return parsePropfindXml(utf8.decode(bytes, allowMalformed: true), target);
+      final body = utf8.decode(bytes, allowMalformed: true);
+      final contentType = (resp.headers.contentType?.mimeType ?? '').toLowerCase();
+      if (contentType.contains('html') ||
+          _htmlDocRe.hasMatch(body) ||
+          (resp.statusCode != 207 && !isValidPropfindXml(body)) ||
+          !isValidPropfindXml(body)) {
+        throw FormatException(
+          'WebDAV 协议校验失败：服务器返回了网页或非标准响应（HTTP ${resp.statusCode}），而非 WebDAV 目录列表',
+        );
+      }
+      return parsePropfindXml(body, target);
     } finally {
       deadline.cancel();
       client.close(force: true);
     }
+  }
+
+  List<CmsVideo> _buildCards(
+    List<({String href, String displayName, bool isDir})> entries, {
+    String query = '',
+  }) {
+    final q = query.trim().toLowerCase();
+    final cards = <CmsVideo>[];
+    for (final e in entries.where((e) => e.isDir)) {
+      if (q.isNotEmpty && !e.displayName.toLowerCase().contains(q)) continue;
+      cards.add(
+        CmsVideo(
+          id: ExternalMediaLibrary.encodeFolderId(e.href),
+          title: e.displayName,
+          remarks: '文件夹',
+          tag: ExternalMediaLibrary.folderTag,
+        ),
+      );
+    }
+    for (final e in entries.where(
+      (e) => !e.isDir && ExternalMediaLibrary.isVideoFileName(e.displayName),
+    )) {
+      if (q.isNotEmpty && !e.displayName.toLowerCase().contains(q)) continue;
+      cards.add(
+        CmsVideo(
+          id: e.href,
+          title: ExternalMediaLibrary.cleanMediaTitle(e.displayName),
+          remarks: 'WebDAV 直连',
+        ),
+      );
+    }
+    return cards;
   }
 
   Future<(List<CmsCategory>, CmsListing)> home() async {
@@ -823,38 +1011,20 @@ class WebDavMediaLibrary {
       for (final e in entries.where((e) => e.isDir))
         CmsCategory(id: e.href, name: e.displayName),
     ];
-    final videos = entries
-        .where((e) => !e.isDir && ExternalMediaLibrary.isVideoFileName(e.displayName))
-        .map((e) => CmsVideo(
-              id: e.href,
-              title: ExternalMediaLibrary.cleanMediaTitle(e.displayName),
-              remarks: 'WebDAV',
-            ))
-        .toList();
-    if (videos.isEmpty && cats.length > 1) {
-      return (cats, await list(cats[1].id, '', 1));
-    }
-    return (cats, CmsListing(page: 1, pageCount: 1, videos: videos));
+    final cards = _buildCards(entries);
+    return (cats, CmsListing(page: 1, pageCount: 1, videos: cards));
   }
 
   Future<CmsListing> list(String categoryId, String query, int page) async {
-    final target = (categoryId.isEmpty || categoryId == '__root__')
-        ? base
-        : Uri.parse(categoryId);
+    final decoded = ExternalMediaLibrary.decodeFolderId(categoryId.trim());
+    final target =
+        (decoded.isEmpty || decoded == '__root__') ? base : Uri.parse(decoded);
     final entries = await _propfind(target);
-    final q = query.trim().toLowerCase();
-    final videos = entries
-        .where((e) =>
-            !e.isDir &&
-            ExternalMediaLibrary.isVideoFileName(e.displayName) &&
-            (q.isEmpty || e.displayName.toLowerCase().contains(q)))
-        .map((e) => CmsVideo(
-              id: e.href,
-              title: ExternalMediaLibrary.cleanMediaTitle(e.displayName),
-              remarks: 'WebDAV 直连',
-            ))
-        .toList();
-    return CmsListing(page: 1, pageCount: 1, videos: videos);
+    return CmsListing(
+      page: 1,
+      pageCount: 1,
+      videos: _buildCards(entries, query: query),
+    );
   }
 
   Future<CmsVideo> detail(CmsVideo fallback) async {
@@ -904,23 +1074,28 @@ class AlistNasLibrary {
     required String group,
     required bool isPrivate,
   }) async {
-    final base = ExternalMediaLibrary._validateHttpBase(address, 'AList / NAS');
+    final base = ExternalMediaLibrary._validateHttpBase(address, 'AList / OpenList');
     var token = '';
-    final probe = AlistNasLibrary._(base, '', rootPath.isEmpty ? '/' : rootPath);
+    final cleanRoot = rootPath.trim().isEmpty ? '/' : rootPath.trim();
+    final probe = AlistNasLibrary._(base, '', cleanRoot);
     if (username.trim().isNotEmpty) {
       final auth = await probe._post('/api/auth/login', {
         'username': username.trim(),
         'password': password,
       });
       token = auth['data']?['token']?.toString() ?? '';
+      if (token.isEmpty) {
+        throw StateError('AList / OpenList 登录未返回有效令牌，请检查账号和密码');
+      }
     }
-    final authed = AlistNasLibrary._(base, token, rootPath.isEmpty ? '/' : rootPath);
-    await authed._listDir(authed.rootPath);
+    final authed = AlistNasLibrary._(base, token, cleanRoot);
+    await authed._listDir(authed.rootPath, page: 1);
     final key = sha256
         .convert(utf8.encode('alist|$base|${authed.rootPath}|${username.trim()}'))
         .toString();
-    final name =
-        label.trim().isNotEmpty ? 'NAS · ${label.trim()}' : 'AList / NAS · ${base.host}';
+    final name = label.trim().isNotEmpty
+        ? 'AList · ${label.trim()}'
+        : 'AList / OpenList · ${base.host}';
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
       'alist.account.$key',
@@ -951,7 +1126,7 @@ class AlistNasLibrary {
     final key = site.api.substring(ExternalMediaLibrary.alistPrefix.length);
     final raw =
         (await SharedPreferences.getInstance()).getString('alist.account.$key');
-    if (raw == null) throw StateError('请在本机重新配置 AList / NAS');
+    if (raw == null) throw StateError('请在本机重新配置 AList / OpenList');
     final map = jsonDecode(raw) as Map<String, dynamic>;
     return AlistNasLibrary._(
       Uri.parse(map['base'].toString()),
@@ -969,6 +1144,7 @@ class AlistNasLibrary {
         Timer(const Duration(seconds: 15), () => client.close(force: true));
     try {
       final req = await client.postUrl(base.replace(path: '${base.path}$path'));
+      req.followRedirects = false;
       req.headers.contentType = ContentType.json;
       if (token.isNotEmpty) {
         req.headers.set('Authorization', token);
@@ -980,7 +1156,19 @@ class AlistNasLibrary {
         if (bytes.length + chunk.length > 4 * 1024 * 1024) break;
         bytes.addAll(chunk);
       }
-      final json = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+      final text = utf8.decode(bytes, allowMalformed: true);
+      final dynamic decoded;
+      try {
+        decoded = jsonDecode(text);
+      } catch (_) {
+        throw FormatException(
+          'AList / OpenList 协议校验失败：服务器返回了非 JSON 内容（HTTP ${resp.statusCode}）',
+        );
+      }
+      if (decoded is! Map) {
+        throw const FormatException('AList / OpenList 响应格式无效');
+      }
+      final json = Map<String, dynamic>.from(decoded);
       final code = (json['code'] as num?)?.toInt() ?? resp.statusCode;
       if (code != 200) {
         throw StateError(json['message']?.toString() ?? 'AList HTTP $code');
@@ -992,16 +1180,23 @@ class AlistNasLibrary {
     }
   }
 
-  Future<List<Map>> _listDir(String dirPath) async {
+  Future<({List<Map> rows, int total})> _listDir(
+    String dirPath, {
+    int page = 1,
+    int perPage = 100,
+  }) async {
     final res = await _post('/api/fs/list', {
       'path': dirPath,
       'password': '',
-      'page': 1,
-      'per_page': 200,
+      'page': page,
+      'per_page': perPage,
       'refresh': false,
     });
-    final content = res['data']?['content'];
-    return content is List ? content.whereType<Map>().toList() : const <Map>[];
+    final data = res['data'] as Map? ?? const {};
+    final content = data['content'];
+    final rows = content is List ? content.whereType<Map>().toList() : const <Map>[];
+    final total = (data['total'] as num?)?.toInt() ?? rows.length;
+    return (rows: rows, total: total);
   }
 
   String _joinPath(String dir, String name) {
@@ -1009,34 +1204,50 @@ class AlistNasLibrary {
     return '$cleanDir$name';
   }
 
+  List<CmsVideo> _buildCards(String dir, List<Map> rows) {
+    final cards = <CmsVideo>[];
+    for (final r in rows.where((e) => e['is_dir'] == true)) {
+      final fname = r['name']?.toString() ?? '';
+      if (fname.isEmpty) continue;
+      final childPath = _joinPath(dir, fname);
+      cards.add(
+        CmsVideo(
+          id: ExternalMediaLibrary.encodeFolderId(childPath),
+          title: fname,
+          remarks: '文件夹',
+          tag: ExternalMediaLibrary.folderTag,
+        ),
+      );
+    }
+    for (final e in rows.where((e) =>
+        e['is_dir'] != true &&
+        ExternalMediaLibrary.isVideoFileName(e['name']?.toString() ?? ''))) {
+      final fname = e['name']?.toString() ?? '';
+      cards.add(
+        CmsVideo(
+          id: _joinPath(dir, fname),
+          title: ExternalMediaLibrary.cleanMediaTitle(fname),
+          poster: e['thumb']?.toString() ?? '',
+          remarks: 'AList 直连',
+        ),
+      );
+    }
+    return cards;
+  }
+
   Future<(List<CmsCategory>, CmsListing)> home() async {
-    final rows = await _listDir(rootPath);
+    final res = await _listDir(rootPath, page: 1);
     final cats = <CmsCategory>[
       CmsCategory(id: rootPath, name: '全部目录'),
-      for (final r in rows.where((e) => e['is_dir'] == true))
+      for (final r in res.rows.where((e) => e['is_dir'] == true))
         CmsCategory(
           id: _joinPath(rootPath, r['name']?.toString() ?? ''),
           name: r['name']?.toString() ?? '目录',
         ),
     ];
-    final videos = rows
-        .where((e) =>
-            e['is_dir'] != true &&
-            ExternalMediaLibrary.isVideoFileName(e['name']?.toString() ?? ''))
-        .map((e) {
-          final fname = e['name']?.toString() ?? '';
-          return CmsVideo(
-            id: _joinPath(rootPath, fname),
-            title: ExternalMediaLibrary.cleanMediaTitle(fname),
-            poster: e['thumb']?.toString() ?? '',
-            remarks: 'NAS 直连',
-          );
-        })
-        .toList();
-    if (videos.isEmpty && cats.length > 1) {
-      return (cats, await list(cats[1].id, '', 1));
-    }
-    return (cats, CmsListing(page: 1, pageCount: 1, videos: videos));
+    final cards = _buildCards(rootPath, res.rows);
+    final pageCount = max(1, (res.total / 100).ceil());
+    return (cats, CmsListing(page: 1, pageCount: pageCount, videos: cards));
   }
 
   Future<CmsListing> list(String categoryId, String query, int page) async {
@@ -1061,30 +1272,22 @@ class AlistNasLibrary {
               return CmsVideo(
                 id: _joinPath(parent, fname),
                 title: ExternalMediaLibrary.cleanMediaTitle(fname),
-                remarks: 'NAS 搜索',
+                remarks: 'AList 搜索',
               );
             })
             .toList();
         return CmsListing(page: page, pageCount: page, videos: videos);
       } catch (_) {}
     }
-    final dir = categoryId.isEmpty ? rootPath : categoryId;
-    final rows = await _listDir(dir);
-    final videos = rows
-        .where((e) =>
-            e['is_dir'] != true &&
-            ExternalMediaLibrary.isVideoFileName(e['name']?.toString() ?? ''))
-        .map((e) {
-          final fname = e['name']?.toString() ?? '';
-          return CmsVideo(
-            id: _joinPath(dir, fname),
-            title: ExternalMediaLibrary.cleanMediaTitle(fname),
-            poster: e['thumb']?.toString() ?? '',
-            remarks: 'NAS 直连',
-          );
-        })
-        .toList();
-    return CmsListing(page: 1, pageCount: 1, videos: videos);
+    final decoded = ExternalMediaLibrary.decodeFolderId(categoryId.trim());
+    final dir = decoded.isEmpty ? rootPath : decoded;
+    final res = await _listDir(dir, page: page);
+    final pageCount = max(page, (res.total / 100).ceil());
+    return CmsListing(
+      page: page,
+      pageCount: pageCount,
+      videos: _buildCards(dir, res.rows),
+    );
   }
 
   Future<CmsVideo> detail(CmsVideo fallback) async {
@@ -1092,10 +1295,10 @@ class AlistNasLibrary {
       id: fallback.id,
       title: fallback.title,
       poster: fallback.poster,
-      remarks: 'AList / NAS',
+      remarks: 'AList / OpenList',
       lines: [
         CmsLine(
-          name: 'NAS 原画',
+          name: 'AList 原画',
           episodes: [
             CmsEpisode(
               name: fallback.title.isEmpty ? '正片' : fallback.title,
@@ -1115,18 +1318,45 @@ class AlistNasLibrary {
     final path = Uri.parse(episode.url).queryParameters['path'] ?? '';
     if (path.isEmpty) throw const FormatException('AList 文件路径缺失');
     final res = await _post('/api/fs/get', {'path': path, 'password': ''});
-    final rawUrl = res['data']?['raw_url']?.toString() ?? '';
-    if (rawUrl.isEmpty) {
-      throw StateError('AList 未返回可播放直链');
+    final data = res['data'] as Map? ?? const {};
+    var rawUrl = data['raw_url']?.toString().trim() ?? '';
+    if (rawUrl.isNotEmpty && rawUrl.startsWith('/')) {
+      rawUrl = base.resolve(rawUrl).toString();
     }
-    return CmsEpisode(name: episode.name, url: rawUrl);
+    if (rawUrl.isEmpty) {
+      final sign = data['sign']?.toString().trim() ?? '';
+      final encodedPath = path
+          .split('/')
+          .map(Uri.encodeComponent)
+          .join('/');
+      final directUri = base.replace(
+        path: '${base.path}/d${encodedPath.startsWith('/') ? encodedPath : '/$encodedPath'}',
+        queryParameters: sign.isNotEmpty ? {'sign': sign} : null,
+      );
+      rawUrl = directUri.toString();
+    }
+    final headers = <String, String>{};
+    final rawHeaders = data['header'];
+    if (rawHeaders is Map) {
+      rawHeaders.forEach((k, v) {
+        if (k != null && v != null && '$v'.trim().isNotEmpty) {
+          headers['$k'] = '$v';
+        }
+      });
+    }
+    if (token.isNotEmpty && rawUrl.startsWith(base.origin)) {
+      headers.putIfAbsent('Authorization', () => token);
+    }
+    return CmsEpisode(name: episode.name, url: rawUrl, headers: headers);
   }
 }
 
-/// SMB / LAN NAS share library (`smbnas://account/<key>`).
+/// Pure SMB2 share library (`smbnas://account/<key>`) with optional separate
+/// WebDAV companion browsing mode.
 ///
-/// Supports optional WebDAV/HTTP NAS companion browsing (Synology/FnOS/QNAP) as
-/// well as direct `smb://` stream URLs handled by Marco's MPV kernel.
+/// Pure SMB connects directly over TCP/445 via [Smb2Client], enumerates real
+/// nested directories & videos, and streams selected videos via
+/// [SmbMediaStreamProxy] (HTTP 206 Range seeking for AVPlayer & MPV).
 class SmbNasLibrary {
   final String host;
   final int port;
@@ -1160,11 +1390,46 @@ class SmbNasLibrary {
         .replaceFirst(RegExp(r'^smb://', caseSensitive: false), '')
         .replaceFirst(RegExp(r'/+$'), '');
     if (cleanHost.isEmpty) {
-      throw const FormatException('请输入 SMB / NAS 主机地址或局域网 IP');
+      throw const FormatException('请输入 SMB 主机地址或局域网 IP');
     }
-    final cleanShare = share.trim().replaceFirst(RegExp(r'^/+'), '');
+    final cleanShare = share
+        .trim()
+        .replaceAll('\\', '/')
+        .replaceFirst(RegExp(r'^/+'), '')
+        .replaceFirst(RegExp(r'/+$'), '');
+    final cleanCompanion = webdavCompanionUrl.trim();
+    if (cleanCompanion.isEmpty && cleanShare.isEmpty) {
+      throw const FormatException('请填写 SMB 共享目录名称（例如 Movies）');
+    }
+
+    // Actively verify connectivity BEFORE saving so invalid/unauthorized shares
+    // never leave behind a fake/empty library entry.
+    if (cleanCompanion.isNotEmpty) {
+      final davUri =
+          ExternalMediaLibrary._validateHttpBase(cleanCompanion, 'SMB 伴随 WebDAV');
+      final dav = WebDavMediaLibrary._(davUri, username.trim(), password);
+      await dav._propfind(davUri);
+    } else {
+      final smb = await Smb2Client.connect(
+        host: cleanHost,
+        port: port,
+        share: cleanShare,
+        username: username.trim(),
+        password: password,
+      );
+      try {
+        await smb.listDirectory('');
+      } finally {
+        await smb.close();
+      }
+    }
+
     final key = sha256
-        .convert(utf8.encode('smb|$cleanHost:$port/$cleanShare|${username.trim()}'))
+        .convert(
+          utf8.encode(
+            'smb|$cleanHost:$port/$cleanShare|${username.trim()}|$cleanCompanion',
+          ),
+        )
         .toString();
     final name = label.trim().isNotEmpty
         ? 'SMB · ${label.trim()}'
@@ -1178,7 +1443,7 @@ class SmbNasLibrary {
         'share': cleanShare,
         'user': username.trim(),
         'pass': password,
-        'webdav': webdavCompanionUrl.trim(),
+        'webdav': cleanCompanion,
       }),
     );
     final api = '${ExternalMediaLibrary.smbPrefix}$key';
@@ -1221,40 +1486,75 @@ class SmbNasLibrary {
     return WebDavMediaLibrary._(uri, username, password);
   }
 
-  String _buildSmbUrl() {
-    final auth = username.isNotEmpty
-        ? '${Uri.encodeComponent(username)}${password.isNotEmpty ? ':${Uri.encodeComponent(password)}' : ''}@'
-        : '';
-    final portSuffix = port != 445 ? ':$port' : '';
-    final path = share.isEmpty ? '' : '/$share';
-    return 'smb://$auth$host$portSuffix$path';
+  Future<List<Smb2Entry>> _listSmbEntries(String relativePath) async {
+    final smb = await Smb2Client.connect(
+      host: host,
+      port: port,
+      share: share,
+      username: username,
+      password: password,
+    );
+    try {
+      return await smb.listDirectory(relativePath);
+    } finally {
+      await smb.close();
+    }
+  }
+
+  List<CmsVideo> _buildSmbCards(List<Smb2Entry> entries, {String query = ''}) {
+    final q = query.trim().toLowerCase();
+    final cards = <CmsVideo>[];
+    for (final e in entries.where((e) => e.isDir)) {
+      if (q.isNotEmpty && !e.name.toLowerCase().contains(q)) continue;
+      cards.add(
+        CmsVideo(
+          id: ExternalMediaLibrary.encodeFolderId(e.relativePath),
+          title: e.name,
+          remarks: '文件夹',
+          tag: ExternalMediaLibrary.folderTag,
+        ),
+      );
+    }
+    for (final e in entries.where(
+      (e) => !e.isDir && ExternalMediaLibrary.isVideoFileName(e.name),
+    )) {
+      if (q.isNotEmpty && !e.name.toLowerCase().contains(q)) continue;
+      cards.add(
+        CmsVideo(
+          id: e.relativePath,
+          title: ExternalMediaLibrary.cleanMediaTitle(e.name),
+          remarks: 'SMB 直连',
+        ),
+      );
+    }
+    return cards;
   }
 
   Future<(List<CmsCategory>, CmsListing)> home() async {
     final dav = _companionDav();
     if (dav != null) return dav.home();
-    final smbUrl = _buildSmbUrl();
+    final entries = await _listSmbEntries('');
+    final cats = <CmsCategory>[
+      CmsCategory(id: '', name: share.isEmpty ? host : share),
+      for (final e in entries.where((e) => e.isDir))
+        CmsCategory(id: e.relativePath, name: e.name),
+    ];
     return (
-      [CmsCategory(id: '__smb__', name: share.isEmpty ? host : share)],
-      CmsListing(
-        page: 1,
-        pageCount: 1,
-        videos: [
-          CmsVideo(
-            id: smbUrl,
-            title: share.isEmpty ? 'SMB 共享 ($host)' : share,
-            remarks: 'SMB / MPV',
-            description: '通过 MPV 内核直连局域网 SMB 共享（填写 NAS WebDAV 端口后可直接浏览目录影片）',
-          ),
-        ],
-      ),
+      cats,
+      CmsListing(page: 1, pageCount: 1, videos: _buildSmbCards(entries)),
     );
   }
 
   Future<CmsListing> list(String categoryId, String query, int page) async {
     final dav = _companionDav();
     if (dav != null) return dav.list(categoryId, query, page);
-    return (await home()).$2;
+    final dirPath = ExternalMediaLibrary.decodeFolderId(categoryId.trim());
+    final entries = await _listSmbEntries(dirPath);
+    return CmsListing(
+      page: 1,
+      pageCount: 1,
+      videos: _buildSmbCards(entries, query: query),
+    );
   }
 
   Future<CmsVideo> detail(CmsVideo fallback) async {
@@ -1271,11 +1571,11 @@ class SmbNasLibrary {
           name: 'SMB 直连',
           episodes: [
             CmsEpisode(
-              name: fallback.title.isEmpty ? '打开共享流' : fallback.title,
+              name: fallback.title.isEmpty ? '正片' : fallback.title,
               url: Uri(
                 scheme: 'mmsmb',
                 host: 'play',
-                queryParameters: {'url': fallback.id},
+                queryParameters: {'path': fallback.id},
               ).toString(),
             ),
           ],
@@ -1289,16 +1589,45 @@ class SmbNasLibrary {
     if (dav != null && episode.url.startsWith('mmwebdav://')) {
       return dav.resolve(episode);
     }
-    final raw = Uri.parse(episode.url).queryParameters['url'] ?? _buildSmbUrl();
-    return CmsEpisode(name: episode.name, url: raw);
+    final params = Uri.parse(episode.url).queryParameters;
+    final relPath = params['path'] ?? params['url'] ?? '';
+    if (relPath.isEmpty) {
+      throw const FormatException('SMB 视频路径缺失');
+    }
+    final proxy = await SmbMediaStreamProxy.open(
+      host: host,
+      port: port,
+      share: share,
+      username: username,
+      password: password,
+      relativePath: relPath,
+    );
+    return CmsEpisode(
+      name: episode.name,
+      url: proxy.url.toString(),
+      playbackSession: {'smbStreamProxy': proxy},
+    );
   }
 }
 
-/// On-device local media library (`localfile://account/<key>`).
+/// On-device persistent local media library (`localfile://account/<key>`).
+///
+/// Copies picked files into `<Documents>/MarcoLocalMedia/<key>/` and stores
+/// container-relative paths so iOS temporary picker cleanup and container UUID
+/// rotation across app restarts never break previously imported videos.
 class LocalDeviceLibrary {
   final List<({String title, String path})> files;
 
   const LocalDeviceLibrary._(this.files);
+
+  @visibleForTesting
+  static Future<Directory> Function()? storageRootProviderOverride;
+
+  static Future<Directory> _resolveStorageRoot() async {
+    final override = storageRootProviderOverride;
+    if (override != null) return override();
+    return getApplicationDocumentsDirectory();
+  }
 
   static Future<SubscriptionEntry> createFromPaths(
     List<String> paths, {
@@ -1313,14 +1642,61 @@ class LocalDeviceLibrary {
     if (cleaned.isEmpty) {
       throw const FormatException('请至少选择一个本机视频文件');
     }
+    final existingSources = <File>[];
+    for (final p in cleaned) {
+      final f = File(p);
+      if (await f.exists()) {
+        existingSources.add(f);
+      }
+    }
+    if (existingSources.isEmpty) {
+      throw const FormatException('所选本机视频文件不可读取，请重新选择');
+    }
+
     final key = sha256
-        .convert(utf8.encode('local|${DateTime.now().microsecondsSinceEpoch}|${cleaned.join('|')}'))
+        .convert(
+          utf8.encode(
+            'local|${DateTime.now().microsecondsSinceEpoch}|${cleaned.join('|')}',
+          ),
+        )
         .toString();
+
+    Directory? mediaDir;
+    Directory? rootDir;
+    try {
+      rootDir = await _resolveStorageRoot();
+      mediaDir = Directory('${rootDir.path}/MarcoLocalMedia/$key');
+      await mediaDir.create(recursive: true);
+    } catch (_) {
+      mediaDir = null;
+      rootDir = null;
+    }
+
+    final items = <Map<String, String>>[];
+    for (var i = 0; i < existingSources.length; i++) {
+      final src = existingSources[i];
+      final rawName = src.uri.pathSegments.isNotEmpty
+          ? src.uri.pathSegments.last
+          : src.path.split(RegExp(r'[/\\]')).last;
+      final safeName = rawName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+      final title = ExternalMediaLibrary.cleanMediaTitle(rawName);
+      if (mediaDir != null && rootDir != null) {
+        final relPath = 'MarcoLocalMedia/$key/${i}_$safeName';
+        final dest = File('${rootDir.path}/$relPath');
+        if (src.absolute.path != dest.absolute.path) {
+          await src.copy(dest.path);
+        }
+        items.add({
+          'title': title,
+          'relPath': relPath,
+          'path': dest.path,
+        });
+      } else {
+        items.add({'title': title, 'path': src.path});
+      }
+    }
+
     final prefs = await SharedPreferences.getInstance();
-    final items = [
-      for (final p in cleaned)
-        {'title': ExternalMediaLibrary.cleanMediaTitle(p), 'path': p},
-    ];
     await prefs.setString('localfile.account.$key', jsonEncode(items));
     final api = '${ExternalMediaLibrary.localPrefix}$key';
     return SubscriptionEntry(
@@ -1344,14 +1720,28 @@ class LocalDeviceLibrary {
     final raw = (await SharedPreferences.getInstance())
         .getString('localfile.account.$key');
     if (raw == null) return const LocalDeviceLibrary._([]);
-    final list = (jsonDecode(raw) as List? ?? const [])
-        .whereType<Map>()
-        .map((m) => (
-              title: m['title']?.toString() ?? '本地视频',
-              path: m['path']?.toString() ?? '',
-            ))
-        .where((e) => e.path.isNotEmpty)
-        .toList();
+    Directory? rootDir;
+    try {
+      rootDir = await _resolveStorageRoot();
+    } catch (_) {
+      rootDir = null;
+    }
+    final list = <({String title, String path})>[];
+    for (final m in (jsonDecode(raw) as List? ?? const []).whereType<Map>()) {
+      final title = m['title']?.toString() ?? '本地视频';
+      final relPath = m['relPath']?.toString() ?? '';
+      final absPath = m['path']?.toString() ?? '';
+      String resolvedPath = absPath;
+      if (relPath.isNotEmpty && rootDir != null) {
+        final candidate = '${rootDir.path}/$relPath';
+        if (await File(candidate).exists()) {
+          resolvedPath = candidate;
+        }
+      }
+      if (resolvedPath.isNotEmpty) {
+        list.add((title: title, path: resolvedPath));
+      }
+    }
     return LocalDeviceLibrary._(list);
   }
 
@@ -1400,6 +1790,9 @@ class LocalDeviceLibrary {
 
   Future<CmsEpisode> resolve(CmsEpisode episode) async {
     final path = Uri.parse(episode.url).queryParameters['path'] ?? '';
+    if (path.isEmpty || !await File(path).exists()) {
+      throw StateError('本机视频文件已不存在或无法读取，请重新导入');
+    }
     return CmsEpisode(name: episode.name, url: path);
   }
 }

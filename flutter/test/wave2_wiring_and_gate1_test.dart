@@ -23,6 +23,7 @@ import 'package:marco_movie/ui/danmu/danmu_layer.dart';
 import 'package:marco_movie/ui/danmu/danmu_settings_sheet.dart';
 import 'package:marco_movie/ui/ios_liquid_glass.dart';
 import 'package:marco_movie/ui/ios_settings.dart';
+import 'package:marco_movie/ui/official_channel_notice.dart';
 import 'package:marco_movie/ui/onboarding/first_play_gesture_hint.dart';
 import 'package:marco_movie/ui/onboarding/onboarding_prefs.dart';
 import 'package:marco_movie/ui/onboarding/onboarding_screen.dart';
@@ -611,6 +612,15 @@ void main() {
         await tester.pump(const Duration(milliseconds: 300));
         await tester.pump(const Duration(milliseconds: 300));
 
+        // First-launch official channel & author anti-tamper dialog shows first
+        expect(find.byType(OfficialChannelNoticeDialog), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('official-channel-notice-confirm')),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+
         // Standalone OnboardingScreen route is presented on fresh install
         expect(find.byType(OnboardingScreen), findsOneWidget);
         // Primary CTA uses IosNativeGlassButton
@@ -624,6 +634,10 @@ void main() {
 
         final prefs = await OnboardingPrefs.load();
         expect(prefs.doneVersion, OnboardingPrefs.currentVersion);
+        expect(
+          prefs.officialChannelNoticeVersion,
+          OnboardingPrefs.currentOfficialChannelNoticeVersion,
+        );
 
         // Navigate to Settings -> 关于与更新 -> verify '重新查看新手引导' entry exists
         await tester.tap(find.text('设置').last);
@@ -637,7 +651,8 @@ void main() {
             findsOneWidget);
         expect(find.text('重新查看新手引导'), findsOneWidget);
 
-        // OHOS guard: fresh launch skips OnboardingScreen completely
+        // OHOS guard: fresh launch still shows official channel notice once,
+        // and after acknowledging skips OnboardingScreen completely
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
         OhosRuntime.debugIsOhosOverride = true;
@@ -657,6 +672,12 @@ void main() {
         );
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 400));
+        expect(find.byType(OfficialChannelNoticeDialog), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('official-channel-notice-confirm')),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
         expect(find.byType(OnboardingScreen), findsNothing);
       },
     );

@@ -1,5 +1,6 @@
 // MARK: - iOS 14+ Native Low-Power AVPlayer Engine (PiP + AirPlay 2 + EDR/XDR + Thermal Telemetry)
 // Injected into AppDelegate.swift by prepare_platform.py (requires `import AVFoundation` and `import AVKit`).
+// System device volume bridge also requires `import MediaPlayer`.
 
 enum MarcoAvPlayerEngine {
   static let methodChannelName = "marco_movie/ios_avplayer"
@@ -166,16 +167,29 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   private var eventSink: FlutterEventSink?
 
   private var queuePlayer: AVQueuePlayer?
-  private weak var boundPlayerLayer: AVPlayerLayer?
+  private weak var visiblePlayerLayer: AVPlayerLayer?
+  private var pipSourceLayer: AVPlayerLayer?
   private var pipController: AVPictureInPictureController?
   private var hiddenAirPlayPicker: AVRoutePickerView?
+  private var hiddenVolumeView: MPVolumeView?
 
+  private var audioSessionConfigured: Bool = false
+  private var audioSessionActive: Bool = false
   private var autoPipEnabled: Bool = true
+  private var pipStarting: Bool = false
+  private var cancelPendingPipStart: Bool = false
+  private var volumeConfirmWorkItem: DispatchWorkItem?
   private var pendingStartPositionMs: Int = 0
   private var currentSessionId: Int = 0
+  private var activeMediaId: Int?
+  private var mediaEventSeq: Int = 0
   private var currentUrlString: String = ""
   private var fallbackEmittedForCurrentItem: Bool = false
   private var requestedRate: Float = 1.0
+
+  private var isPipActiveOrStarting: Bool {
+    return pipStarting || (pipController?.isPictureInPictureActive == true)
+  }
 
   private var timeObserverToken: Any?
   private var statusObservation: NSKeyValueObservation?
@@ -185,6 +199,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   private var timeControlStatusObservation: NSKeyValueObservation?
   private var externalPlaybackObservation: NSKeyValueObservation?
   private var pipPossibleObservation: NSKeyValueObservation?
+  private var systemVolumeObservation: NSKeyValueObservation?
   private var itemNotificationTokens: [NSObjectProtocol] = []
   private var notificationTokens: [NSObjectProtocol] = []
 
@@ -195,6 +210,11 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
 
   deinit {
     cleanupPlaybackObservers()
+    volumeConfirmWorkItem?.cancel()
+    volumeConfirmWorkItem = nil
+    systemVolumeObservation?.invalidate()
+    systemVolumeObservation = nil
+    detachHiddenVolumeView()
     for token in notificationTokens {
       NotificationCenter.default.removeObserver(token)
     }
@@ -236,21 +256,52 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   func bindPlayerLayer(_ layer: AVPlayerLayer) {
     DispatchQueue.main.async { [weak self] in
       guard let self = self else { return }
-      self.boundPlayerLayer = layer
+      self.visiblePlayerLayer = layer
       let player = self.ensurePlayer()
       layer.player = player
-      self.configurePictureInPicture(for: layer)
+      if self.isPipActiveOrStarting {
+        // Keep the starting or active PiP controller attached to pipSourceLayer
+        // until PiP finishes starting/stopping or fails; delegate callbacks will
+        // rebind visiblePlayerLayer cleanly without dropping start/failure events.
+        self.emitPipState()
+        return
+      }
+      if self.pipSourceLayer !== layer || self.pipController == nil {
+        if let oldSource = self.pipSourceLayer, oldSource !== layer {
+          oldSource.player = nil
+        }
+        self.configurePictureInPicture(for: layer)
+      } else {
+        self.emitPipState()
+      }
     }
   }
 
   func unbindPlayerLayer(_ layer: AVPlayerLayer) {
     DispatchQueue.main.async { [weak self] in
       guard let self = self else { return }
-      if self.boundPlayerLayer === layer {
+      if self.visiblePlayerLayer === layer {
+        self.visiblePlayerLayer = nil
+      }
+      let isProtectedPipSource = self.isPipActiveOrStarting
+        && self.pipSourceLayer === layer
+      if isProtectedPipSource {
+        // Retain pipSourceLayer and pipController strongly across both the
+        // starting transition (startPictureInPicture -> didStart/failed) and
+        // active PiP so rotation, Split View, or layout rebuilds never drop
+        // delegate callbacks or cancel PiP silently.
+        return
+      }
+      if self.visiblePlayerLayer !== layer {
         layer.player = nil
-        self.boundPlayerLayer = nil
-        self.pipController?.delegate = nil
-        self.pipController = nil
+      }
+      if self.pipSourceLayer === layer {
+        self.teardownPictureInPicture(detachSourceLayer: false)
+        if let currentVisible = self.visiblePlayerLayer {
+          self.configurePictureInPicture(for: currentVisible)
+        } else {
+          self.emitPipState()
+        }
       }
     }
   }
@@ -279,11 +330,12 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       }
     }
     timeControlStatusObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
+      let item = p.currentItem
       DispatchQueue.main.async {
-        guard let self = self else { return }
+        guard let self = self, let item = item, p.currentItem === item else { return }
         let playing = p.timeControlStatus == .playing
         let buffering = p.timeControlStatus == .waitingToPlayAtSpecifiedRate
-        self.emitEvent([
+        self.emitMediaEvent([
           "type": "playbackState",
           "playing": playing,
           "buffering": buffering,
@@ -303,28 +355,44 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     return player
   }
 
-  private func configurePictureInPicture(for layer: AVPlayerLayer) {
+  private func teardownPictureInPicture(detachSourceLayer: Bool) {
     pipPossibleObservation?.invalidate()
     pipPossibleObservation = nil
     pipController?.delegate = nil
     pipController = nil
+    if detachSourceLayer, let source = pipSourceLayer, source !== visiblePlayerLayer {
+      source.player = nil
+    }
+    pipSourceLayer = nil
+  }
+
+  private func configurePictureInPicture(for layer: AVPlayerLayer) {
+    if isPipActiveOrStarting {
+      emitPipState()
+      return
+    }
+    teardownPictureInPicture(detachSourceLayer: true)
 
     guard AVPictureInPictureController.isPictureInPictureSupported() else {
+      emitPipState()
       return
     }
     guard let controller = AVPictureInPictureController(playerLayer: layer) else {
+      emitPipState()
       return
     }
     controller.delegate = self
     if #available(iOS 14.2, *) {
       controller.canStartPictureInPictureAutomaticallyFromInline = autoPipEnabled
     }
+    pipSourceLayer = layer
     pipController = controller
-    pipPossibleObservation = controller.observe(\.isPictureInPicturePossible, options: [.new]) { [weak self] _, _ in
+    pipPossibleObservation = controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] _, _ in
       DispatchQueue.main.async {
         self?.emitPipState()
       }
     }
+    emitPipState()
   }
 
   private func installGlobalObservers() {
@@ -349,9 +417,39 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
         object: nil,
         queue: .main
       ) { [weak self] _ in
-        self?.emitAirPlayState()
+        guard let self = self else { return }
+        self.emitAirPlayState()
+        self.emitEvent([
+          "type": "systemVolumeChanged",
+          "volume": self.currentSystemVolume(),
+        ])
       }
     )
+    notificationTokens.append(
+      center.addObserver(
+        forName: AVAudioSession.interruptionNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] notif in
+        guard let rawType = notif.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: rawType) else { return }
+        if type == .began {
+          self?.audioSessionActive = false
+        }
+      }
+    )
+    systemVolumeObservation = AVAudioSession.sharedInstance().observe(
+      \.outputVolume,
+      options: [.initial, .new]
+    ) { [weak self] session, _ in
+      let vol = Double(max(0.0, min(session.outputVolume, 1.0)))
+      DispatchQueue.main.async {
+        self?.emitEvent([
+          "type": "systemVolumeChanged",
+          "volume": vol,
+        ])
+      }
+    }
   }
 
   // MARK: - Method Channel Handling
@@ -378,6 +476,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       DispatchQueue.main.async { [weak self] in
         self?.openMedia(
           urlString: urlStr,
+          mediaId: (args["mediaId"] as? NSNumber)?.intValue,
           headers: headers,
           startPositionMs: startPositionMs,
           autoPlay: autoPlay,
@@ -413,9 +512,28 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
           result(false)
           return
         }
-        let target = CMTime(value: CMTimeValue(max(0, posMs)), timescale: 1000)
-        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { finished in
-          result(finished)
+        let seekMediaId = self.activeMediaId
+        let clampedMs = max(0, posMs)
+        let target = CMTime(value: CMTimeValue(clampedMs), timescale: 1000)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+          DispatchQueue.main.async {
+            guard let self = self,
+                  finished,
+                  let mediaId = seekMediaId,
+                  self.activeMediaId == mediaId else {
+              result(false)
+              return
+            }
+            self.mediaEventSeq += 1
+            let seq = self.mediaEventSeq
+            let landedMs = self.currentPositionMs()
+            result([
+              "finished": true,
+              "mediaId": mediaId,
+              "eventSeq": seq,
+              "positionMs": (landedMs > 0 || clampedMs == 0) ? landedMs : clampedMs,
+            ])
+          }
         }
       }
 
@@ -438,10 +556,33 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
         result(nil)
       }
 
+    case "getSystemVolume":
+      DispatchQueue.main.async { [weak self] in
+        result(self?.currentSystemVolume() ?? Double(AVAudioSession.sharedInstance().outputVolume))
+      }
+
+    case "setSystemVolume":
+      let targetVol = (call.arguments as? NSNumber)?.doubleValue
+        ?? ((call.arguments as? [String: Any])?["volume"] as? NSNumber)?.doubleValue
+        ?? 0.5
+      DispatchQueue.main.async { [weak self] in
+        guard let self = self else {
+          result(["applied": false, "volume": Double(AVAudioSession.sharedInstance().outputVolume)])
+          return
+        }
+        result(self.setSystemVolume(targetVol))
+      }
+
+    case "detachSystemVolume":
+      DispatchQueue.main.async { [weak self] in
+        self?.detachHiddenVolumeView()
+        result(nil)
+      }
+
     case "setVideoGravity":
       let mode = (call.arguments as? String) ?? "resizeAspect"
       DispatchQueue.main.async { [weak self] in
-        guard let layer = self?.boundPlayerLayer else { result(nil); return }
+        guard let layer = self?.visiblePlayerLayer else { result(nil); return }
         switch mode {
         case "resizeAspectFill", "cover":
           layer.videoGravity = .resizeAspectFill
@@ -456,20 +597,68 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     case "startPip":
       DispatchQueue.main.async { [weak self] in
         guard let self = self else { result(false); return }
-        if let pip = self.pipController, AVPictureInPictureController.isPictureInPictureSupported() {
-          if !pip.isPictureInPictureActive {
-            pip.startPictureInPicture()
-          }
-          result(true)
-        } else {
+        guard AVPictureInPictureController.isPictureInPictureSupported() else {
+          self.emitPipState()
           result(false)
+          return
         }
+        guard self.configureAudioSession(forceActivate: true) else {
+          self.emitEvent([
+            "type": "pipStateChanged",
+            "active": false,
+            "supported": true,
+            "possible": self.pipController?.isPictureInPicturePossible ?? false,
+            "phase": "failed",
+            "error": "音频会话激活失败，暂无法开启画中画",
+          ])
+          result(false)
+          return
+        }
+        if let visible = self.visiblePlayerLayer,
+           (self.pipController == nil ||
+            (self.pipSourceLayer !== visible && !self.isPipActiveOrStarting)) {
+          self.configurePictureInPicture(for: visible)
+        }
+        guard let pip = self.pipController else {
+          self.emitPipState()
+          result(false)
+          return
+        }
+        if pip.isPictureInPictureActive {
+          self.pipStarting = false
+          self.emitPipState(phase: "didStart")
+          result(true)
+          return
+        }
+        if self.pipStarting {
+          result(true)
+          return
+        }
+        guard pip.isPictureInPicturePossible else {
+          self.emitEvent([
+            "type": "pipStateChanged",
+            "active": false,
+            "supported": true,
+            "possible": false,
+            "phase": "notReady",
+          ])
+          result(false)
+          return
+        }
+        self.cancelPendingPipStart = false
+        self.pipStarting = true
+        pip.startPictureInPicture()
+        result(true)
       }
 
     case "stopPip":
       DispatchQueue.main.async { [weak self] in
-        if let pip = self?.pipController, pip.isPictureInPictureActive {
+        guard let self = self else { result(nil); return }
+        if let pip = self.pipController, pip.isPictureInPictureActive {
+          self.cancelPendingPipStart = false
           pip.stopPictureInPicture()
+        } else if self.pipStarting {
+          self.cancelPendingPipStart = true
         }
         result(nil)
       }
@@ -532,18 +721,36 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
 
   // MARK: - Playback Lifecycle & Auto-Fallback
 
-  private func configureAudioSession() {
-    do {
-      let session = AVAudioSession.sharedInstance()
-      try session.setCategory(.playback, mode: .moviePlayback, options: [.allowAirPlay])
-      try session.setActive(true)
-    } catch {
-      // Best-effort audio session activation.
+  @discardableResult
+  private func configureAudioSession(forceActivate: Bool = false) -> Bool {
+    let session = AVAudioSession.sharedInstance()
+    if !audioSessionConfigured || session.category != .playback || session.mode != .moviePlayback {
+      do {
+        // `.playback` supports AirPlay routing by default; Apple restricts `.allowAirPlay`
+        // to `.playAndRecord` and rejects it on `.playback`.
+        try session.setCategory(.playback, mode: .moviePlayback, options: [])
+        audioSessionConfigured = true
+      } catch {
+        audioSessionConfigured = false
+        NSLog("[MarcoAvPlayer] AVAudioSession.setCategory failed: %@", error.localizedDescription)
+      }
     }
+    if forceActivate || !audioSessionActive {
+      do {
+        try session.setActive(true)
+        audioSessionActive = true
+      } catch {
+        audioSessionActive = false
+        NSLog("[MarcoAvPlayer] AVAudioSession.setActive(true) failed: %@", error.localizedDescription)
+        return false
+      }
+    }
+    return audioSessionActive
   }
 
   private func openMedia(
     urlString: String,
+    mediaId: Int?,
     headers: [String: String],
     startPositionMs: Int,
     autoPlay: Bool,
@@ -563,6 +770,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     configureAudioSession()
     currentSessionId += 1
     let sessionId = currentSessionId
+    activeMediaId = mediaId ?? sessionId
     currentUrlString = urlString
     pendingStartPositionMs = max(0, startPositionMs)
     fallbackEmittedForCurrentItem = false
@@ -584,12 +792,16 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
 
     let player = ensurePlayer()
-    if let layer = boundPlayerLayer, layer.player !== player {
-      layer.player = player
-      configurePictureInPicture(for: layer)
+    if let layer = visiblePlayerLayer {
+      if layer.player !== player {
+        layer.player = player
+      }
+      if pipController == nil || (pipSourceLayer !== layer && !isPipActiveOrStarting) {
+        configurePictureInPicture(for: layer)
+      }
     }
 
-    observePlayerItem(item, sessionId: sessionId, autoPlay: autoPlay)
+    observePlayerItem(item, sessionId: sessionId)
     player.replaceCurrentItem(with: item)
 
     if autoPlay {
@@ -603,7 +815,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     result(true)
   }
 
-  private func observePlayerItem(_ item: AVPlayerItem, sessionId: Int, autoPlay: Bool) {
+  private func observePlayerItem(_ item: AVPlayerItem, sessionId: Int) {
     statusObservation = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
       DispatchQueue.main.async {
         guard let self = self, self.currentSessionId == sessionId else { return }
@@ -615,13 +827,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
             self.queuePlayer?.seek(to: seekTarget, toleranceBefore: .zero, toleranceAfter: .zero)
           }
           self.inspectPlayabilityAndHdr(for: observedItem, sessionId: sessionId)
-          if autoPlay {
-            self.queuePlayer?.play()
-            if self.requestedRate != 1.0 {
-              self.queuePlayer?.rate = self.requestedRate
-            }
-          }
-          self.emitEvent([
+          self.emitMediaEvent([
             "type": "ready",
             "durationMs": self.currentDurationMs(),
             "positionMs": self.currentPositionMs(),
@@ -647,7 +853,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
         guard let self = self, self.currentSessionId == sessionId else { return }
         let size = observedItem.presentationSize
         if size.width > 0 && size.height > 0 {
-          self.emitEvent([
+          self.emitMediaEvent([
             "type": "videoSize",
             "width": Int(size.width),
             "height": Int(size.height),
@@ -660,7 +866,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     likelyToKeepUpObservation = item.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { [weak self] observedItem, _ in
       DispatchQueue.main.async {
         guard let self = self, self.currentSessionId == sessionId else { return }
-        self.emitEvent([
+        self.emitMediaEvent([
           "type": "buffering",
           "buffering": !observedItem.isPlaybackLikelyToKeepUp,
         ])
@@ -671,7 +877,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       DispatchQueue.main.async {
         guard let self = self, self.currentSessionId == sessionId else { return }
         if observedItem.isPlaybackBufferEmpty {
-          self.emitEvent([
+          self.emitMediaEvent([
             "type": "buffering",
             "buffering": true,
           ])
@@ -687,7 +893,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
         queue: .main
       ) { [weak self] _ in
         guard let self = self, self.currentSessionId == sessionId else { return }
-        self.emitEvent([
+        self.emitMediaEvent([
           "type": "completed",
           "positionMs": self.currentDurationMs(),
           "durationMs": self.currentDurationMs(),
@@ -737,12 +943,12 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   }
 
   private func triggerFallbackToMpv(reason: String) {
-    guard !fallbackEmittedForCurrentItem else { return }
+    guard !fallbackEmittedForCurrentItem, let mediaId = activeMediaId else { return }
     fallbackEmittedForCurrentItem = true
     let posMs = max(pendingStartPositionMs, currentPositionMs())
     queuePlayer?.pause()
     if eventSink != nil {
-      emitEvent([
+      emitMediaEvent([
         "type": "fallbackToMpv",
         "positionMs": posMs,
         "reason": reason,
@@ -751,6 +957,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       methodChannel?.invokeMethod(
         "onFallbackToMpv",
         arguments: [
+          "mediaId": mediaId,
           "positionMs": posMs,
           "reason": reason,
         ]
@@ -759,10 +966,31 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   }
 
   private func stopPlayback() {
+    let wasStartingPip = pipStarting
+    let wasActivePip = pipController?.isPictureInPictureActive == true
+    pipStarting = false
+    activeMediaId = nil
     currentSessionId += 1
     cleanupItemObservers()
+    if let pip = pipController, wasActivePip {
+      pip.stopPictureInPicture()
+    } else if wasStartingPip {
+      emitEvent([
+        "type": "pipStateChanged",
+        "active": false,
+        "supported": AVPictureInPictureController.isPictureInPictureSupported(),
+        "possible": false,
+        "phase": "cancelled",
+      ])
+    }
+    if #available(iOS 14.2, *) {
+      pipController?.canStartPictureInPictureAutomaticallyFromInline = false
+    }
+    teardownPictureInPicture(detachSourceLayer: true)
     queuePlayer?.pause()
     queuePlayer?.removeAllItems()
+    detachHiddenVolumeView()
+    audioSessionActive = false
   }
 
   private func cleanupItemObservers() {
@@ -832,6 +1060,107 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     }
   }
 
+  // MARK: - Device System Volume (MPVolumeView + AVAudioSession)
+
+  private func currentSystemVolume() -> Double {
+    let session = AVAudioSession.sharedInstance()
+    return Double(max(0.0, min(session.outputVolume, 1.0)))
+  }
+
+  private func findSlider(in view: UIView) -> UISlider? {
+    for sub in view.subviews {
+      if let slider = sub as? UISlider {
+        return slider
+      }
+      if let nested = findSlider(in: sub) {
+        return nested
+      }
+    }
+    return nil
+  }
+
+  private func ensureHiddenVolumeSlider() -> UISlider? {
+    let volumeView: MPVolumeView
+    if let existing = hiddenVolumeView {
+      volumeView = existing
+    } else {
+      let created = MPVolumeView(frame: CGRect(x: -2000.0, y: -2000.0, width: 1.0, height: 1.0))
+      created.showsVolumeSlider = true
+      created.alpha = 0.01
+      created.isUserInteractionEnabled = false
+      hiddenVolumeView = created
+      volumeView = created
+    }
+    if volumeView.superview == nil, let window = MarcoAvPlayerEngine.activeKeyWindow() {
+      window.addSubview(volumeView)
+      volumeView.layoutIfNeeded()
+    }
+    return findSlider(in: volumeView)
+  }
+
+  private func setSystemVolume(_ volume: Double) -> [String: Any] {
+    let clamped = max(0.0, min(volume, 1.0))
+    let sessionReady = (audioSessionConfigured && audioSessionActive)
+      ? true
+      : configureAudioSession(forceActivate: true)
+    guard sessionReady else {
+      return [
+        "applied": false,
+        "volume": currentSystemVolume(),
+        "reason": "audioSessionFailed",
+      ]
+    }
+    guard let slider = ensureHiddenVolumeSlider() else {
+      return [
+        "applied": false,
+        "volume": currentSystemVolume(),
+        "reason": "sliderUnavailable",
+      ]
+    }
+    let before = currentSystemVolume()
+    slider.setValue(Float(clamped), animated: false)
+    slider.sendActions(for: [.valueChanged, .touchUpInside])
+    let observed = currentSystemVolume()
+    let confirmedNow = abs(observed - before) > 0.001 || abs(observed - clamped) <= 0.02
+    let reportedVolume = confirmedNow ? observed : clamped
+
+    // MPVolumeView commits AVAudioSession.outputVolume asynchronously on the next
+    // runloop cycle on real hardware; always schedule a post-commit readback so
+    // Flutter's volume state and HUD converge to the true hardware volume.
+    volumeConfirmWorkItem?.cancel()
+    let confirmWork = DispatchWorkItem { [weak self] in
+      guard let self = self else { return }
+      self.emitEvent([
+        "type": "systemVolumeChanged",
+        "volume": self.currentSystemVolume(),
+      ])
+    }
+    volumeConfirmWorkItem = confirmWork
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: confirmWork)
+
+    return [
+      "applied": true,
+      "volume": reportedVolume,
+      "observedVolume": observed,
+      "requestedVolume": clamped,
+    ]
+  }
+
+  private func detachHiddenVolumeView() {
+    volumeConfirmWorkItem?.cancel()
+    volumeConfirmWorkItem = nil
+    let viewToRemove = hiddenVolumeView
+    hiddenVolumeView = nil
+    guard let view = viewToRemove else { return }
+    if Thread.isMainThread {
+      view.removeFromSuperview()
+    } else {
+      DispatchQueue.main.async {
+        view.removeFromSuperview()
+      }
+    }
+  }
+
   // MARK: - AirPlay 2
 
   private func presentAirPlayPicker() {
@@ -882,31 +1211,76 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   // MARK: - AVPictureInPictureControllerDelegate
 
   func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-    emitEvent(["type": "pipStateChanged", "active": true, "phase": "willStart"])
+    pipStarting = true
+    emitEvent([
+      "type": "pipStateChanged",
+      "active": false,
+      "supported": AVPictureInPictureController.isPictureInPictureSupported(),
+      "possible": pictureInPictureController.isPictureInPicturePossible,
+      "phase": "willStart",
+    ])
   }
 
   func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-    emitPipState()
+    pipStarting = false
+    if cancelPendingPipStart {
+      cancelPendingPipStart = false
+      pictureInPictureController.stopPictureInPicture()
+      emitEvent([
+        "type": "pipStateChanged",
+        "active": false,
+        "supported": AVPictureInPictureController.isPictureInPictureSupported(),
+        "possible": pictureInPictureController.isPictureInPicturePossible,
+        "phase": "cancelled",
+      ])
+      return
+    }
+    emitPipState(phase: "didStart")
   }
 
   func pictureInPictureController(
     _ pictureInPictureController: AVPictureInPictureController,
     failedToStartPictureInPictureWithError error: Error
   ) {
+    pipStarting = false
+    cancelPendingPipStart = false
+    let prevPossible = pictureInPictureController.isPictureInPicturePossible
+    if pipSourceLayer !== visiblePlayerLayer {
+      teardownPictureInPicture(detachSourceLayer: true)
+      if let currentVisible = visiblePlayerLayer {
+        configurePictureInPicture(for: currentVisible)
+      }
+    }
     emitEvent([
       "type": "pipStateChanged",
       "active": false,
+      "supported": AVPictureInPictureController.isPictureInPictureSupported(),
+      "possible": pipController?.isPictureInPicturePossible ?? prevPossible,
       "phase": "failed",
       "error": error.localizedDescription,
     ])
   }
 
   func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-    emitEvent(["type": "pipStateChanged", "active": false, "phase": "willStop"])
+    pipStarting = false
+    emitEvent([
+      "type": "pipStateChanged",
+      "active": false,
+      "supported": AVPictureInPictureController.isPictureInPictureSupported(),
+      "possible": pictureInPictureController.isPictureInPicturePossible,
+      "phase": "willStop",
+    ])
   }
 
   func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-    emitPipState()
+    pipStarting = false
+    if pipSourceLayer !== visiblePlayerLayer {
+      teardownPictureInPicture(detachSourceLayer: true)
+      if let currentVisible = visiblePlayerLayer {
+        configurePictureInPicture(for: currentVisible)
+      }
+    }
+    emitPipState(phase: "didStop")
   }
 
   func pictureInPictureController(
@@ -918,13 +1292,17 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     completionHandler(true)
   }
 
-  private func emitPipState() {
-    emitEvent([
+  private func emitPipState(phase: String? = nil) {
+    var payload: [String: Any] = [
       "type": "pipStateChanged",
       "active": pipController?.isPictureInPictureActive ?? false,
       "supported": AVPictureInPictureController.isPictureInPictureSupported(),
       "possible": pipController?.isPictureInPicturePossible ?? false,
-    ])
+    ]
+    if let phase = phase {
+      payload["phase"] = phase
+    }
+    emitEvent(payload)
   }
 
   // MARK: - Telemetry & Progress
@@ -955,7 +1333,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
 
   private func emitProgressTick() {
     guard queuePlayer?.currentItem != nil else { return }
-    emitEvent([
+    emitMediaEvent([
       "type": "progress",
       "positionMs": currentPositionMs(),
       "durationMs": currentDurationMs(),
@@ -982,7 +1360,9 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       "isPad": UIDevice.current.userInterfaceIdiom == .pad,
       "lowPowerMode": info.isLowPowerModeEnabled,
       "isPipSupported": AVPictureInPictureController.isPictureInPictureSupported(),
+      "isPipPossible": pipController?.isPictureInPicturePossible ?? false,
       "isPipActive": pipController?.isPictureInPictureActive ?? false,
+      "systemVolume": currentSystemVolume(),
       "isAirPlayActive": airPlayActive,
       "airPlayDeviceName": routeName ?? "",
     ]
@@ -992,6 +1372,22 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     var payload = buildTelemetryMap()
     payload["type"] = "telemetry"
     emitEvent(payload)
+  }
+
+  private func emitMediaEvent(_ payload: [String: Any]) {
+    let dispatch: () -> Void = { [weak self] in
+      guard let self = self, let mediaId = self.activeMediaId else { return }
+      self.mediaEventSeq += 1
+      var event = payload
+      event["mediaId"] = mediaId
+      event["eventSeq"] = self.mediaEventSeq
+      self.eventSink?(event)
+    }
+    if Thread.isMainThread {
+      dispatch()
+    } else {
+      DispatchQueue.main.async(execute: dispatch)
+    }
   }
 
   private func emitEvent(_ payload: [String: Any]) {

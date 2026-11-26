@@ -56,16 +56,38 @@ class WindowsAppearancePreferences {
   }
 
   static Future<void> restore(
-      SharedPreferences prefs, Map<String, dynamic> values) async {
+    SharedPreferences prefs,
+    Map<String, dynamic> values, {
+    Future<void> Function(String key, String value, String label)? setString,
+    Future<void> Function(String key, double value, String label)? setDouble,
+  }) async {
     for (final entry in values.entries) {
+      final key = '$prefix${entry.key}';
       final value = entry.value;
-      final ok = value is String
-          ? await prefs.setString('$prefix${entry.key}', value)
-          : await prefs.setDouble('$prefix${entry.key}', value as double);
-      if (!ok) throw StateError('Windows 外观设置恢复失败');
+      if (value is String) {
+        if (setString != null) {
+          await setString(key, value, 'Windows 外观设置');
+        } else {
+          final ok = await prefs.setString(key, value);
+          if (!ok) throw StateError('Windows 外观设置恢复失败');
+        }
+      } else {
+        final doubleVal = value as double;
+        if (setDouble != null) {
+          await setDouble(key, doubleVal, 'Windows 外观设置');
+        } else {
+          final ok = await prefs.setDouble(key, doubleVal);
+          if (!ok) throw StateError('Windows 外观设置恢复失败');
+        }
+      }
     }
     // A backup selects a portable preset; the imported photo remains available locally.
-    await prefs.setString('${prefix}image', '');
+    if (setString != null) {
+      await setString('${prefix}image', '', 'Windows 外观背景设置');
+    } else {
+      final clearedImage = await prefs.setString('${prefix}image', '');
+      if (!clearedImage) throw StateError('Windows 外观背景设置恢复失败');
+    }
     revision.value++;
   }
 }

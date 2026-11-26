@@ -31,6 +31,7 @@ import 'doh_resolver.dart';
 import 'source_playback.dart';
 import 'source_verification.dart';
 import 'models.dart';
+import 'personal_netdisk_library.dart';
 import 'quark_drive.dart';
 import 'quark_account.dart';
 import 'resilient_http_client.dart';
@@ -271,6 +272,20 @@ class CmsClient {
 
   Future<String> _cloudCredential(String provider) async =>
       (await StorageService.init()).netdiskCredential(provider);
+
+  Future<PersonalCloudLibrary> _openPersonalCloudLibrary(CmsSite site) async {
+    final storage = await StorageService.init();
+    final cloudClient = PersonalCloudDriveClient(
+      credentialReader: _cloudCredential,
+      credentialWriter: (provider, value) =>
+          storage.setNetdiskCredential(provider, value),
+      quarkAccounts: storage.quarkAccounts,
+      quarkClient: _quark,
+      httpClient: _http,
+      isCancelled: _sourceCancelled,
+    );
+    return PersonalCloudLibrary.open(site, client: cloudClient);
+  }
 
   Future<List<CmsEpisode>> _listCloudShare(String rawUrl) async {
     final url =
@@ -1459,6 +1474,14 @@ class CmsClient {
       return (categories, listing);
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).home();
+    if (PersonalCloudLibrary.isSupportedSite(site)) {
+      final lib = await _openPersonalCloudLibrary(site);
+      try {
+        return await lib.home();
+      } finally {
+        lib.close();
+      }
+    }
     if (site.isExternalMediaLibrary) return ExternalMediaLibrary.home(site);
     if (_usesJs(site)) {
       final raw = await _callJs(site, 'home', [false]);
@@ -1598,6 +1621,14 @@ class CmsClient {
       );
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).list(categoryId, '', page);
+    if (PersonalCloudLibrary.isSupportedSite(site)) {
+      final lib = await _openPersonalCloudLibrary(site);
+      try {
+        return await lib.list(categoryId, '', page);
+      } finally {
+        lib.close();
+      }
+    }
     if (site.isExternalMediaLibrary) {
       return ExternalMediaLibrary.list(site, categoryId, '', page);
     }
@@ -1788,6 +1819,14 @@ class CmsClient {
       return CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmt4'));
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).list('', keyword, page);
+    if (PersonalCloudLibrary.isSupportedSite(site)) {
+      final lib = await _openPersonalCloudLibrary(site);
+      try {
+        return await lib.list('', keyword, page);
+      } finally {
+        lib.close();
+      }
+    }
     if (site.isExternalMediaLibrary) {
       return ExternalMediaLibrary.list(site, '', keyword, page);
     }
@@ -2881,6 +2920,14 @@ class CmsClient {
       );
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).detail(fallback.id);
+    if (PersonalCloudLibrary.isSupportedSite(site)) {
+      final lib = await _openPersonalCloudLibrary(site);
+      try {
+        return await lib.detail(fallback);
+      } finally {
+        lib.close();
+      }
+    }
     if (site.isExternalMediaLibrary) {
       return ExternalMediaLibrary.detail(site, fallback);
     }
@@ -3717,6 +3764,15 @@ class CmsClient {
     }
     if (site.isEmby && episode.url.startsWith('mmemby://play?')) {
       return (await EmbyLibrary.open(site)).resolve(episode);
+    }
+    if (PersonalCloudLibrary.isSupportedSite(site) &&
+        PersonalCloudLibrary.isPlayableScheme(episode.url)) {
+      final lib = await _openPersonalCloudLibrary(site);
+      try {
+        return await lib.resolve(episode);
+      } finally {
+        lib.close();
+      }
     }
     if (site.isExternalMediaLibrary &&
         ExternalMediaLibrary.isPlayableScheme(episode.url)) {

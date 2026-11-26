@@ -34,6 +34,90 @@ typedef Pbkdf2ComputeRunner = Future<T> Function<T>(
 Future<T> _defaultIsolatePbkdf2Runner<T>(FutureOr<T> Function() computation) =>
     Isolate.run<T>(computation);
 
+/// Wraps a [SharedPreferences] instance with a per-key monotonic write epoch so
+/// transactional rollbacks can distinguish a later user write from an earlier
+/// transaction write even when both wrote the exact same value (e.g. `[]`).
+class _EpochTrackingPrefs implements SharedPreferences {
+  static final Expando<_EpochTrackingPrefs> _wrappers =
+      Expando<_EpochTrackingPrefs>();
+
+  static _EpochTrackingPrefs wrap(SharedPreferences prefs) {
+    if (prefs is _EpochTrackingPrefs) return prefs;
+    return _wrappers[prefs] ??= _EpochTrackingPrefs._(prefs);
+  }
+
+  final SharedPreferences raw;
+  int _nextEpoch = 0;
+  final Map<String, int> _epochs = <String, int>{};
+
+  _EpochTrackingPrefs._(this.raw);
+
+  int epochOf(String key) => _epochs[key] ?? 0;
+
+  void _bump(String key) {
+    _epochs[key] = ++_nextEpoch;
+  }
+
+  Future<bool> _track(String key, Future<bool> Function() op) async {
+    final ok = await op();
+    if (ok) _bump(key);
+    return ok;
+  }
+
+  @override
+  Set<String> getKeys() => raw.getKeys();
+  @override
+  Object? get(String key) => raw.get(key);
+  @override
+  bool? getBool(String key) => raw.getBool(key);
+  @override
+  int? getInt(String key) => raw.getInt(key);
+  @override
+  double? getDouble(String key) => raw.getDouble(key);
+  @override
+  String? getString(String key) => raw.getString(key);
+  @override
+  bool containsKey(String key) => raw.containsKey(key);
+  @override
+  List<String>? getStringList(String key) => raw.getStringList(key);
+  @override
+  Future<bool> setBool(String key, bool value) =>
+      _track(key, () => raw.setBool(key, value));
+  @override
+  Future<bool> setInt(String key, int value) =>
+      _track(key, () => raw.setInt(key, value));
+  @override
+  Future<bool> setDouble(String key, double value) =>
+      _track(key, () => raw.setDouble(key, value));
+  @override
+  Future<bool> setString(String key, String value) =>
+      _track(key, () => raw.setString(key, value));
+  @override
+  Future<bool> setStringList(String key, List<String> value) =>
+      _track(key, () => raw.setStringList(key, value));
+  @override
+  Future<bool> remove(String key) => _track(key, () => raw.remove(key));
+  @override
+  // ignore: deprecated_member_use
+  Future<bool> commit() => raw.commit();
+  @override
+  Future<bool> clear() async {
+    final existing = raw.getKeys().toList(growable: false);
+    final ok = await raw.clear();
+    if (ok) {
+      for (final key in existing) {
+        _bump(key);
+      }
+      for (final key in _epochs.keys.toList(growable: false)) {
+        _bump(key);
+      }
+    }
+    return ok;
+  }
+  @override
+  Future<void> reload() => raw.reload();
+}
+
 /// Persistent preferences and backup serializer compatible with Android `Prefs.java`.
 class StorageService {
   static const String syncSchema = 'marco-movie-sync';
@@ -152,13 +236,15 @@ class StorageService {
   static const int maxVideoSkipRecords = 500;
   static const String _subscriptionsFileName = 'subscriptions.json';
   static const String _watchHistoryFileName = 'watch_history.json';
+  static const String keyWatchHistoryPrefsPendingFlush =
+      'watch_history_prefs_pending_flush';
   static const List<Duration> _atomicRenameRetryDelays = <Duration>[
     Duration(milliseconds: 20),
     Duration(milliseconds: 50),
     Duration(milliseconds: 100),
   ];
 
-  final SharedPreferences _prefs;
+  final _EpochTrackingPrefs _prefs;
   final Directory? _explicitDataDirectory;
   final StorageFileStore _fileStore;
   @visibleForTesting
@@ -182,6 +268,10 @@ class StorageService {
   final ValueNotifier<bool> credentialMigrationFailureNotifier =
       ValueNotifier<bool>(false);
   bool _historyCorrupted = false;
+  List<int>? _quarantinedHistoryBytes;
+  final Set<String> _unconfirmedQuarantinePrefKeys = <String>{};
+  int _quarantineSequence = 0;
+  int _historyWriteEpoch = 0;
   bool get isHistoryCorrupted => _historyCorrupted;
   bool _subscriptionsCorrupted = false;
   bool _subscriptionsCorruptionNoticeConsumed = false;
@@ -272,7 +362,7 @@ class StorageService {
   int get lastHistoryAutoPushMsForTesting => _lastHistoryAutoPushMs;
   static final Expando<QuarkAccountProvider> _quarkProviders = Expando();
   static final Expando<Map<String, String>> _credentialCaches = Expando();
-  QuarkAccountProvider get quarkAccounts => _quarkProviders[_prefs] ??=
+  QuarkAccountProvider get quarkAccounts => _quarkProviders[_prefs.raw] ??=
       QuarkAccountProvider(
         readCredential: () => getNetdiskCred('quark'),
         writeCredential: (value) => _writeSecret(keyQuarkCookie, value),
@@ -280,7 +370,7 @@ class StorageService {
   final SecureCredentialStore _secureStore;
   final Pbkdf2ComputeRunner _pbkdf2Runner;
   Map<String, String> get _credentialCache =>
-      _credentialCaches[_prefs] ??= <String, String>{};
+      _credentialCaches[_prefs.raw] ??= <String, String>{};
 
   Future<void> _writeSecret(String key, String value) async {
     final hadPrevious = _credentialCache.containsKey(key);
@@ -327,6 +417,7 @@ class StorageService {
 
   int _lastHistoryDiskWriteMs = 0;
   bool _historyDirty = false;
+  bool _historyFlushShouldSync = false;
   Timer? _historyFlushTimer;
 
   int get configRevision => _configRevision;
@@ -460,12 +551,13 @@ class StorageService {
   }
 
   StorageService._internal(
-    this._prefs, {
+    SharedPreferences prefs, {
     required Directory? explicitDataDirectory,
     required StorageFileStore fileStore,
     required SecureCredentialStore secureStore,
     Pbkdf2ComputeRunner? pbkdf2Runner,
-  })  : _explicitDataDirectory = explicitDataDirectory,
+  })  : _prefs = _EpochTrackingPrefs.wrap(prefs),
+        _explicitDataDirectory = explicitDataDirectory,
         _fileStore = fileStore,
         _secureStore = secureStore,
         _pbkdf2Runner = pbkdf2Runner ?? _defaultIsolatePbkdf2Runner {
@@ -910,7 +1002,7 @@ class StorageService {
       (_prefs.getInt(keyMediaDiskCacheLimitMb) ?? 256).clamp(0, 4096);
   List<CmsSniffRule> getSavedSniffRules() {
     final loaded = loadSavedConfig();
-    if (loaded != null && loaded.rules.isNotEmpty) return loaded.rules;
+    if (loaded != null) return loaded.rules;
     final raw = _prefs.getString(keyCmsSniffRules);
     if (raw == null || raw.trim().isEmpty) return const [];
     try {
@@ -927,7 +1019,7 @@ class StorageService {
 
   List<String> getSavedAdRules() {
     final loaded = loadSavedConfig();
-    if (loaded != null && loaded.ads.isNotEmpty) return loaded.ads;
+    if (loaded != null) return loaded.ads;
     final raw = _prefs.getString(keyCmsAds);
     if (raw == null || raw.trim().isEmpty) return const [];
     try {
@@ -983,8 +1075,8 @@ class StorageService {
     await DiskBlockCache.instance.setMaxMegabytes(normalized);
   }
   List<CmsSniffRule> get cachedSniffRules {
-    final loaded = loadSavedConfig()?.rules;
-    if (loaded != null && loaded.isNotEmpty) return loaded;
+    final loaded = loadSavedConfig();
+    if (loaded != null) return loaded.rules;
     final raw = _prefs.getString(keyCachedSniffRules);
     if (raw == null || raw.trim().isEmpty) return const <CmsSniffRule>[];
     try {
@@ -999,32 +1091,44 @@ class StorageService {
     }
   }
   List<String> get cachedAdDomains {
-    final loaded = loadSavedConfig()?.ads;
-    if (loaded != null && loaded.isNotEmpty) return loaded;
+    final loaded = loadSavedConfig();
+    if (loaded != null) return loaded.ads;
     return _prefs.getStringList(keyCachedAdHosts) ?? const <String>[];
   }
-  Future<void> _persistSniffAndAdsCache(CmsConfig? config) async {
+  Future<void> _persistSniffAndAdsCache(
+    CmsConfig? config, {
+    Future<void> Function(String key, String value, String label)? setString,
+    Future<void> Function(String key, List<String> value, String label)?
+        setStringList,
+    Future<void> Function(String key, String label)? removeKey,
+  }) async {
+    final writeString =
+        setString ?? (String k, String v, String _) => _prefs.setString(k, v);
+    final writeStringList = setStringList ??
+        (String k, List<String> v, String _) => _prefs.setStringList(k, v);
+    final deleteKey =
+        removeKey ?? (String k, String _) => _prefs.remove(k);
     if (config == null) {
-      await _prefs.remove(keyCachedSniffRules);
-      await _prefs.remove(keyCachedAdHosts);
-      await _prefs.remove(keyCmsSniffRules);
-      await _prefs.remove(keyCmsAds);
+      await deleteKey(keyCachedSniffRules, '嗅探规则缓存');
+      await deleteKey(keyCachedAdHosts, '广告过滤域名缓存');
+      await deleteKey(keyCmsSniffRules, 'CMS 嗅探规则缓存');
+      await deleteKey(keyCmsAds, 'CMS 广告规则缓存');
       return;
     }
     if (config.rules.isEmpty) {
-      await _prefs.remove(keyCachedSniffRules);
-      await _prefs.remove(keyCmsSniffRules);
+      await deleteKey(keyCachedSniffRules, '嗅探规则缓存');
+      await deleteKey(keyCmsSniffRules, 'CMS 嗅探规则缓存');
     } else {
       final encodedRules = jsonEncode([for (final r in config.rules) r.toJson()]);
-      await _prefs.setString(keyCachedSniffRules, encodedRules);
-      await _prefs.setString(keyCmsSniffRules, encodedRules);
+      await writeString(keyCachedSniffRules, encodedRules, '嗅探规则缓存');
+      await writeString(keyCmsSniffRules, encodedRules, 'CMS 嗅探规则缓存');
     }
     if (config.ads.isEmpty) {
-      await _prefs.remove(keyCachedAdHosts);
-      await _prefs.remove(keyCmsAds);
+      await deleteKey(keyCachedAdHosts, '广告过滤域名缓存');
+      await deleteKey(keyCmsAds, 'CMS 广告规则缓存');
     } else {
-      await _prefs.setStringList(keyCachedAdHosts, config.ads);
-      await _prefs.setString(keyCmsAds, jsonEncode(config.ads));
+      await writeStringList(keyCachedAdHosts, config.ads, '广告过滤域名缓存');
+      await writeString(keyCmsAds, jsonEncode(config.ads), 'CMS 广告规则缓存');
     }
   }
   String get quarkCookie =>
@@ -2959,40 +3063,196 @@ class StorageService {
     _cachedPrivateKeys = keys;
     return keys;
   }
-  void _handleHistoryCorruption(String? rawCorruptString, {List<int>? rawBytes}) {
-    final alreadyCorrupted = _historyCorrupted;
+  static bool _bytesEqual(List<int>? a, List<int>? b) {
+    if (a == null || b == null || a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  static bool _isLosslessUtf8(String? text, List<int> rawBytes) {
+    if (text == null) return false;
+    return _bytesEqual(utf8.encode(text), rawBytes);
+  }
+
+  bool _hasQuarantineMatching(List<int> targetBytes, String? targetText) {
+    try {
+      for (final file in _fileStore.listFileNamesSync()) {
+        if (!file.startsWith('watch_history_corrupt_')) continue;
+        try {
+          if (_bytesEqual(_fileStore.readBytesSync(file), targetBytes)) {
+            return true;
+          }
+        } on Object {
+          // Skip unreadable archive candidate and continue scanning.
+        }
+      }
+    } on Object {
+      // Fall through to SharedPreferences quarantine check.
+    }
+    if (targetText != null &&
+        targetText.isNotEmpty &&
+        _isLosslessUtf8(targetText, targetBytes)) {
+      for (final key in _prefs.getKeys()) {
+        if (!key.startsWith('watch_history_corrupt_')) continue;
+        if (_unconfirmedQuarantinePrefKeys.contains(key)) continue;
+        final val = _prefs.getString(key);
+        if (val != null && _bytesEqual(utf8.encode(val), targetBytes)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  String _nextHistoryQuarantineBaseName() {
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    var base = 'watch_history_corrupt_$ts';
+    while (_fileStore.existsSync('$base.json') || _prefs.containsKey(base)) {
+      base = 'watch_history_corrupt_${ts}_${++_quarantineSequence}';
+    }
+    return base;
+  }
+
+  bool _handleHistoryCorruption(String? rawCorruptString, {List<int>? rawBytes}) {
     _historyCorrupted = true;
     historyCorruptionNotifier.value = true;
     unawaited(_prefs.setBool(keyHistoryCorrupted, true));
-    if (alreadyCorrupted) return;
-    final ts = DateTime.now().millisecondsSinceEpoch;
-    if (rawCorruptString != null && rawCorruptString.isNotEmpty) {
-      unawaited(_prefs.setString('watch_history_corrupt_$ts', rawCorruptString));
+
+    List<int>? bytesToQuarantine = rawBytes;
+    if (bytesToQuarantine == null &&
+        _fileStore.existsSync(_watchHistoryFileName)) {
+      try {
+        bytesToQuarantine = _fileStore.readBytesSync(_watchHistoryFileName);
+      } on Object catch (e) {
+        debugPrint('StorageService: read corrupt watch_history bytes failed: $e');
+      }
     }
+    String? stringToQuarantine = rawCorruptString;
+    if ((stringToQuarantine == null || stringToQuarantine.isEmpty) &&
+        bytesToQuarantine != null &&
+        bytesToQuarantine.isNotEmpty) {
+      stringToQuarantine = utf8.decode(bytesToQuarantine, allowMalformed: true);
+    }
+    final payloadBytes =
+        (bytesToQuarantine != null && bytesToQuarantine.isNotEmpty)
+            ? List<int>.unmodifiable(bytesToQuarantine)
+            : (stringToQuarantine != null && stringToQuarantine.isNotEmpty
+                  ? List<int>.unmodifiable(utf8.encode(stringToQuarantine))
+                  : null);
+    if (payloadBytes == null || payloadBytes.isEmpty) {
+      return false;
+    }
+    if (_bytesEqual(_quarantinedHistoryBytes, payloadBytes) ||
+        _hasQuarantineMatching(payloadBytes, stringToQuarantine)) {
+      _quarantinedHistoryBytes = payloadBytes;
+      return true;
+    }
+
+    final isLosslessUtf8 = _isLosslessUtf8(stringToQuarantine, payloadBytes);
+    final archiveBase = _nextHistoryQuarantineBaseName();
+    var confirmedFile = false;
     try {
-      List<int>? bytesToQuarantine = rawBytes;
-      if (bytesToQuarantine == null &&
-          _fileStore.existsSync(_watchHistoryFileName)) {
-        try {
-          bytesToQuarantine = _fileStore.readBytesSync(_watchHistoryFileName);
-        } on Object catch (e) {
-          debugPrint('StorageService: read corrupt watch_history bytes failed: $e');
-        }
-      }
-      if (bytesToQuarantine != null && bytesToQuarantine.isNotEmpty) {
-        _fileStore.writeBytesSync(
-          'watch_history_corrupt_$ts.json',
-          bytesToQuarantine,
-        );
-      } else if (rawCorruptString != null && rawCorruptString.isNotEmpty) {
-        _fileStore.writeBytesSync(
-          'watch_history_corrupt_$ts.json',
-          utf8.encode(rawCorruptString),
-        );
-      }
+      _fileStore.writeBytesSync('$archiveBase.json', payloadBytes);
+      confirmedFile = true;
+      _quarantinedHistoryBytes = payloadBytes;
     } on Object catch (e) {
       debugPrint('StorageService: quarantine watch_history failed: $e');
     }
+    if (stringToQuarantine != null && stringToQuarantine.isNotEmpty) {
+      // Only confirm the prefs quarantine after the asynchronous write resolves
+      // to `true` AND the UTF-8 string round-trips the exact raw bytes losslessly;
+      // lossy replacement text (e.g. malformed UTF-8 -> U+FFFD) is written only as
+      // a best-effort diagnostic copy and never satisfies exact-byte quarantine.
+      _unconfirmedQuarantinePrefKeys.add(archiveBase);
+      unawaited(
+        _prefs.setString(archiveBase, stringToQuarantine).then(
+          (ok) {
+            if (ok) {
+              _unconfirmedQuarantinePrefKeys.remove(archiveBase);
+              if (isLosslessUtf8) {
+                _quarantinedHistoryBytes = payloadBytes;
+              }
+            }
+          },
+          onError: (_) {},
+        ),
+      );
+    }
+    return confirmedFile;
+  }
+
+  /// Ensures the CURRENT local watch-history bytes are confirmed preserved
+  /// byte-for-byte in a quarantine archive before an explicit backup restore
+  /// overwrites `watch_history.json` after a prior corruption/read failure.
+  /// Older archives, unconfirmed async writes, or lossy UTF-8 replacement text
+  /// do NOT satisfy this check.
+  Future<bool> _ensureHistoryQuarantinedBeforeOverwrite() async {
+    final fileExists = _fileStore.existsSync(_watchHistoryFileName);
+    final rawPrefs = _prefs.getString(keyWatchHistory);
+    if (!fileExists && (rawPrefs == null || rawPrefs.trim().isEmpty)) {
+      return true;
+    }
+
+    List<int>? bytesToQuarantine;
+    if (fileExists) {
+      try {
+        bytesToQuarantine = _fileStore.readBytesSync(_watchHistoryFileName);
+      } on Object catch (e) {
+        debugPrint(
+          'StorageService: retry read corrupt watch_history bytes failed: $e',
+        );
+        return false;
+      }
+    }
+    final stringToQuarantine =
+        (bytesToQuarantine != null && bytesToQuarantine.isNotEmpty)
+            ? utf8.decode(bytesToQuarantine, allowMalformed: true)
+            : rawPrefs;
+    final payloadBytes =
+        (bytesToQuarantine != null && bytesToQuarantine.isNotEmpty)
+            ? List<int>.unmodifiable(bytesToQuarantine)
+            : (stringToQuarantine != null && stringToQuarantine.isNotEmpty
+                  ? List<int>.unmodifiable(utf8.encode(stringToQuarantine))
+                  : null);
+    if (payloadBytes == null || payloadBytes.isEmpty) {
+      return true;
+    }
+    if (_bytesEqual(_quarantinedHistoryBytes, payloadBytes) ||
+        _hasQuarantineMatching(payloadBytes, stringToQuarantine)) {
+      _quarantinedHistoryBytes = payloadBytes;
+      return true;
+    }
+
+    final isLosslessUtf8 = _isLosslessUtf8(stringToQuarantine, payloadBytes);
+    final archiveBase = _nextHistoryQuarantineBaseName();
+    var savedFile = false;
+    var savedPrefs = false;
+    try {
+      _fileStore.writeBytesSync('$archiveBase.json', payloadBytes);
+      savedFile = true;
+    } on Object catch (e) {
+      debugPrint('StorageService: retry quarantine file write failed: $e');
+    }
+    if (stringToQuarantine != null &&
+        stringToQuarantine.isNotEmpty &&
+        (isLosslessUtf8 || !savedFile)) {
+      _unconfirmedQuarantinePrefKeys.add(archiveBase);
+      try {
+        savedPrefs = await _prefs.setString(archiveBase, stringToQuarantine);
+        if (savedPrefs) {
+          _unconfirmedQuarantinePrefKeys.remove(archiveBase);
+        }
+      } on Object catch (e) {
+        debugPrint('StorageService: retry quarantine prefs write failed: $e');
+      }
+    }
+    if (savedFile || (savedPrefs && isLosslessUtf8)) {
+      _quarantinedHistoryBytes = payloadBytes;
+      return true;
+    }
+    return false;
   }
 
   List<WatchHistoryEntry> _readRawWatchHistory() {
@@ -3001,7 +3261,9 @@ class StorageService {
       _allHistoryCache = const [];
       return const [];
     }
-    if (_fileStore.existsSync(_watchHistoryFileName)) {
+    final preferPrefsFallback =
+        _prefs.getBool(keyWatchHistoryPrefsPendingFlush) == true;
+    if (!preferPrefsFallback && _fileStore.existsSync(_watchHistoryFileName)) {
       List<int>? rawBytes;
       try {
         rawBytes = _fileStore.readBytesSync(_watchHistoryFileName);
@@ -3018,12 +3280,25 @@ class StorageService {
         if (decoded is! List) {
           throw const FormatException('watch_history is not a JSON array');
         }
+        var needsSanitizeFlush = false;
         final entries = decoded
             .whereType<Map>()
-            .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
+            .map((m) {
+              if ((m['episodeUrl'] ?? '').toString().trim().isNotEmpty) {
+                needsSanitizeFlush = true;
+              }
+              final rawMid = (m['episodeMediaId'] ?? '').toString().trim();
+              if (rawMid.isNotEmpty && !WatchHistoryEntry.isCanonicalMediaId(rawMid)) {
+                needsSanitizeFlush = true;
+              }
+              return WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m));
+            })
             .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
             .toList();
         _allHistoryCache = entries;
+        if (needsSanitizeFlush) {
+          _scheduleHistorySelfHealFlush();
+        }
         return entries;
       } on Object catch (e) {
         debugPrint('StorageService: _readRawWatchHistory file failed: $e');
@@ -3046,6 +3321,9 @@ class StorageService {
     final raw = _prefs.getString(keyWatchHistory);
     if (raw == null || raw.trim().isEmpty || raw.trim() == '[]') {
       _allHistoryCache = const [];
+      if (preferPrefsFallback) {
+        _scheduleHistorySelfHealFlush();
+      }
       return const [];
     }
     try {
@@ -3053,12 +3331,25 @@ class StorageService {
       if (decoded is! List) {
         throw const FormatException('watch_history is not a JSON array');
       }
+      var needsSanitizeFlush = preferPrefsFallback;
       final entries = decoded
           .whereType<Map>()
-          .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
+          .map((m) {
+            if ((m['episodeUrl'] ?? '').toString().trim().isNotEmpty) {
+              needsSanitizeFlush = true;
+            }
+            final rawMid = (m['episodeMediaId'] ?? '').toString().trim();
+            if (rawMid.isNotEmpty && !WatchHistoryEntry.isCanonicalMediaId(rawMid)) {
+              needsSanitizeFlush = true;
+            }
+            return WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m));
+          })
           .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
           .toList();
       _allHistoryCache = entries;
+      if (needsSanitizeFlush) {
+        _scheduleHistorySelfHealFlush();
+      }
       return entries;
     } on Object catch (e) {
       debugPrint('StorageService: _readRawWatchHistory prefs failed: $e');
@@ -3081,13 +3372,65 @@ class StorageService {
     return result;
   }
 
+  /// Serializes background history self-heal/migration flushes through
+  /// `_runSequentialMutation` with a write-epoch check so a slow/stale heal
+  /// snapshot can NEVER race with or overwrite a subsequent `clearWatchHistory`,
+  /// `removeWatchHistoryItem`, `upsertWatchHistory`, or `importBackupJson`.
+  void _scheduleHistorySelfHealFlush() {
+    final expectedEpoch = _historyWriteEpoch;
+    unawaited(
+      _runSequentialMutation(() async {
+        if (_historyCorrupted || _historyWriteEpoch != expectedEpoch) return;
+        await _flushHistoryToDisk();
+      }).catchError((_) {}),
+    );
+  }
+
   Future<void> _flushHistoryToDisk() async {
     if (_historyCorrupted) return;
     final list = _allHistoryCache ?? _readRawWatchHistory();
     final jsonStr = jsonEncode(list.map((e) => e.toJson()).toList());
     await _atomicWriteFile(_watchHistoryFileName, jsonStr);
-    // Keep watch_history mirror in prefs after file write succeeds (M-F3).
-    await _prefs.setString(keyWatchHistory, jsonStr);
+    // Primary `watch_history.json` is now durably committed on disk.
+    // Keep the secondary SharedPreferences mirror best-effort so a mirror
+    // failure never falsely reports rollback while disk has already committed.
+    try {
+      await _prefs.setString(keyWatchHistory, jsonStr);
+    } on Object catch (e) {
+      debugPrint('StorageService: watch_history prefs mirror skipped: $e');
+    }
+    if (_prefs.getBool(keyWatchHistoryPrefsPendingFlush) == true) {
+      final cleared =
+          await _prefs.setBool(keyWatchHistoryPrefsPendingFlush, false);
+      if (!cleared) {
+        throw StateError('无法清除观看历史待回刷标记');
+      }
+    }
+  }
+
+  void _scheduleDeferredHistoryFlush({bool triggerSync = false}) {
+    if (triggerSync) {
+      _historyFlushShouldSync = true;
+    }
+    if (_historyFlushTimer != null && _historyFlushTimer!.isActive) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final elapsed = now - _lastHistoryDiskWriteMs;
+    final remainingMs = elapsed >= 30000 ? 0 : (30000 - elapsed).clamp(0, 30000);
+    _historyFlushTimer = Timer(Duration(milliseconds: remainingMs), () {
+      _runSequentialMutation(() async {
+        _historyFlushTimer = null;
+        if (_historyDirty && !_historyCorrupted) {
+          final shouldSync = _historyFlushShouldSync;
+          await _flushHistoryToDisk();
+          _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
+          _historyDirty = false;
+          _historyFlushShouldSync = false;
+          if (shouldSync) {
+            scheduleAutoWebdavSync();
+          }
+        }
+      });
+    });
   }
 
   Future<void> _handleHistoryPersistence({
@@ -3104,6 +3447,7 @@ class StorageService {
       await _flushHistoryToDisk();
       _lastHistoryDiskWriteMs = now;
       _historyDirty = false;
+      _historyFlushShouldSync = false;
       if (!isPrivate && triggerSync) {
         scheduleAutoWebdavSync(immediate: effectiveSyncImmediate, nowMs: now);
       }
@@ -3116,26 +3460,13 @@ class StorageService {
       await _flushHistoryToDisk();
       _lastHistoryDiskWriteMs = now;
       _historyDirty = false;
+      _historyFlushShouldSync = false;
       if (!isPrivate && triggerSync) {
         scheduleAutoWebdavSync(immediate: effectiveSyncImmediate, nowMs: now);
       }
     } else {
       _historyDirty = true;
-      if (_historyFlushTimer == null || !_historyFlushTimer!.isActive) {
-        final remainingMs = 30000 - (now - _lastHistoryDiskWriteMs);
-        _historyFlushTimer = Timer(Duration(milliseconds: remainingMs), () {
-          _runSequentialMutation(() async {
-            if (_historyDirty) {
-              await _flushHistoryToDisk();
-              _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
-              _historyDirty = false;
-              if (!isPrivate && triggerSync) {
-                scheduleAutoWebdavSync();
-              }
-            }
-          });
-        });
-      }
+      _scheduleDeferredHistoryFlush(triggerSync: !isPrivate && triggerSync);
     }
   }
 
@@ -3154,6 +3485,7 @@ class StorageService {
         await _flushHistoryToDisk();
         _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
         _historyDirty = false;
+        _historyFlushShouldSync = false;
       }
     });
   }
@@ -3184,6 +3516,7 @@ class StorageService {
           combined.removeRange(CmsParser.maxHistoryEntries, combined.length);
         }
         _allHistoryCache = combined;
+        _historyWriteEpoch++;
         watchHistoryRevision.value++;
         await _handleHistoryPersistence(
           immediate: immediate,
@@ -3202,6 +3535,7 @@ class StorageService {
       }
       _allHistoryCache = combined;
       _historyCache = List.unmodifiable(updatedPublic);
+      _historyWriteEpoch++;
       watchHistoryRevision.value++;
       await _handleHistoryPersistence(
         immediate: immediate,
@@ -3212,25 +3546,111 @@ class StorageService {
     });
   }
 
+  /// Restores a previously deleted watch-history entry (e.g. Undo) with a
+  /// strictly newer sync revision timestamp than any prior deletion tombstone
+  /// while preserving the user's exact playback position, duration, and media
+  /// identity so subsequent cross-device sync converges to the restored state.
+  Future<void> restoreWatchHistoryEntry(WatchHistoryEntry entry) {
+    return _runSequentialMutation(() async {
+      if (_historyCorrupted) return;
+      final tombs = _readSyncTombstones();
+      final tombKey = 'hist:${entry.key}';
+      final prevTomb = tombs[tombKey] ?? 0;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      var restoredUpdated = nowMs;
+      if (entry.updated + 1 > restoredUpdated) {
+        restoredUpdated = entry.updated + 1;
+      }
+      if (prevTomb + 1 > restoredUpdated) {
+        restoredUpdated = prevTomb + 1;
+      }
+      if (tombs.remove(tombKey) != null) {
+        await _writeSyncTombstones(tombs);
+      }
+      final restored = WatchHistoryEntry(
+        site: entry.site,
+        id: entry.id,
+        title: entry.title,
+        poster: entry.poster,
+        line: entry.line,
+        lineId: entry.lineId,
+        episode: entry.episode,
+        episodeMediaId: entry.effectiveMediaId,
+        index: entry.index,
+        position: entry.position,
+        duration: entry.duration,
+        updated: restoredUpdated,
+      );
+      final privKeys = _privateSiteKeySet();
+      final isPrivate = privKeys.contains(restored.site);
+      final allRaw = _allHistoryCache ?? _readRawWatchHistory();
+      if (isPrivate) {
+        final combined = CmsParser.upsertHistory(allRaw, restored);
+        _allHistoryCache = combined;
+        _historyCache = null;
+        _historyWriteEpoch++;
+        watchHistoryRevision.value++;
+        await _handleHistoryPersistence(
+          immediate: true,
+          isPrivate: true,
+          triggerSync: false,
+          syncImmediate: false,
+        );
+        return;
+      }
+      final localPublic =
+          allRaw.where((e) => !privKeys.contains(e.site)).toList();
+      final localPrivate =
+          allRaw.where((e) => privKeys.contains(e.site)).toList();
+      final updatedPublic = CmsParser.upsertHistory(localPublic, restored);
+      final combined = [...updatedPublic, ...localPrivate]
+        ..sort((a, b) => b.updated.compareTo(a.updated));
+      if (combined.length > CmsParser.maxHistoryEntries) {
+        combined.removeRange(CmsParser.maxHistoryEntries, combined.length);
+      }
+      _allHistoryCache = combined;
+      _historyCache = List.unmodifiable(updatedPublic);
+      _historyWriteEpoch++;
+      watchHistoryRevision.value++;
+      await _handleHistoryPersistence(
+        immediate: true,
+        isPrivate: false,
+        triggerSync: true,
+        syncImmediate: true,
+      );
+    });
+  }
+
   Future<void> removeWatchHistoryItem(String siteKey, String videoId) {
     return _runSequentialMutation(() async {
       if (_historyCorrupted) return;
       final targetKey = '$siteKey\n$videoId';
       final allRaw = _allHistoryCache ?? _readRawWatchHistory();
+      var maxRemovedUpdated = 0;
+      for (final e in allRaw) {
+        if (e.key == targetKey && e.updated > maxRemovedUpdated) {
+          maxRemovedUpdated = e.updated;
+        }
+      }
+      final tombs = _readSyncTombstones();
+      final prevTomb = tombs['hist:$targetKey'] ?? 0;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final deleteRev = max(
+        nowMs,
+        max(maxRemovedUpdated + 1, prevTomb + 1),
+      );
       final updated =
           allRaw.where((e) => e.key != targetKey).toList(growable: false);
       _historyCache = null;
       _allHistoryCache = updated;
+      _historyWriteEpoch++;
       _historyFlushTimer?.cancel();
       _historyFlushTimer = null;
       _historyDirty = false;
       await _flushHistoryToDisk();
-      _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
+      _lastHistoryDiskWriteMs = nowMs;
       watchHistoryRevision.value++;
-      await _recordSyncTombstone(
-        'hist:$targetKey',
-        DateTime.now().millisecondsSinceEpoch,
-      );
+      await _recordSyncTombstone('hist:$targetKey', deleteRev);
       if (!_privateSiteKeySet().contains(siteKey)) {
         scheduleAutoWebdavSync(immediate: true);
       }
@@ -3244,7 +3664,9 @@ class StorageService {
       if (existing.isNotEmpty) {
         final tombs = _readSyncTombstones();
         for (final e in existing) {
-          tombs['hist:${e.key}'] = now;
+          final k = 'hist:${e.key}';
+          final prevTomb = tombs[k] ?? 0;
+          tombs[k] = max(now, max(e.updated + 1, prevTomb + 1));
         }
         await _writeSyncTombstones(tombs);
       }
@@ -3253,7 +3675,9 @@ class StorageService {
       _historyDirty = false;
       _historyCache = const [];
       _allHistoryCache = const [];
+      _historyWriteEpoch++;
       _historyCorrupted = false;
+      _quarantinedHistoryBytes = null;
       historyCorruptionNotifier.value = false;
       await _prefs.setBool(keyHistoryCorrupted, false);
       await _flushHistoryToDisk();
@@ -3784,7 +4208,6 @@ class StorageService {
         }
       }
     }
-    if (windowsAppearance != null) await WindowsAppearancePreferences.restore(_prefs, windowsAppearance);
     for (final key in _appearanceStrings) {
       if (settings.containsKey(key) && settings[key] is! String) throw const FormatException('外观设置格式无效');
     }
@@ -3826,156 +4249,583 @@ class StorageService {
                 !incomingIds.contains((jsonDecode(identity) as List).first)))) {
       throw const FormatException('线路管理记录与订阅不匹配');
     }
-    if (updatedSubs != null || incoming.isNotEmpty) {
-      final privateSubs = getSubscriptions().where((s) => s.isEffectivelyPrivate).toList();
-      final privateIds = privateSubs.map((s) => s.id).toSet();
-      if (incoming.any((s) => privateIds.contains(s.id))) throw const FormatException('订阅标识冲突');
-      await saveSubscriptions([...incoming, ...privateSubs]);
-      if (incoming.isEmpty) {
-        await _prefs.remove(keyRawConfig);
-        await _prefs.remove(keyOrigin);
+
+    // Validate & prepare watch-history payload BEFORE mutating any preference
+    // or file on disk so a failure anywhere in the bundle rolls back atomically.
+    List<WatchHistoryEntry>? parsedHistoryEntries;
+    String? sanitizedHistoryJson;
+    if (nextHistory != null) {
+      final decodedHist = jsonDecode(nextHistory);
+      if (decodedHist is List) {
+        final entries = decodedHist
+            .whereType<Map>()
+            .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
+            .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
+            .toList();
+        parsedHistoryEntries = entries;
+        sanitizedHistoryJson =
+            jsonEncode(entries.map((e) => e.toJson()).toList());
       }
     }
-    final privateSubIds = getSubscriptions().where((s) => s.isEffectivelyPrivate).map((s) => s.id).toSet();
-    final retainedAliases = _savedAliases()..removeWhere((key, _) {
-      try {
-        return !privateSubIds.contains((jsonDecode(key) as List).first);
-      } on Object catch (e) {
-        debugPrint('StorageService: prune invalid site alias key: $e');
+
+    final prevCorrupted = _historyCorrupted;
+    final prevQuarantinedBytes = _quarantinedHistoryBytes;
+    final prevAllCache = _allHistoryCache;
+    final prevPublicCache = _historyCache;
+    final prevDirty = _historyDirty;
+    final prevLastHistoryDiskWriteMs = _lastHistoryDiskWriteMs;
+    final prevHistoryFlushShouldSync = _historyFlushShouldSync;
+    final prevSubsCache = _subscriptionsCache;
+
+    if (sanitizedHistoryJson != null && prevCorrupted) {
+      // Retry quarantine before mutating any state or overwriting
+      // `watch_history.json` in case the initial corruption detection happened
+      // while the file was temporarily unreadable or only a lossy prefs copy
+      // could be written.
+      final quarantined = await _ensureHistoryQuarantinedBeforeOverwrite();
+      if (!quarantined) {
+        throw StateError('原观看历史文件尚未完成隔离保全，已中止导入覆盖');
+      }
+    }
+
+    // Track ONLY preference keys actually mutated by this backup transaction
+    // (recording both pre-transaction state and the value written by this
+    // transaction). On rollback, ONLY undo keys owned by this transaction so
+    // concurrent independent user changes (such as WebDAV sync toggles) are
+    // never clobbered.
+    final txOrigPrefs = <String, ({bool existed, Object? value})>{};
+    final txWrittenPrefs = <String, ({bool removed, Object? value})>{};
+    final txWriteEpochs = <String, int>{};
+
+    bool prefValEquals(Object? a, Object? b) {
+      if (a is List && b is List) {
+        if (a.length != b.length) return false;
+        for (var i = 0; i < a.length; i++) {
+          if (a[i] != b[i]) return false;
+        }
         return true;
       }
-    });
-    retainedAliases.addAll(aliases);
-    await _prefs.setString(_siteAliases, jsonEncode(retainedAliases));
-    for (final entry in pickerEdits.entries) {
-      final retainedPrivate = (_prefs.getStringList(entry.key) ?? []).where(privateIdentities.contains);
-      await _prefs.setStringList(entry.key, [...entry.value, ...retainedPrivate]);
+      return a == b;
     }
-    if (incomingOverrides != null) {
-      final retainedPrivateOverrides = <String, Map<String, dynamic>>{};
-      for (final entry in _readSiteOverrides().entries) {
-        if (privateIdentities.contains(entry.key)) {
-          retainedPrivateOverrides[entry.key] = entry.value.toJson();
+
+    void recordPrefTouch(
+      String key, {
+      bool removed = false,
+      Object? nextValue,
+    }) {
+      txOrigPrefs.putIfAbsent(
+        key,
+        () => (
+          existed: _prefs.containsKey(key),
+          value: _prefs.get(key),
+        ),
+      );
+      txWrittenPrefs[key] = (removed: removed, value: nextValue);
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> setPrefStringChecked(
+      String key,
+      String value,
+      String label,
+    ) async {
+      recordPrefTouch(key, nextValue: value);
+      final ok = await _prefs.setString(key, value);
+      if (!ok) throw StateError('无法持久化$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> setPrefBoolChecked(
+      String key,
+      bool value,
+      String label,
+    ) async {
+      recordPrefTouch(key, nextValue: value);
+      final ok = await _prefs.setBool(key, value);
+      if (!ok) throw StateError('无法持久化$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> setPrefIntChecked(
+      String key,
+      int value,
+      String label,
+    ) async {
+      recordPrefTouch(key, nextValue: value);
+      final ok = await _prefs.setInt(key, value);
+      if (!ok) throw StateError('无法持久化$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> setPrefDoubleChecked(
+      String key,
+      double value,
+      String label,
+    ) async {
+      recordPrefTouch(key, nextValue: value);
+      final ok = await _prefs.setDouble(key, value);
+      if (!ok) throw StateError('无法持久化$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> setPrefStringListChecked(
+      String key,
+      List<String> value,
+      String label,
+    ) async {
+      final copy = List<String>.unmodifiable(value);
+      recordPrefTouch(key, nextValue: copy);
+      final ok = await _prefs.setStringList(key, copy);
+      if (!ok) throw StateError('无法持久化$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    Future<void> removePrefChecked(String key, String label) async {
+      recordPrefTouch(key, removed: true);
+      final ok = await _prefs.remove(key);
+      if (!ok) throw StateError('无法清除$label');
+      txWriteEpochs[key] = _prefs.epochOf(key);
+    }
+
+    final hadPrevHistoryFile = _fileStore.existsSync(_watchHistoryFileName);
+    List<int>? prevHistoryDiskBytes;
+    if (hadPrevHistoryFile) {
+      try {
+        prevHistoryDiskBytes = List<int>.unmodifiable(
+          _fileStore.readBytesSync(_watchHistoryFileName),
+        );
+      } on Object {
+        prevHistoryDiskBytes = null;
+      }
+    }
+    final hadPrevSubsFile = _fileStore.existsSync(_subscriptionsFileName);
+    List<int>? prevSubsDiskBytes;
+    if (hadPrevSubsFile) {
+      try {
+        prevSubsDiskBytes = List<int>.unmodifiable(
+          _fileStore.readBytesSync(_subscriptionsFileName),
+        );
+      } on Object {
+        prevSubsDiskBytes = null;
+      }
+    }
+
+    var historyDiskCommitted = false;
+    var historyStateMutated = false;
+    var subsDiskCommitted = false;
+
+    Future<void> rollbackBackupImport() async {
+      if (historyDiskCommitted) {
+        try {
+          if (prevHistoryDiskBytes != null) {
+            _fileStore.writeBytesSync(
+              _watchHistoryFileName,
+              prevHistoryDiskBytes,
+            );
+          } else if (!hadPrevHistoryFile) {
+            await _fileStore.deleteFile(_watchHistoryFileName);
+          }
+        } on Object catch (e) {
+          debugPrint('StorageService: rollback watch_history.json failed: $e');
         }
       }
-      for (final entry in incomingOverrides.entries) {
-        retainedPrivateOverrides[entry.key] = entry.value.toJson();
-      }
-      await _prefs.setString(_siteOverrides, jsonEncode(retainedPrivateOverrides));
-    }
-    for (final key in _appearanceStrings) {
-      if (settings[key] is String) await _prefs.setString(key, settings[key] as String);
-    }
-    for (final key in _appearanceBooleans) {
-      if (settings[key] is bool) await _prefs.setBool(key, settings[key] as bool);
-    }
-    for (final key in [keySkipIntroSec, keySkipOutroSec]) {
-      final value = settings[key];
-      if (value is int && value >= 0 && value <= 600) await _prefs.setInt(key, value);
-    }
-    if (['off','one','all'].contains(settings[keyRepeatMode])) await setRepeatMode(settings[keyRepeatMode] as String);
-    CmsConfig? parsedConfig = decoded.parsedConfig;
-    if (decoded.rawConfig.isNotEmpty) {
-      await _prefs.setString(keyRawConfig, decoded.rawConfig);
-      await _prefs.setString(keyOrigin, decoded.origin);
-      if (parsedConfig != null) {
-        final availSites = parsedConfig.publicAvailableSites;
-        if (!availSites.any((s) => s.key == selectedSiteKey)) {
-          if (availSites.isNotEmpty) {
-            final fallbackSite = availSites.firstWhere(
-              (s) => !CspBridge.isBannerNoticeSite(s),
-              orElse: () => availSites.first,
+      if (subsDiskCommitted) {
+        try {
+          if (prevSubsDiskBytes != null) {
+            _fileStore.writeBytesSync(
+              _subscriptionsFileName,
+              prevSubsDiskBytes,
             );
-            await _prefs.setString(keySelectedSite, fallbackSite.key);
+          } else if (!hadPrevSubsFile) {
+            await _fileStore.deleteFile(_subscriptionsFileName);
+          }
+        } on Object catch (e) {
+          debugPrint('StorageService: rollback subscriptions.json failed: $e');
+        }
+      }
+
+      var needsPrefsReload = false;
+      for (final entry in txOrigPrefs.entries) {
+        final key = entry.key;
+        final orig = entry.value;
+        final written = txWrittenPrefs[key];
+        final txEpoch = txWriteEpochs[key];
+        final curExists = _prefs.containsKey(key);
+        final curVal = _prefs.get(key);
+        // Preserve any concurrent user write that superseded this transaction's
+        // write while we were suspended on async I/O—including when the user
+        // later wrote the exact same value (such as clearing search history to
+        // `[]` after the backup also wrote `[]`).
+        if (txEpoch != null && _prefs.epochOf(key) != txEpoch) {
+          continue;
+        }
+        if (written != null) {
+          if (written.removed) {
+            if (curExists && (!orig.existed || !prefValEquals(curVal, orig.value))) {
+              continue;
+            }
           } else {
-            await _prefs.setString(keySelectedSite, '');
+            if (curExists &&
+                !prefValEquals(curVal, written.value) &&
+                (!orig.existed || !prefValEquals(curVal, orig.value))) {
+              continue;
+            }
+          }
+        }
+        if (!orig.existed && !curExists) continue;
+        if (orig.existed && curExists && prefValEquals(curVal, orig.value)) {
+          continue;
+        }
+        try {
+          bool ok = true;
+          if (!orig.existed || orig.value == null) {
+            ok = await _prefs.remove(key);
+          } else if (orig.value is String) {
+            ok = await _prefs.setString(key, orig.value as String);
+          } else if (orig.value is bool) {
+            ok = await _prefs.setBool(key, orig.value as bool);
+          } else if (orig.value is int) {
+            ok = await _prefs.setInt(key, orig.value as int);
+          } else if (orig.value is double) {
+            ok = await _prefs.setDouble(key, orig.value as double);
+          } else if (orig.value is List<String>) {
+            ok = await _prefs.setStringList(key, orig.value as List<String>);
+          } else if (orig.value is List) {
+            ok = await _prefs.setStringList(
+              key,
+              (orig.value as List).map((e) => '$e').toList(),
+            );
+          }
+          if (!ok) needsPrefsReload = true;
+        } on Object catch (_) {
+          needsPrefsReload = true;
+        }
+      }
+      if (needsPrefsReload) {
+        try {
+          await _prefs.reload();
+        } on Object catch (_) {}
+      }
+
+      _invalidateConfigCache();
+      _subscriptionsCache = prevSubsCache;
+      if (historyStateMutated) {
+        _allHistoryCache = prevAllCache;
+        _historyCache = prevPublicCache;
+        _historyDirty = prevDirty;
+        _lastHistoryDiskWriteMs = prevLastHistoryDiskWriteMs;
+        _historyFlushShouldSync = prevHistoryFlushShouldSync;
+        _historyCorrupted = prevCorrupted;
+        _quarantinedHistoryBytes = prevQuarantinedBytes;
+        historyCorruptionNotifier.value = prevCorrupted;
+        _historyWriteEpoch++;
+        if (prevDirty && !prevCorrupted) {
+          _scheduleDeferredHistoryFlush(
+            triggerSync: prevHistoryFlushShouldSync,
+          );
+        }
+      }
+    }
+
+    try {
+      if (windowsAppearance != null) {
+        await WindowsAppearancePreferences.restore(
+          _prefs,
+          windowsAppearance,
+          setString: setPrefStringChecked,
+          setDouble: setPrefDoubleChecked,
+        );
+      }
+      if (updatedSubs != null || incoming.isNotEmpty) {
+        final privateSubs =
+            getSubscriptions().where((s) => s.isEffectivelyPrivate).toList();
+        final privateIds = privateSubs.map((s) => s.id).toSet();
+        if (incoming.any((s) => privateIds.contains(s.id))) {
+          throw const FormatException('订阅标识冲突');
+        }
+        final mergedSubs = [...incoming, ...privateSubs];
+        recordPrefTouch(
+          keySubscriptions,
+          nextValue: jsonEncode(mergedSubs.map((s) => s.toJson()).toList()),
+        );
+        await saveSubscriptions(mergedSubs);
+        txWriteEpochs[keySubscriptions] = _prefs.epochOf(keySubscriptions);
+        subsDiskCommitted = true;
+        if (incoming.isEmpty) {
+          await removePrefChecked(keyRawConfig, '配置内容');
+          await removePrefChecked(keyOrigin, '配置来源');
+        }
+      }
+      final privateSubIds = getSubscriptions()
+          .where((s) => s.isEffectivelyPrivate)
+          .map((s) => s.id)
+          .toSet();
+      final retainedAliases = _savedAliases()..removeWhere((key, _) {
+        try {
+          return !privateSubIds.contains((jsonDecode(key) as List).first);
+        } on Object catch (e) {
+          debugPrint('StorageService: prune invalid site alias key: $e');
+          return true;
+        }
+      });
+      retainedAliases.addAll(aliases);
+      await setPrefStringChecked(
+        _siteAliases,
+        jsonEncode(retainedAliases),
+        '来源别名',
+      );
+      for (final entry in pickerEdits.entries) {
+        final retainedPrivate =
+            (_prefs.getStringList(entry.key) ?? []).where(privateIdentities.contains);
+        await setPrefStringListChecked(
+          entry.key,
+          [...entry.value, ...retainedPrivate],
+          '线路管理记录',
+        );
+      }
+      if (incomingOverrides != null) {
+        final retainedPrivateOverrides = <String, Map<String, dynamic>>{};
+        for (final entry in _readSiteOverrides().entries) {
+          if (privateIdentities.contains(entry.key)) {
+            retainedPrivateOverrides[entry.key] = entry.value.toJson();
+          }
+        }
+        for (final entry in incomingOverrides.entries) {
+          retainedPrivateOverrides[entry.key] = entry.value.toJson();
+        }
+        await setPrefStringChecked(
+          _siteOverrides,
+          jsonEncode(retainedPrivateOverrides),
+          '线路覆盖设置',
+        );
+      }
+      for (final key in _appearanceStrings) {
+        if (settings[key] is String) {
+          await setPrefStringChecked(key, settings[key] as String, '外观设置');
+        }
+      }
+      for (final key in _appearanceBooleans) {
+        if (settings[key] is bool) {
+          await setPrefBoolChecked(key, settings[key] as bool, '外观设置');
+        }
+      }
+      for (final key in [keySkipIntroSec, keySkipOutroSec]) {
+        final value = settings[key];
+        if (value is int && value >= 0 && value <= 600) {
+          await setPrefIntChecked(key, value, '跳过片头片尾设置');
+        }
+      }
+      if (['off', 'one', 'all'].contains(settings[keyRepeatMode])) {
+        await setPrefStringChecked(
+          keyRepeatMode,
+          settings[keyRepeatMode] as String,
+          '循环播放设置',
+        );
+      }
+      CmsConfig? parsedConfig = decoded.parsedConfig;
+      if (decoded.rawConfig.isNotEmpty) {
+        await setPrefStringChecked(keyRawConfig, decoded.rawConfig, '配置内容');
+        await setPrefStringChecked(keyOrigin, decoded.origin, '配置来源');
+        if (parsedConfig != null) {
+          final availSites = parsedConfig.publicAvailableSites;
+          if (!availSites.any((s) => s.key == selectedSiteKey)) {
+            if (availSites.isNotEmpty) {
+              final fallbackSite = availSites.firstWhere(
+                (s) => !CspBridge.isBannerNoticeSite(s),
+                orElse: () => availSites.first,
+              );
+              await setPrefStringChecked(
+                keySelectedSite,
+                fallbackSite.key,
+                '当前片源',
+              );
+            } else {
+              await setPrefStringChecked(keySelectedSite, '', '当前片源');
+            }
           }
         }
       }
-    }
-    _invalidateConfigCache();
-    final restoredConfig = loadSavedConfig();
-    final restoredPublicAvail =
-        restoredConfig?.publicAvailableSites ?? const <CmsSite>[];
-    if (settings[keyPreferredSite] is String) {
-      final key = (settings[keyPreferredSite] as String).trim();
-      final exists =
-          key.isNotEmpty && restoredPublicAvail.any((s) => s.key == key);
-      await setPreferredSiteKey(exists ? key : '');
-    }
-    if (settings[keySelectedSite] is String) {
-      final candidate = (settings[keySelectedSite] as String).trim();
-      if (candidate.isNotEmpty &&
-          restoredPublicAvail.any((s) => s.key == candidate)) {
-        await setSelectedSiteKey(candidate);
-      } else if (!restoredPublicAvail.any((s) => s.key == selectedSiteKey)) {
-        if (restoredPublicAvail.isNotEmpty) {
-          final fallbackSite = restoredPublicAvail.firstWhere(
-            (s) => !CspBridge.isBannerNoticeSite(s),
-            orElse: () => restoredPublicAvail.first,
-          );
-          await setSelectedSiteKey(fallbackSite.key);
-        } else {
-          await setSelectedSiteKey('');
+      _invalidateConfigCache();
+      final restoredConfig = loadSavedConfig();
+      final restoredPublicAvail =
+          restoredConfig?.publicAvailableSites ?? const <CmsSite>[];
+      if (settings[keyPreferredSite] is String) {
+        final key = (settings[keyPreferredSite] as String).trim();
+        final exists =
+            key.isNotEmpty && restoredPublicAvail.any((s) => s.key == key);
+        await setPrefStringChecked(
+          keyPreferredSite,
+          exists ? key : '',
+          '偏好源设置',
+        );
+      }
+      if (settings[keySelectedSite] is String) {
+        final candidate = (settings[keySelectedSite] as String).trim();
+        if (candidate.isNotEmpty &&
+            restoredPublicAvail.any((s) => s.key == candidate)) {
+          await setPrefStringChecked(keySelectedSite, candidate, '当前片源');
+        } else if (!restoredPublicAvail.any((s) => s.key == selectedSiteKey)) {
+          if (restoredPublicAvail.isNotEmpty) {
+            final fallbackSite = restoredPublicAvail.firstWhere(
+              (s) => !CspBridge.isBannerNoticeSite(s),
+              orElse: () => restoredPublicAvail.first,
+            );
+            await setPrefStringChecked(
+              keySelectedSite,
+              fallbackSite.key,
+              '当前片源',
+            );
+          } else {
+            await setPrefStringChecked(keySelectedSite, '', '当前片源');
+          }
         }
       }
-    }
-    if (nextHistory != null) {
-      _historyFlushTimer?.cancel();
-      _historyFlushTimer = null;
-      _historyDirty = false;
-      _historyCache = null;
-      try {
-        final decodedHist = jsonDecode(nextHistory);
-        if (decodedHist is List) {
-          final entries = decodedHist
-              .whereType<Map>()
-              .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
-              .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
-              .toList();
-          _allHistoryCache = entries;
-          await _flushHistoryToDisk();
+      if (sanitizedHistoryJson != null && parsedHistoryEntries != null) {
+        historyStateMutated = true;
+        _historyFlushTimer?.cancel();
+        _historyFlushTimer = null;
+        _historyDirty = false;
+        _historyFlushShouldSync = false;
+        _historyCache = null;
+        _allHistoryCache = parsedHistoryEntries;
+        _historyWriteEpoch++;
+        _historyCorrupted = false;
+        historyCorruptionNotifier.value = false;
+        await setPrefBoolChecked(
+          keyHistoryCorrupted,
+          false,
+          '观看历史损坏状态标记',
+        );
+        try {
+          await _atomicWriteFile(_watchHistoryFileName, sanitizedHistoryJson);
+          historyDiskCommitted = true;
           _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
+          // Secondary SharedPreferences mirror is best-effort once disk
+          // commit has succeeded; cold start reads `watch_history.json`
+          // whenever `keyWatchHistoryPrefsPendingFlush` is not `true`.
+          try {
+            recordPrefTouch(keyWatchHistory, nextValue: sanitizedHistoryJson);
+            if (await _prefs.setString(keyWatchHistory, sanitizedHistoryJson)) {
+              txWriteEpochs[keyWatchHistory] = _prefs.epochOf(keyWatchHistory);
+            }
+          } on Object catch (mirrorErr) {
+            debugPrint(
+              'StorageService: importBackupJson prefs mirror skipped after disk commit: $mirrorErr',
+            );
+          }
+          if (_prefs.getBool(keyWatchHistoryPrefsPendingFlush) == true) {
+            await setPrefBoolChecked(
+              keyWatchHistoryPrefsPendingFlush,
+              false,
+              '观看历史待回刷标记',
+            );
+          }
+        } on Object catch (e) {
+          if (historyDiskCommitted) {
+            rethrow;
+          }
+          debugPrint(
+            'StorageService: importBackupJson history flush fallback: $e',
+          );
+          await setPrefStringChecked(
+            keyWatchHistory,
+            sanitizedHistoryJson,
+            '规范化后的观看历史: $e',
+          );
+          await setPrefBoolChecked(
+            keyWatchHistoryPrefsPendingFlush,
+            true,
+            '观看历史待回刷标记: $e',
+          );
         }
-      } on Object catch (e) {
-        debugPrint('StorageService: importBackupJson history flush fallback: $e');
-        await _prefs.setString(keyWatchHistory, nextHistory);
       }
-      watchHistoryRevision.value++;
-    }
-    if (nextFavorites != null) {
-      await _prefs.setString(keyFavorites, nextFavorites);
-    }
-    if (nextSearch != null) {
-      await _prefs.setString(keySearchHistory, nextSearch);
-    }
-    if (settings[keyEpisodesDescending] is bool) {
-      await setEpisodesDescending(settings[keyEpisodesDescending] as bool);
-    }
-    if (settings[keyPlaySpeed] is num) {
-      final speed = (settings[keyPlaySpeed] as num).toDouble();
-      if (speed >= minPlaySpeed && speed <= maxPlaySpeed) {
-        await setPlaySpeed(speed);
+      if (nextFavorites != null) {
+        await setPrefStringChecked(keyFavorites, nextFavorites, '收藏数据');
       }
+      if (nextSearch != null) {
+        await setPrefStringChecked(keySearchHistory, nextSearch, '搜索历史');
+      }
+      if (settings[keyEpisodesDescending] is bool) {
+        await setPrefBoolChecked(
+          keyEpisodesDescending,
+          settings[keyEpisodesDescending] as bool,
+          '剧集排序设置',
+        );
+      }
+      if (settings[keyPlaySpeed] is num) {
+        final speed = (settings[keyPlaySpeed] as num).toDouble();
+        if (speed >= minPlaySpeed && speed <= maxPlaySpeed) {
+          await setPrefDoubleChecked(keyPlaySpeed, speed, '倍速设置');
+        }
+      }
+      if (settings[keyAutoNext] is bool) {
+        await setPrefBoolChecked(
+          keyAutoNext,
+          settings[keyAutoNext] as bool,
+          '自动连播设置',
+        );
+      }
+      // Normalize legacy single-key (`hls_ad_removal_enabled`) and newer
+      // dual-key (`hls_ad_strip_enabled`) backups together so settings UI and
+      // player initialization always read the same boolean value.
+      final bool? normalizedHlsAd = settings[keyHlsAdStripEnabled] is bool
+          ? settings[keyHlsAdStripEnabled] as bool
+          : (settings[keyHlsAdRemovalEnabled] is bool
+                ? settings[keyHlsAdRemovalEnabled] as bool
+                : null);
+      if (normalizedHlsAd != null) {
+        await setPrefBoolChecked(
+          keyHlsAdRemovalEnabled,
+          normalizedHlsAd,
+          '去广告设置',
+        );
+        await setPrefBoolChecked(
+          keyHlsAdStripEnabled,
+          normalizedHlsAd,
+          'HLS 过滤设置',
+        );
+      }
+      if (settings[keyMediaDiskCacheLimitMb] is int) {
+        await setPrefIntChecked(
+          keyMediaDiskCacheLimitMb,
+          (settings[keyMediaDiskCacheLimitMb] as int).clamp(0, 4096),
+          '媒体缓存上限设置',
+        );
+      }
+      int? normalizedDiskCacheMaxMb;
+      if (settings[keyDiskCacheMaxMb] is int) {
+        final mb = settings[keyDiskCacheMaxMb] as int;
+        normalizedDiskCacheMaxMb = allowedDiskCacheMbOptions.contains(mb)
+            ? mb
+            : (mb <= 0 ? 0 : defaultDiskCacheMaxMb);
+        await setPrefIntChecked(
+          keyDiskCacheMaxMb,
+          normalizedDiskCacheMaxMb,
+          '磁盘缓存上限设置',
+        );
+      }
+      final finalConfig = loadSavedConfig();
+      await _persistSniffAndAdsCache(
+        finalConfig,
+        setString: setPrefStringChecked,
+        setStringList: setPrefStringListChecked,
+        removeKey: removePrefChecked,
+      );
+      if (normalizedHlsAd != null) {
+        LocalMediaLease.defaultHlsAdStripEnabled = normalizedHlsAd;
+      }
+      if (normalizedDiskCacheMaxMb != null) {
+        await DiskBlockCache.instance.setMaxMegabytes(normalizedDiskCacheMaxMb);
+      }
+      if (sanitizedHistoryJson != null) {
+        _quarantinedHistoryBytes = null;
+        watchHistoryRevision.value++;
+      }
+      return finalConfig;
+    } on Object {
+      await rollbackBackupImport();
+      rethrow;
     }
-    if (settings[keyAutoNext] is bool) {
-      await setAutoNext(settings[keyAutoNext] as bool);
-    }
-    if (settings[keyHlsAdRemovalEnabled] is bool) {
-      await setHlsAdRemovalEnabled(settings[keyHlsAdRemovalEnabled] as bool);
-    }
-    if (settings[keyHlsAdStripEnabled] is bool) {
-      await setHlsAdStripEnabled(settings[keyHlsAdStripEnabled] as bool);
-    }
-    if (settings[keyMediaDiskCacheLimitMb] is int) {
-      await setMediaDiskCacheLimitMb(settings[keyMediaDiskCacheLimitMb] as int);
-    }
-    if (settings[keyDiskCacheMaxMb] is int) {
-      await setDiskCacheMaxMb(settings[keyDiskCacheMaxMb] as int);
-    }
-    final finalConfig = loadSavedConfig();
-    await _persistSniffAndAdsCache(finalConfig);
-    return finalConfig;
   }
 
   // ===========================================================================
@@ -4402,11 +5252,15 @@ class StorageService {
           decoded['history'] ??
           decoded['watchHistory'];
       if (rh is List) {
-        preservedRemoteHist = rh;
+        final sanitized = <Map<String, dynamic>>[];
         for (final item in rh.whereType<Map>()) {
           final e = WatchHistoryEntry.fromJson(Map<String, dynamic>.from(item));
-          if (e.site.isNotEmpty && e.id.isNotEmpty) remoteHist.add(e);
+          if (e.site.isNotEmpty && e.id.isNotEmpty) {
+            remoteHist.add(e);
+            sanitized.add(e.toJson());
+          }
         }
+        preservedRemoteHist = sanitized;
       }
       final rf = decoded['favorites'];
       if (rf is List) {
@@ -4840,6 +5694,7 @@ class StorageService {
       _historyDirty = false;
       _historyCache = null;
       _allHistoryCache = combinedAllHist;
+      _historyWriteEpoch++;
       await _flushHistoryToDisk();
       _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
       await _prefs.setString(keyFavorites, nextFavsJson);

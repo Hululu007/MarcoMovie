@@ -1,5 +1,6 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -114,7 +115,9 @@ class IosAvPlayerTelemetry {
   final IosThermalState thermalState;
   final int physicalMemoryBytes;
   final bool isPipSupported;
+  final bool isPipPossible;
   final bool isPipActive;
+  final double? systemVolume;
   final bool isAirPlayActive;
   final String? airPlayDeviceName;
 
@@ -122,7 +125,9 @@ class IosAvPlayerTelemetry {
     required this.thermalState,
     required this.physicalMemoryBytes,
     required this.isPipSupported,
+    this.isPipPossible = false,
     required this.isPipActive,
+    this.systemVolume,
     required this.isAirPlayActive,
     this.airPlayDeviceName,
   });
@@ -134,13 +139,17 @@ class IosAvPlayerTelemetry {
     final memRaw = map['physicalMemoryBytes'];
     final memBytes = memRaw is num ? memRaw.toInt() : 0;
     final devRaw = map['airPlayDeviceName']?.toString().trim() ?? '';
+    final volRaw = map['systemVolume'];
+    final sysVol = volRaw is num ? volRaw.toDouble().clamp(0.0, 1.0) : null;
     return IosAvPlayerTelemetry(
       thermalState: IosThermalState.fromWire(
         map['thermalState'] ?? map['thermalStateCode'],
       ),
       physicalMemoryBytes: memBytes,
       isPipSupported: map['isPipSupported'] == true,
+      isPipPossible: map['isPipPossible'] == true,
       isPipActive: map['isPipActive'] == true,
+      systemVolume: sysVol,
       isAirPlayActive: map['isAirPlayActive'] == true,
       airPlayDeviceName: devRaw.isEmpty ? null : devRaw,
     );
@@ -249,10 +258,14 @@ class IosAvPlayerController extends ChangeNotifier {
   final StreamController<IosThermalState> _thermalCtrl =
       StreamController<IosThermalState>.broadcast();
   final StreamController<bool> _pipCtrl = StreamController<bool>.broadcast();
+  final StreamController<String> _pipErrorCtrl =
+      StreamController<String>.broadcast();
   final StreamController<void> _pipRestoreCtrl =
       StreamController<void>.broadcast();
   final StreamController<bool> _airPlayCtrl =
       StreamController<bool>.broadcast();
+  final StreamController<double> _systemVolumeCtrl =
+      StreamController<double>.broadcast();
 
   StreamSubscription<dynamic>? _eventSub;
   bool _initialized = false;
@@ -260,20 +273,47 @@ class IosAvPlayerController extends ChangeNotifier {
   bool _fallbackEmittedForCurrentItem = false;
 
   bool _playing = false;
+  bool? _requestedPlaying;
+  static int _nextMediaId = 0;
+  int? _mediaId;
   bool _buffering = false;
   bool _ready = false;
   bool _completed = false;
   bool _hasError = false;
   Duration _position = Duration.zero;
+  Duration? _nativePositionSample;
+  int _nativePositionSampleSeq = 0;
+  int? _nativePositionSampleEventSeq;
+  int? _nativePositionSampleMediaId;
+  Duration? _confirmedSeekPosition;
+  int? _confirmedSeekMediaId;
+  int _confirmedSeekSampleSeq = -1;
+  int? _confirmedSeekEventSeq;
+  int _confirmedSeekGen = 0;
+  int _seekGeneration = 0;
+  int _latestSeekDispatchedSampleSeq = -1;
+  int? _seekBurstOriginPosMs;
+  int? _pendingCompletedMediaId;
+  int? _pendingCompletedEventSeq;
+  int? _completionSuppressMediaId;
+  int? _completionSuppressEventSeq;
+  final Set<int> _inFlightSeekGens = <int>{};
+  final Map<int, ({int targetMs, int sampleSeqAtDispatch})> _burstSeekTargets =
+      <int, ({int targetMs, int sampleSeqAtDispatch})>{};
   Duration _duration = Duration.zero;
   Duration _bufferedPosition = Duration.zero;
   double _rate = 1.0;
   double _volume = 1.0;
+  double _systemVolume = 0.5;
+  bool _hasSystemVolume = false;
   int _videoWidth = 0;
   int _videoHeight = 0;
   bool _isHdr = false;
   bool _isPipSupported = false;
+  bool _isPipPossible = false;
+  bool _isPipStarting = false;
   bool _isPipActive = false;
+  String? _lastPipError;
   bool _autoPipEnabled = true;
   bool _isAirPlayActive = false;
   String? _airPlayDeviceName;
@@ -306,15 +346,61 @@ class IosAvPlayerController extends ChangeNotifier {
   bool get completed => _completed;
   bool get hasError => _hasError;
   Duration get position => _position;
+  /// Latest playback position explicitly reported by native AVPlayer
+  /// (`ready` / `playbackState` / `progress` / `completed`), never mutated
+  /// optimistically by `open()` or `seek()`.
+  Duration? get nativePositionSample => _nativePositionSample;
+  int get nativePositionSampleSeq => _nativePositionSampleSeq;
+  int? get nativePositionSampleMediaId => _nativePositionSampleMediaId;
   Duration get duration => _duration;
   Duration get bufferedPosition => _bufferedPosition;
   double get rate => _rate;
   double get volume => _volume;
+  double get systemVolume => _systemVolume;
+  bool get hasSystemVolume => _hasSystemVolume;
   int get videoWidth => _videoWidth;
   int get videoHeight => _videoHeight;
   bool get isHdr => _isHdr;
+  int? get currentMediaId => _mediaId;
+  bool get _hasActivePendingSeek =>
+      _inFlightSeekGens.any((g) => g > _confirmedSeekGen);
+  bool get _hasLatestPendingSeek =>
+      _inFlightSeekGens.contains(_seekGeneration);
+  bool get hasInFlightSeek => _hasLatestPendingSeek;
+
+  /// Single source of truth for the current media item's latest confirmed
+  /// playback position (resolving native clock samples vs accepted seek
+  /// landings in strict sequence order).
+  Duration? get confirmedPosition {
+    final mediaId = _mediaId;
+    final hasMatchingNative =
+        _nativePositionSample != null &&
+        _nativePositionSampleMediaId == mediaId;
+    final hasMatchingConfirmedSeek =
+        _confirmedSeekPosition != null &&
+        _confirmedSeekMediaId == mediaId;
+    if (hasMatchingNative) {
+      if (!hasMatchingConfirmedSeek) {
+        return _nativePositionSample;
+      }
+      if (_nativePositionSampleEventSeq != null &&
+          _confirmedSeekEventSeq != null) {
+        return _nativePositionSampleEventSeq! > _confirmedSeekEventSeq!
+            ? _nativePositionSample
+            : _confirmedSeekPosition;
+      }
+      if (_nativePositionSampleSeq > _confirmedSeekSampleSeq) {
+        return _nativePositionSample;
+      }
+      return _confirmedSeekPosition;
+    }
+    return hasMatchingConfirmedSeek ? _confirmedSeekPosition : null;
+  }
   bool get isPipSupported => _isPipSupported;
+  bool get isPipPossible => _isPipPossible;
+  bool get isPipStarting => _isPipStarting;
   bool get isPipActive => _isPipActive;
+  String? get lastPipError => _lastPipError;
   bool get autoPipEnabled => _autoPipEnabled;
   bool get isAirPlayActive => _isAirPlayActive;
   String? get airPlayDeviceName => _airPlayDeviceName;
@@ -328,8 +414,10 @@ class IosAvPlayerController extends ChangeNotifier {
       _fallbackCtrl.stream;
   Stream<IosThermalState> get onThermalStateChanged => _thermalCtrl.stream;
   Stream<bool> get onPipStateChanged => _pipCtrl.stream;
+  Stream<String> get onPipError => _pipErrorCtrl.stream;
   Stream<void> get onPipRestoreForeground => _pipRestoreCtrl.stream;
   Stream<bool> get onAirPlayStateChanged => _airPlayCtrl.stream;
+  Stream<double> get onSystemVolumeChanged => _systemVolumeCtrl.stream;
 
   /// Static pre-check before launching `AVPlayer`.
   ///
@@ -502,6 +590,8 @@ class IosAvPlayerController extends ChangeNotifier {
   @visibleForTesting
   void handleNativeEvent(Map<Object?, Object?> event) {
     if (_disposed) return;
+    final mediaId = event['mediaId'];
+    if (mediaId != null && mediaId != _mediaId) return;
     final type = event['type']?.toString() ?? '';
     switch (type) {
       case 'telemetry':
@@ -519,14 +609,69 @@ class IosAvPlayerController extends ChangeNotifier {
         }
         break;
       case 'pipStateChanged':
-        final active = event['active'] == true;
-        if (event.containsKey('supported')) {
-          _isPipSupported = event['supported'] == true;
+        final phase = event['phase']?.toString() ?? '';
+        // Only treat PiP as active once native confirms didStart (or active
+        // state outside transient willStart).
+        final active = phase == 'willStart' ? false : (event['active'] == true);
+        final nextSupported = event.containsKey('supported')
+            ? event['supported'] == true
+            : _isPipSupported;
+        final nextPossible = event.containsKey('possible')
+            ? event['possible'] == true
+            : _isPipPossible;
+        final nextStarting = switch (phase) {
+          'willStart' => true,
+          'didStart' ||
+          'failed' ||
+          'cancelled' ||
+          'willStop' ||
+          'didStop' ||
+          'notReady' =>
+            false,
+          _ => active ? false : _isPipStarting,
+        };
+        final isFailed = phase == 'failed';
+        final failureMessage = isFailed
+            ? ((event['error']?.toString().trim().isNotEmpty ?? false)
+                ? event['error']!.toString().trim()
+                : '无法开启画中画')
+            : null;
+        final nextPipError = isFailed
+            ? failureMessage
+            : (active ? null : _lastPipError);
+        final activeChanged = active != _isPipActive;
+        final changed = activeChanged ||
+            nextSupported != _isPipSupported ||
+            nextPossible != _isPipPossible ||
+            nextStarting != _isPipStarting ||
+            nextPipError != _lastPipError ||
+            isFailed;
+        _isPipSupported = nextSupported;
+        _isPipPossible = nextPossible;
+        _isPipStarting = nextStarting;
+        _isPipActive = active;
+        _lastPipError = nextPipError;
+        if (activeChanged && !_pipCtrl.isClosed) {
+          _pipCtrl.add(active);
         }
-        if (active != _isPipActive) {
-          _isPipActive = active;
-          if (!_pipCtrl.isClosed) _pipCtrl.add(active);
+        if (isFailed && failureMessage != null && !_pipErrorCtrl.isClosed) {
+          _pipErrorCtrl.add(failureMessage);
+        }
+        if (changed) {
           _notify();
+        }
+        break;
+      case 'systemVolumeChanged':
+        final rawVol = event['volume'];
+        if (rawVol is num) {
+          final clamped = rawVol.toDouble().clamp(0.0, 1.0);
+          final changed = !_hasSystemVolume || (clamped - _systemVolume).abs() >= 0.001;
+          _systemVolume = clamped;
+          _hasSystemVolume = true;
+          if (changed) {
+            if (!_systemVolumeCtrl.isClosed) _systemVolumeCtrl.add(clamped);
+            _notify();
+          }
         }
         break;
       case 'pipRestoreForeground':
@@ -550,7 +695,7 @@ class IosAvPlayerController extends ChangeNotifier {
         _buffering = false;
         _hasError = false;
         _lastError = null;
-        _updateMetricsFromMap(event);
+        _updateMetricsFromMap(event, recordClockSample: true);
         if (event['audioTracks'] is List) {
           _audioTracks = _parseTrackList(event['audioTracks'] as List);
         }
@@ -565,17 +710,19 @@ class IosAvPlayerController extends ChangeNotifier {
         break;
       case 'playbackState':
         _playing = event['playing'] == true;
+        if (_playing == _requestedPlaying) _requestedPlaying = null;
         _buffering = event['buffering'] == true;
         if (event['rate'] is num) {
           final r = (event['rate'] as num).toDouble();
           if (r > 0) _rate = r;
         }
-        _updateMetricsFromMap(event);
+        _updateMetricsFromMap(event, recordClockSample: true);
         _notify();
         break;
       case 'progress':
         _playing = event['playing'] == true;
-        _updateMetricsFromMap(event);
+        if (_playing == _requestedPlaying) _requestedPlaying = null;
+        _updateMetricsFromMap(event, recordClockSample: true);
         _notify();
         break;
       case 'buffering':
@@ -586,9 +733,38 @@ class IosAvPlayerController extends ChangeNotifier {
         }
         break;
       case 'completed':
+        final incomingCompletedSeq = event['eventSeq'] is num
+            ? (event['eventSeq'] as num).toInt()
+            : null;
+        final isStaleAfterSeekAwayFromEnd =
+            incomingCompletedSeq != null &&
+            _completionSuppressMediaId == _mediaId &&
+            _completionSuppressEventSeq != null &&
+            incomingCompletedSeq <= _completionSuppressEventSeq!;
+        if (isStaleAfterSeekAwayFromEnd) {
+          break;
+        }
+        _updateMetricsFromMap(event, recordClockSample: true);
+        if (_hasActivePendingSeek) {
+          // A still-unsettled seek on the same media item may supersede this
+          // end-of-item event (e.g. scrubbing back from 99.75s -> 50s).
+          // Defer completion side effects until active in-flight seek(s) settle.
+          if (_pendingCompletedMediaId != _mediaId ||
+              _pendingCompletedEventSeq == null ||
+              incomingCompletedSeq == null ||
+              incomingCompletedSeq >= _pendingCompletedEventSeq!) {
+            _pendingCompletedMediaId = _mediaId;
+            _pendingCompletedEventSeq =
+                incomingCompletedSeq ?? _pendingCompletedEventSeq;
+          }
+          _notify();
+          break;
+        }
+        _pendingCompletedMediaId = null;
+        _pendingCompletedEventSeq = null;
         _playing = false;
+        _requestedPlaying = null;
         _completed = true;
-        _updateMetricsFromMap(event);
         _notify();
         break;
       case 'fallbackToMpv':
@@ -597,6 +773,7 @@ class IosAvPlayerController extends ChangeNotifier {
             : _position.inMilliseconds;
         final reason = event['reason']?.toString() ?? 'AVPlayer playback failed';
         _playing = false;
+        _requestedPlaying = null;
         _buffering = false;
         _hasError = true;
         _lastError = reason;
@@ -625,9 +802,42 @@ class IosAvPlayerController extends ChangeNotifier {
     return out;
   }
 
-  void _updateMetricsFromMap(Map<Object?, Object?> map) {
+  void _updateMetricsFromMap(
+    Map<Object?, Object?> map, {
+    bool recordClockSample = false,
+  }) {
     if (map['positionMs'] is num) {
-      _position = Duration(milliseconds: (map['positionMs'] as num).toInt());
+      final reported =
+          Duration(milliseconds: (map['positionMs'] as num).toInt());
+      final incomingEventSeq =
+          map['eventSeq'] is num ? (map['eventSeq'] as num).toInt() : null;
+      final isStaleNativeSample =
+          recordClockSample &&
+          incomingEventSeq != null &&
+          _nativePositionSampleMediaId == _mediaId &&
+          _nativePositionSampleEventSeq != null &&
+          incomingEventSeq <= _nativePositionSampleEventSeq!;
+      final isOlderThanConfirmedSeek =
+          recordClockSample &&
+          incomingEventSeq != null &&
+          _confirmedSeekMediaId == _mediaId &&
+          _confirmedSeekEventSeq != null &&
+          incomingEventSeq <= _confirmedSeekEventSeq!;
+      if (!isStaleNativeSample && !isOlderThanConfirmedSeek) {
+        // Freeze displayed position ONLY while the latest user seek target is
+        // still pending; once the latest target settles (even if an older
+        // superseded seek is still in flight), let real clock progression
+        // drive the scrubber and relative ±15s jumps.
+        if (!_hasLatestPendingSeek) {
+          _position = reported;
+        }
+        if (recordClockSample) {
+          _nativePositionSample = reported;
+          _nativePositionSampleSeq++;
+          _nativePositionSampleMediaId = _mediaId;
+          _nativePositionSampleEventSeq = incomingEventSeq;
+        }
+      }
     }
     if (map['durationMs'] is num) {
       _duration = Duration(milliseconds: (map['durationMs'] as num).toInt());
@@ -653,7 +863,12 @@ class IosAvPlayerController extends ChangeNotifier {
       _physicalMemoryBytes = t.physicalMemoryBytes;
     }
     _isPipSupported = t.isPipSupported;
+    _isPipPossible = t.isPipPossible;
     _isPipActive = t.isPipActive;
+    if (t.systemVolume != null) {
+      _systemVolume = t.systemVolume!;
+      _hasSystemVolume = true;
+    }
     _isAirPlayActive = t.isAirPlayActive;
     _airPlayDeviceName = t.airPlayDeviceName;
   }
@@ -674,7 +889,31 @@ class IosAvPlayerController extends ChangeNotifier {
     List<String> externalSubtitles = const <String>[],
   }) async {
     if (_disposed) return false;
+    final mediaId = ++_nextMediaId;
+    _mediaId = mediaId;
+    _requestedPlaying = null;
+    _playing = false;
+    _buffering = false;
+    _duration = Duration.zero;
+    _nativePositionSample = null;
+    _nativePositionSampleEventSeq = null;
+    _nativePositionSampleMediaId = mediaId;
+    _confirmedSeekPosition = null;
+    _confirmedSeekMediaId = null;
+    _confirmedSeekSampleSeq = -1;
+    _confirmedSeekEventSeq = null;
+    _seekGeneration++;
+    _confirmedSeekGen = _seekGeneration;
+    _latestSeekDispatchedSampleSeq = -1;
+    _seekBurstOriginPosMs = null;
+    _pendingCompletedMediaId = null;
+    _pendingCompletedEventSeq = null;
+    _completionSuppressMediaId = null;
+    _completionSuppressEventSeq = null;
+    _inFlightSeekGens.clear();
+    _burstSeekTargets.clear();
     await initialize();
+    if (_disposed || _mediaId != mediaId) return false;
     _fallbackEmittedForCurrentItem = false;
 
     final precheck = checkUrlCompatibility(
@@ -712,6 +951,7 @@ class IosAvPlayerController extends ChangeNotifier {
       final ok = await _channel.invokeMethod<bool>(
         'open',
         <String, dynamic>{
+          'mediaId': mediaId,
           'url': url,
           'headers': headers,
           'startPositionMs': startPosition.inMilliseconds,
@@ -719,10 +959,11 @@ class IosAvPlayerController extends ChangeNotifier {
           'preferredForwardBufferDuration': preferredForwardBufferDuration,
         },
       );
-      return ok == true;
+      return _mediaId == mediaId && ok == true;
     } on MissingPluginException {
       return false;
     } catch (e) {
+      if (_disposed || _mediaId != mediaId) return false;
       _hasError = true;
       _lastError = e.toString();
       if (!_fallbackEmittedForCurrentItem && !_fallbackCtrl.isClosed) {
@@ -740,40 +981,233 @@ class IosAvPlayerController extends ChangeNotifier {
     }
   }
 
-  Future<void> play() async {
+  Future<void> _requestPlayback(bool playing) async {
     if (!isSupportedPlatform || _disposed) return;
-    _playing = true;
-    _notify();
+    final mediaId = _mediaId;
+    _requestedPlaying = playing;
     try {
-      await _channel.invokeMethod<void>('play');
-    } on MissingPluginException {
-      // Ignore in widget tests without native host.
-    } catch (_) {}
+      await _channel.invokeMethod<void>(playing ? 'play' : 'pause');
+    } catch (_) {
+      if (mediaId == _mediaId && _requestedPlaying == playing) {
+        _requestedPlaying = null;
+      }
+    }
   }
 
-  Future<void> pause() async {
-    if (!isSupportedPlatform || _disposed) return;
-    _playing = false;
-    _notify();
-    try {
-      await _channel.invokeMethod<void>('pause');
-    } on MissingPluginException {
-      // Ignore in widget tests without native host.
-    } catch (_) {}
-  }
+  Future<void> play() => _requestPlayback(true);
+  Future<void> pause() => _requestPlayback(false);
+  Future<void> playOrPause() => (_requestedPlaying ?? _playing) ? pause() : play();
 
-  Future<void> playOrPause() => _playing ? pause() : play();
-
-  Future<void> seek(Duration target) async {
-    if (!isSupportedPlatform || _disposed) return;
+  Future<bool> seek(Duration target) async {
+    if (!isSupportedPlatform || _disposed) return false;
     final clampedMs = target.inMilliseconds < 0 ? 0 : target.inMilliseconds;
-    _position = Duration(milliseconds: clampedMs);
+    final mediaId = _mediaId;
+    final seekGen = ++_seekGeneration;
+    final sampleSeqAtDispatch = _nativePositionSampleSeq;
+    final preSeekPos = confirmedPosition ?? _nativePositionSample;
+    if (!_hasActivePendingSeek) {
+      _seekBurstOriginPosMs = preSeekPos?.inMilliseconds;
+      _burstSeekTargets.removeWhere((g, _) => g <= _confirmedSeekGen);
+    }
+    final burstOriginMs = _seekBurstOriginPosMs ?? preSeekPos?.inMilliseconds;
+    _latestSeekDispatchedSampleSeq = sampleSeqAtDispatch;
+    _inFlightSeekGens.add(seekGen);
+    _burstSeekTargets[seekGen] = (
+      targetMs: clampedMs,
+      sampleSeqAtDispatch: sampleSeqAtDispatch,
+    );
+    final optimisticPos = Duration(milliseconds: clampedMs);
+    _position = optimisticPos;
     _notify();
+
+    void finishSeekAndReconcile() {
+      _inFlightSeekGens.remove(seekGen);
+      if (_inFlightSeekGens.isEmpty) {
+        _seekBurstOriginPosMs = null;
+        _burstSeekTargets.clear();
+      }
+      if (_disposed || _mediaId != mediaId) return;
+      final hasNewerInFlight = _inFlightSeekGens.any((g) => g > seekGen);
+      if (hasNewerInFlight) return;
+      var changed = false;
+      final resolved = confirmedPosition ?? Duration.zero;
+      if (_position != resolved) {
+        _position = resolved;
+        changed = true;
+      }
+      if (!_hasActivePendingSeek && _pendingCompletedMediaId == mediaId) {
+        final pendingSeq = _pendingCompletedEventSeq;
+        final supersededBySeekAwayFromEnd =
+            pendingSeq != null &&
+            _completionSuppressMediaId == mediaId &&
+            _completionSuppressEventSeq != null &&
+            _completionSuppressEventSeq! >= pendingSeq;
+        _pendingCompletedMediaId = null;
+        _pendingCompletedEventSeq = null;
+        if (!supersededBySeekAwayFromEnd) {
+          _playing = false;
+          _requestedPlaying = null;
+          if (!_completed) {
+            _completed = true;
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        _notify();
+      }
+    }
+
     try {
-      await _channel.invokeMethod<bool>('seek', clampedMs);
+      final rawReply = await _channel.invokeMethod<dynamic>('seek', clampedMs);
+      final bool replyOk;
+      final int? replyEventSeq;
+      final int? replyPositionMs;
+      if (rawReply is Map) {
+        replyOk = rawReply['finished'] == true;
+        replyEventSeq = rawReply['eventSeq'] is num
+            ? (rawReply['eventSeq'] as num).toInt()
+            : null;
+        replyPositionMs = rawReply['positionMs'] is num
+            ? (rawReply['positionMs'] as num).toInt()
+            : null;
+      } else {
+        replyOk = rawReply != false;
+        replyEventSeq = null;
+        replyPositionMs = null;
+      }
+      final nativeAccepted = replyOk && !_disposed && _mediaId == mediaId;
+      final isLatest = _seekGeneration == seekGen;
+      if (nativeAccepted) {
+        final hasMatchingNative =
+            _nativePositionSample != null &&
+            _nativePositionSampleMediaId == mediaId;
+        final hasNewerSample =
+            hasMatchingNative && _nativePositionSampleSeq > sampleSeqAtDispatch;
+        var sampleSupersedesSeek = false;
+        if (replyEventSeq != null &&
+            hasMatchingNative &&
+            _nativePositionSampleEventSeq != null) {
+          // Exact native monotonic ordering when `MarcoAvPlayerEngine` stamps
+          // both clock events and seek completions with `eventSeq`.
+          sampleSupersedesSeek =
+              _nativePositionSampleEventSeq! > replyEventSeq;
+        } else if (hasNewerSample && !isLatest) {
+          // Legacy `bool`-only bridge fallback: distinguish pre-seek ticks
+          // still continuing along the pre-burst timeline (both forward and
+          // backward seeks while playing or paused) from genuine post-seek
+          // landing / clock samples. A sample that already arrived before a
+          // later request was dispatched can never be attributed to that later
+          // request.
+          final sampleMs = _nativePositionSample!.inMilliseconds;
+          final maxOldTimelineDriftMs =
+              (2500 * _rate.clamp(1.0, 4.0)).round();
+          final onOldPreSeekTimeline =
+              burstOriginMs != null &&
+              sampleMs >= burstOriginMs - 250 &&
+              sampleMs <= burstOriginMs + maxOldTimelineDriftMs;
+
+          bool nearTarget(int t) {
+            final tol = math.min(1500, (t * 0.25).round());
+            return sampleMs >= t - tol &&
+                sampleMs <= t + maxOldTimelineDriftMs;
+          }
+
+          final landedAtNewerSeek = _burstSeekTargets.entries.any((e) {
+            if (e.key <= seekGen) return false;
+            if (_nativePositionSampleSeq <= e.value.sampleSeqAtDispatch) {
+              return false;
+            }
+            if (!nearTarget(e.value.targetMs)) return false;
+            if (!onOldPreSeekTimeline) return true;
+            return (sampleMs - e.value.targetMs).abs() <
+                (sampleMs - burstOriginMs).abs();
+          });
+          final landedAtThisSeek =
+              clampedMs > 0 &&
+              nearTarget(clampedMs) &&
+              sampleMs >= clampedMs &&
+              !onOldPreSeekTimeline;
+          final arrivedAfterLatestSeekDispatch =
+              _nativePositionSampleSeq > _latestSeekDispatchedSampleSeq;
+
+          if (landedAtNewerSeek ||
+              landedAtThisSeek ||
+              (!onOldPreSeekTimeline && arrivedAfterLatestSeekDispatch)) {
+            sampleSupersedesSeek = true;
+          }
+        }
+        final landedMs =
+            (replyPositionMs != null && replyPositionMs >= 0)
+                ? replyPositionMs
+                : clampedMs;
+        final durationMs = _duration.inMilliseconds;
+        // Treat a seek as landing away from the endpoint whenever the user
+        // requested a position strictly before `durationMs` AND native
+        // confirmed landing strictly before `durationMs` (no artificial end
+        // fudge window that would swallow legitimate near-end scrub-backs such
+        // as 99.6s on a 100s clip or 1.28s on a 1.6s clip). Exact endpoint
+        // seeks (`clampedMs >= durationMs`, e.g. +15s clamped to duration) or
+        // native landings at `durationMs` keep endpoint completion intact.
+        final landedAwayFromEnd =
+            durationMs <= 0 ||
+            (clampedMs < durationMs && landedMs < durationMs);
+        final newerThanConfirmedEventSeq =
+            replyEventSeq == null ||
+            _confirmedSeekEventSeq == null ||
+            replyEventSeq > _confirmedSeekEventSeq!;
+        // Track completion-suppression watermark independently of whether a
+        // fresher post-landing clock sample already won the position check:
+        // - Scrubbing back away from the end supersedes older stale `completed`
+        //   events even when a newer clock tick arrived before this seek reply.
+        // - Seeking directly onto the media endpoint (`!landedAwayFromEnd`)
+        //   MUST NOT suppress a genuine `completed` event at the endpoint.
+        final isNewerSeekGen = seekGen > _confirmedSeekGen;
+        if (isNewerSeekGen) {
+          _confirmedSeekGen = seekGen;
+          if (landedAwayFromEnd) {
+            if (replyEventSeq != null &&
+                (_completionSuppressMediaId != mediaId ||
+                    _completionSuppressEventSeq == null ||
+                    replyEventSeq > _completionSuppressEventSeq!)) {
+              _completionSuppressMediaId = mediaId;
+              _completionSuppressEventSeq = replyEventSeq;
+            }
+            final supersedesPendingCompletion =
+                _pendingCompletedMediaId == mediaId &&
+                (_pendingCompletedEventSeq == null ||
+                    replyEventSeq == null ||
+                    replyEventSeq >= _pendingCompletedEventSeq!);
+            if (supersedesPendingCompletion) {
+              _pendingCompletedMediaId = null;
+              _pendingCompletedEventSeq = null;
+            }
+            if (_completed) {
+              _completed = false;
+            }
+          }
+          if (newerThanConfirmedEventSeq && !sampleSupersedesSeek) {
+            _confirmedSeekPosition = Duration(milliseconds: landedMs);
+            _confirmedSeekMediaId = mediaId;
+            _confirmedSeekSampleSeq = _nativePositionSampleSeq;
+            _confirmedSeekEventSeq = replyEventSeq;
+          }
+        }
+        finishSeekAndReconcile();
+      } else {
+        _burstSeekTargets.remove(seekGen);
+        finishSeekAndReconcile();
+      }
+      return nativeAccepted;
     } on MissingPluginException {
-      // Ignore in tests.
-    } catch (_) {}
+      _burstSeekTargets.remove(seekGen);
+      finishSeekAndReconcile();
+      return false;
+    } catch (_) {
+      _burstSeekTargets.remove(seekGen);
+      finishSeekAndReconcile();
+      return false;
+    }
   }
 
   Future<void> setRate(double nextRate) async {
@@ -798,6 +1232,186 @@ class IosAvPlayerController extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Reads the real iOS device hardware/system output volume in `[0.0, 1.0]`.
+  Future<double?> getSystemVolume() async {
+    if (!isSupportedPlatform || _disposed) return null;
+    try {
+      final raw = await _channel.invokeMethod<num>('getSystemVolume');
+      if (raw == null) return null;
+      final clamped = raw.toDouble().clamp(0.0, 1.0);
+      _systemVolume = clamped;
+      _hasSystemVolume = true;
+      _notify();
+      return clamped;
+    } on MissingPluginException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Updates the real iOS device hardware/system output volume in `[0.0, 1.0]`.
+  ///
+  /// Returns `({bool applied, double? confirmedVolume, double? observedVolume})`
+  /// so callers can distinguish optimistic slider acceptance from an explicit
+  /// hardware `observedVolume` reading and revert/reconcile HUD & drag baseline.
+  Future<({bool applied, double? confirmedVolume, double? observedVolume})>
+      setSystemVolumeDetailed(
+    double volume01,
+  ) async {
+    if (!isSupportedPlatform || _disposed) {
+      final cur = _hasSystemVolume ? _systemVolume : null;
+      return (applied: false, confirmedVolume: cur, observedVolume: cur);
+    }
+    final clamped = volume01.clamp(0.0, 1.0);
+    try {
+      final raw = await _channel.invokeMethod<dynamic>('setSystemVolume', clamped);
+      if (raw is Map) {
+        final applied = raw['applied'] == true;
+        final rawVol = raw['volume'];
+        final rawObs = raw['observedVolume'];
+        final confirmed = rawVol is num
+            ? rawVol.toDouble().clamp(0.0, 1.0)
+            : (_hasSystemVolume ? _systemVolume : null);
+        final observed = rawObs is num
+            ? rawObs.toDouble().clamp(0.0, 1.0)
+            : (!applied ? confirmed : null);
+        final storedVol = observed ?? confirmed;
+        if (storedVol != null) {
+          _systemVolume = storedVol;
+          _hasSystemVolume = true;
+          _notify();
+        }
+        return (
+          applied: applied,
+          confirmedVolume: confirmed,
+          observedVolume: observed,
+        );
+      }
+      if (raw is num) {
+        final appliedVol = raw.toDouble().clamp(0.0, 1.0);
+        _systemVolume = appliedVol;
+        _hasSystemVolume = true;
+        _notify();
+        return (
+          applied: true,
+          confirmedVolume: appliedVol,
+          observedVolume: null,
+        );
+      }
+      final fallbackConfirmed = await getSystemVolume();
+      final resolved = fallbackConfirmed ?? (_hasSystemVolume ? _systemVolume : null);
+      return (
+        applied: false,
+        confirmedVolume: resolved,
+        observedVolume: resolved,
+      );
+    } on MissingPluginException {
+      final cur = _hasSystemVolume ? _systemVolume : null;
+      return (applied: false, confirmedVolume: cur, observedVolume: cur);
+    } catch (_) {
+      final fallbackConfirmed = await getSystemVolume();
+      final resolved = fallbackConfirmed ?? (_hasSystemVolume ? _systemVolume : null);
+      return (
+        applied: false,
+        confirmedVolume: resolved,
+        observedVolume: resolved,
+      );
+    }
+  }
+
+  /// Updates the real iOS device hardware/system output volume in `[0.0, 1.0]`.
+  /// Returns the confirmed volume on success, or `null` if native write failed.
+  Future<double?> setSystemVolume(double volume01) async {
+    final res = await setSystemVolumeDetailed(volume01);
+    return res.applied ? res.confirmedVolume : null;
+  }
+
+  /// Detaches the hidden native `MPVolumeView` once the player exits so
+  /// system hardware volume buttons behave normally outside playback.
+  Future<void> detachSystemVolume() async {
+    if (!isSupportedPlatform || _disposed) return;
+    try {
+      await _channel.invokeMethod<void>('detachSystemVolume');
+    } on MissingPluginException {
+      // Ignore in tests.
+    } catch (_) {}
+  }
+
+  static Future<double?> readDefaultSystemVolume() async {
+    if (kIsWeb || OhosRuntime.isOhos || defaultTargetPlatform != TargetPlatform.iOS) {
+      return null;
+    }
+    try {
+      final raw = await defaultChannel.invokeMethod<num>('getSystemVolume');
+      return raw?.toDouble().clamp(0.0, 1.0);
+    } on MissingPluginException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<({bool applied, double? confirmedVolume, double? observedVolume})>
+      writeDefaultSystemVolumeDetailed(double volume01) async {
+    if (kIsWeb || OhosRuntime.isOhos || defaultTargetPlatform != TargetPlatform.iOS) {
+      return (applied: false, confirmedVolume: null, observedVolume: null);
+    }
+    final clamped = volume01.clamp(0.0, 1.0);
+    try {
+      final raw = await defaultChannel.invokeMethod<dynamic>(
+        'setSystemVolume',
+        clamped,
+      );
+      if (raw is Map) {
+        final applied = raw['applied'] == true;
+        final rawVol = raw['volume'];
+        final rawObs = raw['observedVolume'];
+        final confirmed = rawVol is num
+            ? rawVol.toDouble().clamp(0.0, 1.0)
+            : await readDefaultSystemVolume();
+        final observed = rawObs is num
+            ? rawObs.toDouble().clamp(0.0, 1.0)
+            : (!applied ? confirmed : null);
+        return (
+          applied: applied,
+          confirmedVolume: confirmed,
+          observedVolume: observed,
+        );
+      }
+      if (raw is num) {
+        return (
+          applied: true,
+          confirmedVolume: raw.toDouble().clamp(0.0, 1.0),
+          observedVolume: null,
+        );
+      }
+      final fallback = await readDefaultSystemVolume();
+      return (applied: false, confirmedVolume: fallback, observedVolume: fallback);
+    } on MissingPluginException {
+      return (applied: false, confirmedVolume: null, observedVolume: null);
+    } catch (_) {
+      final fallback = await readDefaultSystemVolume();
+      return (applied: false, confirmedVolume: fallback, observedVolume: fallback);
+    }
+  }
+
+  static Future<double?> writeDefaultSystemVolume(double volume01) async {
+    final res = await writeDefaultSystemVolumeDetailed(volume01);
+    return res.applied ? res.confirmedVolume : null;
+  }
+
+  static Future<void> detachDefaultSystemVolume() async {
+    if (kIsWeb || OhosRuntime.isOhos || defaultTargetPlatform != TargetPlatform.iOS) {
+      return;
+    }
+    try {
+      await defaultChannel.invokeMethod<void>('detachSystemVolume');
+    } on MissingPluginException {
+      // Ignore in tests.
+    } catch (_) {}
+  }
+
   Future<void> setVideoGravity(String gravity) async {
     if (!isSupportedPlatform || _disposed) return;
     try {
@@ -812,8 +1426,15 @@ class IosAvPlayerController extends ChangeNotifier {
     try {
       final ok = await _channel.invokeMethod<bool>('startPip');
       if (ok == true) {
-        _isPipActive = true;
+        // Do NOT mark `_isPipActive = true` optimistically before native emits
+        // `didStart`; track pending native startup instead.
+        _isPipStarting = !_isPipActive;
         _notify();
+      } else {
+        if (_isPipStarting) {
+          _isPipStarting = false;
+          _notify();
+        }
       }
       return ok == true;
     } on MissingPluginException {
@@ -827,6 +1448,7 @@ class IosAvPlayerController extends ChangeNotifier {
     if (!isSupportedPlatform || _disposed) return;
     try {
       await _channel.invokeMethod<void>('stopPip');
+      _isPipStarting = false;
       _isPipActive = false;
       _notify();
     } on MissingPluginException {
@@ -894,8 +1516,27 @@ class IosAvPlayerController extends ChangeNotifier {
   }
 
   Future<void> stop() async {
+    _mediaId = null;
+    _requestedPlaying = null;
     _playing = false;
     _buffering = false;
+    _nativePositionSample = null;
+    _nativePositionSampleEventSeq = null;
+    _nativePositionSampleMediaId = null;
+    _confirmedSeekPosition = null;
+    _confirmedSeekMediaId = null;
+    _confirmedSeekSampleSeq = -1;
+    _confirmedSeekEventSeq = null;
+    _seekGeneration++;
+    _confirmedSeekGen = _seekGeneration;
+    _latestSeekDispatchedSampleSeq = -1;
+    _seekBurstOriginPosMs = null;
+    _pendingCompletedMediaId = null;
+    _pendingCompletedEventSeq = null;
+    _completionSuppressMediaId = null;
+    _completionSuppressEventSeq = null;
+    _inFlightSeekGens.clear();
+    _burstSeekTargets.clear();
     _notify();
     if (!isSupportedPlatform || _disposed) return;
     try {
@@ -932,8 +1573,10 @@ class IosAvPlayerController extends ChangeNotifier {
     _fallbackCtrl.close();
     _thermalCtrl.close();
     _pipCtrl.close();
+    _pipErrorCtrl.close();
     _pipRestoreCtrl.close();
     _airPlayCtrl.close();
+    _systemVolumeCtrl.close();
     super.dispose();
   }
 }

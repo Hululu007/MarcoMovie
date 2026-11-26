@@ -14,41 +14,51 @@ import '../core/cms_parser.dart';
 import '../core/emby_library.dart';
 import '../core/media_library_connectors.dart';
 import '../core/models.dart';
+import '../core/personal_netdisk_library.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
 import 'ios_settings.dart';
 import 'motion/ios27_springs.dart';
-import 'netdisk_sheet.dart';
+import 'personal_netdisk_picker_page.dart';
+
+/// Computes the responsive column count for the Add Resource Library grid:
+/// - Narrow phone / large Dynamic Type / narrow iPad Split View: 2 columns
+/// - Standard iPhone: 3 columns
+/// - Wide / iPad: 4 columns
+int computeAddLibraryColumnCount({
+  required double availableWidth,
+  required double textScale,
+}) {
+  final safeScale = math.max(1.0, textScale);
+  final effectiveWidth = availableWidth / safeScale;
+  if (availableWidth < 330 || effectiveWidth < 280) return 2;
+  if (availableWidth < 540 || effectiveWidth < 460) return 3;
+  return 4;
+}
 
 enum _LibraryTileId {
-  manualInput,
-  localPack,
-  clipboardQuick,
-  configCenter,
-  webdav,
-  smb,
-  localDevice,
   emby,
   jellyfin,
   plex,
+  webdav,
+  smb,
   alistNas,
   quarkDrive,
   ucDrive,
   baiduDrive,
   aliDrive,
+  localDevice,
+  manualInput,
+  localPack,
 }
 
 class _LibraryTileSpec {
   final _LibraryTileId id;
   final String label;
-  final int sectionIndex;
-  final int columnIndex;
 
   const _LibraryTileSpec({
     required this.id,
     required this.label,
-    required this.sectionIndex,
-    required this.columnIndex,
   });
 }
 
@@ -62,30 +72,9 @@ class _LibrarySectionSpec {
   });
 }
 
-class _ScatterSeed {
-  final Offset startOffset;
-  final double startAngle;
-  final double startScale;
-  final double staggerStart;
-  final double ambientPhase;
-
-  const _ScatterSeed({
-    required this.startOffset,
-    required this.startAngle,
-    required this.startScale,
-    required this.staggerStart,
-    required this.ambientPhase,
-  });
-}
-
-/// Rex-inspired "添加资源库" hub replacing the legacy import dialog.
-///
-/// Features:
-/// - Categorized resource library grid (Subscriptions, File System, Media
-///   Servers, Cloud Drives & NAS) with real end-to-end connectors.
-/// - Custom animated vector icons with tactile spring bounce & ambient motion.
-/// - Randomized scatter/stacked-pile -> categorized aligned grid entrance.
-/// - Cleanly redesigned manual subscription & group-pill form.
+/// Reorganized "添加资源库" hub with four clear aligned sections (Media Servers,
+/// Network Storage, Personal Cloud Drives, Local & Subscriptions), zero scatter
+/// animation, and real end-to-end verified connectors.
 class AddResourceLibraryView extends StatefulWidget {
   final StorageService storage;
   final CmsClient client;
@@ -118,125 +107,46 @@ class AddResourceLibraryView extends StatefulWidget {
   State<AddResourceLibraryView> createState() => _AddResourceLibraryViewState();
 }
 
-class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
-    with TickerProviderStateMixin {
+class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
   static const List<_LibrarySectionSpec> _sections = <_LibrarySectionSpec>[
-    _LibrarySectionSpec(
-      title: '文件系统',
-      tiles: [
-        _LibraryTileSpec(
-          id: _LibraryTileId.webdav,
-          label: 'WebDAV',
-          sectionIndex: 0,
-          columnIndex: 0,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.smb,
-          label: 'SMB',
-          sectionIndex: 0,
-          columnIndex: 1,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.localDevice,
-          label: '当前设备',
-          sectionIndex: 0,
-          columnIndex: 2,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.localPack,
-          label: '本地配置包',
-          sectionIndex: 0,
-          columnIndex: 3,
-        ),
-      ],
-    ),
     _LibrarySectionSpec(
       title: '媒体服务器',
       tiles: [
-        _LibraryTileSpec(
-          id: _LibraryTileId.emby,
-          label: 'Emby',
-          sectionIndex: 1,
-          columnIndex: 0,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.jellyfin,
-          label: 'Jellyfin',
-          sectionIndex: 1,
-          columnIndex: 1,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.plex,
-          label: 'Plex',
-          sectionIndex: 1,
-          columnIndex: 2,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.alistNas,
-          label: 'NAS / AList',
-          sectionIndex: 1,
-          columnIndex: 3,
-        ),
+        _LibraryTileSpec(id: _LibraryTileId.emby, label: 'Emby'),
+        _LibraryTileSpec(id: _LibraryTileId.jellyfin, label: 'Jellyfin'),
+        _LibraryTileSpec(id: _LibraryTileId.plex, label: 'Plex'),
       ],
     ),
     _LibrarySectionSpec(
-      title: '订阅与手动导入',
+      title: '网络存储',
       tiles: [
-        _LibraryTileSpec(
-          id: _LibraryTileId.manualInput,
-          label: '手动输入',
-          sectionIndex: 2,
-          columnIndex: 0,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.clipboardQuick,
-          label: '剪贴板快导',
-          sectionIndex: 2,
-          columnIndex: 1,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.configCenter,
-          label: '配置中心',
-          sectionIndex: 2,
-          columnIndex: 2,
-        ),
+        _LibraryTileSpec(id: _LibraryTileId.webdav, label: 'WebDAV'),
+        _LibraryTileSpec(id: _LibraryTileId.smb, label: 'SMB'),
+        _LibraryTileSpec(id: _LibraryTileId.alistNas, label: 'AList / OpenList'),
       ],
     ),
     _LibrarySectionSpec(
-      title: '网盘与云库',
+      title: '个人网盘',
       tiles: [
-        _LibraryTileSpec(
-          id: _LibraryTileId.quarkDrive,
-          label: '夸克云盘',
-          sectionIndex: 3,
-          columnIndex: 0,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.ucDrive,
-          label: 'UC 网盘',
-          sectionIndex: 3,
-          columnIndex: 1,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.baiduDrive,
-          label: '百度网盘',
-          sectionIndex: 3,
-          columnIndex: 2,
-        ),
-        _LibraryTileSpec(
-          id: _LibraryTileId.aliDrive,
-          label: '阿里云盘',
-          sectionIndex: 3,
-          columnIndex: 3,
-        ),
+        _LibraryTileSpec(id: _LibraryTileId.quarkDrive, label: '夸克'),
+        _LibraryTileSpec(id: _LibraryTileId.ucDrive, label: 'UC'),
+        _LibraryTileSpec(id: _LibraryTileId.baiduDrive, label: '百度'),
+        _LibraryTileSpec(id: _LibraryTileId.aliDrive, label: '阿里'),
+      ],
+    ),
+    _LibrarySectionSpec(
+      title: '本机与订阅',
+      tiles: [
+        _LibraryTileSpec(id: _LibraryTileId.localDevice, label: '当前设备'),
+        _LibraryTileSpec(id: _LibraryTileId.manualInput, label: '手动输入'),
+        _LibraryTileSpec(id: _LibraryTileId.localPack, label: '本地配置包'),
       ],
     ),
   ];
 
-  late final AnimationController _entranceCtrl;
-  late final AnimationController _ambientCtrl;
-  late final Map<_LibraryTileId, _ScatterSeed> _seeds;
   bool _busy = false;
+  _LibraryTileId? _busyTileId;
+  int? _noticeSectionIndex;
   String? _bannerNotice;
   bool _bannerIsError = false;
   bool _openedInitialManual = false;
@@ -244,23 +154,8 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
   @override
   void initState() {
     super.initState();
-    _entranceCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 920),
-    );
-    _ambientCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 3600),
-    )..repeat();
-    _seeds = _generateRandomScatterSeeds();
-
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (Ios27ConcentricGeometry.isReduceMotion(context)) {
-        _entranceCtrl.value = 1.0;
-      } else {
-        unawaited(_entranceCtrl.forward());
-      }
       final hasDirectPayload =
           (widget.initialInput != null && widget.initialInput!.trim().isNotEmpty) ||
               (widget.initialError != null &&
@@ -277,46 +172,23 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
     });
   }
 
-  Map<_LibraryTileId, _ScatterSeed> _generateRandomScatterSeeds() {
-    final rng = math.Random();
-    final map = <_LibraryTileId, _ScatterSeed>{};
-    var idx = 0;
-    for (final section in _sections) {
-      for (final tile in section.tiles) {
-        // Pull every tile initially into a lively, randomized stacked deck near
-        // the center of the sheet, with varied tilt angles & slight depth scale.
-        final centerColBias = (1.5 - tile.columnIndex) * 76.0;
-        final centerRowBias = (1.45 - tile.sectionIndex) * 116.0;
-        final jitterX = (rng.nextDouble() * 2 - 1) * 34.0;
-        final jitterY = (rng.nextDouble() * 2 - 1) * 28.0;
-        final angle = (rng.nextDouble() * 2 - 1) * 0.44;
-        final scale = 0.72 + rng.nextDouble() * 0.24;
-        final stagger = (idx * 0.026).clamp(0.0, 0.36);
-        map[tile.id] = _ScatterSeed(
-          startOffset: Offset(centerColBias + jitterX, centerRowBias + jitterY),
-          startAngle: angle,
-          startScale: scale,
-          staggerStart: stagger,
-          ambientPhase: rng.nextDouble() * math.pi * 2,
-        );
-        idx++;
-      }
-    }
-    return map;
+  String _cleanErrorText(Object error) {
+    return error
+        .toString()
+        .replaceFirst(RegExp(r'^(?:Exception|FormatException|StateError):\s*'), '')
+        .trim();
   }
 
-  @override
-  void dispose() {
-    _entranceCtrl.dispose();
-    _ambientCtrl.dispose();
-    super.dispose();
-  }
-
-  void _setNotice(String msg, {bool isError = false}) {
+  void _setNotice(
+    String msg, {
+    bool isError = false,
+    int? sectionIndex,
+  }) {
     if (!mounted) return;
     setState(() {
       _bannerNotice = msg;
       _bannerIsError = isError;
+      _noticeSectionIndex = sectionIndex;
     });
   }
 
@@ -344,23 +216,17 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
       case _LibraryTileId.localPack:
         await _handlePickLocalPack();
         return;
-      case _LibraryTileId.clipboardQuick:
-        await _handleClipboardQuickImport();
-        return;
-      case _LibraryTileId.configCenter:
-        await _openConfigCenter(null);
-        return;
       case _LibraryTileId.quarkDrive:
-        await _openConfigCenter('quark');
+        await _openPersonalNetdiskPicker(PersonalCloudProvider.quark);
         return;
       case _LibraryTileId.ucDrive:
-        await _openConfigCenter('uc');
+        await _openPersonalNetdiskPicker(PersonalCloudProvider.uc);
         return;
       case _LibraryTileId.baiduDrive:
-        await _openConfigCenter('baidu');
+        await _openPersonalNetdiskPicker(PersonalCloudProvider.baidu);
         return;
       case _LibraryTileId.aliDrive:
-        await _openConfigCenter('ali');
+        await _openPersonalNetdiskPicker(PersonalCloudProvider.ali);
         return;
       case _LibraryTileId.emby:
         await _openServerForm(
@@ -442,7 +308,7 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
         return;
       case _LibraryTileId.alistNas:
         await _openServerForm(
-          title: '添加 NAS / AList 资源库',
+          title: '添加 AList / OpenList 资源库',
           accentColor: const Color(0xFF0EA5E9),
           addressHint: 'http://nas.example:5244',
           fields: const [
@@ -450,7 +316,7 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
             _FormFieldSpec('root', '起始目录（可选）', '/'),
             _FormFieldSpec('user', '账号（公开站可留空）', 'admin'),
             _FormFieldSpec('pass', '密码（公开站可留空）', '填写登录密码', obscure: true),
-            _FormFieldSpec('label', '显示名称（可选）', '如：群晖 / 飞牛 NAS'),
+            _FormFieldSpec('label', '显示名称（可选）', '如：家庭 OpenList'),
           ],
           onConnect: (values, group, isPriv) => AlistNasLibrary.login(
             values['address'] ?? '',
@@ -467,22 +333,24 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
         return;
       case _LibraryTileId.smb:
         await _openServerForm(
-          title: '添加 SMB / 局域网 NAS',
+          title: '添加 SMB 共享资源库',
           accentColor: const Color(0xFF2563EB),
           addressHint: 'nas.example',
           fields: const [
             _FormFieldSpec('host', '主机 IP 或域名', '如：nas.example 或局域网主机 IP'),
             _FormFieldSpec('share', '共享目录名', '如：Movies 或 Video'),
-            _FormFieldSpec('user', '用户名（可选）', 'SMB 登录账号'),
-            _FormFieldSpec('pass', '密码（可选）', 'SMB 登录密码', obscure: true),
+            _FormFieldSpec('port', '端口（默认 445）', '445'),
+            _FormFieldSpec('user', '用户名（访客可留空）', 'SMB 登录账号'),
+            _FormFieldSpec('pass', '密码（访客可留空）', 'SMB 登录密码', obscure: true),
             _FormFieldSpec(
               'webdav',
-              '伴随 WebDAV 地址（可选，用于目录浏览）',
+              '伴随 WebDAV 地址（可选，留空即使用纯 SMB 直连）',
               'https://dav.example:5006/Movies/',
             ),
           ],
           onConnect: (values, group, isPriv) => SmbNasLibrary.configure(
             host: values['host'] ?? '',
+            port: int.tryParse((values['port'] ?? '').trim()) ?? 445,
             share: values['share'] ?? '',
             username: values['user'] ?? '',
             password: values['pass'] ?? '',
@@ -498,21 +366,37 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
     }
   }
 
-  Future<void> _openConfigCenter(String? initialDriveKey) async {
-    await showNetdiskAccountSheet(
-      context,
-      widget.storage,
-      initialDriveKey: initialDriveKey,
-      iosBackLabel: '添加资源库',
-      sites: widget.loadedSites,
-      activeGroup: widget.activeGroup,
-      onOpenCatPawSettings: widget.onOpenCatPawSettings,
-      onChanged: widget.onLibraryAdded,
+  Future<void> _openPersonalNetdiskPicker(
+    PersonalCloudProvider provider,
+  ) async {
+    final saved =
+        await Navigator.of(context).push<({SubscriptionEntry entry, bool updatedExisting})>(
+      buildApplePageRoute<({SubscriptionEntry entry, bool updatedExisting})>(
+        builder: (_) => PersonalNetdiskPickerPage(
+          provider: provider,
+          storage: widget.storage,
+          group: widget.initialGroup,
+          isPrivate: widget.initialIsPrivate,
+          onLibrarySaved: (_) {
+            widget.onLibraryAdded();
+          },
+        ),
+      ),
     );
+    if (saved != null && mounted) {
+      if (widget.initialIsPrivate && !widget.storage.hasPrivacyPassword) {
+        await widget.onNeedsPrivacyPassword?.call();
+      }
+      if (mounted) Navigator.of(context).pop();
+    }
   }
 
   Future<void> _handlePickLocalPack() async {
-    setState(() => _busy = true);
+    setState(() {
+      _busy = true;
+      _busyTileId = _LibraryTileId.localPack;
+      _bannerNotice = null;
+    });
     try {
       final picked = await FilePicker.platform.pickFiles(
         type: FileType.any,
@@ -539,14 +423,23 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
       if (!mounted) return;
       await _openManualImportForm(initialJson: body);
     } catch (e) {
-      _setNotice('读取本地配置包失败：$e', isError: true);
+      _setNotice('读取本地配置包失败：$e', isError: true, sectionIndex: 3);
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _busyTileId = null;
+        });
+      }
     }
   }
 
   Future<void> _handlePickLocalVideos() async {
-    setState(() => _busy = true);
+    setState(() {
+      _busy = true;
+      _busyTileId = _LibraryTileId.localDevice;
+      _bannerNotice = null;
+    });
     try {
       final picked = await FilePicker.platform.pickFiles(
         type: FileType.any,
@@ -558,7 +451,6 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
           .where((p) => p.isNotEmpty)
           .toList();
       if (paths.isEmpty || !mounted) return;
-      // If the user picked a single JSON/ZIP/M3U config file, route to config pack parser.
       if (paths.length == 1) {
         final lower = paths.first.toLowerCase();
         if (lower.endsWith('.json') ||
@@ -583,43 +475,14 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
       );
       await _commitSubscriptionEntry(entry, isPrivate: widget.initialIsPrivate);
     } catch (e) {
-      _setNotice('导入本机影片失败：$e', isError: true);
+      _setNotice('导入本机影片失败：$e', isError: true, sectionIndex: 3);
     } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _handleClipboardQuickImport() async {
-    setState(() => _busy = true);
-    try {
-      final data = await Clipboard.getData(Clipboard.kTextPlain);
-      final text = (data?.text ?? '').trim();
-      if (text.isEmpty) {
-        _setNotice('剪贴板为空，请先复制订阅链接或配置内容', isError: true);
-        return;
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _busyTileId = null;
+        });
       }
-      if (CmsParser.isBackupPayload(text)) {
-        await widget.storage.importBackupJson(text);
-        widget.onLibraryAdded();
-        if (mounted) Navigator.of(context).pop();
-        return;
-      }
-      final entries = await widget.client.resolveBatchSubscriptions(
-        rawTextInput: text,
-        defaultGroup: widget.initialGroup,
-        isPrivate: widget.initialIsPrivate,
-      );
-      await widget.storage.upsertSubscriptions(entries);
-      widget.onLibraryAdded();
-      if (mounted) Navigator.of(context).pop();
-    } catch (e) {
-      if (!mounted) return;
-      await _openManualImportForm(
-        initialUrl: (await Clipboard.getData(Clipboard.kTextPlain))?.text,
-        initialError: '剪贴板内容未能自动识别：$e',
-      );
-    } finally {
-      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -729,9 +592,10 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
                               );
                             } catch (e) {
                               if (ctx.mounted) {
+                                final detail = _cleanErrorText(e);
                                 setModalState(() {
                                   busy = false;
-                                  error = '$e';
+                                  error = '连接失败：$detail（已有资源库不受影响，请检查地址或凭据后重试）';
                                 });
                               }
                             }
@@ -824,9 +688,10 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
               if (mounted) Navigator.of(context).pop();
             } catch (e) {
               if (ctx.mounted) {
+                final detail = _cleanErrorText(e);
                 setModalState(() {
                   submitting = false;
-                  errorText = '导入失败：$e';
+                  errorText = '导入失败：$detail（已有订阅不受影响，请修正内容后重试）';
                 });
               }
             }
@@ -863,60 +728,13 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
                   ),
                   const SizedBox(height: 16),
                 ],
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '订阅地址（支持 JSON / 多仓 / VOD / M3U）',
-                        style: TextStyle(
-                          color: palette.labelSecondary,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    CupertinoButton(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 4,
-                      ),
-                      minimumSize: const Size(0, 28),
-                      onPressed: () async {
-                        final data =
-                            await Clipboard.getData(Clipboard.kTextPlain);
-                        final clip = (data?.text ?? '').trim();
-                        if (clip.isEmpty) return;
-                        if (clip.startsWith('{') ||
-                            clip.startsWith('[') ||
-                            clip.startsWith('#EXTM3U') ||
-                            clip.startsWith('<')) {
-                          jsonCtrl.text = clip;
-                        } else {
-                          urlCtrl.text = clip;
-                        }
-                        setModalState(() => errorText = null);
-                      },
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            CupertinoIcons.doc_on_clipboard,
-                            size: 14,
-                            color: AppleColors.systemBlue,
-                          ),
-                          SizedBox(width: 4),
-                          Text(
-                            '粘贴',
-                            style: TextStyle(
-                              color: AppleColors.systemBlue,
-                              fontSize: 13.5,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+                Text(
+                  '订阅地址（每行一个，支持 JSON / 多仓 / M3U）',
+                  style: TextStyle(
+                    color: palette.labelSecondary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
                 const SizedBox(height: 6),
                 _buildStyledInput(
@@ -1199,115 +1017,55 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
 
   @override
   Widget build(BuildContext context) {
-    final palette = ApplePalette.of(context);
-    final isDark = palette.isDark;
     final safeBottom = MediaQuery.paddingOf(context).bottom;
 
     return SingleChildScrollView(
       key: const ValueKey('add-resource-library-hub'),
-      padding: EdgeInsets.fromLTRB(20, 14, 20, safeBottom + 32),
+      padding: EdgeInsets.fromLTRB(20, 12, 20, safeBottom + 32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Rex-style sheet hero header
-          Row(
-            children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: isDark ? const Color(0xFF1C1C22) : const Color(0xFF11131A),
-                  borderRadius: BorderRadius.circular(13),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Color(0x260F172A),
-                      blurRadius: 12,
-                      offset: Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: const Center(
-                  child: MarcoBrandLogo(iconSize: 28, showWordmark: false),
-                ),
-              ),
-              const SizedBox(width: 13),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      widget.initialIsPrivate ? '添加隐私资源库' : '添加资源库',
-                      style: TextStyle(
-                        color: palette.labelPrimary,
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: -0.35,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Marco Movie 可自动识别并管理各类文件与片源。',
-                      style: TextStyle(
-                        color: palette.labelSecondary,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              if (_busy) const CupertinoActivityIndicator(radius: 10),
-            ],
-          ),
-          if (_bannerNotice != null) ...[
-            const SizedBox(height: 14),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
-              decoration: BoxDecoration(
-                color: _bannerIsError
-                    ? const Color(0x22FF453A)
-                    : const Color(0x2230D158),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: _bannerIsError
-                      ? const Color(0x55FF453A)
-                      : const Color(0x5530D158),
-                  width: 0.7,
-                ),
-              ),
-              child: Text(
-                _bannerNotice!,
-                style: TextStyle(
-                  color: _bannerIsError
-                      ? AppleColors.systemRed
-                      : AppleColors.systemGreen,
-                  fontSize: 13,
-                ),
-              ),
-            ),
+          if (_bannerNotice != null && _noticeSectionIndex == null) ...[
+            _buildInlineNoticeBanner(),
+            const SizedBox(height: 16),
           ],
-          const SizedBox(height: 20),
-          // Categorized Rex-style icon grid with scatter/stack -> aligned entrance
-          AnimatedBuilder(
-            animation: _entranceCtrl,
-            builder: (context, _) {
-              final rawT = _entranceCtrl.value;
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (var sIdx = 0; sIdx < _sections.length; sIdx++) ...[
-                    _buildSectionBlock(
-                      context,
-                      _sections[sIdx],
-                      sectionIndex: sIdx,
-                      entranceT: rawT,
-                    ),
-                    if (sIdx < _sections.length - 1) const SizedBox(height: 22),
-                  ],
-                ],
-              );
-            },
-          ),
+          for (var sIdx = 0; sIdx < _sections.length; sIdx++) ...[
+            _buildSectionBlock(context, _sections[sIdx], sectionIndex: sIdx),
+            if (_bannerNotice != null && _noticeSectionIndex == sIdx) ...[
+              const SizedBox(height: 10),
+              _buildInlineNoticeBanner(),
+            ],
+            if (sIdx < _sections.length - 1) const SizedBox(height: 24),
+          ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildInlineNoticeBanner() {
+    return Container(
+      key: const ValueKey('add-lib-inline-notice'),
+      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
+      decoration: BoxDecoration(
+        color: _bannerIsError
+            ? const Color(0x22FF453A)
+            : const Color(0x2230D158),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: _bannerIsError
+              ? const Color(0x55FF453A)
+              : const Color(0x5530D158),
+          width: 0.7,
+        ),
+      ),
+      child: Text(
+        _bannerNotice ?? '',
+        style: TextStyle(
+          color:
+              _bannerIsError ? AppleColors.systemRed : AppleColors.systemGreen,
+          fontSize: 13,
+          height: 1.35,
+        ),
       ),
     );
   }
@@ -1316,98 +1074,72 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView>
     BuildContext context,
     _LibrarySectionSpec section, {
     required int sectionIndex,
-    required double entranceT,
   }) {
     final palette = ApplePalette.of(context);
-    final headerT =
-        ((entranceT - (0.28 + sectionIndex * 0.08)) / 0.42).clamp(0.0, 1.0);
-    final headerEase = Curves.easeOutCubic.transform(headerT);
+    final textScale = MediaQuery.textScalerOf(context).scale(14.0) / 14.0;
     return Column(
+      key: ValueKey('add-lib-section-$sectionIndex'),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Opacity(
-          opacity: headerEase,
-          child: Transform.translate(
-            offset: Offset(0, (1.0 - headerEase) * 8.0),
-            child: Padding(
-              padding: const EdgeInsets.only(left: 2, bottom: 12),
-              child: Text(
-                section.title,
-                style: TextStyle(
-                  color: palette.labelSecondary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.1,
-                ),
-              ),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Text(
+            section.title,
+            style: TextStyle(
+              color: palette.labelSecondary,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.1,
             ),
           ),
         ),
         LayoutBuilder(
           builder: (context, constraints) {
-            const cols = 4;
-            final tileW = (constraints.maxWidth / cols).floorToDouble();
-            return Wrap(
-              alignment: WrapAlignment.start,
-              runSpacing: 16,
+            final cols = computeAddLibraryColumnCount(
+              availableWidth: constraints.maxWidth,
+              textScale: textScale,
+            );
+            const colGap = 14.0;
+            const rowGap = 16.0;
+            final rowCount = (section.tiles.length / cols).ceil();
+            return Column(
+              key: ValueKey('add-lib-section-$sectionIndex-cols-$cols'),
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                for (final tile in section.tiles)
-                  SizedBox(
-                    width: tileW,
-                    child: _buildAnimatedTile(
-                      context,
-                      tile,
-                      entranceT: entranceT,
-                    ),
+                for (var r = 0; r < rowCount; r++) ...[
+                  if (r > 0) const SizedBox(height: rowGap),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (var c = 0; c < cols; c++) ...[
+                        if (c > 0) const SizedBox(width: colGap),
+                        Expanded(
+                          child: (r * cols + c) < section.tiles.length
+                              ? _ResourceTileButton(
+                                  key: ValueKey(
+                                    'add-lib-tile-${section.tiles[r * cols + c].id.name}',
+                                  ),
+                                  tile: section.tiles[r * cols + c],
+                                  labelColor: palette.labelPrimary,
+                                  busy: _busyTileId ==
+                                      section.tiles[r * cols + c].id,
+                                  onTap: () => unawaited(
+                                    _handleTileTap(
+                                      section.tiles[r * cols + c].id,
+                                    ),
+                                  ),
+                                )
+                              : const SizedBox.shrink(),
+                        ),
+                      ],
+                    ],
                   ),
+                ],
               ],
             );
           },
         ),
       ],
-    );
-  }
-
-  Widget _buildAnimatedTile(
-    BuildContext context,
-    _LibraryTileSpec tile, {
-    required double entranceT,
-  }) {
-    final seed = _seeds[tile.id]!;
-    final palette = ApplePalette.of(context);
-    // Phase 1 (0..0.16): icons pop in as a messy stacked pile at center.
-    // Phase 2 (staggerStart..1.0): icons smoothly un-rotate & spring into grid.
-    final localT = ((entranceT - seed.staggerStart) /
-            math.max(0.05, 1.0 - seed.staggerStart))
-        .clamp(0.0, 1.0);
-    final springCurve = Ios27Spring.bouncy.curve.transform(localT);
-    final dx = seed.startOffset.dx * (1.0 - springCurve);
-    final dy = seed.startOffset.dy * (1.0 - springCurve);
-    final angle = seed.startAngle * (1.0 - springCurve);
-    final scale = seed.startScale + (1.0 - seed.startScale) * springCurve;
-    final iconFade = (entranceT / 0.16).clamp(0.0, 1.0);
-    final labelFade = ((localT - 0.55) / 0.45).clamp(0.0, 1.0);
-
-    return Transform.translate(
-      offset: Offset(dx, dy),
-      child: Transform.rotate(
-        angle: angle,
-        child: Transform.scale(
-          scale: scale,
-          child: Opacity(
-            opacity: iconFade,
-            child: _ResourceTileButton(
-              key: ValueKey('add-lib-tile-${tile.id.name}'),
-              tile: tile,
-              ambientCtrl: _ambientCtrl,
-              ambientPhase: seed.ambientPhase,
-              labelOpacity: labelFade,
-              labelColor: palette.labelPrimary,
-              onTap: () => unawaited(_handleTileTap(tile.id)),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -1428,19 +1160,15 @@ class _FormFieldSpec {
 
 class _ResourceTileButton extends StatefulWidget {
   final _LibraryTileSpec tile;
-  final AnimationController ambientCtrl;
-  final double ambientPhase;
-  final double labelOpacity;
   final Color labelColor;
+  final bool busy;
   final VoidCallback onTap;
 
   const _ResourceTileButton({
     super.key,
     required this.tile,
-    required this.ambientCtrl,
-    required this.ambientPhase,
-    required this.labelOpacity,
     required this.labelColor,
+    required this.busy,
     required this.onTap,
   });
 
@@ -1454,61 +1182,76 @@ class _ResourceTileButtonState extends State<_ResourceTileButton> {
   @override
   Widget build(BuildContext context) {
     final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) => setState(() => _pressed = false),
-      onTapCancel: () => setState(() => _pressed = false),
-      onTap: widget.onTap,
-      child: AnimatedScale(
-        scale: _pressed ? 0.88 : 1.0,
-        duration: reduceMotion
-            ? const Duration(milliseconds: 80)
-            : const Duration(milliseconds: 220),
-        curve: Ios27Spring.bouncy.curve,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AnimatedBuilder(
-              animation: widget.ambientCtrl,
-              builder: (context, _) {
-                final theta =
-                    widget.ambientCtrl.value * math.pi * 2 + widget.ambientPhase;
-                final bobY = reduceMotion ? 0.0 : math.sin(theta) * 1.8;
-                final pulse = reduceMotion ? 0.5 : (math.sin(theta) + 1.0) * 0.5;
-                return Transform.translate(
-                  offset: Offset(0, bobY),
-                  child: SizedBox(
-                    width: 60,
-                    height: 60,
-                    child: CustomPaint(
-                      painter: _LibraryIconPainter(
-                        id: widget.tile.id,
-                        pulse: pulse,
-                        isDark: ApplePalette.isDarkOf(context),
+    return Semantics(
+      button: true,
+      label: widget.tile.label,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        onTap: widget.onTap,
+        child: AnimatedScale(
+          scale: _pressed ? 0.94 : 1.0,
+          duration: reduceMotion
+              ? const Duration(milliseconds: 60)
+              : const Duration(milliseconds: 140),
+          curve: Curves.easeOutCubic,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 44, minHeight: 88),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    SizedBox(
+                      width: 64,
+                      height: 64,
+                      child: CustomPaint(
+                        painter: _LibraryIconPainter(
+                          id: widget.tile.id,
+                          pulse: 0.5,
+                          isDark: ApplePalette.isDarkOf(context),
+                          fontFamily: DefaultTextStyle.of(context).style.fontFamily,
+                        ),
                       ),
                     ),
-                  ),
-                );
-              },
-            ),
-            const SizedBox(height: 8),
-            Opacity(
-              opacity: widget.labelOpacity,
-              child: Text(
-                widget.tile.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: widget.labelColor,
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: -0.15,
+                    if (widget.busy)
+                      Container(
+                        width: 64,
+                        height: 64,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.36),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: const Center(
+                          child: CupertinoActivityIndicator(
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
-              ),
+                const SizedBox(height: 8),
+                Text(
+                  widget.tile.label,
+                  maxLines: 2,
+                  softWrap: true,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.left,
+                  style: TextStyle(
+                    color: widget.labelColor,
+                    fontSize: 13,
+                    height: 1.25,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.1,
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -1522,11 +1265,13 @@ class _LibraryIconPainter extends CustomPainter {
   final _LibraryTileId id;
   final double pulse;
   final bool isDark;
+  final String? fontFamily;
 
   const _LibraryIconPainter({
     required this.id,
     required this.pulse,
     required this.isDark,
+    this.fontFamily,
   });
 
   @override
@@ -1596,22 +1341,6 @@ class _LibraryIconPainter extends CustomPainter {
           const [Color(0xFF4F8BFF), Color(0xFF2563EB)],
         );
         _paintLinkGlyph(canvas, size);
-        break;
-      case _LibraryTileId.clipboardQuick:
-        _paintRoundedBadge(
-          canvas,
-          size,
-          const [Color(0xFF34D399), Color(0xFF059669)],
-        );
-        _paintClipboardGlyph(canvas, size);
-        break;
-      case _LibraryTileId.configCenter:
-        _paintRoundedBadge(
-          canvas,
-          size,
-          const [Color(0xFF818CF8), Color(0xFF4F46E5)],
-        );
-        _paintQrCenterGlyph(canvas, size);
         break;
       case _LibraryTileId.quarkDrive:
         _paintRoundedBadge(
@@ -1755,6 +1484,7 @@ class _LibraryIconPainter extends CustomPainter {
       text: TextSpan(
         text: glyph,
         style: TextStyle(
+          fontFamily: fontFamily,
           color: Colors.white.withValues(alpha: 0.92),
           fontSize: 9.2,
           fontWeight: FontWeight.w800,
@@ -1861,11 +1591,12 @@ class _LibraryIconPainter extends CustomPainter {
       const [Color(0xFF1E1E24), Color(0xFF0A0A0E)],
     );
     final tp = TextPainter(
-      text: const TextSpan(
+      text: TextSpan(
         children: [
           TextSpan(
             text: 'ple',
             style: TextStyle(
+              fontFamily: fontFamily,
               color: Colors.white,
               fontSize: 16.5,
               fontWeight: FontWeight.w800,
@@ -1875,7 +1606,8 @@ class _LibraryIconPainter extends CustomPainter {
           TextSpan(
             text: 'x',
             style: TextStyle(
-              color: Color(0xFFE5A00D),
+              fontFamily: fontFamily,
+              color: const Color(0xFFE5A00D),
               fontSize: 18,
               fontWeight: FontWeight.w900,
             ),
@@ -1969,66 +1701,6 @@ class _LibraryIconPainter extends CustomPainter {
     canvas.restore();
   }
 
-  void _paintClipboardGlyph(Canvas canvas, Size size) {
-    final p = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.4;
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromCenter(
-          center: Offset(size.width * 0.5, size.height * 0.54),
-          width: 22,
-          height: 26,
-        ),
-        const Radius.circular(4.5),
-      ),
-      p,
-    );
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromCenter(
-          center: Offset(size.width * 0.5, size.height * 0.30),
-          width: 11,
-          height: 5,
-        ),
-        const Radius.circular(2.5),
-      ),
-      Paint()..color = Colors.white,
-    );
-    final lineP = Paint()
-      ..color = Colors.white.withValues(alpha: 0.9)
-      ..strokeWidth = 2.0
-      ..strokeCap = StrokeCap.round;
-    canvas.drawLine(const Offset(24, 31), const Offset(36, 31), lineP);
-    canvas.drawLine(const Offset(24, 37), const Offset(33, 37), lineP);
-  }
-
-  void _paintQrCenterGlyph(Canvas canvas, Size size) {
-    final p = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.4;
-    for (final pt in const [
-      Offset(21, 21),
-      Offset(39, 21),
-      Offset(21, 39),
-    ]) {
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromCenter(center: pt, width: 10, height: 10),
-          const Radius.circular(2.5),
-        ),
-        p,
-      );
-    }
-    canvas.drawCircle(
-      const Offset(39, 39),
-      3.5 + pulse * 1.2,
-      Paint()..color = Colors.white,
-    );
-  }
-
   void _paintQuarkOrbitGlyph(Canvas canvas, Size size, double w, double h) {
     final cx = w * 0.5;
     final cy = h * 0.5;
@@ -2113,5 +1785,6 @@ class _LibraryIconPainter extends CustomPainter {
   bool shouldRepaint(covariant _LibraryIconPainter oldDelegate) =>
       oldDelegate.id != id ||
       (oldDelegate.pulse - pulse).abs() > 0.01 ||
-      oldDelegate.isDark != isDark;
+      oldDelegate.isDark != isDark ||
+      oldDelegate.fontFamily != fontFamily;
 }

@@ -406,6 +406,8 @@ class _IosSearchOverlayRoute<T> extends PopupRoute<T> {
     return builder(context);
   }
 
+  AnimationController? get edgeBackController => controller;
+
   @override
   Widget buildTransitions(
     BuildContext context,
@@ -413,34 +415,205 @@ class _IosSearchOverlayRoute<T> extends PopupRoute<T> {
     Animation<double> secondaryAnimation,
     Widget child,
   ) {
-    if (Ios27ConcentricGeometry.isReduceMotion(context)) {
-      return FadeTransition(
-        opacity: CurvedAnimation(
-          parent: animation,
-          curve: Curves.linear,
-          reverseCurve: Curves.linear,
-        ),
-        child: child,
-      );
+    return _IosSearchEdgeBackGestureWrapper(
+      route: this,
+      animation: animation,
+      child: child,
+    );
+  }
+}
+
+class _IosSearchEdgeBackGestureWrapper extends StatefulWidget {
+  final _IosSearchOverlayRoute<dynamic> route;
+  final Animation<double> animation;
+  final Widget child;
+
+  const _IosSearchEdgeBackGestureWrapper({
+    required this.route,
+    required this.animation,
+    required this.child,
+  });
+
+  @override
+  State<_IosSearchEdgeBackGestureWrapper> createState() =>
+      _IosSearchEdgeBackGestureWrapperState();
+}
+
+class _IosSearchEdgeBackGestureWrapperState
+    extends State<_IosSearchEdgeBackGestureWrapper> {
+  bool _dragging = false;
+  bool _gestureDrivenTransition = false;
+  bool _startedUserGesture = false;
+
+  void _stopUserGestureIfNeeded() {
+    if (!_startedUserGesture) return;
+    _startedUserGesture = false;
+    final nav = widget.route.navigator;
+    if (nav != null && nav.userGestureInProgress) {
+      nav.didStopUserGesture();
     }
+  }
+
+  @override
+  void dispose() {
+    _stopUserGestureIfNeeded();
+    super.dispose();
+  }
+
+  void _handleDragStart(DragStartDetails details) {
+    final nav = widget.route.navigator;
+    final ctrl = widget.route.edgeBackController;
+    if (nav == null || ctrl == null || !widget.route.isCurrent) return;
+    _dragging = true;
+    _gestureDrivenTransition = true;
+    if (!_startedUserGesture) {
+      _startedUserGesture = true;
+      nav.didStartUserGesture();
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _handleDragUpdate(DragUpdateDetails details) {
+    if (!_dragging) return;
+    final ctrl = widget.route.edgeBackController;
+    if (ctrl == null) return;
+    final width = math.max(1.0, MediaQuery.sizeOf(context).width);
+    ctrl.value = (ctrl.value - (details.primaryDelta ?? 0.0) / width)
+        .clamp(0.0, 1.0);
+  }
+
+  void _handleDragEnd(DragEndDetails details) {
+    if (!_dragging) return;
+    _dragging = false;
+    final nav = widget.route.navigator;
+    final ctrl = widget.route.edgeBackController;
+    if (nav == null || ctrl == null) {
+      _gestureDrivenTransition = false;
+      _stopUserGestureIfNeeded();
+      return;
+    }
+    final velocity = details.velocity.pixelsPerSecond.dx;
+    final shouldPop = velocity > 420.0 ||
+        (velocity >= -120.0 && ctrl.value < 0.65);
+    if (shouldPop) {
+      final remaining = ctrl.value.clamp(0.0, 1.0);
+      final ms = (remaining * 240.0).round().clamp(80, 240);
+      nav.pop();
+      if (ctrl.isAnimating || ctrl.value > 0.0) {
+        ctrl
+            .animateBack(
+              0.0,
+              duration: Duration(milliseconds: ms),
+              curve: Curves.easeOutCubic,
+            )
+            .whenComplete(() {
+          _gestureDrivenTransition = false;
+          _stopUserGestureIfNeeded();
+        });
+      } else {
+        _gestureDrivenTransition = false;
+        _stopUserGestureIfNeeded();
+      }
+    } else {
+      final remaining = (1.0 - ctrl.value).clamp(0.0, 1.0);
+      final ms = (remaining * 220.0).round().clamp(80, 220);
+      ctrl
+          .animateTo(
+            1.0,
+            duration: Duration(milliseconds: ms),
+            curve: Curves.easeOutCubic,
+          )
+          .whenComplete(() {
+        _gestureDrivenTransition = false;
+        _stopUserGestureIfNeeded();
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  void _handleDragCancel() {
+    if (!_dragging) return;
+    _dragging = false;
+    final ctrl = widget.route.edgeBackController;
+    if (ctrl != null) {
+      ctrl
+          .animateTo(
+            1.0,
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+          )
+          .whenComplete(() {
+        _gestureDrivenTransition = false;
+        _stopUserGestureIfNeeded();
+        if (mounted) setState(() {});
+      });
+    } else {
+      _gestureDrivenTransition = false;
+      _stopUserGestureIfNeeded();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enableEdgeBack =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
     final springCurve = Ios27Spring.bouncy.curve;
     final reverseCurve = Ios27Spring.smooth.curve.flipped;
-    final curved = CurvedAnimation(
-      parent: animation,
-      curve: springCurve,
-      reverseCurve: reverseCurve,
+
+    final animatedPage = AnimatedBuilder(
+      animation: widget.animation,
+      child: widget.child,
+      builder: (context, pageChild) {
+        final raw = widget.animation.value.clamp(0.0, 1.0);
+        if (_dragging ||
+            _gestureDrivenTransition ||
+            widget.route.navigator?.userGestureInProgress == true) {
+          return FractionalTranslation(
+            translation: Offset(1.0 - raw, 0.0),
+            child: pageChild,
+          );
+        }
+        if (reduceMotion) {
+          return Opacity(opacity: raw, child: pageChild);
+        }
+        final isReverse = widget.animation.status == AnimationStatus.reverse;
+        final opacityT =
+            (isReverse ? reverseCurve : Ios27Spring.smooth.curve).transform(raw);
+        final scaleT =
+            (isReverse ? reverseCurve : springCurve).transform(raw);
+        final scale = 0.96 + 0.04 * scaleT;
+        return Opacity(
+          opacity: opacityT.clamp(0.0, 1.0),
+          child: Transform.scale(
+            scale: scale,
+            alignment: Alignment.bottomCenter,
+            child: pageChild,
+          ),
+        );
+      },
     );
-    return FadeTransition(
-      opacity: CurvedAnimation(
-        parent: animation,
-        curve: Ios27Spring.smooth.curve,
-        reverseCurve: reverseCurve,
-      ),
-      child: ScaleTransition(
-        scale: Tween<double>(begin: 0.96, end: 1.0).animate(curved),
-        alignment: Alignment.bottomCenter,
-        child: child,
-      ),
+
+    if (!enableEdgeBack) return animatedPage;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        animatedPage,
+        Positioned(
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: 24,
+          child: GestureDetector(
+            key: const ValueKey('ios-search-edge-back-zone'),
+            behavior: HitTestBehavior.translucent,
+            onHorizontalDragStart: _handleDragStart,
+            onHorizontalDragUpdate: _handleDragUpdate,
+            onHorizontalDragEnd: _handleDragEnd,
+            onHorizontalDragCancel: _handleDragCancel,
+          ),
+        ),
+      ],
     );
   }
 }

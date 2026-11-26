@@ -260,6 +260,18 @@ class DownloadService extends ChangeNotifier {
 
   int get activeCount => _tasks.where((t) => t.isActive).length;
 
+  @visibleForTesting
+  CmsClient? get debugClient => _client;
+
+  @visibleForTesting
+  void resetForTesting() {
+    _client = null;
+    _root = null;
+    _indexFile = null;
+    _ready = false;
+    _tasks.clear();
+  }
+
   Future<void> init(CmsClient client) async {
     _client = client;
     try {
@@ -271,10 +283,11 @@ class DownloadService extends ChangeNotifier {
         final raw = await _indexFile!.readAsString();
         final decoded = jsonDecode(raw);
         if (decoded is List) {
+          final existingIds = _tasks.map((t) => t.id).toSet();
           for (final item in decoded) {
             if (item is! Map) continue;
             final task = DownloadTask.fromJson(Map<String, dynamic>.from(item));
-            if (task.id.isEmpty) continue;
+            if (task.id.isEmpty || existingIds.contains(task.id)) continue;
             if (task.status == DownloadStatus.downloading) {
               task.status = DownloadStatus.queued;
             }
@@ -284,6 +297,7 @@ class DownloadService extends ChangeNotifier {
               task.error = '本地文件已被移动或删除';
               task.progress = 0;
             }
+            existingIds.add(task.id);
             _tasks.add(task);
           }
         }

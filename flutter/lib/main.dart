@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'core/app_log.dart';
 import 'core/cms_client.dart';
 import 'core/download_service.dart';
+import 'core/launch_diagnostics.dart';
 import 'core/ohos_runtime.dart';
 import 'core/storage_service.dart';
 import 'core/video_kernel.dart';
@@ -21,39 +22,64 @@ import 'ui/windows_appearance.dart';
 
 typedef MarcoAppBootstrapResult = ({StorageService storage, CmsClient client});
 
+bool _isIosAppPlatform() =>
+    !kIsWeb &&
+    defaultTargetPlatform == TargetPlatform.iOS &&
+    !OhosRuntime.isOhos;
+
+/// Pure initialization step with ZERO global singleton mutations so a timed-out
+/// or superseded attempt that resolves late can never overwrite theme, native
+/// appearance, log directory, or DownloadService state of a newer attempt.
 Future<MarcoAppBootstrapResult> _defaultBootstrapApp() async {
-  try {
-    await IosLiquidGlassBridge.ensureInitialized()
-        .timeout(const Duration(seconds: 2));
-  } catch (e) {
-    debugPrint('IosLiquidGlassBridge init skipped: $e');
+  if (_isIosAppPlatform()) {
+    MarcoLaunchDiagnostics.record('ios_bridge_init_start');
+    try {
+      await IosLiquidGlassBridge.ensureInitialized()
+          .timeout(const Duration(seconds: 2));
+    } catch (e) {
+      debugPrint('IosLiquidGlassBridge init skipped: $e');
+    }
   }
+  MarcoLaunchDiagnostics.record('storage_init_start');
   final storage = await StorageService.init(
     deferSecureCredentialHydration: !kIsWeb && Platform.isIOS,
   );
+  MarcoLaunchDiagnostics.record(
+    'storage_init_done',
+    'subs=${storage.getSubscriptions().length}',
+  );
+  final client = CmsClient();
+  return (storage: storage, client: client);
+}
+
+/// Applies global app-level side effects ONLY for the winning bootstrap attempt
+/// after stale-attempt verification passes.
+void _applyWinningBootstrapSideEffects(MarcoAppBootstrapResult result) {
+  final storage = result.storage;
+  final client = result.client;
   AppLog.instance.setLogDirectory(
     Directory('${storage.dataDirectory.path}/logs'),
   );
   GlassworkBackdrop.reduceTransparency.value = false;
   GlassworkBackdrop.intensity.value = 0.68;
   AppleTheme.mode.value = AppleTheme.fromPref(storage.appThemeMode);
-  unawaited(
-    IosLiquidGlassBridge.setAppearanceMode(storage.appThemeMode)
-        .timeout(const Duration(seconds: 2))
-        .catchError((_) {}),
-  );
-  final client = CmsClient();
+  if (_isIosAppPlatform()) {
+    unawaited(
+      IosLiquidGlassBridge.setAppearanceMode(storage.appThemeMode)
+          .catchError((_) {}),
+    );
+  }
   unawaited(
     DownloadService.instance.init(client).catchError((Object e) {
       debugPrint('DownloadService init warning: $e');
     }),
   );
-  return (storage: storage, client: client);
 }
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   AppLog.init();
+  MarcoLaunchDiagnostics.record('dart_main');
   FlutterError.onError = (FlutterErrorDetails details) {
     FlutterError.presentError(details);
     debugPrint('FlutterError: ${details.exceptionAsString()}');
@@ -62,7 +88,16 @@ Future<void> main() async {
     debugPrint('Uncaught platform error: $error');
     return true;
   };
-  await OhosRuntime.ensureInitialized();
+  if (!kIsWeb && Platform.isIOS) {
+    try {
+      await OhosRuntime.ensureInitialized()
+          .timeout(const Duration(seconds: 2));
+    } catch (e) {
+      debugPrint('OhosRuntime init skipped on iOS: $e');
+    }
+  } else {
+    await OhosRuntime.ensureInitialized();
+  }
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     await windowManager.ensureInitialized();
     await windowManager.setMinimumSize(const Size(720, 520));
@@ -94,19 +129,27 @@ Future<void> main() async {
 }
 
 /// Immediately paints Frame 1 so iOS never stays frozen on LaunchScreen while
-/// storage/plugin channels finish cold-start registration, and surfaces a
-/// retryable recovery screen if initialization fails instead of dying silently.
+/// storage/plugin channels finish cold-start registration, surfaces an iOS
+/// bounded timeout & retryable recovery screen if initialization throws or
+/// stalls, and prevents any delayed stale attempt from mutating global state or
+/// overwriting an already-recovered app.
 class MarcoBootstrapApp extends StatefulWidget {
+  static const Duration defaultIosBootstrapTimeout = Duration(seconds: 12);
+
   @visibleForTesting
   final Future<MarcoAppBootstrapResult> Function()? bootstrapper;
 
   @visibleForTesting
   final Widget Function(StorageService storage, CmsClient client)? appBuilder;
 
+  @visibleForTesting
+  final Duration? bootstrapTimeout;
+
   const MarcoBootstrapApp({
     super.key,
     this.bootstrapper,
     this.appBuilder,
+    this.bootstrapTimeout,
   });
 
   @override
@@ -116,30 +159,81 @@ class MarcoBootstrapApp extends StatefulWidget {
 class _MarcoBootstrapAppState extends State<MarcoBootstrapApp> {
   MarcoAppBootstrapResult? _ready;
   Object? _error;
+  bool _timedOut = false;
+  String _failedStage = 'none';
   int _attempt = 0;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      MarcoLaunchDiagnostics.record('flutter_first_frame');
+    });
     unawaited(_startBootstrap());
   }
 
   Future<void> _startBootstrap() async {
+    if (_ready != null) return;
     final runId = ++_attempt;
-    if (mounted && _error != null) {
-      setState(() => _error = null);
+    final attempt = MarcoLaunchDiagnostics.beginAttempt(runId);
+    MarcoLaunchDiagnostics.record('bootstrap_attempt', 'attempt=$runId');
+    if (mounted && (_error != null || _timedOut)) {
+      setState(() {
+        _error = null;
+        _timedOut = false;
+        _failedStage = 'none';
+      });
     }
+    final Duration? effectiveTimeout = widget.bootstrapTimeout ??
+        (_isIosAppPlatform()
+            ? MarcoBootstrapApp.defaultIosBootstrapTimeout
+            : null);
     try {
-      final result = await (widget.bootstrapper ?? _defaultBootstrapApp)();
-      if (!mounted || runId != _attempt) return;
+      final future = attempt.run(widget.bootstrapper ?? _defaultBootstrapApp);
+      final result = effectiveTimeout != null
+          ? await future.timeout(effectiveTimeout)
+          : await future;
+      if (!mounted || runId != _attempt || _ready != null) return;
+      _applyWinningBootstrapSideEffects(result);
+      MarcoLaunchDiagnostics.record('bootstrap_ready', 'attempt=$runId');
       setState(() {
         _ready = result;
         _error = null;
+        _timedOut = false;
+        _failedStage = 'none';
+      });
+    } on TimeoutException catch (error, stackTrace) {
+      debugPrint(
+        'MarcoBootstrapApp: startup timed out (attempt=$runId): $error\n$stackTrace',
+      );
+      if (!mounted || runId != _attempt || _ready != null) return;
+      final stalledStage = attempt.workingStage;
+      MarcoLaunchDiagnostics.record(
+        'bootstrap_timeout',
+        'attempt=$runId last=$stalledStage',
+      );
+      setState(() {
+        _error = error;
+        _timedOut = true;
+        _failedStage = stalledStage;
       });
     } on Object catch (error, stackTrace) {
-      debugPrint('MarcoBootstrapApp: startup failed: $error\n$stackTrace');
-      if (!mounted || runId != _attempt) return;
-      setState(() => _error = error);
+      debugPrint(
+        'MarcoBootstrapApp: startup failed (attempt=$runId): $error\n$stackTrace',
+      );
+      if (!mounted || runId != _attempt || _ready != null) return;
+      final failedStage = attempt.workingStage;
+      MarcoLaunchDiagnostics.record(
+        'bootstrap_error',
+        'attempt=$runId stage=$failedStage $error',
+      );
+      setState(() {
+        _error = error;
+        _timedOut = false;
+        _failedStage = failedStage;
+      });
+    } finally {
+      MarcoLaunchDiagnostics.endAttempt(attempt);
     }
   }
 
@@ -186,12 +280,16 @@ class _MarcoBootstrapAppState extends State<MarcoBootstrapApp> {
                     if (_error == null)
                       CupertinoActivityIndicator(
                         key: const ValueKey('marco-bootstrap-spinner'),
+                        animating: !View.of(context)
+                            .platformDispatcher
+                            .accessibilityFeatures
+                            .disableAnimations,
                         radius: 12,
                         color: secondaryFg,
                       )
                     else ...[
                       Text(
-                        '初始化未完成，请重试',
+                        _timedOut ? '初始化响应超时，请重试' : '初始化未完成，请重试',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: fg,
@@ -202,7 +300,9 @@ class _MarcoBootstrapAppState extends State<MarcoBootstrapApp> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        '$_error',
+                        _timedOut
+                            ? '本地存储或系统服务响应过慢（阶段：$_failedStage），点击重新加载即可恢复。'
+                            : '$_error',
                         maxLines: 3,
                         overflow: TextOverflow.ellipsis,
                         textAlign: TextAlign.center,
