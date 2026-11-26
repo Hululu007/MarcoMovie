@@ -186,6 +186,10 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   private var currentUrlString: String = ""
   private var fallbackEmittedForCurrentItem: Bool = false
   private var requestedRate: Float = 1.0
+  private var isAppForegroundActive: Bool = true
+  private var lastProgressPositionMs: Int = -1
+  private var lastProgressBufferedMs: Int = -1
+  private var lastProgressPlaying: Bool = false
 
   private var isPipActiveOrStarting: Bool {
     return pipStarting || (pipController?.isPictureInPictureActive == true)
@@ -346,7 +350,7 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
       }
     }
 
-    let interval = CMTime(seconds: 0.25, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+    let interval = CMTime(seconds: 0.5, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
     timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
       self?.emitProgressTick()
     }
@@ -409,6 +413,24 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
           "thermalState": MarcoAvPlayerEngine.thermalStateString(state),
           "thermalStateCode": MarcoAvPlayerEngine.thermalStateCode(state),
         ])
+      }
+    )
+    notificationTokens.append(
+      center.addObserver(
+        forName: UIApplication.didEnterBackgroundNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        self?.isAppForegroundActive = false
+      }
+    )
+    notificationTokens.append(
+      center.addObserver(
+        forName: UIApplication.didBecomeActiveNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        self?.isAppForegroundActive = true
       }
     )
     notificationTokens.append(
@@ -774,6 +796,9 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     currentUrlString = urlString
     pendingStartPositionMs = max(0, startPositionMs)
     fallbackEmittedForCurrentItem = false
+    lastProgressPositionMs = -1
+    lastProgressBufferedMs = -1
+    lastProgressPlaying = false
 
     cleanupItemObservers()
 
@@ -971,6 +996,9 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
     pipStarting = false
     activeMediaId = nil
     currentSessionId += 1
+    lastProgressPositionMs = -1
+    lastProgressBufferedMs = -1
+    lastProgressPlaying = false
     cleanupItemObservers()
     if let pip = pipController, wasActivePip {
       pip.stopPictureInPicture()
@@ -1332,13 +1360,28 @@ private final class MarcoAvPlayerCoordinator: NSObject, FlutterStreamHandler, AV
   }
 
   private func emitProgressTick() {
-    guard queuePlayer?.currentItem != nil else { return }
+    guard let player = queuePlayer, player.currentItem != nil else { return }
+    if !isAppForegroundActive && !isPipActiveOrStarting {
+      return
+    }
+    let playing = player.timeControlStatus == .playing
+    let posMs = currentPositionMs()
+    let bufMs = currentBufferedMs()
+    if !playing
+      && !lastProgressPlaying
+      && posMs == lastProgressPositionMs
+      && bufMs == lastProgressBufferedMs {
+      return
+    }
+    lastProgressPlaying = playing
+    lastProgressPositionMs = posMs
+    lastProgressBufferedMs = bufMs
     emitMediaEvent([
       "type": "progress",
-      "positionMs": currentPositionMs(),
+      "positionMs": posMs,
       "durationMs": currentDurationMs(),
-      "bufferedMs": currentBufferedMs(),
-      "playing": queuePlayer?.timeControlStatus == .playing,
+      "bufferedMs": bufMs,
+      "playing": playing,
     ])
   }
 

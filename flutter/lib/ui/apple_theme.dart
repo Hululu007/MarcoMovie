@@ -881,6 +881,9 @@ bool _isIosLegacyGlassActive() =>
 bool _isIosThermalDegraded() =>
     _isIosPlatform() && IosLiquidGlassBridge.thermalThrottled;
 
+bool _isIosThermalElevated() =>
+    _isIosPlatform() && IosLiquidGlassBridge.thermalElevated;
+
 bool _isSystemReduceTransparencyActive() =>
     !OhosRuntime.isOhos && IosLiquidGlassBridge.reduceTransparency;
 
@@ -899,6 +902,43 @@ class GlassworkBackdrop extends StatefulWidget {
   const GlassworkBackdrop({super.key, required this.radius, required this.child});
   @override
   State<GlassworkBackdrop> createState() => _GlassworkBackdropState();
+
+  /// Pure render-cost policy for the Flutter-side glass material.
+  ///
+  /// iOS (every version, including the iOS 26/27 native Liquid Glass path):
+  /// - the 54-tap `glasswork.frag` lens shader is never used — it sampled the
+  ///   backdrop 54× per pixel at full Retina resolution under every dark
+  ///   glass card and was a major sustained GPU heat source on 120 Hz
+  ///   ProMotion iPhones (feedback: iPhone 17 Pro Max / iOS 27 / 0.7.8);
+  /// - Gaussian sigma is capped (`<= 10.0`) across ALL iOS versions with
+  ///   `TileMode.clamp` instead of the mirror-tiled 26pt surface blur;
+  /// - from thermal `.fair` upwards the sigma is capped further at `6.0`.
+  ///
+  /// Other platforms keep the original behaviour.
+  @visibleForTesting
+  static ({bool allowLensShader, double blurSigma, TileMode tileMode})
+      resolveRenderPolicy({
+    required double strength,
+    required bool isIos,
+    required bool iosLegacyGlass,
+    bool iosThermalElevated = false,
+  }) {
+    final s = strength.clamp(0.0, 1.0);
+    if (!isIos) {
+      return (
+        allowLensShader: true,
+        blurSigma: 1.5 + 24.5 * s,
+        tileMode: TileMode.mirror,
+      );
+    }
+    var sigma = 1.5 + 8.5 * s;
+    if (iosThermalElevated) sigma = math.min(sigma, 6.0);
+    return (
+      allowLensShader: false,
+      blurSigma: sigma,
+      tileMode: TileMode.clamp,
+    );
+  }
 }
 
 class _GlassworkBackdropState extends State<GlassworkBackdrop> {
@@ -911,13 +951,13 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
     IosLiquidGlassBridge.reduceTransparencyNotifier,
     IosLiquidGlassBridge.available,
     IosLiquidGlassBridge.thermalThrottledNotifier,
+    IosLiquidGlassBridge.thermalLevelNotifier,
   ]);
   @override
   void initState() {
     super.initState();
     if (!_isWindowsDesktop &&
-        !_isIosLegacyGlassActive() &&
-        !_isIosThermalDegraded() &&
+        !_isIosPlatform() &&
         !GlassworkBackdrop.reduceTransparency.value &&
         !_isSystemReduceTransparencyActive() &&
         ImageFilter.isShaderFilterSupported) {
@@ -955,10 +995,19 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
             MediaQuery.highContrastOf(context) ||
             MediaQuery.disableAnimationsOf(context);
         final winFastGlass = _isWindowsDesktop;
+        final isIos = _isIosPlatform();
         final iosLegacyGlass = _isIosLegacyGlassActive();
         final iosThermalDegraded = _isIosThermalDegraded();
-        final disableLensShader =
-            winFastGlass || iosLegacyGlass || iosThermalDegraded;
+        final policy = GlassworkBackdrop.resolveRenderPolicy(
+          strength: strength,
+          isIos: isIos,
+          iosLegacyGlass: iosLegacyGlass,
+          iosThermalElevated: _isIosThermalElevated(),
+        );
+        final disableLensShader = winFastGlass ||
+            !policy.allowLensShader ||
+            iosLegacyGlass ||
+            iosThermalDegraded;
         if (!opaque &&
             !disableLensShader &&
             isDark &&
@@ -970,9 +1019,10 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
         // Use true continuous optical blur + intensity-reactive translucency so
         // dragging the Liquid Glass slider from 0% to 100% produces an immediate,
         // clearly visible visual transformation in both Light and Dark themes.
-        // The 54-tap dark lens shader is disabled on iOS < 26 (e.g. iPad Pro 2020
-        // on iPadOS 15.4) and during iOS thermal throttling to prevent Metal GPU
-        // overheating; elsewhere it stays reserved for high-strength dark mode.
+        // The 54-tap dark lens shader is disabled on every iOS version (incl.
+        // the iOS 26/27 native Liquid Glass path) to prevent sustained Metal
+        // GPU heat on 120Hz ProMotion devices; elsewhere it stays reserved for
+        // high-strength dark mode.
         final useLensShader =
             !disableLensShader && !opaque && isDark && _shader != null && strength >= 0.85;
         final shader = useLensShader ? _shader : null;
@@ -983,11 +1033,10 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
             MediaQuery.devicePixelRatioOf(context) * (0.45 + 1.25 * strength),
           );
         }
-        // On iOS < 26 (iOS 14-25 fallback glass), cap Gaussian blur sigma to
-        // <= 10.0 with TileMode.clamp so 120Hz ProMotion iPads do not burn GPU
-        // fill-rate on 26pt mirror-tiled full-surface backdrop filters.
-        final blurSigma =
-            iosLegacyGlass ? (1.5 + 8.5 * strength) : (1.5 + 24.5 * strength);
+        // On every iOS version (including iOS 26/27), cap Gaussian blur sigma
+        // (<= 10.0, and <= 6.0 from thermal `.fair`) with TileMode.clamp so
+        // 120Hz ProMotion devices do not burn GPU fill-rate on mirror blurs.
+        final blurSigma = policy.blurSigma;
         final Color veilColor;
         if (opaque) {
           veilColor = isDark ? const Color(0xF51E1E22) : const Color(0xFAFFFFFF);
@@ -1025,7 +1074,7 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
                   blur: blurSigma,
                   saturation: isDark ? (1.05 + 0.85 * strength) : (1.08 + 0.45 * strength),
                   brightness: isDark ? (0.82 + 0.14 * strength) : 1.0,
-                  tileMode: iosLegacyGlass ? TileMode.clamp : TileMode.mirror,
+                  tileMode: policy.tileMode,
                 )
               : ImageFilter.shader(shader),
           // Keep the child at the same element-tree depth when the async GPU
@@ -4178,6 +4227,17 @@ class AppleAmbientBackground extends StatefulWidget {
     return true;
   }
 
+  /// Pure policy predicate for the `aurora` wallpaper preset's shader ticker.
+  /// Always static on iOS / iPadOS (one frame, zero idle frames).
+  @visibleForTesting
+  static bool shouldAnimateAurora({
+    required bool animate,
+    required bool showAmbientArtwork,
+    required bool isIosPlatform,
+  }) {
+    return animate && showAmbientArtwork && !isIosPlatform;
+  }
+
   @override
   State<AppleAmbientBackground> createState() => _AppleAmbientBackgroundState();
 }
@@ -4192,6 +4252,17 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
 
   bool get _useAuroraShader =>
       widget.preset == 'aurora' && !OhosRuntime.isOhos && !_isWindowsDesktop;
+
+  /// The home ambient aurora wallpaper is a full-screen fragment shader that
+  /// sits underneath every glass surface. On iOS it renders a single static
+  /// frame instead of animating forever behind an idle UI (sustained heat on
+  /// 120Hz ProMotion iPhones/iPads, including the iOS 26/27 native glass path).
+  bool get _auroraAnimationAllowed =>
+      AppleAmbientBackground.shouldAnimateAurora(
+        animate: widget.animate,
+        showAmbientArtwork: widget.showAmbientArtwork,
+        isIosPlatform: _isIosPlatform(),
+      );
 
   bool get _shouldAnimate => AppleAmbientBackground.shouldAnimateBreath(
         useAuroraShader: _useAuroraShader,
@@ -4352,7 +4423,7 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
                     opacity: 0.04,
                     child: AuroraBackground(
                       key: const Key('apple-ambient-aurora'),
-                      active: widget.animate && widget.showAmbientArtwork,
+                      active: _auroraAnimationAllowed,
                       strength: widget.showAmbientArtwork
                           ? MotionTokens.auroraDefaultStrength
                           : 0.28,
@@ -4374,7 +4445,7 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
             Positioned.fill(
               child: AuroraBackground(
                 key: const Key('apple-ambient-aurora'),
-                active: widget.animate && widget.showAmbientArtwork,
+                active: _auroraAnimationAllowed,
                 strength: widget.showAmbientArtwork
                     ? MotionTokens.auroraDefaultStrength
                     : 0.28,

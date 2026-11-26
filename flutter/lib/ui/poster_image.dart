@@ -2,6 +2,7 @@ import 'dart:async';
 import '../core/emby_library.dart';
 import '../core/media_library_connectors.dart';
 import '../core/catpaw_host.dart';
+import '../core/ohos_runtime.dart';
 import '../core/series_scraper.dart';
 import 'dart:collection';
 import 'dart:convert';
@@ -209,6 +210,42 @@ class PosterLoader {
     final mb = _memoryBytes / (1024 * 1024);
     if (_memory.isEmpty) return '0.0 MB (0 张)';
     return '${mb.toStringAsFixed(1)} MB (${_memory.length} 张)';
+  }
+
+  /// Computes a Retina-sharp, quantized target decode width (`cacheWidth`) on
+  /// iOS / iPadOS so scrolling 120 Hz poster grids (`highRes: true`) never
+  /// decode and upload raw 2000×3000 (~24 MB RGBA) textures for 125pt cards,
+  /// while preserving crisp 3× Retina quality (`allowUpscaling: false`).
+  @visibleForTesting
+  static int? resolveIosDecodeWidth({
+    required double maxWidth,
+    required double maxHeight,
+    required double devicePixelRatio,
+    required bool isHeroOrStrictHd,
+    bool isLandscape = false,
+  }) {
+    final hasFiniteW = maxWidth.isFinite && maxWidth > 0;
+    final hasFiniteH = maxHeight.isFinite && maxHeight > 0;
+    if (!hasFiniteW && !hasFiniteH) {
+      return isHeroOrStrictHd ? 1440 : 720;
+    }
+    final dpr = devicePixelRatio.clamp(1.0, 3.0);
+    final aspectCoverFactor = isLandscape ? 1.78 : 0.72;
+    double effectiveLogicalW = hasFiniteW ? maxWidth : (maxHeight * aspectCoverFactor);
+    if (hasFiniteH && maxHeight * aspectCoverFactor > effectiveLogicalW) {
+      effectiveLogicalW = maxHeight * aspectCoverFactor;
+    }
+    final rawPx = (effectiveLogicalW * dpr).ceil();
+    if (isLandscape) {
+      final bucket = ((rawPx + 239) ~/ 240) * 240;
+      return bucket.clamp(480, 1920);
+    }
+    if (isHeroOrStrictHd || effectiveLogicalW >= 260) {
+      final bucket = ((rawPx + 239) ~/ 240) * 240;
+      return bucket.clamp(720, 1680);
+    }
+    final bucket = ((rawPx + 179) ~/ 180) * 180;
+    return bucket.clamp(360, 1080);
   }
 
   /// Clears both in-memory LRU cache and on-disk temporary poster files.
@@ -5544,13 +5581,23 @@ class _PosterImageState extends State<PosterImage>
             child: backdropImg,
           );
         }
+        final isIosPoster = !kIsWeb &&
+            !OhosRuntime.isOhos &&
+            defaultTargetPlatform == TargetPlatform.iOS;
         final dpr = (MediaQuery.maybeDevicePixelRatioOf(context) ?? 2.0)
             .clamp(1.25, 3.0);
         final isLargeSurface = _wantsHd ||
             (constraints.maxWidth.isFinite && constraints.maxWidth >= 210) ||
             (constraints.maxHeight.isFinite && constraints.maxHeight >= 260);
         int? cacheWidth;
-        if (!isLargeSurface &&
+        if (isIosPoster) {
+          cacheWidth = PosterLoader.resolveIosDecodeWidth(
+            maxWidth: constraints.maxWidth,
+            maxHeight: constraints.maxHeight,
+            devicePixelRatio: dpr,
+            isHeroOrStrictHd: widget.strictHighRes,
+          );
+        } else if (!isLargeSurface &&
             constraints.maxWidth.isFinite &&
             constraints.maxWidth > 0) {
           final effectiveWidth = constraints.maxHeight.isFinite &&
@@ -5560,7 +5607,7 @@ class _PosterImageState extends State<PosterImage>
           final px = (effectiveWidth * dpr).ceil();
           cacheWidth = ((px + 179) ~/ 180) * 180;
         }
-        final ImageProvider provider = isLargeSurface
+        final ImageProvider provider = (!isIosPoster && isLargeSurface)
             ? MemoryImage(bytes)
             : ResizeImage.resizeIfNeeded(
                 cacheWidth,
@@ -5575,8 +5622,11 @@ class _PosterImageState extends State<PosterImage>
           height: constraints.maxHeight.isFinite ? constraints.maxHeight : null,
           gaplessPlayback: true,
           isAntiAlias: true,
-          filterQuality:
-              isLargeSurface ? FilterQuality.high : FilterQuality.medium,
+          filterQuality: isIosPoster
+              ? (widget.strictHighRes
+                    ? FilterQuality.high
+                    : FilterQuality.medium)
+              : (isLargeSurface ? FilterQuality.high : FilterQuality.medium),
           errorBuilder: (_, __, ___) => widget.placeholder,
         );
         if (_loadedSync || !widget.fadeIn) {
@@ -6030,15 +6080,45 @@ class _LandscapePosterImageState extends State<LandscapePosterImage>
     super.build(context);
     final bytes = _landscapeBytes;
     if (bytes != null) {
-      final img = Image(
-        image: MemoryImage(bytes),
-        fit: widget.fit,
-        alignment: widget.alignment,
-        gaplessPlayback: true,
-        isAntiAlias: true,
-        filterQuality: FilterQuality.high,
-        errorBuilder: (_, __, ___) => _buildFallback(),
-      );
+      final isIosPoster = !kIsWeb &&
+          !OhosRuntime.isOhos &&
+          defaultTargetPlatform == TargetPlatform.iOS;
+      final Widget img = isIosPoster
+          ? LayoutBuilder(
+              builder: (ctx, constraints) {
+                final dpr = (MediaQuery.maybeDevicePixelRatioOf(ctx) ?? 2.0)
+                    .clamp(1.25, 3.0);
+                final cacheW = PosterLoader.resolveIosDecodeWidth(
+                  maxWidth: constraints.maxWidth,
+                  maxHeight: constraints.maxHeight,
+                  devicePixelRatio: dpr,
+                  isHeroOrStrictHd: true,
+                  isLandscape: true,
+                );
+                return Image(
+                  image: ResizeImage.resizeIfNeeded(
+                    cacheW,
+                    null,
+                    MemoryImage(bytes),
+                  ),
+                  fit: widget.fit,
+                  alignment: widget.alignment,
+                  gaplessPlayback: true,
+                  isAntiAlias: true,
+                  filterQuality: FilterQuality.medium,
+                  errorBuilder: (_, __, ___) => _buildFallback(),
+                );
+              },
+            )
+          : Image(
+              image: MemoryImage(bytes),
+              fit: widget.fit,
+              alignment: widget.alignment,
+              gaplessPlayback: true,
+              isAntiAlias: true,
+              filterQuality: FilterQuality.high,
+              errorBuilder: (_, __, ___) => _buildFallback(),
+            );
       if (_loadedSync) return img;
       return TweenAnimationBuilder<double>(
         tween: Tween<double>(begin: 0.0, end: 1.0),

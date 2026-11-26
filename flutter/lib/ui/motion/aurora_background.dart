@@ -203,7 +203,7 @@ class AuroraBackgroundState extends State<AuroraBackground>
       !kIsWeb && !OhosRuntime.isOhos && defaultTargetPlatform == TargetPlatform.iOS;
 
   bool get _isIosThermalThrottled =>
-      _isIosPlatform && IosLiquidGlassBridge.thermalThrottled;
+      _isIosPlatform && IosLiquidGlassBridge.thermalElevated;
 
   /// Cap iOS aurora shader redraws to ~30 fps (vs 120Hz ProMotion) so slow
   /// ambient waves stay silky while cutting GPU fragment work by 75%.
@@ -219,6 +219,7 @@ class AuroraBackgroundState extends State<AuroraBackground>
     _ticker = createTicker(_onTick);
     WidgetsBinding.instance.addObserver(this);
     IosLiquidGlassBridge.thermalThrottledNotifier.addListener(_syncTicker);
+    IosLiquidGlassBridge.thermalLevelNotifier.addListener(_syncTicker);
     _initShader();
   }
 
@@ -353,6 +354,7 @@ class AuroraBackgroundState extends State<AuroraBackground>
   @override
   void dispose() {
     IosLiquidGlassBridge.thermalThrottledNotifier.removeListener(_syncTicker);
+    IosLiquidGlassBridge.thermalLevelNotifier.removeListener(_syncTicker);
     WidgetsBinding.instance.removeObserver(this);
     _ticker.dispose();
     _elapsedNotifier.dispose();

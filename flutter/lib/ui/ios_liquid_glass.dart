@@ -5,6 +5,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart' show Colors, Theme;
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 /// Runtime bridge to Apple's true iOS 26+ Liquid Glass UIKit primitives
@@ -71,11 +72,17 @@ class IosLiquidGlassBridge {
       ValueNotifier<bool>(true);
   static final ValueNotifier<bool> thermalThrottledNotifier =
       ValueNotifier<bool>(false);
+
+  /// Raw iOS `ProcessInfo.thermalState` level (`0` nominal, `1` fair,
+  /// `2` serious, `3` critical). Older native builds only report the boolean
+  /// [thermalThrottledNotifier]; [thermalLevel] reconciles both.
+  static final ValueNotifier<int> thermalLevelNotifier = ValueNotifier<int>(0);
   static final ValueNotifier<int> majorVersionNotifier = ValueNotifier<int>(0);
   static bool _initialized = false;
   static bool? _testOverride;
   static bool? _testReduceTransparencyOverride;
   static bool? _testThermalThrottledOverride;
+  static int? _testThermalLevelOverride;
   static int? _testMajorVersionOverride;
   static bool _incomingHandlerInstalled = false;
   static bool _sheetPresentationInFlight = false;
@@ -150,6 +157,23 @@ class IosLiquidGlassBridge {
     return thermalThrottledNotifier.value;
   }
 
+  /// iOS thermal level (`0` nominal … `3` critical). Always `0` on non-iOS
+  /// unless overridden in tests.
+  static int get thermalLevel {
+    if (_testThermalLevelOverride != null) return _testThermalLevelOverride!;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      return thermalThrottled ? 2 : 0;
+    }
+    final level = thermalLevelNotifier.value.clamp(0, 3);
+    if (level < 2 && thermalThrottled) return 2;
+    return level;
+  }
+
+  /// `true` once iOS reports `.fair` or worse. Cheap visual work (animated
+  /// shaders, large blur radii) should already back off here, before the
+  /// device reaches `.serious` and the user feels the heat.
+  static bool get thermalElevated => thermalLevel >= 1 || thermalThrottled;
+
   /// Native iOS/iPadOS major OS version reported by `capabilities` (`0` when
   /// unknown or on non-iOS).
   static int get majorVersion {
@@ -173,6 +197,11 @@ class IosLiquidGlassBridge {
       }
       if (call.method == 'thermalStateChanged' && call.arguments is bool) {
         thermalThrottledNotifier.value = call.arguments as bool;
+        return null;
+      }
+      if (call.method == 'thermalLevelChanged' && call.arguments is num) {
+        thermalLevelNotifier.value =
+            (call.arguments as num).toInt().clamp(0, 3);
         return null;
       }
       if (call.method == 'rootTabSelected' && call.arguments is int) {
@@ -238,6 +267,7 @@ class IosLiquidGlassBridge {
       available.value = false;
       reduceTransparencyNotifier.value = false;
       thermalThrottledNotifier.value = false;
+      thermalLevelNotifier.value = 0;
       majorVersionNotifier.value = 0;
       return false;
     }
@@ -254,6 +284,10 @@ class IosLiquidGlassBridge {
       }
       if (result?['thermalThrottled'] is bool) {
         thermalThrottledNotifier.value = result?['thermalThrottled'] as bool;
+      }
+      if (result?['thermalLevel'] is num) {
+        thermalLevelNotifier.value =
+            (result?['thermalLevel'] as num).toInt().clamp(0, 3);
       }
       if (result?['majorVersion'] is num) {
         majorVersionNotifier.value = (result?['majorVersion'] as num).toInt();
@@ -286,6 +320,10 @@ class IosLiquidGlassBridge {
       reduceTransparencyNotifier.value = reduced;
       if (result?['thermalThrottled'] is bool) {
         thermalThrottledNotifier.value = result?['thermalThrottled'] as bool;
+      }
+      if (result?['thermalLevel'] is num) {
+        thermalLevelNotifier.value =
+            (result?['thermalLevel'] as num).toInt().clamp(0, 3);
       }
       if (result?['majorVersion'] is num) {
         majorVersionNotifier.value = (result?['majorVersion'] as num).toInt();
@@ -540,6 +578,7 @@ class IosLiquidGlassBridge {
       _initialized = false;
       _testReduceTransparencyOverride = null;
       _testThermalThrottledOverride = null;
+      _testThermalLevelOverride = null;
       _testMajorVersionOverride = null;
       _sheetPresentationInFlight = false;
       activeSheetNotifier.value = false;
@@ -548,6 +587,7 @@ class IosLiquidGlassBridge {
       reduceTransparencyNotifier.value = false;
       sceneActiveNotifier.value = true;
       thermalThrottledNotifier.value = false;
+      thermalLevelNotifier.value = 0;
       majorVersionNotifier.value = 0;
       _onRootTabSelected = null;
       _onRootTabSearch = null;
@@ -567,6 +607,12 @@ class IosLiquidGlassBridge {
   static void setThermalThrottledForTest(bool? value) {
     _testThermalThrottledOverride = value;
     thermalThrottledNotifier.value = value ?? false;
+  }
+
+  @visibleForTesting
+  static void setThermalLevelForTest(int? value) {
+    _testThermalLevelOverride = value?.clamp(0, 3);
+    thermalLevelNotifier.value = value?.clamp(0, 3) ?? 0;
   }
 
   @visibleForTesting
@@ -704,32 +750,186 @@ class IosNativeRouteGate extends StatefulWidget {
 
   @override
   State<IosNativeRouteGate> createState() => _IosNativeRouteGateState();
+
+  /// When `true` (default), native `UiKitView`s hosted INSIDE a scrolling
+  /// Flutter `Scrollable` (home hero header, category filter, settings
+  /// switches, detail action pills) are swapped for their exact-geometry
+  /// Flutter placeholders while that scrollable is actively scrolling, and
+  /// restored [scrollRestoreDelay] after scrolling settles.
+  ///
+  /// Every visible iOS platform view forces Flutter to merge the raster and
+  /// platform threads and to re-composite overlay layers on every frame; at
+  /// 120 Hz ProMotion that is one of the largest sustained CPU/GPU costs while
+  /// browsing (feedback: iPhone 17 Pro Max on iOS 27 running hot). Fixed chrome
+  /// (no `Scrollable` ancestor) is never affected.
+  static bool scrollAwareSwapEnabled = true;
+
+  static const Duration scrollRestoreDelay = Duration(milliseconds: 220);
+
+  /// Opt-in flag for dedicated scroll-debounce tests; in standard
+  /// `TestWidgetsFlutterBinding` suites we restore immediately on scroll idle
+  /// so unrelated scroll tests never leave a 220ms pending `Timer`.
+  @visibleForTesting
+  static bool debugEnableRestoreDelayInTests = false;
+
+  /// Pure policy predicate for whether a gate may host a live native view.
+  @visibleForTesting
+  static bool shouldHostNative({
+    required bool available,
+    required bool forcePlaceholders,
+    required bool isCurrentRoute,
+    required bool ancestorScrolling,
+    bool tickerModeEnabled = true,
+    bool scrollableThermalSuppressed = false,
+  }) {
+    if (!available || forcePlaceholders) return false;
+    if (!isCurrentRoute || !tickerModeEnabled) return false;
+    if (ancestorScrolling || scrollableThermalSuppressed) return false;
+    return true;
+  }
 }
 
 class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
   ModalRoute<dynamic>? _route;
+  bool _tickerModeEnabled = true;
   bool _ready = false;
+  final List<ValueListenable<bool>> _scrollingListenables =
+      <ValueListenable<bool>>[];
+  bool _scrollSuppressed = false;
+  Timer? _scrollRestoreTimer;
+  bool _recheckScheduled = false;
 
   @override
   void initState() {
     super.initState();
-    IosLiquidGlassBridge.available.addListener(_recheck);
+    IosLiquidGlassBridge.available.addListener(_onAvailabilityChanged);
+    IosLiquidGlassBridge.thermalThrottledNotifier.addListener(_recheck);
     IosNativeRouteGate._placeholderDepth.addListener(_recheck);
+  }
+
+  void _onAvailabilityChanged() {
+    if (!mounted) return;
+    _rebindScrollables();
+    _recheck();
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     _route = ModalRoute.of(context);
+    _tickerModeEnabled = TickerMode.valuesOf(context).enabled;
+    _rebindScrollables();
     _ready = _computeReady();
   }
 
+  void _rebindScrollables() {
+    final next = <ValueListenable<bool>>[];
+    if (IosNativeRouteGate.scrollAwareSwapEnabled &&
+        IosLiquidGlassBridge.isAvailable) {
+      ScrollableState? scrollable = Scrollable.maybeOf(context);
+      var depth = 0;
+      while (scrollable != null && depth < 4) {
+        next.add(scrollable.position.isScrollingNotifier);
+        scrollable =
+            scrollable.context.findAncestorStateOfType<ScrollableState>();
+        depth++;
+      }
+    }
+    if (!listEquals(next, _scrollingListenables)) {
+      for (final l in _scrollingListenables) {
+        l.removeListener(_onScrollActivityChanged);
+      }
+      _scrollingListenables
+        ..clear()
+        ..addAll(next);
+      for (final l in next) {
+        l.addListener(_onScrollActivityChanged);
+      }
+    }
+    if (next.isEmpty) {
+      _scrollRestoreTimer?.cancel();
+      _scrollRestoreTimer = null;
+      _scrollSuppressed = false;
+    } else if (_anyAncestorScrolling) {
+      // Never mount a brand-new UiKitView mid-fling (e.g. a ListView row
+      // built lazily while the user is actively scrolling at 120 Hz).
+      _scrollRestoreTimer?.cancel();
+      _scrollRestoreTimer = null;
+      _scrollSuppressed = true;
+    }
+  }
+
+  bool get _anyAncestorScrolling {
+    for (final l in _scrollingListenables) {
+      if (l.value) return true;
+    }
+    return false;
+  }
+
+  Duration get _effectiveRestoreDelay {
+    if (!IosNativeRouteGate.debugEnableRestoreDelayInTests &&
+        WidgetsBinding.instance.runtimeType
+            .toString()
+            .contains('TestWidgetsFlutterBinding')) {
+      return Duration.zero;
+    }
+    return IosNativeRouteGate.scrollRestoreDelay;
+  }
+
+  void _onScrollActivityChanged() {
+    if (!mounted) return;
+    if (_anyAncestorScrolling) {
+      _scrollRestoreTimer?.cancel();
+      _scrollRestoreTimer = null;
+      if (!_scrollSuppressed) {
+        _scrollSuppressed = true;
+        _scheduleRecheck();
+      }
+      return;
+    }
+    if (!_scrollSuppressed || _scrollRestoreTimer != null) return;
+    final delay = _effectiveRestoreDelay;
+    if (delay <= Duration.zero) {
+      _scrollSuppressed = false;
+      _scheduleRecheck();
+      return;
+    }
+    _scrollRestoreTimer = Timer(delay, () {
+      _scrollRestoreTimer = null;
+      if (!mounted || _anyAncestorScrolling) return;
+      _scrollSuppressed = false;
+      _scheduleRecheck();
+    });
+  }
+
+  /// `isScrollingNotifier` can flip during layout (e.g. ballistic settle);
+  /// never mark this element dirty mid-layout.
+  void _scheduleRecheck() {
+    final phase = SchedulerBinding.instance.schedulerPhase;
+    if (phase == SchedulerPhase.persistentCallbacks ||
+        phase == SchedulerPhase.midFrameMicrotasks) {
+      if (_recheckScheduled) return;
+      _recheckScheduled = true;
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        _recheckScheduled = false;
+        _recheck();
+      });
+      return;
+    }
+    _recheck();
+  }
+
   bool _computeReady() {
-    if (!IosLiquidGlassBridge.isAvailable) return false;
-    if (IosNativeRouteGate.forcePlaceholders) return false;
     final route = _route;
-    if (route == null) return true;
-    return route.isCurrent;
+    return IosNativeRouteGate.shouldHostNative(
+      available: IosLiquidGlassBridge.isAvailable,
+      forcePlaceholders: IosNativeRouteGate.forcePlaceholders,
+      isCurrentRoute: route == null || route.isCurrent,
+      ancestorScrolling: _scrollSuppressed,
+      tickerModeEnabled: _tickerModeEnabled,
+      scrollableThermalSuppressed: _scrollingListenables.isNotEmpty &&
+          IosLiquidGlassBridge.thermalThrottled,
+    );
   }
 
   void _recheck() {
@@ -742,7 +942,14 @@ class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
 
   @override
   void dispose() {
-    IosLiquidGlassBridge.available.removeListener(_recheck);
+    _scrollRestoreTimer?.cancel();
+    _scrollRestoreTimer = null;
+    for (final l in _scrollingListenables) {
+      l.removeListener(_onScrollActivityChanged);
+    }
+    _scrollingListenables.clear();
+    IosLiquidGlassBridge.available.removeListener(_onAvailabilityChanged);
+    IosLiquidGlassBridge.thermalThrottledNotifier.removeListener(_recheck);
     IosNativeRouteGate._placeholderDepth.removeListener(_recheck);
     super.dispose();
   }
