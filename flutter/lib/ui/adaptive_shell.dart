@@ -47,6 +47,8 @@ import 'curated_discovery_section.dart';
 import 'detail_screen.dart';
 import 'ios_filter_sheet.dart';
 import 'ios_glass_popover.dart' show activeIosGlassPopoverCount;
+import 'ios_download_groups_view.dart';
+import 'ios_history_poster_wall.dart';
 import 'ios_liquid_glass.dart';
 import 'ios_press_slide_menu.dart';
 import 'ios_search_page.dart';
@@ -11274,6 +11276,37 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 ),
                               ),
                             )
+                          : (_isIosNativeFlow
+                          ? IosHistoryPosterWall(
+                              entries: history,
+                              posterOf: _resolveHistoryPoster,
+                              maxCrossAxisExtent: viewport.posterGridExtent(
+                                useSidebar: useSidebar,
+                              ),
+                              padding: EdgeInsets.only(
+                                bottom: useSidebar ? 24 : 124,
+                              ),
+                              placeholderBuilder: _buildPosterPlaceholder,
+                              onOpen: (h, posterCtx, radius, cardId) =>
+                                  _openSyncedMediaEntry(
+                                siteKey: h.site,
+                                videoId: h.id,
+                                title: h.title,
+                                poster: _resolveHistoryPoster(h),
+                                sourceContext: posterCtx,
+                                sourceRadius: radius,
+                                sourceCardId: cardId,
+                              ),
+                              onDelete: (h) async {
+                                await widget.storage.removeWatchHistoryItem(
+                                  h.site,
+                                  h.id,
+                                );
+                                if (!mounted) return;
+                                setState(() {});
+                                _showIosUndoHistoryBanner(this.context, h);
+                              },
+                            )
                           : ListView.separated(
                               padding: EdgeInsets.only(
                                 bottom: useSidebar ? 24 : 124,
@@ -11334,7 +11367,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                   },
                                 );
                               },
-                            ))),
+                            )))),
             ),
           ],
         ),
@@ -11421,9 +11454,26 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ],
                 ),
               ),
-            AppleGroupedSection(
-              children: [for (final t in tasks) _buildDownloadRow(t)],
-            ),
+            if (_isIosNativeFlow)
+              IosDownloadGroupsView(
+                key: const ValueKey('ios-download-groups-view'),
+                tasks: tasks,
+                singleRowBuilder: _buildDownloadRow,
+                placeholderBuilder: _buildPosterPlaceholder,
+                onPlay: _playDownloaded,
+                onPause: (t) => service.pause(t.id),
+                onResume: (t) => service.resume(t.id),
+                onDeleteTask: _confirmDeleteDownload,
+                onPauseGroup: (g) =>
+                    service.pauseTasks(g.tasks.map((t) => t.id)),
+                onResumeGroup: (g) =>
+                    service.resumeTasks(g.tasks.map((t) => t.id)),
+                onDeleteGroup: _confirmDeleteDownloadGroup,
+              )
+            else
+              AppleGroupedSection(
+                children: [for (final t in tasks) _buildDownloadRow(t)],
+              ),
             if (service.rootPath.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
@@ -11513,7 +11563,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         child: LinearProgressIndicator(
                           value: t.status == DownloadStatus.queued &&
                                   t.progress <= 0
-                              ? null
+                              ? (_isIosNativeFlow ? 0.0 : null)
                               : t.progress.clamp(0.0, 1.0),
                           minHeight: 3,
                           backgroundColor: ApplePalette.of(context).fill,
@@ -11581,6 +11631,31 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       ).then((choice) {
         if (choice == 'delete') {
           DownloadService.instance.remove(t.id);
+        }
+      }),
+    );
+  }
+  void _confirmDeleteDownloadGroup(DownloadSeriesGroup g) {
+    unawaited(
+      showAppleNativeAlert(
+        context,
+        title: '删除整部剧集下载？',
+        message: '「${g.title}」共 ${g.episodeCount} 集及已下载的文件将被删除。',
+        actions: const [
+          AppleNativeAlertAction(id: 'cancel', title: '取消', isCancel: true),
+          AppleNativeAlertAction(
+            id: 'delete',
+            title: '删除',
+            isDestructive: true,
+          ),
+        ],
+      ).then((choice) {
+        if (choice == 'delete') {
+          unawaited(
+            DownloadService.instance.removeTasks(
+              g.tasks.map((t) => t.id),
+            ),
+          );
         }
       }),
     );

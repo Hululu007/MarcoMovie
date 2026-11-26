@@ -316,10 +316,10 @@ void main() {
         await tester.pumpAndSettle();
         expect(storage.getWatchHistory().length, 1);
 
-        // Swipe left to delete single item -> Undo banner appears
-        await tester.drag(find.text('可撤销测试剧'), const Offset(-140, 0));
+        // Long-press poster card to delete single item -> Undo banner appears
+        await tester.longPress(find.text('可撤销测试剧'));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('删除'));
+        await tester.tap(find.text('删除记录'));
         await tester.pumpAndSettle();
         expect(storage.getWatchHistory(), isEmpty);
         expect(find.byKey(const ValueKey('ios-undo-history-banner')), findsOneWidget);
