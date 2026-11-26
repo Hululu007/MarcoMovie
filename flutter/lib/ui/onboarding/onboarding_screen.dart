@@ -11,6 +11,7 @@ import '../apple_theme.dart';
 import '../ios_liquid_glass.dart';
 import '../poster_image.dart';
 import 'first_play_gesture_hint.dart';
+import 'ios_onboarding_flow.dart';
 import 'onboarding_prefs.dart';
 
 /// Manifest model kept backward-compatible with `assets/demo/manifest.json`
@@ -459,9 +460,17 @@ class _OnboardingScreenState extends State<OnboardingScreen>
         _ohosBypassSent = true;
         widget.onFinished?.call(true);
       });
-    } else if (_allowContinuousTicker) {
+    } else if (_allowContinuousTicker && !_useIosFlow) {
       _ambientCtrl.repeat();
     }
+  }
+
+  /// iPhone / iPad use the Apple-style feature tour ([IosOnboardingFlow]);
+  /// every other platform keeps the legacy 5-act showcase below.
+  bool get _useIosFlow {
+    final override = widget.platformOverride;
+    return shouldUseIosOnboardingFlow() &&
+        (override == null || override == FirstPlayHintPlatform.touch);
   }
 
   @override
@@ -528,6 +537,17 @@ class _OnboardingScreenState extends State<OnboardingScreen>
   Widget build(BuildContext context) {
     if (OhosRuntime.isOhos) {
       return const SizedBox.shrink();
+    }
+
+    if (_useIosFlow) {
+      if (_ambientCtrl.isAnimating) _ambientCtrl.stop();
+      return IosOnboardingFlow(
+        prefs: widget.prefs,
+        isChinese: widget.isChinese,
+        initialReduceMotion: widget.initialReduceMotion,
+        onImportConfig: widget.onImportConfig,
+        onFinished: widget.onFinished,
+      );
     }
 
     final zh = resolveOnboardingChineseLocale(context, widget.isChinese);

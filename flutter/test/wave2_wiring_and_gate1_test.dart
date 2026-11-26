@@ -724,7 +724,7 @@ void main() {
     );
 
     testWidgets(
-      'L-01: replaying onboarding preserves user glassBlurLevel (light / deep) when adjusting text scale or toggling reduceTransparency',
+      'L-01: replaying onboarding on iOS walks the 5-page Apple feature tour and preserves user glassBlurLevel (light / deep)',
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       (tester) async {
         tester.view.devicePixelRatio = 1.0;
@@ -744,6 +744,8 @@ void main() {
           final strength = savedPreset.$2;
           SharedPreferences.setMockInitialValues(<String, Object>{
             OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+            OnboardingPrefs.officialChannelNoticeVersionKey:
+                OnboardingPrefs.currentOfficialChannelNoticeVersion,
             StorageService.keyGlassBlurLevel: level,
             StorageService.keyGlassBlurStrength: strength,
           });
@@ -778,6 +780,84 @@ void main() {
           await tester.ensureVisible(replayEntry);
           await tester.pumpAndSettle();
           await tester.tap(replayEntry);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 450));
+          expect(find.byType(OnboardingScreen), findsOneWidget);
+          expect(find.byKey(const Key('ios_onboarding_flow')), findsOneWidget);
+
+          // Walk all 5 pages via onboarding_next_button (继续 x4 -> 开始使用)
+          for (var i = 0; i < 5; i++) {
+            await tester.tap(find.byKey(const Key('onboarding_next_button')));
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 420));
+          }
+          expect(find.byType(OnboardingScreen), findsNothing);
+          expect(storage.glassBlurLevel, level);
+          expect(storage.glassBlurStrength, closeTo(strength, 0.01));
+          expect(GlassworkBackdrop.reduceTransparency.value, isFalse);
+
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        }
+      },
+    );
+
+    testWidgets(
+      'L-01 (desktop/macOS): replaying onboarding preserves user glassBlurLevel (light / deep) when adjusting text scale or toggling reduceTransparency',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1200, 820);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+          GlassworkBackdrop.reduceTransparency.value = false;
+          GlassworkBackdrop.intensity.value = 0.68;
+        });
+
+        for (final savedPreset in const <(String, double)>[
+          ('light', 0.35),
+          ('deep', 1.0),
+        ]) {
+          final level = savedPreset.$1;
+          final strength = savedPreset.$2;
+          SharedPreferences.setMockInitialValues(<String, Object>{
+            OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+            OnboardingPrefs.officialChannelNoticeVersionKey:
+                OnboardingPrefs.currentOfficialChannelNoticeVersion,
+            StorageService.keyGlassBlurLevel: level,
+            StorageService.keyGlassBlurStrength: strength,
+          });
+          final storage = await StorageService.init();
+          expect(storage.glassBlurLevel, level);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: AdaptiveShell(
+                storage: storage,
+                client: CmsClient(
+                  client: MockClient(
+                    (_) async => http.Response('{"class":[],"list":[]}', 200),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(find.byType(OnboardingScreen), findsNothing);
+
+          // Open Settings -> 重新查看新手引导
+          await tester.tap(find.text('设置').last);
+          await tester.pumpAndSettle();
+          final replayRow = find.text('重新查看新手引导');
+          await tester.scrollUntilVisible(
+            replayRow,
+            300,
+            scrollable: find.byType(Scrollable).last,
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(replayRow);
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 400));
           expect(find.byType(OnboardingScreen), findsOneWidget);
