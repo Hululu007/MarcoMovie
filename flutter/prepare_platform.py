@@ -4451,6 +4451,12 @@ def main() -> None:
     if win_main.exists():
         text = win_main.read_text(encoding="utf-8")
         text = text.replace('L"marco_movie"', 'L"Marco Movie"')
+        if "#include <flutter_windows.h>" not in text and "#include <windows.h>" in text:
+            text = text.replace(
+                "#include <windows.h>",
+                "#include <flutter_windows.h>\n#include <windows.h>",
+                1,
+            )
         if "SetCurrentDirectoryW" not in text and "wWinMain(" in text:
             init_hook = (
                 "  wchar_t exe_path[MAX_PATH];\n"
@@ -4467,7 +4473,189 @@ def main() -> None:
                 init_hook + "  // Attach to console when present",
                 1,
             )
+        if (
+            "MONITOR_DEFAULTTOPRIMARY" not in text
+            and "Win32Window::Point origin(10, 10);" in text
+            and "Win32Window::Size size(1280, 720);" in text
+        ):
+            centered_origin_block = (
+                "  Win32Window::Size size(1280, 720);\n"
+                "  Win32Window::Point origin(10, 10);\n"
+                "  {\n"
+                "    HMONITOR primary = ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);\n"
+                "    MONITORINFO mi{};\n"
+                "    mi.cbSize = sizeof(MONITORINFO);\n"
+                "    if (primary && ::GetMonitorInfoW(primary, &mi)) {\n"
+                "      UINT dpi = FlutterDesktopGetDpiForMonitor(primary);\n"
+                "      double scale = dpi > 0 ? (dpi / 96.0) : 1.0;\n"
+                "      int log_w = static_cast<int>((mi.rcWork.right - mi.rcWork.left) / scale);\n"
+                "      int log_h = static_cast<int>((mi.rcWork.bottom - mi.rcWork.top) / scale);\n"
+                "      int target_w = (log_w >= 1280) ? 1280 : (log_w > 752 ? log_w - 32 : (log_w > 720 ? 720 : log_w));\n"
+                "      int target_h = (log_h >= 720) ? 720 : (log_h > 552 ? log_h - 32 : (log_h > 520 ? 520 : log_h));\n"
+                "      if (target_w > 0 && target_h > 0) {\n"
+                "        size = Win32Window::Size(static_cast<unsigned int>(target_w),\n"
+                "                                 static_cast<unsigned int>(target_h));\n"
+                "        int log_left = static_cast<int>(mi.rcWork.left / scale);\n"
+                "        int log_top = static_cast<int>(mi.rcWork.top / scale);\n"
+                "        int x = log_left + (log_w - target_w) / 2;\n"
+                "        int y = log_top + (log_h - target_h) / 2;\n"
+                "        origin = Win32Window::Point(\n"
+                "            x > 0 ? static_cast<unsigned int>(x) : 0u,\n"
+                "            y > 0 ? static_cast<unsigned int>(y) : 0u);\n"
+                "      }\n"
+                "    }\n"
+                "  }"
+            )
+            text = text.replace(
+                "  Win32Window::Point origin(10, 10);\n"
+                "  Win32Window::Size size(1280, 720);",
+                centered_origin_block,
+                1,
+            )
+        if (
+            "window.Destroy();" not in text
+            and "window.SetQuitOnClose(true);" in text
+            and "::CoUninitialize();" in text
+        ):
+            text = re.sub(
+                r"  FlutterWindow window\(project\);\n"
+                r"(.*?)  if \(!window\.Create\(L\"Marco Movie\", origin, size\)\) \{\n"
+                r"    return EXIT_FAILURE;\n"
+                r"  \}\n"
+                r"  window\.SetQuitOnClose\(true\);\n\n"
+                r"  ::MSG msg;\n"
+                r"  while \(::GetMessage\(&msg, nullptr, 0, 0\)\) \{\n"
+                r"    ::TranslateMessage\(&msg\);\n"
+                r"    ::DispatchMessage\(&msg\);\n"
+                r"  \}\n\n"
+                r"  ::CoUninitialize\(\);\n"
+                r"  return EXIT_SUCCESS;",
+                lambda m: (
+                    "  int exit_code = EXIT_SUCCESS;\n"
+                    "  {\n"
+                    "    FlutterWindow window(project);\n"
+                    + "".join("  " + line + "\n" if line else "\n" for line in m.group(1).splitlines())
+                    + "    if (!window.Create(L\"Marco Movie\", origin, size)) {\n"
+                    "      window.Destroy();\n"
+                    "      exit_code = EXIT_FAILURE;\n"
+                    "    } else {\n"
+                    "      window.SetQuitOnClose(true);\n\n"
+                    "      ::MSG msg;\n"
+                    "      while (::GetMessage(&msg, nullptr, 0, 0)) {\n"
+                    "        ::TranslateMessage(&msg);\n"
+                    "        ::DispatchMessage(&msg);\n"
+                    "      }\n\n"
+                    "      window.Destroy();\n"
+                    "    }\n"
+                    "  }\n\n"
+                    "  ::CoUninitialize();\n"
+                    "  return exit_code;"
+                ),
+                text,
+                count=1,
+                flags=re.DOTALL,
+            )
         win_main.write_text(text, encoding="utf-8")
+    win_w32_h = win_runner / "win32_window.h"
+    if win_w32_h.exists():
+        w32_h = win_w32_h.read_text(encoding="utf-8")
+        w32_h_changed = False
+        if "void ClearChildContent();" not in w32_h and "virtual void OnDestroy();" in w32_h:
+            w32_h = w32_h.replace(
+                "  virtual void OnDestroy();",
+                "  virtual void OnDestroy();\n\n"
+                "  // Detaches the hosted child HWND pointer before child teardown.\n"
+                "  void ClearChildContent();",
+                1,
+            )
+            w32_h_changed = True
+        if w32_h_changed:
+            win_w32_h.write_text(w32_h, encoding="utf-8")
+    win_w32_cpp = win_runner / "win32_window.cpp"
+    if win_w32_cpp.exists():
+        w32_cpp = win_w32_cpp.read_text(encoding="utf-8")
+        w32_cpp_changed = False
+        if "case WM_NCDESTROY:" not in w32_cpp and "    case WM_DESTROY:" in w32_cpp:
+            w32_cpp = w32_cpp.replace(
+                "    case WM_DESTROY:\n"
+                "      window_handle_ = nullptr;\n"
+                "      Destroy();\n"
+                "      if (quit_on_close_) {\n"
+                "        PostQuitMessage(0);\n"
+                "      }\n"
+                "      return 0;",
+                "    case WM_DESTROY:\n"
+                "      window_handle_ = nullptr;\n"
+                "      Destroy();\n"
+                "      if (quit_on_close_) {\n"
+                "        PostQuitMessage(0);\n"
+                "      }\n"
+                "      return 0;\n\n"
+                "    case WM_NCDESTROY:\n"
+                "      window_handle_ = nullptr;\n"
+                "      SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);\n"
+                "      return DefWindowProc(hwnd, message, wparam, lparam);",
+                1,
+            )
+            w32_cpp_changed = True
+        if "if (child_content_ != nullptr) {" in w32_cpp:
+            w32_cpp = w32_cpp.replace(
+                "if (child_content_ != nullptr) {",
+                "if (child_content_ != nullptr && ::IsWindow(child_content_)) {",
+            )
+            w32_cpp_changed = True
+        if "return DefWindowProc(window_handle_, message, wparam, lparam);" in w32_cpp:
+            w32_cpp = w32_cpp.replace(
+                "return DefWindowProc(window_handle_, message, wparam, lparam);",
+                "return DefWindowProc(hwnd, message, wparam, lparam);",
+            )
+            w32_cpp_changed = True
+        if (
+            "  if (window_handle_) {\n"
+            "    DestroyWindow(window_handle_);\n"
+            "    window_handle_ = nullptr;\n"
+            "  }"
+        ) in w32_cpp:
+            w32_cpp = w32_cpp.replace(
+                "  if (window_handle_) {\n"
+                "    DestroyWindow(window_handle_);\n"
+                "    window_handle_ = nullptr;\n"
+                "  }",
+                "  if (window_handle_) {\n"
+                "    HWND hwnd = window_handle_;\n"
+                "    window_handle_ = nullptr;\n"
+                "    DestroyWindow(hwnd);\n"
+                "  }",
+                1,
+            )
+            w32_cpp_changed = True
+        if "if (!window_handle_) {" not in w32_cpp and "RECT Win32Window::GetClientArea() {" in w32_cpp:
+            w32_cpp = w32_cpp.replace(
+                "RECT Win32Window::GetClientArea() {\n"
+                "  RECT frame;\n"
+                "  GetClientRect(window_handle_, &frame);\n"
+                "  return frame;\n"
+                "}",
+                "RECT Win32Window::GetClientArea() {\n"
+                "  RECT frame{};\n"
+                "  if (window_handle_) {\n"
+                "    GetClientRect(window_handle_, &frame);\n"
+                "  }\n"
+                "  return frame;\n"
+                "}",
+                1,
+            )
+            w32_cpp_changed = True
+        if "void Win32Window::ClearChildContent()" not in w32_cpp:
+            w32_cpp = (
+                w32_cpp.rstrip()
+                + "\n\nvoid Win32Window::ClearChildContent() {\n"
+                + "  child_content_ = nullptr;\n"
+                + "}\n"
+            )
+            w32_cpp_changed = True
+        if w32_cpp_changed:
+            win_w32_cpp.write_text(w32_cpp, encoding="utf-8")
     win_fw_h = win_runner / "flutter_window.h"
     if win_fw_h.exists():
         h_text = win_fw_h.read_text(encoding="utf-8")
@@ -4486,17 +4674,57 @@ def main() -> None:
             h_text = h_text.replace(
                 "  std::unique_ptr<flutter::FlutterViewController> flutter_controller_;",
                 "  std::unique_ptr<flutter::FlutterViewController> flutter_controller_;\n"
+                "  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> wakelock_channel_;\n"
                 "  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> tray_channel_;\n"
                 "  NOTIFYICONDATAW tray_data_{};\n"
                 "  bool tray_icon_added_ = false;\n"
+                "  bool has_created_content_ = false;\n"
+                "  bool is_shutting_down_ = false;\n"
+                "  bool exit_requested_ = false;\n"
+                "  bool on_destroy_completed_ = false;\n"
                 "  UINT taskbar_created_msg_ = 0;\n"
                 "  static constexpr UINT kTrayCallbackMsg = WM_APP + 101;\n"
+                "  static constexpr UINT kExitWindowMsg = WM_APP + 102;\n"
                 "  static constexpr UINT kTrayMenuRestoreId = 1001;\n"
                 "  static constexpr UINT kTrayMenuQuitId = 1002;\n\n"
                 "  bool AddTrayIcon(const std::wstring& tooltip);\n"
                 "  void RemoveTrayIcon();\n"
                 "  void RestoreFromTray();\n"
-                "  void ShowTrayContextMenu(HWND hwnd);",
+                "  void ShowTrayContextMenu(HWND hwnd);\n"
+                "  void RequestShutdownAndDestroy(HWND hwnd);",
+                1,
+            )
+            h_changed = True
+        if "is_shutting_down_" not in h_text and "tray_icon_added_" in h_text:
+            h_text = h_text.replace(
+                "  bool tray_icon_added_ = false;",
+                "  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> wakelock_channel_;\n"
+                "  bool tray_icon_added_ = false;\n"
+                "  bool has_created_content_ = false;\n"
+                "  bool is_shutting_down_ = false;\n"
+                "  bool exit_requested_ = false;\n"
+                "  bool on_destroy_completed_ = false;\n"
+                "  static constexpr UINT kExitWindowMsg = WM_APP + 102;\n"
+                "  void RequestShutdownAndDestroy(HWND hwnd);",
+                1,
+            )
+            h_changed = True
+        if "window_bounds_channel_" not in h_text and "flutter_controller_;" in h_text:
+            h_text = h_text.replace(
+                "  std::unique_ptr<flutter::FlutterViewController> flutter_controller_;",
+                "  std::unique_ptr<flutter::FlutterViewController> flutter_controller_;\n"
+                "  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> window_bounds_channel_;\n"
+                "  RECT last_normal_rect_{};\n"
+                "  bool has_last_normal_rect_ = false;\n"
+                "  bool last_maximized_ = false;\n"
+                "  bool initial_placement_applied_ = false;\n"
+                "  bool restored_from_saved_bounds_ = false;\n"
+                "  bool start_maximized_ = false;\n\n"
+                "  bool ApplyInitialWindowPlacement();\n"
+                "  void ShowInitialWindow();\n"
+                "  void CaptureNormalRectIfWindowed(HWND hwnd);\n"
+                "  void SaveWindowPlacementToRegistry();\n"
+                "  bool IsWindowInFullscreenStyle(HWND hwnd) const;",
                 1,
             )
             h_changed = True
@@ -4533,16 +4761,25 @@ def main() -> None:
                 1,
             )
             changed = True
+        if "FlutterWindow::~FlutterWindow() {}" in text:
+            text = text.replace(
+                "FlutterWindow::~FlutterWindow() {}",
+                "FlutterWindow::~FlutterWindow() {\n"
+                "  Destroy();\n"
+                "}",
+                1,
+            )
+            changed = True
         if "marco_movie/wakelock" not in text and "RegisterPlugins(flutter_controller_->engine());" in text:
             if "<flutter/method_channel.h>" not in text:
                 text = "#include <flutter/method_channel.h>\n#include <flutter/standard_method_codec.h>\n" + text
             text = text.replace(
                 "RegisterPlugins(flutter_controller_->engine());",
                 "RegisterPlugins(flutter_controller_->engine());\n"
-                "  flutter::MethodChannel<flutter::EncodableValue> wakelock_channel(\n"
+                "  wakelock_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(\n"
                 "      flutter_controller_->engine()->messenger(), \"marco_movie/wakelock\",\n"
                 "      &flutter::StandardMethodCodec::GetInstance());\n"
-                "  wakelock_channel.SetMethodCallHandler(\n"
+                "  wakelock_channel_->SetMethodCallHandler(\n"
                 "      [](const flutter::MethodCall<flutter::EncodableValue>& call,\n"
                 "         std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {\n"
                 "        if (call.method_name() == \"setEnabled\") {\n"
@@ -4558,59 +4795,165 @@ def main() -> None:
                 1,
             )
             changed = True
-        if "marco_movie/windows_tray" not in text and "RegisterPlugins(flutter_controller_->engine());" in text:
-            tray_setup = (
-                "  taskbar_created_msg_ = ::RegisterWindowMessageW(L\"TaskbarCreated\");\n"
-                "  tray_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(\n"
-                "      flutter_controller_->engine()->messenger(), \"marco_movie/windows_tray\",\n"
-                "      &flutter::StandardMethodCodec::GetInstance());\n"
-                "  tray_channel_->SetMethodCallHandler(\n"
-                "      [this](const flutter::MethodCall<flutter::EncodableValue>& call,\n"
-                "             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {\n"
-                "        if (call.method_name() == \"hideToTray\") {\n"
-                "          std::wstring tip = L\"Marco Movie\";\n"
-                "          if (const auto* map = std::get_if<flutter::EncodableMap>(call.arguments())) {\n"
-                "            auto it = map->find(flutter::EncodableValue(\"tooltip\"));\n"
-                "            if (it != map->end()) {\n"
-                "              if (const auto* utf8 = std::get_if<std::string>(&it->second); utf8 && !utf8->empty()) {\n"
-                "                int needed = ::MultiByteToWideChar(CP_UTF8, 0, utf8->c_str(), -1, nullptr, 0);\n"
-                "                if (needed > 1) {\n"
-                "                  std::wstring converted(static_cast<size_t>(needed - 1), L'\\0');\n"
-                "                  ::MultiByteToWideChar(CP_UTF8, 0, utf8->c_str(), -1, converted.data(), needed);\n"
-                "                  tip = converted;\n"
-                "                }\n"
-                "              }\n"
-                "            }\n"
-                "          }\n"
-                "          bool ok = AddTrayIcon(tip);\n"
-                "          if (ok && GetHandle()) {\n"
-                "            ::ShowWindow(GetHandle(), SW_HIDE);\n"
-                "          }\n"
-                "          result->Success(flutter::EncodableValue(ok));\n"
-                "        } else if (call.method_name() == \"showFromTray\") {\n"
-                "          RestoreFromTray();\n"
-                "          result->Success(flutter::EncodableValue(true));\n"
-                "        } else if (call.method_name() == \"removeTray\") {\n"
-                "          RemoveTrayIcon();\n"
-                "          result->Success(flutter::EncodableValue(true));\n"
-                "        } else {\n"
-                "          result->NotImplemented();\n"
-                "        }\n"
-                "      });\n"
+        elif "marco_movie/wakelock" in text and "wakelock_channel_" not in text:
+            text = text.replace(
+                "  flutter::MethodChannel<flutter::EncodableValue> wakelock_channel(",
+                "  wakelock_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(",
+                1,
             )
+            text = text.replace(
+                "  wakelock_channel.SetMethodCallHandler(",
+                "  wakelock_channel_->SetMethodCallHandler(",
+                1,
+            )
+            changed = True
+        tray_setup = (
+            "  taskbar_created_msg_ = ::RegisterWindowMessageW(L\"TaskbarCreated\");\n"
+            "  tray_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(\n"
+            "      flutter_controller_->engine()->messenger(), \"marco_movie/windows_tray\",\n"
+            "      &flutter::StandardMethodCodec::GetInstance());\n"
+            "  tray_channel_->SetMethodCallHandler(\n"
+            "      [this](const flutter::MethodCall<flutter::EncodableValue>& call,\n"
+            "             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {\n"
+            "        if (call.method_name() == \"hideToTray\") {\n"
+            "          if (is_shutting_down_ || exit_requested_) {\n"
+            "            result->Success(flutter::EncodableValue(false));\n"
+            "            return;\n"
+            "          }\n"
+            "          std::wstring tip = L\"Marco Movie\";\n"
+            "          if (const auto* map = std::get_if<flutter::EncodableMap>(call.arguments())) {\n"
+            "            auto it = map->find(flutter::EncodableValue(\"tooltip\"));\n"
+            "            if (it != map->end()) {\n"
+            "              if (const auto* utf8 = std::get_if<std::string>(&it->second); utf8 && !utf8->empty()) {\n"
+            "                int needed = ::MultiByteToWideChar(CP_UTF8, 0, utf8->c_str(), -1, nullptr, 0);\n"
+            "                if (needed > 1) {\n"
+            "                  std::wstring converted(static_cast<size_t>(needed - 1), L'\\0');\n"
+            "                  ::MultiByteToWideChar(CP_UTF8, 0, utf8->c_str(), -1, converted.data(), needed);\n"
+            "                  tip = converted;\n"
+            "                }\n"
+            "              }\n"
+            "            }\n"
+            "          }\n"
+            "          bool ok = AddTrayIcon(tip);\n"
+            "          if (ok && GetHandle()) {\n"
+            "            CaptureNormalRectIfWindowed(GetHandle());\n"
+            "            SaveWindowPlacementToRegistry();\n"
+            "            ::ShowWindow(GetHandle(), SW_HIDE);\n"
+            "          }\n"
+            "          result->Success(flutter::EncodableValue(ok));\n"
+            "        } else if (call.method_name() == \"showFromTray\") {\n"
+            "          if (is_shutting_down_ || exit_requested_) {\n"
+            "            result->Success(flutter::EncodableValue(false));\n"
+            "            return;\n"
+            "          }\n"
+            "          RestoreFromTray();\n"
+            "          result->Success(flutter::EncodableValue(true));\n"
+            "        } else if (call.method_name() == \"removeTray\") {\n"
+            "          RemoveTrayIcon();\n"
+            "          result->Success(flutter::EncodableValue(true));\n"
+            "        } else if (call.method_name() == \"destroyWindow\") {\n"
+            "          RemoveTrayIcon();\n"
+            "          if (initial_placement_applied_ && GetHandle()) {\n"
+            "            CaptureNormalRectIfWindowed(GetHandle());\n"
+            "            SaveWindowPlacementToRegistry();\n"
+            "          }\n"
+            "          const bool should_post = !exit_requested_ && !is_shutting_down_;\n"
+            "          exit_requested_ = true;\n"
+            "          result->Success(flutter::EncodableValue(true));\n"
+            "          if (should_post) {\n"
+            "            HWND hwnd = GetHandle();\n"
+            "            if (hwnd && ::IsWindow(hwnd)) {\n"
+            "              ::PostMessageW(hwnd, kExitWindowMsg, 0, 0);\n"
+            "            } else {\n"
+            "              ::PostQuitMessage(0);\n"
+            "            }\n"
+            "          }\n"
+            "        } else {\n"
+            "          result->NotImplemented();\n"
+            "        }\n"
+            "      });\n"
+        )
+        if "marco_movie/windows_tray" not in text and "RegisterPlugins(flutter_controller_->engine());" in text:
             text = text.replace(
                 "  SetChildContent(flutter_controller_->view()->GetNativeWindow());",
                 tray_setup + "  SetChildContent(flutter_controller_->view()->GetNativeWindow());",
                 1,
             )
             changed = True
-        if "tray_channel_.reset();" not in text and "void FlutterWindow::OnDestroy()" in text:
+        elif 'call.method_name() == "destroyWindow"' not in text and "marco_movie/windows_tray" in text:
+            upgraded_tray, n_sub = re.subn(
+                r'  taskbar_created_msg_ = ::RegisterWindowMessageW\(L"TaskbarCreated"\);\n'
+                r'  tray_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>\(.*?\n'
+                r'      \}\);\n',
+                lambda _m: tray_setup,
+                text,
+                count=1,
+                flags=re.DOTALL,
+            )
+            if n_sub == 1:
+                text = upgraded_tray
+                changed = True
+        if "has_created_content_ = true;" not in text and "if (!Win32Window::OnCreate()) {" in text:
             text = text.replace(
-                "void FlutterWindow::OnDestroy() {",
-                "void FlutterWindow::OnDestroy() {\n"
-                "  RemoveTrayIcon();\n"
-                "  tray_channel_.reset();",
+                "  if (!Win32Window::OnCreate()) {\n"
+                "    return false;\n"
+                "  }",
+                "  if (!Win32Window::OnCreate()) {\n"
+                "    return false;\n"
+                "  }\n\n"
+                "  is_shutting_down_ = false;\n"
+                "  exit_requested_ = false;\n"
+                "  on_destroy_completed_ = false;\n"
+                "  has_created_content_ = true;",
                 1,
+            )
+            changed = True
+        if "on_destroy_completed_ = true;" not in text and "void FlutterWindow::OnDestroy()" in text:
+            on_destroy_replacement = (
+                "void FlutterWindow::OnDestroy() {\n"
+                "  if (!has_created_content_ || on_destroy_completed_) {\n"
+                "    Win32Window::OnDestroy();\n"
+                "    return;\n"
+                "  }\n"
+                "  is_shutting_down_ = true;\n"
+                "  on_destroy_completed_ = true;\n"
+                "  has_created_content_ = false;\n"
+                "  ClearChildContent();\n"
+                "  ::SetThreadExecutionState(ES_CONTINUOUS);\n"
+                "  RemoveTrayIcon();\n"
+                "  if (webview2_plugin_) {\n"
+                "    webview2_plugin_->Shutdown();\n"
+                "    webview2_plugin_.reset();\n"
+                "  }\n"
+                "  if (initial_placement_applied_ && GetHandle()) {\n"
+                "    CaptureNormalRectIfWindowed(GetHandle());\n"
+                "    SaveWindowPlacementToRegistry();\n"
+                "  }\n"
+                "  if (window_bounds_channel_) {\n"
+                "    window_bounds_channel_->SetMethodCallHandler(nullptr);\n"
+                "    window_bounds_channel_.reset();\n"
+                "  }\n"
+                "  if (tray_channel_) {\n"
+                "    tray_channel_->SetMethodCallHandler(nullptr);\n"
+                "    tray_channel_.reset();\n"
+                "  }\n"
+                "  if (wakelock_channel_) {\n"
+                "    wakelock_channel_->SetMethodCallHandler(nullptr);\n"
+                "    wakelock_channel_.reset();\n"
+                "  }\n"
+                "  if (flutter_controller_) {\n"
+                "    auto controller = std::move(flutter_controller_);\n"
+                "    controller.reset();\n"
+                "  }\n\n"
+                "  Win32Window::OnDestroy();\n"
+                "}"
+            )
+            text = re.sub(
+                r"void FlutterWindow::OnDestroy\(\) \{.*?\n  Win32Window::OnDestroy\(\);\n\}",
+                on_destroy_replacement,
+                text,
+                count=1,
+                flags=re.DOTALL,
             )
             changed = True
         if "case kTrayCallbackMsg:" not in text and "switch (message) {" in text:
@@ -4636,96 +4979,502 @@ def main() -> None:
                 1,
             )
             changed = True
-        if "bool FlutterWindow::AddTrayIcon(" not in text:
-            text = (
-                text.rstrip()
-                + "\n\n"
-                + "bool FlutterWindow::AddTrayIcon(const std::wstring& tooltip) {\n"
-                + "  HWND hwnd = GetHandle();\n"
-                + "  if (!hwnd) {\n"
-                + "    return false;\n"
-                + "  }\n"
-                + "  if (tray_icon_added_) {\n"
-                + "    wcsncpy_s(tray_data_.szTip,\n"
-                + "              tooltip.empty() ? L\"Marco Movie\" : tooltip.c_str(), _TRUNCATE);\n"
-                + "    ::Shell_NotifyIconW(NIM_MODIFY, &tray_data_);\n"
-                + "    return true;\n"
-                + "  }\n"
-                + "  tray_data_ = {};\n"
-                + "  tray_data_.cbSize = sizeof(NOTIFYICONDATAW);\n"
-                + "  tray_data_.hWnd = hwnd;\n"
-                + "  tray_data_.uID = 1;\n"
-                + "  tray_data_.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;\n"
-                + "  tray_data_.uCallbackMessage = kTrayCallbackMsg;\n"
-                + "  tray_data_.hIcon = ::LoadIconW(::GetModuleHandleW(nullptr),\n"
-                + "                                 MAKEINTRESOURCEW(IDI_APP_ICON));\n"
-                + "  if (!tray_data_.hIcon) {\n"
-                + "    tray_data_.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);\n"
-                + "  }\n"
-                + "  wcsncpy_s(tray_data_.szTip,\n"
-                + "            tooltip.empty() ? L\"Marco Movie\" : tooltip.c_str(), _TRUNCATE);\n"
-                + "  tray_icon_added_ = (::Shell_NotifyIconW(NIM_ADD, &tray_data_) == TRUE);\n"
-                + "  return tray_icon_added_;\n"
-                + "}\n\n"
-                + "void FlutterWindow::RemoveTrayIcon() {\n"
-                + "  if (tray_icon_added_) {\n"
-                + "    ::Shell_NotifyIconW(NIM_DELETE, &tray_data_);\n"
-                + "    tray_icon_added_ = false;\n"
-                + "  }\n"
-                + "}\n\n"
-                + "void FlutterWindow::RestoreFromTray() {\n"
-                + "  RemoveTrayIcon();\n"
-                + "  HWND hwnd = GetHandle();\n"
-                + "  if (hwnd) {\n"
-                + "    ::ShowWindow(hwnd, SW_SHOW);\n"
-                + "    if (::IsIconic(hwnd)) {\n"
-                + "      ::ShowWindow(hwnd, SW_RESTORE);\n"
-                + "    }\n"
-                + "    ::SetForegroundWindow(hwnd);\n"
-                + "  }\n"
-                + "  if (tray_channel_) {\n"
-                + "    tray_channel_->InvokeMethod(\"restore\", nullptr);\n"
-                + "  }\n"
-                + "}\n\n"
-                + "void FlutterWindow::ShowTrayContextMenu(HWND hwnd) {\n"
-                + "  HMENU menu = ::CreatePopupMenu();\n"
-                + "  if (!menu) {\n"
-                + "    return;\n"
-                + "  }\n"
-                + "  ::AppendMenuW(menu, MF_STRING, kTrayMenuRestoreId,\n"
-                + "                L\"\\u663e\\u793a Marco Movie\");\n"
-                + "  ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);\n"
-                + "  ::AppendMenuW(menu, MF_STRING, kTrayMenuQuitId,\n"
-                + "                L\"\\u9000\\u51fa Marco Movie\");\n"
-                + "  ::SetMenuDefaultItem(menu, kTrayMenuRestoreId, FALSE);\n"
-                + "  POINT pt{};\n"
-                + "  ::GetCursorPos(&pt);\n"
-                + "  ::SetForegroundWindow(hwnd);\n"
-                + "  UINT cmd = static_cast<UINT>(::TrackPopupMenu(\n"
-                + "      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,\n"
-                + "      pt.x, pt.y, 0, hwnd, nullptr));\n"
-                + "  ::PostMessageW(hwnd, WM_NULL, 0, 0);\n"
-                + "  ::DestroyMenu(menu);\n"
-                + "  if (cmd == kTrayMenuRestoreId) {\n"
-                + "    RestoreFromTray();\n"
-                + "  } else if (cmd == kTrayMenuQuitId) {\n"
-                + "    RemoveTrayIcon();\n"
-                + "    if (tray_channel_) {\n"
-                + "      tray_channel_->InvokeMethod(\"quit\", nullptr);\n"
-                + "    } else {\n"
-                + "      ::PostMessageW(hwnd, WM_CLOSE, 0, 0);\n"
-                + "    }\n"
-                + "  }\n"
-                + "}\n"
+        if (
+            "case WM_FONTCHANGE:\n      flutter_controller_->engine()->ReloadSystemFonts();"
+            in text
+        ):
+            text = text.replace(
+                "    case WM_FONTCHANGE:\n"
+                "      flutter_controller_->engine()->ReloadSystemFonts();\n"
+                "      break;",
+                "    case WM_FONTCHANGE:\n"
+                "      if (!is_shutting_down_ && flutter_controller_ &&\n"
+                "          flutter_controller_->engine()) {\n"
+                "        flutter_controller_->engine()->ReloadSystemFonts();\n"
+                "      }\n"
+                "      break;",
+                1,
             )
+            changed = True
+        tray_helpers = (
+            "bool FlutterWindow::AddTrayIcon(const std::wstring& tooltip) {\n"
+            "  if (is_shutting_down_ || exit_requested_) {\n"
+            "    return false;\n"
+            "  }\n"
+            "  HWND hwnd = GetHandle();\n"
+            "  if (!hwnd) {\n"
+            "    return false;\n"
+            "  }\n"
+            "  if (tray_icon_added_) {\n"
+            "    wcsncpy_s(tray_data_.szTip,\n"
+            "              tooltip.empty() ? L\"Marco Movie\" : tooltip.c_str(), _TRUNCATE);\n"
+            "    ::Shell_NotifyIconW(NIM_MODIFY, &tray_data_);\n"
+            "    return true;\n"
+            "  }\n"
+            "  tray_data_ = {};\n"
+            "  tray_data_.cbSize = sizeof(NOTIFYICONDATAW);\n"
+            "  tray_data_.hWnd = hwnd;\n"
+            "  tray_data_.uID = 1;\n"
+            "  tray_data_.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;\n"
+            "  tray_data_.uCallbackMessage = kTrayCallbackMsg;\n"
+            "  tray_data_.hIcon = ::LoadIconW(::GetModuleHandleW(nullptr),\n"
+            "                                 MAKEINTRESOURCEW(IDI_APP_ICON));\n"
+            "  if (!tray_data_.hIcon) {\n"
+            "    tray_data_.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);\n"
+            "  }\n"
+            "  wcsncpy_s(tray_data_.szTip,\n"
+            "            tooltip.empty() ? L\"Marco Movie\" : tooltip.c_str(), _TRUNCATE);\n"
+            "  tray_icon_added_ = (::Shell_NotifyIconW(NIM_ADD, &tray_data_) == TRUE);\n"
+            "  return tray_icon_added_;\n"
+            "}\n\n"
+            "void FlutterWindow::RemoveTrayIcon() {\n"
+            "  if (tray_icon_added_) {\n"
+            "    ::Shell_NotifyIconW(NIM_DELETE, &tray_data_);\n"
+            "    tray_icon_added_ = false;\n"
+            "  }\n"
+            "}\n\n"
+            "void FlutterWindow::RestoreFromTray() {\n"
+            "  if (is_shutting_down_ || exit_requested_) {\n"
+            "    return;\n"
+            "  }\n"
+            "  RemoveTrayIcon();\n"
+            "  HWND hwnd = GetHandle();\n"
+            "  if (hwnd) {\n"
+            "    ::ShowWindow(hwnd, SW_SHOW);\n"
+            "    if (::IsIconic(hwnd)) {\n"
+            "      ::ShowWindow(hwnd, SW_RESTORE);\n"
+            "    }\n"
+            "    ::SetForegroundWindow(hwnd);\n"
+            "  }\n"
+            "  if (!is_shutting_down_ && tray_channel_) {\n"
+            "    tray_channel_->InvokeMethod(\"restore\", nullptr);\n"
+            "  }\n"
+            "}\n\n"
+            "void FlutterWindow::ShowTrayContextMenu(HWND hwnd) {\n"
+            "  if (is_shutting_down_ || exit_requested_) {\n"
+            "    return;\n"
+            "  }\n"
+            "  HMENU menu = ::CreatePopupMenu();\n"
+            "  if (!menu) {\n"
+            "    return;\n"
+            "  }\n"
+            "  ::AppendMenuW(menu, MF_STRING, kTrayMenuRestoreId,\n"
+            "                L\"\\u663e\\u793a Marco Movie\");\n"
+            "  ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);\n"
+            "  ::AppendMenuW(menu, MF_STRING, kTrayMenuQuitId,\n"
+            "                L\"\\u9000\\u51fa Marco Movie\");\n"
+            "  ::SetMenuDefaultItem(menu, kTrayMenuRestoreId, FALSE);\n"
+            "  POINT pt{};\n"
+            "  ::GetCursorPos(&pt);\n"
+            "  ::SetForegroundWindow(hwnd);\n"
+            "  UINT cmd = static_cast<UINT>(::TrackPopupMenu(\n"
+            "      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,\n"
+            "      pt.x, pt.y, 0, hwnd, nullptr));\n"
+            "  ::PostMessageW(hwnd, WM_NULL, 0, 0);\n"
+            "  ::DestroyMenu(menu);\n"
+            "  if (is_shutting_down_ || exit_requested_) {\n"
+            "    return;\n"
+            "  }\n"
+            "  if (cmd == kTrayMenuRestoreId) {\n"
+            "    RestoreFromTray();\n"
+            "  } else if (cmd == kTrayMenuQuitId) {\n"
+            "    RemoveTrayIcon();\n"
+            "    if (tray_channel_) {\n"
+            "      tray_channel_->InvokeMethod(\"quit\", nullptr);\n"
+            "    } else {\n"
+            "      RequestShutdownAndDestroy(hwnd);\n"
+            "    }\n"
+            "  }\n"
+            "}\n"
+        )
+        request_shutdown_def = (
+            "void FlutterWindow::RequestShutdownAndDestroy(HWND hwnd) {\n"
+            "  if (is_shutting_down_) {\n"
+            "    return;\n"
+            "  }\n"
+            "  if (initial_placement_applied_ && hwnd) {\n"
+            "    CaptureNormalRectIfWindowed(hwnd);\n"
+            "    SaveWindowPlacementToRegistry();\n"
+            "  }\n"
+            "  is_shutting_down_ = true;\n"
+            "  exit_requested_ = true;\n"
+            "  RemoveTrayIcon();\n"
+            "  HWND target = hwnd ? hwnd : GetHandle();\n"
+            "  if (target && ::IsWindow(target)) {\n"
+            "    ::DestroyWindow(target);\n"
+            "  } else {\n"
+            "    Destroy();\n"
+            "    ::PostQuitMessage(0);\n"
+            "  }\n"
+            "}\n"
+        )
+        if "bool FlutterWindow::AddTrayIcon(" not in text:
+            text = text.rstrip() + "\n\n" + tray_helpers
+            changed = True
+        elif "RequestShutdownAndDestroy(hwnd);" not in text:
+            upgraded_helpers, n_sub = re.subn(
+                r"bool FlutterWindow::AddTrayIcon\(const std::wstring& tooltip\) \{.*?"
+                r"void FlutterWindow::ShowTrayContextMenu\(HWND hwnd\) \{.*?\n    \}\n  \}\n\}\n?",
+                lambda _m: tray_helpers,
+                text,
+                count=1,
+                flags=re.DOTALL,
+            )
+            if n_sub == 1:
+                text = upgraded_helpers
+                changed = True
+        if "void FlutterWindow::RequestShutdownAndDestroy(HWND hwnd)" not in text:
+            text = text.rstrip() + "\n\n" + request_shutdown_def
             changed = True
         if "this->Show();" in text and "// Immediate Show on Windows" not in text:
             text = text.replace(
                 "SetChildContent(flutter_controller_->view()->GetNativeWindow());",
                 "SetChildContent(flutter_controller_->view()->GetNativeWindow());\n"
                 "  // Immediate Show on Windows so the window always appears right away\n"
-                "  this->Show();",
+                "  this->ShowInitialWindow();",
                 1,
+            )
+            changed = True
+        if (
+            "// Immediate Show on Windows so the window always appears right away\n"
+            "  this->Show();"
+        ) in text:
+            text = text.replace(
+                "// Immediate Show on Windows so the window always appears right away\n"
+                "  this->Show();",
+                "// Immediate Show on Windows so the window always appears right away\n"
+                "  this->ShowInitialWindow();",
+                1,
+            )
+            changed = True
+        if (
+            "  flutter_controller_->engine()->SetNextFrameCallback([&]() {\n"
+            "    this->Show();\n"
+            "  });"
+        ) in text:
+            text = text.replace(
+                "  flutter_controller_->engine()->SetNextFrameCallback([&]() {\n"
+                "    this->Show();\n"
+                "  });",
+                "  flutter_controller_->engine()->SetNextFrameCallback([this]() {\n"
+                "    if (!is_shutting_down_ && !exit_requested_ &&\n"
+                "        GetHandle() && !::IsWindowVisible(GetHandle()) && !tray_icon_added_) {\n"
+                "      this->ShowInitialWindow();\n"
+                "    }\n"
+                "  });",
+                1,
+            )
+            changed = True
+        if "ApplyInitialWindowPlacement();" not in text and "RECT frame = GetClientArea();" in text:
+            if "#include <algorithm>" not in text:
+                text = "#include <algorithm>\n#include <cstdint>\n#include <flutter_windows.h>\n#include <vector>\n" + text
+            text = text.replace(
+                "  RECT frame = GetClientArea();",
+                "  ApplyInitialWindowPlacement();\n\n  RECT frame = GetClientArea();",
+                1,
+            )
+            changed = True
+        if "marco_movie/windows_window_bounds" not in text and "SetChildContent(flutter_controller_->view()->GetNativeWindow());" in text:
+            bounds_setup = (
+                "  window_bounds_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(\n"
+                "      flutter_controller_->engine()->messenger(), \"marco_movie/windows_window_bounds\",\n"
+                "      &flutter::StandardMethodCodec::GetInstance());\n"
+                "  window_bounds_channel_->SetMethodCallHandler(\n"
+                "      [this](const flutter::MethodCall<flutter::EncodableValue>& call,\n"
+                "             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {\n"
+                "        if (call.method_name() == \"getStartupPlacementStatus\") {\n"
+                "          flutter::EncodableMap status;\n"
+                "          status[flutter::EncodableValue(\"nativeApplied\")] =\n"
+                "              flutter::EncodableValue(initial_placement_applied_);\n"
+                "          status[flutter::EncodableValue(\"restoredFromSaved\")] =\n"
+                "              flutter::EncodableValue(restored_from_saved_bounds_);\n"
+                "          result->Success(flutter::EncodableValue(status));\n"
+                "        } else if (call.method_name() == \"getDisplayWorkAreas\") {\n"
+                "          flutter::EncodableList list;\n"
+                "          ::EnumDisplayMonitors(\n"
+                "              nullptr, nullptr,\n"
+                "              [](HMONITOR monitor, HDC, LPRECT, LPARAM lparam) -> BOOL {\n"
+                "                auto* out = reinterpret_cast<flutter::EncodableList*>(lparam);\n"
+                "                MONITORINFO mi{};\n"
+                "                mi.cbSize = sizeof(MONITORINFO);\n"
+                "                if (::GetMonitorInfoW(monitor, &mi)) {\n"
+                "                  UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);\n"
+                "                  double scale = dpi > 0 ? (dpi / 96.0) : 1.0;\n"
+                "                  flutter::EncodableMap m;\n"
+                "                  m[flutter::EncodableValue(\"left\")] =\n"
+                "                      flutter::EncodableValue(static_cast<double>(mi.rcWork.left) / scale);\n"
+                "                  m[flutter::EncodableValue(\"top\")] =\n"
+                "                      flutter::EncodableValue(static_cast<double>(mi.rcWork.top) / scale);\n"
+                "                  m[flutter::EncodableValue(\"width\")] =\n"
+                "                      flutter::EncodableValue(static_cast<double>(mi.rcWork.right - mi.rcWork.left) / scale);\n"
+                "                  m[flutter::EncodableValue(\"height\")] =\n"
+                "                      flutter::EncodableValue(static_cast<double>(mi.rcWork.bottom - mi.rcWork.top) / scale);\n"
+                "                  m[flutter::EncodableValue(\"primary\")] =\n"
+                "                      flutter::EncodableValue((mi.dwFlags & MONITORINFOF_PRIMARY) != 0);\n"
+                "                  out->push_back(flutter::EncodableValue(m));\n"
+                "                }\n"
+                "                return TRUE;\n"
+                "              },\n"
+                "              reinterpret_cast<LPARAM>(&list));\n"
+                "          result->Success(flutter::EncodableValue(list));\n"
+                "        } else if (call.method_name() == \"savePlacement\") {\n"
+                "          CaptureNormalRectIfWindowed(GetHandle());\n"
+                "          SaveWindowPlacementToRegistry();\n"
+                "          result->Success(flutter::EncodableValue(true));\n"
+                "        } else {\n"
+                "          result->NotImplemented();\n"
+                "        }\n"
+                "      });\n"
+            )
+            text = text.replace(
+                "  SetChildContent(flutter_controller_->view()->GetNativeWindow());",
+                bounds_setup + "  SetChildContent(flutter_controller_->view()->GetNativeWindow());",
+                1,
+            )
+            changed = True
+        if "case WM_EXITSIZEMOVE:" not in text and "std::optional<LRESULT> result =" in text:
+            passive_bounds_hook = (
+                "  if (message == kExitWindowMsg) {\n"
+                "    RequestShutdownAndDestroy(hwnd);\n"
+                "    return 0;\n"
+                "  }\n\n"
+                "  if (message == WM_DESTROY) {\n"
+                "    if (!is_shutting_down_) {\n"
+                "      if (initial_placement_applied_) {\n"
+                "        CaptureNormalRectIfWindowed(hwnd);\n"
+                "        SaveWindowPlacementToRegistry();\n"
+                "      }\n"
+                "      is_shutting_down_ = true;\n"
+                "    }\n"
+                "    return Win32Window::MessageHandler(hwnd, message, wparam, lparam);\n"
+                "  }\n\n"
+                "  if (is_shutting_down_) {\n"
+                "    return Win32Window::MessageHandler(hwnd, message, wparam, lparam);\n"
+                "  }\n\n"
+                "  if (initial_placement_applied_) {\n"
+                "    switch (message) {\n"
+                "      case WM_MOVE:\n"
+                "        CaptureNormalRectIfWindowed(hwnd);\n"
+                "        break;\n"
+                "      case WM_EXITSIZEMOVE:\n"
+                "        CaptureNormalRectIfWindowed(hwnd);\n"
+                "        SaveWindowPlacementToRegistry();\n"
+                "        break;\n"
+                "      case WM_SIZE:\n"
+                "        if (!IsWindowInFullscreenStyle(hwnd)) {\n"
+                "          if (wparam == SIZE_MAXIMIZED) {\n"
+                "            if (!last_maximized_) {\n"
+                "              last_maximized_ = true;\n"
+                "              SaveWindowPlacementToRegistry();\n"
+                "            }\n"
+                "          } else if (wparam == SIZE_RESTORED) {\n"
+                "            const bool was_maximized = last_maximized_;\n"
+                "            last_maximized_ = false;\n"
+                "            CaptureNormalRectIfWindowed(hwnd);\n"
+                "            if (was_maximized) {\n"
+                "              SaveWindowPlacementToRegistry();\n"
+                "            }\n"
+                "          }\n"
+                "        }\n"
+                "        break;\n"
+                "      case WM_CLOSE:\n"
+                "        CaptureNormalRectIfWindowed(hwnd);\n"
+                "        SaveWindowPlacementToRegistry();\n"
+                "        break;\n"
+                "    }\n"
+                "  }\n\n"
+                "  if (!is_shutting_down_ && flutter_controller_) {\n"
+                "    std::optional<LRESULT> result ="
+            )
+            text = text.replace(
+                "  if (flutter_controller_) {\n"
+                "    std::optional<LRESULT> result =",
+                passive_bounds_hook,
+                1,
+            )
+            changed = True
+        elif "if (message == kExitWindowMsg)" not in text and "if (initial_placement_applied_) {" in text:
+            exit_msg_guard = (
+                "  if (message == kExitWindowMsg) {\n"
+                "    RequestShutdownAndDestroy(hwnd);\n"
+                "    return 0;\n"
+                "  }\n\n"
+                "  if (message == WM_DESTROY) {\n"
+                "    if (!is_shutting_down_) {\n"
+                "      if (initial_placement_applied_) {\n"
+                "        CaptureNormalRectIfWindowed(hwnd);\n"
+                "        SaveWindowPlacementToRegistry();\n"
+                "      }\n"
+                "      is_shutting_down_ = true;\n"
+                "    }\n"
+                "    return Win32Window::MessageHandler(hwnd, message, wparam, lparam);\n"
+                "  }\n\n"
+                "  if (is_shutting_down_) {\n"
+                "    return Win32Window::MessageHandler(hwnd, message, wparam, lparam);\n"
+                "  }\n\n"
+                "  if (initial_placement_applied_) {"
+            )
+            text = text.replace("  if (initial_placement_applied_) {", exit_msg_guard, 1)
+            text = text.replace(
+                "  if (flutter_controller_) {\n"
+                "    std::optional<LRESULT> result =",
+                "  if (!is_shutting_down_ && flutter_controller_) {\n"
+                "    std::optional<LRESULT> result =",
+                1,
+            )
+            changed = True
+        if "bool FlutterWindow::ApplyInitialWindowPlacement()" not in text:
+            text = (
+                text.rstrip()
+                + "\n\n"
+                + "namespace {\n"
+                + "constexpr const wchar_t kWindowPlacementRegPath[] =\n"
+                + "    L\"Software\\\\Pilipala\\\\MarcoMovie\\\\WindowPlacement\";\n\n"
+                + "LONG MinLong(LONG a, LONG b) { return a < b ? a : b; }\n"
+                + "LONG MaxLong(LONG a, LONG b) { return a > b ? a : b; }\n\n"
+                + "bool ReadRegInt32(HKEY key, const wchar_t* name, int32_t* out_val) {\n"
+                + "  DWORD data = 0;\n"
+                + "  DWORD size = sizeof(DWORD);\n"
+                + "  DWORD type = 0;\n"
+                + "  if (::RegQueryValueExW(key, name, nullptr, &type,\n"
+                + "                         reinterpret_cast<LPBYTE>(&data), &size) == ERROR_SUCCESS &&\n"
+                + "      type == REG_DWORD && size == sizeof(DWORD)) {\n"
+                + "    *out_val = static_cast<int32_t>(data);\n"
+                + "    return true;\n"
+                + "  }\n"
+                + "  return false;\n"
+                + "}\n\n"
+                + "void WriteRegInt32(HKEY key, const wchar_t* name, int32_t value) {\n"
+                + "  DWORD data = static_cast<DWORD>(value);\n"
+                + "  ::RegSetValueExW(key, name, 0, REG_DWORD,\n"
+                + "                   reinterpret_cast<const BYTE*>(&data), sizeof(DWORD));\n"
+                + "}\n"
+                + "}  // namespace\n\n"
+                + "bool FlutterWindow::IsWindowInFullscreenStyle(HWND hwnd) const {\n"
+                + "  if (!hwnd) return false;\n"
+                + "  const LONG_PTR style = ::GetWindowLongPtrW(hwnd, GWL_STYLE);\n"
+                + "  return (style & WS_THICKFRAME) == 0;\n"
+                + "}\n\n"
+                + "void FlutterWindow::CaptureNormalRectIfWindowed(HWND hwnd) {\n"
+                + "  if (!hwnd || ::IsIconic(hwnd) || ::IsZoomed(hwnd) ||\n"
+                + "      !::IsWindowVisible(hwnd) || IsWindowInFullscreenStyle(hwnd)) {\n"
+                + "    return;\n"
+                + "  }\n"
+                + "  RECT rc{};\n"
+                + "  if (!::GetWindowRect(hwnd, &rc)) return;\n"
+                + "  const LONG w = rc.right - rc.left;\n"
+                + "  const LONG h = rc.bottom - rc.top;\n"
+                + "  if (w >= 500 && h >= 400 && w <= 16384 && h <= 16384 &&\n"
+                + "      rc.left > -16000 && rc.top > -16000 && rc.left < 32768 && rc.top < 32768) {\n"
+                + "    last_normal_rect_ = rc;\n"
+                + "    has_last_normal_rect_ = true;\n"
+                + "  }\n"
+                + "}\n\n"
+                + "void FlutterWindow::SaveWindowPlacementToRegistry() {\n"
+                + "  if (!has_last_normal_rect_) return;\n"
+                + "  const LONG w = last_normal_rect_.right - last_normal_rect_.left;\n"
+                + "  const LONG h = last_normal_rect_.bottom - last_normal_rect_.top;\n"
+                + "  if (w < 500 || h < 400 || w > 16384 || h > 16384) return;\n"
+                + "  HKEY key = nullptr;\n"
+                + "  if (::RegCreateKeyExW(HKEY_CURRENT_USER, kWindowPlacementRegPath, 0, nullptr,\n"
+                + "                        REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &key,\n"
+                + "                        nullptr) != ERROR_SUCCESS || !key) {\n"
+                + "    return;\n"
+                + "  }\n"
+                + "  WriteRegInt32(key, L\"Left\", static_cast<int32_t>(last_normal_rect_.left));\n"
+                + "  WriteRegInt32(key, L\"Top\", static_cast<int32_t>(last_normal_rect_.top));\n"
+                + "  WriteRegInt32(key, L\"Width\", static_cast<int32_t>(w));\n"
+                + "  WriteRegInt32(key, L\"Height\", static_cast<int32_t>(h));\n"
+                + "  WriteRegInt32(key, L\"Maximized\", last_maximized_ ? 1 : 0);\n"
+                + "  ::RegCloseKey(key);\n"
+                + "}\n\n"
+                + "bool FlutterWindow::ApplyInitialWindowPlacement() {\n"
+                + "  HWND hwnd = GetHandle();\n"
+                + "  if (!hwnd) return false;\n"
+                + "  HKEY key = nullptr;\n"
+                + "  if (::RegOpenKeyExW(HKEY_CURRENT_USER, kWindowPlacementRegPath, 0,\n"
+                + "                      KEY_READ, &key) == ERROR_SUCCESS && key) {\n"
+                + "    int32_t left = 0, top = 0, width = 0, height = 0, maximized = 0;\n"
+                + "    const bool ok =\n"
+                + "        ReadRegInt32(key, L\"Left\", &left) &&\n"
+                + "        ReadRegInt32(key, L\"Top\", &top) &&\n"
+                + "        ReadRegInt32(key, L\"Width\", &width) &&\n"
+                + "        ReadRegInt32(key, L\"Height\", &height);\n"
+                + "    ReadRegInt32(key, L\"Maximized\", &maximized);\n"
+                + "    ::RegCloseKey(key);\n"
+                + "    if (ok && width >= 500 && height >= 400 && width <= 16384 && height <= 16384 &&\n"
+                + "        left > -16000 && top > -16000 && left < 32768 && top < 32768) {\n"
+                + "      RECT saved_rc{left, top, left + width, top + height};\n"
+                + "      HMONITOR mon = ::MonitorFromRect(&saved_rc, MONITOR_DEFAULTTONULL);\n"
+                + "      MONITORINFO mi{};\n"
+                + "      mi.cbSize = sizeof(MONITORINFO);\n"
+                + "      if (mon && ::GetMonitorInfoW(mon, &mi)) {\n"
+                + "        RECT inter{};\n"
+                + "        if (::IntersectRect(&inter, &saved_rc, &mi.rcWork) &&\n"
+                + "            (inter.right - inter.left) >= 160 &&\n"
+                + "            (inter.bottom - inter.top) >= 90) {\n"
+                + "          const LONG work_w = mi.rcWork.right - mi.rcWork.left;\n"
+                + "          const LONG work_h = mi.rcWork.bottom - mi.rcWork.top;\n"
+                + "          const LONG clamped_w = MinLong(work_w, MaxLong(MinLong(500, work_w), static_cast<LONG>(width)));\n"
+                + "          const LONG clamped_h = MinLong(work_h, MaxLong(MinLong(400, work_h), static_cast<LONG>(height)));\n"
+                + "          const LONG min_x = mi.rcWork.left - clamped_w + 160;\n"
+                + "          const LONG max_x = mi.rcWork.right - 160;\n"
+                + "          const LONG x = (min_x <= max_x)\n"
+                + "                             ? MaxLong(min_x, MinLong(max_x, static_cast<LONG>(left)))\n"
+                + "                             : mi.rcWork.left;\n"
+                + "          const LONG max_y = MaxLong(mi.rcWork.top, mi.rcWork.bottom - 90);\n"
+                + "          const LONG y = MaxLong(mi.rcWork.top, MinLong(max_y, static_cast<LONG>(top)));\n"
+                + "          ::SetWindowPos(hwnd, nullptr, x, y, clamped_w, clamped_h,\n"
+                + "                         SWP_NOZORDER | SWP_NOACTIVATE);\n"
+                + "          last_normal_rect_ = RECT{x, y, x + clamped_w, y + clamped_h};\n"
+                + "          has_last_normal_rect_ = true;\n"
+                + "          last_maximized_ = (maximized != 0);\n"
+                + "          start_maximized_ = last_maximized_;\n"
+                + "          restored_from_saved_bounds_ = true;\n"
+                + "          initial_placement_applied_ = true;\n"
+                + "          return true;\n"
+                + "        }\n"
+                + "      }\n"
+                + "    }\n"
+                + "  }\n"
+                + "  // First launch or disconnected monitor: center on primary monitor work area.\n"
+                + "  HMONITOR primary = ::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);\n"
+                + "  MONITORINFO mi{};\n"
+                + "  mi.cbSize = sizeof(MONITORINFO);\n"
+                + "  if (primary && ::GetMonitorInfoW(primary, &mi)) {\n"
+                + "    UINT dpi = FlutterDesktopGetDpiForMonitor(primary);\n"
+                + "    double scale = dpi > 0 ? (dpi / 96.0) : 1.0;\n"
+                + "    const LONG work_w = mi.rcWork.right - mi.rcWork.left;\n"
+                + "    const LONG work_h = mi.rcWork.bottom - mi.rcWork.top;\n"
+                + "    const LONG pref_w = static_cast<LONG>(1280.0 * scale);\n"
+                + "    const LONG pref_h = static_cast<LONG>(720.0 * scale);\n"
+                + "    const LONG min_w = MinLong(static_cast<LONG>(720.0 * scale), work_w);\n"
+                + "    const LONG min_h = MinLong(static_cast<LONG>(520.0 * scale), work_h);\n"
+                + "    const LONG margin = static_cast<LONG>(32.0 * scale);\n"
+                + "    const LONG w = (pref_w <= work_w) ? pref_w : MaxLong(min_w, work_w - margin);\n"
+                + "    const LONG h = (pref_h <= work_h) ? pref_h : MaxLong(min_h, work_h - margin);\n"
+                + "    const LONG x = mi.rcWork.left + (work_w - w) / 2;\n"
+                + "    const LONG y = mi.rcWork.top + (work_h - h) / 2;\n"
+                + "    ::SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);\n"
+                + "    last_normal_rect_ = RECT{x, y, x + w, y + h};\n"
+                + "    has_last_normal_rect_ = true;\n"
+                + "    last_maximized_ = false;\n"
+                + "    start_maximized_ = false;\n"
+                + "    restored_from_saved_bounds_ = false;\n"
+                + "    initial_placement_applied_ = true;\n"
+                + "    return true;\n"
+                + "  }\n"
+                + "  initial_placement_applied_ = true;\n"
+                + "  return false;\n"
+                + "}\n\n"
+                + "void FlutterWindow::ShowInitialWindow() {\n"
+                + "  HWND hwnd = GetHandle();\n"
+                + "  if (!hwnd) {\n"
+                + "    this->Show();\n"
+                + "    return;\n"
+                + "  }\n"
+                + "  ::ShowWindow(hwnd, start_maximized_ ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);\n"
+                + "}\n"
             )
             changed = True
         if "webview2_plugin_ = " not in text and "RegisterPlugins(flutter_controller_->engine());" in text:
@@ -4757,7 +5506,14 @@ def main() -> None:
         if '"shell32.lib"' not in cmake_text and '"dwmapi.lib"' in cmake_text:
             cmake_text = cmake_text.replace(
                 'target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")',
-                'target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib" "shell32.lib")',
+                'target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib" "shell32.lib" "advapi32.lib")',
+                1,
+            )
+            cmake_changed = True
+        elif '"advapi32.lib"' not in cmake_text and '"shell32.lib"' in cmake_text:
+            cmake_text = cmake_text.replace(
+                '"shell32.lib"',
+                '"shell32.lib" "advapi32.lib"',
                 1,
             )
             cmake_changed = True

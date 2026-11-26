@@ -13,6 +13,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart' show Player;
 import '../core/cms_client.dart';
 import '../core/catpaw_host.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -41,7 +42,9 @@ import '../core/app_log.dart';
 import '../core/search_source_notice.dart';
 import '../core/windows_tray_service.dart';
 import '../core/windows_video_quality.dart';
+import '../core/windows_window_bounds.dart';
 import '../core/wogg_source.dart';
+import '../core/work_aggregation.dart';
 import 'apple_theme.dart';
 import 'cloud_sync_panel.dart';
 import 'curated_discovery_section.dart';
@@ -56,6 +59,7 @@ import 'ios_press_slide_menu.dart';
 import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
+import 'windows_update_sheet.dart';
 import 'live_station_badge.dart';
 import 'macos_update_sheet.dart';
 import 'media_folder_browser_page.dart';
@@ -98,6 +102,10 @@ class AdaptiveShell extends StatefulWidget {
   final Future<bool> Function(Uri uri)? onOpenExternalUrlForTest;
   @visibleForTesting
   final Future<void> Function(String text)? onCopyTextForTest;
+  @visibleForTesting
+  final Player Function({required bool embedded})? debugPlayerFactoryForTest;
+  @visibleForTesting
+  final Widget? debugVideoSurfaceForTest;
 
   const AdaptiveShell({
     super.key,
@@ -112,6 +120,8 @@ class AdaptiveShell extends StatefulWidget {
     this.windowCloseTotalBudgetForTest,
     this.onOpenExternalUrlForTest,
     this.onCopyTextForTest,
+    this.debugPlayerFactoryForTest,
+    this.debugVideoSurfaceForTest,
   });
 
   static const Duration defaultWindowCloseBudget =
@@ -126,6 +136,8 @@ class AdaptiveShell extends StatefulWidget {
     required Future<void> Function() closeScripts,
     required Future<void> Function() destroyWindow,
     Future<void> Function()? hideWindow,
+    Future<void> Function()? prepareExit,
+    VoidCallback? onBeforeDestroyWindow,
     Duration totalBudget = defaultWindowCloseBudget,
   }) async {
     final sw = Stopwatch()..start();
@@ -166,6 +178,13 @@ class AdaptiveShell extends StatefulWidget {
             (_) => hideWindow(),
           );
         }
+        if (prepareExit != null) {
+          await runBounded(
+            'prepareExit',
+            const Duration(milliseconds: 900),
+            (_) => prepareExit(),
+          );
+        }
         await runBounded(
           'flushPendingHistory',
           const Duration(milliseconds: 300),
@@ -192,6 +211,11 @@ class AdaptiveShell extends StatefulWidget {
     } on Object catch (e) {
       debugPrint('AdaptiveShell: onWindowClose total budget reached: $e');
     } finally {
+      if (onBeforeDestroyWindow != null) {
+        onBeforeDestroyWindow();
+      } else if (prepareExit != null) {
+        WindowsTrayService.markNativeWindowDestroying();
+      }
       try {
         await setPreventClose(false)
             .timeout(const Duration(milliseconds: 150));
@@ -213,6 +237,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     with WindowListener, WidgetsBindingObserver, TickerProviderStateMixin {
   bool _windowListenerAttached = false;
   bool _isClosingWindow = false;
+  bool _isHidingToTray = false;
   Future<void>? _closingHistoryFlush;
   int _tabIndex = 0;
   String _windowsPage = 'home';
@@ -1450,29 +1475,95 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   @override
+  void onWindowMoved() {
+    if (!kIsWeb && Platform.isWindows) {
+      WindowsWindowBoundsController.shared?.scheduleCapture();
+    }
+  }
+
+  @override
+  void onWindowResized() {
+    if (!kIsWeb && Platform.isWindows) {
+      WindowsWindowBoundsController.shared?.scheduleCapture();
+    }
+  }
+
+  @override
+  void onWindowMaximize() {
+    if (!kIsWeb && Platform.isWindows) {
+      unawaited(WindowsWindowBoundsController.shared?.captureAndPersist());
+    }
+  }
+
+  @override
+  void onWindowUnmaximize() {
+    if (!kIsWeb && Platform.isWindows) {
+      WindowsWindowBoundsController.shared?.scheduleCapture(
+        debounce: const Duration(milliseconds: 120),
+      );
+    }
+  }
+
+  Future<void> _captureWindowsBoundsBeforeHideOrExit() async {
+    if (kIsWeb || !Platform.isWindows) return;
+    final ctrl = WindowsWindowBoundsController.shared;
+    if (ctrl == null) return;
+    try {
+      await ctrl
+          .captureAndPersist(immediate: true)
+          .timeout(const Duration(milliseconds: 200));
+    } catch (_) {}
+  }
+
+  bool get _isWindowsDesktopHost =>
+      !kIsWeb &&
+      !OhosRuntime.isOhos &&
+      (Platform.environment.containsKey('FLUTTER_TEST')
+          ? defaultTargetPlatform == TargetPlatform.windows
+          : Platform.isWindows);
+
+  @override
   Future<void> onWindowClose() async {
-    if (!kIsWeb &&
-        (Platform.isWindows || defaultTargetPlatform == TargetPlatform.windows) &&
+    if (_isClosingWindow || _isHidingToTray) return;
+    if (_isWindowsDesktopHost &&
         widget.storage.windowsCloseAction == 'tray') {
-      unawaited(widget.storage.flushPendingHistory());
-      final hidden = await WindowsTrayService.hideToTray(tooltip: 'Marco Movie');
-      if (hidden) {
-        return;
-      }
+      _isHidingToTray = true;
       try {
-        await windowManager.minimize();
-        return;
-      } catch (_) {}
+        await _captureWindowsBoundsBeforeHideOrExit();
+        unawaited(widget.storage.flushPendingHistory());
+        final hidden =
+            await WindowsTrayService.hideToTray(tooltip: 'Marco Movie');
+        if (hidden) {
+          return;
+        }
+        try {
+          await windowManager.minimize();
+          return;
+        } catch (_) {}
+      } finally {
+        _isHidingToTray = false;
+      }
     }
     await _executeWindowExit();
+  }
+
+  Future<void> _destroyDesktopWindow() async {
+    if (_isWindowsDesktopHost) {
+      final destroyed = await WindowsTrayService.destroyWindow();
+      if (destroyed) return;
+    }
+    await windowManager.destroy();
   }
 
   Future<void> _executeWindowExit() async {
     if (_isClosingWindow) return;
     _isClosingWindow = true;
-    if (!kIsWeb &&
-        (Platform.isWindows || defaultTargetPlatform == TargetPlatform.windows)) {
-      unawaited(WindowsTrayService.removeTray());
+    final isWindowsDesktop = _isWindowsDesktopHost;
+    if (isWindowsDesktop) {
+      await _captureWindowsBoundsBeforeHideOrExit();
+      if (widget.onDestroyWindowForTest == null) {
+        unawaited(WindowsTrayService.removeTray());
+      }
     }
     await AdaptiveShell.runWindowCloseSequence(
       setPreventClose: (prevent) => widget.onSetPreventCloseForTest != null
@@ -1481,6 +1572,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       hideWindow: widget.onDestroyWindowForTest != null
           ? null
           : () => windowManager.hide(),
+      prepareExit: !isWindowsDesktop
+          ? null
+          : () => WindowsTrayService.runBeforeExitHooks(
+                timeout: const Duration(milliseconds: 900),
+              ),
+      onBeforeDestroyWindow:
+          isWindowsDesktop ? WindowsTrayService.markNativeWindowDestroying : null,
       flushHistory: _flushPendingHistoryForCloseOrDispose,
       flushSync: (timeout) => widget.onFlushSyncForTest != null
           ? widget.onFlushSyncForTest!(timeout)
@@ -1493,7 +1591,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           : CmsClient.closeScriptSessions(),
       destroyWindow: () => widget.onDestroyWindowForTest != null
           ? widget.onDestroyWindowForTest!()
-          : windowManager.destroy(),
+          : _destroyDesktopWindow(),
       totalBudget: widget.windowCloseTotalBudgetForTest ??
           AdaptiveShell.defaultWindowCloseBudget,
     );
@@ -1652,14 +1750,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _windowListenerAttached = false;
       if (!kIsWeb && Platform.isWindows) {
         WindowsTrayService.detach();
-        unawaited(WindowsTrayService.removeTray());
+        if (!_isClosingWindow) {
+          unawaited(WindowsTrayService.removeTray());
+        }
       }
     }
     if (!kIsWeb &&
-        (Platform.isWindows ||
-            Platform.isMacOS ||
-            Platform.isLinux ||
-            widget.onSetPreventCloseForTest != null)) {
+        (widget.onSetPreventCloseForTest != null ||
+            (!_isClosingWindow &&
+                (Platform.isWindows ||
+                    Platform.isMacOS ||
+                    Platform.isLinux)))) {
       unawaited(
         (widget.onSetPreventCloseForTest != null
                 ? widget.onSetPreventCloseForTest!(false)
@@ -1676,8 +1777,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _liveProbeAbort!.complete();
     }
     _searchSubscription?.cancel();
-    unawaited(CatPawHost.instance.close());
-    unawaited(CmsClient.closeScriptSessions());
+    if (!_isClosingWindow) {
+      unawaited(CatPawHost.instance.close());
+      unawaited(CmsClient.closeScriptSessions());
+    }
     _searchController.dispose();
     _searchStateRevision.dispose();
     _liveSearchController.dispose();
@@ -2958,6 +3061,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     String? sourcePosterUrl,
     bool isFullBleedHero = false,
     Color? ambientColor,
+    List<WorkSourceRef> initialSources = const [],
   }) {
     if (!CuratedDiscoveryService.isCuratedSite(site) && !site.supported) {
       _showAppleNotice(site.name, site.unsupportedReason);
@@ -3028,6 +3132,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           initialVideo: video,
           client: widget.client,
           storage: widget.storage,
+          initialSources: initialSources,
         );
     final usePosterExpand =
         (defaultTargetPlatform == TargetPlatform.iOS ||
@@ -9776,6 +9881,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               isLive: true,
               liveGroups: catalogGroups,
               initialLiveChannel: ch,
+              debugPlayer:
+                  widget.debugPlayerFactoryForTest?.call(embedded: false),
+              debugVideoSurface: widget.debugVideoSurfaceForTest,
             ),
           ),
         ),
@@ -11381,6 +11489,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     return AnimatedBuilder(
       animation: service,
       builder: (context, _) {
+        if (service.isInitializing) {
+          return const Center(child: CupertinoActivityIndicator(radius: 12));
+        }
         if (!service.isReady) {
           return Center(
             child: Text(
@@ -14527,24 +14638,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   static String _formatCleanReleaseNotes(String raw) =>
       ReleaseNotesSummary.formatPlainText(raw);
 
-  static bool _isRemoteVersionNewer(String remote, String current) {
-    List<int> parseParts(String v) => v
-        .replaceAll(RegExp(r'^[vV]'), '')
-        .split(RegExp(r'[^0-9]+'))
-        .where((s) => s.isNotEmpty)
-        .map((s) => int.tryParse(s) ?? 0)
-        .toList();
-    final r = parseParts(remote);
-    final c = parseParts(current);
-    final len = math.max(r.length, c.length);
-    for (var i = 0; i < len; i++) {
-      final rv = i < r.length ? r[i] : 0;
-      final cv = i < c.length ? c[i] : 0;
-      if (rv != cv) return rv > cv;
-    }
-    return false;
-  }
-
   Future<T?> _openIosOrModalPage<T>({
     required String title,
     BuildContext? hostContext,
@@ -14599,6 +14692,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         context: context,
         title: '检查版本更新',
         builder: (_) => MacosUpdateSheet(installedVersion: _currentAppVersion),
+      );
+      return;
+    }
+    if (!kIsWeb &&
+        !OhosRuntime.isOhos &&
+        defaultTargetPlatform == TargetPlatform.windows) {
+      showAppleModalSheet<void>(
+        context: context,
+        title: '检查版本更新',
+        builder: (_) => WindowsUpdateSheet(
+          installedVersion: _currentAppVersion,
+          readVersion: _resolveInstalledAppVersion,
+        ),
       );
       return;
     }

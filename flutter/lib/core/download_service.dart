@@ -536,13 +536,35 @@ class DownloadService extends ChangeNotifier {
   final Set<String> _running = {};
   final Set<String> _stopRequested = {};
   final Set<String> _deleteRequested = {};
+  final Set<String> _sessionTouchedIds = {};
+  final Set<String> _sessionRemovedIds = {};
   final Map<String, _Meter> _meters = {};
+  List<DownloadTask>? _cachedSortedTasks;
+  int _tasksSortCount = 0;
   CmsClient? _client;
   Directory? _root;
   File? _indexFile;
   bool _ready = false;
+  bool _initialized = false;
+  bool _initializing = false;
+  Future<void>? _initFuture;
+  Future<void>? _verificationFuture;
+  int _restoreCount = 0;
+  int _initEpoch = 0;
   Timer? _saveTimer;
   DateTime _lastNotify = DateTime.fromMillisecondsSinceEpoch(0);
+
+  @visibleForTesting
+  Future<bool> Function(String path)? debugFileExistsProbe;
+
+  @visibleForTesting
+  Duration rootResolveTimeout = const Duration(seconds: 4);
+
+  @visibleForTesting
+  Duration fileVerifyTimeout = const Duration(seconds: 5);
+
+  @visibleForTesting
+  int maxVerifyConcurrency = 4;
 
   final HttpClient _http = HttpClient()
     ..connectionTimeout = const Duration(seconds: 15)
@@ -553,15 +575,34 @@ class DownloadService extends ChangeNotifier {
     ..autoUncompress = false;
 
   bool get isReady => _ready;
+  bool get isInitializing => _initializing;
+  bool get isInitialized => _initialized;
+  @visibleForTesting
+  int get restoreCount => _restoreCount;
+  @visibleForTesting
+  int get tasksSortCount => _tasksSortCount;
+  @visibleForTesting
+  Future<void>? get verificationFuture => _verificationFuture;
+  @visibleForTesting
+  Future<void> flushSavesForTesting() => _saveChain;
   String get rootPath => _root?.path ?? '';
   bool get canOpenFolder =>
       !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
 
-  /// Newest first for display.
+  void _invalidateTasksCache() {
+    _cachedSortedTasks = null;
+  }
+
+  /// Newest first for display (cached snapshot invalidated on queue mutation).
   List<DownloadTask> get tasks {
+    final cached = _cachedSortedTasks;
+    if (cached != null) return cached;
+    _tasksSortCount++;
     final list = List<DownloadTask>.of(_tasks);
     list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return list;
+    final frozen = List<DownloadTask>.unmodifiable(list);
+    _cachedSortedTasks = frozen;
+    return frozen;
   }
 
   int get activeCount => _tasks.where((t) => t.isActive).length;
@@ -569,53 +610,227 @@ class DownloadService extends ChangeNotifier {
   @visibleForTesting
   CmsClient? get debugClient => _client;
 
+  /// Restores persisted download records at most once without blocking UI on
+  /// per-file synchronous disk probes. Completed files are verified
+  /// asynchronously with bounded concurrency after the queue is live.
+  Future<void> init(CmsClient client) {
+    _client = client;
+    if (_initialized) return Future<void>.value();
+    final pending = _initFuture;
+    if (pending != null) {
+      if (identical(Zone.current, _initFutureZone)) return pending;
+      // Avoid deadlocking when a different Zone (e.g. testWidgets runAsync)
+      // awaits an in-flight Future whose continuations belong to a paused Zone.
+      final epoch = ++_initEpoch;
+      _initializing = true;
+      _initFutureZone = Zone.current;
+      final future = _performInit(epoch);
+      _initFuture = future;
+      return future;
+    }
+    _initializing = true;
+    final epoch = ++_initEpoch;
+    _initFutureZone = Zone.current;
+    final future = _performInit(epoch);
+    _initFuture = future;
+    return future;
+  }
+
+  Zone? _initFutureZone;
+
+  Future<void> _performInit(int epoch) async {
+    final completedToVerify = <DownloadTask>[];
+    var indexCorrupted = false;
+    final rootFuture = _resolveRoot().then<Directory?>(
+      (dir) => dir,
+      onError: (_) => null,
+    );
+    try {
+      final support = await getApplicationSupportDirectory();
+      if (epoch != _initEpoch) return;
+      await support.create(recursive: true);
+      if (epoch != _initEpoch) return;
+      _indexFile = File(_join(support.path, 'marco_downloads.json'));
+      if (await _indexFile!.exists()) {
+        try {
+          final raw = await _indexFile!.readAsString();
+          if (epoch != _initEpoch) return;
+          final decoded = jsonDecode(raw);
+          if (decoded is List) {
+            var mutatedAny = false;
+            for (final item in decoded) {
+              if (item is! Map) continue;
+              final task = DownloadTask.fromJson(
+                Map<String, dynamic>.from(item),
+              );
+              if (task.id.isEmpty) continue;
+              if (_sessionRemovedIds.contains(task.id)) continue;
+              final existingIdx = _tasks.indexWhere((t) => t.id == task.id);
+              if (existingIdx >= 0) {
+                final existing = _tasks[existingIdx];
+                // Preserve completed offline record & filePath if user clicked
+                // download on the same episode while disk index was restoring.
+                if (task.status == DownloadStatus.completed &&
+                    task.filePath.isNotEmpty &&
+                    existing.status != DownloadStatus.completed &&
+                    !_running.contains(existing.id)) {
+                  _tasks[existingIdx] = task;
+                  completedToVerify.add(task);
+                  mutatedAny = true;
+                }
+                continue;
+              }
+              if (task.status == DownloadStatus.downloading) {
+                task.status = DownloadStatus.queued;
+              }
+              if (task.status == DownloadStatus.completed) {
+                completedToVerify.add(task);
+              }
+              _tasks.add(task);
+              mutatedAny = true;
+            }
+            if (mutatedAny) {
+              _invalidateTasksCache();
+              notifyListeners();
+            }
+          } else {
+            indexCorrupted = true;
+          }
+        } catch (e) {
+          indexCorrupted = true;
+          debugPrint('DownloadService index parse error: $e');
+        }
+      }
+      if (!indexCorrupted) {
+        _restoreCount++;
+      }
+      final resolvedRoot = await rootFuture;
+      if (epoch != _initEpoch) return;
+      _root = resolvedRoot;
+    } catch (e) {
+      debugPrint('DownloadService init: $e');
+    }
+    if (epoch != _initEpoch) return;
+    _ready = _root != null;
+    if (_ready && !indexCorrupted) {
+      _initialized = true;
+    } else {
+      // Allow subsequent init() retries after index repair or drive recovery.
+      _initialized = false;
+      _initFuture = null;
+    }
+    _initializing = false;
+    if (!indexCorrupted &&
+        (_sessionTouchedIds.isNotEmpty || _sessionRemovedIds.isNotEmpty)) {
+      _scheduleSave(immediate: true);
+    }
+    notifyListeners();
+    _pump();
+    if (completedToVerify.isNotEmpty) {
+      _verificationFuture = _verifyCompletedFilesInBackground(
+        completedToVerify,
+        epoch,
+      );
+    } else {
+      _verificationFuture = Future<void>.value();
+    }
+  }
+
+  /// Returns `true` if the file exists, `false` if definitively absent, or
+  /// `null` when verification timed out / encountered transient I/O errors
+  /// (so slow/disconnected disks never falsely mark valid downloads as failed).
+  Future<bool?> _checkFileExists(String path) async {
+    if (path.isEmpty) return false;
+    final probe = debugFileExistsProbe;
+    if (probe != null) {
+      try {
+        return await probe(path).timeout(fileVerifyTimeout);
+      } on TimeoutException {
+        return null;
+      } catch (_) {
+        return null;
+      }
+    }
+    try {
+      return await File(path).exists().timeout(fileVerifyTimeout);
+    } on TimeoutException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _verifyCompletedFilesInBackground(
+    List<DownloadTask> candidates,
+    int epoch,
+  ) async {
+    if (candidates.isEmpty) return;
+    final concurrency = maxVerifyConcurrency < 1 ? 1 : maxVerifyConcurrency;
+    final workerCount =
+        candidates.length < concurrency ? candidates.length : concurrency;
+    var nextIndex = 0;
+    var mutated = false;
+
+    Future<void> worker() async {
+      while (true) {
+        if (epoch != _initEpoch) return;
+        final idx = nextIndex++;
+        if (idx >= candidates.length) return;
+        final task = candidates[idx];
+        if (task.status != DownloadStatus.completed ||
+            !_tasks.contains(task)) {
+          continue;
+        }
+        final exists = await _checkFileExists(task.filePath);
+        if (epoch != _initEpoch) return;
+        if (exists == false &&
+            task.status == DownloadStatus.completed &&
+            _tasks.contains(task)) {
+          task.status = DownloadStatus.failed;
+          task.error = '本地文件已被移动或删除';
+          task.progress = 0;
+          mutated = true;
+        }
+      }
+    }
+
+    await Future.wait([for (var i = 0; i < workerCount; i++) worker()]);
+    if (epoch != _initEpoch) return;
+    if (mutated) {
+      _invalidateTasksCache();
+      _scheduleSave(immediate: true);
+      notifyListeners();
+    }
+  }
+
   @visibleForTesting
   void resetForTesting() {
+    _initEpoch++;
+    _saveTimer?.cancel();
+    _saveTimer = null;
+    _tasks.clear();
+    _running.clear();
+    _stopRequested.clear();
+    _deleteRequested.clear();
+    _sessionTouchedIds.clear();
+    _sessionRemovedIds.clear();
+    _meters.clear();
+    _cachedSortedTasks = null;
+    _tasksSortCount = 0;
     _client = null;
     _root = null;
     _indexFile = null;
     _ready = false;
-    _tasks.clear();
-  }
-
-  Future<void> init(CmsClient client) async {
-    _client = client;
-    try {
-      _root = await _resolveRoot();
-      final support = await getApplicationSupportDirectory();
-      await support.create(recursive: true);
-      _indexFile = File(_join(support.path, 'marco_downloads.json'));
-      if (await _indexFile!.exists()) {
-        final raw = await _indexFile!.readAsString();
-        final decoded = jsonDecode(raw);
-        if (decoded is List) {
-          final existingIds = _tasks.map((t) => t.id).toSet();
-          for (final item in decoded) {
-            if (item is! Map) continue;
-            final task = DownloadTask.fromJson(Map<String, dynamic>.from(item));
-            if (task.id.isEmpty || existingIds.contains(task.id)) continue;
-            if (task.status == DownloadStatus.downloading) {
-              task.status = DownloadStatus.queued;
-            }
-            if (task.status == DownloadStatus.completed) {
-              final issue = _diagnoseCompletedFilesIssue(task);
-              if (issue != null) {
-                task.status = DownloadStatus.failed;
-                task.error = issue;
-                task.progress = 0;
-              }
-            }
-            existingIds.add(task.id);
-            _tasks.add(task);
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('DownloadService init: $e');
-    }
-    _ready = _root != null;
-    notifyListeners();
-    _pump();
+    _initialized = false;
+    _initializing = false;
+    _initFuture = null;
+    _initFutureZone = null;
+    _verificationFuture = null;
+    _restoreCount = 0;
+    debugFileExistsProbe = null;
+    rootResolveTimeout = const Duration(seconds: 4);
+    fileVerifyTimeout = const Duration(seconds: 5);
+    maxVerifyConcurrency = 4;
   }
 
   /// Simulates a clean app restart in tests by reloading persisted task state
@@ -625,11 +840,19 @@ class DownloadService extends ChangeNotifier {
     _saveTimer?.cancel();
     _saveTimer = null;
     await _save();
+    _initEpoch++;
     _tasks.clear();
     _running.clear();
     _stopRequested.clear();
     _deleteRequested.clear();
+    _sessionTouchedIds.clear();
+    _sessionRemovedIds.clear();
     _meters.clear();
+    _invalidateTasksCache();
+    _initialized = false;
+    _initializing = false;
+    _initFuture = null;
+    _initFutureZone = null;
     await init(client);
   }
 
@@ -787,10 +1010,10 @@ class DownloadService extends ChangeNotifier {
     Directory? base;
     if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
       try {
-        base = await getDownloadsDirectory();
+        base = await getDownloadsDirectory().timeout(rootResolveTimeout);
         if (base != null) {
           final probe = Directory(_join(base.path, 'Marco Movie'));
-          await probe.create(recursive: true);
+          await probe.create(recursive: true).timeout(rootResolveTimeout);
           return probe;
         }
       } catch (_) {
@@ -820,6 +1043,8 @@ class DownloadService extends ChangeNotifier {
       if (idx < 0 || idx >= line.episodes.length) continue;
       final ep = line.episodes[idx];
       final id = _taskId(site.key, video.id, line.name, idx, ep.url);
+      _sessionTouchedIds.add(id);
+      _sessionRemovedIds.remove(id);
       final existing = _byId(id);
       if (existing != null) {
         if (existing.status == DownloadStatus.failed ||
@@ -853,6 +1078,7 @@ class DownloadService extends ChangeNotifier {
       added++;
     }
     if (added > 0) {
+      _invalidateTasksCache();
       _scheduleSave(immediate: true);
       notifyListeners();
       _pump();
@@ -887,6 +1113,7 @@ class DownloadService extends ChangeNotifier {
   void pause(String id) {
     final t = _byId(id);
     if (t == null) return;
+    _sessionTouchedIds.add(id);
     if (_running.contains(id)) {
       _stopRequested.add(id);
     } else if (t.status == DownloadStatus.queued) {
@@ -899,6 +1126,7 @@ class DownloadService extends ChangeNotifier {
   void resume(String id) {
     final t = _byId(id);
     if (t == null) return;
+    _sessionTouchedIds.add(id);
     if (t.status == DownloadStatus.paused || t.status == DownloadStatus.failed) {
       t.status = DownloadStatus.queued;
       t.error = '';
@@ -955,6 +1183,8 @@ class DownloadService extends ChangeNotifier {
     final toDelete = <DownloadTask>[];
     var changed = false;
     for (final id in ids.toSet()) {
+      _sessionRemovedIds.add(id);
+      _sessionTouchedIds.remove(id);
       final t = _byId(id);
       if (t == null) continue;
       _tasks.remove(t);
@@ -967,6 +1197,7 @@ class DownloadService extends ChangeNotifier {
       }
     }
     if (!changed) return;
+    _invalidateTasksCache();
     _scheduleSave(immediate: true);
     notifyListeners();
     for (final t in toDelete) {
@@ -976,7 +1207,10 @@ class DownloadService extends ChangeNotifier {
 
   void resumeAll() {
     for (final t in _tasks) {
-      if (t.status == DownloadStatus.paused) t.status = DownloadStatus.queued;
+      if (t.status == DownloadStatus.paused) {
+        _sessionTouchedIds.add(t.id);
+        t.status = DownloadStatus.queued;
+      }
     }
     _scheduleSave(immediate: true);
     notifyListeners();
@@ -984,9 +1218,12 @@ class DownloadService extends ChangeNotifier {
   }
 
   Future<void> remove(String id) async {
+    _sessionRemovedIds.add(id);
+    _sessionTouchedIds.remove(id);
     final t = _byId(id);
     if (t == null) return;
     _tasks.remove(t);
+    _invalidateTasksCache();
     if (_running.contains(id)) {
       _stopRequested.add(id);
       _deleteRequested.add(id);
@@ -1166,14 +1403,23 @@ class DownloadService extends ChangeNotifier {
     });
   }
 
-  Future<void> _save() async {
-    final file = _indexFile;
-    if (file == null) return;
-    try {
-      final tmp = File('${file.path}.tmp');
-      await tmp.writeAsString(jsonEncode(_tasks.map((t) => t.toJson()).toList()));
-      await tmp.rename(file.path);
-    } catch (_) {}
+  Future<void> _saveChain = Future<void>.value();
+
+  Future<void> _save() {
+    final epoch = _initEpoch;
+    _saveChain = _saveChain.then((_) async {
+      if (epoch != _initEpoch) return;
+      final file = _indexFile;
+      if (file == null) return;
+      try {
+        final tmp = File('${file.path}.tmp');
+        await tmp.writeAsString(
+          jsonEncode(_tasks.map((t) => t.toJson()).toList()),
+        );
+        await tmp.rename(file.path);
+      } catch (_) {}
+    });
+    return _saveChain;
   }
 
   Future<void> _deleteFiles(DownloadTask t) async {

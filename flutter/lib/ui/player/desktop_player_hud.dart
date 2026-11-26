@@ -196,6 +196,8 @@ class DesktopPlayerHud extends StatefulWidget {
   final VoidCallback onPlayPause;
   final VoidCallback onVolumeTap;
   final VoidCallback onEpisodesTap;
+  final VoidCallback? onSwitchSourceTap;
+  final String switchSourceLabel;
   final VoidCallback onSpeedTap;
   final VoidCallback onSubtitlesTap;
   final VoidCallback onSleepTimerTap;
@@ -252,6 +254,8 @@ class DesktopPlayerHud extends StatefulWidget {
     required this.onPlayPause,
     required this.onVolumeTap,
     required this.onEpisodesTap,
+    this.onSwitchSourceTap,
+    this.switchSourceLabel = '换源',
     required this.onSpeedTap,
     required this.onSubtitlesTap,
     required this.onSleepTimerTap,
@@ -793,6 +797,13 @@ class _DesktopPlayerHudState extends State<DesktopPlayerHud> {
                             CupertinoIcons.list_bullet,
                             widget.onEpisodesTap,
                           ),
+                          if (!widget.isLive && widget.onSwitchSourceTap != null)
+                            barButton(
+                              widget.switchSourceLabel,
+                              CupertinoIcons.arrow_2_squarepath,
+                              widget.onSwitchSourceTap!,
+                              key: const Key('desktop-switch-source-button'),
+                            ),
                           barButton(
                             '更多',
                             CupertinoIcons.ellipsis,
@@ -1217,7 +1228,7 @@ class DesktopVideoQualitySection extends StatelessWidget {
   }
 }
 
-/// Reusable 4-tier `dynaudnorm` vocal dialogue & loudness selector section for
+/// Reusable 4-tier parametric EQ vocal dialogue selector section for
 /// [DesktopPlayerMorePopover] or quick-switch popovers.
 class DesktopAudioLoudnessSection extends StatelessWidget {
   final AudioLoudnessPreset currentPreset;
@@ -1242,7 +1253,7 @@ class DesktopAudioLoudnessSection extends StatelessWidget {
             children: [
               const Expanded(
                 child: Text(
-                  '人声响度增强',
+                  '人声均衡增强',
                   style: TextStyle(
                     color: Color(0x99FFFFFF),
                     fontSize: 11.5,

@@ -112,9 +112,13 @@ extension _WindowsDetail on _DetailScreenState {
                           maxWidth: box.maxWidth * 0.45,
                         ),
                         child: Tooltip(
-                          message: _activeSite.name,
+                          message: _aggregatedSources.length > 1
+                              ? '${_activeSite.name}（已聚合 ${_aggregatedSources.length} 个来源）'
+                              : _activeSite.name,
                           child: _windowsFloatingGlassButton(
-                            label: _activeSite.name,
+                            label: _aggregatedSources.length > 1
+                                ? '${_activeSite.name} · ${_aggregatedSources.length} 个来源'
+                                : _activeSite.name,
                             icon: CupertinoIcons.layers_alt,
                             onPressed: _showSourcePickerSheet,
                           ),
@@ -167,6 +171,8 @@ extension _WindowsDetail on _DetailScreenState {
     required WatchHistoryEntry? bookmark,
   }) {
     final hasLines = !_loading && _video.lines.any((l) => l.episodes.isNotEmpty);
+    final unifiedSlotsForCta = _unifiedEpisodeSlots();
+    final hasAnyPlayable = hasLines || unifiedSlotsForCta.isNotEmpty;
     final activeLine = hasLines
         ? _video.lines[_selectedLine.clamp(0, _video.lines.length - 1)]
         : null;
@@ -202,12 +208,16 @@ extension _WindowsDetail on _DetailScreenState {
           ),
           onPressed: hasLines
               ? () => _playPrimaryAction(bookmark)
-              : _loading
-                  ? null
-                  : _searchOtherSources,
+              : (unifiedSlotsForCta.isNotEmpty
+                  ? () => _openPlayerForOffer(
+                        unifiedSlotsForCta.first.preferredOffer(
+                          preferredSiteKey: _activeSite.key,
+                        ),
+                      )
+                  : (_loading ? null : _searchOtherSources)),
           icon: const Icon(CupertinoIcons.play_fill, size: 15),
           label: Text(
-            hasLines
+            hasAnyPlayable
                 ? (bookmark != null && bookmark.resumePosition > 0
                     ? '继续观看'
                     : '立即播放')
@@ -672,6 +682,11 @@ extension _WindowsDetail on _DetailScreenState {
 
   Widget _windowsCollapsibleControlsPanel(WatchHistoryEntry? bookmark) {
     final hasLines = !_loading && _video.lines.any((l) => l.episodes.isNotEmpty);
+    final unifiedSlots = _unifiedEpisodeSlots();
+    final hasMultiOfferPool =
+        _hasAggregatedMultiOfferDetails && unifiedSlots.isNotEmpty;
+    final useUnifiedEpisodes = hasMultiOfferPool && !_windowsManualLineFilter;
+    final hasAnyPlayable = hasLines || hasMultiOfferPool;
     final lineIndex =
         hasLines ? _selectedLine.clamp(0, _video.lines.length - 1) : 0;
     final activeLine = hasLines ? _video.lines[lineIndex] : null;
@@ -699,23 +714,25 @@ extension _WindowsDetail on _DetailScreenState {
             runSpacing: 10,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              if (hasLines) ...[
-                _windowsDrawerToggleButton(
-                  key: const ValueKey('windows-detail-line-toggle'),
-                  icon: CupertinoIcons.layers_alt,
-                  label: _video.lines.length > 1
-                      ? '线路：$lineSummary（共 ${_video.lines.length} 条）'
-                      : '线路：$lineSummary',
-                  expanded: _windowsLinesExpanded,
-                  onPressed: () => _updateWindowsState(() {
-                    _windowsLinesExpanded = !_windowsLinesExpanded;
-                  }),
-                ),
+              if (hasAnyPlayable) ...[
+                if (hasLines)
+                  _windowsDrawerToggleButton(
+                    key: const ValueKey('windows-detail-line-toggle'),
+                    icon: CupertinoIcons.layers_alt,
+                    label: _video.lines.length > 1
+                        ? '线路：$lineSummary（共 ${_video.lines.length} 条）'
+                        : '线路：$lineSummary',
+                    expanded: _windowsLinesExpanded,
+                    onPressed: () => _updateWindowsState(() {
+                      _windowsLinesExpanded = !_windowsLinesExpanded;
+                    }),
+                  ),
                 _windowsDrawerToggleButton(
                   key: const ValueKey('windows-detail-episode-toggle'),
                   icon: CupertinoIcons.square_grid_2x2,
-                  label:
-                      '选集：${_currentSeasonLabel(activeLine!)}（共 ${activeIndices.length} 集）',
+                  label: useUnifiedEpisodes
+                      ? '选集：全部来源（共 ${unifiedSlots.length} 集）'
+                      : '选集：${_currentSeasonLabel(activeLine!)}（共 ${activeIndices.length} 集）',
                   expanded: _windowsEpisodesExpanded,
                   onPressed: () => _updateWindowsState(() {
                     _windowsEpisodesExpanded = !_windowsEpisodesExpanded;
@@ -732,17 +749,43 @@ extension _WindowsDetail on _DetailScreenState {
                     widget.storage.setEpisodesDescending(_descending);
                   },
                 ),
-                _windowsCinemaActionPill(
-                  '全部剧集',
-                  icon: CupertinoIcons.list_bullet,
-                  onPressed: () => _showAllEpisodesGridSheet(bookmark),
-                ),
+                if (hasAnyPlayable)
+                  _windowsCinemaActionPill(
+                    '全部剧集',
+                    icon: CupertinoIcons.list_bullet,
+                    onPressed: () => _showAllEpisodesGridSheet(bookmark),
+                  ),
               ],
               _windowsCinemaActionPill(
-                '切换片源',
+                _aggregatedSources.length > 1
+                    ? '切换片源 (${_aggregatedSources.length})'
+                    : '切换片源',
+                key: const ValueKey('windows-detail-switch-source-btn'),
                 icon: CupertinoIcons.arrow_2_squarepath,
                 onPressed: _showSourcePickerSheet,
               ),
+              if (_hydratingAggregatedSources)
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 6),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.6,
+                          color: Color(0xFF8AB8FF),
+                        ),
+                      ),
+                      SizedBox(width: 6),
+                      Text(
+                        '正在补齐其他来源…',
+                        style: TextStyle(color: _cinemaMuted, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
               if (!_activeSite.isEffectivelyPrivate)
                 _windowsCinemaActionPill(
                   (_scrapeOverride != null &&
@@ -788,71 +831,117 @@ extension _WindowsDetail on _DetailScreenState {
               padding: const EdgeInsets.only(top: 14),
               child: WinPanel(dark: true, child: _buildSourceWarningsSection()),
             ),
-          if (hasLines) ...[
+          if (hasAnyPlayable) ...[
             // Collapsible Lines Drawer
-            AnimatedSize(
-              duration: const Duration(milliseconds: 200),
-              curve: Curves.easeOutCubic,
-              alignment: Alignment.topCenter,
-              child: _windowsLinesExpanded
-                  ? Padding(
-                      key: const ValueKey('windows-detail-lines-panel'),
-                      padding: const EdgeInsets.only(top: 16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Divider(height: 1, color: _cinemaBorder),
-                          const SizedBox(height: 14),
-                          const Text(
-                            '选择播放线路',
-                            style: TextStyle(
-                              color: _cinemaMuted,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
+            if (hasLines)
+              AnimatedSize(
+                duration: const Duration(milliseconds: 200),
+                curve: Curves.easeOutCubic,
+                alignment: Alignment.topCenter,
+                child: _windowsLinesExpanded
+                    ? Padding(
+                        key: const ValueKey('windows-detail-lines-panel'),
+                        padding: const EdgeInsets.only(top: 16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Divider(height: 1, color: _cinemaBorder),
+                            const SizedBox(height: 14),
+                            Text(
+                              '选择播放线路（${_activeSite.name}）',
+                              style: const TextStyle(
+                                color: _cinemaMuted,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 10),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              for (var i = 0; i < _video.lines.length; i++)
-                                Builder(
-                                  builder: (_) {
-                                    final line = _video.lines[i];
-                                    final spec = OhosRuntime.isOhos
-                                        ? ''
-                                        : MediaBadges.formatDotJoined(
-                                            _specBadgesForLineOnly(line),
-                                            maxBadges: 3,
-                                          );
-                                    final label = spec.isEmpty
-                                        ? line.name
-                                        : '${line.name} · $spec';
-                                    return ConstrainedBox(
-                                      constraints: const BoxConstraints(
-                                        maxWidth: 300,
-                                      ),
-                                      child: Tooltip(
-                                        message: label,
-                                        child: _windowsCinemaActionPill(
-                                          label,
-                                          selected: i == lineIndex,
-                                          onPressed: () => _updateWindowsState(
-                                            () => _selectLineManually(i),
+                            const SizedBox(height: 10),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                if (hasMultiOfferPool)
+                                  _windowsCinemaActionPill(
+                                    '全部线路',
+                                    key: const ValueKey(
+                                      'windows-detail-all-lines-pill',
+                                    ),
+                                    selected: !_windowsManualLineFilter,
+                                    onPressed: () => _updateWindowsState(() {
+                                      _windowsManualLineFilter = false;
+                                      _selectedPage = 0;
+                                    }),
+                                  ),
+                                for (var i = 0; i < _video.lines.length; i++)
+                                  Builder(
+                                    builder: (_) {
+                                      final line = _video.lines[i];
+                                      final spec = OhosRuntime.isOhos
+                                          ? ''
+                                          : MediaBadges.formatDotJoined(
+                                              _specBadgesForLineOnly(line),
+                                              maxBadges: 3,
+                                            );
+                                      final label = spec.isEmpty
+                                          ? line.name
+                                          : '${line.name} · $spec';
+                                      return ConstrainedBox(
+                                        constraints: const BoxConstraints(
+                                          maxWidth: 300,
+                                        ),
+                                        child: Tooltip(
+                                          message: label,
+                                          child: _windowsCinemaActionPill(
+                                            label,
+                                            selected: (hasMultiOfferPool
+                                                    ? _windowsManualLineFilter
+                                                    : true) &&
+                                                i == lineIndex,
+                                            onPressed: () =>
+                                                _updateWindowsState(() {
+                                              _selectedLine = i;
+                                              _windowsManualLineFilter = true;
+                                              _selectedPage = 0;
+                                              _selectedInLineSeason = null;
+                                            }),
                                           ),
                                         ),
-                                      ),
-                                    );
-                                  },
+                                      );
+                                    },
+                                  ),
+                              ],
+                            ),
+                            if (_aggregatedSources.length > 1) ...[
+                              const SizedBox(height: 14),
+                              const Text(
+                                '其他已聚合来源站点',
+                                style: TextStyle(
+                                  color: _cinemaMuted,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
                                 ),
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  for (final ref in _aggregatedSources)
+                                    _windowsCinemaActionPill(
+                                      ref.sourceLabel,
+                                      selected: ref.siteIdentityKey ==
+                                          '${_activeSite.subscriptionId}:${_activeSite.key}',
+                                      onPressed: () =>
+                                          _switchToAggregatedSource(ref),
+                                    ),
+                                ],
+                              ),
                             ],
-                          ),
-                        ],
-                      ),
-                    )
-                  : const SizedBox.shrink(),
-            ),
+                          ],
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
             // Collapsible Episodes Drawer
             AnimatedSize(
               duration: const Duration(milliseconds: 220),
@@ -872,12 +961,14 @@ extension _WindowsDetail on _DetailScreenState {
                             runSpacing: 8,
                             crossAxisAlignment: WrapCrossAlignment.center,
                             children: [
-                              _windowsCinemaActionPill(
-                                '季数 · ${_currentSeasonLabel(activeLine!)}',
-                                icon: CupertinoIcons.chevron_down,
-                                onPressed: _showSeasonPickerSheet,
-                              ),
-                              if (!_activeSite.isEffectivelyPrivate)
+                              if (!useUnifiedEpisodes && activeLine != null)
+                                _windowsCinemaActionPill(
+                                  '季数 · ${_currentSeasonLabel(activeLine)}',
+                                  icon: CupertinoIcons.chevron_down,
+                                  onPressed: _showSeasonPickerSheet,
+                                ),
+                              if (!_activeSite.isEffectivelyPrivate &&
+                                  !useUnifiedEpisodes)
                                 _windowsCinemaActionPill(
                                   '集数校准',
                                   key: const ValueKey(
@@ -890,7 +981,10 @@ extension _WindowsDetail on _DetailScreenState {
                                   onPressed: () =>
                                       _openSeriesScrapeSheet(initialTab: 1),
                                 ),
-                              if (activeIndices.length >= 10)
+                              if ((useUnifiedEpisodes
+                                      ? unifiedSlots.length
+                                      : activeIndices.length) >=
+                                  10)
                                 SizedBox(
                                   width: 210,
                                   height: 36,
@@ -959,7 +1053,9 @@ extension _WindowsDetail on _DetailScreenState {
                                   ),
                                 ),
                               Text(
-                                '共 ${activeIndices.length} 集',
+                                useUnifiedEpisodes
+                                    ? '共 ${unifiedSlots.length} 集 · 点集选择站点线路'
+                                    : '共 ${activeIndices.length} 集',
                                 style: const TextStyle(
                                   color: _cinemaMuted,
                                   fontSize: 12,
@@ -968,7 +1064,10 @@ extension _WindowsDetail on _DetailScreenState {
                             ],
                           ),
                           const SizedBox(height: 12),
-                          _windowsEpisodes(bookmark),
+                          if (useUnifiedEpisodes)
+                            _windowsUnifiedEpisodes(unifiedSlots, bookmark)
+                          else
+                            _windowsEpisodes(bookmark),
                         ],
                       ),
                     )
@@ -1263,5 +1362,179 @@ extension _WindowsDetail on _DetailScreenState {
           ]),
         ),
     ]);
+  }
+
+  Widget _windowsUnifiedEpisodes(
+    List<AggregatedEpisodeSlot> slots,
+    WatchHistoryEntry? bookmark,
+  ) {
+    final ordered = _descending ? slots.reversed.toList() : slots;
+    final filterKw = _windowsEpisodeQuery.trim().toLowerCase();
+    final filtered = filterKw.isEmpty
+        ? ordered
+        : ordered.where((slot) {
+            final numStr = slot.episodeNumber?.toString() ?? '';
+            return slot.label.toLowerCase().contains(filterKw) ||
+                numStr == filterKw ||
+                slot.offers.any(
+                  (o) =>
+                      o.episode.name.toLowerCase().contains(filterKw) ||
+                      o.siteAndLineLabel.toLowerCase().contains(filterKw),
+                );
+          }).toList();
+    final pageCount = (filtered.length / CmsParser.episodePageSize).ceil();
+    final page = _selectedPage.clamp(0, pageCount == 0 ? 0 : pageCount - 1);
+    final visible = filtered
+        .skip(page * CmsParser.episodePageSize)
+        .take(CmsParser.episodePageSize);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (filtered.isEmpty && filterKw.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Row(
+              children: [
+                Text(
+                  '未找到匹配「$_windowsEpisodeQuery」的剧集',
+                  style: const TextStyle(color: _cinemaMuted, fontSize: 13),
+                ),
+                const SizedBox(width: 10),
+                _windowsCinemaActionPill(
+                  '清除筛选',
+                  onPressed: () => _updateWindowsState(() {
+                    _windowsEpisodeQueryCtrl.clear();
+                    _windowsEpisodeQuery = '';
+                    _selectedPage = 0;
+                  }),
+                ),
+              ],
+            ),
+          ),
+        LayoutBuilder(builder: (context, box) {
+          final columns = (box.maxWidth / 152).floor().clamp(2, 9);
+          return Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              for (final slot in visible)
+                Builder(builder: (_) {
+                  final hasCurrentSite = slot.hasSiteKey(_activeSite.key);
+                  final isBookmarked = bookmark != null &&
+                      slot.offers.any(
+                        (o) =>
+                            o.source.site.key == bookmark.site &&
+                            (o.lineName == bookmark.line &&
+                                    o.episodeIndex == bookmark.index ||
+                                o.episode.name == bookmark.episode),
+                      );
+                  final sourceBadge = slot.distinctSiteCount > 1
+                      ? '${slot.distinctSiteCount} 源'
+                      : (!hasCurrentSite
+                          ? '仅 ${slot.offers.first.source.site.name}'
+                          : (slot.offers.length > 1
+                              ? '${slot.offers.length} 线'
+                              : (slot.offers.first.lineIndex != _selectedLine
+                                  ? '仅 ${slot.offers.first.lineName}'
+                                  : slot.offers.first.lineName)));
+                  return SizedBox(
+                    width: (box.maxWidth - (columns - 1) * 10) / columns,
+                    child: Tooltip(
+                      message:
+                          '${slot.label} · ${slot.offers.map((o) => o.siteAndLineLabel).join(' / ')}',
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          key: ValueKey('unified_ep_card_${slot.slotKey}'),
+                          onTap: () => _onUnifiedEpisodeSlotTap(slot, bookmark),
+                          borderRadius: BorderRadius.circular(12),
+                          child: Container(
+                            constraints: const BoxConstraints(minHeight: 50),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 9,
+                            ),
+                            alignment: Alignment.centerLeft,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              color: isBookmarked
+                                  ? const Color(0x334C9AFF)
+                                  : Colors.white.withValues(alpha: .06),
+                              border: Border.all(
+                                color: isBookmarked
+                                    ? const Color(0xFF4C9AFF)
+                                    : (!hasCurrentSite
+                                        ? const Color(0x558AB8FF)
+                                        : _cinemaBorder),
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    slot.label,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: slot.isSpecial
+                                        ? const Color(0x33FF9F0A)
+                                        : (slot.distinctSiteCount > 1
+                                            ? const Color(0x334C9AFF)
+                                            : const Color(0x22FFFFFF)),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    slot.isSpecial ? '特 · $sourceBadge' : sourceBadge,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: slot.isSpecial
+                                          ? const Color(0xFFFFD080)
+                                          : const Color(0xFFB8D4FF),
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+            ],
+          );
+        }),
+        if (pageCount > 1)
+          Padding(
+            padding: const EdgeInsets.only(top: 16),
+            child: Wrap(spacing: 7, runSpacing: 7, children: [
+              for (var i = 0; i < pageCount; i++)
+                _windowsCinemaActionPill(
+                  '${i * CmsParser.episodePageSize + 1}–${math.min((i + 1) * CmsParser.episodePageSize, filtered.length)}',
+                  selected: i == page,
+                  onPressed: () =>
+                      _updateWindowsState(() => _selectedPage = i),
+                ),
+            ]),
+          ),
+      ],
+    );
   }
 }
