@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
-"""Offline ECDSA P-256 passcode generator & verifier for Marco Movie AI Beta Lab.
+"""Offline ECDSA P-256 passcode generator, verifier & mobile vault exporter for Marco Movie.
 
+Unified across Android Mobile, iOS, and Windows (single P-256 public key embedded in all 3 apps).
 Zero third-party dependencies (pure Python 3 standard library).
-Private key is stored locally under android-mobile/private/ai_beta_signing.key
-(gitignored) and MUST NEVER be committed or distributed. Only the 65-byte
-uncompressed public key hex is embedded in AiBetaGate.java.
+
+Private key is stored locally under android-mobile/private/ai_beta_signing.key (gitignored)
+and MUST NEVER be committed or distributed.
 
 Usage examples:
-  # 1. Initialize author signing keypair (run once, back up the private key safely!)
+  # 1. Initialize author signing keypair (run once, back up safely!)
   python -X utf8 scripts/gen_ai_beta_code.py init-key
 
-  # 2. Issue a shared 30-day Tencent Channel beta passcode (batch #1)
-  python -X utf8 scripts/gen_ai_beta_code.py issue --batch 1 --days 30 --shared
+  # 2. Issue a 3-platform (Android+iOS+Windows) shared 30-day Tencent Channel passcode
+  python -X utf8 scripts/gen_ai_beta_code.py issue --batch 1 --days 30 --shared --platforms all
 
-  # 3. Issue 5 individual tester codes with experimental OAuth enabled
-  python -X utf8 scripts/gen_ai_beta_code.py issue --batch 2 --days 60 --experimental-oauth --count 5
+  # 3. Issue 5 iOS-only tester passcodes valid for 60 days
+  python -X utf8 scripts/gen_ai_beta_code.py issue --batch 2 --days 60 --platforms ios --count 5
 
-  # 4. Issue a permanent core-tester code requiring app versionCode >= 103
-  python -X utf8 scripts/gen_ai_beta_code.py issue --batch 99 --never-expire --experimental-oauth --min-version-code 103
+  # 4. Issue a permanent core-tester passcode with experimental OAuth enabled
+  python -X utf8 scripts/gen_ai_beta_code.py issue --batch 99 --never-expire --experimental-oauth
 
-  # 5. Verify any passcode offline
+  # 5. Export password-encrypted vault & ready-to-transfer offline Mobile HTML Keygen
+  python -X utf8 scripts/gen_ai_beta_code.py export-mobile-vault
+
+  # 6. Verify any passcode offline
   python -X utf8 scripts/gen_ai_beta_code.py verify MM-AI1-...
 """
 
@@ -28,6 +32,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime
+import getpass
 import hashlib
 import hmac
 import json
@@ -53,13 +58,18 @@ EPOCH_DATE = datetime.date(2026, 1, 1)
 FLAG_CORE_AI = 0x01
 FLAG_EXPERIMENTAL_OAUTH = 0x02
 FLAG_SHARED_CHANNEL = 0x04
+FLAG_PLATFORM_ANDROID = 0x10
+FLAG_PLATFORM_IOS = 0x20
+FLAG_PLATFORM_WINDOWS = 0x40
+FLAG_PLATFORM_MASK = 0x70
 
-DEFAULT_KEY_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "android-mobile"
-    / "private"
-    / "ai_beta_signing.key"
-)
+VAULT_PBKDF2_ITERS = 100_000
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_KEY_PATH = ROOT_DIR / "android-mobile" / "private" / "ai_beta_signing.key"
+DEFAULT_VAULT_PATH = ROOT_DIR / "android-mobile" / "private" / "ai_beta_mobile_vault.json"
+DEFAULT_READY_HTML_PATH = ROOT_DIR / "android-mobile" / "private" / "marco_phone_keygen_ready.html"
+TEMPLATE_HTML_PATH = ROOT_DIR / "scripts" / "ai_beta_phone_keygen.html"
 
 
 def _modinv(a: int, m: int) -> int:
@@ -146,7 +156,6 @@ def ecdsa_sign(priv_int: int, message: bytes) -> Tuple[int, int]:
     s = (_modinv(k, _N) * (z + r * priv_int)) % _N
     if s == 0:
         raise ValueError("Invalid ECDSA s=0")
-    # Canonical low-S normalization
     if s > _N // 2:
         s = _N - s
     return r, s
@@ -169,6 +178,38 @@ def ecdsa_verify(pub_uncompressed: bytes, message: bytes, r: int, s: int) -> boo
     u2 = (r * w) % _N
     pt = _point_add(_scalar_mul(u1, _G), _scalar_mul(u2, q))
     return pt is not None and (pt[0] % _N) == r
+
+
+def parse_platforms_arg(raw: str) -> int:
+    text = (raw or "all").strip().lower()
+    if text in ("", "all", "*"):
+        return 0  # 0 = all 3 platforms allowed (backwards-compatible default)
+    mask = 0
+    for part in text.split(","):
+        p = part.strip()
+        if p in ("android", "android-mobile", "mobile"):
+            mask |= FLAG_PLATFORM_ANDROID
+        elif p in ("ios", "iphone", "ipad"):
+            mask |= FLAG_PLATFORM_IOS
+        elif p in ("win", "windows", "pc"):
+            mask |= FLAG_PLATFORM_WINDOWS
+        elif p:
+            raise ValueError(f"Unknown platform '{p}' (use all, android, ios, windows)")
+    return 0 if mask == FLAG_PLATFORM_MASK else mask
+
+
+def platform_scope_label(flags: int) -> str:
+    mask = flags & FLAG_PLATFORM_MASK
+    if mask == 0 or mask == FLAG_PLATFORM_MASK:
+        return "三端通用 (Android/iOS/Windows)"
+    names = []
+    if mask & FLAG_PLATFORM_ANDROID:
+        names.append("Android")
+    if mask & FLAG_PLATFORM_IOS:
+        names.append("iOS")
+    if mask & FLAG_PLATFORM_WINDOWS:
+        names.append("Windows")
+    return "仅限 " + "/".join(names)
 
 
 def encode_passcode(
@@ -216,7 +257,10 @@ def decode_and_verify_passcode(code: str, pub_uncompressed: bytes) -> dict:
     s = int.from_bytes(raw[42:74], "big")
     valid = ecdsa_verify(pub_uncompressed, DOMAIN_SEP + payload, r, s)
     version, flags, batch_id, expire_day, min_vc, nonce = struct.unpack(">BBHHHH", payload)
-    expire_date = None if expire_day == 0 else (EPOCH_DATE + datetime.timedelta(days=expire_day)).isoformat()
+    expire_date = (
+        None if expire_day == 0 else (EPOCH_DATE + datetime.timedelta(days=expire_day)).isoformat()
+    )
+    mask = flags & FLAG_PLATFORM_MASK
     return {
         "valid_signature": valid,
         "version": version,
@@ -224,6 +268,12 @@ def decode_and_verify_passcode(code: str, pub_uncompressed: bytes) -> dict:
         "core_ai": bool(flags & FLAG_CORE_AI),
         "experimental_oauth": bool(flags & FLAG_EXPERIMENTAL_OAUTH),
         "shared_channel": bool(flags & FLAG_SHARED_CHANNEL),
+        "platforms": {
+            "android": mask == 0 or bool(mask & FLAG_PLATFORM_ANDROID),
+            "ios": mask == 0 or bool(mask & FLAG_PLATFORM_IOS),
+            "windows": mask == 0 or bool(mask & FLAG_PLATFORM_WINDOWS),
+            "label": platform_scope_label(flags),
+        },
         "batch_id": batch_id,
         "expire_day": expire_day,
         "expire_date": expire_date or "never",
@@ -232,14 +282,77 @@ def decode_and_verify_passcode(code: str, pub_uncompressed: bytes) -> dict:
     }
 
 
+def _vault_keystream(enc_key: bytes, nonce: bytes, length: int) -> bytes:
+    out = bytearray()
+    counter = 0
+    while len(out) < length:
+        block = hashlib.sha256(enc_key + nonce + struct.pack(">I", counter)).digest()
+        out.extend(block)
+        counter += 1
+    return bytes(out[:length])
+
+
+def encrypt_mobile_vault(priv_int: int, pub_bytes: bytes, password: str) -> dict:
+    """Encrypts P-256 private scalar with PBKDF2-HMAC-SHA256 + SHA256-CTR + Encrypt-then-MAC."""
+    if not password or len(password) < 6:
+        raise ValueError("Master password must be at least 6 characters")
+    salt = secrets.token_bytes(16)
+    nonce = secrets.token_bytes(16)
+    derived = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, VAULT_PBKDF2_ITERS, dklen=64
+    )
+    enc_key, mac_key = derived[:32], derived[32:]
+    plaintext = priv_int.to_bytes(32, "big")
+    stream = _vault_keystream(enc_key, nonce, len(plaintext))
+    ciphertext = bytes(a ^ b for a, b in zip(plaintext, stream))
+    mac = hmac.new(mac_key, b"MARCO-VAULT-V1:" + salt + nonce + ciphertext, hashlib.sha256).digest()
+    return {
+        "format": "marco-ai-vault-v1",
+        "kdf": "pbkdf2-hmac-sha256",
+        "iterations": VAULT_PBKDF2_ITERS,
+        "salt_hex": salt.hex(),
+        "nonce_hex": nonce.hex(),
+        "ciphertext_hex": ciphertext.hex(),
+        "mac_hex": mac.hex(),
+        "pub_uncompressed_hex": pub_bytes.hex(),
+    }
+
+
+def decrypt_mobile_vault(vault: dict, password: str) -> Tuple[int, bytes]:
+    if vault.get("format") != "marco-ai-vault-v1":
+        raise ValueError("Unsupported mobile vault format")
+    salt = bytes.fromhex(vault["salt_hex"])
+    nonce = bytes.fromhex(vault["nonce_hex"])
+    ciphertext = bytes.fromhex(vault["ciphertext_hex"])
+    expected_mac = bytes.fromhex(vault["mac_hex"])
+    iters = int(vault.get("iterations", VAULT_PBKDF2_ITERS))
+    derived = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iters, dklen=64)
+    enc_key, mac_key = derived[:32], derived[32:]
+    actual_mac = hmac.new(
+        mac_key, b"MARCO-VAULT-V1:" + salt + nonce + ciphertext, hashlib.sha256
+    ).digest()
+    if not hmac.compare_digest(actual_mac, expected_mac):
+        raise ValueError("Wrong password or corrupted vault")
+    stream = _vault_keystream(enc_key, nonce, len(ciphertext))
+    plaintext = bytes(a ^ b for a, b in zip(ciphertext, stream))
+    priv_int = int.from_bytes(plaintext, "big")
+    pub_bytes = bytes.fromhex(vault["pub_uncompressed_hex"])
+    pt = _scalar_mul(priv_int, _G)
+    assert pt is not None
+    derived_pub = b"\x04" + pt[0].to_bytes(32, "big") + pt[1].to_bytes(32, "big")
+    if derived_pub != pub_bytes:
+        raise ValueError("Vault public key mismatch")
+    return priv_int, pub_bytes
+
+
 def _load_key_file(path: Path) -> Tuple[int, bytes]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("format") != "marco-ai-beta-p256-v1":
         raise ValueError("Unsupported key file format")
     priv_int = int(data["d_hex"], 16)
     pub_bytes = bytes.fromhex(data["pub_uncompressed_hex"])
-    # Sanity verify public key matches private scalar
     pt = _scalar_mul(priv_int, _G)
+    assert pt is not None
     expected_pub = b"\x04" + pt[0].to_bytes(32, "big") + pt[1].to_bytes(32, "big")
     if pub_bytes != expected_pub:
         raise ValueError("Key file corrupted: public key mismatch")
@@ -274,7 +387,8 @@ def cmd_issue(args: argparse.Namespace) -> int:
         print(f"ERROR: signing key not found at {key_path}. Run `init-key` first.", file=sys.stderr)
         return 1
     priv_int, pub_bytes = _load_key_file(key_path)
-    flags = FLAG_CORE_AI
+    platform_mask = parse_platforms_arg(args.platforms)
+    flags = FLAG_CORE_AI | platform_mask
     if args.experimental_oauth:
         flags |= FLAG_EXPERIMENTAL_OAUTH
     if args.shared:
@@ -291,8 +405,9 @@ def cmd_issue(args: argparse.Namespace) -> int:
 
     mode_label = "频道通用内测口令" if args.shared else "专属内测口令"
     oauth_label = "含实验性 OAuth" if args.experimental_oauth else "标准内测权限"
+    plat_label = platform_scope_label(flags)
     print(
-        f"# Batch #{args.batch:04d} | {mode_label} | {oauth_label} | 有效期至: {expire_label} | 最低版本码: {args.min_version_code}"
+        f"# Batch #{args.batch:04d} | {plat_label} | {mode_label} | {oauth_label} | 有效期至: {expire_label} | 最低版本码: {args.min_version_code}"
     )
     for idx in range(args.count):
         code = encode_passcode(
@@ -311,6 +426,44 @@ def cmd_issue(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export_mobile_vault(args: argparse.Namespace) -> int:
+    key_path = Path(args.key_file)
+    if not key_path.exists():
+        print(f"ERROR: signing key not found at {key_path}. Run `init-key` first.", file=sys.stderr)
+        return 1
+    priv_int, pub_bytes = _load_key_file(key_path)
+    password = args.password
+    if not password:
+        p1 = getpass.getpass("设置手机发码器主密码（至少 6 位）：")
+        p2 = getpass.getpass("再次输入主密码确认：")
+        if p1 != p2:
+            print("ERROR: 两次输入的密码不一致", file=sys.stderr)
+            return 1
+        password = p1
+    vault = encrypt_mobile_vault(priv_int, pub_bytes, password)
+    # Round-trip decrypt check before writing
+    dec_priv, dec_pub = decrypt_mobile_vault(vault, password)
+    assert dec_priv == priv_int and dec_pub == pub_bytes
+
+    vault_out = Path(args.vault_out)
+    vault_out.parent.mkdir(parents=True, exist_ok=True)
+    vault_json = json.dumps(vault, indent=2)
+    vault_out.write_text(vault_json + "\n", encoding="utf-8")
+    print(f"Encrypted mobile vault written -> {vault_out}")
+
+    if TEMPLATE_HTML_PATH.exists():
+        template = TEMPLATE_HTML_PATH.read_text(encoding="utf-8")
+        marker = "/*__PRELOADED_ENCRYPTED_VAULT__*/null"
+        if marker in template:
+            ready_html = template.replace(marker, json.dumps(vault, separators=(",", ":")), 1)
+            html_out = Path(args.html_out)
+            html_out.parent.mkdir(parents=True, exist_ok=True)
+            html_out.write_text(ready_html, encoding="utf-8")
+            print(f"Ready-to-transfer phone keygen HTML written -> {html_out}")
+            print("将此 HTML 发送到你自己的手机（iPhone 文件/Safari 或安卓浏览器打开）后输入主密码即可随时离线签发三端口令。")
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     if args.pub_hex:
         pub_bytes = bytes.fromhex(args.pub_hex.strip())
@@ -323,7 +476,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Offline ECDSA P-256 passcode generator for Marco Movie AI Beta Lab"
+        description="Unified Android/iOS/Windows ECDSA P-256 passcode generator for Marco Movie"
     )
     parser.add_argument(
         "--key-file",
@@ -342,15 +495,32 @@ def main() -> int:
     p_issue.add_argument("--never-expire", action="store_true", help="Issue non-expiring code")
     p_issue.add_argument("--shared", action="store_true", help="Mark as shared community/channel code")
     p_issue.add_argument(
+        "--platforms",
+        default="all",
+        help="Target platforms: all (default: Android+iOS+Windows) or comma list of android,ios,windows",
+    )
+    p_issue.add_argument(
         "--experimental-oauth",
         action="store_true",
         help="Allow experimental OpenAI OAuth toggle in addition to standard API + OpenRouter/Kimi OAuth",
     )
     p_issue.add_argument(
-        "--min-version-code", type=int, default=103, help="Minimum Android versionCode (default: 103)"
+        "--min-version-code",
+        type=int,
+        default=0,
+        help="Minimum app versionCode (default: 0 for cross-platform compatibility)",
     )
     p_issue.add_argument("--count", type=int, default=1, help="Number of passcodes to mint")
     p_issue.set_defaults(func=cmd_issue)
+
+    p_exp = sub.add_parser(
+        "export-mobile-vault",
+        help="Export password-encrypted vault JSON + ready-to-transfer phone HTML keygen into private/",
+    )
+    p_exp.add_argument("--password", default="", help="Master password (prompted interactively if omitted)")
+    p_exp.add_argument("--vault-out", default=str(DEFAULT_VAULT_PATH), help="Output encrypted vault JSON path")
+    p_exp.add_argument("--html-out", default=str(DEFAULT_READY_HTML_PATH), help="Output ready phone HTML path")
+    p_exp.set_defaults(func=cmd_export_mobile_vault)
 
     p_verify = sub.add_parser("verify", help="Verify and inspect a beta passcode offline")
     p_verify.add_argument("code", help="Passcode string (MM-AI1-...)")

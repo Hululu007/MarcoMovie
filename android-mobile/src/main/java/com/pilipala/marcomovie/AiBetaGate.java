@@ -42,6 +42,10 @@ final class AiBetaGate {
     static final int FLAG_CORE_AI = 0x01;
     static final int FLAG_EXPERIMENTAL_OAUTH = 0x02;
     static final int FLAG_SHARED_CHANNEL = 0x04;
+    static final int FLAG_PLATFORM_ANDROID = 0x10;
+    static final int FLAG_PLATFORM_IOS = 0x20;
+    static final int FLAG_PLATFORM_WINDOWS = 0x40;
+    static final int FLAG_PLATFORM_MASK = 0x70;
 
     /** 2026-01-01 00:00:00 UTC in epoch milliseconds. */
     static final long EPOCH_2026_UTC_MS = 1767225600000L;
@@ -156,6 +160,10 @@ final class AiBetaGate {
             return ok && (flags & FLAG_SHARED_CHANNEL) != 0;
         }
 
+        String platformScopeLabel() {
+            return AiBetaGate.platformScopeLabel(flags);
+        }
+
         String expireDateLabel() {
             if (!ok) return "";
             if (expireDay <= 0) return "永久有效";
@@ -169,6 +177,7 @@ final class AiBetaGate {
             if (!ok) return "未解锁";
             StringBuilder sb = new StringBuilder();
             sb.append(String.format(Locale.US, "批次 #%04d", batchId));
+            sb.append(" · ").append(platformScopeLabel());
             sb.append(sharedChannel() ? " · 频道通用" : " · 专属内测");
             if (experimentalOAuthAllowed()) {
                 sb.append(" · 含实验性 OAuth");
@@ -179,10 +188,42 @@ final class AiBetaGate {
         }
     }
 
+    static boolean isPlatformAllowed(int flags, int requiredPlatformFlag) {
+        int mask = flags & FLAG_PLATFORM_MASK;
+        if (mask == 0) return true; // All 3 platforms allowed (backwards-compatible default)
+        return (mask & requiredPlatformFlag) != 0;
+    }
+
+    static String platformScopeLabel(int flags) {
+        int mask = flags & FLAG_PLATFORM_MASK;
+        if (mask == 0 || mask == FLAG_PLATFORM_MASK) return "三端通用";
+        StringBuilder sb = new StringBuilder();
+        if ((mask & FLAG_PLATFORM_ANDROID) != 0) sb.append("安卓");
+        if ((mask & FLAG_PLATFORM_IOS) != 0) {
+            if (sb.length() > 0) sb.append("/");
+            sb.append("iOS");
+        }
+        if ((mask & FLAG_PLATFORM_WINDOWS) != 0) {
+            if (sb.length() > 0) sb.append("/");
+            sb.append("Windows");
+        }
+        return sb.length() == 0 ? "三端通用" : ("仅限 " + sb);
+    }
+
     static VerifyResult verifyPasscode(
             String rawCode, int currentAppVersionCode, long nowEpochMillis) {
         return verifyPasscode(
-                rawCode, currentAppVersionCode, nowEpochMillis, hexToBytes(DEFAULT_PUBLIC_KEY_HEX));
+                rawCode,
+                currentAppVersionCode,
+                nowEpochMillis,
+                hexToBytes(DEFAULT_PUBLIC_KEY_HEX),
+                FLAG_PLATFORM_ANDROID);
+    }
+
+    static VerifyResult verifyPasscode(
+            String rawCode, int currentAppVersionCode, long nowEpochMillis, byte[] pubKey65) {
+        return verifyPasscode(
+                rawCode, currentAppVersionCode, nowEpochMillis, pubKey65, FLAG_PLATFORM_ANDROID);
     }
 
     /**
@@ -191,7 +232,11 @@ final class AiBetaGate {
      * <p>Format: {@code MM-AI1-<base64url(payload_10B || r_32B || s_32B)>}.
      */
     static VerifyResult verifyPasscode(
-            String rawCode, int currentAppVersionCode, long nowEpochMillis, byte[] pubKey65) {
+            String rawCode,
+            int currentAppVersionCode,
+            long nowEpochMillis,
+            byte[] pubKey65,
+            int requiredPlatformFlag) {
         if (rawCode == null) return VerifyResult.fail("请输入内测口令");
         String cleaned = stripWhitespace(rawCode);
         if (!cleaned.startsWith(TOKEN_PREFIX)) {
@@ -229,6 +274,9 @@ final class AiBetaGate {
 
         if ((flags & FLAG_CORE_AI) == 0) {
             return VerifyResult.fail("该口令未包含 AI 观影实验室测试权限");
+        }
+        if (!isPlatformAllowed(flags, requiredPlatformFlag)) {
+            return VerifyResult.fail("该内测口令适用范围为「" + platformScopeLabel(flags) + "」，不适用于当前设备平台");
         }
         if (minVersionCode > 0
                 && currentAppVersionCode > 0

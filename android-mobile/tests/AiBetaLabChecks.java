@@ -110,9 +110,9 @@ public final class AiBetaLabChecks {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length < 6) {
+        if (args.length < 9) {
             throw new IllegalArgumentException(
-                    "Usage: AiBetaLabChecks <root> <pubHex> <sharedCode> <expCode> <highMinVcCode> <expiredCode> [realAuthorCode]");
+                    "Usage: AiBetaLabChecks <root> <pubHex> <sharedCode> <expCode> <highMinVcCode> <expiredCode> <jsAllPlatCode> <jsIosOnlyCode> <jsAndWinCode> [realAuthorCode]");
         }
         Path root = Paths.get(args[0]);
         byte[] testPub = AiBetaGate.hexToBytes(args[1]);
@@ -120,10 +120,21 @@ public final class AiBetaLabChecks {
         String expCode = args[3];
         String highMinVcCode = args[4];
         String expiredCode = args[5];
-        String realAuthorCode = args.length >= 7 ? args[6] : "";
+        String jsAllPlatCode = args[6];
+        String jsIosOnlyCode = args[7];
+        String jsAndWinCode = args[8];
+        String realAuthorCode = args.length >= 10 ? args[9] : "";
 
         test1_EcdsaPasscodeGate(
-                testPub, sharedCode, expCode, highMinVcCode, expiredCode, realAuthorCode);
+                testPub,
+                sharedCode,
+                expCode,
+                highMinVcCode,
+                expiredCode,
+                jsAllPlatCode,
+                jsIosOnlyCode,
+                jsAndWinCode,
+                realAuthorCode);
         test2_DualModeAuthAndOpenMinisHardening();
         test3_FullEpisodeSlidingSubtitleTranslator();
         test4_CinemaCopilotPromptsAndParser();
@@ -138,6 +149,9 @@ public final class AiBetaLabChecks {
             String expCode,
             String highMinVcCode,
             String expiredCode,
+            String jsAllPlatCode,
+            String jsIosOnlyCode,
+            String jsAndWinCode,
             String realAuthorCode) {
         long nowValid = AiBetaGate.EPOCH_2026_UTC_MS + 10L * AiBetaGate.MILLIS_PER_DAY;
 
@@ -239,6 +253,57 @@ public final class AiBetaLabChecks {
         check(
                 !AiBetaGate.currentStatus(store, 103, day1Valid, pubKey).ok,
                 "Gate: deactivate clears active passcode");
+
+        // 8. 3-way Phone HTML JS signer -> Android Java verifier + 3-platform scoping
+        AiBetaGate.VerifyResult jsAllAnd =
+                AiBetaGate.verifyPasscode(
+                        jsAllPlatCode, 103, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_ANDROID);
+        AiBetaGate.VerifyResult jsAllIos =
+                AiBetaGate.verifyPasscode(
+                        jsAllPlatCode, 100, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_IOS);
+        AiBetaGate.VerifyResult jsAllWin =
+                AiBetaGate.verifyPasscode(
+                        jsAllPlatCode, 1, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_WINDOWS);
+        check(
+                jsAllAnd.ok
+                        && jsAllIos.ok
+                        && jsAllWin.ok
+                        && "三端通用".equals(jsAllAnd.platformScopeLabel())
+                        && jsAllAnd.batchId == 501,
+                "Gate: Phone-JS minted 3-platform code verifies in Java across Android, iOS, and Windows");
+
+        AiBetaGate.VerifyResult jsIosOnAndroid =
+                AiBetaGate.verifyPasscode(
+                        jsIosOnlyCode, 103, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_ANDROID);
+        AiBetaGate.VerifyResult jsIosOnIos =
+                AiBetaGate.verifyPasscode(
+                        jsIosOnlyCode, 100, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_IOS);
+        AiBetaGate.VerifyResult jsIosOnWin =
+                AiBetaGate.verifyPasscode(
+                        jsIosOnlyCode, 1, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_WINDOWS);
+        check(
+                !jsIosOnAndroid.ok
+                        && jsIosOnAndroid.errorReason.contains("iOS")
+                        && jsIosOnIos.ok
+                        && !jsIosOnWin.ok,
+                "Gate: Phone-JS minted iOS-only code is rejected on Android/Windows and passes on iOS");
+
+        AiBetaGate.VerifyResult jsAwOnAnd =
+                AiBetaGate.verifyPasscode(
+                        jsAndWinCode, 103, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_ANDROID);
+        AiBetaGate.VerifyResult jsAwOnWin =
+                AiBetaGate.verifyPasscode(
+                        jsAndWinCode, 1, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_WINDOWS);
+        AiBetaGate.VerifyResult jsAwOnIos =
+                AiBetaGate.verifyPasscode(
+                        jsAndWinCode, 100, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_IOS);
+        check(
+                jsAwOnAnd.ok
+                        && jsAwOnWin.ok
+                        && !jsAwOnIos.ok
+                        && jsAwOnAnd.platformScopeLabel().contains("安卓")
+                        && jsAwOnAnd.platformScopeLabel().contains("Windows"),
+                "Gate: Phone-JS minted Android+Windows code passes on Android/Windows and rejects iOS");
     }
 
     private static void test2_DualModeAuthAndOpenMinisHardening() throws Exception {
