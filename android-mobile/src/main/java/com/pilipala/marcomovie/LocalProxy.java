@@ -19,11 +19,12 @@ public final class LocalProxy implements Closeable {
     final String token = UUID.randomUUID().toString().replace("-", "");
     final ThreadPoolExecutor requests = createRequestExecutor();
     final Map<Socket, RequestScope> activeRequests = new ConcurrentHashMap<>();
+    private final Map<String, RequestScope> activeRangeStreams = new ConcurrentHashMap<>();
 
     private static ThreadPoolExecutor createRequestExecutor() {
         ThreadPoolExecutor pool =
                 new ThreadPoolExecutor(
-                        16, 64, 45, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(64));
+                        8, 96, 45, TimeUnit.SECONDS, new SynchronousQueue<Runnable>());
         pool.allowCoreThreadTimeOut(true);
         return pool;
     }
@@ -363,7 +364,8 @@ public final class LocalProxy implements Closeable {
         boolean isActionRoute =
                 "/action".equals(path) && (method.equals("GET") || method.equals("POST"));
         boolean isProxyRoute =
-                "/proxy".equals(path) && (method.equals("GET") || method.equals("HEAD"));
+                "/proxy".equals(path)
+                        && (method.equals("GET") || method.equals("HEAD") || method.equals("POST"));
         boolean isHlsRoute =
                 ("/hls".equals(path) || "/seg".equals(path))
                         && (method.equals("GET") || method.equals("HEAD"));
@@ -406,7 +408,8 @@ public final class LocalProxy implements Closeable {
                     return false;
                 }
             }
-            if (contentLen < 0 || contentLen > 16384) {
+            int maxPostLen = isProxyRoute ? (256 * 1024) : 16384;
+            if (contentLen < 0 || contentLen > maxPostLen) {
                 simple(out, 400, "Payload too large");
                 return false;
             }
@@ -446,8 +449,12 @@ public final class LocalProxy implements Closeable {
                 }
             }
         }
-        if (isActionRoute && postBody != null && postBody.length > 0) {
+        if ((isActionRoute || isProxyRoute) && postBody != null && postBody.length > 0) {
             String bodyText = new String(postBody, "UTF-8").trim();
+            if (isProxyRoute) {
+                params.put("post-body", bodyText);
+                params.put("http-method", method);
+            }
             if (bodyText.startsWith("{")) {
                 try {
                     JSONObject bodyJson = new JSONObject(bodyText);
@@ -474,6 +481,10 @@ public final class LocalProxy implements Closeable {
         String requestToken = params.remove("_mm_token");
         boolean isJs =
                 "js".equalsIgnoreCase(params.get("do")) || "py".equalsIgnoreCase(params.get("do"));
+        if (isJs && "POST".equals(method)) {
+            simple(out, 404, "Not found");
+            return false;
+        }
         if (isJs) {
             String route = queryParams.get("do");
             String key = queryParams.get("py".equalsIgnoreCase(route) ? "siteKey" : "site");
@@ -544,6 +555,13 @@ public final class LocalProxy implements Closeable {
                     && mediaPath != null
                     && !mediaPath.trim().isEmpty()) {
                 CspEngine.onPluginSubtitle(mediaPath.trim());
+                simple(out, 200, "ok");
+                return false;
+            }
+            if (("refresh".equalsIgnoreCase(actionDo) && "config".equalsIgnoreCase(actionType))
+                    || "config".equalsIgnoreCase(actionDo)
+                    || "panconfig".equalsIgnoreCase(actionDo)) {
+                notifyPluginConfigRefresh();
                 simple(out, 200, "ok");
                 return false;
             }
@@ -910,6 +928,13 @@ public final class LocalProxy implements Closeable {
             }
             out.flush();
             return keepAlive;
+        }
+    }
+
+    private static void notifyPluginConfigRefresh() {
+        try {
+            CspEngine.class.getDeclaredMethod("onPluginConfigRefresh").invoke(null);
+        } catch (Throwable ignored) {
         }
     }
 

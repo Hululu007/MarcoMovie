@@ -246,7 +246,17 @@ final class ProxyAddress {
             boolean requireToken) {
         if (hostHeader != null && !hostHeader.isEmpty() && !isLoopbackHost(hostHeader))
             return false;
-        if (originHeader != null && !originHeader.isEmpty()) return false;
+        if (originHeader != null && !originHeader.isEmpty()) {
+            // Allow exact same-origin loopback form/fetch posts on non-token CSP config pages
+            // while still strictly rejecting cross-origin browser requests and script-route
+            // Origins.
+            boolean sameLoopbackOrigin =
+                    !requireToken
+                            && hostHeader != null
+                            && !hostHeader.isEmpty()
+                            && originHeader.trim().equalsIgnoreCase("http://" + hostHeader.trim());
+            if (!sameLoopbackOrigin) return false;
+        }
         if (secFetchSite != null
                 && !secFetchSite.isEmpty()
                 && !"none".equalsIgnoreCase(secFetchSite.trim())

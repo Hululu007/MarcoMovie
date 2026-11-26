@@ -191,7 +191,16 @@ final class AccountPanel {
     }
 
     static boolean isAvailable(MainActivity a) {
+        if (a != null && !a.isTvDevice()) return true;
         return findConfigCenterSite(a) != null || CatPawSettings.available(a);
+    }
+
+    static void refreshActivePage() {
+        MainActivity a = MainActivity.activeActivity;
+        Runnable refresh = activePageRefresh;
+        if (a != null && refresh != null) {
+            a.ui.post(refresh);
+        }
     }
 
     static void recordObservedSpiderRow(MainActivity a, String accountLabel, String statusLabel) {
@@ -239,6 +248,7 @@ final class AccountPanel {
 
     static boolean isDriveLoggedIn(MainActivity a, String driveKey) {
         if (a == null || driveKey == null) return false;
+        if (NetdiskStore.isLoggedIn(a, driveKey)) return true;
         if (a.prefs != null) {
             int obs = a.prefs.getInt(PREF_LOGIN_PREFIX + configScopePrefix(a) + driveKey, -1);
             if (obs >= 0) return obs == 1;
@@ -378,12 +388,13 @@ final class AccountPanel {
             showTvDialog(a, anchor);
             return;
         }
-        boolean hasCatPaw = CatPawSettings.available(a);
-        Cms.Site configSite = findConfigCenterSite(a);
-        if (configSite == null && !hasCatPaw) {
-            AlistAccounts.openManager(a);
-            return;
-        }
+        // Sync bidirectional Config Center credentials on entry without overwriting valid accounts.
+        final Cms.Config snap = a.config;
+        a.worker.execute(
+                () -> {
+                    ConfigCenterBridge.syncAll(a, snap, true, true, false);
+                    refreshActivePage();
+                });
         String backLabel =
                 (a.current != null && a.current.home && MobileShell.activeTab == 4) ? "设置" : "返回";
         if (a.current != null && "mobile-netdisk-page".equals(a.current.focus)) {
@@ -1074,20 +1085,27 @@ final class AccountPanel {
         sv.addView(body, new ScrollView.LayoutParams(-1, -2));
         outerCol.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
 
-        // Card A: Priority Order Banner
-        if (configSite != null) {
-            body.addView(buildPriorityOrderBanner(a));
-            a.gap(body, 14);
-        }
+        // Card A: Priority Order Banner (always visible on mobile, backed by NetdiskStore)
+        final LinearLayout bannerHolder = a.vertical();
+        bannerHolder.addView(
+                buildPriorityOrderBanner(
+                        a,
+                        configSite,
+                        () -> {
+                            bannerHolder.removeAllViews();
+                            bannerHolder.addView(
+                                    buildPriorityOrderBanner(a, configSite, activePageRefresh));
+                            populateDriveCards(a, drivesHolder, configSite);
+                        }));
+        body.addView(bannerHolder, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(body, 14);
 
         // Card Group B: 4 Stacked Two-Tier Drive Cards (夸父 / 优汐 / 嘟嘟 / 阿狸)
-        if (configSite != null) {
-            populateDriveCards(a, drivesHolder, configSite);
-            body.addView(drivesHolder, new LinearLayout.LayoutParams(-1, -2));
-            a.gap(body, 8);
-        }
+        populateDriveCards(a, drivesHolder, configSite);
+        body.addView(drivesHolder, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(body, 8);
 
-        // Card Group C: Secondary Grouped Settings Card (搜索排序 / 扩展网盘 / CatPaw / AList)
+        // Card Group C: Secondary Grouped Settings Card (网页配置 / 手动填参 / Emby / AList / CatPaw)
         body.addView(buildSecondarySettingsCard(a, configSite, hasCatPaw));
 
         if (!MobileMotion.isReduced(a)) {
@@ -1102,7 +1120,8 @@ final class AccountPanel {
         }
     }
 
-    private static View buildPriorityOrderBanner(final MainActivity a) {
+    private static View buildPriorityOrderBanner(
+            final MainActivity a, final Cms.Site configSite, final Runnable onRefresh) {
         final MobileTheme.Palette p = MobileTheme.of(a);
         LinearLayout banner = a.vertical();
         banner.setPadding(a.dp(15), a.dp(13), a.dp(15), a.dp(13));
@@ -1123,7 +1142,11 @@ final class AccountPanel {
         icLp.rightMargin = a.dp(8);
         row.addView(iconCircle, icLp);
 
-        TextView orderTv = a.text("盘序优先：夸父 > 优汐 > 嘟嘟 > 阿狸", 13.5f, p.textPrimary);
+        TextView orderTv =
+                a.text(
+                        NetdiskStore.formatOrderBanner(NetdiskStore.getOrder(a)),
+                        13.5f,
+                        p.textPrimary);
         orderTv.setTypeface(null, Typeface.BOLD);
         orderTv.setSingleLine(true);
         orderTv.setEllipsize(TextUtils.TruncateAt.END);
@@ -1136,14 +1159,14 @@ final class AccountPanel {
                         "切换盘序",
                         false,
                         true,
-                        () -> runSafeAccountAction(a, "panSortShow"));
+                        () -> PersonalNetdiskBrowser.showManualCredentialSheet(a, "", onRefresh));
         LinearLayout.LayoutParams sLp = new LinearLayout.LayoutParams(-2, a.dp(30));
         sLp.leftMargin = a.dp(8);
         row.addView(switchBtn, sLp);
         banner.addView(row, new LinearLayout.LayoutParams(-1, -2));
 
         TextView hint =
-                a.text("与电视端「我的云盘配置」保持一致，支持优汐智1 / 夸父智1 / 嘟嘟无限2 / 阿狸原画", 11.5f, p.textSecondary);
+                a.text("一次扫码自动同步至本机「我的云盘」与已识别订阅配置中心；拒绝存储权限也可正常登录、重启与播放", 11.5f, p.textSecondary);
         hint.setLineSpacing(a.dp(2), 1f);
         hint.setPadding(0, a.dp(6), 0, 0);
         banner.addView(hint, new LinearLayout.LayoutParams(-1, -2));
@@ -1250,7 +1273,7 @@ final class AccountPanel {
         divLp.bottomMargin = a.dp(10);
         tile.addView(divider, divLp);
 
-        // Lower Action Row: Primary Scan/Toggle Capsule + Manual Cookie/Token Capsule
+        // Lower Action Row: Native One-Scan QR Login + "我的文件" Browser / Manual Credential Config
         LinearLayout actionRow = a.row();
         actionRow.setGravity(Gravity.CENTER_VERTICAL);
 
@@ -1258,24 +1281,36 @@ final class AccountPanel {
                 buildIosCapsuleButton(
                         a,
                         ICON_QR,
-                        loggedIn ? "账号与启用开关" : "扫码登录",
+                        loggedIn ? "重新扫码" : "扫码登录",
                         !loggedIn,
                         false,
-                        () -> dispatchDriveLoginAction(a, configSite, drive));
+                        () ->
+                                PersonalNetdiskBrowser.showQrLoginSheet(
+                                        a, drive.key, AccountPanel::refreshActivePage));
         LinearLayout.LayoutParams leftLp = new LinearLayout.LayoutParams(0, a.dp(36), 1f);
         leftLp.rightMargin = a.dp(8);
         actionRow.addView(scanBtn, leftLp);
 
-        View tokenBtn =
-                buildIosCapsuleButton(
-                        a,
-                        ICON_PENCIL,
-                        "配置 Token / Cookie",
-                        false,
-                        false,
-                        () -> runSafeAccountAction(a, "pushCkShow"));
+        View secondBtn =
+                loggedIn
+                        ? buildIosCapsuleButton(
+                                a,
+                                ICON_CLOUD,
+                                "我的文件",
+                                true,
+                                false,
+                                () -> PersonalNetdiskBrowser.openDriveFiles(a, drive.key))
+                        : buildIosCapsuleButton(
+                                a,
+                                ICON_PENCIL,
+                                "手动填写凭据",
+                                false,
+                                false,
+                                () ->
+                                        PersonalNetdiskBrowser.showManualCredentialSheet(
+                                                a, drive.key, AccountPanel::refreshActivePage));
         LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(0, a.dp(36), 1f);
-        actionRow.addView(tokenBtn, rightLp);
+        actionRow.addView(secondBtn, rightLp);
 
         tile.addView(actionRow, new LinearLayout.LayoutParams(-1, -2));
         return tile;
@@ -1335,7 +1370,32 @@ final class AccountPanel {
         card.setBackground(MobileTheme.cardBg(a, 16));
 
         boolean addedAny = false;
+        card.addView(
+                buildGroupedRow(
+                        a,
+                        ICON_PENCIL,
+                        p.accent,
+                        "手动填写 Cookie / Token 与盘序",
+                        "无需存储权限，直接写入本机并同步已识别配置中心",
+                        () ->
+                                PersonalNetdiskBrowser.showManualCredentialSheet(
+                                        a, "", AccountPanel::refreshActivePage)));
+        addedAny = true;
+
+        card.addView(buildGroupedDivider(a));
+        card.addView(
+                buildGroupedRow(
+                        a,
+                        ICON_QR,
+                        0xff10b981,
+                        "本机网页 / 同 Wi-Fi 扫码配置",
+                        "在本机浏览器或另一台同 Wi-Fi 设备打开网页提交网盘凭据",
+                        () ->
+                                PersonalNetdiskBrowser.showConfigWebServerSheet(
+                                        a, AccountPanel::refreshActivePage)));
+
         if (configSite != null) {
+            card.addView(buildGroupedDivider(a));
             card.addView(
                     buildGroupedRow(
                             a,
@@ -1344,7 +1404,6 @@ final class AccountPanel {
                             "网盘搜索结果排序",
                             "自定义多网盘聚合检索时的画质与网盘展示先后",
                             () -> runSafeAccountAction(a, "panSourceSortShow")));
-            addedAny = true;
 
             card.addView(buildGroupedDivider(a));
             card.addView(
@@ -1352,8 +1411,8 @@ final class AccountPanel {
                             a,
                             ICON_CLOUD,
                             p.accent,
-                            "全部云盘授权开关面板",
-                            "打开扩展原生配置面板（支持 115 / 天翼 / 移动 / 123 等扩展盘）",
+                            "订阅内置配置中心面板",
+                            "打开订阅自带的扩展配置中心（支持 115 / 天翼 / 移动 / 123 等扩展盘）",
                             () -> runSafeAccountAction(a, "LoginShow")));
         }
 
@@ -1379,6 +1438,16 @@ final class AccountPanel {
                         "挂载 AList 网盘 / 媒体库",
                         AlistAccounts.statusSummary(a),
                         () -> AlistAccounts.openManager(a)));
+
+        card.addView(buildGroupedDivider(a));
+        card.addView(
+                buildGroupedRow(
+                        a,
+                        ICON_CLOUD,
+                        0xff6366f1,
+                        "挂载 Emby 私人媒体库",
+                        com.pilipala.emby.EmbyAccounts.statusSummary(a),
+                        () -> EmbyEngine.openManager(a)));
 
         section.addView(card, new LinearLayout.LayoutParams(-1, -2));
         return section;

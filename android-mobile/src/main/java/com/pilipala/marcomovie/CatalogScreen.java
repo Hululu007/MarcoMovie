@@ -224,6 +224,9 @@ final class CatalogScreen {
 
     static void resumeHistory(MainActivity a, WatchHistory.Entry e) {
         if (a == null || e == null) return;
+        if (PersonalNetdiskBrowser.tryOpenPersonalCloudEntry(a, e.site, e.id)) {
+            return;
+        }
         if (a.config == null) {
             String origin = a.prefs != null ? a.prefs.getString(Prefs.ORIGIN, "") : "";
             if (origin != null && !origin.trim().isEmpty()) {

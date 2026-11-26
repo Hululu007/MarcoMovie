@@ -24,6 +24,57 @@ public final class EmbyAccounts {
         void save(JSONObject site) throws Exception;
     }
 
+    public interface OnOpenSite {
+        void open(JSONObject site);
+    }
+
+    public static java.util.List<JSONObject> listSaved(Context context) {
+        java.util.List<JSONObject> out = new java.util.ArrayList<JSONObject>();
+        if (context == null) return out;
+        SharedPreferences sp = context.getSharedPreferences("emby.accounts", 0);
+        java.util.Map<String, ?> all = sp.getAll();
+        if (all == null) return out;
+        for (java.util.Map.Entry<String, ?> entry : all.entrySet()) {
+            String k = entry.getKey();
+            if (k == null || !k.startsWith(EmbyLibrary.PREFIX)) continue;
+            Object v = entry.getValue();
+            if (!(v instanceof String)) continue;
+            try {
+                JSONObject session = new JSONObject((String) v);
+                String keySuffix = k.substring(EmbyLibrary.PREFIX.length());
+                String displayName = session.optString("name", "").trim();
+                if (displayName.length() == 0) {
+                    displayName = session.optString("base", "Emby");
+                }
+                JSONObject site =
+                        new JSONObject()
+                                .put("key", "emby_" + keySuffix)
+                                .put("name", "Emby · " + displayName)
+                                .put("type", 1)
+                                .put("api", k)
+                                .put("base", session.optString("base", ""))
+                                .put("user", session.optString("user", ""));
+                out.add(site);
+            } catch (Exception ignored) {
+            }
+        }
+        return out;
+    }
+
+    public static void remove(Context context, String api) {
+        if (context == null || api == null || !api.startsWith(EmbyLibrary.PREFIX)) return;
+        context.getSharedPreferences("emby.accounts", 0).edit().remove(api).commit();
+    }
+
+    public static String statusSummary(Context context) {
+        java.util.List<JSONObject> saved = listSaved(context);
+        if (saved.isEmpty()) return "连接自建 Emby / Jellyfin 媒体库，登录时校验读库权限并持久保存";
+        if (saved.size() == 1) {
+            return "已挂载「" + saved.get(0).optString("name", "Emby") + "」";
+        }
+        return "已挂载 " + saved.size() + " 个 Emby 媒体库，点击管理或进入";
+    }
+
     public static EmbyLibrary open(Context context, String api) throws Exception {
         if (!api.startsWith(EmbyLibrary.PREFIX)) throw new IOException("Emby 来源无效");
         String raw = context.getSharedPreferences("emby.accounts", 0).getString(api, "");
@@ -174,14 +225,14 @@ public final class EmbyAccounts {
                                                                         callback.save(site);
                                                                         pass.setText("");
                                                                         dlg.dismiss();
-                                                                    } catch (Exception ex) {
+                                                                    } catch (final Exception ex) {
                                                                         submit.setEnabled(true);
                                                                         status.setText(
                                                                                 ex.getMessage());
                                                                     }
                                                                 }
                                                             });
-                                                } catch (Exception ex) {
+                                                } catch (final Exception ex) {
                                                     a.runOnUiThread(
                                                             new Runnable() {
                                                                 public void run() {

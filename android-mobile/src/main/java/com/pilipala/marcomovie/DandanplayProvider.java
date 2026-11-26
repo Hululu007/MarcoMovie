@@ -254,6 +254,12 @@ public final class DandanplayProvider implements DanmuProvider {
         while (trimmed.endsWith("/")) {
             trimmed = trimmed.substring(0, trimmed.length() - 1);
         }
+        if (trimmed.toLowerCase(Locale.ROOT).endsWith("/api/v2")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 7);
+            while (trimmed.endsWith("/")) {
+                trimmed = trimmed.substring(0, trimmed.length() - 1);
+            }
+        }
         try {
             URI uri = URI.create(trimmed);
             String scheme = uri.getScheme();
@@ -503,9 +509,35 @@ public final class DandanplayProvider implements DanmuProvider {
     private List<Candidate> matchOrSearchSingleOrigin(
             String origin, MatchQuery query, CancellationToken token) throws IOException {
         if (token != null) token.throwIfCancelled();
-        List<Candidate> matched = tryMatchEndpoint(origin, query, token);
-        if (!matched.isEmpty()) return matched;
-        return trySearchEpisodesEndpoint(origin, query, token);
+        List<Candidate> matched = Collections.emptyList();
+        try {
+            matched = tryMatchEndpoint(origin, query, token);
+        } catch (IOException ignored) {
+        }
+        double topConf = 0.0;
+        for (Candidate c : matched) {
+            if (c.confidence > topConf) topConf = c.confidence;
+        }
+        if (!matched.isEmpty() && topConf >= 0.55) {
+            return matched;
+        }
+        List<Candidate> searched = Collections.emptyList();
+        try {
+            searched = trySearchEpisodesEndpoint(origin, query, token);
+        } catch (IOException e) {
+            if (matched.isEmpty()) throw e;
+        }
+        if (matched.isEmpty()) return searched;
+        if (searched.isEmpty()) return matched;
+        List<Candidate> combined = new ArrayList<>(matched.size() + searched.size());
+        Set<String> seen = new LinkedHashSet<>();
+        for (Candidate c : matched) {
+            if (seen.add(c.boundEpisodeId)) combined.add(c);
+        }
+        for (Candidate c : searched) {
+            if (seen.add(c.boundEpisodeId)) combined.add(c);
+        }
+        return combined;
     }
 
     private List<Candidate> tryMatchEndpoint(
@@ -536,8 +568,8 @@ public final class DandanplayProvider implements DanmuProvider {
                 String epId = stringifyId(m.opt("episodeId"));
                 if (epId.isEmpty()) continue;
                 String animeId = stringifyId(m.opt("animeId"));
-                String animeTitle = m.optString("animeTitle", query.title);
-                String epTitle = m.optString("episodeTitle", query.episodeTitle);
+                String animeTitle = m.optString("animeTitle", "").trim();
+                String epTitle = m.optString("episodeTitle", "").trim();
                 double conf =
                         m.has("confidence")
                                 ? m.optDouble("confidence", exact ? 1.0 : 0.85)
@@ -1189,10 +1221,26 @@ public final class DandanplayProvider implements DanmuProvider {
     private static String buildCleanFileName(MatchQuery query) {
         String t = cleanTitle(query.title);
         if (t.isEmpty()) return "";
+        if (query.seasonNumber > 0 && query.episodeIndex > 0) {
+            String sStr =
+                    query.seasonNumber < 10
+                            ? ("S0" + query.seasonNumber)
+                            : ("S" + query.seasonNumber);
+            String eStr =
+                    query.episodeIndex < 10
+                            ? ("E0" + query.episodeIndex)
+                            : ("E" + query.episodeIndex);
+            return t + " " + sStr + eStr;
+        }
         if (query.episodeIndex > 0) {
             return t
                     + " E"
                     + (query.episodeIndex < 10 ? "0" + query.episodeIndex : query.episodeIndex);
+        }
+        if (query.seasonNumber > 0) {
+            return t
+                    + " S"
+                    + (query.seasonNumber < 10 ? "0" + query.seasonNumber : query.seasonNumber);
         }
         String ep = cleanTitle(query.episodeTitle);
         if (!ep.isEmpty() && !ep.equalsIgnoreCase(t)) {

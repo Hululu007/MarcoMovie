@@ -63,6 +63,7 @@ final class MobileSearchPage {
         final int engineEpoch;
         final int generation;
         final int totalSites;
+        final boolean exactMode;
         private final List<Hit> hits = new ArrayList<>();
         private int doneCount;
         private String status = "";
@@ -79,6 +80,28 @@ final class MobileSearchPage {
                 int engineEpoch,
                 int generation,
                 int totalSites) {
+            this(
+                    querySeq,
+                    pageToken,
+                    keyword,
+                    privateMode,
+                    config,
+                    engineEpoch,
+                    generation,
+                    totalSites,
+                    false);
+        }
+
+        SearchSession(
+                long querySeq,
+                long pageToken,
+                String keyword,
+                boolean privateMode,
+                Object config,
+                int engineEpoch,
+                int generation,
+                int totalSites,
+                boolean exactMode) {
             this.querySeq = querySeq;
             this.pageToken = pageToken;
             this.keyword = keyword == null ? "" : keyword;
@@ -87,7 +110,8 @@ final class MobileSearchPage {
             this.engineEpoch = engineEpoch;
             this.generation = generation;
             this.totalSites = Math.max(0, totalSites);
-            this.status = "正在并发检索 " + this.totalSites + " 个片源…";
+            this.exactMode = exactMode;
+            this.status = (exactMode ? "精准匹配：正在并发检索 " : "正在并发检索 ") + this.totalSites + " 个片源…";
         }
 
         synchronized boolean isComplete() {
@@ -116,10 +140,29 @@ final class MobileSearchPage {
                 return false;
             }
             if (batch != null && !batch.isEmpty()) {
-                hits.addAll(batch);
+                if (exactMode) {
+                    for (int i = 0; i < batch.size(); i++) {
+                        Hit h = batch.get(i);
+                        if (h != null
+                                && h.video != null
+                                && SearchRanking.isExactTitleMatch(h.video.title, keyword)) {
+                            hits.add(h);
+                        }
+                    }
+                } else {
+                    hits.addAll(batch);
+                }
             }
             doneCount = Math.min(totalSites, doneCount + 1);
-            status = "已检索 " + doneCount + "/" + totalSites + " 个片源 · 命中 " + hits.size() + " 条结果";
+            status =
+                    (exactMode ? "精准匹配 · " : "")
+                            + "已检索 "
+                            + doneCount
+                            + "/"
+                            + totalSites
+                            + " 个片源 · 命中 "
+                            + hits.size()
+                            + " 条结果";
             return true;
         }
 
@@ -190,6 +233,7 @@ final class MobileSearchPage {
         private long boundQuerySeq = -1L;
         private String boundFilter = "";
         private boolean boundSidebar;
+        private boolean boundExactMode;
         private int processedHitCount;
         int fullRebuildCount;
         int incrementalUpdateCount;
@@ -197,20 +241,32 @@ final class MobileSearchPage {
         void reset() {
             boundQuerySeq = -1L;
             boundFilter = "";
+            boundExactMode = false;
             processedHitCount = 0;
         }
 
         Diff planUpdate(long querySeq, String filter, boolean useSidebar, int totalHits) {
+            return planUpdate(querySeq, filter, useSidebar, boundExactMode, totalHits);
+        }
+
+        Diff planUpdate(
+                long querySeq,
+                String filter,
+                boolean useSidebar,
+                boolean exactMode,
+                int totalHits) {
             String f = filter == null ? "" : filter;
             boolean needFull =
                     boundQuerySeq != querySeq
                             || !boundFilter.equals(f)
                             || boundSidebar != useSidebar
+                            || boundExactMode != exactMode
                             || totalHits < processedHitCount;
             if (needFull) {
                 boundQuerySeq = querySeq;
                 boundFilter = f;
                 boundSidebar = useSidebar;
+                boundExactMode = exactMode;
                 processedHitCount = totalHits;
                 fullRebuildCount++;
                 return new Diff(true, 0);
@@ -276,6 +332,26 @@ final class MobileSearchPage {
             int engineEpoch,
             int generation,
             int totalSites) {
+        return startSession(
+                pageToken,
+                keyword,
+                privateMode,
+                config,
+                engineEpoch,
+                generation,
+                totalSites,
+                false);
+    }
+
+    static SearchSession startSession(
+            long pageToken,
+            String keyword,
+            boolean privateMode,
+            Object config,
+            int engineEpoch,
+            int generation,
+            int totalSites,
+            boolean exactMode) {
         synchronized (SESSION_LOCK) {
             if (activeSession != null) {
                 activeSession.cancelPool();
@@ -293,7 +369,8 @@ final class MobileSearchPage {
                             config,
                             engineEpoch,
                             generation,
-                            totalSites);
+                            totalSites,
+                            exactMode);
             return activeSession;
         }
     }
@@ -388,6 +465,49 @@ final class MobileSearchPage {
 
         page.addView(searchRow, new LinearLayout.LayoutParams(-1, -2));
 
+        // 1b. Fuzzy vs Exact Match mode toggle row (原 7: 精准搜索模式)
+        final boolean[] exactMode = {
+            a.mobilePrefs().getBoolean(Prefs.MOBILE_SEARCH_EXACT_MODE, false)
+        };
+        LinearLayout modeRow = a.row();
+        modeRow.setGravity(Gravity.CENTER_VERTICAL);
+        modeRow.setPadding(0, a.dp(10), 0, a.dp(2));
+
+        final TextView fuzzyPill = a.text("模糊聚合", 12.5f, p.textPrimary);
+        fuzzyPill.setSingleLine(true);
+        fuzzyPill.setPadding(a.dp(13), a.dp(6), a.dp(13), a.dp(6));
+        MobileMotion.bindPress(fuzzyPill, 0.94f);
+        LinearLayout.LayoutParams fLp = new LinearLayout.LayoutParams(-2, -2);
+        fLp.rightMargin = a.dp(8);
+        modeRow.addView(fuzzyPill, fLp);
+
+        final TextView exactPill = a.text("精准匹配", 12.5f, p.textPrimary);
+        exactPill.setSingleLine(true);
+        exactPill.setPadding(a.dp(13), a.dp(6), a.dp(13), a.dp(6));
+        MobileMotion.bindPress(exactPill, 0.94f);
+        LinearLayout.LayoutParams eLp = new LinearLayout.LayoutParams(-2, -2);
+        eLp.rightMargin = a.dp(8);
+        modeRow.addView(exactPill, eLp);
+
+        final TextView modeHint = a.text("", 11.5f, p.textTertiary);
+        modeHint.setSingleLine(true);
+        modeHint.setEllipsize(TextUtils.TruncateAt.END);
+        modeRow.addView(modeHint, new LinearLayout.LayoutParams(0, -2, 1f));
+        page.addView(modeRow, new LinearLayout.LayoutParams(-1, -2));
+
+        final Runnable updateModePills =
+                () -> {
+                    boolean exact = exactMode[0];
+                    fuzzyPill.setTextColor(!exact ? p.accent : p.textSecondary);
+                    fuzzyPill.setTypeface(null, !exact ? Typeface.BOLD : Typeface.NORMAL);
+                    fuzzyPill.setBackground(MobileTheme.pillBg(a, !exact, 999));
+                    exactPill.setTextColor(exact ? p.accent : p.textSecondary);
+                    exactPill.setTypeface(null, exact ? Typeface.BOLD : Typeface.NORMAL);
+                    exactPill.setBackground(MobileTheme.pillBg(a, exact, 999));
+                    modeHint.setText(exact ? "仅保留原始完整片名完全一致的结果" : "精确命中优先 · 跨源聚合");
+                };
+        updateModePills.run();
+
         // 2. History chips + status row
         final LinearLayout historySection = a.vertical();
         historySection.setPadding(0, a.dp(10), 0, a.dp(4));
@@ -427,7 +547,9 @@ final class MobileSearchPage {
                             resultsStage.removeAllViews();
                             return;
                         }
-                        List<Hit> snapshot = session.snapshotHits();
+                        List<Hit> snapshot =
+                                SearchRanking.rankAndFilter(
+                                        session.snapshotHits(), session.keyword, session.exactMode);
                         if (snapshot.isEmpty()) {
                             renderPlan.reset();
                             filterContainerRef[0] = null;
@@ -458,9 +580,18 @@ final class MobileSearchPage {
                                 a.mobilePrefs().getBoolean(Prefs.SEARCH_PLATFORM_SIDEBAR, false);
                         IncrementalResultPlan.Diff diff =
                                 renderPlan.planUpdate(
-                                        session.querySeq, curFilter, useSidebar, snapshot.size());
+                                        session.querySeq,
+                                        curFilter,
+                                        useSidebar,
+                                        session.exactMode,
+                                        snapshot.size());
+                        // In fuzzy mode, exact/cross-source consensus hits can promote above older
+                        // rows when later batches arrive; rebuild in that case so ranking stays
+                        // strictly exact-first. In exact mode every hit is exact, so incremental
+                        // append preserves scroll position without jitter.
+                        boolean allowIncremental = !diff.fullRebuild && session.exactMode;
 
-                        if (!diff.fullRebuild && listContainerRef[0] != null) {
+                        if (allowIncremental && listContainerRef[0] != null) {
                             // Incremental path (#45): preserve ScrollView, scrollY, and existing
                             // cards; update filter counts in-place and append only newly arrived
                             // matching hits!
@@ -719,7 +850,8 @@ final class MobileSearchPage {
                                     a.config,
                                     a.engineEpoch,
                                     a.generation,
-                                    searchable.size());
+                                    searchable.size(),
+                                    exactMode[0]);
                     pageTokenHolder[0] = session.pageToken;
                     displayedSession[0] = session;
                     statusText.setText(session.status());
@@ -821,6 +953,31 @@ final class MobileSearchPage {
                             });
                 };
 
+        View.OnClickListener switchMode =
+                v -> {
+                    boolean nextExact = v == exactPill;
+                    if (exactMode[0] == nextExact) return;
+                    exactMode[0] = nextExact;
+                    a.mobilePrefs()
+                            .edit()
+                            .putBoolean(Prefs.MOBILE_SEARCH_EXACT_MODE, nextExact)
+                            .apply();
+                    updateModePills.run();
+                    String curKeyword = input.getText().toString().trim();
+                    if (!curKeyword.isEmpty()) {
+                        // Cancel any in-flight query from the previous mode immediately so stale
+                        // batches can never mix into the newly selected mode.
+                        runSearch[0].run();
+                    } else {
+                        invalidateSession();
+                        displayedSession[0] = null;
+                        statusText.setText("");
+                        rebuildResults.run();
+                    }
+                };
+        fuzzyPill.setOnClickListener(switchMode);
+        exactPill.setOnClickListener(switchMode);
+
         goBtn.setOnClickListener(v -> runSearch[0].run());
         input.setOnEditorActionListener(
                 (v, actionId, event) -> {
@@ -865,7 +1022,7 @@ final class MobileSearchPage {
             runSearch[0].run();
         } else {
             SearchSession cached = cachedSessionFor(a.privateMode, a.config, a.engineEpoch);
-            if (cached != null && !cached.keyword.isEmpty()) {
+            if (cached != null && !cached.keyword.isEmpty() && cached.exactMode == exactMode[0]) {
                 displayedSession[0] = cached;
                 input.setText(cached.keyword);
                 statusText.setText(cached.status());

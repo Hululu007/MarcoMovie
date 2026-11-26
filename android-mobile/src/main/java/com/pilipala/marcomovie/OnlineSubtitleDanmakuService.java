@@ -77,34 +77,11 @@ final class OnlineSubtitleDanmakuService {
     private OnlineSubtitleDanmakuService() {}
 
     static List<DanmakuSource> loadDanmakuSources(MainActivity a) {
-        List<DanmakuSource> out = new ArrayList<>();
-        String raw = a.mobilePrefs().getString(Prefs.DANMAKU_SOURCES_JSON, "[]");
-        try {
-            JSONArray arr = new JSONArray(raw);
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject o = arr.optJSONObject(i);
-                if (o == null) continue;
-                String url = Prefs.sanitizeHttpUrl(o.optString("url", "").trim());
-                if (url == null || url.isEmpty()) continue;
-                out.add(
-                        new DanmakuSource(
-                                o.optString("name", "自定义弹幕源 " + (i + 1)),
-                                url,
-                                o.optBoolean("enabled", true),
-                                o.optLong("latencyMs", -1)));
-            }
-        } catch (Exception ignored) {
-        }
-        return out;
+        return DanmuSourceManager.loadUnifiedSources(a);
     }
 
     static void saveDanmakuSources(MainActivity a, List<DanmakuSource> list) {
-        try {
-            JSONArray arr = new JSONArray();
-            for (DanmakuSource s : list) arr.put(s.toJson());
-            a.mobilePrefs().edit().putString(Prefs.DANMAKU_SOURCES_JSON, arr.toString()).apply();
-        } catch (Exception ignored) {
-        }
+        DanmuSourceManager.saveUnifiedSources(a, list);
     }
 
     /** Benchmarks all user-configured Danmaku sources and sorts fastest reachable endpoints first. */
@@ -155,71 +132,85 @@ final class OnlineSubtitleDanmakuService {
                 });
     }
 
-    /** Resolves Danmaku XML/JSON text from DandanPlay v2 or user-configured LogVar APIs. */
+    /** Resolves Danmaku JSON text from the unified configured Danmaku sources via DandanplayProvider. */
     static void searchAndLoadDanmakuAsync(
             final MainActivity a,
             final String videoTitle,
             final String episodeName,
             final Callback<String> onDanmakuBody) {
         if (a == null || videoTitle == null || onDanmakuBody == null) return;
-        final String cleanSeries =
-                EpisodeNameCleaner.cleanSearchTitle(
-                        SeasonParser.parseSeasonMeta(videoTitle).baseTitle);
+        final SeasonParser.SeasonMeta sm = SeasonParser.parseSeasonMeta(videoTitle);
+        final String cleanSeries = EpisodeNameCleaner.cleanSearchTitle(sm.baseTitle);
         final EpisodeNameCleaner.CleanedEpisode cleanEp =
-                EpisodeNameCleaner.clean(episodeName, cleanSeries, 1);
+                EpisodeNameCleaner.clean(episodeName, cleanSeries, 0);
 
         a.worker.execute(
                 () -> {
-                    // 1. Try user-configured LogVar / custom Danmaku APIs in latency order
-                    List<DanmakuSource> customSources = loadDanmakuSources(a);
-                    for (DanmakuSource src : customSources) {
-                        if (!src.enabled) continue;
-                        try {
-                            String base = src.baseUrl;
-                            while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
-                            String searchUrl =
-                                    base
-                                            + "/api/v2/search/episodes?anime="
-                                            + URLEncoder.encode(cleanSeries, "UTF-8")
-                                            + "&episode="
-                                            + cleanEp.episodeNumber;
-                            String raw = TmdbService.httpGet(searchUrl, Collections.emptyMap());
-                            String comments = extractDandanComments(base, raw);
-                            if (comments != null) {
-                                a.ui.post(() -> onDanmakuBody.onResult(comments));
-                                return;
-                            }
-                        } catch (Exception ignored) {
-                        }
-                    }
-
-                    // 2. Try official DandanPlay API v2 if AppId/Secret or public search succeeds
                     try {
-                        Map<String, String> headers = new HashMap<>();
-                        String appId =
-                                a.secretsPrefs().getString(Prefs.SECRET_DANDAN_APP_ID, "").trim();
-                        String appSecret =
-                                a.secretsPrefs().getString(Prefs.SECRET_DANDAN_SECRET, "").trim();
-                        if (!appId.isEmpty() && !appSecret.isEmpty()) {
-                            headers.put("X-AppId", appId);
-                            headers.put("X-AppSecret", appSecret);
-                        }
-                        String searchUrl =
-                                "https://api.dandanplay.net/api/v2/search/episodes?anime="
-                                        + URLEncoder.encode(cleanSeries, "UTF-8")
-                                        + "&episode="
-                                        + cleanEp.episodeNumber;
-                        String raw = TmdbService.httpGet(searchUrl, headers);
-                        String comments =
-                                extractDandanCommentsWithHeaders(
-                                        "https://api.dandanplay.net", raw, headers);
-                        if (comments != null) {
-                            a.ui.post(() -> onDanmakuBody.onResult(comments));
-                            return;
+                        DanmuSettingsPanel.DanmuConfig cfg =
+                                DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
+                        List<DanmakuSource> unified = loadDanmakuSources(a);
+                        String origins = DanmuSourceManager.enabledOriginsMultiline(unified);
+                        if (!origins.isEmpty()) {
+                            String appId = cfg.appId;
+                            String appSecret = cfg.appSecret;
+                            if (appId.isEmpty()) {
+                                appId =
+                                        a.secretsPrefs()
+                                                .getString(Prefs.SECRET_DANDAN_APP_ID, "")
+                                                .trim();
+                            }
+                            if (appSecret.isEmpty()) {
+                                appSecret =
+                                        a.secretsPrefs()
+                                                .getString(Prefs.SECRET_DANDAN_SECRET, "")
+                                                .trim();
+                            }
+                            DandanplayProvider provider =
+                                    new DandanplayProvider(origins, appId, appSecret);
+                            DanmuProvider.MatchQuery query =
+                                    new DanmuProvider.MatchQuery(
+                                            cleanSeries,
+                                            episodeName == null ? "" : episodeName,
+                                            sm.seasonNumber,
+                                            cleanEp.episodeNumber,
+                                            0L);
+                            DanmuProvider.CancellationToken token =
+                                    new DanmuProvider.CancellationToken();
+                            List<DanmuProvider.Candidate> candidates =
+                                    provider.matchOrSearch(query, token);
+                            if (candidates != null && !candidates.isEmpty()) {
+                                DanmuProvider.EpisodeSession session =
+                                        provider.openSession(
+                                                candidates.get(0).boundEpisodeId, token);
+                                List<DanmuProvider.DanmuItem> items = session.preloadComments;
+                                if (items != null && !items.isEmpty()) {
+                                    JSONArray commentsArr = new JSONArray();
+                                    for (DanmuProvider.DanmuItem item : items) {
+                                        String pField =
+                                                String.format(
+                                                        Locale.US,
+                                                        "%.2f,%d,%d",
+                                                        item.timeMs / 1000.0,
+                                                        item.mode,
+                                                        item.rgbColor & 0xFFFFFF);
+                                        commentsArr.put(
+                                                new JSONObject()
+                                                        .put("cid", item.id)
+                                                        .put("p", pField)
+                                                        .put("m", item.text));
+                                    }
+                                    final String payload =
+                                            new JSONObject()
+                                                    .put("comments", commentsArr)
+                                                    .toString();
+                                    a.ui.post(() -> onDanmakuBody.onResult(payload));
+                                    return;
+                                }
+                            }
                         }
                     } catch (Exception ignored) {
                     }
-
                     a.ui.post(() -> onDanmakuBody.onResult(null));
                 });
     }

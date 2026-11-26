@@ -14,6 +14,16 @@ final class SourcePicker {
         return "source-picker:" + (origin == null ? "" : origin);
     }
 
+    private static String profile(String origin, String raw) {
+        if (origin != null && !origin.trim().isEmpty()) {
+            return profile(origin.trim());
+        }
+        if (raw != null && !raw.isEmpty()) {
+            return "source-picker:local:" + NetdiskStore.sha256Hex("local:" + raw).substring(0, 16);
+        }
+        return profile("");
+    }
+
     static String siteGroup(Cms.Site site) {
         if (site == null || site.group == null || site.group.trim().isEmpty()) {
             return DEFAULT_GROUP;
@@ -104,7 +114,7 @@ final class SourcePicker {
     static void applyEdits(MainActivity a, Cms.Config config, String origin) {
         String legacyProfile = profile(origin);
         if (!config.origin.isEmpty()) origin = config.origin;
-        String currentProfile = profile(origin);
+        String currentProfile = profile(origin, config.raw);
         if (!currentProfile.equals(legacyProfile)
                 && !a.prefs.contains(currentProfile)
                 && a.prefs.contains(legacyProfile)) {
@@ -123,7 +133,7 @@ final class SourcePicker {
     private static String activeProfileKey(MainActivity a, Cms.Config config) {
         String origin =
                 (config != null && !config.origin.isEmpty()) ? config.origin : a.configOrigin;
-        return profile(origin);
+        return profile(origin, config != null ? config.raw : "");
     }
 
     private static org.json.JSONObject loadSavedProfile(MainActivity a, Cms.Config config) {
@@ -241,7 +251,7 @@ final class SourcePicker {
                 .show();
     }
 
-    private static void showSiteActionMenu(
+    static void showSiteActionMenu(
             MainActivity a, Cms.Config config, Cms.Site site, String returnGroup) {
         if (a.config != config) return;
         int index = config.sites.indexOf(site);
@@ -867,7 +877,7 @@ final class SourcePicker {
         }
     }
 
-    private static void commitSelectedSiteForCrashGuard(MainActivity a, String siteKey) {
+    static void commitSelectedSiteForCrashGuard(MainActivity a, String siteKey) {
         if (a == null || a.prefs == null) return;
         a.prefs
                 .edit()
@@ -1095,14 +1105,12 @@ final class SourcePicker {
         Button selectedButton = null;
         LinearLayout row = null;
         float fontScale = a.getResources().getConfiguration().fontScale;
-        int availWidth = Math.min(a.windowWidth(), a.dp(740)) - a.dp(tv ? 52 : 36);
-        int targetColWidth = a.dp(tv ? 200 : 142);
-        int columns =
-                Math.max(
-                        tv ? 2 : (fontScale > 1.35f ? 1 : 2),
-                        Math.min(
-                                3,
-                                (int) (availWidth / (targetColWidth * Math.max(1f, fontScale)))));
+        float density = Math.max(1f, a.getResources().getDisplayMetrics().density);
+        int marginH = tv ? a.dp(48) : a.dp(20);
+        int panelWidth = Math.min(a.dp(740), Math.max(a.dp(280), a.windowWidth() - marginH));
+        int availWidthPx = Math.max(a.dp(220), panelWidth - a.dp(tv ? 52 : 36));
+        float availWidthDp = availWidthPx / density;
+        int columns = SourcePickerLayout.resolveFullPickerColumns(availWidthDp, fontScale, tv);
         int index = 0;
         for (Cms.Site site : a.config.sites) {
             if (!"全部".equals(activeGroup) && !siteGroup(site).equals(activeGroup)) {
@@ -1114,6 +1122,61 @@ final class SourcePicker {
                 grid.addView(row);
             }
             boolean current = site.key.equals(selected);
+            if (!tv) {
+                final boolean avail = a.available(site);
+                final boolean pref = avail && SourcePreferences.isPreferred(a, site);
+                LinearLayout card =
+                        SourcePickerLayout.buildMobileSourceCard(
+                                a,
+                                site,
+                                current,
+                                pref,
+                                avail,
+                                () -> {
+                                    if (site.api.startsWith("catpaw://")
+                                            && android.net.Uri.parse(site.api)
+                                                    .getPath()
+                                                    .equals("/api/baseset")) {
+                                        dialog.dismiss();
+                                        CatPawSettings.open(a, site);
+                                        return;
+                                    }
+                                    if (!avail) {
+                                        dialog.dismiss();
+                                        showSiteActionMenu(a, a.config, site, activeGroup);
+                                        return;
+                                    }
+                                    commitSelectedSiteForCrashGuard(a, site.key);
+                                    dialog.dismiss();
+                                    a.back.clear();
+                                    a.open(new MainActivity.Screen(a::home), false);
+                                },
+                                avail
+                                        ? () -> {
+                                            a.prefs
+                                                    .edit()
+                                                    .putString(
+                                                            Prefs.PREFERRED_SITE,
+                                                            pref
+                                                                    ? ""
+                                                                    : SourcePreferences.identity(
+                                                                            site))
+                                                    .apply();
+                                            a.toast(pref ? "已取消常用片源" : "已设为常用片源");
+                                            dialog.dismiss();
+                                            show(a, activeGroup);
+                                        }
+                                        : null,
+                                () -> {
+                                    dialog.dismiss();
+                                    showSiteActionMenu(a, a.config, site, activeGroup);
+                                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1f);
+                lp.setMargins(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+                row.addView(card, lp);
+                index++;
+                continue;
+            }
             Button button =
                     a.button(
                             (current ? "✓ " : "")
@@ -1276,8 +1339,6 @@ final class SourcePicker {
             }
         }
         panel.addView(footer, new LinearLayout.LayoutParams(-1, -2));
-        int marginH = tv ? a.dp(48) : a.dp(20);
-        int panelWidth = Math.min(a.dp(740), a.windowWidth() - marginH);
         int maxHeight = Math.max(a.dp(180), a.windowHeight() - a.dp(tv ? 32 : 84));
         panel.measure(
                 View.MeasureSpec.makeMeasureSpec(panelWidth, View.MeasureSpec.EXACTLY),
@@ -1315,7 +1376,7 @@ final class SourcePicker {
                         ((LinearLayout) grid.getChildAt(0)).getChildAt(0).requestFocus();
                 });
         dialog.show();
-        if (window != null) window.setLayout(Math.min(a.dp(720), a.root.getWidth() - marginH), -2);
+        if (window != null) window.setLayout(panelWidth, -2);
     }
 
     static void showSavedConfigs(MainActivity a) {

@@ -569,8 +569,13 @@ public final class MpvPlayer extends MoviePlayer {
     private void handleEndFile() {
         if (released) return;
         if (prepared) {
-            if (eofReached && completionListener != null) {
-                completionListener.onCompletion(MpvPlayer.this);
+            if (eofReached) {
+                if (completionListener != null) {
+                    completionListener.onCompletion(MpvPlayer.this);
+                }
+            } else if (errorListener != null) {
+                lastError = "MPV_STREAM_INTERRUPTED";
+                errorListener.onError(MpvPlayer.this, -1, 0);
             }
             return;
         }
@@ -851,7 +856,8 @@ public final class MpvPlayer extends MoviePlayer {
                             new String[] {
                                 "seek", String.format(Locale.ROOT, "%.3f", seconds), "absolute"
                             });
-                    positionSec = seconds;
+                    // Do NOT optimistically overwrite positionSec before libmpv confirms time-pos,
+                    // so failed or stalled seeks never leak an unreached target into WatchHistory.
                     return null;
                 });
     }
@@ -1044,6 +1050,9 @@ public final class MpvPlayer extends MoviePlayer {
             for (int i = 0; i < array.length(); i++) {
                 JSONObject item = array.optJSONObject(i);
                 if (item != null && target.equals(item.optString("type"))) {
+                    if (type == C.TRACK_TYPE_VIDEO && item.optBoolean("albumart", false)) {
+                        continue;
+                    }
                     out.add(item);
                 }
             }
@@ -1053,7 +1062,53 @@ public final class MpvPlayer extends MoviePlayer {
     }
 
     @Override
+    public List<VideoTrackOption> listVideoTracks() {
+        return onMain(
+                () -> {
+                    List<VideoTrackOption> out = new ArrayList<>();
+                    List<JSONObject> tracks = mpvTracks(C.TRACK_TYPE_VIDEO);
+                    for (int i = 0; i < tracks.size(); i++) {
+                        JSONObject t = tracks.get(i);
+                        int w = t.optInt("demux-w", 0);
+                        int h = t.optInt("demux-h", 0);
+                        int bitrate = t.optInt("demux-bitrate", 0);
+                        float fps = (float) t.optDouble("demux-fps", 0.0);
+                        String codec = t.optString("codec", "").trim().toUpperCase(Locale.ROOT);
+                        boolean selected = t.optBoolean("selected", false);
+                        String title = t.optString("title", "").trim();
+                        out.add(
+                                new VideoTrackOption(
+                                        i, w, h, bitrate, fps, codec, false, selected, title));
+                    }
+                    return out;
+                });
+    }
+
+    @Override
+    public int selectedVideoTrackIndex() {
+        List<VideoTrackOption> tracks = listVideoTracks();
+        for (int i = 0; i < tracks.size(); i++) {
+            if (tracks.get(i).selected) return tracks.get(i).index;
+        }
+        return -1;
+    }
+
+    @Override
+    public String activeDecodedResolution() {
+        return !released && width > 0 && height > 0 ? (width + "×" + height) : "";
+    }
+
+    @Override
     public List<String> trackLabels(int type) {
+        if (type == C.TRACK_TYPE_VIDEO) {
+            List<VideoTrackOption> tracks = listVideoTracks();
+            List<String> labels = new ArrayList<>(tracks.size());
+            for (int i = 0; i < tracks.size(); i++) {
+                VideoTrackOption opt = tracks.get(i);
+                labels.add((opt.selected ? "✓ " : "") + opt.formatLabel());
+            }
+            return labels;
+        }
         return onMain(
                 () -> {
                     List<String> labels = new ArrayList<>();
@@ -1064,21 +1119,13 @@ public final class MpvPlayer extends MoviePlayer {
                         String title = t.optString("title", "").trim();
                         String lang = t.optString("lang", "").trim();
                         String codec = t.optString("codec", "").trim();
-                        String label;
-                        if (type == C.TRACK_TYPE_VIDEO) {
-                            int w = t.optInt("demux-w", 0);
-                            int h = t.optInt("demux-h", 0);
-                            label = w > 0 && h > 0 ? (w + "×" + h) : ("视频轨 " + (i + 1));
-                            if (!codec.isEmpty()) label += " · " + codec.toUpperCase(Locale.ROOT);
-                        } else {
-                            label =
-                                    !title.isEmpty()
-                                            ? title
-                                            : (!lang.isEmpty() ? lang : "轨道 " + (i + 1));
-                            int ch = t.optInt("demux-channel-count", 0);
-                            if (ch > 0) label += " · " + ch + " 声道";
-                            if (!codec.isEmpty()) label += " · " + codec.toUpperCase(Locale.ROOT);
-                        }
+                        String label =
+                                !title.isEmpty()
+                                        ? title
+                                        : (!lang.isEmpty() ? lang : "轨道 " + (i + 1));
+                        int ch = t.optInt("demux-channel-count", 0);
+                        if (ch > 0) label += " · " + ch + " 声道";
+                        if (!codec.isEmpty()) label += " · " + codec.toUpperCase(Locale.ROOT);
                         labels.add((selected ? "✓ " : "") + label);
                     }
                     return labels;

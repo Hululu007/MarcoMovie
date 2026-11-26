@@ -221,7 +221,9 @@ final class EditionImpl {
                                                     "Content-Type",
                                                     "application/x-www-form-urlencoded; charset=UTF-8");
                                             byte[] body =
-                                                    ("url=" + URLEncoder.encode(originUrl, "UTF-8"))
+                                                    ("address="
+                                                                    + URLEncoder.encode(
+                                                                            originUrl, "UTF-8"))
                                                             .getBytes("UTF-8");
                                             try (OutputStream out = conn.getOutputStream()) {
                                                 out.write(body);

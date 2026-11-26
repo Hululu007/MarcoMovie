@@ -603,6 +603,22 @@ final class MobileSettingsScreen {
                         1,
                         false));
         navRows.add(
+                tagged(
+                        MobileSectionGroup.navRow(
+                                a,
+                                MobileIcons.IC_LIBRARY,
+                                TINT_VIOLET,
+                                "首页专题显示与排序",
+                                "已开启 "
+                                        + MobileHomeSections.visibleCount(a)
+                                        + " / "
+                                        + MobileHomeSections.DEFAULT_ORDER.size()
+                                        + " 个",
+                                () ->
+                                        MobileHomeSections.showSettingsSheet(
+                                                a, () -> reloadPreservingScroll(shell, sv))),
+                        "ms-home-sections"));
+        navRows.add(
                 mobileToggleRow(
                         a,
                         "ms-home-banner",
@@ -611,7 +627,11 @@ final class MobileSettingsScreen {
                         "首页精选大图横幅",
                         Prefs.HOME_CAROUSEL,
                         true,
-                        null));
+                        () ->
+                                MobileHomeSections.setVisible(
+                                        a,
+                                        MobileHomeSections.ID_HERO_BILLBOARD,
+                                        a.mobilePrefs().getBoolean(Prefs.HOME_CAROUSEL, true))));
         navRows.add(
                 coreIntRow(
                         shell,
@@ -649,7 +669,11 @@ final class MobileSettingsScreen {
                         "首页显示继续观看",
                         Prefs.MOBILE_SHOW_HISTORY,
                         true,
-                        null));
+                        () ->
+                                MobileHomeSections.setVisible(
+                                        a,
+                                        MobileHomeSections.ID_WATCH_HISTORY,
+                                        a.prefs.getBoolean(Prefs.MOBILE_SHOW_HISTORY, true))));
         addSection(a, body, "导航与首页", "长按或按住上滑底栏任意图标，均可呼出高频快捷菜单。", navRows);
 
         // Section ③: 背景与动效
@@ -1336,7 +1360,17 @@ final class MobileSettingsScreen {
                         "隐藏按钮后保留底部进度细线",
                         Prefs.MINI_PROGRESS_BAR,
                         true,
-                        null));
+                        () -> {
+                            boolean on = a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true);
+                            com.pilipala.marcomovie.hud.PlayerHudPrefs.setSlimProgressEnabled(
+                                    a, on);
+                            if (a.mobilePlayerOverlay != null) {
+                                a.mobilePlayerOverlay.syncControlsVisibility();
+                            }
+                            if (a.playerChrome != null) {
+                                a.playerChrome.update();
+                            }
+                        }));
         gestureRows.add(
                 tagged(
                         MobileSectionGroup.navRow(
@@ -1651,7 +1685,14 @@ final class MobileSettingsScreen {
                         "播放时默认开启弹幕",
                         Prefs.DANMAKU_DEFAULT,
                         true,
-                        null));
+                        () -> {
+                            boolean on = a.prefs.getBoolean(Prefs.DANMAKU_DEFAULT, true);
+                            DanmuSettingsPanel.DanmuConfig cur =
+                                    DanmuSettingsPanel.loadConfig(a, false);
+                            DanmuSettingsPanel.DanmuConfig.Builder b = cur.toBuilder();
+                            b.enabled = on;
+                            DanmuSettingsPanel.saveConfig(a, b.build());
+                        }));
         dmRows.add(
                 tagged(
                         MobileSectionGroup.navRow(
@@ -2820,21 +2861,31 @@ final class MobileSettingsScreen {
                 };
         Runnable onAdd =
                 () -> {
-                    String u = Prefs.sanitizeHttpUrl(urlIn.getText().toString().trim());
+                    String u =
+                            DanmuSourceManager.normalizeServiceOrigin(
+                                    urlIn.getText().toString().trim());
                     if (u == null || u.isEmpty()) {
-                        a.toast("请输入有效的 HTTP / HTTPS 弹幕源地址");
+                        a.toast("请输入有效的 HTTP / HTTPS 弹幕源地址（保留端口与 /dm 等子路径）");
                         return;
                     }
                     String n = nameIn.getText().toString().trim();
-                    list.add(
-                            new OnlineSubtitleDanmakuService.DanmakuSource(
-                                    n.isEmpty() ? "弹幕源 " + (list.size() + 1) : n, u, true, -1));
-                    OnlineSubtitleDanmakuService.saveDanmakuSources(a, list);
+                    DanmuSourceManager.addOrUpdateSource(
+                            a, n.isEmpty() ? DanmuSourceManager.defaultSourceName(u) : n, u, -1L);
                     if (hRef[0] != null) hRef[0].dismiss();
-                    a.toast("已添加弹幕源");
+                    a.toast("已添加弹幕源（设置与自动播放已同步）");
                     reloadPreservingScroll(shell, sv);
                 };
+        Runnable onDiscover =
+                () -> {
+                    if (hRef[0] != null) hRef[0].dismiss();
+                    DanmuSourceManager.showDiscoverAndAddServiceSheet(
+                            a, () -> reloadPreservingScroll(shell, sv));
+                };
 
+        box.addView(
+                buildSheetActionPill(a, p, "搜索并添加新弹幕源（探测端口与子路径）", false, onDiscover),
+                new LinearLayout.LayoutParams(-1, a.dp(42)));
+        a.gap(box, 8);
         LinearLayout footerRow = a.row();
         footerRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, a.dp(44), 1f);
@@ -2853,6 +2904,7 @@ final class MobileSettingsScreen {
 
     private static void showCornerHudConfigSheet(final MobileRootShell shell, final ScrollView sv) {
         final MainActivity a = shell.a;
+        final MobileTheme.Palette p = MobileTheme.of(a);
         final int[] mask = {a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD, 7)};
         final int[] flags = {
             Prefs.HUD_CLOCK, Prefs.HUD_BATTERY, Prefs.HUD_NET_SPEED, Prefs.HUD_RESOLUTION
@@ -2880,24 +2932,47 @@ final class MobileSettingsScreen {
                             checked -> {
                                 if (checked) mask[0] |= bit;
                                 else mask[0] &= ~bit;
+                                a.mobilePrefs()
+                                        .edit()
+                                        .putInt(Prefs.PLAYER_CORNER_HUD, mask[0])
+                                        .apply();
+                                boolean clockOn = (mask[0] & Prefs.HUD_CLOCK) != 0;
+                                a.prefs
+                                        .edit()
+                                        .putBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, clockOn)
+                                        .apply();
+                                if (a.mobilePlayerOverlay != null) {
+                                    a.mobilePlayerOverlay.syncControlsVisibility();
+                                }
+                                if (a.playerChrome != null) {
+                                    a.playerChrome.syncClockViews();
+                                }
                             }));
         }
 
         final MobileBottomSheet.SheetHandle[] handleRef = new MobileBottomSheet.SheetHandle[1];
-        LinearLayout content = MobileSectionGroup.create(a, null, null, rows);
+        LinearLayout content = a.vertical();
+        TextView desc = a.text("点击开关即刻生效并自动保存，返回后无需再次确认。", 12.5f, p.textSecondary);
+        desc.setPadding(a.dp(4), 0, a.dp(4), a.dp(10));
+        content.addView(desc);
+        content.addView(MobileSectionGroup.create(a, null, null, rows));
+        a.gap(content, 12);
+
+        TextView doneBtn = a.text("完成", 14f, p.accentOnFill);
+        doneBtn.setTypeface(null, Typeface.BOLD);
+        doneBtn.setGravity(Gravity.CENTER);
+        doneBtn.setPadding(0, a.dp(12), 0, a.dp(12));
+        doneBtn.setBackground(MobileTheme.accentPillBg(a, 14));
+        MobileMotion.bindPress(doneBtn, 0.96f);
+        doneBtn.setOnClickListener(
+                v -> {
+                    if (handleRef[0] != null) handleRef[0].dismiss();
+                });
+        content.addView(doneBtn, new LinearLayout.LayoutParams(-1, -2));
+
         handleRef[0] =
-                MobileBottomSheet.showHandle(
-                        a,
-                        "播放页右上角状态信息",
-                        "仅在全屏按钮隐藏时静默浮现，绝不遮挡画面或与顶栏重叠",
-                        "保存",
-                        () -> {
-                            a.mobilePrefs().edit().putInt(Prefs.PLAYER_CORNER_HUD, mask[0]).apply();
-                            if (handleRef[0] != null) handleRef[0].dismiss();
-                            reloadPreservingScroll(shell, sv);
-                        },
-                        content,
-                        true);
+                MobileBottomSheet.showCustom(
+                        a, "播放页右上角状态信息", content, () -> reloadPreservingScroll(shell, sv));
     }
 
     private static void showPlayerButtonOrderDialog(final MobileRootShell shell) {

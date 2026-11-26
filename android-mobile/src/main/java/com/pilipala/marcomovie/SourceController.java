@@ -531,6 +531,7 @@ final class SourceController {
                                 if ((video.id == null || video.id.trim().isEmpty()) && id != null) {
                                     video.id = id.trim();
                                 }
+                                PlaybackLineRules.applyToVideo(a, site, video);
                                 if (!timing.cached
                                         && hasPlayableDetailLines(video)
                                         && detailContext.matches(
@@ -654,6 +655,12 @@ final class SourceController {
                         || s.startsWith("媒体地址返回")
                         || s.startsWith("此剧集")
                         || s.startsWith("当前片源")
+                        || s.startsWith("Emby")
+                        || s.startsWith("AList")
+                        || s.startsWith("请在本机")
+                        || s.startsWith("读取 AList")
+                        || s.startsWith("获取 AList")
+                        || s.startsWith("未找到对应的 AList")
                         || s.startsWith("MPV "))) return s;
         return "连接超时、来源不可达或数据格式不受支持。请检查配置与网络后重试。";
     }
@@ -2278,6 +2285,7 @@ final class SourceController {
                             .put("api", ns.api)
                             .put("searchable", ns.searchable ? 1 : 0);
             if (ns.jar != null && !ns.jar.isEmpty()) sObj.put("jar", ns.jar);
+            if (ns.playUrl != null && !ns.playUrl.isEmpty()) sObj.put("playUrl", ns.playUrl);
             if (ns.ext != null) sObj.put("ext", ns.ext);
             sitesArr.put(sObj);
             if (preferredPref != null
@@ -2288,6 +2296,35 @@ final class SourceController {
                                             || preferredPref.startsWith(cleanLegacyKey + "\n"))))) {
                 updatedPreferredPref = SourcePreferences.identity(ns);
             }
+        }
+        try {
+            org.json.JSONObject incJson =
+                    incoming.raw != null && !incoming.raw.trim().isEmpty()
+                            ? new org.json.JSONObject(Cms.withoutComments(incoming.raw))
+                            : null;
+            if (incJson != null) {
+                for (String field : new String[] {"parses", "rules", "ads", "flags"}) {
+                    org.json.JSONArray incArr = incJson.optJSONArray(field);
+                    if (incArr == null || incArr.length() == 0) continue;
+                    org.json.JSONArray baseArr = baseJson.optJSONArray(field);
+                    if (baseArr == null) {
+                        baseArr = new org.json.JSONArray();
+                        baseJson.put(field, baseArr);
+                    }
+                    java.util.Set<String> seenItems = new java.util.LinkedHashSet<>();
+                    for (int i = 0; i < baseArr.length(); i++) {
+                        Object o = baseArr.opt(i);
+                        if (o != null) seenItems.add(o.toString());
+                    }
+                    for (int i = 0; i < incArr.length(); i++) {
+                        Object o = incArr.opt(i);
+                        if (o != null && seenItems.add(o.toString())) {
+                            baseArr.put(o);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
         }
         String mergedRaw = baseJson.toString(2);
         Cms.Config merged = Cms.parseConfig(mergedRaw, a.configOrigin);
@@ -3034,6 +3071,7 @@ final class SourceController {
         final String targetOrigin = origin;
         final String rememberedName = configName(c);
         final String rememberedSelected = selected;
+        EmbyEngine.reattachSavedLibraries(a, c);
         SourcePicker.applyEdits(a, c, targetOrigin);
         String currentKey = selected;
         boolean hasSelected = false;

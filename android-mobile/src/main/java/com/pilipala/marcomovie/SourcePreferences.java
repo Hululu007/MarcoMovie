@@ -58,8 +58,8 @@ final class SourcePreferences {
     static int lineIndex(MainActivity a, Cms.Video video) {
         String preferred = a.prefs.getString(Prefs.PREFERRED_LINE, "");
         for (int i = 0; i < video.lines.size(); i++) {
-            if (video.lines.get(i).name.equals(preferred) && !video.lines.get(i).episodes.isEmpty())
-                return i;
+            if (PlaybackLineRules.matchesLine(video.lines.get(i), preferred)
+                    && !video.lines.get(i).episodes.isEmpty()) return i;
         }
         for (int i = 0; i < video.lines.size(); i++)
             if (!video.lines.get(i).episodes.isEmpty()) return i;
@@ -78,8 +78,8 @@ final class SourcePreferences {
         names[0] = "自动选择";
         String preferred = a.prefs.getString(Prefs.PREFERRED_LINE, "");
         for (int i = 0; i < video.lines.size(); i++) {
-            String name = video.lines.get(i).name;
-            names[i + 1] = (name.equals(preferred) ? "★ " : "") + name;
+            Cms.Line line = video.lines.get(i);
+            names[i + 1] = (PlaybackLineRules.matchesLine(line, preferred) ? "★ " : "") + line.name;
         }
         new AppDialog.Builder(a)
                 .wrapChoices()
@@ -91,7 +91,7 @@ final class SourcePreferences {
                                     .edit()
                                     .putString(
                                             Prefs.PREFERRED_LINE,
-                                            index == 0 ? "" : video.lines.get(index - 1).name)
+                                            index == 0 ? "" : video.lines.get(index - 1).rawName())
                                     .apply();
                             a.toast("已保存，下次打开影片时优先选择；观看记录仍优先续播");
                         })

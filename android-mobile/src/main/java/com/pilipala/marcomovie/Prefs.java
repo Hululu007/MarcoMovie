@@ -185,6 +185,9 @@ final class Prefs {
     static final String DANMAKU_OPACITY = "danmaku_opacity";
     static final String DANMAKU_SPEED = "danmaku_speed";
     static final String DANMAKU_SOURCES_JSON = "danmaku_sources_json";
+    static final String MOBILE_HOME_SECTION_HIDDEN = "mobile_home_section_hidden";
+    static final String MOBILE_HOME_SECTION_ORDER = "mobile_home_section_order";
+    static final String MOBILE_SEARCH_EXACT_MODE = "mobile_search_exact_mode";
 
     // Device-local credentials stored ONLY in SECRETS_FILE ("movie_secrets"), never plain-exported.
     static final String SECRET_TMDB_API_KEY = "tmdb_api_key";
@@ -300,7 +303,10 @@ final class Prefs {
         DANMAKU_AREA,
         DANMAKU_OPACITY,
         DANMAKU_SPEED,
-        DANMAKU_SOURCES_JSON
+        DANMAKU_SOURCES_JSON,
+        MOBILE_HOME_SECTION_HIDDEN,
+        MOBILE_HOME_SECTION_ORDER,
+        MOBILE_SEARCH_EXACT_MODE
     };
 
     static final Set<String> CROSS_FORM_SAFE_KEYS =
@@ -340,7 +346,8 @@ final class Prefs {
                                     AI_CLEAN_SEARCH,
                                     AI_TRANSLATE_SUB,
                                     AI_PY_SECURITY_CHECK,
-                                    SUBTITLE_BILINGUAL)));
+                                    SUBTITLE_BILINGUAL,
+                                    MOBILE_SEARCH_EXACT_MODE)));
 
     private static final Map<String, int[]> MOBILE_INT_RANGES;
     private static final Set<String> ALLOWED_BUTTON_TOKENS =
@@ -623,6 +630,13 @@ final class Prefs {
                 return (text.startsWith("[") && text.endsWith("]") && text.length() <= 32768)
                         ? text
                         : null;
+            }
+            if (MOBILE_HOME_SECTION_HIDDEN.equals(key)) {
+                if (text.isEmpty()) return "[]";
+                return text.length() <= 2048 ? text : null;
+            }
+            if (MOBILE_HOME_SECTION_ORDER.equals(key)) {
+                return text.length() <= 2048 ? text : null;
             }
         }
         return null;

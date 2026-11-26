@@ -55,17 +55,29 @@ final class PlaybackController {
         if (a.player == null || !a.prepared || a.playingBookmark == null) return;
         try {
             int rawPos = a.player.getCurrentPosition();
-            int position =
-                    a.playbackControls != null
-                            ? a.playbackControls.displayPosition(rawPos)
-                            : rawPos;
-            if (a.playbackControls != null
-                    && a.playbackControls.pendingResumeMs > 0
-                    && position < 2000) {
-                position = a.playbackControls.pendingResumeMs;
-            }
-            if (position < 1000 && a.playingBookmark.position >= 1000) {
-                position = a.playingBookmark.position;
+            boolean isPlayingNow = a.player.isPlaying();
+            SeekCommitGuard guard = SeekCommitGuard.forHost(a);
+            guard.onPlaybackTick(rawPos, isPlayingNow, guard.buffering);
+            int position;
+            if (guard.isPendingSeek()) {
+                // Keep last confirmed reached position while a seek is still unconfirmed/stalled.
+                position = guard.historyPositionMs();
+            } else {
+                position =
+                        a.playbackControls != null
+                                ? a.playbackControls.displayPosition(rawPos)
+                                : rawPos;
+                if (a.playbackControls != null
+                        && a.playbackControls.pendingResumeMs > 0
+                        && position < 2000) {
+                    position = a.playbackControls.pendingResumeMs;
+                }
+                if (position < 1000 && a.playingBookmark.position >= 1000) {
+                    position = a.playingBookmark.position;
+                }
+                if (guard.historyPositionMs() > 0 && guard.buffering) {
+                    position = guard.historyPositionMs();
+                }
             }
             a.playingBookmark.position = Math.max(0, position);
             int dur = a.player.getDuration();
@@ -100,7 +112,7 @@ final class PlaybackController {
 
     static void resolveWebPage(
             MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode ep, String prefix) {
-        String address = (prefix == null ? "" : prefix) + ep.url;
+        String address = ExternalParserResolver.buildWebParserUrl(prefix, ep.url);
         if (!Cms.isHttp(address)) {
             a.changingMiniEpisode = false;
             clearPlaybackLoading(a);
@@ -148,7 +160,10 @@ final class PlaybackController {
                                 }
                             });
             if (a.webResolver.view() != null) {
-                a.playbackLoading.addView(a.webResolver.view(), new FrameLayout.LayoutParams(1, 1));
+                ViewGroup host = a.playbackLoading != null ? a.playbackLoading : a.root;
+                if (host != null) {
+                    host.addView(a.webResolver.view(), new FrameLayout.LayoutParams(1, 1));
+                }
             }
         } catch (Exception error) {
             AppLog.w("PlaybackController", "WebResolver init failed", error);
@@ -338,7 +353,7 @@ final class PlaybackController {
                                 Cms.Site targetSite = s;
                                 Cms.Line chosenLine = line;
                                 Cms.Episode chosenEp = ep;
-                                String targetFlag = line != null ? line.name : "";
+                                String targetFlag = line != null ? line.rawName() : "";
                                 String targetId = ep.url != null ? ep.url : "";
                                 if (targetId.regionMatches(true, 0, "push://", 0, 7)) {
                                     Cms.Site pushSite = findPushSite(a);
@@ -440,7 +455,7 @@ final class PlaybackController {
                                                     new JSONObject(
                                                             a.engine(s)
                                                                     .player(
-                                                                            altLine.name,
+                                                                            altLine.rawName(),
                                                                             altEp.url));
                                             Cms.Episode altResolved =
                                                     MediaOptions.episode(s, altEp, altRes);
@@ -520,16 +535,37 @@ final class PlaybackController {
                                                         resolved.url = fallbackEpUrl;
                                                     }
                                                 }
-                                                if (finalResult.optInt("parse", 0) != 0
-                                                        || finalResult.optInt("jx", 0) != 0) {
+                                                int parseFlag = finalResult.optInt("parse", 0);
+                                                int jxFlag = finalResult.optInt("jx", 0);
+                                                if (parseFlag != 0 || jxFlag != 0) {
                                                     String playPrefix =
-                                                            finalResult.optString(
-                                                                    "playUrl", s.playUrl);
-                                                    if ((playPrefix == null || playPrefix.isEmpty())
-                                                            && a.config != null
-                                                            && !a.config.parses.isEmpty()) {
+                                                            Cms.optSafeString(
+                                                                            finalResult,
+                                                                            "playUrl",
+                                                                            s.playUrl == null
+                                                                                    ? ""
+                                                                                    : s.playUrl)
+                                                                    .trim();
+                                                    List<Cms.Parse> cfgParses =
+                                                            a.config != null
+                                                                    ? a.config.parses
+                                                                    : java.util.Collections
+                                                                            .<Cms.Parse>emptyList();
+                                                    boolean needsJsonParser =
+                                                            jxFlag != 0
+                                                                    || ExternalParserResolver
+                                                                            .isKnownJsonParserPrefix(
+                                                                                    playPrefix,
+                                                                                    cfgParses)
+                                                                    || (playPrefix.isEmpty()
+                                                                            && !cfgParses.isEmpty()
+                                                                            && ExternalParserResolver
+                                                                                    .isKnownVipPageUrl(
+                                                                                            resolved.url));
+                                                    if (needsJsonParser) {
                                                         clearPlaybackLoading(a);
-                                                        resolveCmsWithParser(a, s, v, resolved, "");
+                                                        resolveCmsWithParser(
+                                                                a, s, v, resolved, playPrefix);
                                                         return;
                                                     }
                                                     resolveWebPage(a, s, v, resolved, playPrefix);
@@ -543,23 +579,31 @@ final class PlaybackController {
                                                         return;
                                                     }
                                                     String spiderMsg =
-                                                            finalResult
-                                                                    .optString(
+                                                            Cms.optSafeString(
+                                                                            finalResult,
                                                                             "msg",
-                                                                            finalResult.optString(
+                                                                            Cms.optSafeString(
+                                                                                    finalResult,
                                                                                     "message",
-                                                                                    finalResult
-                                                                                            .optString(
+                                                                                    Cms
+                                                                                            .optSafeString(
+                                                                                                    finalResult,
                                                                                                     "tip",
                                                                                                     "")))
                                                                     .trim();
-                                                    if (!spiderMsg.isEmpty()) {
-                                                        failInPlaceSwitch(a, spiderMsg);
-                                                    } else if (looksLikeNetdiskLine(
+                                                    if (looksLikeNetdiskLine(
                                                             s, finalLine, finalEp.url)) {
-                                                        failInPlaceSwitch(
+                                                        offerPlayerNetdiskQrRetry(
                                                                 a,
-                                                                "该网盘线路未返回播放地址，请先在「网盘与账号」扫码登录对应网盘，或点击右上角 ⇄ 切换其他线路");
+                                                                s,
+                                                                v,
+                                                                finalLine,
+                                                                finalEp,
+                                                                spiderMsg.isEmpty()
+                                                                        ? "该网盘线路需要扫码授权，扫码完成后将自动同步配置中心并继续当前线路播放。"
+                                                                        : spiderMsg);
+                                                    } else if (!spiderMsg.isEmpty()) {
+                                                        failInPlaceSwitch(a, spiderMsg);
                                                     } else {
                                                         failInPlaceSwitch(
                                                                 a, "当前线路未返回有效播放地址，请点击右上角 ⇄ 切换其他线路");
@@ -570,9 +614,13 @@ final class PlaybackController {
                                                         && !url.startsWith("magnet:?")) {
                                                     a.changingMiniEpisode = false;
                                                     if (looksLikeNetdiskLine(s, finalLine, url)) {
-                                                        failInPlaceSwitch(
+                                                        offerPlayerNetdiskQrRetry(
                                                                 a,
-                                                                "该网盘线路需先在「网盘与账号」登录授权，或点击右上角 ⇄ 切换其他线路");
+                                                                s,
+                                                                v,
+                                                                finalLine,
+                                                                finalEp,
+                                                                "该网盘线路需要扫码授权，扫码完成后将自动同步配置中心并继续播放。");
                                                     } else {
                                                         failInPlaceSwitch(
                                                                 a, "来源返回的播放协议暂不支持，请切换其他线路");
@@ -639,19 +687,75 @@ final class PlaybackController {
         return "";
     }
 
+    private static String detectNetdiskDriveFromLine(Cms.Site s, Cms.Line line, String url) {
+        String combined =
+                ((s != null && s.name != null ? s.name : "")
+                                + " "
+                                + (line != null && line.name != null ? line.name : "")
+                                + " "
+                                + (line != null ? line.rawName() : "")
+                                + " "
+                                + (url != null ? url : ""))
+                        .toLowerCase(Locale.ROOT);
+        if (combined.contains("quark") || combined.contains("夸克") || combined.contains("夸父")) {
+            return NetdiskStore.DRIVE_QUARK;
+        }
+        if (combined.contains("uc") || combined.contains("优视")) {
+            return NetdiskStore.DRIVE_UC;
+        }
+        if (combined.contains("baidu") || combined.contains("百度") || combined.contains("摆渡")) {
+            return NetdiskStore.DRIVE_BAIDU;
+        }
+        if (combined.contains("ali") || combined.contains("阿里")) {
+            return NetdiskStore.DRIVE_ALI;
+        }
+        return NetdiskStore.DRIVE_QUARK;
+    }
+
+    /** Path 1 (播放页扫码): offers one-scan QR auth and automatically retries original subscription & line. */
+    private static void offerPlayerNetdiskQrRetry(
+            final MainActivity a,
+            final Cms.Site s,
+            final Cms.Video v,
+            final Cms.Line line,
+            final Cms.Episode ep,
+            final String reason) {
+        if (a == null || a.isFinishing()) return;
+        failInPlaceSwitch(a, reason);
+        if (a.isTvDevice()) return;
+        final String drive = detectNetdiskDriveFromLine(s, line, ep != null ? ep.url : "");
+        MobileBottomSheet.showConfirm(
+                a,
+                "需要登录" + NetdiskStore.displayName(drive),
+                reason,
+                "扫码登录并续播",
+                false,
+                () ->
+                        PersonalNetdiskBrowser.showQrLoginSheet(
+                                a,
+                                drive,
+                                () -> {
+                                    a.toast("登录完成，正在继续原线路播放…");
+                                    resolvePlayer(a, s, v, line, ep);
+                                }));
+    }
+
     static void resolveCmsWithParser(
             MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode ep, String preferredPrefix) {
         if (a.playbackLoading != null) return;
         showPlaybackLoading(a);
         PluginDialogStyler.watch(a);
         final int serial = a.playbackResolveSerial, ticket = a.generation;
+        final String lineFlag = a.activeLine != null ? a.activeLine.rawName() : "";
         Future<?> request =
                 RequestScope.submit(
                         PLAYER_RESOLVE,
                         () -> {
-                            // 0. If ep.url is an HTML share wrapper with an embedded .m3u8/.mp4,
+                            // 0. If ep.url is a non-VIP HTML wrapper with an embedded .m3u8/.mp4,
                             // extract it directly before falling back to external parsers.
-                            if (ep.url != null && Cms.isHttp(ep.url)) {
+                            if (ep.url != null
+                                    && Cms.isHttp(ep.url)
+                                    && !ExternalParserResolver.isKnownVipPageUrl(ep.url)) {
                                 try {
                                     String html = Cms.fetch(ep.url, s.headers);
                                     String embedded = extractEmbeddedStreamUrl(ep.url, html);
@@ -674,66 +778,105 @@ final class PlaybackController {
                                 } catch (Exception ignored) {
                                 }
                             }
-                            // 1. Try preferredPrefix or JSON parsers in config.parses
-                            List<Cms.Parse> candidates = new java.util.ArrayList<>();
-                            if (preferredPrefix != null && Cms.isHttp(preferredPrefix)) {
-                                Cms.Parse direct = new Cms.Parse();
-                                direct.name = s.name;
-                                direct.url = preferredPrefix;
-                                direct.type = 1;
-                                direct.headers.putAll(s.headers);
-                                candidates.add(direct);
-                            }
-                            if (a.config != null && a.config.parses != null) {
-                                for (Cms.Parse p : a.config.parses) {
-                                    if (p != null && Cms.isHttp(p.url)) candidates.add(p);
-                                }
-                            }
-                            String webFallbackPrefix =
-                                    preferredPrefix != null ? preferredPrefix : "";
-                            for (int i = 0; i < Math.min(4, candidates.size()); i++) {
+                            // 1. Flag-aware prioritized candidate ordering (never blind 4-item
+                            // cutoff)
+                            List<Cms.Parse> allParses =
+                                    a.config != null && a.config.parses != null
+                                            ? a.config.parses
+                                            : java.util.Collections.<Cms.Parse>emptyList();
+                            List<Cms.Parse> candidates =
+                                    ExternalParserResolver.orderParsersForFlag(
+                                            allParses,
+                                            lineFlag,
+                                            preferredPrefix,
+                                            s.headers,
+                                            s.name);
+                            Cms.Parse webFallbackParser = null;
+                            int triedJson = 0;
+                            for (Cms.Parse p : candidates) {
                                 if (Thread.currentThread().isInterrupted()) return;
-                                Cms.Parse p = candidates.get(i);
-                                if (p.type == 0 && webFallbackPrefix.isEmpty()) {
-                                    webFallbackPrefix = p.url;
+                                if (p.type == 0 && webFallbackParser == null) {
+                                    webFallbackParser = p;
                                 }
-                                if (p.type == 1 || p.type == 2 || p.type == 3 || i == 0) {
+                                if ((p.type == 1 || p.type == 2 || p.type == 3) && triedJson < 8) {
+                                    triedJson++;
                                     try {
                                         String targetUrl =
-                                                p.url + java.net.URLEncoder.encode(ep.url, "UTF-8");
+                                                ExternalParserResolver.buildWebParserUrl(
+                                                        p.url, ep.url);
                                         String resp = Cms.fetch(targetUrl, p.headers);
-                                        if (resp != null && resp.trim().startsWith("{")) {
-                                            JSONObject jo = new JSONObject(resp.trim());
-                                            String mediaUrl = jo.optString("url", "").trim();
-                                            if (Cms.isMedia(mediaUrl)) {
-                                                final Cms.Episode resolved =
-                                                        MediaOptions.episode(s, ep, jo);
-                                                a.ui.post(
-                                                        () -> {
-                                                            if (serial != a.playbackResolveSerial
-                                                                    || ticket != a.generation
-                                                                    || a.isFinishing()) return;
-                                                            clearPlaybackLoading(a);
-                                                            openPlayer(a, s, v, resolved);
-                                                        });
-                                                return;
+                                        ExternalParserResolver.ParsedResult pr =
+                                                ExternalParserResolver.parseJsonParserResponse(
+                                                        resp, ep.url);
+                                        if (pr.ok && pr.needsWebSniff) {
+                                            final Cms.Episode sniffEp = new Cms.Episode();
+                                            sniffEp.name = ep.name;
+                                            sniffEp.url = pr.url;
+                                            sniffEp.headers.putAll(p.headers);
+                                            Cms.mergeHeaders(sniffEp.headers, pr.headers);
+                                            sniffEp.media = ep.media;
+                                            a.ui.post(
+                                                    () -> {
+                                                        if (serial != a.playbackResolveSerial
+                                                                || ticket != a.generation
+                                                                || a.isFinishing()) return;
+                                                        resolveWebPage(a, s, v, sniffEp, "");
+                                                    });
+                                            return;
+                                        }
+                                        if (pr.ok && pr.rawJson != null) {
+                                            final Cms.Episode resolved =
+                                                    MediaOptions.episode(s, ep, pr.rawJson);
+                                            if (resolved.headers.isEmpty()
+                                                    && !p.headers.isEmpty()) {
+                                                resolved.headers.putAll(p.headers);
                                             }
+                                            a.ui.post(
+                                                    () -> {
+                                                        if (serial != a.playbackResolveSerial
+                                                                || ticket != a.generation
+                                                                || a.isFinishing()) return;
+                                                        clearPlaybackLoading(a);
+                                                        openPlayer(a, s, v, resolved);
+                                                    });
+                                            return;
                                         }
                                     } catch (Exception ignored) {
                                     }
                                 }
                             }
-                            final String finalPrefix = webFallbackPrefix;
+                            final String finalPrefix =
+                                    webFallbackParser != null
+                                            ? webFallbackParser.url
+                                            : (preferredPrefix != null
+                                                            && !ExternalParserResolver
+                                                                    .isKnownJsonParserPrefix(
+                                                                            preferredPrefix,
+                                                                            allParses)
+                                                    ? preferredPrefix
+                                                    : "");
+                            final Map<String, String> fallbackHeaders =
+                                    webFallbackParser != null
+                                            ? webFallbackParser.headers
+                                            : java.util.Collections.<String, String>emptyMap();
                             a.ui.post(
                                     () -> {
                                         if (serial != a.playbackResolveSerial
                                                 || ticket != a.generation
                                                 || a.isFinishing()) return;
-                                        if (Cms.isHttp(finalPrefix + ep.url)) {
+                                        String webTarget =
+                                                ExternalParserResolver.buildWebParserUrl(
+                                                        finalPrefix, ep.url);
+                                        if (!finalPrefix.isEmpty() && Cms.isHttp(webTarget)) {
+                                            if (!fallbackHeaders.isEmpty()) {
+                                                Cms.mergeHeaders(ep.headers, fallbackHeaders);
+                                            }
                                             resolveWebPage(a, s, v, ep, finalPrefix);
-                                        } else if (Cms.isMedia(ep.url)) {
+                                        } else if (Cms.isDirectStreamUrl(ep.url)) {
                                             clearPlaybackLoading(a);
                                             openPlayer(a, s, v, ep);
+                                        } else if (Cms.isHttp(ep.url)) {
+                                            resolveWebPage(a, s, v, ep, "");
                                         } else {
                                             a.changingMiniEpisode = false;
                                             clearPlaybackLoading(a);
@@ -942,6 +1085,10 @@ final class PlaybackController {
 
     static void prepareInPlaceSwitch(MainActivity a, Cms.Line line, Cms.Episode episode) {
         a.fullscreenPlaybackSession++;
+        PersonalNetdiskBrowser.releaseActiveLease();
+        SeekCommitGuard guard = SeekCommitGuard.forHost(a);
+        guard.onSeekFailedOrCancelled();
+        guard.buffering = false;
         finishSeek(a, false);
         savePlaybackHistory(a, true);
         stopWeb(a);
@@ -1128,7 +1275,7 @@ final class PlaybackController {
             a.playingBookmark.id = bookmarkId;
             a.playingBookmark.title = v.title;
             a.playingBookmark.poster = v.poster;
-            a.playingBookmark.line = a.activeLine.name;
+            a.playingBookmark.line = a.activeLine.rawName();
             a.playingBookmark.episode = a.activeEpisode.name;
             a.playingBookmark.index = a.activeLine.episodes.indexOf(a.activeEpisode);
             a.playingBookmark.position = Math.max(0, initialResume);
@@ -1212,6 +1359,9 @@ final class PlaybackController {
                             bottom = Math.max(bottom, cutout.getSafeInsetBottom());
                         }
                         chrome.safeInsets(left, top, right, bottom);
+                        if (a.playbackControls != null && a.playbackControls.danmaku != null) {
+                            a.playbackControls.danmaku.setPadding(0, top, 0, 0);
+                        }
                         return insets;
                     });
             a.root.requestApplyInsets();
@@ -1392,6 +1542,16 @@ final class PlaybackController {
                                                                         hdrSurface);
                                                             }
                                                         });
+                                                ready.setOnBufferingListener(
+                                                        buf -> {
+                                                            if (isFullscreenSessionActive(
+                                                                            a, ticket, sessionId)
+                                                                    && a.player == ready) {
+                                                                SeekCommitGuard.forHost(a)
+                                                                                .buffering =
+                                                                        buf;
+                                                            }
+                                                        });
                                                 ready.setOnPreparedListener(
                                                         mp -> {
                                                             if (!isFullscreenSessionActive(
@@ -1427,8 +1587,21 @@ final class PlaybackController {
                                                                         hdrSurface);
                                                                 a.playerChrome.setLoading(false);
                                                             }
-                                                            a.playing = a.foreground;
-                                                            if (a.foreground) mp.start();
+                                                            SeekCommitGuard guard =
+                                                                    SeekCommitGuard.forHost(a);
+                                                            boolean startPaused =
+                                                                    guard.pendingStartPaused;
+                                                            guard.pendingStartPaused = false;
+                                                            boolean shouldPlay =
+                                                                    a.foreground && !startPaused;
+                                                            a.playing = shouldPlay;
+                                                            guard.buffering = false;
+                                                            guard.reset(
+                                                                    Math.max(
+                                                                            0,
+                                                                            mp
+                                                                                    .getCurrentPosition()));
+                                                            if (shouldPlay) mp.start();
                                                             else mp.pause();
                                                             controls.prepared();
                                                             if (!"live".equals(s.key)
@@ -2306,11 +2479,13 @@ final class PlaybackController {
         a.seekGesture.cancel();
         a.ui.removeCallbacks(a.seekPulse);
         if (commit && a.player != null && a.prepared) {
+            SeekCommitGuard.forHost(a).beginSeek(target);
             a.player.seekTo(target);
-            if (a.playingBookmark != null) {
-                a.playingBookmark.position = Math.max(0, target);
+            if (a.playbackControls != null) {
+                a.playbackControls.recordUserSeek(target);
             }
-            savePlaybackHistory(a, true);
+            // Do NOT persist unconfirmed target to WatchHistory before playback reaches & advances
+            // at the destination; SeekCommitGuard commits it once confirmed.
         }
         if (a.playStatus != null) a.playStatus.setText(a.seekStatus);
         if (a.playerChrome != null && a.playerChrome.seekHint != null) {
@@ -3121,6 +3296,10 @@ final class PlaybackController {
         // Immediately revoke any in-flight fullscreen PLAYER_INIT session before releasing active
         // resources so delayed background init can never create or start a player after exit.
         a.fullscreenPlaybackSession++;
+        PersonalNetdiskBrowser.releaseActiveLease();
+        SeekCommitGuard guard = SeekCommitGuard.forHost(a);
+        guard.onSeekFailedOrCancelled();
+        guard.buffering = false;
         if (a.inlinePlayer != null) {
             a.inlinePlayer.detach();
             a.inlinePlayer = null;

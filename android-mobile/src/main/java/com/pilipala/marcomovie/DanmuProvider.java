@@ -97,12 +97,23 @@ public interface DanmuProvider {
     final class MatchQuery {
         public final String title;
         public final String episodeTitle;
+        public final int seasonNumber;
         public final int episodeIndex;
         public final long durationSec;
 
         public MatchQuery(String title, String episodeTitle, int episodeIndex, long durationSec) {
+            this(title, episodeTitle, 0, episodeIndex, durationSec);
+        }
+
+        public MatchQuery(
+                String title,
+                String episodeTitle,
+                int seasonNumber,
+                int episodeIndex,
+                long durationSec) {
             this.title = title == null ? "" : title;
             this.episodeTitle = episodeTitle == null ? "" : episodeTitle;
+            this.seasonNumber = Math.max(0, seasonNumber);
             this.episodeIndex = episodeIndex;
             this.durationSec = Math.max(0L, durationSec);
         }

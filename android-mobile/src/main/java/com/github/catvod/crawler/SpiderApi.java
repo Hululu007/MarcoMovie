@@ -54,7 +54,14 @@ public class SpiderApi {
     public void log(String message) {}
 
     public String getAddress(boolean local) {
-        return "http://127.0.0.1:" + com.pilipala.marcomovie.CspEngine.proxyPort() + "/";
+        int port = com.pilipala.marcomovie.CspEngine.proxyPort();
+        if (!local) {
+            String lanIp = com.pilipala.marcomovie.CspEngine.detectLanAddress();
+            if (lanIp != null && !lanIp.isEmpty()) {
+                return "http://" + lanIp + ":" + port + "/";
+            }
+        }
+        return "http://127.0.0.1:" + port + "/";
     }
 
     public String getPort() {

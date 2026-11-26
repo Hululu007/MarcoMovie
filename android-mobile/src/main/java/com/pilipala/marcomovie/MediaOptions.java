@@ -47,13 +47,15 @@ final class MediaOptions {
         out.headers.putAll(Cms.inheritedHeaders(site.api, out.url, site.headers));
         Cms.mergeHeaders(
                 out.headers, Cms.inheritedHeaders(original.url, out.url, original.headers));
-        Object value = result.opt("header");
-        if (value instanceof String)
-            try {
-                value = new JSONObject((String) value);
-            } catch (JSONException ignored) {
-            }
-        if (value instanceof JSONObject) headers(out.headers, (JSONObject) value);
+        for (String hKey : new String[] {"header", "headers"}) {
+            Object value = result.opt(hKey);
+            if (value instanceof String)
+                try {
+                    value = new JSONObject((String) value);
+                } catch (JSONException ignored) {
+                }
+            if (value instanceof JSONObject) headers(out.headers, (JSONObject) value);
+        }
         for (String key : new String[] {"User-Agent", "UA", "ua"})
             if (!result.optString(key).isEmpty())
                 put(out.headers, "User-Agent", result.optString(key));
@@ -194,6 +196,7 @@ final class MediaOptions {
         if (raw == null) return "";
         String t = raw.trim();
         if (t.isEmpty()) return "";
+        if (t.startsWith("//")) t = "https:" + t;
         return ProxyAddress.rewrite(t);
     }
 

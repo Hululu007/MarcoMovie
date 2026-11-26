@@ -17,6 +17,7 @@ final class DrpyEngine implements SourceEngine {
     private final CatPawHost host;
     private final String address;
     private final JSONObject description;
+    private final JSONArray vipFlags;
     private boolean active;
 
     static boolean eligible(Cms.Site site) {
@@ -36,6 +37,12 @@ final class DrpyEngine implements SourceEngine {
         if (!eligible(site) && !Cms.looksLikeDrpyRule(fetchedRule))
             throw new IOException("此来源不是已识别的 DRPY 规则");
         host = new CatPawHost(context);
+        vipFlags = new JSONArray();
+        if (config != null && config.flags != null) {
+            for (String f : config.flags) {
+                if (f != null && !f.trim().isEmpty()) vipFlags.put(f.trim());
+            }
+        }
         description =
                 manifest(
                         config,
@@ -207,7 +214,7 @@ final class DrpyEngine implements SourceEngine {
     }
 
     public String player(String flag, String id) throws Exception {
-        return playback(call("play", flag, id, new JSONArray()), description);
+        return playback(call("play", flag, id, vipFlags), description);
     }
 
     static String playback(String raw, JSONObject manifest) throws Exception {

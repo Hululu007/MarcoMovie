@@ -130,6 +130,15 @@ final class MobileBottomSheet {
         return show(a, title, null, null, null, content, true);
     }
 
+    static SheetHandle showCustom(
+            MainActivity a, String title, View content, final Runnable onDismiss) {
+        SheetHandle handle = showHandle(a, title, null, null, null, content, true);
+        if (handle.dialog != null && onDismiss != null) {
+            handle.dialog.setOnDismissListener(d -> onDismiss.run());
+        }
+        return handle;
+    }
+
     static Dialog show(
             MainActivity a,
             String title,

@@ -44,6 +44,26 @@ final class MobileLibraryPage {
         title.setTypeface(null, Typeface.BOLD);
         topRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
 
+        LinearLayout cloudPill = a.row();
+        cloudPill.setTag("library-cloud-drives");
+        cloudPill.setGravity(Gravity.CENTER_VERTICAL);
+        cloudPill.setPadding(a.dp(11), a.dp(7), a.dp(12), a.dp(7));
+        cloudPill.setBackground(MobileTheme.cardBg(a, 999));
+        if (!p.isDark) UiCompat.setElevation(cloudPill, a.dp(2f));
+        MobileIcons.IconView driveIcon =
+                MobileIcons.create(a, MobileIcons.IC_FOLDER, 14f, p.textPrimary);
+        LinearLayout.LayoutParams diLp = new LinearLayout.LayoutParams(a.dp(14), a.dp(14));
+        diLp.rightMargin = a.dp(5);
+        cloudPill.addView(driveIcon, diLp);
+        TextView cloudLbl = a.text("云盘", 12.5f, p.textPrimary);
+        cloudLbl.setTypeface(null, Typeface.BOLD);
+        cloudPill.addView(cloudLbl);
+        MobileMotion.bindPress(cloudPill, 0.94f);
+        cloudPill.setOnClickListener(v -> AccountPanel.show(a));
+        LinearLayout.LayoutParams cpLp = new LinearLayout.LayoutParams(-2, -2);
+        cpLp.rightMargin = a.dp(8);
+        topRow.addView(cloudPill, cpLp);
+
         LinearLayout syncPill = a.row();
         syncPill.setGravity(Gravity.CENTER_VERTICAL);
         syncPill.setPadding(a.dp(12), a.dp(7), a.dp(13), a.dp(7));
@@ -344,6 +364,9 @@ final class MobileLibraryPage {
 
             row.setOnClickListener(
                     v -> {
+                        if (PersonalNetdiskBrowser.tryOpenPersonalCloudEntry(a, f.site, f.id)) {
+                            return;
+                        }
                         Cms.Site targetSite = null;
                         if (a.config != null) {
                             for (Cms.Site s : a.config.sites) {

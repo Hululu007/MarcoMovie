@@ -666,11 +666,24 @@ class DanmakuView extends View implements AutoCloseable {
 
         int viewW = getWidth();
         int viewH = getHeight();
-        if (viewW <= 0 || viewH <= 0) return;
+        if (viewW <= 0 || viewH <= 0) {
+            scheduleNextFrame(playing, true);
+            return;
+        }
 
-        float density = getResources().getDisplayMetrics().density;
-        float scaledDensity = getResources().getDisplayMetrics().scaledDensity;
-        float pxSize = textSize * (scaledDensity > 0f ? scaledDensity : density);
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        float density = dm.density;
+        float pxSize;
+        try {
+            pxSize =
+                    android.util.TypedValue.applyDimension(
+                            android.util.TypedValue.COMPLEX_UNIT_SP, textSize, dm);
+        } catch (Throwable ignored) {
+            pxSize = textSize * (dm.scaledDensity > 0f ? dm.scaledDensity : Math.max(1f, density));
+        }
+        if (pxSize <= 0f) {
+            pxSize = textSize * Math.max(1f, density);
+        }
         paint.setTextSize(pxSize);
         strokePaint.setTextSize(pxSize);
         strokePaint.setStrokeWidth(Math.max(2f, 2.4f * density));
@@ -702,27 +715,38 @@ class DanmakuView extends View implements AutoCloseable {
                 widthMeasurer);
 
         ActiveSlot[] slots = layoutEngine.getSlots();
+        int activeDrawn = 0;
         for (int i = 0; i < slots.length; i++) {
             ActiveSlot slot = slots[i];
             if (!slot.active || slot.text == null) continue;
+            activeDrawn++;
             canvas.drawText(slot.text, slot.x, slot.y, strokePaint);
             paint.setColor(0xff000000 | (slot.rgbColor & 0xffffff));
             paint.setAlpha(alpha);
             canvas.drawText(slot.text, slot.x, slot.y, paint);
         }
 
-        scheduleNextFrame(playing);
+        scheduleNextFrame(playing, activeDrawn == 0 && frameItems.isEmpty());
     }
 
     /**
      * One scheduling path for both draw exits. An attached, visible, enabled overlay requests the
-     * next animation frame while playing, and a delayed redraw while paused or buffering so
-     * playback automatically resumes animation after seeks, stalls, or negative time offsets.
+     * next animation frame while playing active items, throttles when idle to avoid 120Hz VSync
+     * spin on Android 14-17, and uses a delayed redraw while paused or buffering so playback
+     * automatically resumes animation after seeks, stalls, or negative time offsets.
      */
     private void scheduleNextFrame(boolean playing) {
+        scheduleNextFrame(playing, false);
+    }
+
+    private void scheduleNextFrame(boolean playing, boolean idleEmpty) {
         if (!enabled || closed || getVisibility() != VISIBLE || !isAttachedToWindow()) return;
         if (playing) {
-            postInvalidateOnAnimation();
+            if (idleEmpty) {
+                postInvalidateDelayed(120L);
+            } else {
+                postInvalidateOnAnimation();
+            }
         } else {
             postInvalidateDelayed(PAUSED_REDRAW_DELAY_MS);
         }

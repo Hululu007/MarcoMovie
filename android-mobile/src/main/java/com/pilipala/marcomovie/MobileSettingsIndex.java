@@ -54,6 +54,7 @@ final class MobileSettingsIndex {
                 "底部导航栏形态（4+1 分离搜索 / 五栏一体）",
                 "底栏 搜索按钮 分离 胶囊 导航");
         add(SUB_APPEARANCE, "ms-nav-scroll", "外观与导航", "滑动页面时底栏自动收起", "上滑 折叠 隐藏 常驻 滚动 导航");
+        add(SUB_APPEARANCE, "ms-home-sections", "外观与导航", "首页专题显示与排序", "首页 专题 栏目 隐藏 显示 开关 排序 发现 模块");
         add(SUB_APPEARANCE, "ms-home-banner", "外观与导航", "首页精选大图横幅", "轮播 海报 头图 横幅");
         add(SUB_APPEARANCE, "ms-poster-density", "外观与导航", "海报墙排布密度", "海报 列数 紧凑 标准 宽敞 密度 网格");
         add(SUB_APPEARANCE, "ms-card-subtitle", "外观与导航", "海报下方信息显示", "副标题 角标 海报 标题 清晰度");

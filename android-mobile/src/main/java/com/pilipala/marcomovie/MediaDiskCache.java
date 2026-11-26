@@ -271,11 +271,35 @@ public final class MediaDiskCache {
             int available = block.length - offsetInBlock;
             int toWrite = (int) Math.min((long) available, (end - pos) + 1L);
             out.write(block, offsetInBlock, toWrite);
+            out.flush();
             pos += toWrite;
         }
         out.flush();
-        trimIfNeeded();
+        scheduleTrimAsync();
         return false;
+    }
+
+    private final java.util.concurrent.ExecutorService trimExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor(
+                    r -> {
+                        Thread t = new Thread(r, "marco-media-cache-trim");
+                        t.setDaemon(true);
+                        return t;
+                    });
+    private final java.util.concurrent.atomic.AtomicBoolean trimScheduled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private void scheduleTrimAsync() {
+        if (trimScheduled.compareAndSet(false, true)) {
+            trimExecutor.execute(
+                    () -> {
+                        try {
+                            trimIfNeeded();
+                        } finally {
+                            trimScheduled.set(false);
+                        }
+                    });
+        }
     }
 
     byte[] getOrFetchBlock(Session session, File entryDir, Meta meta, long blockIndex)
@@ -303,8 +327,21 @@ public final class MediaDiskCache {
             }
             byte[] data;
             if (code == 206) {
+                long[] cr = LocalProxy.parseContentRange(conn.getHeaderField("Content-Range"));
+                if (cr != null && cr[0] != blockStart) {
+                    throw new IOException(
+                            "Upstream Content-Range mismatch: expected "
+                                    + blockStart
+                                    + " got "
+                                    + cr[0]);
+                }
                 data = readExactUpTo(conn.getInputStream(), (int) (blockEnd - blockStart + 1L));
             } else {
+                // Never linearly download and discard gigabytes on a tail seek (e.g. 40 GiB MKV
+                // Cues).
+                if (blockStart > 2L * 1024L * 1024L) {
+                    throw new IOException("Upstream ignored Range for offset " + blockStart);
+                }
                 data =
                         readSliceFromFull(
                                 conn.getInputStream(),
@@ -323,6 +360,9 @@ public final class MediaDiskCache {
 
     private byte[] fetchBlockWithoutRange(Session session, long blockStart, long blockEnd)
             throws IOException {
+        if (blockStart > 2L * 1024L * 1024L) {
+            throw new IOException("Upstream rejected Range for tail offset " + blockStart);
+        }
         HttpURLConnection retry = openUpstream(session.url, session.headers, null);
         try {
             int code = retry.getResponseCode();

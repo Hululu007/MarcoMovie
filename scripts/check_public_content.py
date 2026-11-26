@@ -131,6 +131,8 @@ CLOUD_SHARE_HOSTS = {
     'android-tv/src/main/java/com/pilipala/marcomovie/Cms.java': {'223.5.5.5', '1.12.12.12'},
     'android-mobile/src/main/java/com/github/catvod/crawler/Spider.java': {'223.5.5.5', '1.12.12.12'},
     'android-mobile/src/main/java/com/pilipala/marcomovie/Cms.java': {'223.5.5.5', '1.12.12.12'},
+    'android-mobile/src/main/java/com/pilipala/marcomovie/NetdiskAuthService.java': {'auth.aliyundrive.com'},
+    'android-mobile/src/main/java/com/pilipala/marcomovie/PersonalNetdiskLibrary.java': {'pc-api.uc.cn', 'd.pcs.baidu.com', 'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
     'flutter/lib/core/ali_share.dart': {'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
     'flutter/lib/core/netdisk_service.dart': {'auth.aliyundrive.com'},
     'flutter/lib/core/cloud_share.dart': {'fast.uc.cn'},

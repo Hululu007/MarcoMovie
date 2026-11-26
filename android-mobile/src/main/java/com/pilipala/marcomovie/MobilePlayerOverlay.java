@@ -313,6 +313,11 @@ final class MobilePlayerOverlay {
         }
     }
 
+    private boolean isSlimBarEnabled() {
+        return a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true)
+                && com.pilipala.marcomovie.hud.PlayerHudPrefs.isSlimProgressEnabled(a);
+    }
+
     /** Immediately synchronizes idle capsule and mini progress bar when HUD visibility toggles. */
     void syncControlsVisibility() {
         if (closed || a.isFinishing()) return;
@@ -326,16 +331,17 @@ final class MobilePlayerOverlay {
         renderIdleCornerCapsule(mask, lastSampledNetSpeed, bat, charging, nowClock);
         if (a.controlsVisible || a.miniMode) {
             setMiniBarVisible(false);
-        } else if (!a.isLive()
-                && a.prepared
-                && a.player != null
-                && a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true)) {
+        } else if (!a.isLive() && a.prepared && a.player != null && isSlimBarEnabled()) {
             int dur = a.player.getDuration();
             if (dur > 0) {
                 miniBar.setAccentColor(MobileTheme.of(a).accent);
                 miniBar.setFraction(a.player.getCurrentPosition() / (float) dur);
                 setMiniBarVisible(true);
+            } else {
+                setMiniBarVisible(false);
             }
+        } else {
+            setMiniBarVisible(false);
         }
     }
 
@@ -457,7 +463,7 @@ final class MobilePlayerOverlay {
                         && !a.isLive()
                         && a.prepared
                         && a.player != null
-                        && a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true);
+                        && isSlimBarEnabled();
         if (showMini && dur > 0) {
             miniBar.setAccentColor(MobileTheme.of(a).accent);
             miniBar.setFraction(pos / (float) dur);

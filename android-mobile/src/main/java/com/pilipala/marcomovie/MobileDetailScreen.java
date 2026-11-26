@@ -1256,7 +1256,7 @@ final class MobileDetailScreen {
                                 if (remembered != null) {
                                     a.resumeAt = remembered.resume();
                                     for (Cms.Line candL : v.lines) {
-                                        if (candL.name.equals(remembered.line)) {
+                                        if (PlaybackLineRules.matchesLine(candL, remembered.line)) {
                                             defLine = candL;
                                             for (Cms.Episode candE : candL.episodes) {
                                                 if (candE.name.equals(remembered.episode)) {
@@ -1303,7 +1303,7 @@ final class MobileDetailScreen {
                     int initLine = SourcePreferences.lineIndex(a, v), initPage = 0;
                     if (remembered != null) {
                         for (int i = 0; i < v.lines.size(); i++) {
-                            if (v.lines.get(i).name.equals(remembered.line)) {
+                            if (PlaybackLineRules.matchesLine(v.lines.get(i), remembered.line)) {
                                 initLine = i;
                                 int remIdx =
                                         resolveInitialEpisodeIndex(
@@ -1746,7 +1746,7 @@ final class MobileDetailScreen {
                             v -> {
                                 a.prefs
                                         .edit()
-                                        .putString(Prefs.PREFERRED_LINE, candLine.name)
+                                        .putString(Prefs.PREFERRED_LINE, candLine.rawName())
                                         .apply();
                                 renderMobileEpisodes(
                                         a,
@@ -1758,6 +1758,34 @@ final class MobileDetailScreen {
                                         remembered,
                                         discoveredSeasons,
                                         discoveredLabels);
+                            });
+                    lPill.setOnLongClickListener(
+                            v -> {
+                                PlaybackLineRules.showManageLineSheet(
+                                        a,
+                                        site,
+                                        video,
+                                        candLine,
+                                        () -> {
+                                            int safeIdx =
+                                                    Math.max(
+                                                            0,
+                                                            Math.min(
+                                                                    targetLineIdx,
+                                                                    video.lines.size() - 1));
+                                            panel.removeAllViews();
+                                            renderMobileEpisodes(
+                                                    a,
+                                                    site,
+                                                    video,
+                                                    safeIdx,
+                                                    0,
+                                                    panel,
+                                                    remembered,
+                                                    discoveredSeasons,
+                                                    discoveredLabels);
+                                        });
+                                return true;
                             });
                     LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
                     lp.rightMargin = a.dp(8);
@@ -2315,10 +2343,47 @@ final class MobileDetailScreen {
                 optRow.addView(check, clp);
             }
 
+            TextView manageLineBtn = a.text("管理", 12f, p.textSecondary);
+            manageLineBtn.setPadding(a.dp(10), a.dp(5), a.dp(10), a.dp(5));
+            manageLineBtn.setBackground(MobileTheme.subtleBg(a, 999));
+            MobileMotion.bindPress(manageLineBtn, 0.92f);
+            Runnable openLineManage =
+                    () -> {
+                        if (handleRef[0] != null) handleRef[0].dismiss();
+                        PlaybackLineRules.showManageLineSheet(
+                                a,
+                                site,
+                                video,
+                                cand,
+                                () -> {
+                                    int safeIdx =
+                                            Math.max(
+                                                    0,
+                                                    Math.min(
+                                                            currentLineIndex,
+                                                            video.lines.size() - 1));
+                                    panel.removeAllViews();
+                                    renderMobileEpisodes(
+                                            a,
+                                            site,
+                                            video,
+                                            safeIdx,
+                                            0,
+                                            panel,
+                                            remembered,
+                                            discoveredSeasons,
+                                            discoveredLabels);
+                                });
+                    };
+            manageLineBtn.setOnClickListener(v -> openLineManage.run());
+            LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-2, -2);
+            mlp.leftMargin = a.dp(10);
+            optRow.addView(manageLineBtn, mlp);
+
             optRow.setOnClickListener(
                     v -> {
                         if (handleRef[0] != null) handleRef[0].dismiss();
-                        a.prefs.edit().putString(Prefs.PREFERRED_LINE, cand.name).apply();
+                        a.prefs.edit().putString(Prefs.PREFERRED_LINE, cand.rawName()).apply();
                         renderMobileEpisodes(
                                 a,
                                 site,
@@ -2329,6 +2394,11 @@ final class MobileDetailScreen {
                                 remembered,
                                 discoveredSeasons,
                                 discoveredLabels);
+                    });
+            optRow.setOnLongClickListener(
+                    v -> {
+                        openLineManage.run();
+                        return true;
                     });
             list.addView(optRow, new LinearLayout.LayoutParams(-1, -2));
 

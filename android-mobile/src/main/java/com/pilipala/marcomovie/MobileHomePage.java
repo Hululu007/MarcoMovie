@@ -1180,7 +1180,12 @@ final class MobileHomePage {
                 () -> {
                     if (curatedWrap.getVisibility() == View.VISIBLE) {
                         boolean curatedIsFirst = historyWrap.getVisibility() != View.VISIBLE;
-                        MobileCuratedSection.renderInto(a, curatedWrap, true, curatedIsFirst);
+                        MobileCuratedSection.renderInto(
+                                a,
+                                curatedWrap,
+                                true,
+                                curatedIsFirst,
+                                MobileHomeSections.visibleCuratedIds(a));
                         if (heroHolder.getChildCount() > 0 && curatedIsFirst) {
                             Object liveAtmoObj = heroHolder.getTag();
                             if (liveAtmoObj instanceof Integer) {
@@ -1198,24 +1203,59 @@ final class MobileHomePage {
                     a.ui.postDelayed(debouncedCuratedRefresh, 160L);
                 };
 
+        // Recovery card when the user turns off every single Home section
+        final LinearLayout allHiddenRecovery = buildAllSectionsHiddenCard(shell);
+        allHiddenRecovery.setVisibility(View.GONE);
+        body.addView(allHiddenRecovery, new LinearLayout.LayoutParams(-1, -2));
+
         final HomeScreen.Snapshot[] coldDiskHolder = {null};
         fetchListing[0] =
                 () -> {
                     final int myReq = ++reqId[0];
                     final int pageToLoad = curPage[0];
                     final String catId = selectedCategoryId;
+                    boolean heroAllowed =
+                            MobileHomeSections.isVisible(a, MobileHomeSections.ID_HERO_BILLBOARD);
                     boolean showHistory =
                             catId.isEmpty()
-                                    && a.prefs.getBoolean(Prefs.MOBILE_SHOW_HISTORY, true)
+                                    && MobileHomeSections.isVisible(
+                                            a, MobileHomeSections.ID_WATCH_HISTORY)
                                     && !a.watchHistory().isEmpty();
                     historyWrap.setVisibility(showHistory ? View.VISIBLE : View.GONE);
-                    boolean showCurated = catId.isEmpty() && !a.privateMode;
+                    List<String> enabledCurated = MobileHomeSections.visibleCuratedIds(a);
+                    boolean showCurated =
+                            catId.isEmpty() && !a.privateMode && !enabledCurated.isEmpty();
                     curatedWrap.setVisibility(showCurated ? View.VISIBLE : View.GONE);
-                    sourceCatalogHeader.setVisibility(showCurated ? View.VISIBLE : View.GONE);
-                    if (showCurated && curatedWrap.getChildCount() == 0) {
+                    boolean showSourceCatalog =
+                            !catId.isEmpty()
+                                    || MobileHomeSections.isVisible(
+                                            a, MobileHomeSections.ID_SOURCE_UPDATES);
+                    sourceCatalogHeader.setVisibility(
+                            showSourceCatalog && catId.isEmpty() ? View.VISIBLE : View.GONE);
+                    categoryBarWrap.setVisibility(showSourceCatalog ? View.VISIBLE : View.GONE);
+                    gridWrap.setVisibility(showSourceCatalog ? View.VISIBLE : View.GONE);
+                    boolean allOff = catId.isEmpty() && MobileHomeSections.areAllHidden(a, true);
+                    allHiddenRecovery.setVisibility(allOff ? View.VISIBLE : View.GONE);
+                    if (showCurated) {
                         MobileCuratedDiscovery.hydrateFromDiskIfNeeded(a);
-                        MobileCuratedSection.renderInto(a, curatedWrap, true, !showHistory);
+                        MobileCuratedSection.renderInto(
+                                a, curatedWrap, true, !showHistory, enabledCurated);
                         MobileCuratedDiscovery.fetchAllAsync(a, a.generation, refreshCuratedRef[0]);
+                    } else {
+                        ImageLoader.detachImageViews(curatedWrap);
+                        curatedWrap.removeAllViews();
+                    }
+                    if (!showSourceCatalog) {
+                        statusView.setVisibility(View.GONE);
+                        moreBtn.setVisibility(View.GONE);
+                        clearFilterBtn.setVisibility(View.GONE);
+                        recoverSwitchBtn.setVisibility(View.GONE);
+                        if (!heroAllowed) {
+                            ImageLoader.detachImageViews(heroHolder);
+                            heroHolder.removeAllViews();
+                            applyHeroLayoutMode[0].run();
+                            return;
+                        }
                     }
 
                     // Instant in-memory snapshot hit for page 1 home (already fetched this session)
@@ -2489,7 +2529,7 @@ final class MobileHomePage {
         int contentPx = Math.max(a.dp(240), a.windowWidth() - sideRailPx);
 
         if (allowHero
-                && a.mobilePrefs().getBoolean(Prefs.HOME_CAROUSEL, true)
+                && MobileHomeSections.isVisible(a, MobileHomeSections.ID_HERO_BILLBOARD)
                 && heroHolder.getChildCount() == 0) {
             final List<Cms.Video> featuredList = new ArrayList<>();
             for (Cms.Video cand : videos) {
@@ -2642,14 +2682,25 @@ final class MobileHomePage {
                 heroAtmosphereView,
                 new FrameLayout.LayoutParams(-1, heroHeightPx + a.dp(174), Gravity.TOP));
 
+        final boolean showHero =
+                MobileHomeSections.isVisible(a, MobileHomeSections.ID_HERO_BILLBOARD);
+        final boolean showHistorySection =
+                MobileHomeSections.isVisible(a, MobileHomeSections.ID_WATCH_HISTORY)
+                        && !a.watchHistory().isEmpty();
+        final List<String> enabledCurated = MobileHomeSections.visibleCuratedIds(a);
+        final boolean allHidden = MobileHomeSections.areAllHidden(a, false);
+
+        final int standardTopPad = a.statusBarHeight() + a.dp(56);
         final LinearLayout body = a.vertical();
         final int bottomPad = a.navigationBarHeight() + a.dp(108);
-        body.setPadding(0, 0, 0, bottomPad);
+        body.setPadding(0, showHero ? 0 : standardTopPad, 0, bottomPad);
         scrollContentHost.addView(body, new FrameLayout.LayoutParams(-1, -2));
         sv.addView(scrollContentHost, new ScrollView.LayoutParams(-1, -2));
         page.addView(sv, new FrameLayout.LayoutParams(-1, -1));
 
         final FrameLayout heroHolder = new FrameLayout(a);
+        heroHolder.setVisibility(showHero ? View.VISIBLE : View.GONE);
+        heroAtmosphereView.setVisibility(showHero ? View.VISIBLE : View.GONE);
         body.addView(heroHolder, new LinearLayout.LayoutParams(-1, -2));
 
         // Optional 1-tap clipboard import banner when user copied a source URL
@@ -2677,11 +2728,20 @@ final class MobileHomePage {
 
         final LinearLayout historyWrap = a.vertical();
         body.addView(historyWrap, new LinearLayout.LayoutParams(-1, -2));
-        renderContinueWatchingStrip(a, historyWrap);
+        if (showHistorySection) {
+            renderContinueWatchingStrip(a, historyWrap);
+        } else {
+            historyWrap.setVisibility(View.GONE);
+        }
 
         final LinearLayout curatedWrap = a.vertical();
         curatedWrap.setPadding(0, a.dp(8), 0, a.dp(12));
+        curatedWrap.setVisibility(enabledCurated.isEmpty() ? View.GONE : View.VISIBLE);
         body.addView(curatedWrap, new LinearLayout.LayoutParams(-1, -2));
+
+        if (allHidden) {
+            body.addView(buildAllSectionsHiddenCard(shell), new LinearLayout.LayoutParams(-1, -2));
+        }
 
         // Floating iOS-style Top Brand Header + "+ 导入片源" pill
         final LinearLayout floatingTopBar = a.vertical();
@@ -2695,8 +2755,8 @@ final class MobileHomePage {
         LinearLayout brandLockup =
                 buildBrandWordmark(
                         a,
-                        true,
-                        true,
+                        showHero || p.isDark,
+                        showHero,
                         brandWordmarkRef,
                         () -> {
                             if (sv.getScrollY() > a.dp(16)) {
@@ -2713,16 +2773,19 @@ final class MobileHomePage {
         final LinearLayout importPill = a.row();
         importPill.setGravity(Gravity.CENTER_VERTICAL);
         importPill.setPadding(a.dp(11), 0, a.dp(11), 0);
-        GradientDrawable glassPill = a.bg(0x450E121C, 999);
-        glassPill.setStroke(MobileTheme.hairlinePx(a), 0x33FFFFFF);
+        GradientDrawable glassPill = a.bg(showHero ? 0x450E121C : p.bgSubtle, 999);
+        glassPill.setStroke(
+                MobileTheme.hairlinePx(a),
+                showHero ? 0x33FFFFFF : (p.isDark ? 0x1EFFFFFF : 0x12000000));
         importPill.setBackground(glassPill);
 
-        MobileIcons.IconView plusIcon = MobileIcons.create(a, MobileIcons.IC_PLUS, 13f, 0xEBFFFFFF);
+        MobileIcons.IconView plusIcon =
+                MobileIcons.create(a, MobileIcons.IC_PLUS, 13f, showHero ? 0xEBFFFFFF : p.accent);
         LinearLayout.LayoutParams spLp = new LinearLayout.LayoutParams(a.dp(13), a.dp(13));
         spLp.rightMargin = a.dp(5);
         importPill.addView(plusIcon, spLp);
 
-        TextView modeLbl = a.text("导入片源", 12.5f, 0xF5FFFFFF);
+        TextView modeLbl = a.text("导入片源", 12.5f, showHero ? 0xF5FFFFFF : p.textPrimary);
         modeLbl.setTag("source-switcher");
         modeLbl.setTypeface(null, Typeface.BOLD);
         importPill.addView(modeLbl);
@@ -2735,6 +2798,12 @@ final class MobileHomePage {
         final Boolean[] lastOverHeroState = {null};
         final Runnable syncPolarity =
                 () -> {
+                    if (!showHero) {
+                        floatingTopBar.setTranslationY(0f);
+                        shell.setStatusBarVeilAlpha(1f);
+                        a.applyMobileSystemBars(false, false);
+                        return;
+                    }
                     int scrollY = sv.getScrollY();
                     floatingTopBar.setTranslationY(-Math.min(scrollY, heroHeightPx));
                     float veilAlpha =
@@ -2759,6 +2828,15 @@ final class MobileHomePage {
 
         final Runnable renderAll =
                 () -> {
+                    boolean curatedIsFirst = historyWrap.getVisibility() != View.VISIBLE;
+                    if (!enabledCurated.isEmpty()) {
+                        MobileCuratedSection.renderInto(
+                                a, curatedWrap, false, showHero && curatedIsFirst, enabledCurated);
+                    }
+                    if (!showHero) {
+                        MobileCuratedSection.applyFirstHeaderInk(curatedWrap, p, false, false);
+                        return;
+                    }
                     List<Cms.Video> heroPool = new ArrayList<>();
                     List<Cms.Video> trend =
                             MobileCuratedDiscovery.peekById(
@@ -2783,9 +2861,6 @@ final class MobileHomePage {
                             heroPool.add(trend.get(i));
                         }
                     }
-
-                    boolean curatedIsFirst = historyWrap.getVisibility() != View.VISIBLE;
-                    MobileCuratedSection.renderInto(a, curatedWrap, false, curatedIsFirst);
 
                     if (!heroPool.isEmpty()
                             && (heroHolder.getChildCount() == 0
@@ -2816,6 +2891,58 @@ final class MobileHomePage {
                 };
         MobileCuratedDiscovery.hydrateFromDiskIfNeeded(a);
         renderAll.run();
-        MobileCuratedDiscovery.fetchAllAsync(a, a.generation, debouncedRender);
+        if (showHero || !enabledCurated.isEmpty()) {
+            MobileCuratedDiscovery.fetchAllAsync(a, a.generation, debouncedRender);
+        }
+    }
+
+    private static LinearLayout buildAllSectionsHiddenCard(final MobileRootShell shell) {
+        final MainActivity a = shell.a;
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        LinearLayout card = a.vertical();
+        card.setTag("home-all-sections-hidden");
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setBackground(MobileTheme.cardBg(a, 18));
+        card.setPadding(a.dp(20), a.dp(26), a.dp(20), a.dp(24));
+        LinearLayout.LayoutParams outerLp = new LinearLayout.LayoutParams(-1, -2);
+        outerLp.setMargins(a.dp(16), a.dp(24), a.dp(16), a.dp(16));
+        card.setLayoutParams(outerLp);
+
+        TextView title = a.text("所有首页专题均已隐藏", 16.5f, p.textPrimary);
+        title.setTypeface(null, Typeface.BOLD);
+        card.addView(title);
+        a.gap(card, 8);
+
+        TextView desc = a.text("你可以随时在此重新开启首页专题，或前往底部「设置 → 外观与导航」恢复默认显示。", 12.5f, p.textSecondary);
+        desc.setGravity(Gravity.CENTER);
+        desc.setLineSpacing(a.dp(2), 1f);
+        card.addView(desc);
+        a.gap(card, 16);
+
+        LinearLayout btnRow = a.row();
+        TextView manageBtn = a.text("管理首页专题", 13f, p.accentOnFill);
+        manageBtn.setTypeface(null, Typeface.BOLD);
+        manageBtn.setGravity(Gravity.CENTER);
+        manageBtn.setPadding(a.dp(16), a.dp(10), a.dp(16), a.dp(10));
+        manageBtn.setBackground(MobileTheme.accentPillBg(a, 999));
+        MobileMotion.bindPress(manageBtn, 0.95f);
+        manageBtn.setOnClickListener(
+                v ->
+                        MobileHomeSections.showSettingsSheet(
+                                a, () -> shell.switchTab(MobileRootShell.TAB_HOME)));
+        LinearLayout.LayoutParams b1 = new LinearLayout.LayoutParams(0, -2, 1f);
+        b1.rightMargin = a.dp(8);
+        btnRow.addView(manageBtn, b1);
+
+        TextView settingsBtn = a.text("前往设置", 13f, p.textPrimary);
+        settingsBtn.setTypeface(null, Typeface.BOLD);
+        settingsBtn.setGravity(Gravity.CENTER);
+        settingsBtn.setPadding(a.dp(16), a.dp(10), a.dp(16), a.dp(10));
+        settingsBtn.setBackground(MobileTheme.subtleBg(a, 999));
+        MobileMotion.bindPress(settingsBtn, 0.95f);
+        settingsBtn.setOnClickListener(v -> shell.switchTab(MobileRootShell.TAB_SETTINGS));
+        btnRow.addView(settingsBtn, new LinearLayout.LayoutParams(0, -2, 1f));
+        card.addView(btnRow, new LinearLayout.LayoutParams(-1, -2));
+        return card;
     }
 }

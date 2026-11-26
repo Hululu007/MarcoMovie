@@ -555,6 +555,7 @@ final class SubscriptionManager {
                 copy.put("group", pb.groupName);
                 copy.put("type", site.type);
                 copy.put("api", site.api);
+                copy.put("_marco_origin", pb.effectiveOrigin);
                 copy.put("searchable", site.searchable ? 1 : 0);
                 String effectiveJar =
                         (site.jar != null && !site.jar.isEmpty())

@@ -463,6 +463,13 @@ public final class MainActivity extends Activity {
 
     void ensureStoragePermissionForNetdisk(final Runnable proceed) {
         if (proceed == null) return;
+        // Mobile uses app-private SecureStorage + files/TV + externalFilesDir/TV and MUST
+        // complete login, restart, and playback even when external storage permission is denied.
+        if (!isTvDevice()) {
+            CspEngine.prepareHostStorage(getApplication());
+            proceed.run();
+            return;
+        }
         if (hasFullStoragePermission()) {
             CspEngine.prepareHostStorage(getApplication());
             proceed.run();
@@ -1375,6 +1382,7 @@ public final class MainActivity extends Activity {
                     heal.apply();
                 }
                 config = Cms.parseConfig(recovered.raw, configOrigin);
+                EmbyEngine.reattachSavedLibraries(this, config);
                 SourcePicker.applyEdits(this, config, configOrigin);
                 if (priorBootCrashes == 0 && !priorLoadingCrash) {
                     SourcePreferences.restoreDefault(this);
@@ -1383,6 +1391,12 @@ public final class MainActivity extends Activity {
         } catch (Exception e) {
             AppLog.w("MainActivity", "load saved config failed", e);
             config = null;
+        }
+        if (config == null
+                && (!com.pilipala.emby.EmbyAccounts.listSaved(this).isEmpty()
+                        || !AlistAccounts.list(this).isEmpty())) {
+            config = new Cms.Config();
+            EmbyEngine.reattachSavedLibraries(this, config);
         }
         // Phone / tablet only: restore the offline download queue (never started on TV).
         if (!isTvDevice()) DownloadManager.get(this);
@@ -3799,8 +3813,13 @@ public final class MainActivity extends Activity {
         foreground = true;
         if (inlinePlayer != null) inlinePlayer.onActivityStart();
         CspEngine.syncAllPluginActivities(this);
+        PersonalNetdiskBrowser.onActivityResumed();
         syncCastService();
         syncSpiderGateway();
+        if (!isTvDevice() && config != null) {
+            final Cms.Config snap = config;
+            worker.execute(() -> ConfigCenterBridge.syncAll(this, snap, true, true, false));
+        }
         if (layoutReady && !privateMode) {
             SourceController.runDailyAutoUpdateIfNeeded(this, false);
         }

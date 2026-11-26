@@ -72,13 +72,13 @@ final class AlistEngine implements SourceEngine {
                 String folderPassword) {
             this.baseUrl = normalizeBaseUrl(baseUrl);
             this.rootPath = normalizePath(rootPath);
+            this.username = username == null ? "" : username.trim();
             this.id =
                     id != null && !id.trim().isEmpty()
                             ? id.trim()
-                            : generateMountId(this.baseUrl, this.rootPath);
+                            : generateMountId(this.baseUrl, this.rootPath, this.username);
             String cleanName = name == null ? "" : name.trim();
             this.name = cleanName.isEmpty() ? defaultNameForUrl(this.baseUrl) : cleanName;
-            this.username = username == null ? "" : username.trim();
             this.password = password == null ? "" : password;
             this.token = token == null ? "" : token.trim();
             this.folderPassword = folderPassword == null ? "" : folderPassword;
@@ -129,6 +129,7 @@ final class AlistEngine implements SourceEngine {
         final String thumb;
         final String sign;
         final String rawUrl;
+        final Map<String, String> headers;
 
         FsItem(
                 String name,
@@ -138,6 +139,18 @@ final class AlistEngine implements SourceEngine {
                 String thumb,
                 String sign,
                 String rawUrl) {
+            this(name, path, isDir, size, thumb, sign, rawUrl, null);
+        }
+
+        FsItem(
+                String name,
+                String path,
+                boolean isDir,
+                long size,
+                String thumb,
+                String sign,
+                String rawUrl,
+                Map<String, String> headers) {
             this.name = name == null ? "" : name;
             this.path = normalizePath(path);
             this.isDir = isDir;
@@ -145,6 +158,11 @@ final class AlistEngine implements SourceEngine {
             this.thumb = thumb == null ? "" : thumb.trim();
             this.sign = sign == null ? "" : sign.trim();
             this.rawUrl = rawUrl == null ? "" : rawUrl.trim();
+            this.headers =
+                    headers == null || headers.isEmpty()
+                            ? Collections.<String, String>emptyMap()
+                            : Collections.unmodifiableMap(
+                                    new LinkedHashMap<String, String>(headers));
         }
     }
 
@@ -181,9 +199,17 @@ final class AlistEngine implements SourceEngine {
     }
 
     static String generateMountId(String baseUrl, String rootPath) {
-        String seed = normalizeBaseUrl(baseUrl) + "|" + normalizePath(rootPath);
-        int hash = seed.hashCode() & 0x7fffffff;
-        return Integer.toHexString(hash);
+        return generateMountId(baseUrl, rootPath, "");
+    }
+
+    static String generateMountId(String baseUrl, String rootPath, String username) {
+        String user = username == null ? "" : username.trim();
+        String seed =
+                normalizeBaseUrl(baseUrl)
+                        + "|"
+                        + normalizePath(rootPath)
+                        + (user.isEmpty() ? "" : "|" + user);
+        return NetdiskStore.sha256Hex(seed).substring(0, 16);
     }
 
     static String normalizeBaseUrl(String raw) {
@@ -420,7 +446,7 @@ final class AlistEngine implements SourceEngine {
             if (!forceRefresh && activeToken != null && !activeToken.isEmpty()) {
                 return activeToken;
             }
-            if (!config.token.isEmpty()) {
+            if ((!forceRefresh || config.username.isEmpty()) && !config.token.isEmpty()) {
                 activeToken = config.token;
                 return activeToken;
             }
@@ -455,46 +481,66 @@ final class AlistEngine implements SourceEngine {
         private JSONObject rawPost(String apiPath, JSONObject payload, String authToken)
                 throws IOException {
             String target = config.baseUrl + apiPath;
-            HttpURLConnection conn = null;
-            try {
-                conn = (HttpURLConnection) new URL(target).openConnection();
-                conn.setRequestMethod("POST");
-                conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
-                conn.setReadTimeout(READ_TIMEOUT_MS);
-                conn.setDoOutput(true);
-                conn.setInstanceFollowRedirects(true);
-                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-                conn.setRequestProperty("Accept", "application/json");
-                conn.setRequestProperty("User-Agent", Cms.USER_AGENT);
-                if (authToken != null && !authToken.isEmpty()) {
-                    conn.setRequestProperty("Authorization", authToken);
+            URI originUri = URI.create(config.baseUrl);
+            byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+            for (int hop = 0; hop < 6; hop++) {
+                HttpURLConnection conn = null;
+                try {
+                    conn = ProxyAddress.openHttpConnection(new URL(target));
+                    conn.setRequestMethod("POST");
+                    conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+                    conn.setReadTimeout(READ_TIMEOUT_MS);
+                    conn.setDoOutput(true);
+                    conn.setInstanceFollowRedirects(false);
+                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                    conn.setRequestProperty("Accept", "application/json");
+                    conn.setRequestProperty("User-Agent", Cms.USER_AGENT);
+                    URI curUri = URI.create(target);
+                    boolean sameHost =
+                            originUri.getHost() != null
+                                    && originUri.getHost().equalsIgnoreCase(curUri.getHost());
+                    if (authToken != null && !authToken.isEmpty() && sameHost) {
+                        conn.setRequestProperty("Authorization", authToken);
+                    }
+                    conn.setFixedLengthStreamingMode(bytes.length);
+                    try (OutputStream os = conn.getOutputStream()) {
+                        os.write(bytes);
+                    }
+                    int status = conn.getResponseCode();
+                    if (status == 301
+                            || status == 302
+                            || status == 303
+                            || status == 307
+                            || status == 308) {
+                        String loc = conn.getHeaderField("Location");
+                        if (loc == null || loc.trim().isEmpty()) {
+                            throw new IOException("AList 重定向地址缺失（HTTP " + status + "）");
+                        }
+                        target = new URL(new URL(target), loc.trim()).toExternalForm();
+                        continue;
+                    }
+                    InputStream in = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                    String text = readBoundedUtf8(in);
+                    if (text.isEmpty()) {
+                        throw new IOException("AList 服务返回空响应（HTTP " + status + "）");
+                    }
+                    return new JSONObject(text);
+                } catch (IOException e) {
+                    throw e;
+                } catch (Exception e) {
+                    throw new IOException("AList 响应解析失败：" + e.getMessage(), e);
+                } finally {
+                    if (conn != null) conn.disconnect();
                 }
-                byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
-                conn.setFixedLengthStreamingMode(bytes.length);
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write(bytes);
-                }
-                int status = conn.getResponseCode();
-                InputStream in = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
-                String text = readBoundedUtf8(in);
-                if (text.isEmpty()) {
-                    throw new IOException("AList 服务返回空响应（HTTP " + status + "）");
-                }
-                return new JSONObject(text);
-            } catch (IOException e) {
-                throw e;
-            } catch (Exception e) {
-                throw new IOException("AList 响应解析失败：" + e.getMessage(), e);
-            } finally {
-                if (conn != null) conn.disconnect();
             }
+            throw new IOException("AList 重定向次数过多");
         }
 
         private JSONObject postApi(String apiPath, JSONObject payload) throws IOException {
             String tok = ensureToken(false);
             JSONObject resp = rawPost(apiPath, payload, tok);
             int code = resp.optInt("code", -1);
-            if (code == 401 && !config.username.isEmpty() && config.token.isEmpty()) {
+            if (code == 401 && !config.username.isEmpty()) {
                 activeToken = "";
                 tok = ensureToken(true);
                 resp = rawPost(apiPath, payload, tok);
@@ -519,32 +565,37 @@ final class AlistEngine implements SourceEngine {
                                 .put("refresh", false);
                 JSONObject resp = postApi("/api/fs/list", payload);
                 JSONObject data = resp.optJSONObject("data");
+                if (data == null) {
+                    throw new IOException("AList 目录接口响应缺少 data 字段，请确认地址是否为 AList 服务");
+                }
+                if (data.has("content")
+                        && !data.isNull("content")
+                        && data.optJSONArray("content") == null) {
+                    throw new IOException("AList 目录接口响应格式无效");
+                }
                 List<FsItem> items = new ArrayList<>();
-                int total = 0;
-                if (data != null) {
-                    total = data.optInt("total", 0);
-                    JSONArray content = data.optJSONArray("content");
-                    if (content != null) {
-                        for (int i = 0; i < content.length(); i++) {
-                            JSONObject o = content.optJSONObject(i);
-                            if (o == null) continue;
-                            String name = Cms.optSafeString(o, "name");
-                            if (name.isEmpty()) continue;
-                            boolean isDir = o.optBoolean("is_dir", false);
-                            long size = o.optLong("size", 0L);
-                            String thumb = Cms.optSafeString(o, "thumb");
-                            String sign = Cms.optSafeString(o, "sign");
-                            String rawUrl = Cms.optSafeString(o, "raw_url");
-                            items.add(
-                                    new FsItem(
-                                            name,
-                                            joinPath(norm, name),
-                                            isDir,
-                                            size,
-                                            thumb,
-                                            sign,
-                                            rawUrl));
-                        }
+                int total = data.optInt("total", 0);
+                JSONArray content = data.optJSONArray("content");
+                if (content != null) {
+                    for (int i = 0; i < content.length(); i++) {
+                        JSONObject o = content.optJSONObject(i);
+                        if (o == null) continue;
+                        String name = Cms.optSafeString(o, "name");
+                        if (name.isEmpty()) continue;
+                        boolean isDir = o.optBoolean("is_dir", false);
+                        long size = o.optLong("size", 0L);
+                        String thumb = Cms.optSafeString(o, "thumb");
+                        String sign = Cms.optSafeString(o, "sign");
+                        String rawUrl = Cms.optSafeString(o, "raw_url");
+                        items.add(
+                                new FsItem(
+                                        name,
+                                        joinPath(norm, name),
+                                        isDir,
+                                        size,
+                                        thumb,
+                                        sign,
+                                        rawUrl));
                     }
                 }
                 if (page == 1 && !items.isEmpty()) {
@@ -572,7 +623,17 @@ final class AlistEngine implements SourceEngine {
                 String thumb = Cms.optSafeString(data, "thumb");
                 String sign = Cms.optSafeString(data, "sign");
                 String rawUrl = Cms.optSafeString(data, "raw_url");
-                return new FsItem(name, norm, isDir, size, thumb, sign, rawUrl);
+                Map<String, String> itemHeaders = new LinkedHashMap<>();
+                JSONObject hdrObj = data.optJSONObject("header");
+                if (hdrObj != null) {
+                    java.util.Iterator<String> keys = hdrObj.keys();
+                    while (keys.hasNext()) {
+                        String k = keys.next();
+                        String v = Cms.optSafeString(hdrObj, k);
+                        if (!k.isEmpty() && !v.isEmpty()) itemHeaders.put(k, v);
+                    }
+                }
+                return new FsItem(name, norm, isDir, size, thumb, sign, rawUrl, itemHeaders);
             } catch (IOException e) {
                 throw e;
             } catch (Exception e) {
@@ -649,10 +710,55 @@ final class AlistEngine implements SourceEngine {
 
         String resolvePlayableUrl(FsItem item) {
             if (item == null) return "";
-            if (!item.rawUrl.isEmpty() && Cms.isHttp(item.rawUrl)) {
-                return item.rawUrl;
+            if (!item.rawUrl.isEmpty()) {
+                if (Cms.isHttp(item.rawUrl)) {
+                    return item.rawUrl;
+                }
+                if (item.rawUrl.startsWith("//")) {
+                    String scheme = config.baseUrl.startsWith("https://") ? "https:" : "http:";
+                    return scheme + item.rawUrl;
+                }
+                if (item.rawUrl.startsWith("/")) {
+                    try {
+                        URI baseUri = URI.create(config.baseUrl);
+                        String basePath = baseUri.getPath() == null ? "" : baseUri.getPath();
+                        String rel = item.rawUrl;
+                        if (!basePath.isEmpty() && !rel.startsWith(basePath + "/")) {
+                            rel = basePath + rel;
+                        }
+                        return new URL(new URL(config.baseUrl + "/"), rel).toExternalForm();
+                    } catch (Exception ignored) {
+                    }
+                }
             }
             return buildDirectDownloadUrl(config.baseUrl, item.path, item.sign);
+        }
+
+        boolean isSameOrigin(String url) {
+            if (url == null || url.isEmpty()) return false;
+            try {
+                URI a = URI.create(config.baseUrl);
+                URI b = URI.create(url);
+                int pa =
+                        a.getPort() > 0
+                                ? a.getPort()
+                                : ("https".equalsIgnoreCase(a.getScheme()) ? 443 : 80);
+                int pb =
+                        b.getPort() > 0
+                                ? b.getPort()
+                                : ("https".equalsIgnoreCase(b.getScheme()) ? 443 : 80);
+                return a.getScheme() != null
+                        && a.getScheme().equalsIgnoreCase(b.getScheme())
+                        && a.getHost() != null
+                        && a.getHost().equalsIgnoreCase(b.getHost())
+                        && pa == pb;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+
+        String currentAuthToken() {
+            return activeToken == null ? "" : activeToken;
         }
 
         String findFolderCover(List<FsItem> items) {
@@ -817,6 +923,15 @@ final class AlistEngine implements SourceEngine {
         }
         JSONObject headers = new JSONObject();
         headers.put("User-Agent", Cms.USER_AGENT);
+        for (Map.Entry<String, String> h : item.headers.entrySet()) {
+            if (h.getKey() != null && h.getValue() != null) {
+                headers.put(h.getKey(), h.getValue());
+            }
+        }
+        String tok = client.currentAuthToken();
+        if (!tok.isEmpty() && client.isSameOrigin(directUrl) && !headers.has("Authorization")) {
+            headers.put("Authorization", tok);
+        }
         JSONObject out = new JSONObject();
         out.put("parse", 0);
         out.put("url", directUrl);

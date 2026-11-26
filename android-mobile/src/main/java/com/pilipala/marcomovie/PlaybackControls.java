@@ -369,6 +369,7 @@ final class PlaybackControls {
     void recordUserSeek(int targetMs) {
         lastSeekTimeMs = android.os.SystemClock.uptimeMillis();
         lastSeekTargetMs = Math.max(0, targetMs);
+        SeekCommitGuard.forHost(a).beginSeek(lastSeekTargetMs);
         timeline.setProgress(lastSeekTargetMs);
         onDanmuSeekSettled(lastSeekTargetMs);
     }
@@ -3067,6 +3068,177 @@ final class PlaybackControls {
         dlgRef[0] = openMobilePlayerSheet("工具栏自定义排序", root);
     }
 
+    private String lastVideoTrackSelectionRecord = "";
+
+    private interface ToggleStateAction {
+        void onToggle(boolean enabled);
+    }
+
+    private View buildMobileMoreToggleRow(
+            int icon, String title, boolean initialOn, ToggleStateAction action) {
+        final boolean[] state = {initialOn};
+        LinearLayout row = a.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12));
+        MobileIcons.IconView iv = MobileIcons.create(a, icon, 18f, 0xFFD8DEE9);
+        LinearLayout.LayoutParams iLp = new LinearLayout.LayoutParams(a.dp(18), a.dp(18));
+        iLp.rightMargin = a.dp(12);
+        row.addView(iv, iLp);
+        TextView titleView = a.text(title, 14f, MainActivity.WHITE);
+        titleView.setSingleLine(true);
+        titleView.setEllipsize(TextUtils.TruncateAt.END);
+        row.addView(titleView, new LinearLayout.LayoutParams(0, -2, 1f));
+        final TextView badge = a.text("", 12f, MainActivity.WHITE);
+        badge.setTypeface(null, android.graphics.Typeface.BOLD);
+        badge.setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4));
+        final Runnable paintState =
+                () -> {
+                    boolean on = state[0];
+                    badge.setText(on ? "已开启" : "已关闭");
+                    badge.setTextColor(on ? MobileTheme.of(a).accentOnFill : 0xFFA5B0C2);
+                    badge.setBackground(a.bg(on ? MobileTheme.of(a).accent : 0x26FFFFFF, 999));
+                };
+        paintState.run();
+        row.addView(badge, new LinearLayout.LayoutParams(-2, -2));
+        MobileMotion.bindPress(row, 0.98f);
+        row.setOnClickListener(
+                v -> {
+                    state[0] = !state[0];
+                    paintState.run();
+                    action.onToggle(state[0]);
+                });
+        return row;
+    }
+
+    void showQualityAndVideoTrackSheet() {
+        final boolean isLiveMode = "live".equals(site.key);
+        final org.json.JSONArray qualities =
+                resolved != null && resolved.media != null
+                        ? resolved.media.optJSONArray("qualities")
+                        : null;
+        final int qCount = qualities != null && qualities.length() > 1 ? qualities.length() : 0;
+        final int currentQualityIdx =
+                resolved != null && resolved.media != null
+                        ? resolved.media.optInt("_qualityIdx", 0)
+                        : 0;
+        final List<VideoTrackOption> videoTracks =
+                (a.player != null && a.prepared)
+                        ? a.player.listVideoTracks()
+                        : Collections.emptyList();
+        final int selectedTrackIdx =
+                (a.player != null && a.prepared) ? a.player.selectedVideoTrackIndex() : -1;
+        final String activeRes =
+                (a.player != null && a.prepared) ? a.player.activeDecodedResolution() : "";
+
+        if (qCount == 0 && videoTracks.isEmpty()) {
+            message(
+                    activeRes.isEmpty()
+                            ? "当前流未提供可切换的画质或视频轨道。"
+                            : ("当前流仅包含单视频轨（实际解码 " + activeRes + "）。"));
+            return;
+        }
+
+        List<String> items = new ArrayList<>();
+        final int qStart = items.size();
+        for (int q = 0; q < qCount; q++) {
+            org.json.JSONObject qObj = qualities.optJSONObject(q);
+            String qName = qObj != null ? qObj.optString("name", "画质 " + (q + 1)) : "画质 " + (q + 1);
+            items.add("片源画质 · " + qName + (q == currentQualityIdx ? "（当前）" : ""));
+        }
+        final int vTrackStart = items.size();
+        if (!videoTracks.isEmpty()) {
+            items.add("视频轨 · 自动优选" + (selectedTrackIdx < 0 ? "（当前）" : ""));
+            for (int t = 0; t < videoTracks.size(); t++) {
+                VideoTrackOption opt = videoTracks.get(t);
+                items.add("视频轨 · " + opt.formatLabel() + (opt.selected ? "（当前）" : ""));
+            }
+        }
+        int selected =
+                !videoTracks.isEmpty()
+                        ? (selectedTrackIdx >= 0 ? vTrackStart + 1 + selectedTrackIdx : vTrackStart)
+                        : (qCount > 0 ? qStart + currentQualityIdx : -1);
+        String title = activeRes.isEmpty() ? "画质与视频轨" : ("画质与视频轨 · 当前解码 " + activeRes);
+        choose(
+                title,
+                items.toArray(new String[0]),
+                selected,
+                idx -> {
+                    int qChoice = idx - qStart;
+                    if (qChoice >= 0 && qChoice < qCount && qualities != null) {
+                        org.json.JSONObject qObj = qualities.optJSONObject(qChoice);
+                        if (qObj != null) {
+                            String nextUrl = qObj.optString("url", "");
+                            String qName = qObj.optString("name", "画质 " + (qChoice + 1));
+                            if (!nextUrl.isEmpty()) {
+                                int curPos =
+                                        a.prepared && a.player != null
+                                                ? a.player.getCurrentPosition()
+                                                : 0;
+                                boolean playingNow =
+                                        a.prepared && a.player != null && a.player.isPlaying();
+                                VideoTrackOption.SwitchState sw =
+                                        VideoTrackOption.SwitchState.capture(
+                                                isLiveMode, a.prepared, curPos, playingNow);
+                                try {
+                                    resolved.media.put("_qualityIdx", qChoice);
+                                } catch (Exception ignored) {
+                                }
+                                PlaybackController.applyCandidateHeaders(site, resolved, qObj);
+                                a.resumeAt = sw.resumePositionMs;
+                                SeekCommitGuard.forHost(a).pendingStartPaused = sw.startPaused;
+                                lastVideoTrackSelectionRecord =
+                                        "已选画质: "
+                                                + qName
+                                                + " | 保留位置: "
+                                                + PlaybackController.formatTime(sw.resumePositionMs)
+                                                + (sw.startPaused ? "（暂停）" : "");
+                                markSleepTimerInPlaceSwitch();
+                                if (LiveQualityPolicy.isEmbyLiveUrl(nextUrl)) {
+                                    LiveController.playEmbyLiveAsync(
+                                            a, site, video, resolved, nextUrl);
+                                } else {
+                                    resolved.url = LocalProxy.rewrite(nextUrl);
+                                    a.playerPage(site, video, resolved);
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    int vtChoice = idx - vTrackStart;
+                    if (!videoTracks.isEmpty()
+                            && vtChoice >= 0
+                            && vtChoice <= videoTracks.size()
+                            && a.player != null
+                            && a.prepared) {
+                        final VideoTrackOption chosen =
+                                vtChoice == 0 ? null : videoTracks.get(vtChoice - 1);
+                        a.player.selectTrack(2, vtChoice == 0 ? -1 : vtChoice - 1);
+                        lastVideoTrackSelectionRecord =
+                                VideoTrackOption.formatSelectionRecord(
+                                        chosen,
+                                        a.player.getVideoWidth(),
+                                        a.player.getVideoHeight());
+                        a.toast(
+                                chosen == null
+                                        ? "已切换为自动优选视频轨"
+                                        : ("已切换视频轨：" + chosen.formatLabel()));
+                        if (a.playerChrome != null) a.playerChrome.update();
+                        a.ui.postDelayed(
+                                () -> {
+                                    if (a.player != null && a.prepared) {
+                                        lastVideoTrackSelectionRecord =
+                                                VideoTrackOption.formatSelectionRecord(
+                                                        chosen,
+                                                        a.player.getVideoWidth(),
+                                                        a.player.getVideoHeight());
+                                        if (a.playerChrome != null) a.playerChrome.update();
+                                    }
+                                },
+                                700L);
+                    }
+                });
+    }
+
     /** Layer 4 — Frosted Side/Bottom Panel housing secondary cinema tools with vector icons. */
     private void showMobileMoreSheet() {
         final boolean live = "live".equals(site.key);
@@ -3088,9 +3260,20 @@ final class PlaybackControls {
                 (introSec <= 0 && outroSec <= 0)
                         ? "未设置"
                         : ("头 " + skipLabel(introSec) + " · 尾 " + skipLabel(outroSec));
+        String qualitySummary =
+                (a.player != null && a.prepared) ? a.player.activeDecodedResolution() : "";
 
-        // Group 1: Video & Audio
+        // Group 1: Video, Quality, Audio & Danmu
         List<View> avRows = new ArrayList<>();
+        avRows.add(
+                buildMobileMoreToolRow(
+                        MobileIcons.IC_SLIDERS,
+                        "画质 / 视频轨",
+                        qualitySummary.isEmpty() ? "切换" : qualitySummary,
+                        () -> {
+                            if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            showQualityAndVideoTrackSheet();
+                        }));
         avRows.add(
                 buildMobileMoreToolRow(
                         MobileIcons.IC_ASPECT,
@@ -3120,7 +3303,76 @@ final class PlaybackControls {
                             if (dlgRef[0] != null) dlgRef[0].dismiss();
                             pictureEffect();
                         }));
+        if (!live) {
+            avRows.add(
+                    buildMobileMoreToolRow(
+                            MobileIcons.IC_DANMAKU,
+                            "手动匹配本集弹幕",
+                            "",
+                            () -> {
+                                if (dlgRef[0] != null) dlgRef[0].dismiss();
+                                openManualDanmuMatch();
+                            }));
+        }
         addMoreGroupCard(body, avRows);
+
+        // Group 1b: Instant HUD switches (原 8, 11: 点击即生效、返回即保存)
+        int hudMask = a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD, 7);
+        boolean clockOn = (hudMask & Prefs.HUD_CLOCK) != 0;
+        boolean netSpeedOn = (hudMask & Prefs.HUD_NET_SPEED) != 0;
+        boolean slimBarOn =
+                a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true)
+                        && com.pilipala.marcomovie.hud.PlayerHudPrefs.isSlimProgressEnabled(a);
+        List<View> hudRows = new ArrayList<>();
+        hudRows.add(
+                buildMobileMoreToggleRow(
+                        MobileIcons.IC_TIMER,
+                        "显示系统时间",
+                        clockOn,
+                        on -> {
+                            int cur = a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD, 7);
+                            int next = on ? (cur | Prefs.HUD_CLOCK) : (cur & ~Prefs.HUD_CLOCK);
+                            a.mobilePrefs().edit().putInt(Prefs.PLAYER_CORNER_HUD, next).apply();
+                            a.prefs.edit().putBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, on).apply();
+                            if (a.mobilePlayerOverlay != null) {
+                                a.mobilePlayerOverlay.syncControlsVisibility();
+                            }
+                            if (a.playerChrome != null) a.playerChrome.syncClockViews();
+                        }));
+        hudRows.add(
+                buildMobileMoreToggleRow(
+                        MobileIcons.IC_SPEED,
+                        "显示实时网速",
+                        netSpeedOn,
+                        on -> {
+                            int cur = a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD, 7);
+                            int next =
+                                    on ? (cur | Prefs.HUD_NET_SPEED) : (cur & ~Prefs.HUD_NET_SPEED);
+                            a.mobilePrefs().edit().putInt(Prefs.PLAYER_CORNER_HUD, next).apply();
+                            if (a.mobilePlayerOverlay != null) {
+                                a.mobilePlayerOverlay.syncControlsVisibility();
+                            }
+                        }));
+        if (!live) {
+            hudRows.add(
+                    buildMobileMoreToggleRow(
+                            MobileIcons.IC_SLIDERS,
+                            "底部进度细线",
+                            slimBarOn,
+                            on -> {
+                                a.mobilePrefs()
+                                        .edit()
+                                        .putBoolean(Prefs.MINI_PROGRESS_BAR, on)
+                                        .apply();
+                                com.pilipala.marcomovie.hud.PlayerHudPrefs.setSlimProgressEnabled(
+                                        a, on);
+                                if (a.mobilePlayerOverlay != null) {
+                                    a.mobilePlayerOverlay.syncControlsVisibility();
+                                }
+                                if (a.playerChrome != null) a.playerChrome.update();
+                            }));
+        }
+        addMoreGroupCard(body, hudRows);
 
         // Group 2: Playback utilities
         List<View> playRows = new ArrayList<>();
@@ -3223,12 +3475,17 @@ final class PlaybackControls {
                         a.player != null ? a.player.activeEngineShortLabel() : "",
                         () -> {
                             if (dlgRef[0] != null) dlgRef[0].dismiss();
+                            String extraTrack =
+                                    lastVideoTrackSelectionRecord.isEmpty()
+                                            ? ""
+                                            : ("\n" + lastVideoTrackSelectionRecord);
                             message(
                                     a.player == null
                                             ? "播放器尚未准备好。"
                                             : a.player.playbackInfo()
                                                     + "\n"
-                                                    + surface.outputName());
+                                                    + surface.outputName()
+                                                    + extraTrack);
                         }));
         addMoreGroupCard(body, sysRows);
 
@@ -3367,10 +3624,12 @@ final class PlaybackControls {
                         ? resolved.media.optJSONArray("qualities")
                         : null;
         int qCount = qualities != null && qualities.length() > 1 ? qualities.length() : 0;
-        List<String> videoTracks =
+        final List<VideoTrackOption> videoTracks =
                 (a.player != null && a.prepared)
-                        ? a.player.trackLabels(2)
+                        ? a.player.listVideoTracks()
                         : Collections.emptyList();
+        final int selectedVideoTrackIdx =
+                (a.player != null && a.prepared) ? a.player.selectedVideoTrackIndex() : -1;
         int vTrackMenuCount = videoTracks.size() > 1 ? videoTracks.size() + 1 : 0;
         boolean isLiveMode = "live".equals(site.key);
         boolean canCrossSearch =
@@ -3378,6 +3637,7 @@ final class PlaybackControls {
                         && video.title != null
                         && !video.title.trim().isEmpty()
                         && !isLiveMode;
+        boolean canManageLines = !isLiveMode && video != null && !video.lines.isEmpty();
         boolean canEpg = isLiveMode && a.liveSession != null && a.liveSession.index >= 0;
         if (video.lines.isEmpty()
                 && qCount == 0
@@ -3395,8 +3655,9 @@ final class PlaybackControls {
         final int vTrackStart = items.size();
         if (vTrackMenuCount > 0) {
             items.add("视频子轨 · 自动优选画质");
-            for (String vt : videoTracks) {
-                items.add("视频子轨 · " + vt);
+            for (int t = 0; t < videoTracks.size(); t++) {
+                VideoTrackOption opt = videoTracks.get(t);
+                items.add("视频子轨 · " + (opt.selected ? "✓ " : "") + opt.formatLabel());
             }
         }
         final int qStart = items.size();
@@ -3414,14 +3675,23 @@ final class PlaybackControls {
         for (int i = 0; i < video.lines.size(); i++) {
             items.add((qCount > 0 ? "线路 · " : "") + video.lines.get(i).name);
         }
+        final int manageLinesIndex = canManageLines ? items.size() : -1;
+        if (canManageLines) {
+            items.add("管理本片播放线路（重命名 / 排序 / 删除）");
+        }
         final int crossSearchIndex = canCrossSearch ? items.size() : -1;
         if (canCrossSearch) {
             items.add("搜索同名其他片源 · " + video.title);
         }
+        int curLine = lineIndex();
         int selected =
                 qCount > 0
                         ? (qStart + currentQualityIdx)
-                        : (vTrackMenuCount > 0 ? vTrackStart : (canEpg ? 0 : lineIndex()));
+                        : (vTrackMenuCount > 0
+                                ? (selectedVideoTrackIdx >= 0
+                                        ? vTrackStart + 1 + selectedVideoTrackIdx
+                                        : vTrackStart)
+                                : (canEpg ? 0 : (curLine >= 0 ? lineStart + curLine : -1)));
         final int finalVTrackMenuCount = vTrackMenuCount;
         final int finalQCount = qCount;
         final org.json.JSONArray finalQualities = qualities;
@@ -3432,6 +3702,15 @@ final class PlaybackControls {
                 i -> {
                     if (epgIndex >= 0 && i == epgIndex) {
                         LiveController.showEpgAndCatchupDialog(a);
+                        return;
+                    }
+                    if (manageLinesIndex >= 0 && i == manageLinesIndex) {
+                        Cms.Line targetLine =
+                                curLine >= 0 && curLine < video.lines.size()
+                                        ? video.lines.get(curLine)
+                                        : video.lines.get(0);
+                        PlaybackLineRules.showManageLineSheet(
+                                a, site, video, targetLine, () -> chooseLine());
                         return;
                     }
                     if (crossSearchIndex >= 0 && i == crossSearchIndex) {
@@ -3445,8 +3724,31 @@ final class PlaybackControls {
                             && i < vTrackStart + finalVTrackMenuCount) {
                         int vtChoice = i - vTrackStart;
                         if (a.player != null && a.prepared) {
+                            final VideoTrackOption chosen =
+                                    vtChoice == 0 ? null : videoTracks.get(vtChoice - 1);
                             a.player.selectTrack(2, vtChoice == 0 ? -1 : vtChoice - 1);
-                            a.toast(vtChoice == 0 ? "已切换为自动优选画质" : "已锁定所选视频画质轨道");
+                            lastVideoTrackSelectionRecord =
+                                    VideoTrackOption.formatSelectionRecord(
+                                            chosen,
+                                            a.player.getVideoWidth(),
+                                            a.player.getVideoHeight());
+                            a.toast(
+                                    chosen == null
+                                            ? "已切换为自动优选画质"
+                                            : ("已切换视频轨：" + chosen.formatLabel()));
+                            if (a.playerChrome != null) a.playerChrome.update();
+                            a.ui.postDelayed(
+                                    () -> {
+                                        if (a.player != null && a.prepared) {
+                                            lastVideoTrackSelectionRecord =
+                                                    VideoTrackOption.formatSelectionRecord(
+                                                            chosen,
+                                                            a.player.getVideoWidth(),
+                                                            a.player.getVideoHeight());
+                                            if (a.playerChrome != null) a.playerChrome.update();
+                                        }
+                                    },
+                                    700L);
                         }
                         return;
                     }
@@ -3455,16 +3757,30 @@ final class PlaybackControls {
                         org.json.JSONObject qObj = finalQualities.optJSONObject(qChoice);
                         if (qObj != null) {
                             String nextUrl = qObj.optString("url", "");
+                            String qName = qObj.optString("name", "画质 " + (qChoice + 1));
                             if (!nextUrl.isEmpty()) {
+                                int curPos =
+                                        a.prepared && a.player != null
+                                                ? a.player.getCurrentPosition()
+                                                : 0;
+                                boolean playingNow =
+                                        a.prepared && a.player != null && a.player.isPlaying();
+                                VideoTrackOption.SwitchState sw =
+                                        VideoTrackOption.SwitchState.capture(
+                                                isLiveMode, a.prepared, curPos, playingNow);
                                 try {
                                     resolved.media.put("_qualityIdx", qChoice);
                                 } catch (Exception ignored) {
                                 }
                                 PlaybackController.applyCandidateHeaders(site, resolved, qObj);
-                                a.resumeAt =
-                                        !isLiveMode && a.prepared && a.player != null
-                                                ? a.player.getCurrentPosition()
-                                                : 0;
+                                a.resumeAt = sw.resumePositionMs;
+                                SeekCommitGuard.forHost(a).pendingStartPaused = sw.startPaused;
+                                lastVideoTrackSelectionRecord =
+                                        "已选画质: "
+                                                + qName
+                                                + " | 保留位置: "
+                                                + PlaybackController.formatTime(sw.resumePositionMs)
+                                                + (sw.startPaused ? "（暂停）" : "");
                                 markSleepTimerInPlaceSwitch();
                                 if (LiveQualityPolicy.isEmbyLiveUrl(nextUrl)) {
                                     LiveController.playEmbyLiveAsync(
@@ -3673,15 +3989,84 @@ final class PlaybackControls {
     }
 
     private DanmuProvider.MatchQuery buildDanmuMatchQuery() {
-        String title = video != null && video.title != null ? video.title.trim() : "";
+        String rawTitle = video != null && video.title != null ? video.title.trim() : "";
+        SeasonParser.SeasonMeta sm = SeasonParser.parseSeasonMeta(rawTitle);
+        String cleanBase = EpisodeNameCleaner.cleanSearchTitle(sm.baseTitle);
+        String title = cleanBase.isEmpty() ? rawTitle : cleanBase;
         Cms.Episode ep = a.activeEpisode != null ? a.activeEpisode : resolved;
         String epTitle = ep != null && ep.name != null ? ep.name.trim() : "";
-        int epNum = Math.max(1, episodeIndex() + 1);
+        int totalEps =
+                a.activeLine != null && a.activeLine.episodes != null
+                        ? a.activeLine.episodes.size()
+                        : 0;
+        int rawIdx = episodeIndex();
+        boolean desc = a.prefs != null && a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false);
+        int fallbackEp =
+                totalEps <= 1
+                        ? 0
+                        : (desc && rawIdx >= 0
+                                ? Math.max(1, totalEps - rawIdx)
+                                : Math.max(1, rawIdx + 1));
+        EpisodeNameCleaner.CleanedEpisode cleaned =
+                EpisodeNameCleaner.clean(epTitle, title, fallbackEp);
+        int epNum = cleaned.episodeNumber;
+        if (totalEps <= 1 && epNum == 0) {
+            // Movie / single-episode item: keep 0 so we don't synthesize "E01"
+            epNum = 0;
+        }
         long durSec =
                 (a.player != null && a.prepared && a.player.getDuration() > 0)
                         ? (a.player.getDuration() / 1000L)
                         : 0L;
-        return new DanmuProvider.MatchQuery(title, epTitle, epNum, durSec);
+        return new DanmuProvider.MatchQuery(title, epTitle, sm.seasonNumber, epNum, durSec);
+    }
+
+    void openManualDanmuMatch() {
+        DanmuProvider.MatchQuery q = buildDanmuMatchQuery();
+        DanmuSourceManager.showManualMatchSheet(
+                a,
+                q.title,
+                q.seasonNumber,
+                q.episodeIndex,
+                q.durationSec,
+                this::bindManualDanmuCandidate);
+    }
+
+    private void bindManualDanmuCandidate(final DanmuProvider.Candidate cand) {
+        if (cand == null
+                || cand.boundEpisodeId == null
+                || cand.boundEpisodeId.isEmpty()
+                || danmaku == null
+                || danmaku.closed) {
+            return;
+        }
+        closeSegmentedDanmuSession();
+        DanmuSettingsPanel.DanmuConfig cur = DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
+        DanmuSettingsPanel.DanmuConfig.Builder b = cur.toBuilder();
+        b.enabled = true;
+        DanmuSettingsPanel.DanmuConfig enabledCfg = b.build();
+        DanmuSettingsPanel.saveConfig(a, enabledCfg);
+        DandanplayProvider provider = enabledCfg.createProvider();
+        DanmuSegmentCache cache = new DanmuSegmentCache(provider);
+        danmuSegmentCache = cache;
+        danmakuLoaded = false;
+        activeDanmuCandidate = cand;
+        danmaku.applyConfig(enabledCfg);
+        danmaku.attachSegmentCache(cache);
+        danmaku.enabled(true);
+        cache.bindSession(cand.boundEpisodeId);
+        if (a.player != null && a.prepared) {
+            danmaku.setPlaySpeed(a.player.getSpeed());
+            cache.onPlaybackTick(a.player.getCurrentPosition(), a.player.isPlaying());
+        }
+        syncMobileDanmakuCapsule();
+        String badge =
+                DanmuSourceManager.formatCandidateSourceBadge(
+                        cand.sourceOrigin, DanmuSourceManager.loadUnifiedSources(a));
+        String label =
+                (cand.animeTitle.isEmpty() ? "" : cand.animeTitle)
+                        + (cand.episodeTitle.isEmpty() ? "" : " · " + cand.episodeTitle);
+        a.toast("已加载弹幕：" + label + "（" + badge + "）");
     }
 
     static String danmuServerSignature(DanmuSettingsPanel.DanmuConfig cfg) {
@@ -3783,6 +4168,7 @@ final class PlaybackControls {
                                                 a.player.getCurrentPosition(),
                                                 a.player.isPlaying());
                                     }
+                                    syncMobileDanmakuCapsule();
                                     if (showFeedback) {
                                         String label =
                                                 best.animeTitle
@@ -3892,6 +4278,20 @@ final class PlaybackControls {
 
     void applyMobileDanmakuStyle() {
         if (a.isTvDevice() || danmaku == null) return;
+        android.content.SharedPreferences mainPrefs =
+                a.getSharedPreferences(
+                        DanmuSettingsPanel.PREFS_FILE, android.content.Context.MODE_PRIVATE);
+        if (mainPrefs.contains(DanmuSettingsPanel.KEY_OPACITY)
+                || mainPrefs.contains(DanmuSettingsPanel.KEY_DISPLAY_AREA)
+                || mainPrefs.contains(DanmuSettingsPanel.KEY_FONT_SIZE)) {
+            DanmuSettingsPanel.DanmuConfig cfg = DanmuSettingsPanel.loadConfig(a, false);
+            danmaku.opacity = cfg.opacity;
+            danmaku.area = cfg.displayArea;
+            danmaku.textSize = cfg.fontSizeSp;
+            danmaku.speedMultiplier = cfg.speedMultiplier;
+            danmaku.invalidate();
+            return;
+        }
         int areaIdx = a.mobilePrefs().getInt(Prefs.DANMAKU_AREA, 1);
         float[] areas = {0.25f, 0.50f, 0.75f, 0.95f};
         int opPct = Math.max(20, Math.min(100, a.mobilePrefs().getInt(Prefs.DANMAKU_OPACITY, 85)));
@@ -3963,7 +4363,8 @@ final class PlaybackControls {
                 "弹幕",
                 new String[] {
                     "弹幕设置（" + DanmuSettingsPanel.formatCompactStatus(dmCur) + "）",
-                    "在线匹配多源弹幕 (弹弹Play / 自定义弹幕源)",
+                    "手动匹配本集弹幕（改片名 / 选季集 / 来源服务）",
+                    "搜索并添加新弹幕源（探测端口与子路径）",
                     "开启 / 重新加载来源弹幕",
                     "关闭弹幕",
                     "导入本地弹幕 XML / JSON"
@@ -3975,33 +4376,15 @@ final class PlaybackControls {
                         return;
                     }
                     if (i == 1) {
-                        a.toast("正在在线匹配弹幕…");
-                        OnlineSubtitleDanmakuService.searchAndLoadDanmakuAsync(
-                                a,
-                                video.title,
-                                resolved == null ? "" : resolved.name,
-                                body -> {
-                                    if (body == null || body.isEmpty()) {
-                                        message("未匹配到在线弹幕，可在设置中添加弹幕源或导入本地文件。");
-                                        return;
-                                    }
-                                    danmaku.enabled(true);
-                                    danmaku.loadText(
-                                            body,
-                                            new DanmakuView.Listener() {
-                                                public void loaded(int count) {
-                                                    a.toast("在线匹配成功，已加载 " + count + " 条弹幕");
-                                                }
-
-                                                public void error(String msg) {
-                                                    message(msg);
-                                                }
-                                            });
-                                });
+                        openManualDanmuMatch();
                         return;
                     }
-                    int mapped = i - 1;
-                    if (mapped == 2) {
+                    if (i == 2) {
+                        DanmuSourceManager.showDiscoverAndAddServiceSheet(
+                                a, () -> openManualDanmuMatch());
+                        return;
+                    }
+                    if (i == 4) {
                         closeSegmentedDanmuSession();
                         danmaku.enabled(false);
                         DanmuSettingsPanel.DanmuConfig cur =
@@ -4009,9 +4392,10 @@ final class PlaybackControls {
                         DanmuSettingsPanel.DanmuConfig.Builder b = cur.toBuilder();
                         b.enabled = false;
                         DanmuSettingsPanel.saveConfig(a, b.build());
+                        syncMobileDanmakuCapsule();
                         return;
                     }
-                    if (mapped == 3) {
+                    if (i == 5) {
                         a.pickDanmaku();
                         return;
                     }
@@ -4043,8 +4427,9 @@ final class PlaybackControls {
                     if (!enabledCfg.serverUrls.isEmpty()) {
                         startSegmentedDanmuSession(enabledCfg, true);
                     } else {
-                        openDanmuSettingsPanel();
-                        a.toast("请先填写自定义弹幕服务地址，或导入本地 XML / JSON");
+                        DanmuSourceManager.showDiscoverAndAddServiceSheet(
+                                a, () -> openManualDanmuMatch());
+                        a.toast("请先搜索添加弹幕服务源，或导入本地 XML / JSON");
                     }
                 });
     }
@@ -6534,12 +6919,19 @@ final class PlaybackControls {
             }
         }
         List<String> dmCandidates = collectResolvedDanmakuUrls();
-        if (a.prefs.getBoolean(Prefs.DANMAKU_DEFAULT, true)
-                && !danmakuLoaded
-                && !dmCandidates.isEmpty()) {
+        boolean defaultDanmuOn = a.prefs.getBoolean(Prefs.DANMAKU_DEFAULT, true);
+        if (defaultDanmuOn && !danmakuLoaded && !dmCandidates.isEmpty()) {
             loadDanmakuCandidateChain(dmCandidates, 0, false);
         } else if (!danmakuLoaded && !a.isLive() && !a.isCast()) {
             DanmuSettingsPanel.DanmuConfig dmCfg = DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
+            if (!dmCfg.enabled
+                    && defaultDanmuOn
+                    && !a.isTvDevice()
+                    && !dmCfg.serverUrls.isEmpty()) {
+                DanmuSettingsPanel.DanmuConfig.Builder b = dmCfg.toBuilder();
+                b.enabled = true;
+                dmCfg = b.build();
+            }
             danmaku.applyConfig(dmCfg);
             if (dmCfg.enabled && !dmCfg.serverUrls.isEmpty()) {
                 startSegmentedDanmuSession(dmCfg, false);

@@ -389,14 +389,14 @@ final class DownloadManager {
         int added = 0;
         synchronized (this) {
             for (Cms.Episode ep : episodes) {
-                String key = key(site.key, video.id, line.name, ep.name);
+                String key = key(site.key, video.id, line.rawName(), ep.name);
                 if (findKey(key) != null) continue;
                 Task t = new Task();
                 t.id = newId();
                 t.key = key;
                 t.title = text(video.title);
                 t.episode = text(ep.name);
-                t.line = text(line.name);
+                t.line = text(line.rawName());
                 t.poster = text(video.poster);
                 t.site = text(site.key);
                 t.videoId = text(video.id);

@@ -77,8 +77,13 @@ public class MoviePlayer {
         void onAudioTracksChanged();
     }
 
+    public interface OnBufferingListener {
+        void onBufferingChanged(boolean buffering);
+    }
+
     private OnTextTracksChangedListener textTracksChangedListener;
     private OnAudioTracksChangedListener audioTracksChangedListener;
+    private OnBufferingListener bufferingListener;
 
     public void setOnTextTracksChangedListener(OnTextTracksChangedListener listener) {
         onMain(
@@ -92,6 +97,14 @@ public class MoviePlayer {
         onMain(
                 () -> {
                     audioTracksChangedListener = listener;
+                    return null;
+                });
+    }
+
+    public void setOnBufferingListener(OnBufferingListener listener) {
+        onMain(
+                () -> {
+                    bufferingListener = listener;
                     return null;
                 });
     }
@@ -387,6 +400,10 @@ public class MoviePlayer {
                                 @Override
                                 public void onPlaybackStateChanged(int state) {
                                     if (released) return;
+                                    if (bufferingListener != null) {
+                                        bufferingListener.onBufferingChanged(
+                                                state == Player.STATE_BUFFERING);
+                                    }
                                     if (state == Player.STATE_READY
                                             && !readySent
                                             && !unsupportedVideo) {
@@ -1687,7 +1704,71 @@ public class MoviePlayer {
         return lang.trim();
     }
 
+    public java.util.List<VideoTrackOption> listVideoTracks() {
+        return onMain(
+                () -> {
+                    java.util.List<VideoTrackOption> out = new java.util.ArrayList<>();
+                    if (released || exo == null) return out;
+                    int idx = 0;
+                    for (androidx.media3.common.Tracks.Group group :
+                            exo.getCurrentTracks().getGroups()) {
+                        if (group.getType() != C.TRACK_TYPE_VIDEO) continue;
+                        for (int i = 0; i < group.length; i++) {
+                            if (!group.isTrackSupported(i)) continue;
+                            androidx.media3.common.Format f = group.getTrackFormat(i);
+                            String codec = shortVideoCodec(f.sampleMimeType);
+                            boolean hdr =
+                                    (f.colorInfo != null
+                                                    && androidx.media3.common.ColorInfo
+                                                            .isTransferHdr(f.colorInfo))
+                                            || MimeTypes.VIDEO_DOLBY_VISION.equals(
+                                                    f.sampleMimeType);
+                            out.add(
+                                    new VideoTrackOption(
+                                            idx++,
+                                            f.width,
+                                            f.height,
+                                            f.bitrate,
+                                            f.frameRate,
+                                            codec,
+                                            hdr,
+                                            group.isTrackSelected(i),
+                                            f.label));
+                        }
+                    }
+                    return out;
+                });
+    }
+
+    public int selectedVideoTrackIndex() {
+        java.util.List<VideoTrackOption> tracks = listVideoTracks();
+        for (int i = 0; i < tracks.size(); i++) {
+            if (tracks.get(i).selected) return tracks.get(i).index;
+        }
+        return -1;
+    }
+
+    public String activeDecodedResolution() {
+        return onMain(
+                () -> {
+                    if (released || exo == null) return "";
+                    androidx.media3.common.Format vf = exo.getVideoFormat();
+                    int w = vf != null && vf.width > 0 ? vf.width : exo.getVideoSize().width;
+                    int h = vf != null && vf.height > 0 ? vf.height : exo.getVideoSize().height;
+                    return (w > 0 && h > 0) ? (w + "×" + h) : "";
+                });
+    }
+
     public java.util.List<String> trackLabels(int type) {
+        if (type == C.TRACK_TYPE_VIDEO) {
+            java.util.List<VideoTrackOption> vTracks = listVideoTracks();
+            java.util.List<String> labels = new java.util.ArrayList<>(vTracks.size());
+            for (int i = 0; i < vTracks.size(); i++) {
+                VideoTrackOption opt = vTracks.get(i);
+                labels.add((opt.selected ? "✓ " : "") + opt.formatLabel());
+            }
+            return labels;
+        }
         return onMain(
                 () -> {
                     java.util.List<String> out = new java.util.ArrayList<>();

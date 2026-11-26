@@ -1138,7 +1138,8 @@ final class MobileInlinePlayer {
             return;
         }
         long now = System.currentTimeMillis();
-        String epKey = site.key + "\n" + video.id + "\n" + activeLine.name + "\n" + rawEpisode.name;
+        String lineKey = activeLine.rawName();
+        String epKey = site.key + "\n" + video.id + "\n" + lineKey + "\n" + rawEpisode.name;
         if (!checkpointPolicy.shouldWrite(now, pos, dur, epKey, force)) {
             return;
         }
@@ -1147,7 +1148,7 @@ final class MobileInlinePlayer {
         entry.id = video.id;
         entry.title = video.title;
         entry.poster = video.poster;
-        entry.line = activeLine.name;
+        entry.line = lineKey;
         entry.episode = rawEpisode.name;
         entry.index = activeLine.episodes.indexOf(rawEpisode);
         entry.position = pos;

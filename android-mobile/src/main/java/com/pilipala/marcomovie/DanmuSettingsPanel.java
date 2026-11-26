@@ -544,9 +544,15 @@ public final class DanmuSettingsPanel {
                 if (!line.trim().isEmpty()) rules.add(line.trim());
             }
         }
+        String unifiedOrigins =
+                DanmuSourceManager.enabledOriginsMultiline(
+                        DanmuSourceManager.loadUnifiedSources(context));
+        if (unifiedOrigins.isEmpty()) {
+            unifiedOrigins = prefs.getString(KEY_SERVER_URLS, def.serverUrls);
+        }
         return new DanmuConfig(
                 prefs.getBoolean(KEY_ENABLED, def.enabled),
-                prefs.getString(KEY_SERVER_URLS, def.serverUrls),
+                unifiedOrigins,
                 prefs.getString(KEY_APP_ID, def.appId),
                 prefs.getString(KEY_APP_SECRET, def.appSecret),
                 prefs.getFloat(KEY_OPACITY, def.opacity),
@@ -586,6 +592,7 @@ public final class DanmuSettingsPanel {
                 .putInt(KEY_MAX_ROWS, config.maxRows)
                 .putString(KEY_BLOCK_RULES, rulesJoined.toString())
                 .apply();
+        DanmuSourceManager.syncFromServerUrlsText(context, config.serverUrls);
     }
 
     public static AlertDialog showDialog(
@@ -1113,6 +1120,18 @@ public final class DanmuSettingsPanel {
         serverFooter.addView(
                 saveServerBtn,
                 new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(d, 34)));
+        final TextView discoverServerBtn =
+                (!isTv && hostActivity != null)
+                        ? makePill(
+                                context, "搜索并添加新源", d, false, reducedMotion, PillStyle.SUBTLE, th)
+                        : null;
+        if (discoverServerBtn != null) {
+            discoverServerBtn.setPadding(dp(d, 12), 0, dp(d, 12), 0);
+            LinearLayout.LayoutParams dLp =
+                    new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(d, 34));
+            dLp.leftMargin = dp(d, 8);
+            serverFooter.addView(discoverServerBtn, dLp);
+        }
         final TextView serverFeedback = new TextView(context);
         serverFeedback.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         serverFeedback.setTextColor(th.green);
@@ -1517,6 +1536,28 @@ public final class DanmuSettingsPanel {
                 });
 
         // Save server config
+        if (discoverServerBtn != null && hostActivity != null) {
+            discoverServerBtn.setOnClickListener(
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            DanmuSourceManager.showDiscoverAndAddServiceSheet(
+                                    hostActivity,
+                                    new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            DanmuConfig reloaded = loadConfig(context, isTv);
+                                            state[0] = reloaded;
+                                            serverUrlsInput.setText(reloaded.serverUrls);
+                                            if (listener != null) {
+                                                listener.onDanmuConfigChanged(reloaded);
+                                            }
+                                            refreshAll.run();
+                                        }
+                                    });
+                        }
+                    });
+        }
         saveServerBtn.setOnClickListener(
                 new View.OnClickListener() {
                     @Override

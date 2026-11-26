@@ -27,5 +27,7 @@ public final class RefreshEvent {
 
     public static void history() {}
 
-    public static void config() {}
+    public static void config() {
+        CspEngine.onPluginConfigRefresh();
+    }
 }

@@ -1433,9 +1433,12 @@ final class PlayerChrome {
     void updateMobileTopStatus(
             String clockText, int batteryPercent, boolean charging, String netSpeed) {
         if (mobileTopStatusRow == null) return;
-        boolean hasNet = netSpeed != null && !netSpeed.trim().isEmpty();
-        boolean hasBat = batteryPercent >= 0;
-        boolean hasClock = clockText != null && !clockText.trim().isEmpty();
+        int mask = a.mobilePrefs().getInt(Prefs.PLAYER_CORNER_HUD, 7);
+        boolean hasNet =
+                (mask & Prefs.HUD_NET_SPEED) != 0 && netSpeed != null && !netSpeed.trim().isEmpty();
+        boolean hasBat = (mask & Prefs.HUD_BATTERY) != 0 && batteryPercent >= 0;
+        boolean hasClock =
+                (mask & Prefs.HUD_CLOCK) != 0 && clockText != null && !clockText.trim().isEmpty();
 
         if (mobileNetSpeedView != null) {
             mobileNetSpeedView.setVisibility(hasNet ? View.VISIBLE : View.GONE);
@@ -1462,11 +1465,13 @@ final class PlayerChrome {
             mobileStatusSep2.setVisibility(
                     (hasNet || hasBat) && hasClock ? View.VISIBLE : View.GONE);
         }
-        if (mobileTopClockView != null && hasClock) {
-            if (!clockText.contentEquals(mobileTopClockView.getText())) {
+        if (mobileTopClockView != null) {
+            mobileTopClockView.setVisibility(hasClock ? View.VISIBLE : View.GONE);
+            if (hasClock && !clockText.contentEquals(mobileTopClockView.getText())) {
                 mobileTopClockView.setText(clockText);
             }
         }
+        mobileTopStatusRow.setVisibility((hasNet || hasBat || hasClock) ? View.VISIBLE : View.GONE);
     }
 
     void scheduleLayout() {
@@ -2207,15 +2212,23 @@ final class PlayerChrome {
         }
         boolean suppressLiveHud =
                 shouldSuppressLiveHudRedraws(a.isTvDevice(), hdrSurfaceActive, a.controlsVisible);
+        boolean slimPrefOn =
+                PlayerHudPrefs.isSlimProgressEnabled(a)
+                        && (a.isTvDevice()
+                                || a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true));
+        // On mobile, MobilePlayerOverlay already owns the unified bottom slim bar; avoid drawing a
+        // second overlapping bar when the overlay is attached.
+        boolean delegatedToOverlay = !a.isTvDevice() && a.mobilePlayerOverlay != null;
         boolean showSlim =
                 !suppressLiveHud
+                        && !delegatedToOverlay
                         && shouldShowSlimProgressBar(
                                 a.controlsVisible,
                                 a.miniMode,
                                 live,
                                 a.prepared,
                                 durationMs,
-                                PlayerHudPrefs.isSlimProgressEnabled(a));
+                                slimPrefOn);
         slimProgressBar.setActiveVisible(showSlim);
     }
 

@@ -193,6 +193,20 @@ public final class CspEngine implements SourceEngine {
         return ProxyAddress.port > 0 ? ProxyAddress.port : 9978;
     }
 
+    public static String detectLanAddress() {
+        return NetdiskConfigWebServer.detectLanIpv4();
+    }
+
+    public static void onPluginConfigRefresh() {
+        final MainActivity activity = MainActivity.activeActivity;
+        if (activity == null || activity.isFinishing()) return;
+        activity.worker.execute(
+                () -> {
+                    ConfigCenterBridge.syncAll(activity, activity.config, true, false, false);
+                    AccountPanel.refreshActivePage();
+                });
+    }
+
     public static void onPluginDanmaku(String path) {
         if (path == null || path.trim().isEmpty()) return;
         final String trimmed = path.trim();
@@ -232,6 +246,7 @@ public final class CspEngine implements SourceEngine {
     final Cms.Site site;
     final Spider spider;
     final Object pluginLock;
+    final List<String> vipFlags;
     public final String pluginSha256;
     private volatile boolean homeWarmed = false;
 
@@ -239,6 +254,10 @@ public final class CspEngine implements SourceEngine {
             throws Exception {
         app = wrapPluginApplication(application);
         site = selected;
+        vipFlags =
+                config != null && config.flags != null
+                        ? new ArrayList<>(config.flags)
+                        : Collections.<String>emptyList();
         if (!eligible(selected)) throw new IOException("此来源不是实验 CSP JAR 接口支持的 csp_ 站点");
         try {
             String primaryJar =
@@ -338,9 +357,15 @@ public final class CspEngine implements SourceEngine {
             }
             if (app != null && declaration != null && !declaration.isEmpty()) {
                 File folder = new File(unwrapApplication(app).getFilesDir(), "csp");
-                String key = hex(declaration.trim().split(";md5;", 2)[0].trim().getBytes("UTF-8"));
-                File identity = new File(folder, "selection-" + key + ".txt");
-                if (identity.exists()) identity.delete();
+                String fullKey = hex(declaration.getBytes("UTF-8"));
+                File fullId = new File(folder, "selection-" + fullKey + ".txt");
+                if (fullId.exists()) fullId.delete();
+                String legacyKey =
+                        hex(declaration.trim().split("(?i);md5;", 2)[0].trim().getBytes("UTF-8"));
+                if (!legacyKey.equals(fullKey)) {
+                    File legacyId = new File(folder, "selection-" + legacyKey + ".txt");
+                    if (legacyId.exists()) legacyId.delete();
+                }
             }
         } catch (Throwable ignored) {
         }
@@ -1341,8 +1366,17 @@ public final class CspEngine implements SourceEngine {
                     }) {
                 try {
                     Class<?> proxyCls = Class.forName(proxyClassName, false, cl);
-                    Method m = proxyCls.getMethod("proxy", Map.class);
-                    Object raw = m.invoke(null, params);
+                    Object raw;
+                    try {
+                        Method m = proxyCls.getMethod("proxy", Map.class);
+                        raw = m.invoke(null, params);
+                    } catch (NoSuchMethodException mapMissing) {
+                        Method hm = proxyCls.getMethod("proxy", HashMap.class);
+                        raw =
+                                hm.invoke(
+                                        null,
+                                        params instanceof HashMap ? params : new HashMap<>(params));
+                    }
                     if (raw instanceof Object[]) {
                         Object[] arr = (Object[]) raw;
                         boolean nonEmptyStream = true;
@@ -1411,6 +1445,9 @@ public final class CspEngine implements SourceEngine {
                 if (candidates.isEmpty()) throw e;
             }
         }
+        for (DexClassLoader loaded : LOADERS.values()) {
+            if (loaded != null) candidates.add(loaded);
+        }
         // playerContent may call its own HTTP proxy synchronously. Holding its
         // catalogue lock here would deadlock that reentrant network request.
         Throwable lastError = null;
@@ -1458,8 +1495,13 @@ public final class CspEngine implements SourceEngine {
             } catch (Throwable t) {
                 Throwable error = unwrap(t);
                 diagnostic(operation + "_failed", site.api, error);
+                String detail = safePluginErrorDetail(error);
                 throw new EngineException(
-                        "扩展来源请求失败：" + error.getClass().getSimpleName() + "。请检查来源或稍后重试。", error);
+                        "扩展来源请求失败："
+                                + error.getClass().getSimpleName()
+                                + (detail.isEmpty() ? "" : "（" + detail + "）")
+                                + "。请检查来源或稍后重试。",
+                        error);
             }
         }
     }
@@ -1604,7 +1646,13 @@ public final class CspEngine implements SourceEngine {
                     String raw = null;
                     for (int attempt = 0; attempt < 2; attempt++) {
                         try {
-                            raw = spider.playerContent(flag, id, Collections.emptyList());
+                            raw =
+                                    spider.playerContent(
+                                            flag,
+                                            id,
+                                            vipFlags != null
+                                                    ? vipFlags
+                                                    : Collections.<String>emptyList());
                             if (raw != null && !raw.trim().isEmpty()) {
                                 break;
                             }
@@ -1807,6 +1855,19 @@ public final class CspEngine implements SourceEngine {
         return true;
     }
 
+    private static File safeExternalFilesDir(Context app) {
+        if (app == null) return null;
+        try {
+            Object dir =
+                    app.getClass()
+                            .getMethod("getExternalFilesDir", String.class)
+                            .invoke(app, new Object[] {null});
+            return dir instanceof File ? (File) dir : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     static File obtain(Context app, String declaration) throws Exception {
         if (declaration == null || declaration.trim().isEmpty())
             throw new IOException("配置没有声明 spider 插件");
@@ -1820,7 +1881,14 @@ public final class CspEngine implements SourceEngine {
         if (address.startsWith("file:")) {
             File localFile = new File(URI.create(address));
             String allowedPrefix = app.getFilesDir().getCanonicalPath() + File.separator;
-            if (!localFile.exists() || !localFile.getCanonicalPath().startsWith(allowedPrefix)) {
+            File extDir = safeExternalFilesDir(app);
+            String extPrefix = extDir != null ? (extDir.getCanonicalPath() + File.separator) : null;
+            String canon = localFile.exists() ? localFile.getCanonicalPath() : "";
+            boolean inAllowed =
+                    !canon.isEmpty()
+                            && (canon.startsWith(allowedPrefix)
+                                    || (extPrefix != null && canon.startsWith(extPrefix)));
+            if (!localFile.exists() || !inAllowed) {
                 throw new IOException("本地 spider 插件不存在或不在受保护目录内");
             }
             if (!expected.isEmpty() && !expected.equals(digest(localFile, "MD5")))
@@ -1893,22 +1961,29 @@ public final class CspEngine implements SourceEngine {
                 }
                 boolean done = false;
                 boolean forceDirect = false;
-                for (int redirect = 0; redirect < 5 && !done; redirect++) {
+                String[] userAgents = {Cms.USER_AGENT, Cms.MOBILE_USER_AGENT, Cms.TVBOX_USER_AGENT};
+                int uaIdx = 0;
+                for (int redirect = 0; redirect < 10 && !done; redirect++) {
                     checkRequest();
                     boolean canFallbackDirect =
                             !forceDirect && ProxyAddress.hasActiveHttpProxy(next);
                     HttpURLConnection c = ProxyAddress.openHttpConnection(next, forceDirect);
                     c.setConnectTimeout(12000);
-                    c.setReadTimeout(20000);
+                    c.setReadTimeout(25000);
                     c.setInstanceFollowRedirects(false);
-                    c.setRequestProperty("User-Agent", Cms.USER_AGENT);
+                    c.setRequestProperty("User-Agent", userAgents[uaIdx]);
+                    c.setRequestProperty("Accept", "*/*");
                     if (authorization != null) c.setRequestProperty("Authorization", authorization);
                     RequestScope.attach(c);
                     try {
                         int code;
                         try {
                             code = c.getResponseCode();
-                        } catch (ConnectException | SocketTimeoutException proxyIo) {
+                        } catch (ConnectException
+                                | SocketTimeoutException
+                                | javax.net.ssl.SSLException
+                                | EOFException
+                                | UnknownHostException proxyIo) {
                             if (canFallbackDirect) {
                                 forceDirect = true;
                                 redirect--;
@@ -1918,6 +1993,11 @@ public final class CspEngine implements SourceEngine {
                         }
                         if (canFallbackDirect && ProxyAddress.shouldRetryDirectAfterStatus(code)) {
                             forceDirect = true;
+                            redirect--;
+                            continue;
+                        }
+                        if (code == 403 && uaIdx + 1 < userAgents.length) {
+                            uaIdx++;
                             redirect--;
                             continue;
                         }
@@ -1961,6 +2041,9 @@ public final class CspEngine implements SourceEngine {
                     }
                 }
                 if (!done) throw new IOException("插件重定向次数过多");
+                if (looksLikeHtmlInsteadOfJar(temp)) {
+                    throw new IOException("插件地址返回了网页内容而非 JAR/DEX 压缩包");
+                }
                 String actualMd5 = expected.isEmpty() ? "" : digest(temp, "MD5");
                 if (!expected.isEmpty() && !expected.equals(actualMd5))
                     throw new IOException("插件 MD5 与配置不一致，已拒绝加载");
@@ -1971,8 +2054,12 @@ public final class CspEngine implements SourceEngine {
                 String sha = digest(temp, "SHA-256");
                 File artifact = new File(folder, sha + ".jar");
                 if (artifact.exists()) {
-                    if (!verifyCachedArtifact(artifact, sha, expected))
-                        throw new IOException("缓存插件摘要不一致");
+                    if (!verifyCachedArtifact(artifact, sha, expected)) {
+                        artifact.setWritable(true);
+                        if (!artifact.delete() || !temp.renameTo(artifact)) {
+                            throw new IOException("缓存插件摘要不一致且无法覆盖修复");
+                        }
+                    }
                 } else if (!temp.renameTo(artifact)) throw new IOException("无法保存插件");
                 artifact.setReadOnly();
                 VERIFIED_CACHE.put(sha, new VerifiedArtifact(artifact, sha, actualMd5));
@@ -1983,6 +2070,27 @@ public final class CspEngine implements SourceEngine {
             } finally {
                 temp.delete();
             }
+        }
+    }
+
+    static boolean looksLikeHtmlInsteadOfJar(File file) {
+        if (file == null || !file.isFile() || file.length() < 4) return true;
+        byte[] head = new byte[(int) Math.min(256L, file.length())];
+        try (InputStream in = new FileInputStream(file)) {
+            int read = in.read(head);
+            if (read < 4) return true;
+            // ZIP archive magic: PK\x03\x04 (also allow custom-header obfuscated JARs that ZipFile
+            // can still open)
+            if ((head[0] & 0xFF) == 0x50 && (head[1] & 0xFF) == 0x4B) return false;
+            String prefix = new String(head, 0, read, "UTF-8").trim().toLowerCase(Locale.ROOT);
+            return prefix.startsWith("<!doctype html")
+                    || prefix.startsWith("<html")
+                    || prefix.startsWith("<?xml")
+                    || (prefix.startsWith("{")
+                            && prefix.contains("\"code\"")
+                            && !prefix.contains("dex"));
+        } catch (Exception ignored) {
+            return false;
         }
     }
 

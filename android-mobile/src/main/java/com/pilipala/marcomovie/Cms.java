@@ -189,6 +189,7 @@ public final class Cms {
         public String name = "", url = "";
         public int type;
         public final Map<String, String> headers = new LinkedHashMap<>();
+        public final List<String> flags = new ArrayList<>();
     }
 
     public static final class SniffRule {
@@ -231,6 +232,7 @@ public final class Cms {
         public final List<Parse> parses = new ArrayList<>();
         public final List<SniffRule> rules = new ArrayList<>();
         public final List<String> ads = new ArrayList<>();
+        public final List<String> flags = new ArrayList<>();
         public String raw;
         public String spider;
         public String origin = "", warehouse = "";
@@ -248,7 +250,7 @@ public final class Cms {
         public static final int MAX_EXT_SIZE = 128 * 1024;
 
         public String key = "", name = "", api = "", playUrl = "", jar = "";
-        public String originalKey = "", originalApi = "", group = "默认分组";
+        public String originalKey = "", originalApi = "", group = "默认分组", sourceOrigin = "";
         public int type;
         public final Map<String, String> headers = new LinkedHashMap<>();
         public boolean requiresParser;
@@ -421,7 +423,12 @@ public final class Cms {
 
     public static final class Line {
         public String name;
+        public String rawName;
         public final List<Episode> episodes = new ArrayList<>();
+
+        public String rawName() {
+            return (rawName != null && !rawName.isEmpty()) ? rawName : (name == null ? "" : name);
+        }
     }
 
     public static final class Episode {
@@ -1096,7 +1103,7 @@ public final class Cms {
         String rawSpider = optSafeString(root, "spider", "").trim();
         if (rawSpider.isEmpty()) rawSpider = optSafeString(root, "jar", "").trim();
         if (!rawSpider.isEmpty()) {
-            String[] spParts = rawSpider.split(";md5;", 2);
+            String[] spParts = rawSpider.split("(?i);md5;", 2);
             out.spider =
                     resolve(origin, spParts[0]) + (spParts.length == 2 ? ";md5;" + spParts[1] : "");
         } else {
@@ -1117,14 +1124,19 @@ public final class Cms {
                 p.headers.put("User-Agent", USER_AGENT);
                 copySafeHeaders(p.headers, pj.opt("header"));
                 copySafeHeaders(p.headers, pj.opt("headers"));
+                appendStringList(p.flags, pj.opt("flag"));
+                appendStringList(p.flags, pj.opt("flags"));
                 JSONObject pExt = pj.optJSONObject("ext");
                 if (pExt != null) {
                     copySafeHeaders(p.headers, pExt.opt("header"));
                     copySafeHeaders(p.headers, pExt.opt("headers"));
+                    appendStringList(p.flags, pExt.opt("flag"));
+                    appendStringList(p.flags, pExt.opt("flags"));
                 }
                 out.parses.add(p);
             }
         }
+        appendStringList(out.flags, root.opt("flags"));
         JSONArray rulesArr = root.optJSONArray("rules");
         if (rulesArr != null) {
             for (int i = 0; i < Math.min(200, rulesArr.length()); i++) {
@@ -1169,9 +1181,11 @@ public final class Cms {
             s.type = Json.integer(j, "type", -1);
             s.api = resolve(origin, optSafeString(j, "api", "").trim());
             s.originalApi = s.api;
+            String siteOrigin = optSafeString(j, "_marco_origin", "").trim();
+            s.sourceOrigin = !siteOrigin.isEmpty() ? siteOrigin : (origin == null ? "" : origin);
             String rawJar = optSafeString(j, "jar", "").trim();
             if (!rawJar.isEmpty()) {
-                String[] jarParts = rawJar.split(";md5;", 2);
+                String[] jarParts = rawJar.split("(?i);md5;", 2);
                 s.jar =
                         resolve(origin, jarParts[0])
                                 + (jarParts.length == 2 ? ";md5;" + jarParts[1] : "");

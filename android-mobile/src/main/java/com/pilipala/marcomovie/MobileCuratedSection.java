@@ -42,13 +42,31 @@ final class MobileCuratedSection {
 
     private MobileCuratedSection() {}
 
-    /** Renders all 6 editorial discovery modules inside {@code host}. */
+    /** Renders user-enabled editorial discovery modules inside {@code host}. */
     static void renderInto(
             final MainActivity a,
             final LinearLayout host,
             final boolean hasUserSources,
             final boolean firstUnderHero) {
+        renderInto(
+                a, host, hasUserSources, firstUnderHero, MobileHomeSections.visibleCuratedIds(a));
+    }
+
+    static void renderInto(
+            final MainActivity a,
+            final LinearLayout host,
+            final boolean hasUserSources,
+            final boolean firstUnderHero,
+            final List<String> visibleCuratedIds) {
         if (a == null || host == null) return;
+        final List<String> enabledModules =
+                visibleCuratedIds == null ? new ArrayList<String>() : visibleCuratedIds;
+        if (enabledModules.isEmpty()) {
+            host.setTag("empty-curated");
+            ImageLoader.detachImageViews(host);
+            host.removeAllViews();
+            return;
+        }
         final MobileTheme.Palette p = MobileTheme.of(a);
         final Cms.Site curatedSite = MobileCuratedDiscovery.curatedSiteSentinel();
 
@@ -79,18 +97,20 @@ final class MobileCuratedSection {
         List<Cms.Video> dcItems = MobileCuratedDiscovery.peekModule(dcSpec);
 
         String fp =
-                buildCuratedRenderFingerprint(
-                        p.isDark,
-                        hasUserSources,
-                        firstUnderHero,
-                        trendingItems,
-                        cnHotItems,
-                        varietyItems,
-                        doubanItems,
-                        rtItems,
-                        disneyItems,
-                        marvelItems,
-                        dcItems);
+                enabledModules.toString()
+                        + "#"
+                        + buildCuratedRenderFingerprint(
+                                p.isDark,
+                                hasUserSources,
+                                firstUnderHero,
+                                trendingItems,
+                                cnHotItems,
+                                varietyItems,
+                                doubanItems,
+                                rtItems,
+                                disneyItems,
+                                marvelItems,
+                                dcItems);
         if (host.getChildCount() > 0 && fp.equals(host.getTag())) {
             return;
         }
@@ -98,238 +118,240 @@ final class MobileCuratedSection {
         ImageLoader.detachImageViews(host);
         host.removeAllViews();
 
-        // 1. 光影风向标 (16:9 Widescreen Cinema Frame Shelf)
-        addWidescreenRadarShelf(
-                a,
-                host,
-                curatedSite,
-                "光影风向标",
-                trendingSpec,
-                trendingItems,
-                firstUnderHero,
-                hasUserSources);
-
-        // 2. 月度策划 · 藤蔓特辑 (Botanical Vine Editorial Collection Cards)
-        a.gap(host, 20);
-        addSectionHeader(a, host, "月度策划", "藤蔓特辑", null, false);
-        HorizontalScrollView edHsv = new HorizontalScrollView(a);
-        edHsv.setHorizontalScrollBarEnabled(false);
-        edHsv.setClipToPadding(false);
-        edHsv.setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(4));
-        LinearLayout edRow = a.row();
-        edRow.setGravity(Gravity.TOP);
-        edRow.setBaselineAligned(false);
-        edHsv.addView(edRow);
-
-        addEditorialCollectionCard(
-                a,
-                edRow,
-                curatedSite,
-                "当月欢笑 · 热门综艺",
-                varietySpec,
-                varietyItems,
-                p.isDark ? 0xFF3E3A32 : 0xFF70685A,
-                varietySpec.accentColor,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
-        addEditorialCollectionCard(
-                a,
-                edRow,
-                curatedSite,
-                "当月热追 · 精选剧集",
-                cnHotSpec,
-                cnHotItems,
-                p.isDark ? 0xFF21312F : 0xFF3A5451,
-                cnHotSpec.accentColor,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
-        addEditorialCollectionCard(
-                a,
-                edRow,
-                curatedSite,
-                "高分必刷 · 影迷片单",
-                doubanSpec,
-                doubanItems,
-                p.isDark ? 0xFF1D3125 : 0xFF31523E,
-                doubanSpec.accentColor,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
-        addEditorialCollectionCard(
-                a,
-                edRow,
-                curatedSite,
-                "口碑风向 · 全球严选",
-                rtSpec,
-                rtItems,
-                p.isDark ? 0xFF372028 : 0xFF5D3542,
-                rtSpec.accentColor,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
-        host.addView(edHsv, new LinearLayout.LayoutParams(-1, -2));
-
-        // 3. 热播剧影榜 (Ranked 2:3 Vertical Poster Shelf)
-        a.gap(host, 20);
-        addRankedPortraitShelf(
-                a, host, curatedSite, "热播剧影榜", cnHotSpec, cnHotItems, hasUserSources);
-
-        // 4. 灵感片单 (Fanned 3-Poster Mood Capsules)
-        a.gap(host, 20);
-        addSectionHeader(a, host, "灵感片单", null, null, false);
-        HorizontalScrollView moodHsv = new HorizontalScrollView(a);
-        moodHsv.setHorizontalScrollBarEnabled(false);
-        moodHsv.setClipToPadding(false);
-        moodHsv.setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(4));
-        LinearLayout moodRow = a.row();
-        moodRow.setGravity(Gravity.CENTER_VERTICAL);
-        moodHsv.addView(moodRow);
-
-        addMoodCapsule(
-                a,
-                moodRow,
-                curatedSite,
-                "轻松解压",
-                disneySpec,
-                disneyItems,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
-        addMoodCapsule(
-                a,
-                moodRow,
-                curatedSite,
-                "高能热剧",
-                cnHotSpec,
-                cnHotItems,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
-        addMoodCapsule(
-                a,
-                moodRow,
-                curatedSite,
-                "下饭综艺",
-                varietySpec,
-                varietyItems,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_GRAVITY_STACK);
-        addMoodCapsule(
-                a,
-                moodRow,
-                curatedSite,
-                "院线新片",
-                trendingSpec,
-                trendingItems,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
-        addMoodCapsule(
-                a,
-                moodRow,
-                curatedSite,
-                "热血超英",
-                marvelSpec,
-                marvelItems,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
-        addMoodCapsule(
-                a,
-                moodRow,
-                curatedSite,
-                "暗黑悬疑",
-                dcSpec,
-                dcItems,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
-        host.addView(moodHsv, new LinearLayout.LayoutParams(-1, -2));
-
-        // 5. 影业档案室 (Studio Brand Cards with Tilted 2x2 Poster Collage)
-        a.gap(host, 20);
-        addSectionHeader(a, host, "影业档案室", hasUserSources ? "点播自动匹配片源" : "需添加片源播放", null, false);
-        HorizontalScrollView studioHsv = new HorizontalScrollView(a);
-        studioHsv.setHorizontalScrollBarEnabled(false);
-        studioHsv.setClipToPadding(false);
-        studioHsv.setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(4));
-        LinearLayout studioRow = a.row();
-        studioRow.setGravity(Gravity.TOP);
-        studioRow.setBaselineAligned(false);
-        studioHsv.addView(studioRow);
-
-        addStudioFanCard(
-                a,
-                studioRow,
-                curatedSite,
-                0,
-                disneySpec,
-                disneyItems,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
-        addStudioFanCard(
-                a,
-                studioRow,
-                curatedSite,
-                1,
-                marvelSpec,
-                marvelItems,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
-        addStudioFanCard(
-                a,
-                studioRow,
-                curatedSite,
-                2,
-                dcSpec,
-                dcItems,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
-        host.addView(studioHsv, new LinearLayout.LayoutParams(-1, -2));
-
-        // 6. 口碑典藏馆 (3-Row Staggered Poster Mosaic Collector Cards)
-        a.gap(host, 20);
-        addSectionHeader(a, host, "口碑典藏馆", null, null, false);
-        HorizontalScrollView mosaicHsv = new HorizontalScrollView(a);
-        mosaicHsv.setHorizontalScrollBarEnabled(false);
-        mosaicHsv.setClipToPadding(false);
-        mosaicHsv.setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(4));
-        LinearLayout mosaicRow = a.row();
-        mosaicRow.setGravity(Gravity.TOP);
-        mosaicRow.setBaselineAligned(false);
-        mosaicHsv.addView(mosaicRow);
-
-        addMosaicCard(
-                a,
-                mosaicRow,
-                curatedSite,
-                "高分殿堂",
-                "影迷严选年度佳作",
-                doubanItems,
-                doubanSpec.accentColor,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
-        addMosaicCard(
-                a,
-                mosaicRow,
-                curatedSite,
-                "口碑新片",
-                "全球影评新鲜直击",
-                rtItems,
-                rtSpec.accentColor,
-                hasUserSources,
-                MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
-        List<Cms.Video> heroUniverse = new ArrayList<>();
-        for (int i = 0; i < Math.min(6, marvelItems.size()); i++)
-            heroUniverse.add(marvelItems.get(i));
-        for (int i = 0; i < Math.min(6, dcItems.size()); i++) heroUniverse.add(dcItems.get(i));
-        List<Cms.Video> heroUniverseAll = new ArrayList<>(marvelItems);
-        heroUniverseAll.addAll(dcItems);
-        addMosaicCard(
-                a,
-                mosaicRow,
-                curatedSite,
-                "英雄宇宙",
-                "漫威 · DC 史诗巡礼",
-                heroUniverse,
-                marvelSpec.accentColor,
-                hasUserSources,
-                heroUniverseAll,
-                MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
-        host.addView(mosaicHsv, new LinearLayout.LayoutParams(-1, -2));
+        boolean firstRendered = true;
+        for (String modId : enabledModules) {
+            boolean markFirst = firstRendered && firstUnderHero;
+            if (!firstRendered) {
+                a.gap(host, 20);
+            }
+            if (MobileHomeSections.ID_WIDESCREEN_RADAR.equals(modId)) {
+                addWidescreenRadarShelf(
+                        a,
+                        host,
+                        curatedSite,
+                        "光影风向标",
+                        trendingSpec,
+                        trendingItems,
+                        markFirst,
+                        hasUserSources);
+                firstRendered = false;
+            } else if (MobileHomeSections.ID_EDITORIAL_PICKS.equals(modId)) {
+                addSectionHeader(a, host, "月度策划", "藤蔓特辑", null, markFirst);
+                HorizontalScrollView edHsv = new HorizontalScrollView(a);
+                edHsv.setHorizontalScrollBarEnabled(false);
+                edHsv.setClipToPadding(false);
+                edHsv.setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(4));
+                LinearLayout edRow = a.row();
+                edRow.setGravity(Gravity.TOP);
+                edRow.setBaselineAligned(false);
+                edHsv.addView(edRow);
+                addEditorialCollectionCard(
+                        a,
+                        edRow,
+                        curatedSite,
+                        "当月欢笑 · 热门综艺",
+                        varietySpec,
+                        varietyItems,
+                        p.isDark ? 0xFF3E3A32 : 0xFF70685A,
+                        varietySpec.accentColor,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
+                addEditorialCollectionCard(
+                        a,
+                        edRow,
+                        curatedSite,
+                        "当月热追 · 精选剧集",
+                        cnHotSpec,
+                        cnHotItems,
+                        p.isDark ? 0xFF21312F : 0xFF3A5451,
+                        cnHotSpec.accentColor,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
+                addEditorialCollectionCard(
+                        a,
+                        edRow,
+                        curatedSite,
+                        "高分必刷 · 影迷片单",
+                        doubanSpec,
+                        doubanItems,
+                        p.isDark ? 0xFF1D3125 : 0xFF31523E,
+                        doubanSpec.accentColor,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
+                addEditorialCollectionCard(
+                        a,
+                        edRow,
+                        curatedSite,
+                        "口碑风向 · 全球严选",
+                        rtSpec,
+                        rtItems,
+                        p.isDark ? 0xFF372028 : 0xFF5D3542,
+                        rtSpec.accentColor,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
+                host.addView(edHsv, new LinearLayout.LayoutParams(-1, -2));
+                firstRendered = false;
+            } else if (MobileHomeSections.ID_HOT_STREAM.equals(modId)) {
+                addRankedPortraitShelf(
+                        a, host, curatedSite, "热播剧影榜", cnHotSpec, cnHotItems, hasUserSources);
+                firstRendered = false;
+            } else if (MobileHomeSections.ID_MOOD_CAPSULES.equals(modId)) {
+                addSectionHeader(a, host, "灵感片单", null, null, markFirst);
+                HorizontalScrollView moodHsv = new HorizontalScrollView(a);
+                moodHsv.setHorizontalScrollBarEnabled(false);
+                moodHsv.setClipToPadding(false);
+                moodHsv.setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(4));
+                LinearLayout moodRow = a.row();
+                moodRow.setGravity(Gravity.CENTER_VERTICAL);
+                moodHsv.addView(moodRow);
+                addMoodCapsule(
+                        a,
+                        moodRow,
+                        curatedSite,
+                        "轻松解压",
+                        disneySpec,
+                        disneyItems,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
+                addMoodCapsule(
+                        a,
+                        moodRow,
+                        curatedSite,
+                        "高能热剧",
+                        cnHotSpec,
+                        cnHotItems,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
+                addMoodCapsule(
+                        a,
+                        moodRow,
+                        curatedSite,
+                        "下饭综艺",
+                        varietySpec,
+                        varietyItems,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_GRAVITY_STACK);
+                addMoodCapsule(
+                        a,
+                        moodRow,
+                        curatedSite,
+                        "院线新片",
+                        trendingSpec,
+                        trendingItems,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
+                addMoodCapsule(
+                        a,
+                        moodRow,
+                        curatedSite,
+                        "热血超英",
+                        marvelSpec,
+                        marvelItems,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
+                addMoodCapsule(
+                        a,
+                        moodRow,
+                        curatedSite,
+                        "暗黑悬疑",
+                        dcSpec,
+                        dcItems,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
+                host.addView(moodHsv, new LinearLayout.LayoutParams(-1, -2));
+                firstRendered = false;
+            } else if (MobileHomeSections.ID_STUDIO_GALLERIES.equals(modId)) {
+                addSectionHeader(
+                        a, host, "影业档案室", hasUserSources ? "点播自动匹配片源" : "需添加片源播放", null, markFirst);
+                HorizontalScrollView studioHsv = new HorizontalScrollView(a);
+                studioHsv.setHorizontalScrollBarEnabled(false);
+                studioHsv.setClipToPadding(false);
+                studioHsv.setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(4));
+                LinearLayout studioRow = a.row();
+                studioRow.setGravity(Gravity.TOP);
+                studioRow.setBaselineAligned(false);
+                studioHsv.addView(studioRow);
+                addStudioFanCard(
+                        a,
+                        studioRow,
+                        curatedSite,
+                        0,
+                        disneySpec,
+                        disneyItems,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
+                addStudioFanCard(
+                        a,
+                        studioRow,
+                        curatedSite,
+                        1,
+                        marvelSpec,
+                        marvelItems,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
+                addStudioFanCard(
+                        a,
+                        studioRow,
+                        curatedSite,
+                        2,
+                        dcSpec,
+                        dcItems,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
+                host.addView(studioHsv, new LinearLayout.LayoutParams(-1, -2));
+                firstRendered = false;
+            } else if (MobileHomeSections.ID_POSTER_MOSAICS.equals(modId)) {
+                addSectionHeader(a, host, "口碑典藏馆", null, null, markFirst);
+                HorizontalScrollView mosaicHsv = new HorizontalScrollView(a);
+                mosaicHsv.setHorizontalScrollBarEnabled(false);
+                mosaicHsv.setClipToPadding(false);
+                mosaicHsv.setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(4));
+                LinearLayout mosaicRow = a.row();
+                mosaicRow.setGravity(Gravity.TOP);
+                mosaicRow.setBaselineAligned(false);
+                mosaicHsv.addView(mosaicRow);
+                addMosaicCard(
+                        a,
+                        mosaicRow,
+                        curatedSite,
+                        "高分殿堂",
+                        "影迷严选年度佳作",
+                        doubanItems,
+                        doubanSpec.accentColor,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_TETRIS_TUMBLE);
+                addMosaicCard(
+                        a,
+                        mosaicRow,
+                        curatedSite,
+                        "口碑新片",
+                        "全球影评新鲜直击",
+                        rtItems,
+                        rtSpec.accentColor,
+                        hasUserSources,
+                        MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
+                List<Cms.Video> heroUniverse = new ArrayList<>();
+                for (int i = 0; i < Math.min(6, marvelItems.size()); i++)
+                    heroUniverse.add(marvelItems.get(i));
+                for (int i = 0; i < Math.min(6, dcItems.size()); i++)
+                    heroUniverse.add(dcItems.get(i));
+                List<Cms.Video> heroUniverseAll = new ArrayList<>(marvelItems);
+                heroUniverseAll.addAll(dcItems);
+                addMosaicCard(
+                        a,
+                        mosaicRow,
+                        curatedSite,
+                        "英雄宇宙",
+                        "漫威 · DC 史诗巡礼",
+                        heroUniverse,
+                        marvelSpec.accentColor,
+                        hasUserSources,
+                        heroUniverseAll,
+                        MobileCuratedWallScreen.STYLE_BLACK_HOLE_VORTEX);
+                host.addView(mosaicHsv, new LinearLayout.LayoutParams(-1, -2));
+                firstRendered = false;
+            }
+        }
     }
 
     private static String buildCuratedRenderFingerprint(

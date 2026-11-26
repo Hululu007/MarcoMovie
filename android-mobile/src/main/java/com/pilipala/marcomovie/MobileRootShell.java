@@ -180,6 +180,7 @@ final class MobileRootShell {
     private TextView collapsedPillLabel;
     private MobileIcons.IconView searchBubbleIcon;
     private MobileIcons.IconView collapsedSearchIcon;
+    private int renderedHomeSectionsRev = -1;
 
     MobileRootShell(MainActivity activity) {
         this.a = activity;
@@ -329,6 +330,11 @@ final class MobileRootShell {
         a.setContentView(shellRoot);
         a.watchRootLayout(shellRoot);
         expandDock();
+        if (activeTab == TAB_HOME && renderedHomeSectionsRev != MobileHomeSections.revision()) {
+            renderedHomeSectionsRev = MobileHomeSections.revision();
+            switchTab(TAB_HOME);
+            return true;
+        }
         ImageLoader.resumeMissingPosters(a, shellRoot);
         return true;
     }
@@ -1415,44 +1421,131 @@ final class MobileRootShell {
     }
 
     void showQuickSourceAndModeSheet() {
-        final List<String> labels = new ArrayList<>();
-        final List<Runnable> actions = new ArrayList<>();
-        int selectedIdx = 0;
+        final MobileTheme.Palette p = MobileTheme.of(a);
+        final MobileBottomSheet.SheetHandle[] handleRef = new MobileBottomSheet.SheetHandle[1];
+        LinearLayout content = a.vertical();
+        content.setPadding(a.dp(2), a.dp(4), a.dp(2), a.dp(8));
 
         if (a.config != null && !a.config.sites.isEmpty()) {
-            for (final Cms.Site s : a.config.sites) {
-                if (!a.available(s)) continue;
-                boolean isCur = activeSite != null && s.key.equals(activeSite.key);
-                if (isCur) selectedIdx = labels.size();
-                labels.add("片源 · " + s.name);
-                actions.add(
-                        () -> {
-                            a.prefs
-                                    .edit()
-                                    .putString(Prefs.SELECTED_SITE, s.key)
-                                    .putString(Prefs.RECOVERED_SKIP_SITE, "")
-                                    .apply();
-                            activeSite = s;
-                            switchTab(TAB_HOME);
-                        });
-            }
-            if (a.config.depots != null && a.config.depots.length() > 1) {
-                labels.add("切换多仓仓库 (" + a.config.depots.length() + " 个子仓)");
-                actions.add(() -> SourcePicker.showWarehouses(a));
-            }
-        }
-        labels.add("导入或更新配置源");
-        actions.add(() -> UiWidgets.showMobileImportDialog(a));
+            float density = Math.max(1f, a.getResources().getDisplayMetrics().density);
+            float fontScale = a.getResources().getConfiguration().fontScale;
+            float availWidthDp = Math.max(220f, (a.windowWidth() - a.dp(36)) / density);
+            int cols = SourcePickerLayout.resolveQuickSwitchColumns(availWidthDp, fontScale);
+            int gapPx = a.dp(8);
 
-        UiWidgets.showDrawerPicker(
-                a,
-                "快速切换首页与片源",
-                "按住底栏「发现」图标上滑可随时呼出此面板",
-                labels.toArray(new String[0]),
-                selectedIdx,
-                idx -> {
-                    if (idx >= 0 && idx < actions.size()) actions.get(idx).run();
+            LinearLayout grid = a.vertical();
+            LinearLayout row = null;
+            int colIdx = 0;
+            for (final Cms.Site s : a.config.sites) {
+                if (s == null) continue;
+                final boolean avail = a.available(s);
+                if (!avail) continue;
+                if (row == null || colIdx == cols) {
+                    row = a.row();
+                    row.setBaselineAligned(false);
+                    LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+                    rlp.bottomMargin = gapPx;
+                    grid.addView(row, rlp);
+                    colIdx = 0;
+                }
+                final boolean isCur = activeSite != null && s.key.equals(activeSite.key);
+                final boolean isPref = SourcePreferences.isPreferred(a, s);
+                LinearLayout card =
+                        SourcePickerLayout.buildMobileSourceCard(
+                                a,
+                                s,
+                                isCur,
+                                isPref,
+                                true,
+                                () -> {
+                                    if (handleRef[0] != null) handleRef[0].dismiss();
+                                    SourcePicker.commitSelectedSiteForCrashGuard(a, s.key);
+                                    activeSite = s;
+                                    switchTab(TAB_HOME);
+                                },
+                                () -> {
+                                    a.prefs
+                                            .edit()
+                                            .putString(
+                                                    Prefs.PREFERRED_SITE,
+                                                    isPref ? "" : SourcePreferences.identity(s))
+                                            .apply();
+                                    a.toast(isPref ? "已取消常用片源" : "已设为常用片源");
+                                    if (handleRef[0] != null) handleRef[0].dismiss();
+                                    showQuickSourceAndModeSheet();
+                                },
+                                () -> {
+                                    if (handleRef[0] != null) handleRef[0].dismiss();
+                                    SourcePicker.showSiteActionMenu(a, a.config, s, null);
+                                });
+                LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, -2, 1f);
+                if (colIdx + 1 < cols) clp.rightMargin = gapPx;
+                row.addView(card, clp);
+                colIdx++;
+            }
+            if (row != null && colIdx > 0 && colIdx < cols) {
+                for (int pad = colIdx; pad < cols; pad++) {
+                    LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(0, 1, 1f);
+                    if (pad + 1 < cols) plp.rightMargin = gapPx;
+                    row.addView(new View(a), plp);
+                }
+            }
+            content.addView(grid, new LinearLayout.LayoutParams(-1, -2));
+        } else {
+            TextView empty = a.text("尚未导入片源配置，可先导入订阅源或查看推荐榜单。", 13f, p.textSecondary);
+            empty.setPadding(a.dp(4), a.dp(8), a.dp(4), a.dp(12));
+            content.addView(empty);
+        }
+
+        LinearLayout footerRow = a.row();
+        footerRow.setPadding(0, a.dp(6), 0, 0);
+        if (a.config != null && !a.config.sites.isEmpty()) {
+            TextView fullPickerBtn = a.text("完整片源管理", 12.5f, p.textPrimary);
+            fullPickerBtn.setTypeface(null, Typeface.BOLD);
+            fullPickerBtn.setGravity(Gravity.CENTER);
+            fullPickerBtn.setBackground(MobileTheme.subtleBg(a, 999));
+            MobileMotion.bindPress(fullPickerBtn, 0.95f);
+            fullPickerBtn.setOnClickListener(
+                    v -> {
+                        if (handleRef[0] != null) handleRef[0].dismiss();
+                        SourcePicker.show(a);
+                    });
+            LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(0, a.dp(38), 1f);
+            flp.rightMargin = a.dp(8);
+            footerRow.addView(fullPickerBtn, flp);
+        }
+        if (a.config != null && a.config.depots != null && a.config.depots.length() > 1) {
+            TextView depotBtn =
+                    a.text("切换多仓 (" + a.config.depots.length() + ")", 12.5f, p.textPrimary);
+            depotBtn.setTypeface(null, Typeface.BOLD);
+            depotBtn.setGravity(Gravity.CENTER);
+            depotBtn.setBackground(MobileTheme.subtleBg(a, 999));
+            MobileMotion.bindPress(depotBtn, 0.95f);
+            depotBtn.setOnClickListener(
+                    v -> {
+                        if (handleRef[0] != null) handleRef[0].dismiss();
+                        SourcePicker.showWarehouses(a);
+                    });
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(0, a.dp(38), 1f);
+            dlp.rightMargin = a.dp(8);
+            footerRow.addView(depotBtn, dlp);
+        }
+        TextView importBtn = a.text("导入/更新配置", 12.5f, p.accentOnFill);
+        importBtn.setTypeface(null, Typeface.BOLD);
+        importBtn.setGravity(Gravity.CENTER);
+        importBtn.setBackground(MobileTheme.accentPillBg(a, 999));
+        MobileMotion.bindPress(importBtn, 0.95f);
+        importBtn.setOnClickListener(
+                v -> {
+                    if (handleRef[0] != null) handleRef[0].dismiss();
+                    UiWidgets.showMobileImportDialog(a);
                 });
+        footerRow.addView(importBtn, new LinearLayout.LayoutParams(0, a.dp(38), 1f));
+        content.addView(footerRow, new LinearLayout.LayoutParams(-1, -2));
+
+        handleRef[0] =
+                MobileBottomSheet.showHandle(
+                        a, "快速切换首页与片源", "点选切换 · 长按或点击右侧按钮可收藏/编辑/排序/删除", null, null, content, true);
     }
 
     private void performTabHaptic(View v) {
@@ -1558,6 +1651,7 @@ final class MobileRootShell {
                 break;
             case TAB_HOME:
             default:
+                renderedHomeSectionsRev = MobileHomeSections.revision();
                 MobileHomePage.render(this, contentContainer);
                 break;
         }
