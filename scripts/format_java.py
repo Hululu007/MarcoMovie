@@ -3,9 +3,9 @@
     python scripts/format_java.py           # rewrite files in place
     python scripts/format_java.py --check   # exit 1 if any file needs formatting
 
-Scope: first-party sources under android/src/main/java/com/pilipala and the
-offline/device checks under android/tests. Vendored Media3 decoder sources and
-the catvod Spider ABI stay byte-identical to their references.
+Scope: first-party sources under android-tv/ and android-mobile/ (com/pilipala)
+and offline/device checks under their tests/ directories. Vendored Media3 decoder
+sources and the catvod Spider ABI stay byte-identical to their references.
 
 Options keep the change purely mechanical: imports are neither reordered nor
 removed, long string literals are not split, and Javadoc is not rewrapped, so
@@ -19,7 +19,15 @@ VERSION = '1.24.0'
 SHA256 = '812f805f58112460edf01bf202a8e61d0fd1f35c0d4fabd54220640776ec57a1'
 URL = f'https://github.com/google/google-java-format/releases/download/v{VERSION}/google-java-format-{VERSION}-all-deps.jar'
 JAR = ROOT / 'tools/format' / f'google-java-format-{VERSION}-all-deps.jar'
-SCOPES = (('shared/java', '**/*.java'), ('android/src/main/java/com/pilipala', '**/*.java'), ('android/tests', '*.java'), ('android/tests/device', '*.java'))
+SCOPES = (
+    ('shared/java', '**/*.java'),
+    ('android-tv/src/main/java/com/pilipala', '**/*.java'),
+    ('android-tv/tests', '*.java'),
+    ('android-tv/tests/device', '*.java'),
+    ('android-mobile/src/main/java/com/pilipala', '**/*.java'),
+    ('android-mobile/tests', '*.java'),
+    ('android-mobile/tests/device', '*.java'),
+)
 OPTIONS = ['--aosp', '--skip-sorting-imports', '--skip-removing-unused-imports',
            '--skip-reflowing-long-strings', '--skip-javadoc-formatting']
 EXPORTS = [f'--add-exports=jdk.compiler/com.sun.tools.javac.{p}=ALL-UNNAMED'

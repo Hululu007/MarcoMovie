@@ -12,7 +12,6 @@ from native_elf import inspect_elf
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / 'tools/python-android'
 DEPS_CACHE = CACHE / 'deps'
-BUILD = ROOT / 'android/build/python'
 
 PYTHON_VERSION = '3.11.17-0'
 TARGETS = {
@@ -43,7 +42,7 @@ PURE_DEPS = [
     ),
     (
         'urllib3-2.2.3.zip',
-        'https://github.com/urllib3/urllib3/archive/refs/tags/2.2.3.zip',
+        'https://github.com/urllib3/urllib3/archive/refs/tags/v2.2.3.zip',
         'c487db502a4a09b98621714e47bddd96e6ccffbeb38e544375f43eacfea34022',
         'urllib3-2.2.3/src/urllib3/',
         'urllib3/',
@@ -115,7 +114,10 @@ def _build_site_packages_zip(out_zip: Path) -> bytes:
     return out_zip.read_bytes()
 
 
-def build():
+def build_for_module(module_dir: Path, abis=('armeabi-v7a',)):
+    """Build CPython JNI bridge and runtime assets isolated to a single Android edition module."""
+    module_dir = Path(module_dir)
+    build_dir = module_dir / 'build/python'
     ndk = toolchain()
     clang = ndk / 'bin' / ('clang.exe' if os.name == 'nt' else 'clang')
     if not clang.exists():
@@ -124,17 +126,20 @@ def build():
     stdlib_zip = _fetch_verified(
         CACHE / f'target-{PYTHON_VERSION}-stdlib-pyc.zip', STDLIB[0], STDLIB[1]
     )
-    site_zip = BUILD / 'site-packages.zip'
+    site_zip = build_dir / 'site-packages.zip'
     site_bytes = _build_site_packages_zip(site_zip)
 
-    native_tv = {}
-    native_mobile = {}
+    native_libs = {}
     dynload_zips = {}
+    bridge_src = module_dir / 'src/main/cpp/python_bridge.c'
+    runner_src = module_dir / 'src/main/assets/python-native/android_runner.py'
 
-    bridge_src = ROOT / 'android/src/main/cpp/python_bridge.c'
-    for abi, (url, digest, triple) in TARGETS.items():
+    for abi in abis:
+        if abi not in TARGETS:
+            raise ValueError(f'Unsupported Python Android ABI: {abi}')
+        url, digest, triple = TARGETS[abi]
         archive = _fetch_verified(CACHE / f'target-{PYTHON_VERSION}-{abi}.zip', url, digest)
-        unpack = BUILD / 'unpack' / abi
+        unpack = build_dir / 'unpack' / abi
         if unpack.exists():
             shutil.rmtree(unpack)
         unpack.mkdir(parents=True, exist_ok=True)
@@ -147,7 +152,7 @@ def build():
         if not inc_dir.is_dir() or not libpython.is_file():
             raise RuntimeError(f'Incomplete CPython target archive for {abi}')
 
-        out_so = BUILD / 'so' / abi / 'libmarco_python.so'
+        out_so = build_dir / 'so' / abi / 'libmarco_python.so'
         out_so.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             list(
@@ -190,43 +195,47 @@ def build():
                     raise RuntimeError(f'Python ARM64 library is not 16 KB page-aligned: {name}')
 
         for name, data in abi_libs.items():
-            key = f'lib/{abi}/{name}'
-            native_mobile[key] = data
-            if abi == 'armeabi-v7a':
-                native_tv[key] = data
+            native_libs[f'lib/{abi}/{name}'] = data
 
         # Package ABI-specific lib-dynload extensions into a compact zip asset.
         dyn_dir = unpack / 'lib-dynload' / abi
-        dyn_zip = BUILD / f'lib-dynload-{abi}.zip'
+        dyn_zip = build_dir / f'lib-dynload-{abi}.zip'
         with zipfile.ZipFile(dyn_zip, 'w', zipfile.ZIP_DEFLATED) as dz:
             for ext_so in sorted(dyn_dir.glob('*.so')):
                 dz.write(ext_so, ext_so.name)
         dynload_zips[abi] = dyn_zip
 
-    # Stage separate asset roots for TV (32-bit only) and Mobile (32+64-bit).
     version_hash = hashlib.sha256(
-        (PYTHON_VERSION + ':' + hashlib.sha256(site_bytes).hexdigest() + ':'
-         + hashlib.sha256((ROOT / 'android/src/main/assets/python-native/android_runner.py').read_bytes()).hexdigest()
+        (
+            PYTHON_VERSION
+            + ':'
+            + hashlib.sha256(site_bytes).hexdigest()
+            + ':'
+            + hashlib.sha256(runner_src.read_bytes()).hexdigest()
         ).encode('utf-8')
     ).hexdigest()[:16]
 
-    assets_tv = BUILD / 'assets-tv'
-    assets_mobile = BUILD / 'assets-mobile'
-    for dst_root, abis in [(assets_tv, ['armeabi-v7a']), (assets_mobile, ['armeabi-v7a', 'arm64-v8a'])]:
-        target_dir = dst_root / 'python-native'
-        if target_dir.exists():
-            shutil.rmtree(target_dir)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(stdlib_zip, target_dir / 'stdlib-pyc.zip')
-        shutil.copy2(site_zip, target_dir / 'site-packages.zip')
-        for abi in abis:
-            shutil.copy2(dynload_zips[abi], target_dir / f'lib-dynload-{abi}.zip')
-        (target_dir / 'runtime-version.txt').write_text(version_hash + '\n', encoding='ascii')
+    assets_root = build_dir / 'assets'
+    target_dir = assets_root / 'python-native'
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(stdlib_zip, target_dir / 'stdlib-pyc.zip')
+    shutil.copy2(site_zip, target_dir / 'site-packages.zip')
+    for abi in abis:
+        shutil.copy2(dynload_zips[abi], target_dir / f'lib-dynload-{abi}.zip')
+    (target_dir / 'runtime-version.txt').write_text(version_hash + '\n', encoding='ascii')
 
     print(
-        f'PASS built Android CPython {PYTHON_VERSION} bridge '
-        f'(TV libs={len(native_tv)}, Mobile libs={len(native_mobile)}, stamp={version_hash})'
+        f'PASS built Android CPython {PYTHON_VERSION} bridge for {module_dir.name} '
+        f'(abis={",".join(abis)}, libs={len(native_libs)}, stamp={version_hash})'
     )
+    return native_libs, assets_root
+
+
+def build():
+    native_tv, assets_tv = build_for_module(ROOT / 'android-tv', abis=('armeabi-v7a',))
+    native_mobile, assets_mobile = build_for_module(ROOT / 'android-mobile', abis=('armeabi-v7a', 'arm64-v8a'))
     return native_tv, native_mobile, assets_tv, assets_mobile
 
 

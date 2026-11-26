@@ -29,6 +29,7 @@ import '../core/download_service.dart';
 import '../core/ios_avplayer_controller.dart';
 import '../core/live_channel_organizer.dart';
 import '../core/local_media_proxy.dart';
+import '../core/mdk_platform_player.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
 import '../core/python_source_host.dart';
@@ -52,6 +53,8 @@ import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
 import 'live_station_badge.dart';
+import 'macos_official_notice.dart';
+import 'macos_update_sheet.dart';
 import 'media_folder_browser_page.dart';
 import 'motion/aurora_background.dart';
 import 'motion/ios27_springs.dart';
@@ -90,6 +93,8 @@ class AdaptiveShell extends StatefulWidget {
   final Duration? windowCloseTotalBudgetForTest;
   @visibleForTesting
   final Future<bool> Function(Uri uri)? onOpenExternalUrlForTest;
+  @visibleForTesting
+  final Future<void> Function(String text)? onCopyTextForTest;
 
   const AdaptiveShell({
     super.key,
@@ -103,6 +108,7 @@ class AdaptiveShell extends StatefulWidget {
     this.onFlushSyncForTest,
     this.windowCloseTotalBudgetForTest,
     this.onOpenExternalUrlForTest,
+    this.onCopyTextForTest,
   });
 
   static const Duration defaultWindowCloseBudget =
@@ -579,7 +585,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   ModalRoute<dynamic>? _officialCommunityOriginRoute;
   int? _officialCommunityOriginTabIndex;
   bool _startupOnboardingChecked = false;
-  bool get _isMacOS => !kIsWeb && Platform.isMacOS;
+  bool _startupOfficialNoticeChecked = false;
+  bool _officialNoticeDialogOpen = false;
+  bool get _isMacOS =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.macOS &&
+      !OhosRuntime.isOhos;
   CmsFilter get _currentFilter => CmsFilter(
         primaryTab: _primaryTab,
         categoryId: _filterSubCategoryId,
@@ -693,7 +704,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
       unawaited(_initRootNativeTabChrome());
     }
-    unawaited(_runFirstLaunchPrompts());
+    unawaited(_runStartupPrompts());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         MarcoLaunchDiagnostics.record(
@@ -978,6 +989,41 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
 
+  Future<void> _runStartupPrompts() async {
+    if (_isMacOS) {
+      await _maybeShowMacosFirstLaunchOfficialNotice();
+    }
+    if (!mounted) return;
+    await _runFirstLaunchPrompts();
+  }
+
+  Future<void> _maybeShowMacosFirstLaunchOfficialNotice() async {
+    if (_startupOfficialNoticeChecked || !_isMacOS || !mounted) return;
+    _startupOfficialNoticeChecked = true;
+    final prefs = await MacosOfficialNoticePrefs.load();
+    if (!mounted || !prefs.shouldShow(isMacosOverride: _isMacOS)) return;
+    final ready = Completer<void>();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!ready.isCompleted) ready.complete();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+    await ready.future;
+    if (!mounted || _officialNoticeDialogOpen) return;
+    _officialNoticeDialogOpen = true;
+    try {
+      final confirmed = await showMacosFirstLaunchOfficialNoticeDialog(
+        context,
+        onOpenUrl: widget.onOpenExternalUrlForTest,
+        onCopyText: widget.onCopyTextForTest,
+      );
+      if (confirmed == true) {
+        await prefs.markAcknowledged();
+      }
+    } finally {
+      _officialNoticeDialogOpen = false;
+    }
+  }
+
   Future<void> _runFirstLaunchPrompts() async {
     if (_startupOnboardingChecked || !mounted) return;
     _startupOnboardingChecked = true;
@@ -1005,6 +1051,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     final isFreshInstall = prefs.doneVersion < OnboardingPrefs.currentVersion;
     if (isFreshInstall &&
+        !OhosRuntime.isOhos &&
+        !_isMacOS &&
         prefs.shouldShowOfficialChannelNotice() &&
         !_officialNoticeOpen) {
       final frameReady = Completer<void>();
@@ -3016,7 +3064,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           storage: widget.storage,
         );
     final usePosterExpand =
-        defaultTargetPlatform == TargetPlatform.iOS &&
+        (defaultTargetPlatform == TargetPlatform.iOS ||
+            defaultTargetPlatform == TargetPlatform.macOS) &&
         !OhosRuntime.isOhos &&
         sourceContext != null;
     final initialRect =
@@ -3247,7 +3296,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     try {
       if (CmsParser.isBackupPayload(text)) {
-        await widget.storage.importBackupJson(text);
+        if (OhosRuntime.isOhos) {
+          await widget.storage.importValidatedLocalBackupJson(text);
+        } else {
+          await widget.storage.importBackupJson(text);
+        }
         _reloadSavedConfig();
         _showAppleNotice('已从剪贴板恢复备份', '备份中的配置、收藏与观看历史已同步生效。');
         return;
@@ -3718,7 +3771,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           // blurred ambient artwork of the featured title on the home tab.
           RepaintBoundary(
             child: AnimatedSwitcher(
-              duration: isWindowsDesktopUi
+              duration: (isWindowsDesktopUi ||
+                      Ios27ConcentricGeometry.isReduceMotion(context))
                   ? Duration.zero
                   : const Duration(milliseconds: 600),
               child: AppleAmbientBackground(
@@ -4502,7 +4556,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   SliverPadding(
                     padding: EdgeInsets.fromLTRB(
                       0,
-                      useSidebar && _isMacOS ? 24 : 12,
+                      _isMacOS ? 38 : 12,
                       0,
                       12,
                     ),
@@ -4525,6 +4579,30 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               child: _privateSessionUnlocked
                                   ? _buildEmptyPrivacySpaceNotice(context)
                                   : _buildPluginOnlyConfigNotice(context),
+                            ),
+                          ] else if (_isMacOS &&
+                              !CspBridge.isMyDriveSite(_activeSite!) &&
+                              _primaryTab == 'recommend' &&
+                              !_currentFilter.hasSubFilter &&
+                              _currentPage == 1) ...[
+                            _buildMacWideHomeHeroSection(
+                              context,
+                              site: _activeSite!,
+                              history: (!_privateSessionUnlocked &&
+                                      widget.storage.showContinueWatching)
+                                  ? history
+                                  : const <WatchHistoryEntry>[],
+                              contentWidth: math.max(
+                                320.0,
+                                constraints.maxWidth - horizontalPad * 2,
+                              ),
+                              horizontalPad: horizontalPad,
+                            ),
+                            _buildHomeCategoryFilterSection(
+                              context,
+                              horizontalPad: horizontalPad,
+                              activeFilterCount: activeFilterCount,
+                              topSpacing: 18,
                             ),
                           ] else ...[
                             if (!_privateSessionUnlocked &&
@@ -6537,6 +6615,515 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       child: pill,
     );
   }
+  /// macOS widescreen home hero + optional docked right-hand Continue Watching
+  /// panel (inspired by Windows 0.6.0 wide home while preserving Apple Glass
+  /// aesthetics, Light/Dark contrast, Reduce Motion, and iOS poster expand).
+  Widget _buildMacWideHomeHeroSection(
+    BuildContext context, {
+    required CmsSite site,
+    required List<WatchHistoryEntry> history,
+    required double contentWidth,
+    required double horizontalPad,
+  }) {
+    final showHero = widget.storage.showHeroBanner;
+    final candidates = _homeVideos
+        .where((v) => !v.id.startsWith('netdisk_qr:'))
+        .toList(growable: false);
+    final sideHistory =
+        showHero && candidates.isNotEmpty && history.isNotEmpty && contentWidth >= 960;
+    final historyWidth = contentWidth >= 1480 ? 336.0 : 304.0;
+    final heroHeight = contentWidth >= 1480
+        ? 284.0
+        : (contentWidth >= 1060 ? 256.0 : 228.0);
+    final heroAreaWidth =
+        sideHistory ? math.max(320.0, contentWidth - historyWidth - 18.0) : contentWidth;
+    final maxHeroSlots = (heroAreaWidth / 340.0).floor().clamp(1, 4);
+    final heroVideos = showHero
+        ? candidates.take(math.min(candidates.length, maxHeroSlots)).toList(growable: false)
+        : const <CmsVideo>[];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (history.isNotEmpty && !sideHistory)
+          _buildHomeHistoryShelf(
+            context,
+            history: history,
+            horizontalPad: horizontalPad,
+            topSpacing: 18,
+          ),
+        if (heroVideos.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: horizontalPad),
+            child: SizedBox(
+              key: const ValueKey('mac-home-hero-row'),
+              height: heroHeight,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (var i = 0; i < heroVideos.length; i++) ...[
+                          if (i > 0) const SizedBox(width: 14),
+                          Expanded(
+                            child: _buildMacWideHeroCard(
+                              context,
+                              site,
+                              heroVideos[i],
+                              index: i,
+                              compact: heroVideos.length >= 3 ||
+                                  (heroAreaWidth / heroVideos.length) < 420,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  if (sideHistory) ...[
+                    const SizedBox(width: 16),
+                    SizedBox(
+                      key: const ValueKey('mac-home-side-history'),
+                      width: historyWidth,
+                      child: _buildMacSideHistoryPanel(context, history),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildMacWideHeroCard(
+    BuildContext context,
+    CmsSite site,
+    CmsVideo featured, {
+    required int index,
+    required bool compact,
+  }) {
+    final palette = ApplePalette.of(context);
+    final isDark = palette.isDark;
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+    final cardId =
+        'mac_hero_${site.key}_${featured.id.isNotEmpty ? featured.id : featured.title}_$index';
+    final tags = <String>[
+      if (featured.year.trim().isNotEmpty) featured.year.trim(),
+      if (featured.area.trim().isNotEmpty) featured.area.trim(),
+      if (featured.remarks.trim().isNotEmpty) featured.remarks.trim(),
+    ];
+    final infoLine = featured.description.trim().isNotEmpty
+        ? featured.description.trim()
+        : (featured.actor.trim().isNotEmpty ? '主演：${featured.actor.trim()}' : '');
+    BuildContext? cardCtx;
+    void openFeatured() => _openVideoDetail(
+          site,
+          featured,
+          sourceContext: cardCtx ?? context,
+          sourceRadius: 22.0,
+          sourceCardId: cardId,
+        );
+
+    final inner = PosterExpandSourceCard(
+      cardId: cardId,
+      child: Builder(
+        builder: (ctx) {
+          cardCtx = ctx;
+          return AppleSmoothClipCard(
+            key: ValueKey('mac-home-hero-card-$index'),
+            borderRadius: 24,
+            backgroundColor:
+                isDark ? const Color(0xFF111319) : const Color(0xFF1A202C),
+            rimStrength: isDark ? 1.0 : 0.65,
+            boxShadow: isDark
+                ? const [
+                    BoxShadow(
+                      color: Color(0x52000000),
+                      blurRadius: 24,
+                      offset: Offset(0, 10),
+                    ),
+                  ]
+                : const [
+                    BoxShadow(
+                      color: Color(0x240F172A),
+                      blurRadius: 20,
+                      offset: Offset(0, 8),
+                    ),
+                  ],
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                LandscapePosterImage(
+                  url: featured.poster,
+                  title: site.isEffectivelyPrivate ? '' : featured.title,
+                  year: site.isEffectivelyPrivate ? '' : featured.year,
+                  allowExternalLookup: !site.isEffectivelyPrivate,
+                  blurPortraitFallback: true,
+                  showRightFramedPortraitFallback: !compact,
+                  placeholder: Container(
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [Color(0xFF1D2434), Color(0xFF0E1118)],
+                      ),
+                    ),
+                  ),
+                ),
+                const DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      colors: [
+                        Color(0xD90A0D14),
+                        Color(0x8C0A0D14),
+                        Color(0x1A0A0D14),
+                      ],
+                      stops: [0.0, 0.56, 1.0],
+                    ),
+                  ),
+                ),
+                const DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Color(0x14000000),
+                        Color(0x28000000),
+                        Color(0xCF080A10),
+                      ],
+                      stops: [0.0, 0.48, 1.0],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 16 : 20,
+                    compact ? 14 : 18,
+                    compact ? 16 : 124,
+                    compact ? 14 : 18,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (index == 0)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0x40FFFFFF),
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: const Color(0x4DFFFFFF),
+                              width: 0.6,
+                            ),
+                          ),
+                          child: const Text(
+                            '精选推荐',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      const Spacer(),
+                      Text(
+                        featured.title,
+                        maxLines: compact ? 1 : 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: compact ? 18 : 22,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.4,
+                          height: 1.18,
+                        ),
+                      ),
+                      if (tags.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 4,
+                          children: [
+                            for (final tag in tags.take(compact ? 2 : 3))
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 2.5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0x33FFFFFF),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  tag,
+                                  style: const TextStyle(
+                                    color: Color(0xF2FFFFFF),
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ],
+                      if (!compact && infoLine.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          infoLine,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xCCFFFFFF),
+                            fontSize: 12,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+
+    if (reduceMotion) {
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: openFeatured,
+        child: inner,
+      );
+    }
+    return ApplePressableScale(
+      pressedScale: 0.975,
+      pressedOpacity: 0.94,
+      onTap: openFeatured,
+      child: inner,
+    );
+  }
+
+  Widget _buildMacSideHistoryPanel(
+    BuildContext context,
+    List<WatchHistoryEntry> history,
+  ) {
+    final palette = ApplePalette.of(context);
+    final isDark = palette.isDark;
+    final items = history.take(3).toList(growable: false);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xA6161820) : const Color(0xE8FFFFFF),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: isDark
+              ? Colors.white.withValues(alpha: 0.12)
+              : const Color(0x1F0F172A),
+          width: 0.85,
+        ),
+        boxShadow: isDark
+            ? const [
+                BoxShadow(
+                  color: Color(0x3D000000),
+                  blurRadius: 20,
+                  offset: Offset(0, 8),
+                ),
+              ]
+            : const [
+                BoxShadow(
+                  color: Color(0x140F172A),
+                  blurRadius: 16,
+                  offset: Offset(0, 6),
+                ),
+              ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                '继续观看',
+                style: TextStyle(
+                  color: palette.labelPrimary,
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.2,
+                ),
+              ),
+              const Spacer(),
+              CupertinoButton(
+                padding: EdgeInsets.zero,
+                minSize: 22,
+                onPressed: _showWatchHistorySheet,
+                child: const Text(
+                  '全部',
+                  style: TextStyle(
+                    color: AppleColors.systemBlue,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                for (final entry in items)
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Builder(
+                        builder: (ctx) {
+                          final resolvedPoster = _resolveHistoryPoster(entry);
+                          final cwCardId = 'mac_side_cw_${entry.site}_${entry.id}';
+                          final hasKnownDuration = entry.duration > 0;
+                          final realProgress = hasKnownDuration
+                              ? entry.progressFraction.clamp(0.0, 1.0)
+                              : null;
+                          return Semantics(
+                            button: true,
+                            label: entry.episode.isNotEmpty
+                                ? '继续观看 ${entry.title} ${entry.episode}'
+                                : '继续观看 ${entry.title}',
+                            child: Material(
+                              color: Colors.transparent,
+                              borderRadius: BorderRadius.circular(12),
+                              child: InkWell(
+                                key: ValueKey(
+                                  'mac-side-history-item-${entry.site}-${entry.id}',
+                                ),
+                                borderRadius: BorderRadius.circular(12),
+                                focusColor:
+                                    AppleColors.systemBlue.withValues(alpha: 0.24),
+                                hoverColor: isDark
+                                    ? Colors.white.withValues(alpha: 0.08)
+                                    : const Color(0x140F172A),
+                                onTap: () => _openSyncedMediaEntry(
+                                  siteKey: entry.site,
+                                  videoId: entry.id,
+                                  title: entry.title,
+                                  poster: resolvedPoster,
+                                  sourceContext: ctx,
+                                  sourceRadius: 10.0,
+                                  sourceCardId: cwCardId,
+                                ),
+                                child: Ink(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: isDark
+                                        ? Colors.white.withValues(alpha: 0.05)
+                                        : const Color(0x0A0F172A),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      PosterExpandSourceCard(
+                                        cardId: cwCardId,
+                                        child: ClipRRect(
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          child: SizedBox(
+                                            width: 36,
+                                            height: 50,
+                                            child: PosterImage(
+                                              url: resolvedPoster,
+                                              title: entry.title,
+                                              placeholder:
+                                                  _buildPosterPlaceholder(),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              entry.title,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: palette.labelPrimary,
+                                                fontSize: 12.5,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              entry.episode.isNotEmpty
+                                                  ? entry.episode
+                                                  : '继续观看',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: palette.labelSecondary,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                            if (realProgress != null) ...[
+                                              const SizedBox(height: 4),
+                                              ClipRRect(
+                                                borderRadius:
+                                                    BorderRadius.circular(999),
+                                                child: LinearProgressIndicator(
+                                                  key: ValueKey(
+                                                    'mac-side-history-progress-${entry.site}-${entry.id}',
+                                                  ),
+                                                  value: realProgress,
+                                                  minHeight: 3,
+                                                  backgroundColor:
+                                                      palette.groupedTertiary,
+                                                  valueColor:
+                                                      const AlwaysStoppedAnimation<
+                                                          Color>(
+                                                    AppleColors.systemBlue,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHeroShowcaseCard(
     CmsSite site,
     CmsVideo featured, {
@@ -7226,20 +7813,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     fontSize: 12,
                   ),
                 ),
-                const SizedBox(height: 8),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(999),
-                  child: LinearProgressIndicator(
-                    value: entry.progressFraction > 0
-                        ? entry.progressFraction
-                        : 0.15,
-                    minHeight: 3.5,
-                    backgroundColor: palette.groupedTertiary,
-                    valueColor: const AlwaysStoppedAnimation<Color>(
-                      AppleColors.systemBlue,
+                if (entry.duration > 0) ...[
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: LinearProgressIndicator(
+                      key: ValueKey('cw-progress-${entry.site}-${entry.id}'),
+                      value: entry.progressFraction.clamp(0.0, 1.0),
+                      minHeight: 3.5,
+                      backgroundColor: palette.groupedTertiary,
+                      valueColor: const AlwaysStoppedAnimation<Color>(
+                        AppleColors.systemBlue,
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -8795,7 +9383,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           livePad,
-          useSidebar && _isMacOS ? 28 : 14,
+          _isMacOS ? 38 : 14,
           livePad,
           0,
         ),
@@ -9684,42 +10272,56 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
           Future<void> pickLocalFile() async {
             try {
-              final result = await FilePicker.platform.pickFiles(
-                type: FileType.any,
-                withData: true,
-              );
-              if (result == null || result.files.isEmpty) return;
-              final file = result.files.first;
               String rawText = '';
-              if (file.bytes != null) {
-                if (file.bytes!.length > CmsClient.maxResponseBytes) {
-                  setSheetState(() => errorMsg = '直播源文件超过 6 MB 限制');
-                  return;
+              String fileName = '';
+              if (OhosRuntime.isOhos) {
+                final picked = await OhosRuntime.pickDocumentFile(
+                  purpose: OhosDocumentPurpose.live,
+                  maxBytes: CmsClient.maxResponseBytes,
+                );
+                if (picked == null) return;
+                fileName = picked.name;
+                rawText = CmsParser.decodeConfigDocument(picked.bytes);
+              } else {
+                final result = await FilePicker.platform.pickFiles(
+                  type: FileType.any,
+                  withData: true,
+                );
+                if (result == null || result.files.isEmpty) return;
+                final file = result.files.first;
+                fileName = file.name;
+                if (file.bytes != null) {
+                  if (file.bytes!.length > CmsClient.maxResponseBytes) {
+                    setSheetState(() => errorMsg = '直播源文件超过 6 MB 限制');
+                    return;
+                  }
+                  rawText = utf8.decode(file.bytes!, allowMalformed: true);
+                } else if (file.path != null && file.path!.isNotEmpty) {
+                  final ioFile = File(file.path!);
+                  if (await ioFile.length() > CmsClient.maxResponseBytes) {
+                    setSheetState(() => errorMsg = '直播源文件超过 6 MB 限制');
+                    return;
+                  }
+                  rawText = await ioFile.readAsString();
                 }
-                rawText = utf8.decode(file.bytes!, allowMalformed: true);
-              } else if (file.path != null && file.path!.isNotEmpty) {
-                final ioFile = File(file.path!);
-                if (await ioFile.length() > CmsClient.maxResponseBytes) {
-                  setSheetState(() => errorMsg = '直播源文件超过 6 MB 限制');
-                  return;
-                }
-                rawText = await ioFile.readAsString();
               }
               if (rawText.trim().isEmpty) {
                 setSheetState(() => errorMsg = '所选直播文件内容为空');
                 return;
               }
               setSheetState(() {
-                pickedFileName = file.name;
+                pickedFileName = fileName;
                 pickedFileContent = rawText;
                 errorMsg = null;
                 if (nameCtrl.text.trim().isEmpty) {
-                  nameCtrl.text = file.name.replaceAll(
+                  nameCtrl.text = fileName.replaceAll(
                     RegExp(r'\.(?:m3u8?|txt|json)$', caseSensitive: false),
                     '',
                   );
                 }
               });
+            } on FormatException catch (e) {
+              setSheetState(() => errorMsg = '读取文件失败：${e.message}');
             } catch (e) {
               setSheetState(() => errorMsg = '读取文件失败：$e');
             }
@@ -10439,7 +11041,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           pad,
-          useSidebar && _isMacOS ? 28 : 14,
+          _isMacOS ? 38 : 14,
           pad,
           0,
         ),
@@ -11277,7 +11879,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           child: ListView(
             padding: EdgeInsets.fromLTRB(
               pad,
-              useSidebar && _isMacOS ? 28 : 16,
+              _isMacOS ? 38 : 16,
               pad,
               useSidebar ? 36 : MediaQuery.paddingOf(context).bottom + 28,
             ),
@@ -11451,51 +12053,113 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                 ],
               ),
-              const SizedBox(height: 22),
-              AppleGroupedSection(
-                header: '联系反馈与官方交流',
-                footer: OfficialChannelInfo.antiTamperWarning,
-                children: [
-                  Builder(
-                    builder: (rowCtx) => _buildSettingsQuickActionRow(
-                      key: const ValueKey('settings-author-socials'),
-                      icon: CupertinoIcons.person_crop_circle_badge_checkmark,
+              if (_isMacOS) ...[
+                const SizedBox(height: 22),
+                AppleGroupedSection(
+                  key: const ValueKey('macos-settings-contact-section'),
+                  header: '联系与反馈作者',
+                  footer: MacosOfficialInfo.securityWarning,
+                  children: [
+                    _buildSettingsQuickActionRow(
+                      key: const ValueKey('macos-settings-contact-author'),
+                      icon: CupertinoIcons.bubble_left_bubble_right_fill,
                       iconBgColor: AppleColors.systemPink,
-                      title: '联系反馈作者（各社媒账号名）',
-                      subtitle: OfficialChannelInfo.authorSocialSummary,
-                      trailingText: '复制',
-                      onTap: () =>
-                          _copyAuthorSocialName(originContext: rowCtx),
+                      title: '联系反馈作者 · ${MacosOfficialInfo.authorSocialName}',
+                      subtitle:
+                          '${MacosOfficialInfo.socialPlatformsSummary}（全平台同名）',
+                      trailingText: '查看 / 复制',
+                      onTap: _showMacosAuthorContactSheet,
                     ),
-                  ),
-                  Builder(
-                    builder: (rowCtx) => _buildSettingsQuickActionRow(
-                      key: const ValueKey('settings-official-community'),
-                      icon: CupertinoIcons.chat_bubble_2_fill,
-                      iconBgColor: AppleColors.systemGreen,
-                      title: '官网交流群',
-                      subtitle: OfficialChannelInfo.officialCommunityUrl,
+                    _buildSettingsQuickActionRow(
+                      key: const ValueKey('macos-settings-official-group'),
+                      icon: CupertinoIcons.globe,
+                      iconBgColor: AppleColors.systemBlue,
+                      title: '官网交流群链接',
+                      subtitle:
+                          'Marco 官网：${MacosOfficialInfo.officialWebsiteDisplay}',
                       trailingText: '打开官网',
-                      onTap: () =>
-                          _openOfficialCommunityLink(originContext: rowCtx),
+                      onTap: _openMacosOfficialWebsiteFromSettings,
                     ),
-                  ),
-                  _buildSettingsQuickActionRow(
-                    key: const ValueKey('settings-official-notice'),
-                    icon: CupertinoIcons.shield_lefthalf_fill,
-                    iconBgColor: AppleColors.systemOrange,
-                    title: '官方渠道安全声明',
-                    subtitle:
-                        '认准 Marco 官网 ${OfficialChannelInfo.officialWebsiteDisplay}',
-                    trailingText: '查看',
-                    onTap: _openOfficialNoticeDialogFromSettings,
-                  ),
-                ],
-              ),
+                  ],
+                ),
+              ] else ...[
+                const SizedBox(height: 22),
+                AppleGroupedSection(
+                  header: '联系反馈与官方交流',
+                  footer: OfficialChannelInfo.antiTamperWarning,
+                  children: [
+                    Builder(
+                      builder: (rowCtx) => _buildSettingsQuickActionRow(
+                        key: const ValueKey('settings-author-socials'),
+                        icon: CupertinoIcons.person_crop_circle_badge_checkmark,
+                        iconBgColor: AppleColors.systemPink,
+                        title: '联系反馈作者（各社媒账号名）',
+                        subtitle: OfficialChannelInfo.authorSocialSummary,
+                        trailingText: '复制',
+                        onTap: () =>
+                            _copyAuthorSocialName(originContext: rowCtx),
+                      ),
+                    ),
+                    Builder(
+                      builder: (rowCtx) => _buildSettingsQuickActionRow(
+                        key: const ValueKey('settings-official-community'),
+                        icon: CupertinoIcons.chat_bubble_2_fill,
+                        iconBgColor: AppleColors.systemGreen,
+                        title: '官网交流群',
+                        subtitle: OfficialChannelInfo.officialCommunityUrl,
+                        trailingText: '打开官网',
+                        onTap: () =>
+                            _openOfficialCommunityLink(originContext: rowCtx),
+                      ),
+                    ),
+                    _buildSettingsQuickActionRow(
+                      key: const ValueKey('settings-official-notice'),
+                      icon: CupertinoIcons.shield_lefthalf_fill,
+                      iconBgColor: AppleColors.systemOrange,
+                      title: '官方渠道安全声明',
+                      subtitle:
+                          '认准 Marco 官网 ${OfficialChannelInfo.officialWebsiteDisplay}',
+                      trailingText: '查看',
+                      onTap: _openOfficialNoticeDialogFromSettings,
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
       ),
+    );
+  }
+
+  void _showMacosAuthorContactSheet() {
+    showAppleModalSheet<void>(
+      context: context,
+      title: '联系与反馈作者',
+      builder: (_) => MacosAuthorContactSheet(
+        onOpenUrl: widget.onOpenExternalUrlForTest,
+        onCopyText: widget.onCopyTextForTest,
+      ),
+    );
+  }
+
+  Future<void> _openMacosOfficialWebsiteFromSettings() async {
+    final opened = await openMacosOfficialUrl(
+      MacosOfficialInfo.officialWebsiteUrl,
+      onOpenUrl: widget.onOpenExternalUrlForTest,
+    );
+    if (opened || !mounted) return;
+    if (widget.onCopyTextForTest != null) {
+      await widget.onCopyTextForTest!(MacosOfficialInfo.officialWebsiteUrl);
+    } else {
+      await Clipboard.setData(
+        const ClipboardData(text: MacosOfficialInfo.officialWebsiteUrl),
+      );
+    }
+    if (!mounted) return;
+    _showAppleNotice(
+      '已复制官网地址',
+      '请在浏览器中打开：${MacosOfficialInfo.officialWebsiteUrl}',
     );
   }
 
@@ -13709,14 +14373,34 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   String _currentAppVersion = '读取中';
   Timer? _installedVersionTimer;
 
+  Future<String> _resolveInstalledAppVersion() async {
+    if (OhosRuntime.isOhos) {
+      final ohosPkg = await OhosRuntime.getPackageInfo();
+      if (ohosPkg != null && ohosPkg.version.isNotEmpty) {
+        return ohosPkg.version;
+      }
+    }
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (info.version.trim().isNotEmpty) {
+        return info.version.trim();
+      }
+    } catch (_) {}
+    return '';
+  }
+
   Future<void> _loadInstalledVersion() async {
     _installedVersionTimer = Timer(const Duration(seconds: 3), () {
       if (mounted) setState(() => _currentAppVersion = '未知');
     });
     try {
-      final info = await PackageInfo.fromPlatform();
+      final version = await _resolveInstalledAppVersion();
       _installedVersionTimer?.cancel();
-      if (mounted) setState(() => _currentAppVersion = info.version);
+      if (mounted) {
+        setState(
+          () => _currentAppVersion = version.isNotEmpty ? version : '未知',
+        );
+      }
     } catch (_) {
       _installedVersionTimer?.cancel();
       if (mounted) setState(() => _currentAppVersion = '未知');
@@ -13793,38 +14477,105 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
       return;
     }
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.macOS) {
+      showAppleModalSheet<void>(
+        context: context,
+        title: '检查版本更新',
+        builder: (_) => MacosUpdateSheet(installedVersion: _currentAppVersion),
+      );
+      return;
+    }
     bool checking = true;
     bool downloading = false;
+    bool checkFailed = false;
     double progress = 0.0;
-    String statusText = '正在连接镜像站检测最新版本…';
+    final isHarmony = OhosRuntime.isOhos;
+    String statusText = isHarmony
+        ? '正在检查 HarmonyOS NEXT 独立更新源…'
+        : '正在连接镜像站检测最新版本…';
     String latestVersion = _currentAppVersion;
     String releaseNotes = '';
     String downloadUrl = '';
     bool hasNewer = false;
+    int versionCompare = 0;
     bool checkStarted = false;
     AppUpdate? release;
 
+    String formatMb(int bytes) => '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+
+    Future<void> openHarmonyOrCopyUrl(String targetUrl, String label) async {
+      final opened = await OhosRuntime.openExternalUrl(targetUrl);
+      if (opened) return;
+      await Clipboard.setData(ClipboardData(text: targetUrl));
+      _showAppleNotice('已复制$label', '请在系统浏览器中打开：$targetUrl');
+    }
+
     showAppleModalSheet<void>(
       context: context,
-      title: '检查版本更新',
+      title: isHarmony ? 'HarmonyOS NEXT 版本更新' : '检查版本更新',
       builder: (ctx) {
         return StatefulBuilder(
           builder: (ctx, setSheetState) {
             Future<void> checkRemote() async {
+              if (ctx.mounted) {
+                setSheetState(() {
+                  checking = true;
+                  checkFailed = false;
+                  release = null;
+                  releaseNotes = '';
+                  downloadUrl = '';
+                  hasNewer = false;
+                  versionCompare = 0;
+                  statusText = isHarmony
+                      ? '正在检查 HarmonyOS NEXT 独立更新源…'
+                      : '正在连接镜像站检测最新版本…';
+                });
+              }
               try {
-                final installed = await PackageInfo.fromPlatform();
-                if (installed.version.isEmpty) throw const FormatException('无法读取已安装版本');
-                _currentAppVersion = installed.version;
-                release = await AppUpdate.check();
+                final resolvedVersion = await _resolveInstalledAppVersion();
+                if (resolvedVersion.isEmpty) {
+                  throw const FormatException('无法读取已安装版本');
+                }
+                _currentAppVersion = resolvedVersion;
+                if (mounted) setState(() {});
+                release = await AppUpdate.check(
+                  platform: isHarmony ? 'harmonyos' : null,
+                );
                 latestVersion = release!.version;
                 releaseNotes = _formatCleanReleaseNotes(release!.notes);
-                downloadUrl = release!.windowsUrl?.toString() ?? '';
-                hasNewer = _isRemoteVersionNewer(latestVersion, _currentAppVersion);
-                statusText = hasNewer ? '发现新版本 v$latestVersion（当前 v$_currentAppVersion）'
-                    : '当前已是最新版本（v$_currentAppVersion）';
+                downloadUrl = isHarmony
+                    ? (release!.harmonyosUrl?.toString() ?? '')
+                    : (release!.windowsUrl?.toString() ?? '');
+                if (isHarmony && downloadUrl.isEmpty) {
+                  throw const FormatException('未获取到有效的鸿蒙 HAP 安装包或校验信息');
+                }
+                versionCompare = AppUpdate.compareVersions(
+                  latestVersion,
+                  _currentAppVersion,
+                );
+                hasNewer = versionCompare > 0;
+                statusText = isHarmony
+                    ? (versionCompare > 0
+                        ? '发现新版本 v$latestVersion（当前 v$_currentAppVersion）'
+                        : versionCompare == 0
+                            ? '当前已是最新版本（v$_currentAppVersion）'
+                            : '当前已装版本 v$_currentAppVersion 高于正式源版本 v$latestVersion（无需降级）')
+                    : (hasNewer
+                        ? '发现新版本 v$latestVersion（当前 v$_currentAppVersion）'
+                        : '当前已是最新版本（v$_currentAppVersion）');
               } on FormatException catch (e) {
+                checkFailed = true;
+                release = null;
+                downloadUrl = '';
+                hasNewer = false;
+                versionCompare = 0;
                 statusText = '检查更新失败：${e.message}';
               } catch (_) {
+                checkFailed = true;
+                release = null;
+                downloadUrl = '';
+                hasNewer = false;
+                versionCompare = 0;
                 statusText = '暂时无法检查更新，请稍后重试或打开官方下载站';
               }
               if (ctx.mounted) setSheetState(() => checking = false);
@@ -13938,15 +14689,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         const SizedBox(width: 10),
                       ] else ...[
                         Icon(
-                          hasNewer
-                              ? CupertinoIcons.arrow_down_circle_fill
-                              : CupertinoIcons.checkmark_seal_fill,
-                          color: hasNewer
-                              ? AppleColors.systemBlue
-                              : AppleColors.systemGreen,
+                          checkFailed
+                              ? CupertinoIcons.exclamationmark_triangle_fill
+                              : hasNewer
+                                  ? CupertinoIcons.arrow_down_circle_fill
+                                  : CupertinoIcons.checkmark_seal_fill,
+                          color: checkFailed
+                              ? AppleColors.systemOrange
+                              : hasNewer
+                                  ? AppleColors.systemBlue
+                                  : AppleColors.systemGreen,
                           size: 22,
                         ),
-                        SizedBox(width: 8),
+                        const SizedBox(width: 8),
                       ],
                       Expanded(
                         child: Text(
@@ -13960,6 +14715,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       ),
                     ],
                   ),
+                  if (isHarmony) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      '当前已装版本：v$_currentAppVersion · 通道：HarmonyOS NEXT (arm64-v8a)',
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelSecondary,
+                        fontSize: 12.5,
+                      ),
+                    ),
+                  ],
                   if (downloading) ...[
                     const SizedBox(height: 12),
                     ClipRRect(
@@ -13996,56 +14761,156 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       ),
                     ),
                   ],
-                  const SizedBox(height: 18),
-                  if (!checking && !downloading)
-                    Row(
-                      children: [
-                        if (!kIsWeb &&
-                            Platform.isWindows &&
-                            downloadUrl.isNotEmpty)
-                          Expanded(
-                            child: AppleCapsuleButton(
-                              label: hasNewer
-                                  ? '一键下载安装 v$latestVersion'
-                                  : '重新下载安装 v$latestVersion',
-                              icon: CupertinoIcons.arrow_down_to_line,
-                              primary: true,
-                              onPressed: downloadAndInstallWindows,
+                  if (isHarmony && !checking && !checkFailed && release != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: ApplePalette.of(context).groupedSecondary,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: AppleColors.glassBorder,
+                          width: 0.5,
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '安装包：${release!.packageFileName ?? "MarcoMovie-$latestVersion-harmonyos-universal.hap"}'
+                            '${release!.size != null ? "（${formatMb(release!.size!)}）" : ""}',
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelPrimary,
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
-                        if (!kIsWeb &&
-                            Platform.isWindows &&
-                            downloadUrl.isNotEmpty)
-                          const SizedBox(width: 10),
-                        Expanded(
-                          child: AppleCapsuleButton(
-                            label: '打开官方下载站',
-                            icon: CupertinoIcons.globe,
-                            primary: kIsWeb || !Platform.isWindows,
-                            onPressed: () async {
-                              const mirror =
-                                  'https://marcotv.wlj9919.top/movie/';
-                              if (!kIsWeb && Platform.isWindows) {
-                                await Process.run(
-                                  'cmd',
-                                  ['/c', 'start', '', mirror],
-                                );
-                              } else if (!kIsWeb && Platform.isMacOS) {
-                                await Process.run('open', [mirror]);
-                              } else {
-                                await Clipboard.setData(
-                                  const ClipboardData(text: mirror),
-                                );
-                                _showAppleNotice(
-                                  '已复制下载站地址',
-                                  '请在浏览器中打开：$mirror',
-                                );
-                              }
-                            },
-                          ),
-                        ),
-                      ],
+                          if ((release!.checksum ?? '').isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            SelectableText(
+                              'SHA-256：${release!.checksum}',
+                              style: TextStyle(
+                                color: ApplePalette.of(context).labelSecondary,
+                                fontSize: 11.5,
+                              ),
+                            ),
+                          ],
+                          if (versionCompare >= 0) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              AppUpdate.harmonyosUnsignedInstallGuide,
+                              style: TextStyle(
+                                color: ApplePalette.of(context).labelSecondary,
+                                fontSize: 12,
+                                height: 1.45,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
                     ),
+                  ],
+                  const SizedBox(height: 18),
+                  if (!checking && !downloading)
+                    if (isHarmony)
+                      Row(
+                        children: [
+                          if (downloadUrl.isNotEmpty && versionCompare >= 0) ...[
+                            Expanded(
+                              child: AppleCapsuleButton(
+                                key: const ValueKey('ohos-update-download-hap'),
+                                label: hasNewer
+                                    ? '下载未签名 HAP v$latestVersion'
+                                    : '重新下载 HAP v$latestVersion',
+                                icon: CupertinoIcons.arrow_down_to_line,
+                                primary: true,
+                                onPressed: () => openHarmonyOrCopyUrl(
+                                  downloadUrl,
+                                  'HAP 下载链接',
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                          ] else if (checkFailed) ...[
+                            Expanded(
+                              child: AppleCapsuleButton(
+                                key: const ValueKey('ohos-update-retry'),
+                                label: '重新检查更新',
+                                icon: CupertinoIcons.refresh,
+                                primary: true,
+                                onPressed: checkRemote,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                          ],
+                          Expanded(
+                            child: AppleCapsuleButton(
+                              key: const ValueKey('ohos-update-open-release'),
+                              label: release?.releaseUrl != null
+                                  ? '打开鸿蒙发布页'
+                                  : '打开官方下载站',
+                              icon: CupertinoIcons.globe,
+                              primary: (downloadUrl.isEmpty || versionCompare < 0) &&
+                                  !checkFailed,
+                              onPressed: () => openHarmonyOrCopyUrl(
+                                release?.releaseUrl?.toString() ??
+                                    'https://marcotv.wlj9919.top/movie/',
+                                '鸿蒙发布页地址',
+                              ),
+                            ),
+                          ),
+                        ],
+                      )
+                    else
+                      Row(
+                        children: [
+                          if (!kIsWeb &&
+                              Platform.isWindows &&
+                              downloadUrl.isNotEmpty)
+                            Expanded(
+                              child: AppleCapsuleButton(
+                                label: hasNewer
+                                    ? '一键下载安装 v$latestVersion'
+                                    : '重新下载安装 v$latestVersion',
+                                icon: CupertinoIcons.arrow_down_to_line,
+                                primary: true,
+                                onPressed: downloadAndInstallWindows,
+                              ),
+                            ),
+                          if (!kIsWeb &&
+                              Platform.isWindows &&
+                              downloadUrl.isNotEmpty)
+                            const SizedBox(width: 10),
+                          Expanded(
+                            child: AppleCapsuleButton(
+                              label: '打开官方下载站',
+                              icon: CupertinoIcons.globe,
+                              primary: kIsWeb || !Platform.isWindows,
+                              onPressed: () async {
+                                const mirror =
+                                    'https://marcotv.wlj9919.top/movie/';
+                                if (!kIsWeb && Platform.isWindows) {
+                                  await Process.run(
+                                    'cmd',
+                                    ['/c', 'start', '', mirror],
+                                  );
+                                } else if (!kIsWeb && Platform.isMacOS) {
+                                  await Process.run('open', [mirror]);
+                                } else {
+                                  await Clipboard.setData(
+                                    const ClipboardData(text: mirror),
+                                  );
+                                  _showAppleNotice(
+                                    '已复制下载站地址',
+                                    '请在浏览器中打开：$mirror',
+                                  );
+                                }
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
                 ],
               ),
             );
@@ -16503,7 +17368,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
   Future<void> _showBackupRestoreDialog({String iosBackLabel = '返回'}) async {
-    final ctrl = TextEditingController(text: widget.storage.exportBackupJson());
+    const int inlineTextFieldCharLimit = 256 * 1024;
+    final initialBackup = widget.storage.exportBackupJson();
+    String? fullBackupPayload =
+        initialBackup.length > inlineTextFieldCharLimit ? initialBackup : null;
+    final ctrl = TextEditingController(
+      text: fullBackupPayload == null ? initialBackup : '',
+    );
+    String? loadedLargeSummary = fullBackupPayload == null
+        ? null
+        : '当前备份较大（${(utf8.encode(fullBackupPayload).length / (1024 * 1024)).toStringAsFixed(1)} MB），已就绪可直接导出或恢复';
+    String effectivePayload() => fullBackupPayload ?? ctrl.text;
     String? errorText;
     await _openIosOrModalPage<void>(
       title: defaultTargetPlatform == TargetPlatform.iOS
@@ -16511,10 +17386,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           : '跨平台备份导出 / 恢复',
       backLabel: iosBackLabel,
       trailingAction: CupertinoButton(
+        key: const ValueKey('backup-copy-export'),
         padding: const EdgeInsets.symmetric(horizontal: 10),
         minimumSize: const Size(28, 28),
         onPressed: () {
-          Clipboard.setData(ClipboardData(text: ctrl.text));
+          final payload = effectivePayload();
+          if (OhosRuntime.isOhos) {
+            try {
+              StorageService.encodeValidatedLocalBackupUtf8(payload);
+            } on FormatException catch (e) {
+              _showAppleNotice('复制导出失败', e.message);
+              return;
+            }
+          }
+          Clipboard.setData(ClipboardData(text: payload));
           _showAppleNotice('已复制备份', '备份 JSON 已复制到剪贴板，可发送至其他设备恢复。');
         },
         child: const Text(
@@ -16535,16 +17420,48 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                '与 Android 电视/手机端 MarcoMovie-1 备份格式双向兼容：',
+                OhosRuntime.isOhos
+                    ? '与 Android 电视/手机端 MarcoMovie-1 备份格式双向兼容（鸿蒙本地备份上限 ${StorageService.formatLocalBackupByteLimit()}）：'
+                    : '与 Android 电视/手机端 MarcoMovie-1 备份格式双向兼容：',
                 style: TextStyle(
                   color: ApplePalette.of(context).labelSecondary,
                   fontSize: 12,
                 ),
               ),
+              if (loadedLargeSummary != null) ...[
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: AppleColors.systemBlue.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    loadedLargeSummary!,
+                    style: const TextStyle(
+                      color: AppleColors.systemBlue,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
               SizedBox(height: 10),
               TextSelectionMouseGuard(
                 child: CupertinoTextField(
                   controller: ctrl,
+                  onChanged: (_) {
+                    if (fullBackupPayload != null || loadedLargeSummary != null) {
+                      setModalState(() {
+                        fullBackupPayload = null;
+                        loadedLargeSummary = null;
+                      });
+                    }
+                  },
+                  placeholder: loadedLargeSummary != null
+                      ? '大体积备份已加载（可省略预览直接导出/恢复，或在此粘贴覆盖）'
+                      : null,
                   maxLines: 9,
                   minLines: 6,
                   autocorrect: false,
@@ -16586,7 +17503,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       icon: CupertinoIcons.square_arrow_down,
                       onPressed: () async {
                         try {
-                          final bytes = Uint8List.fromList(utf8.encode(ctrl.text));
+                          final payload = effectivePayload();
+                          if (OhosRuntime.isOhos) {
+                            StorageService.encodeValidatedLocalBackupUtf8(
+                              payload,
+                            );
+                            final savedUri = await OhosRuntime.saveTextFile(
+                              fileName: 'marco-movie-backup.json',
+                              content: payload,
+                              maxBytes: StorageService.maxLocalBackupBytes,
+                            );
+                            if (savedUri == null || !ctx.mounted) return;
+                            setModalState(() => errorText = null);
+                            _showAppleNotice('导出成功', '备份 JSON 文件已保存。');
+                            return;
+                          }
+                          final bytes = Uint8List.fromList(utf8.encode(payload));
                           final outputPath = await FilePicker.platform.saveFile(
                             dialogTitle: '导出 Marco Movie 备份 JSON',
                             fileName: 'marco-movie-backup.json',
@@ -16600,6 +17532,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           }
                           setModalState(() => errorText = null);
                           _showAppleNotice('导出成功', '备份 JSON 文件已保存。');
+                        } on FormatException catch (e) {
+                          if (ctx.mounted) {
+                            setModalState(() => errorText = '保存 JSON 文件失败：${e.message}');
+                          }
                         } catch (e) {
                           if (ctx.mounted) {
                             setModalState(() => errorText = '保存 JSON 文件失败：$e');
@@ -16616,29 +17552,62 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       icon: CupertinoIcons.folder,
                       onPressed: () async {
                         try {
-                          final picked = await FilePicker.platform.pickFiles(
-                            type: FileType.any,
-                            withData: false,
-                          );
-                          final entry = picked?.files.single;
-                          if (entry == null || !ctx.mounted) return;
                           final String text;
-                          if (entry.path != null && entry.path!.isNotEmpty) {
-                            final file = File(entry.path!);
-                            if (await file.length() > StorageService.maxSyncPayloadBytes) {
-                              throw const FormatException('备份文件超过 8 MB 限制');
-                            }
-                            text = await file.readAsString();
-                          } else if (entry.bytes != null) {
-                            text = utf8.decode(entry.bytes!);
+                          final int byteLength;
+                          if (OhosRuntime.isOhos) {
+                            final picked = await OhosRuntime.pickDocumentFile(
+                              purpose: OhosDocumentPurpose.backup,
+                              maxBytes: StorageService.maxLocalBackupBytes,
+                            );
+                            if (picked == null || !ctx.mounted) return;
+                            StorageService.validateLocalBackupUtf8Bytes(
+                              picked.bytes,
+                            );
+                            byteLength = picked.bytes.length;
+                            text = picked.decodeUtf8(allowMalformed: false);
                           } else {
-                            return;
+                            final picked = await FilePicker.platform.pickFiles(
+                              type: FileType.any,
+                              withData: false,
+                            );
+                            final entry = picked?.files.single;
+                            if (entry == null || !ctx.mounted) return;
+                            if (entry.path != null && entry.path!.isNotEmpty) {
+                              final file = File(entry.path!);
+                              final len = await file.length();
+                              if (len > StorageService.maxSyncPayloadBytes) {
+                                throw const FormatException('备份文件超过 8 MB 限制');
+                              }
+                              byteLength = len;
+                              text = await file.readAsString();
+                            } else if (entry.bytes != null) {
+                              if (entry.bytes!.length > StorageService.maxSyncPayloadBytes) {
+                                throw const FormatException('备份文件超过 8 MB 限制');
+                              }
+                              byteLength = entry.bytes!.length;
+                              text = utf8.decode(entry.bytes!);
+                            } else {
+                              return;
+                            }
                           }
                           if (!ctx.mounted) return;
                           setModalState(() {
-                            ctrl.text = text;
+                            if (text.length > inlineTextFieldCharLimit) {
+                              fullBackupPayload = text;
+                              ctrl.text = '';
+                              loadedLargeSummary =
+                                  '已载入备份文件（${(byteLength / (1024 * 1024)).toStringAsFixed(1)} MB），点击下方按钮恢复';
+                            } else {
+                              fullBackupPayload = null;
+                              loadedLargeSummary = null;
+                              ctrl.text = text;
+                            }
                             errorText = null;
                           });
+                        } on FormatException catch (e) {
+                          if (ctx.mounted) {
+                            setModalState(() => errorText = '读取备份文件失败：${e.message}');
+                          }
                         } catch (e) {
                           if (ctx.mounted) {
                             setModalState(() => errorText = '读取备份文件失败：$e');
@@ -16653,12 +17622,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               SizedBox(
                 width: double.infinity,
                 child: AppleCapsuleButton(
+                  key: const ValueKey('backup-restore-confirm'),
                   label: '从此备份文本恢复',
                   icon: CupertinoIcons.arrow_counterclockwise,
                   primary: true,
                   onPressed: () async {
                     try {
-                      await widget.storage.importBackupJson(ctrl.text);
+                      final payload = effectivePayload();
+                      if (OhosRuntime.isOhos) {
+                        await widget.storage.importValidatedLocalBackupJson(
+                          payload,
+                        );
+                      } else {
+                        await widget.storage.importBackupJson(payload);
+                      }
                       if (ctx.mounted) Navigator.of(ctx).pop();
                       _reloadSavedConfig();
                     } catch (e) {
@@ -17148,7 +18125,9 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                               ),
                               SizedBox(height: 4),
                               Text(
-                                '$epLabel · 已看 $pct%',
+                                h.duration > 0
+                                    ? '$epLabel · 已看 $pct%'
+                                    : epLabel,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
@@ -17156,21 +18135,21 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                                   fontSize: 12.5,
                                 ),
                               ),
-                              SizedBox(height: 8),
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(999),
-                                child: LinearProgressIndicator(
-                                  value: h.progressFraction > 0
-                                      ? h.progressFraction
-                                      : 0.12,
-                                  minHeight: 3.5,
-                                  backgroundColor: ApplePalette.of(context).groupedTertiary,
-                                  valueColor:
-                                      const AlwaysStoppedAnimation<Color>(
-                                    AppleColors.systemBlue,
+                              if (h.duration > 0) ...[
+                                SizedBox(height: 8),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(999),
+                                  child: LinearProgressIndicator(
+                                    value: h.progressFraction.clamp(0.0, 1.0),
+                                    minHeight: 3.5,
+                                    backgroundColor: ApplePalette.of(context).groupedTertiary,
+                                    valueColor:
+                                        const AlwaysStoppedAnimation<Color>(
+                                      AppleColors.systemBlue,
+                                    ),
                                   ),
                                 ),
-                              ),
+                              ],
                             ],
                           ),
                         ),

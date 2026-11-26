@@ -72,6 +72,7 @@ public final class LiteStore {
         public String vodName = "";
         public String vodPic = "";
         public String lineName = "";
+        public String lineFrom = "";
         public int lineIndex;
         public String epName = "";
         public String epUrl = "";
@@ -89,6 +90,7 @@ public final class LiteStore {
                     .put("vodName", vodName)
                     .put("vodPic", vodPic)
                     .put("lineName", lineName)
+                    .put("lineFrom", lineFrom)
                     .put("lineIndex", lineIndex)
                     .put("epName", epName)
                     .put("epUrl", epUrl)
@@ -108,6 +110,7 @@ public final class LiteStore {
             e.vodName = o.optString("vodName", "");
             e.vodPic = o.optString("vodPic", "");
             e.lineName = o.optString("lineName", "");
+            e.lineFrom = o.optString("lineFrom", "");
             e.lineIndex = o.optInt("lineIndex", 0);
             e.epName = o.optString("epName", "");
             e.epUrl = o.optString("epUrl", "");
@@ -226,6 +229,11 @@ public final class LiteStore {
     }
 
     public static String recordHistoryJson(String existingRaw, HistoryEntry entry) {
+        return recordHistoryJson(existingRaw, entry, false);
+    }
+
+    public static String recordHistoryJson(
+            String existingRaw, HistoryEntry entry, boolean collapseLegacyEmptyApi) {
         if (historyCorrupted || isMalformedHistory(existingRaw)) {
             historyCorrupted = true;
             logWarn("Skipping history record because history is corrupted", null);
@@ -236,12 +244,29 @@ public final class LiteStore {
         }
         List<HistoryEntry> current = parseHistoryJson(existingRaw);
         JSONArray next = new JSONArray();
+        String entryApi = normApi(entry.siteApi);
+        boolean safeCollapseLegacy =
+                collapseLegacyEmptyApi
+                        && entryApi.length() > 0
+                        && !hasConflictingApiInHistory(current, entry.siteKey, entryApi);
         try {
             if (entry.updatedAt <= 0L) entry.updatedAt = System.currentTimeMillis();
             next.put(entry.toJson());
             for (int i = 0; i < current.size() && next.length() < MAX_HISTORY; i++) {
                 HistoryEntry old = current.get(i);
-                if (sameVideo(old.siteKey, old.vodId, entry.siteKey, entry.vodId)) continue;
+                boolean dupExact =
+                        sameVideo(
+                                old.siteKey,
+                                old.siteApi,
+                                old.vodId,
+                                entry.siteKey,
+                                entryApi,
+                                entry.vodId);
+                boolean dupLegacy =
+                        safeCollapseLegacy
+                                && normApi(old.siteApi).length() == 0
+                                && sameVideoLegacy(old.siteKey, old.vodId, entry.siteKey, entry.vodId);
+                if (dupExact || dupLegacy) continue;
                 next.put(old.toJson());
             }
         } catch (Exception e) {
@@ -251,16 +276,35 @@ public final class LiteStore {
     }
 
     public static void saveHistory(Context context, HistoryEntry entry) {
+        saveHistory(context, entry, false);
+    }
+
+    public static void saveHistory(
+            Context context, HistoryEntry entry, boolean collapseLegacyEmptyApi) {
         if (context == null) return;
-        saveHistory(prefs(context), entry);
+        saveHistory(prefs(context), entry, collapseLegacyEmptyApi);
     }
 
     public static void saveHistory(SharedPreferences sp, HistoryEntry entry) {
+        saveHistory(sp, entry, false);
+    }
+
+    public static void saveHistory(
+            SharedPreferences sp, HistoryEntry entry, boolean collapseLegacyEmptyApi) {
         if (sp == null || entry == null) return;
         if (isHistoryCorrupted(sp)) {
             return;
         }
-        String updated = recordHistoryJson(sp.getString(KEY_HISTORY, "[]"), entry);
+        String histRaw = sp.getString(KEY_HISTORY, "[]");
+        boolean safeCollapse =
+                collapseLegacyEmptyApi
+                        && LiteSync.isSiteKeyUnambiguouslyUnique(
+                                entry.siteKey,
+                                null,
+                                histRaw,
+                                sp.getString(KEY_FAVORITES, "[]"),
+                                sp.getString(KEY_SYNC_TOMBSTONES, ""));
+        String updated = recordHistoryJson(histRaw, entry, safeCollapse);
         if (!isHistoryCorrupted()) {
             sp.edit().putString(KEY_HISTORY, updated).apply();
         }
@@ -268,27 +312,83 @@ public final class LiteStore {
 
     public static HistoryEntry findHistory(Context context, String siteKey, String vodId) {
         if (context == null) return null;
-        List<HistoryEntry> list = getHistory(context);
+        return findHistoryInList(getHistory(context), siteKey, "", vodId, true);
+    }
+
+    public static HistoryEntry findHistory(
+            Context context,
+            String siteKey,
+            String siteApi,
+            String vodId,
+            boolean allowLegacyEmptyApi) {
+        if (context == null) return null;
+        return findHistoryInList(
+                getHistory(context), siteKey, siteApi, vodId, allowLegacyEmptyApi);
+    }
+
+    public static HistoryEntry findHistoryInList(
+            List<HistoryEntry> list,
+            String siteKey,
+            String siteApi,
+            String vodId,
+            boolean allowLegacyEmptyApi) {
+        if (list == null || list.isEmpty()) return null;
+        String api = normApi(siteApi);
         for (int i = 0; i < list.size(); i++) {
             HistoryEntry e = list.get(i);
-            if (sameVideo(e.siteKey, e.vodId, siteKey, vodId)) return e;
+            if (sameVideo(e.siteKey, e.siteApi, e.vodId, siteKey, api, vodId)) return e;
+        }
+        if (api.length() == 0) {
+            for (int i = 0; i < list.size(); i++) {
+                HistoryEntry e = list.get(i);
+                if (sameVideoLegacy(e.siteKey, e.vodId, siteKey, vodId)) return e;
+            }
+        } else if (allowLegacyEmptyApi && !hasConflictingApiInHistory(list, siteKey, api)) {
+            for (int i = 0; i < list.size(); i++) {
+                HistoryEntry e = list.get(i);
+                if (normApi(e.siteApi).length() == 0
+                        && sameVideoLegacy(e.siteKey, e.vodId, siteKey, vodId)) {
+                    return e;
+                }
+            }
         }
         return null;
     }
 
     public static void removeHistory(Context context, String siteKey, String vodId) {
         if (context == null) return;
-        removeHistory(prefs(context), siteKey, vodId);
+        removeHistory(prefs(context), siteKey, null, vodId);
+    }
+
+    public static void removeHistory(
+            Context context, String siteKey, String siteApi, String vodId) {
+        if (context == null) return;
+        removeHistory(prefs(context), siteKey, siteApi, vodId);
     }
 
     public static void removeHistory(SharedPreferences sp, String siteKey, String vodId) {
+        removeHistory(sp, siteKey, null, vodId);
+    }
+
+    public static void removeHistory(
+            SharedPreferences sp, String siteKey, String siteApi, String vodId) {
         if (sp == null || isHistoryCorrupted(sp)) return;
         List<HistoryEntry> current = getHistory(sp);
         JSONArray next = new JSONArray();
         try {
             for (int i = 0; i < current.size(); i++) {
                 HistoryEntry old = current.get(i);
-                if (!sameVideo(old.siteKey, old.vodId, siteKey, vodId)) {
+                boolean matched =
+                        siteApi == null
+                                ? sameVideoLegacy(old.siteKey, old.vodId, siteKey, vodId)
+                                : sameVideo(
+                                        old.siteKey,
+                                        old.siteApi,
+                                        old.vodId,
+                                        siteKey,
+                                        siteApi,
+                                        vodId);
+                if (!matched) {
                     next.put(old.toJson());
                 }
             }
@@ -332,7 +432,14 @@ public final class LiteStore {
         }
         clearHistory(storePrefs);
         if (appPrefs != null) {
-            appPrefs.edit().remove("resume_address").remove("resume_ms").apply();
+            appPrefs.edit()
+                    .remove("resume_address")
+                    .remove("resume_site_api")
+                    .remove("resume_vod_id")
+                    .remove("resume_ep_name")
+                    .remove("resume_line_from")
+                    .remove("resume_ms")
+                    .apply();
         }
         return !wasCorrupted;
     }
@@ -361,33 +468,118 @@ public final class LiteStore {
         return containsFavorite(prefs(context).getString(KEY_FAVORITES, "[]"), siteKey, vodId);
     }
 
+    public static boolean isFavorite(
+            Context context,
+            String siteKey,
+            String siteApi,
+            String vodId,
+            boolean allowLegacyEmptyApi) {
+        return containsFavorite(
+                prefs(context).getString(KEY_FAVORITES, "[]"),
+                siteKey,
+                siteApi,
+                vodId,
+                allowLegacyEmptyApi);
+    }
+
     public static boolean containsFavorite(String raw, String siteKey, String vodId) {
         List<FavoriteEntry> list = parseFavoritesJson(raw);
         for (int i = 0; i < list.size(); i++) {
             FavoriteEntry e = list.get(i);
-            if (sameVideo(e.siteKey, e.vodId, siteKey, vodId)) return true;
+            if (sameVideoLegacy(e.siteKey, e.vodId, siteKey, vodId)) return true;
+        }
+        return false;
+    }
+
+    public static boolean containsFavorite(
+            String raw,
+            String siteKey,
+            String siteApi,
+            String vodId,
+            boolean allowLegacyEmptyApi) {
+        List<FavoriteEntry> list = parseFavoritesJson(raw);
+        String api = normApi(siteApi);
+        for (int i = 0; i < list.size(); i++) {
+            FavoriteEntry e = list.get(i);
+            if (sameVideo(e.siteKey, e.siteApi, e.vodId, siteKey, api, vodId)) return true;
+        }
+        if (allowLegacyEmptyApi
+                && api.length() > 0
+                && !hasConflictingApiInFavorites(list, siteKey, api)) {
+            for (int i = 0; i < list.size(); i++) {
+                FavoriteEntry e = list.get(i);
+                if (normApi(e.siteApi).length() == 0
+                        && sameVideoLegacy(e.siteKey, e.vodId, siteKey, vodId)) {
+                    return true;
+                }
+            }
         }
         return false;
     }
 
     public static String toggleFavoriteJson(String existingRaw, FavoriteEntry entry) {
+        return toggleFavoriteJson(existingRaw, entry, false);
+    }
+
+    public static String toggleFavoriteJson(
+            String existingRaw, FavoriteEntry entry, boolean allowLegacyEmptyApi) {
         List<FavoriteEntry> list = parseFavoritesJson(existingRaw);
-        boolean removed = false;
-        JSONArray next = new JSONArray();
-        try {
+        boolean removedExact = false;
+        boolean removedLegacy = false;
+        String entryApi = normApi(entry.siteApi);
+        boolean safeAllowLegacy =
+                allowLegacyEmptyApi
+                        && entryApi.length() > 0
+                        && !hasConflictingApiInFavorites(list, entry.siteKey, entryApi);
+        for (int i = 0; i < list.size(); i++) {
+            FavoriteEntry old = list.get(i);
+            if (sameVideo(
+                    old.siteKey,
+                    old.siteApi,
+                    old.vodId,
+                    entry.siteKey,
+                    entryApi,
+                    entry.vodId)) {
+                removedExact = true;
+            }
+        }
+        if (!removedExact && safeAllowLegacy) {
             for (int i = 0; i < list.size(); i++) {
                 FavoriteEntry old = list.get(i);
-                if (sameVideo(old.siteKey, old.vodId, entry.siteKey, entry.vodId)) {
-                    removed = true;
+                if (normApi(old.siteApi).length() == 0
+                        && sameVideoLegacy(old.siteKey, old.vodId, entry.siteKey, entry.vodId)) {
+                    removedLegacy = true;
+                    break;
                 }
             }
+        }
+        boolean removed = removedExact || removedLegacy;
+        JSONArray next = new JSONArray();
+        try {
             if (!removed) {
                 if (entry.addedAt <= 0L) entry.addedAt = System.currentTimeMillis();
                 next.put(entry.toJson());
             }
             for (int i = 0; i < list.size() && next.length() < MAX_FAVORITES; i++) {
                 FavoriteEntry old = list.get(i);
-                if (!sameVideo(old.siteKey, old.vodId, entry.siteKey, entry.vodId)) {
+                boolean skipExact =
+                        removedExact
+                                && sameVideo(
+                                        old.siteKey,
+                                        old.siteApi,
+                                        old.vodId,
+                                        entry.siteKey,
+                                        entryApi,
+                                        entry.vodId);
+                boolean skipLegacy =
+                        (removedLegacy || (removedExact && safeAllowLegacy))
+                                && normApi(old.siteApi).length() == 0
+                                && sameVideoLegacy(
+                                        old.siteKey,
+                                        old.vodId,
+                                        entry.siteKey,
+                                        entry.vodId);
+                if (!skipExact && !skipLegacy) {
                     next.put(old.toJson());
                 }
             }
@@ -397,11 +589,25 @@ public final class LiteStore {
     }
 
     public static boolean toggleFavorite(Context context, FavoriteEntry entry) {
+        return toggleFavorite(context, entry, false);
+    }
+
+    public static boolean toggleFavorite(
+            Context context, FavoriteEntry entry, boolean allowLegacyEmptyApi) {
         SharedPreferences sp = prefs(context);
         String raw = sp.getString(KEY_FAVORITES, "[]");
-        String updated = toggleFavoriteJson(raw, entry);
+        boolean safeAllowLegacy =
+                allowLegacyEmptyApi
+                        && LiteSync.isSiteKeyUnambiguouslyUnique(
+                                entry.siteKey,
+                                null,
+                                sp.getString(KEY_HISTORY, "[]"),
+                                raw,
+                                sp.getString(KEY_SYNC_TOMBSTONES, ""));
+        String updated = toggleFavoriteJson(raw, entry, safeAllowLegacy);
         sp.edit().putString(KEY_FAVORITES, updated).commit();
-        return containsFavorite(updated, entry.siteKey, entry.vodId);
+        return containsFavorite(
+                updated, entry.siteKey, entry.siteApi, entry.vodId, safeAllowLegacy);
     }
 
     public static void clearFavorites(Context context) {
@@ -478,11 +684,70 @@ public final class LiteStore {
         prefs(context).edit().putString(KEY_SYNC_TOMBSTONES, raw == null ? "" : raw).commit();
     }
 
-    private static boolean sameVideo(String siteA, String vodA, String siteB, String vodB) {
-        String sa = siteA == null ? "" : siteA;
-        String sb = siteB == null ? "" : siteB;
-        String va = vodA == null ? "" : vodA;
-        String vb = vodB == null ? "" : vodB;
+    private static String normApi(String api) {
+        return api == null ? "" : api.trim();
+    }
+
+    private static boolean hasConflictingApiInHistory(
+            List<HistoryEntry> list, String siteKey, String targetApi) {
+        if (list == null || list.isEmpty()) return false;
+        String sk = siteKey == null ? "" : siteKey.trim();
+        if (sk.length() == 0) return false;
+        String firstApi = normApi(targetApi);
+        for (int i = 0; i < list.size(); i++) {
+            HistoryEntry e = list.get(i);
+            if (e == null) continue;
+            String esk = e.siteKey == null ? "" : e.siteKey.trim();
+            if (!sk.equals(esk)) continue;
+            String ea = normApi(e.siteApi);
+            if (ea.length() == 0) continue;
+            if (firstApi.length() == 0) {
+                firstApi = ea;
+            } else if (!firstApi.equals(ea)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasConflictingApiInFavorites(
+            List<FavoriteEntry> list, String siteKey, String targetApi) {
+        if (list == null || list.isEmpty()) return false;
+        String sk = siteKey == null ? "" : siteKey.trim();
+        if (sk.length() == 0) return false;
+        String firstApi = normApi(targetApi);
+        for (int i = 0; i < list.size(); i++) {
+            FavoriteEntry e = list.get(i);
+            if (e == null) continue;
+            String esk = e.siteKey == null ? "" : e.siteKey.trim();
+            if (!sk.equals(esk)) continue;
+            String ea = normApi(e.siteApi);
+            if (ea.length() == 0) continue;
+            if (firstApi.length() == 0) {
+                firstApi = ea;
+            } else if (!firstApi.equals(ea)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean sameVideoLegacy(String siteA, String vodA, String siteB, String vodB) {
+        String sa = siteA == null ? "" : siteA.trim();
+        String sb = siteB == null ? "" : siteB.trim();
+        String va = vodA == null ? "" : vodA.trim();
+        String vb = vodB == null ? "" : vodB.trim();
         return sa.equals(sb) && va.equals(vb) && va.length() > 0;
+    }
+
+    public static boolean sameVideo(
+            String siteA,
+            String apiA,
+            String vodA,
+            String siteB,
+            String apiB,
+            String vodB) {
+        if (!sameVideoLegacy(siteA, vodA, siteB, vodB)) return false;
+        return normApi(apiA).equals(normApi(apiB));
     }
 }

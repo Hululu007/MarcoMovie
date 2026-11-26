@@ -1,0 +1,29 @@
+<resources>
+  <color name="window_background">#0A0B0E</color>
+  <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
+    <item name="android:fontFamily">sans</item>
+    <item name="android:colorAccent">#007AFF</item>
+    <item name="android:windowActionModeOverlay">true</item>
+    <item name="android:windowNoTitle">true</item>
+    <item name="android:statusBarColor">@android:color/transparent</item>
+    <item name="android:navigationBarColor">@android:color/transparent</item>
+    <item name="android:windowBackground">@color/window_background</item>
+    <item name="android:windowLightStatusBar">false</item>
+    <item name="android:alertDialogTheme">@style/MarcoAlertDialogTheme</item>
+    <item name="android:dialogTheme">@style/MarcoAlertDialogTheme</item>
+  </style>
+
+  <style name="MarcoAlertDialogTheme" parent="android:style/Theme.Material.Dialog.Alert">
+    <item name="android:windowBackground">@android:color/transparent</item>
+    <item name="android:windowContentOverlay">@null</item>
+    <item name="android:windowMinWidthMajor">0dp</item>
+    <item name="android:windowMinWidthMinor">0dp</item>
+    <item name="android:colorBackground">#15171E</item>
+    <item name="android:colorPrimary">#007AFF</item>
+    <item name="android:colorAccent">#007AFF</item>
+    <item name="android:textColorPrimary">#F3F5F9</item>
+    <item name="android:textColorSecondary">#949BA8</item>
+    <item name="android:windowIsFloating">true</item>
+    <item name="android:backgroundDimEnabled">true</item>
+  </style>
+</resources>

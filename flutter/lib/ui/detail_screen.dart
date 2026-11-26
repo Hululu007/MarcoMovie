@@ -19,6 +19,7 @@ import '../core/episode_scraper.dart';
 import '../core/media_badges.dart';
 import '../core/models.dart';
 import '../core/ohos_runtime.dart';
+import '../core/series_scraper.dart' hide ScrapedEpisodeInfo;
 import '../core/storage_service.dart';
 import '../core/web_media_resolver.dart';
 import '../core/wogg_source.dart';
@@ -34,6 +35,7 @@ import 'motion/player_enter_transition.dart';
 import 'netdisk_sheet.dart';
 import 'player_screen.dart';
 import 'poster_image.dart';
+import 'series_scrape_sheet.dart';
 import 'source_verification_dialog.dart';
 import 'windows_appearance.dart';
 import 'windows_title_bar.dart';
@@ -77,6 +79,10 @@ class DetailScreen extends StatefulWidget {
   final ui.FragmentProgram? debugTransitionShaderProgram;
   @visibleForTesting
   final ValueChanged<PlayerTransitionMode>? debugOnTransitionModeResolved;
+  @visibleForTesting
+  final SeriesScrapeSearchFn? debugScrapeSearchFn;
+  @visibleForTesting
+  final SeriesScrapeHydrateFn? debugScrapeHydrateFn;
   const DetailScreen({
     super.key,
     required this.site,
@@ -88,6 +94,8 @@ class DetailScreen extends StatefulWidget {
     this.debugTransitionCapturer,
     this.debugTransitionShaderProgram,
     this.debugOnTransitionModeResolved,
+    this.debugScrapeSearchFn,
+    this.debugScrapeHydrateFn,
   });
 
   static List<CmsSite> selectRelatedSeasonSiblings(
@@ -205,6 +213,11 @@ class _DetailScreenState extends State<DetailScreen> {
   bool _windowsEpisodesExpanded = false;
   bool _windowsSynopsisExpanded = false;
   bool _windowsHeroHasLandscape = false;
+  bool _macHeroHasLandscape = false;
+  bool get _isMacosDetail =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.macOS &&
+      !OhosRuntime.isOhos;
   late bool _descending;
   late bool _isFavorite;
   final ValueNotifier<double> _scrollOffset = ValueNotifier<double>(0.0);
@@ -279,6 +292,147 @@ class _DetailScreenState extends State<DetailScreen> {
   final GlobalKey _transitionPosterKey = GlobalKey();
   Uint8List? _loadedPosterBytes;
   String _loadedPosterIdentity = '';
+  SeriesScrapeOverride? _scrapeOverride;
+  final TextEditingController _windowsEpisodeQueryCtrl = TextEditingController();
+  String _windowsEpisodeQuery = '';
+  CmsLine? _cachedScrapeLine;
+  String _cachedScrapeSig = '';
+  LineEpisodeScrapeResult? _cachedScrapeResult;
+
+  void _loadScrapeOverride() {
+    _scrapeOverride = widget.storage.getSeriesScrapeOverride(
+      _activeSite.key,
+      _video.id,
+      isPrivate: _activeSite.isEffectivelyPrivate,
+    );
+    _cachedScrapeLine = null;
+    _cachedScrapeSig = '';
+    _cachedScrapeResult = null;
+  }
+
+  bool get _effectiveWantMotionComic {
+    final ov = _scrapeOverride;
+    if (ov != null && ov.hasWorkBinding) return ov.isMotionComic;
+    return SeriesScraper.isMotionComicText(
+      _video.title,
+      extraContext: '${_video.tag} ${_video.remarks}',
+    );
+  }
+
+  String get _effectiveLookupTitle {
+    if (_activeSite.isEffectivelyPrivate) return '';
+    final ov = _scrapeOverride;
+    if (ov != null && ov.matchedTitle.trim().isNotEmpty) {
+      return ov.matchedTitle.trim();
+    }
+    return _video.title;
+  }
+
+  String get _effectiveLookupYear {
+    final ov = _scrapeOverride;
+    if (!_activeSite.isEffectivelyPrivate &&
+        ov != null &&
+        ov.matchedYear.trim().isNotEmpty) {
+      return ov.matchedYear.trim();
+    }
+    return _video.year;
+  }
+
+  String get _effectiveDoubanId {
+    if (_activeSite.isEffectivelyPrivate) return '';
+    return _scrapeOverride?.doubanId.trim() ?? '';
+  }
+
+  bool get _effectiveDoubanIsTv => _scrapeOverride?.isTv ?? true;
+
+  String get _effectiveBackdropUrl {
+    if (_activeSite.isEffectivelyPrivate) return '';
+    return _scrapeOverride?.backdropUrl.trim() ?? '';
+  }
+
+  String get _effectivePosterUrl {
+    final ov = _scrapeOverride;
+    if (!_activeSite.isEffectivelyPrivate &&
+        ov != null &&
+        ov.posterUrl.trim().isNotEmpty) {
+      return ov.posterUrl.trim();
+    }
+    return _video.poster;
+  }
+
+  LineEpisodeScrapeResult _scrapeResultForLine(CmsLine line) {
+    final ov = _scrapeOverride;
+    final title = _effectiveLookupTitle.isNotEmpty
+        ? _effectiveLookupTitle
+        : _video.title;
+    final offset = ov?.episodeOffset ?? 0;
+    final overrides = ov?.episodeNumberOverrides ?? const <String, int>{};
+    final calibs = ov?.episodeCalibrations ??
+        const <String, EpisodeManualCalibration>{};
+    final sig =
+        '${line.name}|${line.episodes.length}|$title|$offset|'
+        '${overrides.entries.map((e) => "${e.key}:${e.value}").join(",")}|'
+        '${calibs.entries.map((e) => "${e.key}:${e.value.seasonNumber}:${e.value.episodeNumber}:${e.value.isSpecial}").join(",")}';
+    if (identical(_cachedScrapeLine, line) &&
+        _cachedScrapeSig == sig &&
+        _cachedScrapeResult != null) {
+      return _cachedScrapeResult!;
+    }
+    final result = SeriesScraper.scrapeLineEpisodes(
+      line.episodes,
+      seriesTitle: title,
+      episodeOffset: offset,
+      manualOverrides: overrides,
+      episodeCalibrations: calibs,
+    );
+    _cachedScrapeLine = line;
+    _cachedScrapeSig = sig;
+    _cachedScrapeResult = result;
+    return result;
+  }
+
+  Future<void> _openSeriesScrapeSheet({int initialTab = 0}) async {
+    if (_activeSite.isEffectivelyPrivate) return;
+    final activeLine = _video.lines.isNotEmpty
+        ? _video.lines[_selectedLine.clamp(0, _video.lines.length - 1)]
+        : null;
+    await showSeriesScrapeSheet(
+      context,
+      site: _activeSite,
+      video: _video,
+      storage: widget.storage,
+      activeLine: activeLine,
+      initialOverride: _scrapeOverride,
+      initialTab: initialTab,
+      debugSearchFn: widget.debugScrapeSearchFn,
+      debugHydrateFn: widget.debugScrapeHydrateFn,
+    );
+  }
+
+  void _onSeriesScrapeRevision() {
+    if (!mounted) return;
+    _loadScrapeOverride();
+    _externalSynopsis = '';
+    _resolvedDoubanScore = null;
+    _resolvedRtScore = null;
+    _seedCachedExternalFields();
+    final hasCachedLandscape = !_activeSite.isEffectivelyPrivate &&
+        PosterLoader.peekLandscapeMemory(
+              _effectiveLookupTitle,
+              year: _effectiveLookupYear,
+              wantMotionComic: _effectiveWantMotionComic,
+              preferredBackdropUrl: _effectiveBackdropUrl,
+              preferredDoubanId: _effectiveDoubanId,
+            ) !=
+            null;
+    _windowsHeroHasLandscape = hasCachedLandscape;
+    _macHeroHasLandscape = hasCachedLandscape;
+    setState(() {
+      _selectedPage = 0;
+    });
+    _warmRatings(_effectiveLookupTitle, year: _effectiveLookupYear);
+    _warmExternalMetadata(_effectiveLookupTitle);
+  }
 
   static bool _canShowInitialLinesImmediately(CmsSite site, CmsVideo video) {
     if (!video.lines.any((l) => l.episodes.isNotEmpty)) return false;
@@ -306,15 +460,23 @@ class _DetailScreenState extends State<DetailScreen> {
       _resolvedRtScore = null;
       return;
     }
-    final syn = PosterLoader.peekSeriesSynopsis(_video.title);
+    final lookupTitle = _effectiveLookupTitle;
+    final lookupYear = _effectiveLookupYear;
+    final wantMc = _effectiveWantMotionComic;
+    final syn = PosterLoader.peekSeriesSynopsis(
+      lookupTitle,
+      year: lookupYear,
+      wantMotionComic: wantMc,
+    );
     if (syn.isNotEmpty) {
       _externalSynopsis = syn;
     }
     final cachedRatings = PosterLoader.peekRatings(
-      _video.title,
-      year: _video.year,
+      lookupTitle,
+      year: lookupYear,
+      wantMotionComic: wantMc,
     );
-    _resolvedDoubanScore = cachedRatings?.douban;
+    _resolvedDoubanScore = _scrapeOverride?.doubanScore ?? cachedRatings?.douban;
     _resolvedRtScore = cachedRatings?.rt;
   }
 
@@ -420,19 +582,25 @@ class _DetailScreenState extends State<DetailScreen> {
       _video.id,
       forPrivate: _activeSite.isEffectivelyPrivate,
     );
+    _loadScrapeOverride();
     _seedCachedExternalFields();
     _windowsHeroHasLandscape = !_activeSite.isEffectivelyPrivate &&
         PosterLoader.peekLandscapeMemory(
-              _publicLookupTitle,
-              year: _video.year,
+              _effectiveLookupTitle,
+              year: _effectiveLookupYear,
+              wantMotionComic: _effectiveWantMotionComic,
+              preferredBackdropUrl: _effectiveBackdropUrl,
+              preferredDoubanId: _effectiveDoubanId,
             ) !=
             null;
+    _macHeroHasLandscape = _windowsHeroHasLandscape;
     PosterLoader.metadataRevision.addListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.addListener(_onWatchHistoryChanged);
+    widget.storage.seriesScrapeRevision.addListener(_onSeriesScrapeRevision);
     final immediateBytes = PosterLoader.peekMemory(
-      _video.poster,
-      title: _publicLookupTitle,
-      year: _video.year,
+      _effectivePosterUrl,
+      title: _effectiveLookupTitle,
+      year: _effectiveLookupYear,
       preferHd: true,
     );
     if (immediateBytes != null) {
@@ -444,14 +612,13 @@ class _DetailScreenState extends State<DetailScreen> {
       }
     }
     _loadDetail();
-    _warmRatings(_video.title, year: _video.year);
+    _warmRatings(_effectiveLookupTitle, year: _effectiveLookupYear);
     if (!_loading) {
-      _warmExternalMetadata(_video.title);
+      _warmExternalMetadata(_effectiveLookupTitle);
     }
   }
 
-  String get _publicLookupTitle =>
-      _activeSite.isEffectivelyPrivate ? '' : _video.title;
+  String get _publicLookupTitle => _effectiveLookupTitle;
 
   String get _effectiveScrapeTitle {
     if (_activeSite.isEffectivelyPrivate) return _video.title;
@@ -498,7 +665,7 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   String get _currentPosterIdentity =>
-      '${_activeSite.key}|${_video.id}|${_video.poster}|$_publicLookupTitle|${_video.year}';
+      '${_activeSite.key}|${_video.id}|$_effectivePosterUrl|$_effectiveLookupTitle|$_effectiveLookupYear|$_effectiveDoubanId';
 
   void _onPosterCardBytesLoaded(Uint8List bytes) {
     _loadedPosterBytes = bytes;
@@ -541,6 +708,8 @@ class _DetailScreenState extends State<DetailScreen> {
     _cancelDetailWork();
     PosterLoader.metadataRevision.removeListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryChanged);
+    widget.storage.seriesScrapeRevision.removeListener(_onSeriesScrapeRevision);
+    _windowsEpisodeQueryCtrl.dispose();
     _scrollOffset.dispose();
     _pullOverscroll.dispose();
     _pullRefreshPhase.dispose();
@@ -575,10 +744,27 @@ class _DetailScreenState extends State<DetailScreen> {
 
   void _onExternalMetadataRevision() {
     if (!mounted || _activeSite.isEffectivelyPrivate) return;
-    final syn = PosterLoader.peekSeriesSynopsis(_video.title);
-    final epMetaLen = PosterLoader.peekAllEpisodeMeta(_video.title).length;
-    final capLen = PosterLoader.peekSeriesEpisodeCaptions(_video.title).length;
-    final ratings = PosterLoader.peekRatings(_video.title, year: _video.year);
+    final lookupTitle = _effectiveLookupTitle;
+    final lookupYear = _effectiveLookupYear;
+    final wantMc = _effectiveWantMotionComic;
+    final syn = PosterLoader.peekSeriesSynopsis(
+      lookupTitle,
+      year: lookupYear,
+      wantMotionComic: wantMc,
+    );
+    final epMetaLen = PosterLoader.peekAllEpisodeMeta(
+      lookupTitle,
+      wantMotionComic: wantMc,
+    ).length;
+    final capLen = PosterLoader.peekSeriesEpisodeCaptions(
+      lookupTitle,
+      wantMotionComic: wantMc,
+    ).length;
+    final ratings = PosterLoader.peekRatings(
+      lookupTitle,
+      year: lookupYear,
+      wantMotionComic: wantMc,
+    );
     final sig = Object.hash(
       syn,
       epMetaLen,
@@ -592,7 +778,8 @@ class _DetailScreenState extends State<DetailScreen> {
       _externalSynopsis = syn;
     }
     if (ratings != null) {
-      _resolvedDoubanScore = ratings.douban ?? _resolvedDoubanScore;
+      _resolvedDoubanScore =
+          _scrapeOverride?.doubanScore ?? ratings.douban ?? _resolvedDoubanScore;
       _resolvedRtScore = ratings.rt ?? _resolvedRtScore;
     }
     setState(() {});
@@ -642,15 +829,26 @@ class _DetailScreenState extends State<DetailScreen> {
 
   Future<void> _warmRatings(String title, {String year = ''}) async {
     if (_activeSite.isEmby || _activeSite.isEffectivelyPrivate) return;
-    final trimmed = title.trim();
+    final trimmed = _effectiveLookupTitle.trim().isNotEmpty
+        ? _effectiveLookupTitle.trim()
+        : title.trim();
     if (trimmed.isEmpty) return;
+    final effectiveYear =
+        _effectiveLookupYear.isNotEmpty ? _effectiveLookupYear : year;
     final epoch = _detailEpoch;
-    final ratings = await PosterLoader.fetchRatings(trimmed, year: year);
+    final ratings = await PosterLoader.fetchRatings(
+      trimmed,
+      year: effectiveYear,
+      wantMotionComic: _effectiveWantMotionComic,
+      preferredDoubanId: _effectiveDoubanId,
+      preferredDoubanIsTv: _effectiveDoubanIsTv,
+    );
     if (!mounted || epoch != _detailEpoch) return;
     if ((ratings.douban != null && ratings.douban != _resolvedDoubanScore) ||
         (ratings.rt != null && ratings.rt != _resolvedRtScore)) {
       setState(() {
-        _resolvedDoubanScore = ratings.douban ?? _resolvedDoubanScore;
+        _resolvedDoubanScore =
+            _scrapeOverride?.doubanScore ?? ratings.douban ?? _resolvedDoubanScore;
         _resolvedRtScore = ratings.rt ?? _resolvedRtScore;
       });
     }
@@ -658,9 +856,18 @@ class _DetailScreenState extends State<DetailScreen> {
 
   Future<void> _warmExternalMetadata(String title) async {
     if (_activeSite.isEmby || _activeSite.isEffectivelyPrivate) return;
-    if (title.trim().isEmpty) return;
+    final lookupTitle = _effectiveLookupTitle.trim().isNotEmpty
+        ? _effectiveLookupTitle.trim()
+        : title.trim();
+    if (lookupTitle.isEmpty) return;
+    final lookupYear = _effectiveLookupYear;
+    final wantMc = _effectiveWantMotionComic;
     unawaited(
-      PosterLoader.fetchSeriesSynopsis(title, year: _video.year).then((syn) {
+      PosterLoader.fetchSeriesSynopsis(
+        lookupTitle,
+        year: lookupYear,
+        wantMotionComic: wantMc,
+      ).then((syn) {
         if (!mounted || syn.isEmpty) return;
         if (_externalSynopsis != syn) {
           setState(() {
@@ -670,9 +877,21 @@ class _DetailScreenState extends State<DetailScreen> {
       }),
     );
     if (!_isVarietyShow) {
-      unawaited(PosterLoader.fetchSeriesEpisodeMetadata(title));
+      unawaited(
+        PosterLoader.fetchSeriesEpisodeMetadata(
+          lookupTitle,
+          year: lookupYear,
+          wantMotionComic: wantMc,
+        ),
+      );
     }
-    unawaited(PosterLoader.fetchSeriesEpisodeStills(title, year: _video.year));
+    unawaited(
+      PosterLoader.fetchSeriesEpisodeStills(
+        lookupTitle,
+        year: lookupYear,
+        wantMotionComic: wantMc,
+      ),
+    );
   }
 
   final Map<(CmsLine, String, List<CmsParse>), String?> _lineUnavailableCache =
@@ -1734,7 +1953,10 @@ class _DetailScreenState extends State<DetailScreen> {
       if (_isIosDetail) {
         _descending = false;
       }
+      _windowsEpisodeQuery = '';
+      _windowsEpisodeQueryCtrl.clear();
       _externalSynopsis = '';
+      _loadScrapeOverride();
       _seedCachedExternalFields();
       _isFavorite = widget.storage.isFavorite(
         _activeSite.key,
@@ -1816,9 +2038,15 @@ class _DetailScreenState extends State<DetailScreen> {
   String _effectiveSeriesSynopsis() {
     final raw = _video.description.trim();
     if (_activeSite.isEffectivelyPrivate) return raw;
+    final boundSyn = _scrapeOverride?.synopsis.trim() ?? '';
+    if (boundSyn.isNotEmpty) return boundSyn;
     final ext = _externalSynopsis.trim().isNotEmpty
         ? _externalSynopsis.trim()
-        : PosterLoader.peekSeriesSynopsis(_video.title).trim();
+        : PosterLoader.peekSeriesSynopsis(
+            _effectiveLookupTitle,
+            year: _effectiveLookupYear,
+            wantMotionComic: _effectiveWantMotionComic,
+          ).trim();
     // Always preserve the CMS's own authentic description unless it is empty
     // or a generic placeholder slogan (e.g. "正式启动！", "敬请期待", "暂无简介").
     final isPlaceholderSlogan = raw.length < 14 ||
@@ -2667,25 +2895,64 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   List<int> _activeEpisodeIndicesFor(CmsLine line, {int? seasonNumber}) {
-    final scraped = _scrapeLine(line);
+    if (_isIosDetail) {
+      final scraped = _scrapeLine(line);
+      final inLine = CmsParser.extractInLineSeasons(line.episodes);
+      if (inLine.length >= 2) {
+        final activeNum =
+            seasonNumber ?? _selectedInLineSeason ?? inLine.first.seasonNumber;
+        List<int> seasonIndices = inLine.first.episodeIndexes;
+        for (final s in inLine) {
+          if (s.seasonNumber == activeNum) {
+            seasonIndices = s.episodeIndexes;
+            break;
+          }
+        }
+        final seasonSet = seasonIndices.toSet();
+        final filtered = [
+          for (final idx in scraped.visibleRawIndices)
+            if (seasonSet.contains(idx)) idx,
+        ];
+        return filtered.isNotEmpty ? filtered : seasonIndices;
+      }
+      return scraped.visibleRawIndices;
+    }
+    final scrape = _scrapeResultForLine(line);
+    final sortByScraped =
+        _scrapeOverride?.sortByScrapedEpisode ?? scrape.sourceOrderScrambled;
+    final hideSpecials = _scrapeOverride?.hideSpecials ?? false;
     final inLine = CmsParser.extractInLineSeasons(line.episodes);
     if (inLine.length >= 2) {
-      final activeNum = seasonNumber ?? _selectedInLineSeason ?? inLine.first.seasonNumber;
-      List<int> seasonIndices = inLine.first.episodeIndexes;
+      final activeNum =
+          seasonNumber ?? _selectedInLineSeason ?? inLine.first.seasonNumber;
+      List<int> base = inLine.first.episodeIndexes;
       for (final s in inLine) {
         if (s.seasonNumber == activeNum) {
-          seasonIndices = s.episodeIndexes;
+          base = s.episodeIndexes;
           break;
         }
       }
-      final seasonSet = seasonIndices.toSet();
-      final filtered = [
-        for (final idx in scraped.visibleRawIndices)
-          if (seasonSet.contains(idx)) idx,
-      ];
-      return filtered.isNotEmpty ? filtered : seasonIndices;
+      var list = hideSpecials
+          ? base.where((i) => !scrape.byOriginalIndex[i].isSpecial).toList()
+          : List<int>.from(base);
+      if (list.isEmpty) list = List<int>.from(base);
+      if (sortByScraped) {
+        list.sort((a, b) {
+          final ea = scrape.byOriginalIndex[a];
+          final eb = scrape.byOriginalIndex[b];
+          if (ea.isSpecial != eb.isSpecial) return ea.isSpecial ? 1 : -1;
+          final na = ea.resolvedEpisodeNumber;
+          final nb = eb.resolvedEpisodeNumber;
+          if (na != null && nb != null && na != nb) return na.compareTo(nb);
+          return a.compareTo(b);
+        });
+      }
+      return list;
     }
-    return scraped.visibleRawIndices;
+    return scrape.orderedIndices(
+      sortByScraped: sortByScraped,
+      hideSpecials: hideSpecials,
+    );
   }
 
   void _playPrimaryAction(WatchHistoryEntry? bookmark) {
@@ -3151,8 +3418,11 @@ class _DetailScreenState extends State<DetailScreen> {
       videoId: capturedVideoId,
     );
     final scraped = _scrapeLine(line);
+    final scrape = _scrapeResultForLine(line);
     final activeIndices = _activeEpisodeIndicesFor(line);
-    final total = activeIndices.length;
+    final ordered =
+        _descending ? activeIndices.reversed.toList() : activeIndices;
+    final total = ordered.length;
     final playedEpIdx = _isIosDetail
         ? _resolvePlayedEpisodeIndexForLine(
             line,
@@ -3161,110 +3431,202 @@ class _DetailScreenState extends State<DetailScreen> {
             bookmark,
           )
         : null;
+    String filterQuery = '';
     showIos27LiquidSheet<void>(
       context: context,
       title: '全部剧集 · ${_currentSeasonLabel(line)} · ${line.name} ($total)',
-      builder: (ctx) => GridView.builder(
-        shrinkWrap: true,
-        padding: const EdgeInsets.all(16),
-        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: 140,
-          mainAxisSpacing: 10,
-          crossAxisSpacing: 10,
-          childAspectRatio: 2.5,
-        ),
-        itemCount: total,
-        itemBuilder: (ctx, idx) {
-          final posIdx = _descending ? (total - 1 - idx) : idx;
-          final originalIdx = activeIndices[posIdx];
-          final ep = line.episodes[originalIdx];
-          final epInfo = scraped.infoForRawIndex(originalIdx);
-          final unavailReason = _episodeUnavailableReason(ep);
-          final isUnavailable = unavailReason != null;
-          final isBookmarked = !isUnavailable &&
-              (_isIosDetail
-                  ? (playedEpIdx != null && playedEpIdx == originalIdx)
-                  : (bookmark != null &&
-                      bookmark.line == line.name &&
-                      bookmark.index == originalIdx));
-          final cellLabel = epInfo != null
-              ? epInfo.compactLabel(
-                  isVariety: _isVarietyShow,
-                  singleItemMovie: total <= 1,
-                )
-              : ep.name;
-          final cell = GestureDetector(
-            onTap: () {
-              if (unavailReason != null) {
-                unawaited(
-                  showAppleNativeAlert(
-                    ctx,
-                    title: ep.name,
-                    message: unavailReason,
-                    actions: const [
-                      AppleNativeAlertAction(
-                        id: 'ok',
-                        title: '我知道了',
-                        isDefault: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (sheetCtx, setSheetState) {
+          final q = filterQuery.trim().toLowerCase();
+          final filtered = q.isEmpty
+              ? ordered
+              : ordered.where((origIdx) {
+                  final ep = line.episodes[origIdx];
+                  final info = scrape.byOriginalIndex[origIdx];
+                  final epNumStr = info.resolvedEpisodeNumber?.toString() ?? '';
+                  return ep.name.toLowerCase().contains(q) ||
+                      info.displayLabel.toLowerCase().contains(q) ||
+                      epNumStr == q;
+                }).toList();
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (total >= 12)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                  child: TextField(
+                    decoration: InputDecoration(
+                      hintText: '输入集数或关键词快速定位（如 180）',
+                      prefixIcon: const Icon(CupertinoIcons.search, size: 16),
+                      isDense: true,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                    ],
-                  ),
-                );
-                return;
-              }
-              Navigator.of(ctx).pop();
-              if (!mounted) return;
-              final target = _resolveEpisodeTargetByIdentity(
-                snapshotLineIdentity: snapshotLineIdentity,
-                snapshotEpisode: ep,
-              );
-              if (target == null) {
-                _toast('剧集列表已更新或目标已下架，请重新选择');
-                return;
-              }
-              final (resolvedLineIdx, resolvedEpIdx) = target;
-              if (_selectedLine != resolvedLineIdx) {
-                setState(() => _selectedLine = resolvedLineIdx);
-              }
-              _openPlayer(resolvedLineIdx, resolvedEpIdx);
-            },
-            child: Builder(
-              builder: (cellCtx) {
-                final palette = ApplePalette.of(cellCtx);
-                final isDark = palette.isDark;
-                return Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  decoration: BoxDecoration(
-                    color: isBookmarked
-                        ? AppleColors.systemBlue
-                        : (isDark ? const Color(0xFF28282E) : Colors.white),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: isBookmarked
-                          ? AppleColors.systemBlue
-                          : (isDark
-                              ? const Color(0x26FFFFFF)
-                              : Colors.black.withValues(alpha: 0.09)),
-                      width: isBookmarked ? 1.2 : 0.65,
                     ),
+                    onChanged: (v) => setSheetState(() => filterQuery = v),
                   ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    isUnavailable ? '$cellLabel (不可解析)' : cellLabel,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: isBookmarked ? Colors.white : palette.labelPrimary,
-                      fontSize: 13.5,
-                      fontWeight:
-                          isBookmarked ? FontWeight.w700 : FontWeight.w500,
-                    ),
+                ),
+              Flexible(
+                child: GridView.builder(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.all(16),
+                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 152,
+                    mainAxisSpacing: 10,
+                    crossAxisSpacing: 10,
+                    childAspectRatio: 2.35,
                   ),
-                );
-              },
-            ),
+                  itemCount: filtered.length,
+                  itemBuilder: (ctx, idx) {
+                    final originalIdx = filtered[idx];
+                    final ep = line.episodes[originalIdx];
+                    final epInfo = scraped.infoForRawIndex(originalIdx);
+                    final info = scrape.byOriginalIndex[originalIdx];
+                    final unavailReason = _episodeUnavailableReason(ep);
+                    final isUnavailable = unavailReason != null;
+                    final isBookmarked = !isUnavailable &&
+                        (_isIosDetail
+                            ? (playedEpIdx != null && playedEpIdx == originalIdx)
+                            : (bookmark != null &&
+                                bookmark.line == line.name &&
+                                bookmark.index == originalIdx));
+                    final showScrapedSub = !_isIosDetail &&
+                        info.resolvedEpisodeNumber != null &&
+                        !info.isSpecial &&
+                        ep.name.trim() != info.displayLabel &&
+                        !ep.name.contains('第${info.resolvedEpisodeNumber}集');
+                    final cellLabel = _isIosDetail && epInfo != null
+                        ? epInfo.compactLabel(
+                            isVariety: _isVarietyShow,
+                            singleItemMovie: total <= 1,
+                          )
+                        : ep.name;
+                    final cell = GestureDetector(
+                      onTap: () {
+                        if (unavailReason != null) {
+                          unawaited(
+                            showAppleNativeAlert(
+                              ctx,
+                              title: ep.name,
+                              message: unavailReason,
+                              actions: const [
+                                AppleNativeAlertAction(
+                                  id: 'ok',
+                                  title: '我知道了',
+                                  isDefault: true,
+                                ),
+                              ],
+                            ),
+                          );
+                          return;
+                        }
+                        Navigator.of(ctx).pop();
+                        if (!mounted) return;
+                        final target = _resolveEpisodeTargetByIdentity(
+                          snapshotLineIdentity: snapshotLineIdentity,
+                          snapshotEpisode: ep,
+                        );
+                        if (target == null) {
+                          _toast('剧集列表已更新或目标已下架，请重新选择');
+                          return;
+                        }
+                        final (resolvedLineIdx, resolvedEpIdx) = target;
+                        if (_selectedLine != resolvedLineIdx) {
+                          setState(() => _selectedLine = resolvedLineIdx);
+                        }
+                        _openPlayer(resolvedLineIdx, resolvedEpIdx);
+                      },
+                      child: Builder(
+                        builder: (cellCtx) {
+                          final palette = ApplePalette.of(cellCtx);
+                          final isDark = palette.isDark;
+                          return Tooltip(
+                            message: showScrapedSub
+                                ? '${info.displayLabel} · ${ep.name}'
+                                : cellLabel,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: isBookmarked
+                                    ? AppleColors.systemBlue
+                                    : (isDark
+                                        ? const Color(0xFF28282E)
+                                        : Colors.white),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isBookmarked
+                                      ? AppleColors.systemBlue
+                                      : (isDark
+                                          ? const Color(0x26FFFFFF)
+                                          : Colors.black.withValues(alpha: 0.09)),
+                                  width: isBookmarked ? 1.2 : 0.65,
+                                ),
+                              ),
+                              alignment: Alignment.center,
+                              child: showScrapedSub
+                                  ? Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          isUnavailable
+                                              ? '${info.displayLabel} (不可解析)'
+                                              : info.displayLabel,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: isBookmarked
+                                                ? Colors.white
+                                                : palette.labelPrimary,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        Text(
+                                          ep.name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: isBookmarked
+                                                ? Colors.white70
+                                                : palette.labelSecondary,
+                                            fontSize: 10.5,
+                                          ),
+                                        ),
+                                      ],
+                                    )
+                                  : Text(
+                                      isUnavailable
+                                          ? '$cellLabel (不可解析)'
+                                          : cellLabel,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: isBookmarked
+                                            ? Colors.white
+                                            : palette.labelPrimary,
+                                        fontSize: 13.5,
+                                        fontWeight: isBookmarked
+                                            ? FontWeight.w700
+                                            : FontWeight.w500,
+                                      ),
+                                    ),
+                            ),
+                          );
+                        },
+                      ),
+                    );
+                    return isUnavailable
+                        ? Opacity(opacity: 0.48, child: cell)
+                        : cell;
+                  },
+                ),
+              ),
+            ],
           );
-          return isUnavailable ? Opacity(opacity: 0.48, child: cell) : cell;
         },
       ),
     );
@@ -3479,7 +3841,9 @@ class _DetailScreenState extends State<DetailScreen> {
     if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
       screen = _buildWindowsDetail(context);
     } else {
-      final wideLayout = AppleViewportLayout.of(context).prefersWideDetail;
+      final wideLayout = _isMacosDetail
+          ? MediaQuery.sizeOf(context).width >= 860
+          : AppleViewportLayout.of(context).prefersWideDetail;
       screen = wideLayout
           ? _buildWideDesktopScreen(context)
           : _buildPortraitImmersiveScreen(context);
@@ -3506,15 +3870,24 @@ class _DetailScreenState extends State<DetailScreen> {
   Widget _buildPortraitImmersiveScreen(BuildContext context) {
     final targetBg = _resolveBaseAmbientColor();
     final bookmark = _findBookmark();
+    final isMac = _isMacosDetail;
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
     final topPad = math.max(
       MediaQuery.paddingOf(context).top,
-      defaultTargetPlatform == TargetPlatform.macOS ? 28.0 : 0.0,
+      isMac ? 36.0 : 0.0,
     );
     final viewport = AppleViewportLayout.of(context);
     final screenHeight = viewport.height;
     final double posterWindowHeight;
     final double foregroundHeroHeight;
-    if (viewport.isShortPortrait) {
+    if (isMac) {
+      posterWindowHeight = _macHeroHasLandscape
+          ? (viewport.width * 9 / 16).clamp(320.0, 460.0)
+          : (screenHeight * 0.64).clamp(430.0, 560.0);
+      foregroundHeroHeight = _macHeroHasLandscape
+          ? (posterWindowHeight * 0.92).clamp(300.0, 440.0)
+          : (posterWindowHeight * 0.96).clamp(410.0, 540.0);
+    } else if (viewport.isShortPortrait) {
       // iPhone Duo 5.4" outer cover (`466×678 pt`) & compact phones:
       // keep title, badges, synopsis, and Play CTA visible above the fold.
       posterWindowHeight = (screenHeight * 0.72).clamp(390.0, 540.0);
@@ -3553,8 +3926,10 @@ class _DetailScreenState extends State<DetailScreen> {
                 child: ValueListenableBuilder<double>(
                   valueListenable: _scrollOffset,
                   builder: (context, offset, child) {
-                    final progress = (offset / 340.0).clamp(0.0, 1.0);
-                    final blurSigma = progress * 9.5;
+                    final progress = reduceMotion
+                        ? 0.0
+                        : (offset / 340.0).clamp(0.0, 1.0);
+                    final blurSigma = reduceMotion ? 0.0 : progress * 9.5;
                     final scrollVeilAlpha = progress * 0.38;
 
                     Widget posterStack = Stack(
@@ -3706,17 +4081,42 @@ class _DetailScreenState extends State<DetailScreen> {
                       ],
                     );
                   },
-                  child: PosterImage(
-                    url: _video.poster,
-                    title: _publicLookupTitle,
-                    year: _video.year,
-                    fit: BoxFit.cover,
-                    alignment: const Alignment(0.0, -0.32),
-                    highRes: true,
-                    strictHighRes: true,
-                    onBytesLoaded: _updateAmbientFromBytes,
-                    placeholder: _posterPlaceholder(bgColor),
-                  ),
+                  child: isMac
+                      ? LandscapePosterImage(
+                          key: const ValueKey('mac-detail-narrow-backdrop'),
+                          url: _effectivePosterUrl,
+                          title: _effectiveLookupTitle,
+                          year: _effectiveLookupYear,
+                          preferredBackdropUrl: _effectiveBackdropUrl,
+                          preferredDoubanId: _effectiveDoubanId,
+                          preferredDoubanIsTv: !_video.tag.contains('电影') &&
+                              (_video.lines.isEmpty ||
+                                  _video.lines.first.episodes.length > 1),
+                          wantMotionComic: _effectiveWantMotionComic,
+                          allowExternalLookup:
+                              !_activeSite.isEffectivelyPrivate,
+                          blurPortraitFallback: true,
+                          showRightFramedPortraitFallback: false,
+                          alignment: const Alignment(0.0, -0.2),
+                          onBytesLoaded: _updateAmbientFromBytes,
+                          onLandscapeStatusChanged: (isLand) {
+                            if (mounted && _macHeroHasLandscape != isLand) {
+                              setState(() => _macHeroHasLandscape = isLand);
+                            }
+                          },
+                          placeholder: _posterPlaceholder(bgColor),
+                        )
+                      : PosterImage(
+                          url: _effectivePosterUrl,
+                          title: _effectiveLookupTitle,
+                          year: _effectiveLookupYear,
+                          fit: BoxFit.cover,
+                          alignment: const Alignment(0.0, -0.32),
+                          highRes: true,
+                          strictHighRes: true,
+                          onBytesLoaded: _updateAmbientFromBytes,
+                          placeholder: _posterPlaceholder(bgColor),
+                        ),
                 ),
               ),
 
@@ -3761,9 +4161,15 @@ class _DetailScreenState extends State<DetailScreen> {
                                   ],
                                   const SizedBox(height: 18),
                                   CastAvatarSection(
-                                    title: _video.title,
+                                    title: _effectiveLookupTitle.isNotEmpty
+                                        ? _effectiveLookupTitle
+                                        : _video.title,
                                     actorRaw: _video.actor,
-                                    year: _video.year,
+                                    year: _effectiveLookupYear,
+                                    doubanId: _effectiveDoubanId,
+                                    wantMotionComic: _effectiveWantMotionComic,
+                                    allowExternalLookup:
+                                        !_activeSite.isEffectivelyPrivate,
                                     forceDark: true,
                                     padding: EdgeInsets.zero,
                                   ),
@@ -3833,24 +4239,29 @@ class _DetailScreenState extends State<DetailScreen> {
                 top: topPad + 8,
                 left: viewport.isCompactSplit ? 12 : 16,
                 right: viewport.isCompactSplit ? 12 : 16,
-                child: Row(
-                  children: [
-                    _buildFloatingGlassCircleButton(
-                      icon: CupertinoIcons.chevron_back,
-                      onTap: () => Navigator.of(context).maybePop(),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Align(
-                        alignment: Alignment.centerRight,
-                        child: _buildFloatingSourceButton(
-                          maxWidth: viewport.isCompactSplit ? 112.0 : 168.0,
+                child: Theme(
+                  data: _isMacosDetail
+                      ? Theme.of(context).copyWith(brightness: Brightness.dark)
+                      : Theme.of(context),
+                  child: Row(
+                    children: [
+                      _buildFloatingGlassCircleButton(
+                        icon: CupertinoIcons.chevron_back,
+                        onTap: () => Navigator.of(context).maybePop(),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: _buildFloatingSourceButton(
+                            maxWidth: viewport.isCompactSplit ? 112.0 : 168.0,
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    _buildFloatingTopRightPill(),
-                  ],
+                      const SizedBox(width: 8),
+                      _buildFloatingTopRightPill(),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -4256,7 +4667,7 @@ class _DetailScreenState extends State<DetailScreen> {
         ? 0
         : _video.lines[safeLineIdx].episodes.length;
     final pills = <String>[
-      if (_video.year.trim().isNotEmpty) _video.year.trim(),
+      if (_effectiveLookupYear.trim().isNotEmpty) _effectiveLookupYear.trim(),
       if (_video.area.trim().isNotEmpty) _video.area.trim(),
       if (_video.tag.trim().isNotEmpty) _video.tag.trim(),
       if (_video.remarks.trim().isNotEmpty)
@@ -4264,17 +4675,31 @@ class _DetailScreenState extends State<DetailScreen> {
       else if (epCount > 1)
         '共$epCount集',
     ];
+    final targetBg = _resolveBaseAmbientColor();
 
-    return SizedBox(
-      height: heroHeight,
+    return ConstrainedBox(
+      constraints: BoxConstraints(minHeight: heroHeight),
       child: Align(
         alignment: Alignment.bottomCenter,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 14),
+          padding: EdgeInsets.fromLTRB(
+            20,
+            (_isMacosDetail && !_macHeroHasLandscape) ? 92 : 0,
+            20,
+            14,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
+              if (_isMacosDetail && !_macHeroHasLandscape) ...[
+                SizedBox(
+                  key: const ValueKey('mac-detail-narrow-portrait-poster'),
+                  width: 132,
+                  child: _buildPosterCard(targetBg),
+                ),
+                const SizedBox(height: 14),
+              ],
               Text(
                 _video.title,
                 textAlign: TextAlign.center,
@@ -4349,6 +4774,10 @@ class _DetailScreenState extends State<DetailScreen> {
                   },
                 ),
               ],
+              if (_isMacosDetail && !_activeSite.isEffectivelyPrivate) ...[
+                const SizedBox(height: 10),
+                _buildMacScrapeBar(alignment: WrapAlignment.center),
+              ],
             ],
           ),
         ),
@@ -4374,6 +4803,12 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   double? _effectiveDoubanScore() {
+    if (!_activeSite.isEffectivelyPrivate) {
+      final boundRating = _scrapeOverride?.doubanScore;
+      if (boundRating != null && boundRating >= 2.0 && boundRating <= 10.0) {
+        return boundRating;
+      }
+    }
     final direct = _video.doubanScore;
     if (direct != null && direct >= 2.0 && direct <= 10.0) return direct;
     if (!_activeSite.isEffectivelyPrivate) {
@@ -4976,7 +5411,73 @@ class _DetailScreenState extends State<DetailScreen> {
                 ),
               ),
             ),
-            const SizedBox(width: 5),
+            if (_isMacosDetail && !_activeSite.isEffectivelyPrivate) ...[
+              const SizedBox(width: 8),
+              Semantics(
+                button: true,
+                label: (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                    ? '集数已校准'
+                    : '集数校准',
+                child: Material(
+                  color: Colors.transparent,
+                  borderRadius: BorderRadius.circular(999),
+                  child: InkWell(
+                    key: const ValueKey('mac-episodes-calibrate-btn'),
+                    borderRadius: BorderRadius.circular(999),
+                    focusColor: const Color(0x664C9AFF),
+                    hoverColor: const Color(0x33FFFFFF),
+                    onTap: () => _openSeriesScrapeSheet(initialTab: 1),
+                    child: Ink(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                            ? const Color(0x474C9AFF)
+                            : const Color(0x24FFFFFF),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color:
+                              (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                                  ? const Color(0x994C9AFF)
+                                  : const Color(0x30FFFFFF),
+                          width: 0.6,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            CupertinoIcons.slider_horizontal_3,
+                            color: (_scrapeOverride?.hasEpisodeCalibration ??
+                                    false)
+                                ? const Color(0xFF93C5FD)
+                                : const Color(0xE6FFFFFF),
+                            size: 12,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            (_scrapeOverride?.hasEpisodeCalibration ?? false)
+                                ? '集数已校准'
+                                : '集数校准',
+                            style: TextStyle(
+                              color: (_scrapeOverride?.hasEpisodeCalibration ??
+                                      false)
+                                  ? Colors.white
+                                  : const Color(0xE6FFFFFF),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+            SizedBox(width: _isIosDetail ? 5 : 8),
             GestureDetector(
               onTap: () => _showAllEpisodesGridSheet(bookmark),
               child: Container(
@@ -5175,6 +5676,11 @@ class _DetailScreenState extends State<DetailScreen> {
               final originalIdx = activeIndices[posIdx];
               final ep = line.episodes[originalIdx];
               final epInfo = scraped.infoForRawIndex(originalIdx);
+              final epScrape =
+                  _scrapeResultForLine(line).byOriginalIndex[originalIdx];
+              final pillLabel = epScrape.isSpecial
+                  ? epScrape.displayLabel
+                  : '${epScrape.resolvedEpisodeNumber ?? (posIdx + 1)}';
               final unavailReason = _episodeUnavailableReason(ep);
               final isUnavailable = unavailReason != null;
               final isCurrent = !isUnavailable &&
@@ -5213,7 +5719,7 @@ class _DetailScreenState extends State<DetailScreen> {
                   ),
                   alignment: Alignment.center,
                   child: Text(
-                    labelText,
+                    _isIosDetail ? labelText : pillLabel,
                     style: TextStyle(
                       color: isCurrent
                           ? const Color(0xFF121215)
@@ -5331,36 +5837,69 @@ class _DetailScreenState extends State<DetailScreen> {
               final ep = line.episodes[originalIdx];
               final epInfo = scraped.infoForRawIndex(originalIdx);
               final epNum = epInfo?.effectiveEpisodeNumber ?? (posIdx + 1);
+              final epScrape =
+                  _scrapeResultForLine(line).byOriginalIndex[originalIdx];
+              final resolvedEpNum = epScrape.resolvedEpisodeNumber;
+              final realEpNum = resolvedEpNum ?? (posIdx + 1);
               final unavailReason = _episodeUnavailableReason(ep);
               final isUnavailable = unavailReason != null;
               final isCurrent = !isUnavailable &&
                   currentActiveEpIdx != null &&
                   originalIdx == currentActiveEpIdx;
               final (cleanTitle, parsedBadge) =
-                  _parseEpisodeDisplay(ep.name, epNum);
+                  _parseEpisodeDisplay(
+                    ep.name,
+                    _isIosDetail ? epNum : realEpNum,
+                  );
               final specBadge = isUnavailable
                   ? '不可解析'
-                  : (parsedBadge ?? epInfo?.qualityBadge);
-              final unitLabel = (epInfo != null && epInfo.isSpecial)
-                  ? (epInfo.specialTag ?? '特辑')
-                  : (_isVarietyShow ? '第$epNum期' : '第$epNum集');
+                  : (_isIosDetail
+                      ? (parsedBadge ?? epInfo?.qualityBadge)
+                      : parsedBadge);
+              final unitLabel = _isIosDetail
+                  ? ((epInfo != null && epInfo.isSpecial)
+                      ? (epInfo.specialTag ?? '特辑')
+                      : (_isVarietyShow ? '第$epNum期' : '第$epNum集'))
+                  : (epScrape.needsConfirmation
+                      ? '待确认'
+                      : (epScrape.isSpecial
+                          ? epScrape.displayLabel
+                          : (epScrape.seasonNumber != null &&
+                                  epScrape.seasonNumber! > 0 &&
+                                  resolvedEpNum != null
+                              ? '第${epScrape.seasonNumber}季 第$resolvedEpNum集'
+                              : (_isVarietyShow
+                                  ? '第$realEpNum期'
+                                  : '第$realEpNum集'))));
               final subMeta = isUnavailable
                   ? unavailReason
                   : [
-                      if (_video.year.trim().isNotEmpty) _video.year.trim(),
+                      if (_effectiveLookupYear.trim().isNotEmpty)
+                        _effectiveLookupYear.trim(),
                       unitLabel,
                       if (specBadge != null) specBadge,
                     ].join(' · ');
-              final headline = _formatEpisodeCardHeadline(
-                cleanTitle,
-                epNum,
-                scrapedInfo: epInfo,
-              );
-              final epDesc = _resolveAuthenticEpisodeSummary(
-                epNum,
-                cleanTitle,
-                scrapedInfo: epInfo,
-              );
+              final headline = _isIosDetail
+                  ? _formatEpisodeCardHeadline(
+                      cleanTitle,
+                      epNum,
+                      scrapedInfo: epInfo,
+                    )
+                  : (epScrape.needsConfirmation
+                      ? (ep.name.trim().isNotEmpty ? ep.name.trim() : '待确认')
+                      : _formatEpisodeCardHeadline(cleanTitle, realEpNum));
+              final epDesc = _isIosDetail
+                  ? _resolveAuthenticEpisodeSummary(
+                      epNum,
+                      cleanTitle,
+                      scrapedInfo: epInfo,
+                    )
+                  : (epScrape.needsConfirmation
+                      ? ''
+                      : _resolveAuthenticEpisodeSummary(
+                          realEpNum,
+                          cleanTitle,
+                        ));
 
               final card = RepaintBoundary(
                 child: GestureDetector(
@@ -5391,12 +5930,23 @@ class _DetailScreenState extends State<DetailScreen> {
                               fit: StackFit.expand,
                               children: [
                                 EpisodeStillImage(
-                                  seriesTitle: _activeSite.isEffectivelyPrivate
-                                      ? ''
-                                      : _effectiveScrapeTitle,
-                                  year: _video.year,
-                                  episodeIndex: math.max(0, epNum - 1),
-                                  fallbackPosterUrl: _video.poster,
+                                  seriesTitle: _isIosDetail
+                                      ? (_activeSite.isEffectivelyPrivate
+                                          ? ''
+                                          : _effectiveScrapeTitle)
+                                      : _effectiveLookupTitle,
+                                  year: _isIosDetail
+                                      ? _video.year
+                                      : _effectiveLookupYear,
+                                  episodeIndex: _isIosDetail
+                                      ? math.max(0, epNum - 1)
+                                      : posIdx,
+                                  realEpisodeNumber:
+                                      _isIosDetail ? epNum : realEpNum,
+                                  wantMotionComic: _effectiveWantMotionComic,
+                                  fallbackPosterUrl: _isIosDetail
+                                      ? _video.poster
+                                      : _effectivePosterUrl,
                                   placeholder: _posterPlaceholder(
                                     _resolveBaseAmbientColor(),
                                   ),
@@ -5470,8 +6020,22 @@ class _DetailScreenState extends State<DetailScreen> {
                                             ),
                                             const SizedBox(width: 3),
                                             Text(
-                                              epInfo?.badgeLabel ??
-                                                  'E${(posIdx + 1).toString().padLeft(2, '0')}',
+                                              _isIosDetail
+                                                  ? (epInfo?.badgeLabel ??
+                                                      'E${(posIdx + 1).toString().padLeft(2, '0')}')
+                                                  : (epScrape.needsConfirmation
+                                                      ? '待确认'
+                                                      : (epScrape.isSpecial
+                                                          ? epScrape.displayLabel
+                                                          : (epScrape.seasonNumber !=
+                                                                      null &&
+                                                                  epScrape.seasonNumber! >
+                                                                      0 &&
+                                                                  resolvedEpNum !=
+                                                                      null
+                                                              ? epScrape
+                                                                  .formattedSeasonEpisode
+                                                              : 'E${realEpNum.toString().padLeft(2, '0')}'))),
                                               style: TextStyle(
                                                 color: isCurrent
                                                     ? const Color(0xFF121215)
@@ -5672,9 +6236,12 @@ class _DetailScreenState extends State<DetailScreen> {
     final bookmark = _findBookmark();
     final size = MediaQuery.sizeOf(context);
     final safePad = MediaQuery.paddingOf(context);
+    final isMac = _isMacosDetail;
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+    final isLightMode = !ApplePalette.isDarkOf(context);
     final topPad = math.max(
       safePad.top,
-      defaultTargetPlatform == TargetPlatform.macOS ? 28.0 : 0.0,
+      isMac ? 36.0 : 0.0,
     );
     final horizontalPad = (size.width * 0.045).clamp(24.0, 56.0);
     final compactWideH = size.height < 520;
@@ -5684,10 +6251,11 @@ class _DetailScreenState extends State<DetailScreen> {
     final posterCardW = compactWideH
         ? (heroStageHeight * 0.43).clamp(132.0, 176.0)
         : (heroStageHeight * 0.48).clamp(168.0, 224.0);
+    final showFramedPortraitCard = !isMac || !_macHeroHasLandscape;
 
     return TweenAnimationBuilder<Color?>(
       tween: ColorTween(begin: targetBg, end: targetBg),
-      duration: Ios27ConcentricGeometry.isReduceMotion(context)
+      duration: reduceMotion
           ? Ios27ConcentricGeometry.reducedMotionDuration
           : Ios27Spring.smooth.nominalDuration,
       curve: Ios27Spring.smooth.curve,
@@ -5701,9 +6269,8 @@ class _DetailScreenState extends State<DetailScreen> {
               // 1. Unified Solid Ambient Canvas Matching Poster Edge Color
               ColoredBox(color: bgColor),
 
-              // 2. Full-Screen Widescreen Backdrop (`Positioned.fill` eliminates both
-              //    the vertical 34% line and the horizontal heroStageHeight line, while
-              //    keeping right-side poster artwork clearly visible with low blur!)
+              // 2. Full-Screen Widescreen Backdrop (`Positioned.fill` with `TileMode.clamp`
+              //    eliminates vertical/horizontal seams and right-edge blur streaks)
               Positioned.fill(
                 child: isWindowsDesktopUi
                     ? Stack(
@@ -5717,12 +6284,12 @@ class _DetailScreenState extends State<DetailScreen> {
                                   imageFilter: ImageFilter.blur(
                                     sigmaX: 2.2,
                                     sigmaY: 2.2,
-                                    tileMode: TileMode.decal,
+                                    tileMode: TileMode.clamp,
                                   ),
                                   child: PosterImage(
-                                    url: _video.poster,
-                                    title: _publicLookupTitle,
-                                    year: _video.year,
+                                    url: _effectivePosterUrl,
+                                    title: _effectiveLookupTitle,
+                                    year: _effectiveLookupYear,
                                     fit: BoxFit.cover,
                                     alignment: const Alignment(0.35, -0.2),
                                     forBackdrop: true,
@@ -5768,8 +6335,9 @@ class _DetailScreenState extends State<DetailScreen> {
                           ValueListenableBuilder<double>(
                             valueListenable: _scrollOffset,
                             builder: (context, offset, _) {
-                              final veil =
-                                  (offset / 320.0).clamp(0.0, 1.0) * 0.52;
+                              final veil = reduceMotion
+                                  ? 0.0
+                                  : (offset / 320.0).clamp(0.0, 1.0) * 0.52;
                               if (veil <= 0.01) return const SizedBox.shrink();
                               return ColoredBox(
                                 color: bgColor.withValues(alpha: veil),
@@ -5781,18 +6349,25 @@ class _DetailScreenState extends State<DetailScreen> {
                     : ValueListenableBuilder<double>(
                         valueListenable: _scrollOffset,
                         builder: (context, offset, child) {
-                          final progress = (offset / 320.0).clamp(0.0, 1.0);
-                          final blurSigma = 1.6 + progress * 7.5;
+                          final progress = reduceMotion
+                              ? 0.0
+                              : (offset / 320.0).clamp(0.0, 1.0);
+                          final baseBlur =
+                              (isMac && _macHeroHasLandscape) ? 0.0 : 1.6;
+                          final blurSigma =
+                              reduceMotion ? baseBlur : (baseBlur + progress * 7.5);
                           final scrollVeilAlpha = progress * 0.36;
 
-                          final backdropImage = ImageFiltered(
-                            imageFilter: ImageFilter.blur(
-                              sigmaX: blurSigma,
-                              sigmaY: blurSigma,
-                              tileMode: TileMode.decal,
-                            ),
-                            child: child!,
-                          );
+                          final Widget backdropImage = blurSigma > 0.15
+                              ? ImageFiltered(
+                                  imageFilter: ImageFilter.blur(
+                                    sigmaX: blurSigma,
+                                    sigmaY: blurSigma,
+                                    tileMode: TileMode.clamp,
+                                  ),
+                                  child: child!,
+                                )
+                              : child!;
 
                           return Stack(
                             fit: StackFit.expand,
@@ -5803,13 +6378,21 @@ class _DetailScreenState extends State<DetailScreen> {
                                   gradient: LinearGradient(
                                     begin: Alignment.centerLeft,
                                     end: Alignment.centerRight,
-                                    colors: [
-                                      bgColor,
-                                      bgColor.withValues(alpha: 0.94),
-                                      bgColor.withValues(alpha: 0.46),
-                                      bgColor.withValues(alpha: 0.14),
-                                      bgColor.withValues(alpha: 0.05),
-                                    ],
+                                    colors: isMac && _macHeroHasLandscape
+                                        ? [
+                                            bgColor.withValues(alpha: 0.92),
+                                            bgColor.withValues(alpha: 0.68),
+                                            bgColor.withValues(alpha: 0.24),
+                                            bgColor.withValues(alpha: 0.06),
+                                            Colors.transparent,
+                                          ]
+                                        : [
+                                            bgColor,
+                                            bgColor.withValues(alpha: 0.94),
+                                            bgColor.withValues(alpha: 0.46),
+                                            bgColor.withValues(alpha: 0.14),
+                                            bgColor.withValues(alpha: 0.05),
+                                          ],
                                     stops: const [0.0, 0.24, 0.46, 0.72, 1.0],
                                   ),
                                 ),
@@ -5820,7 +6403,9 @@ class _DetailScreenState extends State<DetailScreen> {
                                     begin: Alignment.topCenter,
                                     end: Alignment.bottomCenter,
                                     colors: [
-                                      bgColor.withValues(alpha: 0.56),
+                                      bgColor.withValues(
+                                        alpha: (isMac && isLightMode) ? 0.32 : 0.56,
+                                      ),
                                       bgColor.withValues(alpha: 0.04),
                                       bgColor.withValues(alpha: 0.32),
                                       bgColor.withValues(alpha: 0.90),
@@ -5841,16 +6426,44 @@ class _DetailScreenState extends State<DetailScreen> {
                             ],
                           );
                         },
-                        child: PosterImage(
-                          url: _video.poster,
-                          title: _publicLookupTitle,
-                          year: _video.year,
-                          fit: BoxFit.cover,
-                          alignment: const Alignment(0.35, -0.2),
-                          forBackdrop: true,
-                          onBytesLoaded: _updateAmbientFromBytes,
-                          placeholder: _posterPlaceholder(bgColor),
-                        ),
+                        child: isMac
+                            ? LandscapePosterImage(
+                                key: const ValueKey('mac-detail-backdrop'),
+                                url: _effectivePosterUrl,
+                                title: _effectiveLookupTitle,
+                                year: _effectiveLookupYear,
+                                preferredBackdropUrl: _effectiveBackdropUrl,
+                                preferredDoubanId: _effectiveDoubanId,
+                                preferredDoubanIsTv: !_video.tag.contains('电影') &&
+                                    (_video.lines.isEmpty ||
+                                        _video.lines.first.episodes.length > 1),
+                                wantMotionComic: _effectiveWantMotionComic,
+                                allowExternalLookup:
+                                    !_activeSite.isEffectivelyPrivate,
+                                blurPortraitFallback: true,
+                                showRightFramedPortraitFallback: false,
+                                alignment: const Alignment(0.25, -0.2),
+                                onBytesLoaded: _updateAmbientFromBytes,
+                                onLandscapeStatusChanged: (isLand) {
+                                  if (mounted &&
+                                      _macHeroHasLandscape != isLand) {
+                                    setState(
+                                      () => _macHeroHasLandscape = isLand,
+                                    );
+                                  }
+                                },
+                                placeholder: _posterPlaceholder(bgColor),
+                              )
+                            : PosterImage(
+                                url: _effectivePosterUrl,
+                                title: _effectiveLookupTitle,
+                                year: _effectiveLookupYear,
+                                fit: BoxFit.cover,
+                                alignment: const Alignment(0.35, -0.2),
+                                forBackdrop: true,
+                                onBytesLoaded: _updateAmbientFromBytes,
+                                placeholder: _posterPlaceholder(bgColor),
+                              ),
                       ),
               ),
 
@@ -5882,11 +6495,16 @@ class _DetailScreenState extends State<DetailScreen> {
                             child: Row(
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
-                                SizedBox(
-                                  width: posterCardW,
-                                  child: _buildPosterCard(bgColor),
-                                ),
-                                SizedBox(width: compactWideH ? 20 : 28),
+                                if (showFramedPortraitCard) ...[
+                                  SizedBox(
+                                    key: const ValueKey(
+                                      'mac-detail-portrait-poster-card',
+                                    ),
+                                    width: posterCardW,
+                                    child: _buildPosterCard(bgColor),
+                                  ),
+                                  SizedBox(width: compactWideH ? 20 : 28),
+                                ],
                                 Expanded(
                                   child: _buildWideHeroShowcaseColumn(bookmark),
                                 ),
@@ -5902,9 +6520,15 @@ class _DetailScreenState extends State<DetailScreen> {
                             children: [
                               const SizedBox(height: 8),
                               CastAvatarSection(
-                                title: _video.title,
+                                title: _effectiveLookupTitle.isNotEmpty
+                                    ? _effectiveLookupTitle
+                                    : _video.title,
                                 actorRaw: _video.actor,
-                                year: _video.year,
+                                year: _effectiveLookupYear,
+                                doubanId: _effectiveDoubanId,
+                                wantMotionComic: _effectiveWantMotionComic,
+                                allowExternalLookup:
+                                    !_activeSite.isEffectivelyPrivate,
                                 forceDark: true,
                                 padding: EdgeInsets.zero,
                               ),
@@ -5956,17 +6580,22 @@ class _DetailScreenState extends State<DetailScreen> {
                 top: topPad + 10,
                 left: horizontalPad + safePad.left,
                 right: horizontalPad + safePad.right,
-                child: Row(
-                  children: [
-                    _buildFloatingGlassCircleButton(
-                      icon: CupertinoIcons.chevron_back,
-                      onTap: () => Navigator.of(context).maybePop(),
-                    ),
-                    const Spacer(),
-                    _buildFloatingSourceButton(),
-                    const SizedBox(width: 10),
-                    _buildFloatingTopRightPill(),
-                  ],
+                child: Theme(
+                  data: _isMacosDetail
+                      ? Theme.of(context).copyWith(brightness: Brightness.dark)
+                      : Theme.of(context),
+                  child: Row(
+                    children: [
+                      _buildFloatingGlassCircleButton(
+                        icon: CupertinoIcons.chevron_back,
+                        onTap: () => Navigator.of(context).maybePop(),
+                      ),
+                      const Spacer(),
+                      _buildFloatingSourceButton(),
+                      const SizedBox(width: 10),
+                      _buildFloatingTopRightPill(),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -5997,9 +6626,9 @@ class _DetailScreenState extends State<DetailScreen> {
             fit: StackFit.expand,
             children: [
               PosterImage(
-                url: _video.poster,
-                title: _publicLookupTitle,
-                year: _video.year,
+                url: _effectivePosterUrl,
+                title: _effectiveLookupTitle,
+                year: _effectiveLookupYear,
                 highRes: true,
                 strictHighRes: true,
                 onBytesLoaded: _onPosterCardBytesLoaded,
@@ -6054,7 +6683,7 @@ class _DetailScreenState extends State<DetailScreen> {
         ? 0
         : _video.lines[safeLineIdx].episodes.length;
     final pills = <String>[
-      if (_video.year.trim().isNotEmpty) _video.year.trim(),
+      if (_effectiveLookupYear.trim().isNotEmpty) _effectiveLookupYear.trim(),
       if (_video.area.trim().isNotEmpty) _video.area.trim(),
       if (_video.tag.trim().isNotEmpty) _video.tag.trim(),
       if (_video.remarks.trim().isNotEmpty)
@@ -6141,6 +6770,10 @@ class _DetailScreenState extends State<DetailScreen> {
             },
           ),
         ],
+        if (_isMacosDetail && !_activeSite.isEffectivelyPrivate) ...[
+          const SizedBox(height: 10),
+          _buildMacScrapeBar(alignment: WrapAlignment.start),
+        ],
         if (desc.isNotEmpty || cast.isNotEmpty) ...[
           const SizedBox(height: 12),
           GestureDetector(
@@ -6190,6 +6823,142 @@ class _DetailScreenState extends State<DetailScreen> {
             child: _buildPortraitBookmarkProgress(bookmark),
           ),
         ],
+      ],
+    );
+  }
+
+  /// macOS series scrape & episode calibration toolbar (hidden for private sources).
+  Widget _buildMacScrapeBar({required WrapAlignment alignment}) {
+    final ov = _scrapeOverride;
+    final hasWorkBinding = ov?.hasWorkBinding ?? false;
+    final hasEpCalib = ov?.hasEpisodeCalibration ?? false;
+    final calibrated = hasWorkBinding || hasEpCalib;
+    final statusParts = <String>[];
+    if (hasWorkBinding) {
+      final t = ov!.matchedTitle.trim();
+      final y = ov.matchedYear.trim();
+      if (t.isNotEmpty) {
+        statusParts.add(y.isNotEmpty ? '$t ($y)' : t);
+      }
+      if (ov.isMotionComic) {
+        statusParts.add('动态漫画');
+      }
+    }
+    if (hasEpCalib) {
+      if (ov!.episodeOffset != 0) {
+        final sign = ov.episodeOffset > 0 ? '+' : '';
+        statusParts.add('偏移 $sign${ov.episodeOffset}');
+      }
+      if (ov.hideSpecials) {
+        statusParts.add('隐藏特别篇');
+      }
+      final manualCount =
+          ov.episodeCalibrations.length + ov.episodeNumberOverrides.length;
+      if (manualCount > 0) {
+        statusParts.add('手动 $manualCount 集');
+      }
+    }
+
+    Widget pill({
+      required Key key,
+      required IconData icon,
+      required String label,
+      required bool selected,
+      required VoidCallback onTap,
+    }) {
+      return Semantics(
+        button: true,
+        label: label,
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(999),
+          child: InkWell(
+            key: key,
+            borderRadius: BorderRadius.circular(999),
+            focusColor: const Color(0x664C9AFF),
+            hoverColor: const Color(0x33FFFFFF),
+            onTap: onTap,
+            child: Ink(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 11, vertical: 5.5),
+              decoration: BoxDecoration(
+                color: selected
+                    ? const Color(0x524C9AFF)
+                    : const Color(0x2BFFFFFF),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: selected
+                      ? const Color(0xB37BB4FF)
+                      : const Color(0x3DFFFFFF),
+                  width: 0.7,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    icon,
+                    size: 13,
+                    color: selected ? const Color(0xFFBFE0FF) : Colors.white,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Wrap(
+      alignment: alignment,
+      spacing: 8,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        pill(
+          key: const ValueKey('mac-detail-scrape-btn'),
+          icon: CupertinoIcons.sparkles,
+          label: calibrated ? '刮削匹配 · 已校准' : '刮削匹配',
+          selected: calibrated,
+          onTap: () => _openSeriesScrapeSheet(initialTab: 0),
+        ),
+        pill(
+          key: const ValueKey('mac-detail-calibrate-btn'),
+          icon: CupertinoIcons.slider_horizontal_3,
+          label: hasEpCalib ? '集数已校准' : '集数校准',
+          selected: hasEpCalib,
+          onTap: () => _openSeriesScrapeSheet(initialTab: 1),
+        ),
+        if (statusParts.isNotEmpty)
+          Container(
+            key: const ValueKey('mac-detail-scrape-status-badge'),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
+            decoration: BoxDecoration(
+              color: const Color(0x381D4ED8),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: const Color(0x8060A5FA),
+                width: 0.65,
+              ),
+            ),
+            child: Text(
+              statusParts.join(' · '),
+              style: const TextStyle(
+                color: Color(0xFFE0F2FE),
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
       ],
     );
   }

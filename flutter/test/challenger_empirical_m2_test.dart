@@ -10,6 +10,7 @@ import 'package:marco_movie/core/models.dart';
 import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/apple_theme.dart';
+import 'package:marco_movie/ui/macos_official_notice.dart';
 import 'package:marco_movie/ui/player_screen.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -38,7 +39,10 @@ void main() {
     late CmsClient client;
 
     setUp(() async {
-      SharedPreferences.setMockInitialValues({});
+      SharedPreferences.setMockInitialValues({
+        MacosOfficialNoticePrefs.acknowledgedVersionKey:
+            MacosOfficialNoticePrefs.currentVersion,
+      });
       storage = await StorageService.init();
       await storage.saveConfig(
         '{"sites":[{"key":"demo","name":"演示源","type":1,"api":"https://source.example/api"}]}',
@@ -267,7 +271,10 @@ void main() {
     );
 
     setUp(() async {
-      SharedPreferences.setMockInitialValues({});
+      SharedPreferences.setMockInitialValues({
+        MacosOfficialNoticePrefs.acknowledgedVersionKey:
+            MacosOfficialNoticePrefs.currentVersion,
+      });
       storage = await StorageService.init();
     });
 

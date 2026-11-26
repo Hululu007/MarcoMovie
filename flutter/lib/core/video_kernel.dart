@@ -8,13 +8,17 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import 'mdk_platform_player.dart';
 import 'ohos_runtime.dart';
+
+export 'mdk_platform_player.dart';
 
 /// Playback pipeline mode used by [VideoKernel] across desktop, mobile, and HarmonyOS NEXT.
 enum VideoKernelMode {
   auto,
   ohosHardwareHdr,
   proxyAccelerated,
+  windowsMdk,
 }
 
 /// Formats stream pixel dimensions into a crisp living-room badge (`4K UHD`, `1080P FHD`, etc.).
@@ -40,6 +44,29 @@ class OhosPlatformPlayer extends PlatformPlayer {
   static const MethodChannel _channel =
       MethodChannel('com.pilipala.marcomovie/ohos_avplayer');
 
+  /// Exact playback speed tiers executable by HarmonyOS NEXT API 12 `@kit.MediaKit` `AVPlayer`.
+  static const List<double> supportedSpeeds = <double>[
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    1.75,
+    2.0,
+  ];
+
+  /// Maps any requested speed to the exact tier executed by HarmonyOS API 12 `AVPlayer`.
+  static double normalizeSupportedRate(double rate) {
+    if (!rate.isFinite || rate <= 0) return 1.0;
+    if (rate <= 0.625) return 0.5;
+    if (rate <= 0.875) return 0.75;
+    if (rate <= 1.125) return 1.0;
+    if (rate <= 1.375) return 1.25;
+    if (rate <= 1.625) return 1.5;
+    if (rate <= 1.875) return 1.75;
+    return 2.0;
+  }
+
   final MethodChannel _controlChannel;
   final ValueNotifier<int?> _textureId = ValueNotifier<int?>(null);
   int? _playerId;
@@ -52,6 +79,9 @@ class OhosPlatformPlayer extends PlatformPlayer {
   int? _activeSubtitleTrackIndex;
   int _bufferingPercent = 100;
   int _streamBitrate = 0;
+  bool _hasRenderedFirstFrame = false;
+  final StreamController<void> _firstFrameController =
+      StreamController<void>.broadcast();
 
   OhosPlatformPlayer({
     super.configuration = const PlayerConfiguration(),
@@ -64,6 +94,8 @@ class OhosPlatformPlayer extends PlatformPlayer {
   int? get activeSubtitleTrackIndex => _activeSubtitleTrackIndex;
   int get bufferingPercent => _bufferingPercent;
   int get streamBitrate => _streamBitrate;
+  bool get hasRenderedFirstFrame => _hasRenderedFirstFrame;
+  Stream<void> get firstFrameStream => _firstFrameController.stream;
   String get videoResolutionLabel => state.videoResolutionLabel;
   Map<String, String> get properties => Map<String, String>.unmodifiable(_properties);
 
@@ -161,6 +193,20 @@ class OhosPlatformPlayer extends PlatformPlayer {
           heightController.add(h);
         }
         break;
+      case 'firstFrame':
+      case 'startRenderFrame':
+        _hasRenderedFirstFrame = true;
+        final w = (event['width'] as num?)?.toInt() ?? 0;
+        final h = (event['height'] as num?)?.toInt() ?? 0;
+        if (w > 0 && h > 0 && (state.width != w || state.height != h)) {
+          state = state.copyWith(width: w, height: h);
+          widthController.add(w);
+          heightController.add(h);
+        }
+        if (!_firstFrameController.isClosed) {
+          _firstFrameController.add(null);
+        }
+        break;
       case 'bufferingPercent':
         final pct = (event['percent'] as num?)?.toInt();
         if (pct != null) {
@@ -175,6 +221,14 @@ class OhosPlatformPlayer extends PlatformPlayer {
         final rawList = event['tracks'];
         if (rawList is List) {
           _applyNativeTracks(rawList);
+        }
+        break;
+      case 'rate':
+        final rawRate = (event['rate'] as num?)?.toDouble();
+        if (rawRate != null && rawRate.isFinite && rawRate > 0) {
+          final normalized = normalizeSupportedRate(rawRate);
+          state = state.copyWith(rate: normalized);
+          rateController.add(normalized);
         }
         break;
       case 'error':
@@ -253,17 +307,32 @@ class OhosPlatformPlayer extends PlatformPlayer {
     }
 
     final mergedHeaders = <String, String>{};
+    final lowerKeys = <String, String>{};
+    void putHeader(String key, String value) {
+      final k = key.trim();
+      final v = value.trim();
+      if (k.isEmpty || v.isEmpty) return;
+      final lower = k.toLowerCase();
+      final prev = lowerKeys[lower];
+      if (prev != null && prev != k) {
+        mergedHeaders.remove(prev);
+      }
+      lowerKeys[lower] = k;
+      mergedHeaders[k] = v;
+    }
+
     final propUa = _properties['user-agent'] ?? '';
     final propRef = _properties['referrer'] ?? '';
-    if (propUa.isNotEmpty) mergedHeaders['User-Agent'] = propUa;
-    if (propRef.isNotEmpty) mergedHeaders['Referer'] = propRef;
+    if (propUa.isNotEmpty) putHeader('User-Agent', propUa);
+    if (propRef.isNotEmpty) putHeader('Referer', propRef);
     if (media.httpHeaders != null) {
-      mergedHeaders.addAll(media.httpHeaders!);
+      media.httpHeaders!.forEach(putHeader);
     }
 
     _activeSubtitleTrackIndex = null;
     _bufferingPercent = 0;
     _streamBitrate = 0;
+    _hasRenderedFirstFrame = false;
 
     final hdrRaw = _properties['hdr']?.trim().toLowerCase();
     final preferredHdr = hdrRaw == null || hdrRaw.isEmpty
@@ -337,6 +406,7 @@ class OhosPlatformPlayer extends PlatformPlayer {
     if (pid == null || _disposed) return;
     await _controlChannel.invokeMethod<void>('stop', {'playerId': pid});
     state = state.copyWith(playing: false, buffering: false);
+    _hasRenderedFirstFrame = false;
     playingController.add(false);
     bufferingController.add(false);
   }
@@ -358,13 +428,13 @@ class OhosPlatformPlayer extends PlatformPlayer {
   @override
   Future<void> setRate(double rate) async {
     final pid = _playerId;
-    final clamped = rate.clamp(0.25, 3.0);
-    state = state.copyWith(rate: clamped);
-    rateController.add(clamped);
+    final normalized = normalizeSupportedRate(rate);
+    state = state.copyWith(rate: normalized);
+    rateController.add(normalized);
     if (pid == null || _disposed) return;
     await _controlChannel.invokeMethod<void>('setRate', {
       'playerId': pid,
-      'rate': clamped,
+      'rate': normalized,
     });
   }
 
@@ -455,12 +525,16 @@ class OhosPlatformPlayer extends PlatformPlayer {
         await _controlChannel.invokeMethod<void>('dispose', {'playerId': pid});
       } catch (_) {}
     }
+    if (!_firstFrameController.isClosed) {
+      await _firstFrameController.close();
+    }
     await super.dispose();
   }
 }
 
-/// Unified video kernel binding [PlayerScreen] to either `media_kit` (`libmpv`)
-/// on Windows / macOS / iOS or `OhosPlatformPlayer` (`AVPlayer` + GPU Texture) on HarmonyOS NEXT.
+/// Unified video kernel binding [PlayerScreen] to `media_kit` (`libmpv`),
+/// Windows `MdkPlatformPlayer` (`libmdk` D3D11/MFT/DXVA iGPU-friendly engine),
+/// or `OhosPlatformPlayer` (`AVPlayer` + GPU Texture) on HarmonyOS NEXT.
 class VideoKernel {
   static bool _mediaKitInitialized = false;
 
@@ -481,14 +555,18 @@ class VideoKernel {
   final Player player;
   final VideoController? mediaKitController;
   final OhosPlatformPlayer? ohosPlatform;
+  final MdkPlatformPlayer? mdkPlatform;
   final Widget? debugSurface;
   final VideoKernelMode mode;
+
+  bool get isMdk => mdkPlatform != null;
 
   const VideoKernel._({
     required this.player,
     required this.mode,
     this.mediaKitController,
     this.ohosPlatform,
+    this.mdkPlatform,
     this.debugSurface,
   });
 
@@ -497,16 +575,25 @@ class VideoKernel {
     Widget? debugVideoSurface,
     required String hwdec,
     VideoKernelMode? mode,
+    WindowsPlaybackEngine windowsEngine = WindowsPlaybackEngine.mpv,
+    String kernelStrategy = 'exo',
+    MdkNativeBackend? debugMdkBackend,
   }) {
     if (debugPlayer != null) {
       final isOhosDebug = debugPlayer.platform is OhosPlatformPlayer;
+      final isMdkDebug = debugPlayer.platform is MdkPlatformPlayer;
       return VideoKernel._(
         player: debugPlayer,
         mode: mode ??
             (isOhosDebug
                 ? VideoKernelMode.ohosHardwareHdr
-                : VideoKernelMode.auto),
-        mediaKitController: debugVideoSurface == null && !OhosRuntime.isOhos
+                : (isMdkDebug
+                    ? VideoKernelMode.windowsMdk
+                    : VideoKernelMode.auto)),
+        mediaKitController: debugVideoSurface == null &&
+                !OhosRuntime.isOhos &&
+                !isOhosDebug &&
+                !isMdkDebug
             ? VideoController(
                 debugPlayer,
                 configuration: VideoControllerConfiguration(hwdec: hwdec),
@@ -515,6 +602,8 @@ class VideoKernel {
         ohosPlatform: isOhosDebug
             ? debugPlayer.platform as OhosPlatformPlayer
             : null,
+        mdkPlatform:
+            isMdkDebug ? debugPlayer.platform as MdkPlatformPlayer : null,
         debugSurface: debugVideoSurface,
       );
     }
@@ -525,6 +614,21 @@ class VideoKernel {
         player: Player(platformPlayer: ohos),
         mode: mode ?? VideoKernelMode.ohosHardwareHdr,
         ohosPlatform: ohos,
+        debugSurface: debugVideoSurface,
+      );
+    }
+
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.windows &&
+        windowsEngine == WindowsPlaybackEngine.mdk) {
+      final mdkPlayer = MdkPlatformPlayer(
+        kernelStrategy: kernelStrategy,
+        debugBackend: debugMdkBackend,
+      );
+      return VideoKernel._(
+        player: Player(platformPlayer: mdkPlayer),
+        mode: mode ?? VideoKernelMode.windowsMdk,
+        mdkPlatform: mdkPlayer,
         debugSurface: debugVideoSurface,
       );
     }
@@ -580,6 +684,40 @@ class VideoKernel {
         },
       );
     }
+    if (mdkPlatform != null) {
+      return ValueListenableBuilder<int?>(
+        valueListenable: mdkPlatform!.textureIdListenable,
+        builder: (context, tid, _) {
+          if (tid == null || tid < 0) {
+            return const ColoredBox(
+              key: ValueKey('windows-mdk-surface-loading'),
+              color: Colors.black,
+              child: SizedBox.expand(),
+            );
+          }
+          final w = videoWidth > 0 ? videoWidth.toDouble() : 1920.0;
+          final h = videoHeight > 0 ? videoHeight.toDouble() : 1080.0;
+          return ColoredBox(
+            key: const ValueKey('windows-mdk-surface'),
+            color: Colors.black,
+            child: SizedBox.expand(
+              child: FittedBox(
+                fit: fit,
+                clipBehavior: Clip.hardEdge,
+                child: SizedBox(
+                  width: w,
+                  height: h,
+                  child: Texture(
+                    textureId: tid,
+                    filterQuality: FilterQuality.medium,
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      );
+    }
     return Video(
       controller: mediaKitController!,
       fit: fit,
@@ -592,8 +730,15 @@ class VideoKernel {
 
   /// Renders media_kit subtitles as an independent layer strictly ABOVE
   /// `DanmuLayer` and BELOW HUD controls when `externalSubtitleOverlay` is enabled.
-  Widget? buildSubtitleOverlay() {
-    if (OhosRuntime.isOhos || debugSurface != null || ohosPlatform != null) {
+  Widget? buildSubtitleOverlay({
+    Key? subtitleViewKey,
+    EdgeInsets padding = const EdgeInsets.fromLTRB(16.0, 0.0, 16.0, 24.0),
+    bool visible = true,
+  }) {
+    if (OhosRuntime.isOhos ||
+        debugSurface != null ||
+        ohosPlatform != null ||
+        mdkPlatform != null) {
       return null;
     }
     final ctrl = mediaKitController;
@@ -601,10 +746,17 @@ class VideoKernel {
     if (ctrl.player.platform?.configuration.libass ?? false) {
       return null;
     }
-    return SubtitleView(
+    final view = SubtitleView(
+      key: subtitleViewKey,
       controller: ctrl,
-      configuration: const SubtitleViewConfiguration(),
+      configuration: SubtitleViewConfiguration(
+        padding: padding,
+      ),
     );
+    if (!visible) {
+      return Opacity(opacity: 0.0, child: view);
+    }
+    return view;
   }
 }
 

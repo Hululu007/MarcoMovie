@@ -5,6 +5,7 @@ import 'package:meta/meta.dart';
 import 'js_source_syntax.dart';
 import 'models.dart';
 import 'live_catalog_parser.dart';
+import 'series_scraper.dart';
 /// Pure Dart parser for Marco Movie / TVBox JSON & XML CMS, multi-depot configs,
 /// obfuscated/encrypted config payloads (**Base64, Base64, $#...#$ AES-128-CBC),
 /// Punycode IDN URLs, M3U/TXT live playlists, and cross-platform backups.
@@ -2119,11 +2120,22 @@ class CmsParser {
           episodes: [
             for (final episode in (line['episodes'] as List).whereType<Map>())
               if ((episode['url'] ?? '').toString().isNotEmpty)
-                CmsEpisode(name: (episode['name'] ?? '').toString(),
-                  url: episode['url'].toString(),
-                  headers: episode['headers'] is Map
-                      ? (episode['headers'] as Map).map((k, v) => MapEntry(k.toString(), v.toString()))
-                      : const {}),
+                () {
+                  final rawName = (episode['name'] ?? '').toString().trim();
+                  final epUrl = episode['url'].toString();
+                  final urlParts = _extractUrlFileAndDir(epUrl);
+                  return CmsEpisode(
+                    name: rawName,
+                    url: epUrl,
+                    headers: episode['headers'] is Map
+                        ? (episode['headers'] as Map)
+                            .map((k, v) => MapEntry(k.toString(), v.toString()))
+                        : const {},
+                    originalFileName: urlParts.fileName,
+                    directoryPath: urlParts.dirPath,
+                    nameIsGenerated: rawName.isEmpty,
+                  );
+                }(),
           ],
         ),
   ];
@@ -2709,6 +2721,32 @@ class CmsParser {
     }
     return trimmed;
   }
+  static ({String fileName, String dirPath}) _extractUrlFileAndDir(String url) {
+    final trimmed = url.trim();
+    if (trimmed.isEmpty) return (fileName: '', dirPath: '');
+    final uri = Uri.tryParse(trimmed);
+    if (uri != null && uri.pathSegments.isNotEmpty) {
+      final nonEmpty = uri.pathSegments
+          .map((seg) {
+            try {
+              return Uri.decodeComponent(seg).trim();
+            } catch (_) {
+              return seg.trim();
+            }
+          })
+          .where((seg) => seg.isNotEmpty)
+          .toList(growable: false);
+      if (nonEmpty.isNotEmpty) {
+        final last = nonEmpty.last;
+        final dir = nonEmpty.length > 1
+            ? nonEmpty.sublist(0, nonEmpty.length - 1).join('/')
+            : '';
+        return (fileName: last, dirPath: dir);
+      }
+    }
+    return (fileName: '', dirPath: '');
+  }
+
   static List<CmsLine> _parseLines(
     String playFrom,
     String playUrl, {
@@ -2732,15 +2770,23 @@ class CmsParser {
         final s = segment.trim();
         if (s.isEmpty) continue;
         final dollar = s.indexOf(r'$');
-        final epName = dollar >= 0 ? s.substring(0, dollar).trim() : '正片';
+        final rawEpName = dollar >= 0 ? s.substring(0, dollar).trim() : '';
         final epUrl = _cleanStreamUrl(
           dollar >= 0 ? s.substring(dollar + 1).trim() : s,
         );
         if (epUrl.isNotEmpty) {
+          final isGenerated = rawEpName.isEmpty;
+          final displayName = isGenerated
+              ? (dollar >= 0 ? '第 ${episodes.length + 1} 集' : '正片')
+              : rawEpName;
+          final urlParts = _extractUrlFileAndDir(epUrl);
           episodes.add(
             CmsEpisode(
-              name: epName.isEmpty ? '第 ${episodes.length + 1} 集' : epName,
+              name: displayName,
               url: epUrl,
+              originalFileName: urlParts.fileName,
+              directoryPath: urlParts.dirPath,
+              nameIsGenerated: isGenerated,
             ),
           );
         }
@@ -3069,6 +3115,10 @@ class CmsParser {
     String currentTitle,
     String candidateTitle,
   ) {
+    if (SeriesScraper.isMotionComicText(currentTitle) !=
+        SeriesScraper.isMotionComicText(candidateTitle)) {
+      return false;
+    }
     final cur = parseSeriesSeasonInfo(currentTitle);
     final cand = parseSeriesSeasonInfo(candidateTitle);
     final curNorm = _normalizeFranchiseKey(cur.baseTitle);

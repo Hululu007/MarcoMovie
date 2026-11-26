@@ -137,7 +137,10 @@ class DanmuSegmentCache extends ChangeNotifier {
     _seeking = false;
     _invalidateSnapshotCache();
 
-    if (_boundEpisodeId.isEmpty) return;
+    if (_boundEpisodeId.isEmpty) {
+      if (!_disposed) notifyListeners();
+      return;
+    }
 
     final token = DanmuCancelToken();
     _openToken = token;

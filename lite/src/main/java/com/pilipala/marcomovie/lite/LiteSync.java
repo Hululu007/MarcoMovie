@@ -237,7 +237,17 @@ public final class LiteSync {
     }
 
     public static String itemKey(String siteKey, String vodId) {
-        return (siteKey == null ? "" : siteKey) + "\n" + (vodId == null ? "" : vodId);
+        return itemKey(siteKey, "", vodId);
+    }
+
+    public static String itemKey(String siteKey, String siteApi, String vodId) {
+        String sk = siteKey == null ? "" : siteKey.trim();
+        String sa = siteApi == null ? "" : siteApi.trim();
+        String vi = vodId == null ? "" : vodId.trim();
+        if (sa.length() > 0) {
+            return sk + "\n" + sa + "\n" + vi;
+        }
+        return sk + "\n" + vi;
     }
 
     public static String subscriptionIdentity(String origin, String raw) {
@@ -376,6 +386,8 @@ public final class LiteSync {
                                 .put("title", e.vodName)
                                 .put("poster", e.vodPic)
                                 .put("line", e.lineName)
+                                .put("lineFrom", e.lineFrom)
+                                .put("lineIndex", e.lineIndex)
                                 .put("episode", e.epName)
                                 .put("epUrl", e.epUrl)
                                 .put("index", e.epIndex)
@@ -390,7 +402,7 @@ public final class LiteSync {
         JSONArray favArr = new JSONArray();
         for (int i = 0; i < favs.size(); i++) {
             LiteStore.FavoriteEntry f = favs.get(i);
-            String k = itemKey(f.siteKey, f.vodId);
+            String k = itemKey(f.siteKey, f.siteApi, f.vodId);
             long ts = Math.max(1L, Math.max(f.addedAt, tombs.get("add:" + k)));
             try {
                 favArr.put(
@@ -428,6 +440,97 @@ public final class LiteSync {
         }
     }
 
+    private static void addKnownSiteApi(
+            Map<String, Set<String>> knownApisByKey, String siteKey, String siteApi) {
+        String sk = siteKey == null ? "" : siteKey.trim();
+        String sa = siteApi == null ? "" : siteApi.trim();
+        if (sk.length() == 0 || sa.length() == 0) return;
+        Set<String> apis = knownApisByKey.get(sk);
+        if (apis == null) {
+            apis = new HashSet<String>();
+            knownApisByKey.put(sk, apis);
+        }
+        apis.add(sa);
+    }
+
+    private static void collectKnownApisFromConfig(
+            Map<String, Set<String>> knownApisByKey, String rawConfig, String originUrl) {
+        if (rawConfig == null || rawConfig.trim().length() == 0) return;
+        try {
+            List<LiteCatalog.Site> parsed = LiteCatalog.parse(rawConfig, originUrl);
+            for (int i = 0; i < parsed.size(); i++) {
+                LiteCatalog.Site s = parsed.get(i);
+                if (s != null && s.supported) {
+                    addKnownSiteApi(knownApisByKey, s.key, s.api);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void collectKnownApisFromTombstones(
+            Map<String, Set<String>> knownApisByKey, Tombstones tombs) {
+        if (tombs == null) return;
+        for (String key : tombs.stamps.keySet()) {
+            if (key == null) continue;
+            String rest = null;
+            if (key.startsWith("hist:")) rest = key.substring(5);
+            else if (key.startsWith("fav:")) rest = key.substring(4);
+            else if (key.startsWith("add:")) rest = key.substring(4);
+            if (rest == null) continue;
+            int firstNl = rest.indexOf('\n');
+            if (firstNl <= 0) continue;
+            int secondNl = rest.indexOf('\n', firstNl + 1);
+            if (secondNl <= firstNl + 1) continue;
+            String sk = rest.substring(0, firstNl).trim();
+            String sa = rest.substring(firstNl + 1, secondNl).trim();
+            addKnownSiteApi(knownApisByKey, sk, sa);
+        }
+    }
+
+    private static String uniqueApiForKey(
+            Map<String, Set<String>> knownApisByKey, String siteKey) {
+        String sk = siteKey == null ? "" : siteKey.trim();
+        if (sk.length() == 0) return "";
+        Set<String> apis = knownApisByKey.get(sk);
+        if (apis != null && apis.size() == 1) {
+            return apis.iterator().next();
+        }
+        return "";
+    }
+
+    public static boolean isSiteKeyUnambiguouslyUnique(
+            String siteKey,
+            List<LiteCatalog.Site> configuredSites,
+            String historyRaw,
+            String favoritesRaw,
+            String tombstonesRaw) {
+        String sk = siteKey == null ? "" : siteKey.trim();
+        if (sk.length() == 0) return true;
+        Map<String, Set<String>> knownApisByKey = new LinkedHashMap<String, Set<String>>();
+        if (configuredSites != null) {
+            for (int i = 0; i < configuredSites.size(); i++) {
+                LiteCatalog.Site s = configuredSites.get(i);
+                if (s != null && s.supported) {
+                    addKnownSiteApi(knownApisByKey, s.key, s.api);
+                }
+            }
+        }
+        List<LiteStore.HistoryEntry> hist = LiteStore.parseHistoryJson(historyRaw);
+        for (int i = 0; i < hist.size(); i++) {
+            addKnownSiteApi(knownApisByKey, hist.get(i).siteKey, hist.get(i).siteApi);
+        }
+        List<LiteStore.FavoriteEntry> favs = LiteStore.parseFavoritesJson(favoritesRaw);
+        for (int i = 0; i < favs.size(); i++) {
+            addKnownSiteApi(knownApisByKey, favs.get(i).siteKey, favs.get(i).siteApi);
+        }
+        if (tombstonesRaw != null && tombstonesRaw.trim().length() > 0) {
+            collectKnownApisFromTombstones(knownApisByKey, Tombstones.read(tombstonesRaw));
+        }
+        Set<String> apis = knownApisByKey.get(sk);
+        return apis == null || apis.size() <= 1;
+    }
+
     public static MergeResult merge(
             String localHistoryRaw,
             String localFavoritesRaw,
@@ -436,15 +539,29 @@ public final class LiteSync {
             boolean syncSubs,
             String remotePayloadJson,
             long now) {
+        return merge(
+                localHistoryRaw,
+                localFavoritesRaw,
+                localTombstonesRaw,
+                localSub,
+                syncSubs,
+                remotePayloadJson,
+                now,
+                null);
+    }
+
+    public static MergeResult merge(
+            String localHistoryRaw,
+            String localFavoritesRaw,
+            String localTombstonesRaw,
+            LocalSubscription localSub,
+            boolean syncSubs,
+            String remotePayloadJson,
+            long now,
+            List<LiteCatalog.Site> configuredSites) {
         List<LiteStore.HistoryEntry> localHist = LiteStore.parseHistoryJson(localHistoryRaw);
         List<LiteStore.FavoriteEntry> localFavs = LiteStore.parseFavoritesJson(localFavoritesRaw);
         Tombstones tombs = Tombstones.read(localTombstonesRaw);
-        for (int i = 0; i < localFavs.size(); i++) {
-            LiteStore.FavoriteEntry lf = localFavs.get(i);
-            if (lf.addedAt > 0L) {
-                tombs.putMax("add:" + itemKey(lf.siteKey, lf.vodId), lf.addedAt);
-            }
-        }
 
         List<LiteStore.HistoryEntry> remoteHist = new ArrayList<LiteStore.HistoryEntry>();
         List<LiteStore.FavoriteEntry> remoteFavs = new ArrayList<LiteStore.FavoriteEntry>();
@@ -505,30 +622,86 @@ public final class LiteSync {
             }
         }
 
-        // 1. Merge WatchHistory (LWW + hist: tombstones)
-        Map<String, LiteStore.HistoryEntry> histMap =
-                new LinkedHashMap<String, LiteStore.HistoryEntry>();
+        // Build per-siteKey API inventory so unique sources safely canonicalize legacy no-API
+        // records and honor 0.5.8 unscoped tombstones, while ambiguous multi-site keys stay isolated.
+        Map<String, Set<String>> knownApisByKey = new LinkedHashMap<String, Set<String>>();
+        if (configuredSites != null) {
+            for (int i = 0; i < configuredSites.size(); i++) {
+                LiteCatalog.Site s = configuredSites.get(i);
+                if (s != null && s.supported) {
+                    addKnownSiteApi(knownApisByKey, s.key, s.api);
+                }
+            }
+        }
+        if (localSub != null) {
+            collectKnownApisFromConfig(knownApisByKey, localSub.rawContent, localSub.url);
+        }
+        if (rawRemoteSubs != null) {
+            for (int i = 0; i < rawRemoteSubs.length(); i++) {
+                LocalSubscription parsedRemote =
+                        parseRemoteSubscription(rawRemoteSubs.optJSONObject(i));
+                if (parsedRemote != null) {
+                    collectKnownApisFromConfig(
+                            knownApisByKey, parsedRemote.rawContent, parsedRemote.url);
+                }
+            }
+        }
         for (int i = 0; i < localHist.size(); i++) {
-            LiteStore.HistoryEntry e = localHist.get(i);
-            String k = itemKey(e.siteKey, e.vodId);
-            long delAt = tombs.get("hist:" + k);
-            if (delAt > 0L && delAt >= e.updatedAt) continue;
-            histMap.put(k, e);
+            addKnownSiteApi(knownApisByKey, localHist.get(i).siteKey, localHist.get(i).siteApi);
         }
         for (int i = 0; i < remoteHist.size(); i++) {
-            LiteStore.HistoryEntry r = remoteHist.get(i);
-            String k = itemKey(r.siteKey, r.vodId);
+            addKnownSiteApi(knownApisByKey, remoteHist.get(i).siteKey, remoteHist.get(i).siteApi);
+        }
+        for (int i = 0; i < localFavs.size(); i++) {
+            addKnownSiteApi(knownApisByKey, localFavs.get(i).siteKey, localFavs.get(i).siteApi);
+        }
+        for (int i = 0; i < remoteFavs.size(); i++) {
+            addKnownSiteApi(knownApisByKey, remoteFavs.get(i).siteKey, remoteFavs.get(i).siteApi);
+        }
+        collectKnownApisFromTombstones(knownApisByKey, tombs);
+
+        // 1. Merge WatchHistory (LWW + hist: tombstones + unique-source legacy compatibility)
+        Map<String, LiteStore.HistoryEntry> histMap =
+                new LinkedHashMap<String, LiteStore.HistoryEntry>();
+        List<LiteStore.HistoryEntry> allHist =
+                new ArrayList<LiteStore.HistoryEntry>(localHist.size() + remoteHist.size());
+        allHist.addAll(localHist);
+        allHist.addAll(remoteHist);
+        for (int i = 0; i < allHist.size(); i++) {
+            LiteStore.HistoryEntry e = allHist.get(i);
+            String soleApi = uniqueApiForKey(knownApisByKey, e.siteKey);
+            if ((e.siteApi == null || e.siteApi.trim().length() == 0) && soleApi.length() > 0) {
+                e.siteApi = soleApi;
+            }
+            String k = itemKey(e.siteKey, e.siteApi, e.vodId);
             long delAt = tombs.get("hist:" + k);
-            if (delAt > 0L && delAt >= r.updatedAt) continue;
+            boolean isSole =
+                    soleApi.length() > 0
+                            && e.siteApi != null
+                            && soleApi.equals(e.siteApi.trim());
+            if (isSole) {
+                long legacyDel = tombs.get("hist:" + itemKey(e.siteKey, "", e.vodId));
+                if (legacyDel > delAt) delAt = legacyDel;
+            }
+            if (delAt > 0L && delAt >= e.updatedAt) {
+                if (isSole) tombs.putMax("hist:" + k, delAt);
+                continue;
+            }
             LiteStore.HistoryEntry cur = histMap.get(k);
             if (cur == null) {
-                histMap.put(k, r);
-            } else if (r.updatedAt > cur.updatedAt
-                    || (r.updatedAt == cur.updatedAt && r.positionMs > cur.positionMs)) {
-                if (r.siteApi.length() == 0 && cur.siteApi.length() > 0) r.siteApi = cur.siteApi;
-                if (r.siteName.length() == 0 && cur.siteName.length() > 0) r.siteName = cur.siteName;
-                if (r.epUrl.length() == 0 && cur.epUrl.length() > 0) r.epUrl = cur.epUrl;
-                histMap.put(k, r);
+                histMap.put(k, e);
+            } else if (e.updatedAt > cur.updatedAt
+                    || (e.updatedAt == cur.updatedAt && e.positionMs > cur.positionMs)) {
+                if (e.siteApi.length() == 0 && cur.siteApi.length() > 0) e.siteApi = cur.siteApi;
+                if (e.siteName.length() == 0 && cur.siteName.length() > 0) e.siteName = cur.siteName;
+                if (e.epUrl.length() == 0 && cur.epUrl.length() > 0) e.epUrl = cur.epUrl;
+                if (e.lineFrom.length() == 0 && cur.lineFrom.length() > 0) e.lineFrom = cur.lineFrom;
+                histMap.put(k, e);
+            } else {
+                if (cur.siteApi.length() == 0 && e.siteApi.length() > 0) cur.siteApi = e.siteApi;
+                if (cur.siteName.length() == 0 && e.siteName.length() > 0) cur.siteName = e.siteName;
+                if (cur.epUrl.length() == 0 && e.epUrl.length() > 0) cur.epUrl = e.epUrl;
+                if (cur.lineFrom.length() == 0 && e.lineFrom.length() > 0) cur.lineFrom = e.lineFrom;
             }
         }
         List<LiteStore.HistoryEntry> mergedHist =
@@ -549,36 +722,55 @@ public final class LiteSync {
             }
         }
 
-        // 2. Merge Favorites (fav: vs add: timestamps)
+        // 2. Merge Favorites (fav: vs add: timestamps + unique-source legacy compatibility)
         Map<String, LiteStore.FavoriteEntry> favMap =
                 new LinkedHashMap<String, LiteStore.FavoriteEntry>();
-        for (int i = 0; i < localFavs.size(); i++) {
-            LiteStore.FavoriteEntry f = localFavs.get(i);
-            String k = itemKey(f.siteKey, f.vodId);
+        List<LiteStore.FavoriteEntry> allFavs =
+                new ArrayList<LiteStore.FavoriteEntry>(localFavs.size() + remoteFavs.size());
+        allFavs.addAll(localFavs);
+        allFavs.addAll(remoteFavs);
+        for (int i = 0; i < allFavs.size(); i++) {
+            LiteStore.FavoriteEntry f = allFavs.get(i);
+            String soleApi = uniqueApiForKey(knownApisByKey, f.siteKey);
+            if ((f.siteApi == null || f.siteApi.trim().length() == 0) && soleApi.length() > 0) {
+                f.siteApi = soleApi;
+            }
+            String k = itemKey(f.siteKey, f.siteApi, f.vodId);
             long addTs = Math.max(1L, Math.max(f.addedAt, tombs.get("add:" + k)));
             long delTs = tombs.get("fav:" + k);
-            if (delTs > addTs) continue;
+            boolean isSole =
+                    soleApi.length() > 0
+                            && f.siteApi != null
+                            && soleApi.equals(f.siteApi.trim());
+            if (isSole) {
+                String legacyK = itemKey(f.siteKey, "", f.vodId);
+                long legacyAdd = tombs.get("add:" + legacyK);
+                long legacyDel = tombs.get("fav:" + legacyK);
+                if (legacyAdd > addTs) addTs = legacyAdd;
+                if (legacyDel > delTs) delTs = legacyDel;
+            }
+            if (delTs > addTs) {
+                if (isSole) tombs.putMax("fav:" + k, delTs);
+                continue;
+            }
             f.addedAt = addTs;
             tombs.putMax("add:" + k, addTs);
-            favMap.put(k, f);
-        }
-        for (int i = 0; i < remoteFavs.size(); i++) {
-            LiteStore.FavoriteEntry rf = remoteFavs.get(i);
-            String k = itemKey(rf.siteKey, rf.vodId);
-            long effAdd = Math.max(1L, Math.max(rf.addedAt, tombs.get("add:" + k)));
-            long delTs = tombs.get("fav:" + k);
-            if (delTs > effAdd) continue;
-            rf.addedAt = effAdd;
-            tombs.putMax("add:" + k, effAdd);
             LiteStore.FavoriteEntry existing = favMap.get(k);
             if (existing == null) {
-                favMap.put(k, rf);
+                favMap.put(k, f);
             } else {
-                if (existing.vodPic.length() == 0 && rf.vodPic.length() > 0) {
-                    existing.vodPic = rf.vodPic;
+                if (f.addedAt > existing.addedAt) existing.addedAt = f.addedAt;
+                if (existing.vodPic.length() == 0 && f.vodPic.length() > 0) {
+                    existing.vodPic = f.vodPic;
                 }
-                if (existing.siteApi.length() == 0 && rf.siteApi.length() > 0) {
-                    existing.siteApi = rf.siteApi;
+                if (existing.siteApi.length() == 0 && f.siteApi.length() > 0) {
+                    existing.siteApi = f.siteApi;
+                }
+                if (existing.siteName.length() == 0 && f.siteName.length() > 0) {
+                    existing.siteName = f.siteName;
+                }
+                if (existing.vodRemarks.length() == 0 && f.vodRemarks.length() > 0) {
+                    existing.vodRemarks = f.vodRemarks;
                 }
             }
         }
@@ -739,6 +931,8 @@ public final class LiteSync {
             e.vodName = title;
             e.vodPic = o.optString("poster", o.optString("vodPic", ""));
             e.lineName = o.optString("line", o.optString("lineName", ""));
+            e.lineFrom = o.optString("lineFrom", "");
+            e.lineIndex = Math.max(0, o.optInt("lineIndex", 0));
             e.epName =
                     o.optString(
                             "episode",
@@ -917,6 +1111,25 @@ public final class LiteSync {
                                                                 LiteStore.getFavoritesRaw(appCtx);
                                                         String tomb =
                                                                 LiteStore.getTombstonesRaw(appCtx);
+                                                        List<LiteCatalog.Site> configuredSites =
+                                                                null;
+                                                        if (statusPrefsOrNull != null) {
+                                                            String cfg =
+                                                                    statusPrefsOrNull.getString(
+                                                                            "config", "");
+                                                            String addr =
+                                                                    statusPrefsOrNull.getString(
+                                                                            "address", "");
+                                                            if (cfg != null
+                                                                    && cfg.trim().length() > 0) {
+                                                                try {
+                                                                    configuredSites =
+                                                                            LiteCatalog.parse(
+                                                                                    cfg, addr);
+                                                                } catch (Throwable ignored) {
+                                                                }
+                                                            }
+                                                        }
                                                         MergeResult merged =
                                                                 LiteSync.merge(
                                                                         hist,
@@ -927,7 +1140,8 @@ public final class LiteSync {
                                                                                 : null,
                                                                         syncSubs,
                                                                         remote,
-                                                                        now);
+                                                                        now,
+                                                                        configuredSites);
                                                         if (!LiteStore.isHistoryCorrupted(appCtx)) {
                                                             LiteStore.setHistoryRaw(
                                                                     appCtx, merged.historyJson);

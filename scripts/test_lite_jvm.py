@@ -17,7 +17,7 @@ def prepare_json_jar():
     env_jar = os.environ.get('MARCOMOVIE_JSON_JAR')
     if env_jar and Path(env_jar).exists():
         return Path(env_jar)
-    jar = ROOT / 'android/tests/lib/json-20240303.jar'
+    jar = ROOT / 'android-tv/tests/lib/json-20240303.jar'
     if not jar.exists():
         jar.parent.mkdir(parents=True, exist_ok=True)
         jar.write_bytes(urllib.request.urlopen(JSON_JAR_URL, timeout=30).read())
@@ -195,7 +195,7 @@ def main():
         probe_classes.mkdir()
         probe_dex.mkdir()
 
-        # 1. Verify LiteProbe.java compiles cleanly against API 14 + classes.jar and dexes for min-api 14
+        # 1. Verify LiteProbe.java & LiteUpgradeProbe.java compile cleanly against API 14 + classes.jar and dex for min-api 14
         run(
             exe(JDK / 'bin', 'javac'),
             '-encoding', 'UTF-8',
@@ -204,6 +204,7 @@ def main():
             '-classpath', BUILD / 'classes.jar',
             '-d', probe_classes,
             ROOT / 'lite/tests/LiteProbe.java',
+            ROOT / 'lite/tests/LiteUpgradeProbe.java',
         )
         probe_jar = tmp_dir / 'probe.jar'
         with zipfile.ZipFile(probe_jar, 'w') as zf:
@@ -256,7 +257,9 @@ def main():
         print(out.strip())
         # Pin the exact check count so accidentally skipped or deleted checks fail CI;
         # update this number in lockstep whenever checks are added to or removed from LiteJvmChecks.java.
-        assert 'PASS 194 TV Lite JVM checks' in out, f'Expected 194 TV Lite JVM checks, got: {out.strip()}'
+        assert 'PASS 280 TV Lite JVM checks (194 baseline + 86 new regressions [37 R1-stage + 25 R2-rework + 12 R3-rework + 10 R4-rework + 2 v0.5.10]; 0 failed, 0 skipped)' in out, (
+            f'Expected 280 TV Lite JVM checks (194 baseline + 86 new), got: {out.strip()}'
+        )
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteCredentialProbe', capture=True).strip())
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteTlsChecks', capture=True).strip())
 

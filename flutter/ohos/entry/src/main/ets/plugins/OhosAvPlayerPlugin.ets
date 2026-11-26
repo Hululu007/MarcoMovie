@@ -16,7 +16,7 @@ import { media } from '@kit.MediaKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
   extractMethodArg,
-  stringRecordFromDynamicObject
+  normalizeHeadersCaseInsensitive
 } from './OhosDynamicBridge';
 
 const METHOD_CHANNEL_NAME: string = 'com.pilipala.marcomovie/ohos_avplayer';
@@ -67,6 +67,7 @@ class PlayerSession {
   playing: boolean = false;
   buffering: boolean = false;
   completed: boolean = false;
+  renderedFirstFrame: boolean = false;
   positionMs: number = 0;
   durationMs: number = 0;
   bufferedMs: number = 0;
@@ -76,7 +77,10 @@ class PlayerSession {
   videoHeight: number = 0;
   pendingStartPositionMs: number = 0;
   pendingAutoPlay: boolean = true;
+  pauseRequestedByApp: boolean = false;
+  pauseEnforcementInFlight: boolean = false;
   pendingSpeed: media.PlaybackSpeed | null = null;
+  currentRate: number = 1.0;
   pendingVolume: number | null = null;
   disposed: boolean = false;
 
@@ -244,7 +248,7 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
   }
 
   private toHeaderRecord(rawHeaders: ESObject): Record<string, string> {
-    return stringRecordFromDynamicObject(rawHeaders);
+    return normalizeHeadersCaseInsensitive(rawHeaders);
   }
 
   private requireSession(playerId: number): PlayerSession {
@@ -260,6 +264,9 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
   }
 
   private mapPlaybackSpeed(rate: number): media.PlaybackSpeed {
+    if (!Number.isFinite(rate)) {
+      return media.PlaybackSpeed.SPEED_FORWARD_1_00_X;
+    }
     if (rate <= 0.625) {
       return media.PlaybackSpeed.SPEED_FORWARD_0_50_X;
     }
@@ -279,6 +286,39 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
       return media.PlaybackSpeed.SPEED_FORWARD_1_75_X;
     }
     return media.PlaybackSpeed.SPEED_FORWARD_2_00_X;
+  }
+
+  private playbackSpeedToRate(speed: media.PlaybackSpeed): number {
+    switch (speed) {
+      case media.PlaybackSpeed.SPEED_FORWARD_0_50_X:
+        return 0.5;
+      case media.PlaybackSpeed.SPEED_FORWARD_0_75_X:
+        return 0.75;
+      case media.PlaybackSpeed.SPEED_FORWARD_1_00_X:
+        return 1.0;
+      case media.PlaybackSpeed.SPEED_FORWARD_1_25_X:
+        return 1.25;
+      case media.PlaybackSpeed.SPEED_FORWARD_1_50_X:
+        return 1.5;
+      case media.PlaybackSpeed.SPEED_FORWARD_1_75_X:
+        return 1.75;
+      case media.PlaybackSpeed.SPEED_FORWARD_2_00_X:
+        return 2.0;
+      default:
+        return 1.0;
+    }
+  }
+
+  private emitRate(session: PlayerSession, rate: number): void {
+    if (session.disposed) {
+      return;
+    }
+    session.currentRate = rate;
+    const payload: Record<string, Object> = {
+      'type': 'rate',
+      'rate': rate
+    };
+    session.streamHandler.emit(payload);
   }
 
   private emitState(session: PlayerSession): void {
@@ -426,7 +466,15 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
             avPlayer.setVolume(session.pendingVolume);
           }
           if (session.pendingSpeed !== null) {
-            avPlayer.setSpeed(session.pendingSpeed);
+            try {
+              avPlayer.setSpeed(session.pendingSpeed);
+              this.emitRate(session, this.playbackSpeedToRate(session.pendingSpeed));
+            } catch (_speedErr) {
+              session.pendingSpeed = media.PlaybackSpeed.SPEED_FORWARD_1_00_X;
+              this.emitRate(session, 1.0);
+            }
+          } else {
+            this.emitRate(session, 1.0);
           }
           if (session.pendingStartPositionMs > 0) {
             const targetPos: number = session.pendingStartPositionMs;
@@ -449,13 +497,18 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
           if (session.pendingAutoPlay) {
             try {
               await avPlayer.play();
+              if (!session.disposed && !session.pendingAutoPlay && avPlayer.state === 'playing') {
+                await this.enforcePause(session);
+              }
             } catch (err) {
-              const error = err as BusinessError;
-              this.emitError(
-                session,
-                Number(error?.code ?? -1),
-                String(error?.message ?? 'Failed to start AVPlayer')
-              );
+              if (!session.disposed && session.pendingAutoPlay) {
+                const error = err as BusinessError;
+                this.emitError(
+                  session,
+                  Number(error?.code ?? -1),
+                  String(error?.message ?? 'Failed to start AVPlayer')
+                );
+              }
             }
           } else {
             session.playing = false;
@@ -464,6 +517,16 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
           break;
         }
         case 'playing': {
+          if (!session.pendingAutoPlay) {
+            // A prior async play() settled after the user already requested pause/stop.
+            // Immediately drive AVPlayer back to paused so audio/video cannot keep playing.
+            session.playing = false;
+            session.buffering = false;
+            this.emitState(session);
+            await this.enforcePause(session);
+            break;
+          }
+          session.pauseRequestedByApp = false;
           session.playing = true;
           session.buffering = false;
           session.completed = false;
@@ -471,8 +534,25 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
           break;
         }
         case 'paused': {
+          const wasAppPause: boolean = session.pauseRequestedByApp;
+          session.pauseRequestedByApp = false;
           session.playing = false;
           session.buffering = false;
+          if (wasAppPause && session.pendingAutoPlay && !session.disposed) {
+            // User tapped play while an earlier async pause() was still settling.
+            try {
+              await avPlayer.play();
+              if (!session.disposed && !session.pendingAutoPlay && avPlayer.state === 'playing') {
+                await this.enforcePause(session);
+              }
+              break;
+            } catch (_resumeErr) {
+              session.pendingAutoPlay = false;
+            }
+          } else if (!wasAppPause) {
+            // External system pause (e.g. audio focus loss): keep desired state aligned.
+            session.pendingAutoPlay = false;
+          }
           this.emitState(session);
           break;
         }
@@ -492,12 +572,14 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
           session.playing = false;
           session.buffering = false;
           session.completed = false;
+          session.renderedFirstFrame = false;
           this.emitState(session);
           break;
         }
         case 'error': {
           session.playing = false;
           session.buffering = false;
+          session.renderedFirstFrame = false;
           this.emitState(session);
           break;
         }
@@ -567,6 +649,34 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
       this.emitVideoSize(session, width, height);
     });
 
+    avPlayer.on('startRenderFrame', () => {
+      if (session.disposed) {
+        return;
+      }
+      session.renderedFirstFrame = true;
+      session.buffering = false;
+      const width: number = avPlayer.width > 0 ? Math.trunc(avPlayer.width) : session.videoWidth;
+      const height: number = avPlayer.height > 0 ? Math.trunc(avPlayer.height) : session.videoHeight;
+      if (width > 0 && height > 0) {
+        session.videoWidth = width;
+        session.videoHeight = height;
+      }
+      const firstFramePayload: Record<string, Object> = {
+        'type': 'firstFrame',
+        'width': width,
+        'height': height
+      };
+      session.streamHandler.emit(firstFramePayload);
+    });
+
+    avPlayer.on('speedDone', (speed: number) => {
+      if (session.disposed) {
+        return;
+      }
+      const actualRate: number = this.playbackSpeedToRate(speed as media.PlaybackSpeed);
+      this.emitRate(session, actualRate);
+    });
+
     avPlayer.on('error', (err: BusinessError) => {
       if (session.disposed) {
         return;
@@ -591,6 +701,12 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
     return scheme === 'http' || scheme === 'https' || scheme === 'rtmp' || scheme === 'rtsp';
   }
 
+  private isHlsStreamUrl(url: string): boolean {
+    const withoutFragment: string = url.split('#')[0];
+    const cleanPath: string = withoutFragment.split('?')[0].toLowerCase();
+    return cleanPath.endsWith('.m3u8') || cleanPath.endsWith('.m3u');
+  }
+
   private async handleOpen(
     playerId: number,
     url: string,
@@ -611,6 +727,7 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
     session.playing = false;
     session.buffering = true;
     session.completed = false;
+    session.renderedFirstFrame = false;
     session.positionMs = startPositionMs;
     session.durationMs = 0;
     session.bufferedMs = startPositionMs;
@@ -620,20 +737,64 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
     session.videoHeight = 0;
     session.pendingStartPositionMs = startPositionMs;
     session.pendingAutoPlay = autoPlay;
+    session.pauseRequestedByApp = false;
+    session.pauseEnforcementInFlight = false;
     this.emitState(session);
 
     const headers: Record<string, string> = this.toHeaderRecord(rawHeaders);
     const headerKeys: Array<string> = Object.keys(headers);
-    if (headerKeys.length > 0 || this.isNetworkStreamUrl(trimmedUrl)) {
+    const hasRequiredHeaders: boolean = headerKeys.length > 0;
+    if (hasRequiredHeaders || this.isNetworkStreamUrl(trimmedUrl)) {
+      const clampedBufferSec: number = Math.min(20, Math.max(1, Math.trunc(preferredBufferDuration)));
+      const playbackStrategy: media.PlaybackStrategy = {
+        preferredBufferDuration: clampedBufferSec,
+        preferredHdr: preferredHdr
+      };
       try {
         const mediaSource: media.MediaSource = media.createMediaSourceWithUrl(trimmedUrl, headers);
-        const clampedBufferSec: number = Math.min(20, Math.max(1, Math.trunc(preferredBufferDuration)));
-        const playbackStrategy: media.PlaybackStrategy = {
-          preferredBufferDuration: clampedBufferSec,
-          preferredHdr: preferredHdr
-        };
-        await session.avPlayer.setMediaSource(mediaSource, playbackStrategy);
-      } catch (_err) {
+        if (this.isHlsStreamUrl(trimmedUrl)) {
+          try {
+            mediaSource.setMimeType(media.AVMimeTypes.APPLICATION_M3U8);
+          } catch (_mimeErr) {
+            // Non-fatal if platform auto-detects HLS MIME type.
+          }
+        }
+        try {
+          await session.avPlayer.setMediaSource(mediaSource, playbackStrategy);
+        } catch (strategyErr) {
+          if (hasRequiredHeaders) {
+            // Retry setMediaSource without optional strategy while strictly preserving required headers.
+            const retrySource: media.MediaSource = media.createMediaSourceWithUrl(trimmedUrl, headers);
+            if (this.isHlsStreamUrl(trimmedUrl)) {
+              try {
+                retrySource.setMimeType(media.AVMimeTypes.APPLICATION_M3U8);
+              } catch (_retryMimeErr) {
+                // Non-fatal.
+              }
+            }
+            await session.avPlayer.setMediaSource(retrySource);
+          } else {
+            throw strategyErr instanceof Error ? strategyErr : new Error(String(strategyErr));
+          }
+        }
+      } catch (err) {
+        if (hasRequiredHeaders) {
+          // NEVER strip required HTTP headers (e.g. Referer / User-Agent / Cookie) by falling back to bare url.
+          const error = err as BusinessError;
+          const code: number = Math.trunc(Number(error?.code ?? -1));
+          const reason: string = String(error?.message ?? String(err));
+          const detail: string =
+            '无法保留必要请求头打开播放源 (code=' +
+            String(code) +
+            ')：' +
+            reason +
+            '，请重试或切换线路';
+          session.playing = false;
+          session.buffering = false;
+          this.emitState(session);
+          this.emitError(session, code, detail);
+          throw new Error(detail);
+        }
         session.avPlayer.url = trimmedUrl;
       }
     } else {
@@ -642,12 +803,33 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
     return true;
   }
 
+  private async enforcePause(session: PlayerSession): Promise<void> {
+    if (session.disposed || session.pauseEnforcementInFlight) {
+      return;
+    }
+    session.pauseEnforcementInFlight = true;
+    try {
+      if (!session.disposed && !session.pendingAutoPlay && session.avPlayer.state === 'playing') {
+        session.pauseRequestedByApp = true;
+        await session.avPlayer.pause();
+      }
+    } catch (_pauseErr) {
+      session.pauseRequestedByApp = false;
+      // Ignore pause race errors if player already transitioned to paused/stopped/error.
+    } finally {
+      session.pauseEnforcementInFlight = false;
+    }
+  }
+
   private async handlePlay(playerId: number): Promise<boolean> {
     const session: PlayerSession = this.requireSession(playerId);
     session.pendingAutoPlay = true;
     const state: string = session.avPlayer.state;
     if (state === 'prepared' || state === 'paused' || state === 'completed') {
       await session.avPlayer.play();
+      if (!session.disposed && !session.pendingAutoPlay && session.avPlayer.state === 'playing') {
+        await this.enforcePause(session);
+      }
     }
     return true;
   }
@@ -655,8 +837,12 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
   private async handlePause(playerId: number): Promise<boolean> {
     const session: PlayerSession = this.requireSession(playerId);
     session.pendingAutoPlay = false;
+    session.playing = false;
+    session.buffering = false;
     if (session.avPlayer.state === 'playing') {
-      await session.avPlayer.pause();
+      await this.enforcePause(session);
+    } else {
+      this.emitState(session);
     }
     return true;
   }
@@ -664,6 +850,9 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
   private async handleStop(playerId: number): Promise<boolean> {
     const session: PlayerSession = this.requireSession(playerId);
     session.pendingAutoPlay = false;
+    session.pauseRequestedByApp = false;
+    session.pauseEnforcementInFlight = false;
+    session.renderedFirstFrame = false;
     if (this.isPlayableState(session.avPlayer.state)) {
       await session.avPlayer.stop();
     }
@@ -684,10 +873,12 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
   private async handleSetRate(playerId: number, rate: number): Promise<boolean> {
     const session: PlayerSession = this.requireSession(playerId);
     const speed: media.PlaybackSpeed = this.mapPlaybackSpeed(rate);
+    const appliedRate: number = this.playbackSpeedToRate(speed);
     session.pendingSpeed = speed;
     if (this.isPlayableState(session.avPlayer.state)) {
       session.avPlayer.setSpeed(speed);
     }
+    this.emitRate(session, appliedRate);
     return true;
   }
 
@@ -780,6 +971,8 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
       session.avPlayer.off('durationUpdate');
       session.avPlayer.off('bufferingUpdate');
       session.avPlayer.off('videoSizeChange');
+      session.avPlayer.off('startRenderFrame');
+      session.avPlayer.off('speedDone');
       session.avPlayer.off('error');
     } catch (_err) {
       // Ignore listener detach errors during teardown.

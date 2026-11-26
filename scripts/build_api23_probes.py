@@ -12,27 +12,30 @@ import os
 import wave
 import zipfile
 
-from build_android import ROOT, BUILD, JDK, SDK, ANDROID, run, exe
+from android_build_common import ANDROID, JDK, ROOT, SDK, exe, resolve_signing_key, run
 from build_quickjs_deadline import build as build_quickjs_deadline
 
 
+MODULE = ROOT / "android-tv"
+BUILD = MODULE / "build"
 OUT = BUILD / "api23-probes"
 PROBES = ("SubtitleProbe", "HomeProbe", "LoadingProbe", "SourceHostProbe")
 
 
-def sign(source, name):
+def sign(source, name, module_dir=None):
     aligned = OUT / (name + "-aligned.apk")
     output = OUT / (name + ".apk")
+    key = resolve_signing_key(module_dir or MODULE)
     run(exe(SDK, "zipalign"), "-f", "4", source, aligned)
     run(
         exe(JDK / "bin", "java"), "-jar", SDK / "lib/apksigner.jar", "sign",
-        "--ks", Path(os.environ.get("MARCOMOVIE_SIGNING_KEY", str(ROOT / "android/private/development.p12"))),
+        "--ks", key,
         "--ks-key-alias", "marcomovie", "--ks-pass", "env:MARCOMOVIE_KEY_PASSWORD", "--out", output, aligned,
     )
     return output
 
 
-def build_live_plugin(app_classes):
+def build_live_plugin(app_classes, tests_dir):
     # Deliberately separate DEX: exercise DexClassLoader, not a class on the app path.
     fixture = OUT / 'live-plugin'
     for name in ('classes', 'dex'):
@@ -43,7 +46,7 @@ def build_live_plugin(app_classes):
             old.unlink()
     run(exe(JDK/'bin', 'javac'), '-encoding', 'UTF-8', '-source', '8', '-target', '8', '-Xlint:-options',
         '-classpath', str(ANDROID)+os.pathsep+str(app_classes), '-d', fixture/'classes',
-        *sorted((ROOT/'android/tests/device/plugin').glob('*.java')))
+        *sorted((tests_dir / 'plugin').glob('*.java')))
     with zipfile.ZipFile(fixture/'classes.jar', 'w') as jar:
         for compiled in (fixture/'classes').rglob('*.class'):
             jar.write(compiled, compiled.relative_to(fixture/'classes').as_posix())
@@ -55,14 +58,18 @@ def build_live_plugin(app_classes):
 
 
 def main(phone=False):
-    global OUT, PROBES
+    global MODULE, BUILD, OUT, PROBES
+    MODULE = ROOT / ('android-mobile' if phone else 'android-tv')
+    BUILD = MODULE / 'build'
     OUT = BUILD / ('phone-source-probe' if phone else 'api23-probes')
+    tests_dir = MODULE / 'tests/device'
     PROBES = ('SourceHostProbe',) if phone else ('SubtitleProbe', 'HomeProbe', 'LoadingProbe', 'SourceHostProbe')
     abi = 'x86_64' if phone else 'x86'
     source = BUILD / ('unsigned-mobile.apk' if phone else 'unsigned.apk')
     app_classes = BUILD / "classes.jar"
     if not source.exists() or not app_classes.exists():
-        raise RuntimeError("Run build_android.py first; this script never builds the production app")
+        builder = "scripts/build_android_mobile.py" if phone else "scripts/build_android_tv.py"
+        raise RuntimeError(f"Run {builder} first; this script never builds the production app")
     for name in ("classes", "dex", "assets"):
         folder = OUT / name
         folder.mkdir(parents=True, exist_ok=True)
@@ -83,14 +90,14 @@ def main(phone=False):
     with wave.open(str(OUT / "assets/timeline.wav"), "wb") as audio:
         audio.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
         audio.writeframes(b"\x00\x00" * 8000 * 60)
-    build_live_plugin(app_classes)
+    build_live_plugin(app_classes, tests_dir)
     run(exe(SDK, "aapt2"), "link", "-o", OUT / "resources.apk", "--manifest", manifest,
         "-I", ANDROID, "-A", OUT / "assets")
     run(exe(JDK / "bin", "javac"), "-encoding", "UTF-8", "-source", "8", "-target", "8", "-Xlint:-options",
         "-classpath", str(ANDROID) + os.pathsep + str(app_classes), "-d", OUT / "classes",
-        *(ROOT / ("android/tests/device/" + name + ".java") for name in PROBES),
-        ROOT / "android/tests/device/HttpT4Checks.java",
-        *([ROOT / "android/tests/device/HomeRenderDiagnostics.java"] if "HomeProbe" in PROBES else []))
+        *(tests_dir / (name + ".java") for name in PROBES),
+        tests_dir / "HttpT4Checks.java",
+        *([tests_dir / "HomeRenderDiagnostics.java"] if "HomeProbe" in PROBES else []))
     with zipfile.ZipFile(OUT / "classes.jar", "w") as jar:
         for compiled in (OUT / "classes").rglob("*.class"):
             jar.write(compiled, compiled.relative_to(OUT / "classes").as_posix())
@@ -101,26 +108,31 @@ def main(phone=False):
             apk.writestr(entry, resources.read(entry.filename))
         for dex in (OUT / "dex").glob("*.dex"):
             apk.write(dex, dex.name)
-    sign(OUT / "probe-unsigned.apk", "probe")
+    sign(OUT / "probe-unsigned.apk", "probe", MODULE)
 
     wrapper_name = "wrapper-android-3.2.3.aar"
-    dependency = next(item for item in json.loads((ROOT / "android/dependencies.json").read_text(encoding="utf-8"))
+    dependency = next(item for item in json.loads((MODULE / "dependencies.json").read_text(encoding="utf-8"))
                       if item["url"].endswith("/" + wrapper_name))
     wrapper = ROOT / "tools/java-dependencies" / wrapper_name
     if hashlib.sha256(wrapper.read_bytes()).hexdigest() != dependency["sha256"]:
         raise RuntimeError("Pinned QuickJS JNI digest mismatch")
-    deadline_files = build_quickjs_deadline()
+    deadline_files = build_quickjs_deadline(
+        output=OUT / "quickjs-deadline",
+        module_dir=MODULE,
+        abis=(abi,),
+    )
     with zipfile.ZipFile(source) as production, zipfile.ZipFile(wrapper) as jni, zipfile.ZipFile(OUT / "fixture-unsigned.apk", "w") as apk:
         for entry in production.infolist():
             if not entry.filename.startswith("lib/"):
                 apk.writestr(entry, production.read(entry.filename))
         apk.writestr('lib/'+abi+'/libquickjs-android-wrapper.so', jni.read('jni/'+abi+'/libquickjs-android-wrapper.so'))
         apk.writestr('lib/'+abi+'/libmovie-quickjs-deadline.so', deadline_files['lib/'+abi+'/libmovie-quickjs-deadline.so'])
-    fixture = sign(OUT / "fixture-unsigned.apk", "fixture")
+    fixture = sign(OUT / "fixture-unsigned.apk", "fixture", MODULE)
     (OUT / "scope.json").write_text(json.dumps({
         "scope": ("API 36 phone QuickJS/Python JNI and local source requests only. " if phone else
                   "API 23 TV UI, local system-player subtitles, synthetic home/history and QuickJS/Python JNI only. ")
                  + "No ARM decoder or CatPaw Node acceptance. Not distributable.",
+        "module": MODULE.name,
         "production_unsigned_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "production_classes_sha256": hashlib.sha256(app_classes.read_bytes()).hexdigest(),
         "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),

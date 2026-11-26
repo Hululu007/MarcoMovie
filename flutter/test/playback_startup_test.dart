@@ -85,4 +85,58 @@ void main() {
     await tester.pump(const Duration(minutes: 2));
     expect(timedOut, isFalse);
   });
+
+  testWidgets(
+      'waiting for first frame with playing=false and buffering=true keeps timeout armed while explicit user pause cancels it',
+      (tester) async {
+    final startup = PlaybackStartup();
+    var timeouts = 0;
+    startup.waitForProgress(
+      () => timeouts++,
+      hasFallback: true,
+      timeoutOverride: const Duration(seconds: 7),
+    );
+    // HarmonyOS AVPlayer immediately reports playing=false, buffering=true on open.
+    startup.updateState(playing: false, buffering: true, userPaused: false);
+    await tester.pump(const Duration(seconds: 6));
+    expect(timeouts, 0);
+    await tester.pump(const Duration(seconds: 1));
+    expect(timeouts, 1);
+
+    // Explicit user pause cancels startup timeout and keeps it cancelled even if buffering events arrive.
+    timeouts = 0;
+    startup.waitForProgress(
+      () => timeouts++,
+      hasFallback: true,
+      timeoutOverride: const Duration(seconds: 7),
+    );
+    startup.updateState(playing: false, buffering: true, userPaused: false);
+    await tester.pump(const Duration(seconds: 3));
+    startup.setUserPaused(true);
+    startup.updateState(playing: false, buffering: true, userPaused: true);
+    await tester.pump(const Duration(seconds: 30));
+    expect(timeouts, 0);
+    expect(startup.isUserPaused, isTrue);
+
+    // Resuming playback re-arms the startup deadline if no progress occurred yet.
+    startup.setUserPaused(false);
+    await tester.pump(const Duration(seconds: 7));
+    expect(timeouts, 1);
+  });
+
+  testWidgets(
+      'markLiveFrameReady cancels startup timer while still advancing isPastStartupWindow',
+      (tester) async {
+    final startup = PlaybackStartup();
+    var timeouts = 0;
+    startup.waitForProgress(
+      () => timeouts++,
+      hasFallback: true,
+      timeoutOverride: const Duration(seconds: 7),
+    );
+    startup.markLiveFrameReady();
+    await tester.pump(const Duration(seconds: 10));
+    expect(timeouts, 0);
+    expect(startup.isPastStartupWindow, isTrue);
+  });
 }

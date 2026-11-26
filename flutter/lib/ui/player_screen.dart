@@ -9,11 +9,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart' show SubtitleViewState;
 import '../core/anime4k_controller.dart';
 import '../core/bluray_iso_proxy.dart';
 import '../core/cast_service.dart';
 import '../core/catpaw_host.dart';
 import '../core/cms_client.dart';
+import '../core/container_metadata_reader.dart';
 import '../core/download_service.dart';
 import '../core/danmu/dandanplay_provider.dart';
 import '../core/danmu/danmu_prefs.dart';
@@ -21,7 +23,8 @@ import '../core/danmu/provider.dart';
 import '../core/danmu/segment_cache.dart';
 import '../core/emby_library.dart';
 import '../core/csp_bridge.dart';
-import '../core/episode_scraper.dart';
+import '../core/episode_scraper.dart' hide ScrapedEpisodeInfo;
+import '../core/episode_scraper.dart' as ep_scraper show ScrapedEpisodeInfo;
 import '../core/cloud_media_proxy.dart';
 import '../core/ios_avplayer_controller.dart';
 import '../core/ios_mpv_profile.dart';
@@ -32,6 +35,8 @@ import '../core/playback_recovery_policy.dart';
 import '../core/playback_startup.dart';
 import '../core/playback_wakelock.dart';
 import '../core/ohos_runtime.dart';
+import '../core/series_scraper.dart';
+import '../core/subtitle_layout.dart';
 import '../core/video_kernel.dart';
 import '../core/web_media_resolver.dart';
 import '../core/windows_tray_service.dart';
@@ -67,9 +72,21 @@ import 'player/slim_progress_bar.dart';
 import 'player/speed_capsule.dart';
 import 'player/start_spec_overlay.dart';
 import 'poster_image.dart';
+import 'series_scrape_sheet.dart';
 import 'source_verification_dialog.dart';
 import 'tv/tv_player_overlay.dart';
 import 'windows_title_bar.dart';
+
+/// Explicit live playback startup phases so early audio/position events cannot
+/// masquerade as audio-only radio before track discovery completes, and
+/// clockless video streams that render real frames do not trigger spurious
+/// startup failover.
+enum _LiveStartupPhase {
+  tracksUnknown,
+  confirmedAudioOnly,
+  awaitingVideoFrame,
+  videoFrameRendered,
+}
 
 /// Apple AVPlayerViewController / iOS 26 Concentric Spatial Cinema video player:
 /// - Unified iOS/iPadOS 26 Liquid Glass HUD (`IosPlayerChrome`) with zero
@@ -148,6 +165,8 @@ class PlayerScreen extends StatefulWidget {
   final OnboardingPrefs? debugOnboardingPrefs;
   @visibleForTesting
   final Anime4kController? debugAnime4kController;
+  @visibleForTesting
+  final Stream<bool>? debugLiveVideoOutputStream;
 
   const PlayerScreen({
     super.key,
@@ -180,6 +199,7 @@ class PlayerScreen extends StatefulWidget {
     this.debugDanmuSettings,
     this.debugOnboardingPrefs,
     this.debugAnime4kController,
+    this.debugLiveVideoOutputStream,
   });
 
   /// The resolver already applies origin rules and explicit playback headers.
@@ -251,9 +271,13 @@ class PlayerCloudMediaSession {
 
 class _PlayerScreenState extends State<PlayerScreen>
     with WidgetsBindingObserver {
-  late final VideoKernel _videoKernel;
-  late final Player _player;
+  late VideoKernel _videoKernel;
+  late Player _player;
+  bool _playerDisposed = false;
   late Future<void> _playerConfiguration;
+  WindowsPlaybackEngine _windowsEngine = WindowsPlaybackEngine.mpv;
+  bool _mdkAutoFallbackTriggered = false;
+  bool _switchingWindowsEngine = false;
   final CmsClient _client = CmsClient();
   final List<StreamSubscription<dynamic>> _playerSubscriptions = [];
 
@@ -281,6 +305,18 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _hudFadingOut = false;
   bool _hudAutoHidden = false;
   Timer? _hudUnmountTimer;
+  final GlobalKey<SubtitleViewState> _subtitleViewKey =
+      GlobalKey<SubtitleViewState>();
+  double _measuredDesktopBottomBarHeight = 0.0;
+  SubtitleRenderMode _subtitleRenderMode =
+      SubtitleRenderMode.flutterTextOverlay;
+  int _lastAppliedMpvSubPos = 100;
+  bool? _lastAppliedMpvSubVisible;
+  bool _mpvSubtitleAssInitialized = false;
+  double _lastAppliedSubtitleOverlayBottomPadding = -1.0;
+  Size _lastVideoStackViewport = Size.zero;
+  bool _subtitleSyncScheduled = false;
+  int _subtitleSyncEpoch = 0;
   bool _screenLocked = false;
   bool _lockButtonVisible = false;
   Timer? _lockHideTimer;
@@ -294,6 +330,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   );
   final Set<int> _globalActivePointers = <int>{};
   bool _appInForeground = true;
+  bool _resumeOhosOnForeground = false;
+  int _ohosBackgroundResumeMs = 0;
   double _previousVolume = 100.0;
   final ScrollController _portraitToolsScrollController = ScrollController();
   String _playbackError = '';
@@ -314,7 +352,16 @@ class _PlayerScreenState extends State<PlayerScreen>
   Timer? _hideTimer;
   Timer? _historyTimer;
   EmbyPlaybackSession? _embySession;
-  Duration _position = Duration.zero;
+  Duration _positionValue = Duration.zero;
+  final ValueNotifier<int> _danmuPositionMs = ValueNotifier<int>(0);
+  Duration get _position => _positionValue;
+  set _position(Duration value) {
+    _positionValue = value;
+    final ms = value.inMilliseconds;
+    if (_danmuPositionMs.value != ms) {
+      _danmuPositionMs.value = ms;
+    }
+  }
   Duration _duration = Duration.zero;
   bool _playing = false;
   bool _loading = true;
@@ -437,7 +484,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  ScrapedEpisodeInfo _currentScrapedEpisode() {
+  ep_scraper.ScrapedEpisodeInfo _currentScrapedEpisode() {
     return EpisodeScraper.parseEpisode(
       _currentEpisode.name,
       rawIndex: _episodeIndex,
@@ -475,6 +522,14 @@ class _PlayerScreenState extends State<PlayerScreen>
           : '已校准集数并重新匹配弹幕（第 ${cur.effectiveEpisodeNumber} 集）',
     );
   }
+
+  DanmuCandidate? _matchedDanmuCandidate;
+  List<DanmuCandidate> _pendingDanmuCandidates = const <DanmuCandidate>[];
+  int? _scrapedDanmuEpisodeNumber;
+  int _activeDanmuEpisodeOffset = 0;
+  final Map<String, Map<String, String>> _runtimeContainerTags =
+      <String, Map<String, String>>{};
+  int _containerProbeGen = 0;
   OnboardingPrefs? _onboardingPrefs;
   bool _hasStartedVodPlayback = false;
   bool _firstPlayHintDismissedThisSession = false;
@@ -482,6 +537,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final bool _ownsAnime4kController;
   late final WindowsVideoQualityController _winQualityController;
   BlurayIsoLease? _blurayIsoLease;
+  OfflineHlsLease? _offlineHlsLease;
   List<BlurayChapter> _blurayChapters = const [];
 
   bool get _isIosPlayerPlatform =>
@@ -491,6 +547,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool get _isWindowsPlayerPlatform =>
       !kIsWeb &&
       defaultTargetPlatform == TargetPlatform.windows &&
+      !OhosRuntime.isOhos;
+  bool get _isMacosPlayerPlatform =>
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.macOS &&
       !OhosRuntime.isOhos;
   bool get _canUseIosAvPlayerEngine =>
       _isIosPlayerPlatform &&
@@ -509,6 +569,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _wasAvPlaying = false;
   bool _wasAvBuffering = false;
   bool _wasAvCompleted = false;
+  bool _userPausedPlayback = false;
+  bool _pausedEngineInvalidated = false;
+  bool _ohosRenderedFirstFrame = false;
 
   static String _avGravityForFit(BoxFit fit) => switch (fit) {
     BoxFit.cover => 'resizeAspectFill',
@@ -522,6 +585,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(
         _iosAvPlayerController?.setVideoGravity(_avGravityForFit(nextFit)),
       );
+    } else {
+      unawaited(_syncNativeSubtitleState());
     }
   }
 
@@ -529,21 +594,87 @@ class _PlayerScreenState extends State<PlayerScreen>
       ? ((_iosAvPlayerController?.volume ?? 1.0) * 100.0).clamp(0.0, 100.0)
       : _player.state.volume;
 
-  Future<void> _enginePlay() => _usingAvPlayer
-      ? (_iosAvPlayerController?.play() ?? Future<void>.value())
-      : _player.play();
+  Future<void> _enginePlay() {
+    _userPausedPlayback = false;
+    _startup.setUserPaused(false);
+    if (_hudText.startsWith('已暂停')) {
+      _hudTimer?.cancel();
+      if (mounted) {
+        setState(() => _hudText = '');
+      } else {
+        _hudText = '';
+      }
+    }
+    if (_pausedEngineInvalidated && _playbackError.isEmpty) {
+      _pausedEngineInvalidated = false;
+      final resumeMs = _isLiveStream
+          ? 0
+          : (_position.inMilliseconds > 0
+                ? _position.inMilliseconds
+                : _lastKnownPositionMs);
+      return _openCurrentEpisode(resumeMs: resumeMs);
+    }
+    return _usingAvPlayer
+        ? (_iosAvPlayerController?.play() ?? Future<void>.value())
+        : _player.play();
+  }
 
-  Future<void> _enginePause() => _usingAvPlayer
-      ? (_iosAvPlayerController?.pause() ?? Future<void>.value())
-      : _player.pause();
+  Future<void> _enginePause() {
+    _userPausedPlayback = true;
+    _startup.setUserPaused(true);
+    return _usingAvPlayer
+        ? (_iosAvPlayerController?.pause() ?? Future<void>.value())
+        : _player.pause();
+  }
 
-  Future<void> _enginePlayOrPause() => _usingAvPlayer
-      ? (_iosAvPlayerController?.playOrPause() ?? Future<void>.value())
-      : _player.playOrPause();
+  Future<void> _enginePlayOrPause() {
+    final shouldPause = _playing ||
+        (!_userPausedPlayback &&
+            (_loading || _buffering) &&
+            _playbackError.isEmpty);
+    if (_usesOhosAvPlayer || _usingAvPlayer || _pausedEngineInvalidated) {
+      return shouldPause ? _enginePause() : _enginePlay();
+    }
+    if (shouldPause) {
+      _userPausedPlayback = true;
+      _startup.setUserPaused(true);
+      if (!_playing) return _player.pause();
+    } else {
+      _userPausedPlayback = false;
+      _startup.setUserPaused(false);
+      if (_hudText.startsWith('已暂停')) {
+        _hudTimer?.cancel();
+        if (mounted) {
+          setState(() => _hudText = '');
+        } else {
+          _hudText = '';
+        }
+      }
+    }
+    return _player.playOrPause();
+  }
+
+  bool get _usesOhosAvPlayer =>
+      _player.platform is OhosPlatformPlayer || OhosRuntime.isOhos;
+
+  List<double> get _supportedPlaybackSpeeds => _usesOhosAvPlayer
+      ? OhosPlatformPlayer.supportedSpeeds
+      : const <double>[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+
+  double _normalizePlaybackSpeed(double rate) {
+    if (_usesOhosAvPlayer) {
+      return OhosPlatformPlayer.normalizeSupportedRate(rate);
+    }
+    return double.parse(
+      rate
+          .clamp(StorageService.minPlaySpeed, StorageService.maxPlaySpeed)
+          .toStringAsFixed(2),
+    );
+  }
 
   Future<void> _engineSetRate(double rate) => _usingAvPlayer
       ? (_iosAvPlayerController?.setRate(rate) ?? Future<void>.value())
-      : _player.setRate(rate);
+      : _player.setRate(_normalizePlaybackSpeed(rate));
 
   Future<void> _engineSetVolume100(double vol100) => _usingAvPlayer
       ? (_iosAvPlayerController?.setVolume((vol100 / 100.0).clamp(0.0, 1.0)) ??
@@ -943,7 +1074,30 @@ class _PlayerScreenState extends State<PlayerScreen>
   final Set<String> _failedQualityUrls = <String>{};
   bool _liveDirectFallbackTried = false;
   bool _activeEpisodeUsedLocalProxy = false;
+  bool _liveSessionHasProgress = false;
+  _LiveStartupPhase _liveStartupPhase = _LiveStartupPhase.tracksUnknown;
+  int _liveSessionVideoOutputCount = 0;
+  bool _hasLiveVideoOutputObserver = false;
+  bool _liveVoConfigured = false;
+  bool _liveStartSpecTriggered = false;
+  final Set<String> _observedMpvVideoProps = <String>{};
+  VoidCallback? _videoRectListener;
+  VoidCallback? _mdkTextureListener;
+  VoidCallback? _ohosTextureListener;
   LiveChannel? _activeLiveChannel;
+
+  static bool _isRealTrackId(String id) {
+    final trimmed = id.trim();
+    return trimmed.isNotEmpty && trimmed != 'auto' && trimmed != 'no';
+  }
+
+  bool get _liveSessionReadyForDisplay =>
+      !_isLiveStream ||
+      !_hasLiveVideoOutputObserver ||
+      _liveStartupPhase == _LiveStartupPhase.videoFrameRendered ||
+      (_player.platform is OhosPlatformPlayer && _liveSessionHasProgress) ||
+      (_liveStartupPhase == _LiveStartupPhase.confirmedAudioOnly &&
+          _liveSessionHasProgress);
 
   String get _displayTitle => _activeLiveChannel?.name ?? widget.video.title;
   bool get _hasLiveChannelCatalog =>
@@ -1004,7 +1158,13 @@ class _PlayerScreenState extends State<PlayerScreen>
             videoId: widget.video.id,
             videoTitle: widget.video.title,
           );
-    _normalSpeed = _isLiveStream ? 1.0 : widget.storage.playSpeed;
+    final initUsesOhos =
+        OhosRuntime.isOhos || widget.debugPlayer?.platform is OhosPlatformPlayer;
+    _normalSpeed = _isLiveStream
+        ? 1.0
+        : (initUsesOhos
+            ? OhosPlatformPlayer.normalizeSupportedRate(widget.storage.playSpeed)
+            : widget.storage.playSpeed);
     _skipIntroSec = widget.storage.getVideoSkipIntroSec(
       widget.site.key,
       widget.video.id,
@@ -1066,6 +1226,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       ..addListener(_onHudSubstateChanged);
     _skipCountdown.addListener(_onHudSubstateChanged);
     _startSpecController.addListener(_onHudSubstateChanged);
+    widget.storage.seriesScrapeRevision.addListener(
+      _onPlayerSeriesScrapeRevision,
+    );
+    if (!OhosRuntime.isOhos) {
+      widget.storage.danmuSourcesRevision.addListener(
+        _onDanmuSourcesRevisionChanged,
+      );
+    }
     IosLiquidGlassBridge.reduceTransparencyNotifier.addListener(
       _onReduceTransparencyChanged,
     );
@@ -1089,6 +1257,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _autoNext = widget.storage.autoNext;
     _repeatMode = widget.storage.repeatMode;
     _playerKernel = widget.storage.playerKernel;
+    _windowsEngine = WindowsPlaybackEngine.fromId(
+      widget.storage.windowsPlaybackEngine,
+    );
     _iosEngineMode = IosPlaybackEngineMode.fromId(
       widget.storage.iosPlaybackEngineMode,
     );
@@ -1175,8 +1346,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       debugPlayer: widget.debugPlayer,
       debugVideoSurface: widget.debugVideoSurface,
       hwdec: _hardwareDecoder(_playerKernel),
+      windowsEngine: _windowsEngine,
+      kernelStrategy: _playerKernel,
     );
     _player = _videoKernel.player;
+    _playerDisposed = false;
     // Keep one source lease for this page, including pause and overlapping
     // episode/quality transitions. Release only after the decoder is disposed.
     _releaseSourceSession = _client.pinPlaybackSource(widget.site);
@@ -1187,18 +1361,342 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(_initAnime4kAfterKernel());
     }
 
+    _attachPlayerStreams();
+
+    _openCurrentEpisode(resumeMs: widget.initialPositionMs);
+    _historyTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => _saveProgress(immediate: false),
+    );
+  }
+
+  void _detachLiveVideoOutputObservers() {
+    if (_videoRectListener != null) {
+      _videoKernel.mediaKitController?.rect.removeListener(_videoRectListener!);
+      _videoRectListener = null;
+    }
+    if (_mdkTextureListener != null) {
+      _videoKernel.mdkPlatform?.textureIdListenable
+          .removeListener(_mdkTextureListener!);
+      _mdkTextureListener = null;
+    }
+    if (_ohosTextureListener != null) {
+      _videoKernel.ohosPlatform?.textureIdListenable
+          .removeListener(_ohosTextureListener!);
+      _ohosTextureListener = null;
+    }
+    if (_observedMpvVideoProps.isNotEmpty) {
+      final platform = _player.platform;
+      final props = List<String>.of(_observedMpvVideoProps);
+      _observedMpvVideoProps.clear();
+      if (platform != null) {
+        for (final prop in props) {
+          try {
+            unawaited((platform as dynamic).unobserveProperty(prop));
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
+  void _armStartupWatchdog(int session) {
+    final hasFallback = _isLiveStream
+        ? (_currentLine.episodes.length > 1 &&
+            _failedLiveEpisodes.length <
+                math.min(_currentLine.episodes.length - 1, 8))
+        : (_nextFallbackQuality() != null ||
+            (PlaybackRecoveryPolicy.decide(
+                      episode: _currentEpisode,
+                      isTrial: false,
+                      hasNextQuality: false,
+                    ) ==
+                    PlaybackRecoveryDecision.alternateLine &&
+                _lines.length > 1 &&
+                _failedLinesForEpisode.length < 6));
+    _startup.waitForProgress(
+      () {
+        if (mounted && session == _playSession && _allowEvents) {
+          _failPlayback(TimeoutException('media startup'));
+          _changeMedia(
+            session,
+            () => _usingAvPlayer
+                ? (_iosAvPlayerController?.stop() ?? Future<void>.value())
+                : _player.stop(),
+          ).catchError((_) {});
+        }
+      },
+      hasFallback: hasFallback || (_isLiveStream && !_liveDirectFallbackTried),
+      startOffset: _pendingResumeMs > 0
+          ? Duration(milliseconds: _pendingResumeMs)
+          : Duration.zero,
+      timeoutOverride: _isLiveStream
+          ? Duration(seconds: !_liveDirectFallbackTried ? 7 : 8)
+          : null,
+    );
+  }
+
+  void _markLiveVideoTrackDiscovered() {
+    if (!_isLiveStream) return;
+    if (_liveStartupPhase == _LiveStartupPhase.videoFrameRendered) return;
+    final wasAudioOnly =
+        _liveStartupPhase == _LiveStartupPhase.confirmedAudioOnly;
+    _liveStartupPhase = _LiveStartupPhase.awaitingVideoFrame;
+    if (wasAudioOnly) {
+      if (mounted && !_loading) {
+        setState(() {
+          _loading = true;
+        });
+      } else {
+        _loading = true;
+      }
+      if (_allowEvents && _matchesActiveMedia) {
+        _armStartupWatchdog(_playSession);
+        _startup.updateState(
+          playing: _playing,
+          buffering: _buffering,
+          userPaused: _userPausedPlayback,
+        );
+      }
+    }
+  }
+
+  void _markLiveTracksConfirmedAudioOnly() {
+    if (!_isLiveStream ||
+        _videoWidth > 0 ||
+        _videoHeight > 0 ||
+        _liveStartupPhase == _LiveStartupPhase.videoFrameRendered ||
+        _liveStartupPhase == _LiveStartupPhase.awaitingVideoFrame) {
+      return;
+    }
+    final changed = _liveStartupPhase != _LiveStartupPhase.confirmedAudioOnly;
+    _liveStartupPhase = _LiveStartupPhase.confirmedAudioOnly;
+    if (changed && _liveSessionHasProgress) {
+      if (_position > Duration.zero) {
+        _startup.position(_position);
+      }
+      if (_loading) {
+        setState(() {
+          _loading = false;
+        });
+        if (_playing &&
+            !_buffering &&
+            _controlsVisible &&
+            (_hideTimer == null || !_hideTimer!.isActive)) {
+          _scheduleHide();
+        }
+      }
+    }
+  }
+
+  void _confirmLiveVideoOutput() {
+    if (!mounted || !_allowEvents || !_matchesActiveMedia || !_isLiveStream) {
+      return;
+    }
+    final alreadyReady =
+        _liveStartupPhase == _LiveStartupPhase.videoFrameRendered;
+    _liveStartupPhase = _LiveStartupPhase.videoFrameRendered;
+    _liveSessionVideoOutputCount++;
+    _startup.confirmVideoOutput(sustained: _liveSessionVideoOutputCount >= 2);
+    if (_position > Duration.zero) {
+      _startup.position(_position);
+    }
+    if (!alreadyReady) {
+      final clearStaleBuffering =
+          _buffering && _position.inMilliseconds >= 250;
+      if (_loading || clearStaleBuffering) {
+        setState(() {
+          _loading = false;
+          if (clearStaleBuffering) {
+            _buffering = false;
+          }
+        });
+        if (_playing &&
+            !_buffering &&
+            _controlsVisible &&
+            (_hideTimer == null || !_hideTimer!.isActive)) {
+          _scheduleHide();
+        }
+      }
+      if (_videoWidth > 0 && _videoHeight > 0 && !_liveStartSpecTriggered) {
+        _liveStartSpecTriggered = true;
+        _startSpecController.onFirstFrameReady(
+          enabled: _hudPrefs.effectiveStartSpecHud,
+          isLive: true,
+        );
+      }
+    }
+  }
+
+  void _attachLiveVideoOutputObservers() {
+    _detachLiveVideoOutputObservers();
+    _hasLiveVideoOutputObserver = false;
+    if (widget.debugLiveVideoOutputStream != null) {
+      _hasLiveVideoOutputObserver = true;
+      _playerSubscriptions.add(
+        widget.debugLiveVideoOutputStream!.listen((hasOutput) {
+          if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+          if (hasOutput) {
+            _confirmLiveVideoOutput();
+          }
+        }),
+      );
+    }
+    final mkCtrl = _videoKernel.mediaKitController;
+    if (mkCtrl != null) {
+      _hasLiveVideoOutputObserver = true;
+      void onRectChanged() {
+        if (!mounted || !_allowEvents || !_matchesActiveMedia || !_isLiveStream) {
+          return;
+        }
+        final r = mkCtrl.rect.value;
+        if (r != null && r.width > 0 && r.height > 0) {
+          _confirmLiveVideoOutput();
+        }
+      }
+
+      _videoRectListener = onRectChanged;
+      mkCtrl.rect.addListener(onRectChanged);
+    }
+    final mdk = _videoKernel.mdkPlatform;
+    if (mdk != null) {
+      _hasLiveVideoOutputObserver = true;
+      void onMdkTexture() {
+        if (!mounted || !_allowEvents || !_matchesActiveMedia || !_isLiveStream) {
+          return;
+        }
+        final tid = mdk.textureIdListenable.value;
+        if (tid != null && tid >= 0 && _videoWidth > 0 && _videoHeight > 0) {
+          _confirmLiveVideoOutput();
+        }
+      }
+
+      _mdkTextureListener = onMdkTexture;
+      mdk.textureIdListenable.addListener(onMdkTexture);
+    }
+    final ohos = _videoKernel.ohosPlatform;
+    if (ohos != null) {
+      _hasLiveVideoOutputObserver = true;
+      void onOhosTexture() {
+        if (!mounted || !_allowEvents || !_matchesActiveMedia || !_isLiveStream) {
+          return;
+        }
+        final tid = ohos.textureIdListenable.value;
+        if (tid != null && tid >= 0 && _videoWidth > 0 && _videoHeight > 0) {
+          _confirmLiveVideoOutput();
+        }
+      }
+
+      _ohosTextureListener = onOhosTexture;
+      ohos.textureIdListenable.addListener(onOhosTexture);
+    }
+    if (_isLiveStream) {
+      final platform = _player.platform;
+      if (platform is NativePlayer) {
+        _hasLiveVideoOutputObserver = true;
+        Future<void> observe(
+          String prop,
+          void Function(String val) handler,
+        ) async {
+          if (!mounted || _playerDisposed) return;
+          try {
+            await platform.observeProperty(prop, (String val) async {
+              if (!mounted || _playerDisposed) return;
+              handler(val);
+            });
+            if (mounted && !_playerDisposed) {
+              _observedMpvVideoProps.add(prop);
+            }
+          } catch (_) {}
+        }
+
+        unawaited(observe('vo-configured', (val) {
+          if (!_allowEvents || !_matchesActiveMedia) return;
+          final configured = val.trim().toLowerCase() == 'yes';
+          _liveVoConfigured = configured;
+          if (configured && _videoWidth > 0 && _videoHeight > 0) {
+            _confirmLiveVideoOutput();
+          }
+        }));
+        unawaited(observe('estimated-vf-fps', (val) {
+          if (!_allowEvents || !_matchesActiveMedia) return;
+          final fps = double.tryParse(val.trim()) ?? 0;
+          if (fps > 0.1) {
+            _confirmLiveVideoOutput();
+          }
+        }));
+        unawaited(observe('video-frame-info/picture-type', (val) {
+          if (!_allowEvents || !_matchesActiveMedia) return;
+          if (val.trim().isNotEmpty) {
+            _confirmLiveVideoOutput();
+          }
+        }));
+      }
+    }
+  }
+
+  void _attachPlayerStreams() {
+    _detachLiveVideoOutputObservers();
+    for (final sub in _playerSubscriptions) {
+      unawaited(sub.cancel());
+    }
+    _playerSubscriptions.clear();
+    _attachLiveVideoOutputObservers();
+    final boundPlayer = _player;
+    final isOhosPlatform = boundPlayer.platform is OhosPlatformPlayer;
+    if (isOhosPlatform) {
+      final ohosPlatform = boundPlayer.platform as OhosPlatformPlayer;
+      _playerSubscriptions.add(ohosPlatform.firstFrameStream.listen((_) {
+        if (!mounted ||
+            !identical(boundPlayer, _player) ||
+            !_allowEvents ||
+            !_matchesActiveMedia) {
+          return;
+        }
+        _ohosRenderedFirstFrame = true;
+        if (_isLiveStream) {
+          _confirmLiveVideoOutput();
+          if (!_userPausedPlayback) {
+            _startup.markLiveFrameReady();
+          }
+        } else if (_loading) {
+          setState(() => _loading = false);
+        }
+        _startSpecController.onFirstFrameReady(
+          enabled: _hudPrefs.effectiveStartSpecHud,
+          isLive: _isLiveStream,
+        );
+      }));
+      _playerSubscriptions.add(boundPlayer.stream.rate.listen((rate) {
+        if (!mounted ||
+            !identical(boundPlayer, _player) ||
+            !_allowEvents ||
+            !_matchesActiveMedia ||
+            _isLiveStream ||
+            _speedBoosting) {
+          return;
+        }
+        final normalized = OhosPlatformPlayer.normalizeSupportedRate(rate);
+        if ((_normalSpeed - normalized).abs() >= 0.01) {
+          setState(() => _normalSpeed = normalized);
+        }
+      }));
+    }
     _playerSubscriptions.add(_player.stream.width.listen((w) {
-      if (!mounted || w == null || w <= 0 || w == _videoWidth) return;
+      if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      if (w == null || w <= 0 || w == _videoWidth) return;
       setState(() {
         _videoWidth = w;
-        if (_isLiveStream && _videoHeight > 0) {
-          _loading = false;
-        }
       });
-      if (_videoWidth > 0 && _videoHeight > 0) {
-        if (_isLiveStream && _playing && !_buffering) {
-          _startup.cancel();
-        }
+      if (_isLiveStream) _markLiveVideoTrackDiscovered();
+      if (_liveVoConfigured && _videoWidth > 0 && _videoHeight > 0) {
+        _confirmLiveVideoOutput();
+      }
+      if (_videoWidth > 0 &&
+          _videoHeight > 0 &&
+          _liveSessionReadyForDisplay &&
+          (!isOhosPlatform || _ohosRenderedFirstFrame) &&
+          !_liveStartSpecTriggered) {
+        _liveStartSpecTriggered = true;
         _startSpecController.onFirstFrameReady(
           enabled: _hudPrefs.effectiveStartSpecHud,
           isLive: _isLiveStream,
@@ -1206,17 +1704,21 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     }));
     _playerSubscriptions.add(_player.stream.height.listen((h) {
-      if (!mounted || h == null || h <= 0 || h == _videoHeight) return;
+      if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      if (h == null || h <= 0 || h == _videoHeight) return;
       setState(() {
         _videoHeight = h;
-        if (_isLiveStream && _videoWidth > 0) {
-          _loading = false;
-        }
       });
-      if (_videoWidth > 0 && _videoHeight > 0) {
-        if (_isLiveStream && _playing && !_buffering) {
-          _startup.cancel();
-        }
+      if (_isLiveStream) _markLiveVideoTrackDiscovered();
+      if (_liveVoConfigured && _videoWidth > 0 && _videoHeight > 0) {
+        _confirmLiveVideoOutput();
+      }
+      if (_videoWidth > 0 &&
+          _videoHeight > 0 &&
+          _liveSessionReadyForDisplay &&
+          (!isOhosPlatform || _ohosRenderedFirstFrame) &&
+          !_liveStartSpecTriggered) {
+        _liveStartSpecTriggered = true;
         _startSpecController.onFirstFrameReady(
           enabled: _hudPrefs.effectiveStartSpecHud,
           isLive: _isLiveStream,
@@ -1225,6 +1727,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     }));
     _playerSubscriptions.add(_player.stream.track.listen((track) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      if (_isLiveStream) {
+        final vid = track.video.id.trim();
+        final aid = track.audio.id.trim();
+        if (_isRealTrackId(vid)) {
+          _markLiveVideoTrackDiscovered();
+        } else if (vid == 'no') {
+          _markLiveTracksConfirmedAudioOnly();
+        } else if (_isRealTrackId(aid)) {
+          final knownVideos = _player.state.tracks.video;
+          if (knownVideos.isNotEmpty &&
+              !knownVideos.any((t) => _isRealTrackId(t.id))) {
+            _markLiveTracksConfirmedAudioOnly();
+          }
+        }
+      }
       final vCodec = (track.video.codec ?? track.video.decoder ?? '').trim();
       final aCodec = (track.audio.codec ?? track.audio.decoder ?? '').trim();
       final extraParts = <String>[
@@ -1245,9 +1762,22 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (extra.isNotEmpty) _extraTrackSpecInfo = extra;
         });
       }
+      _scheduleSyncNativeSubtitleState();
+      Future<void>.microtask(() {
+        if (mounted) unawaited(_syncNativeSubtitleState());
+      });
     }));
     _playerSubscriptions.add(_player.stream.tracks.listen((tracks) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      if (_isLiveStream) {
+        final hasRealVideo = tracks.video.any((t) => _isRealTrackId(t.id));
+        final hasRealAudio = tracks.audio.any((t) => _isRealTrackId(t.id));
+        if (hasRealVideo) {
+          _markLiveVideoTrackDiscovered();
+        } else if (!hasRealVideo && hasRealAudio) {
+          _markLiveTracksConfirmedAudioOnly();
+        }
+      }
       String pickCodec(Iterable<({String id, String? codec, String? decoder})> list) {
         for (final item in list) {
           if (item.id == 'auto' || item.id == 'no') continue;
@@ -1269,11 +1799,21 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (_audioCodec.isEmpty && aCodec.isNotEmpty) _audioCodec = aCodec;
         });
       }
+      _scheduleSyncNativeSubtitleState();
+      Future<void>.microtask(() {
+        if (mounted) unawaited(_syncNativeSubtitleState());
+      });
+      _probeCurrentEpisodeContainerTags(_playSession);
     }));
 
     _playerSubscriptions.add(_player.stream.position.listen((pos) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
-      _startup.position(pos);
+      if (!_isLiveStream ||
+          isOhosPlatform ||
+          _liveStartupPhase == _LiveStartupPhase.confirmedAudioOnly ||
+          _liveStartupPhase == _LiveStartupPhase.videoFrameRendered) {
+        _startup.position(pos);
+      }
       final nextPos = (!_isDraggingSeek && !_isSliderDragging)
           ? ((_pendingResumeMs > 0 && pos.inMilliseconds < 2000)
                 ? Duration(milliseconds: _pendingResumeMs)
@@ -1291,9 +1831,25 @@ class _PlayerScreenState extends State<PlayerScreen>
           unawaited(_saveProgress());
         }
       }
-      final shouldClearLoading = pos > Duration.zero && _loading;
+      if (_isLiveStream && pos > Duration.zero && !_liveSessionHasProgress) {
+        _liveSessionHasProgress = true;
+      }
+      final liveReady = _liveSessionReadyForDisplay;
+      final shouldClearLoading = pos > Duration.zero && _loading && liveReady;
+      if (_isLiveStream &&
+          liveReady &&
+          _videoWidth > 0 &&
+          _videoHeight > 0 &&
+          !_liveStartSpecTriggered) {
+        _liveStartSpecTriggered = true;
+        _startSpecController.onFirstFrameReady(
+          enabled: _hudPrefs.effectiveStartSpecHud,
+          isLive: true,
+        );
+      }
       final shouldClearStaleLiveBuffering =
           _isLiveStream &&
+          liveReady &&
           _buffering &&
           pos > _position &&
           pos.inMilliseconds >= 250;
@@ -1371,7 +1927,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         } else {
           _duration = dur;
         }
-        final clearedLoading = dur > Duration.zero && _loading;
+        final clearedLoading = !_isLiveStream && dur > Duration.zero && _loading;
         if (clearedLoading) {
           _loading = false;
         }
@@ -1414,14 +1970,31 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _playerSubscriptions.add(_player.stream.playing.listen((playing) {
       if (mounted && _allowEvents && _matchesActiveMedia) {
+        if (playing && _userPausedPlayback) {
+          // A late async play() settled after the user explicitly paused.
+          // Preserve the user's pause intent and drive the native player back
+          // to paused so UI and audio stay aligned.
+          _startup.updateState(playing: false, userPaused: true);
+          if (_playing) {
+            setState(() => _playing = false);
+          }
+          PlaybackWakelock.setEnabled(false);
+          unawaited(_player.pause());
+          return;
+        }
         if (playing && widget.site.isEmby && _embySession == null) {
           _openCurrentEpisode(resumeMs: 0);
           return;
         }
-        _startup.updateState(playing: playing);
+        final effectivePaused =
+            _userPausedPlayback || (!isOhosPlatform && !playing && _playing);
+        _startup.updateState(
+          playing: playing,
+          userPaused: effectivePaused,
+        );
         setState(() {
           _playing = playing;
-          if (playing) {
+          if (playing && _liveSessionReadyForDisplay) {
             _loading = false;
             if (!OhosRuntime.isOhos && !_isLiveStream && !widget.embedded) {
               _hasStartedVodPlayback = true;
@@ -1464,17 +2037,26 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _playerSubscriptions.add(_player.stream.buffering.listen((buffering) {
       if (mounted && _allowEvents && _matchesActiveMedia) {
-        _startup.updateState(buffering: buffering);
+        _startup.updateState(
+          buffering: buffering,
+          userPaused: _userPausedPlayback,
+        );
         setState(() => _buffering = buffering);
         if (!buffering) {
           _midPlaybackStallTimer?.cancel();
           if (_playing) {
             _markCurrentEpisodePlaybackConfirmed();
           }
-          if (_isLiveStream && _playing && _videoWidth > 0 && _videoHeight > 0) {
-            _startup.cancel();
+          if (_playing && _liveSessionReadyForDisplay) {
+            if (_isLiveStream &&
+                (!isOhosPlatform || _ohosRenderedFirstFrame) &&
+                _videoWidth > 0 &&
+                _videoHeight > 0 &&
+                !_userPausedPlayback) {
+              _startup.markLiveFrameReady();
+            }
+            _scheduleHide();
           }
-          if (_playing) _scheduleHide();
         } else if (!_isLiveStream &&
             !_loading &&
             !_userSelectedQuality &&
@@ -1529,9 +2111,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       // Only treat terminal open/format failures as immediate startup errors;
       // do not abort live HLS/FLV streams on transient sliding-window segment
       // 404s or harmless initial decoder warnings (e.g. missing SPS before keyframe).
+      final isOhosAvPlayerError =
+          boundPlayer.platform is OhosPlatformPlayer ||
+          lower.contains('avplayer error') ||
+          lower.contains('ohos avplayer') ||
+          lower.contains('无法保留必要请求头');
       final isFatalStartupError = !_startup.isPastStartupWindow &&
           _position <= Duration.zero &&
-          (lower.contains('failed to open') ||
+          (isOhosAvPlayerError ||
+              lower.contains('failed to open') ||
               lower.contains('failed to recognize file format') ||
               lower.contains('could not open') ||
               lower.contains('cannot open') ||
@@ -1548,21 +2136,53 @@ class _PlayerScreenState extends State<PlayerScreen>
               lower.contains('server returned 403') ||
               lower.contains('server returned 404') ||
               lower.contains('server returned 410') ||
-              lower.contains('server returned 5'));
-      if (isFatalStartupError ||
+              lower.contains('server returned 5') ||
+              lower.contains('mdk reader.open') ||
+              lower.contains('mdk decoder.video') ||
+              lower.contains('mdk failed'));
+      final shouldHandleError = isFatalStartupError ||
+          isOhosAvPlayerError ||
           (!_isLiveStream &&
               !_playing &&
               _duration <= Duration.zero &&
-              _position <= Duration.zero)) {
+              _position <= Duration.zero);
+      if (shouldHandleError) {
+        if (_userPausedPlayback) {
+          // A late error arriving after an explicit user pause must NEVER
+          // auto-open, auto-play, or switch live sources. Mark the underlying
+          // engine as needing reopen when the user explicitly resumes.
+          _pausedEngineInvalidated = true;
+          _startup.cancel();
+          _midPlaybackStallTimer?.cancel();
+          _midPlaybackStallEpochsMs.clear();
+          PlaybackWakelock.setEnabled(false);
+          setState(() {
+            _loading = false;
+            _buffering = false;
+            _playing = false;
+            _controlsVisible = true;
+          });
+          _showHud('已暂停 · 当前源已断开，继续播放将重新连接', persistent: true);
+          return;
+        }
+        if (_isWindowsPlayerPlatform &&
+            _videoKernel.isMdk &&
+            widget.debugPlayer == null &&
+            !_mdkAutoFallbackTriggered &&
+            !_switchingWindowsEngine) {
+          _mdkAutoFallbackTriggered = true;
+          unawaited(
+            _switchWindowsPlaybackEngine(
+              WindowsPlaybackEngine.mpv,
+              persist: false,
+              customToast: 'MDK 引擎不支持当前流，已自动切回 MPV 播放',
+            ),
+          );
+          return;
+        }
         _failPlayback(message);
       }
     }));
-
-    _openCurrentEpisode(resumeMs: widget.initialPositionMs);
-    _historyTimer = Timer.periodic(
-      const Duration(seconds: 15),
-      (_) => _saveProgress(immediate: false),
-    );
   }
 
   @override
@@ -1999,7 +2619,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       _videoWidth = nextW;
       _videoHeight = nextH;
       if (_isLiveStream && nextPlaying && !nextBuffering) {
-        _startup.cancel();
+        _confirmLiveVideoOutput();
+        _startup.markLiveFrameReady();
       }
       _startSpecController.onFirstFrameReady(
         enabled: _hudPrefs.effectiveStartSpecHud,
@@ -2117,7 +2738,24 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     _startup.position(nextPos);
-    _startup.updateState(playing: nextPlaying, buffering: nextBuffering);
+    if (nextPlaying && _userPausedPlayback) {
+      _startup.updateState(
+        playing: false,
+        buffering: nextBuffering,
+        userPaused: true,
+      );
+      _playing = false;
+      _buffering = nextBuffering;
+      PlaybackWakelock.setEnabled(false);
+      unawaited(ctrl.pause());
+      if (mounted) setState(() {});
+      return;
+    }
+    _startup.updateState(
+      playing: nextPlaying,
+      buffering: nextBuffering,
+      userPaused: _userPausedPlayback,
+    );
     _playing = nextPlaying;
     _buffering = nextBuffering;
 
@@ -2544,6 +3182,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       _cancelTransientInteractions(GestureInterruptReason.lifecyclePause);
       if (state == AppLifecycleState.paused ||
           state == AppLifecycleState.hidden) {
+        if (_usesOhosAvPlayer && !_usingAvPlayer) {
+          _resumeOhosOnForeground = _playing && _playbackError.isEmpty;
+          _ohosBackgroundResumeMs = _position.inMilliseconds > 0
+              ? _position.inMilliseconds
+              : _lastKnownPositionMs;
+          if (_resumeOhosOnForeground) {
+            unawaited(_enginePause());
+          }
+        }
         _saveProgress(immediate: true);
         widget.storage.flushPendingHistory();
         widget.storage.scheduleAutoWebdavSync(immediate: true);
@@ -2560,6 +3207,20 @@ class _PlayerScreenState extends State<PlayerScreen>
             forceHostReconcile: wasInactive,
           ),
         );
+      }
+      if (_usesOhosAvPlayer && !_usingAvPlayer && _resumeOhosOnForeground) {
+        _resumeOhosOnForeground = false;
+        if (_playbackError.isEmpty) {
+          if (_isLiveStream) {
+            unawaited(_openCurrentEpisode(resumeMs: 0));
+          } else if (_ohosBackgroundResumeMs > 0 &&
+              _position.inMilliseconds == 0) {
+            unawaited(_openCurrentEpisode(resumeMs: _ohosBackgroundResumeMs));
+          } else {
+            unawaited(_enginePlay());
+            unawaited(_engineSetRate(_normalSpeed));
+          }
+        }
       }
       _maybeEvaluateSkipTriggers();
     }
@@ -2599,11 +3260,14 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     if (_autoNext) {
-      if (_episodeIndex < _currentLine.episodes.length - 1) {
+      final nextIdx = _adjacentVisibleEpisodeIndex(1);
+      if (nextIdx != null) {
         _stepEpisode(1);
       } else if (_repeatMode == 'all' && _currentLine.episodes.isNotEmpty) {
+        final order = _visibleOrderedEpisodeIndices();
+        final firstVisible = order.isNotEmpty ? order.first : 0;
         _saveProgress(immediate: true, syncImmediate: false);
-        setState(() => _episodeIndex = 0);
+        setState(() => _episodeIndex = firstVisible);
         _openCurrentEpisode(resumeMs: 0);
       }
     }
@@ -2710,11 +3374,11 @@ class _PlayerScreenState extends State<PlayerScreen>
               nextLine.episodes.any((e) => !e.isDirectPlayable)) {
             continue;
           }
-          final nextEpIdx = CspBridge.matchEpisodeIndexInLine(
-            nextLine,
-            currentEpName,
-            _episodeIndex,
-          );
+          final targetMatch = _resolveTargetLineEpisodeMatch(nextLineIdx);
+          final nextEpIdx = targetMatch.matchedIndex;
+          if (nextEpIdx == null) {
+            continue;
+          }
           final candidateEp = nextLine.episodes[nextEpIdx];
           if (!PlaybackRecoveryPolicy.isAutomaticLineCandidate(candidateEp)) {
             continue;
@@ -2773,7 +3437,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (proxyStatus != null && proxyStatus >= 400) {
       _lastLiveUpstreamStatus = proxyStatus;
     }
-    if (_isLiveStream &&
+    if (!_userPausedPlayback &&
+        _isLiveStream &&
         !_startup.isPastStartupWindow &&
         !_liveDirectFallbackTried) {
       _liveDirectFallbackTried = true;
@@ -2813,7 +3478,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
       return;
     }
-    if (_isLiveStream &&
+    if (!_userPausedPlayback &&
+        _isLiveStream &&
         !_startup.isPastStartupWindow &&
         _currentLine.episodes.length > 1 &&
         _failedLiveEpisodes.length < 8) {
@@ -2823,8 +3489,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         final nextIdx = (_episodeIndex + step) % total;
         if (_failedLiveEpisodes.contains(nextIdx)) continue;
         final candidate = _currentLine.episodes[nextIdx];
-        if (candidate.url == _activeStreamUrl ||
-            candidate.url == _currentEpisode.url) {
+        final sameHeaders =
+            mapEquals(candidate.headers, _currentEpisode.headers);
+        if ((candidate.url == _activeStreamUrl ||
+                candidate.url == _currentEpisode.url) &&
+            sameHeaders) {
           continue;
         }
         setState(() {
@@ -2837,7 +3506,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         return;
       }
     }
-    if (cloudError.isEmpty &&
+    if (!_userPausedPlayback &&
+        cloudError.isEmpty &&
         !_isLiveStream &&
         !_startup.isPastStartupWindow &&
         !CmsClient.needsSourceVerification(widget.site, error)) {
@@ -2871,6 +3541,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     }
     _clearPendingAutoStartPip();
+    String? specificHeaderError;
+    if (error is PlatformException &&
+        (error.message ?? '').contains('请求头')) {
+      specificHeaderError = error.message!.trim();
+    } else if (error is String && error.contains('请求头')) {
+      specificHeaderError = error.trim();
+    }
     setState(() {
       _allowEvents = false;
       _allowHistory = false;
@@ -2882,6 +3559,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       _hudText = '';
       _playbackError = cloudError.isNotEmpty
           ? cloudError
+          : specificHeaderError != null
+          ? specificHeaderError
           : _isLiveStream
           ? PlayerScreen.formatLivePlaybackError(
               error,
@@ -2916,6 +3595,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     bool preferUdpRtsp = false,
     bool armPendingPipForThisSession = false,
   }) async {
+    _userPausedPlayback = false;
+    _pausedEngineInvalidated = false;
+    _ohosRenderedFirstFrame = false;
+    if (_hudText.startsWith('已暂停')) {
+      _hudTimer?.cancel();
+      _hudText = '';
+    }
     _startup.reset();
     _currentEpisodePlaybackConfirmed = false;
     _confirmedPlaybackSession = -1;
@@ -2934,6 +3620,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       _lastKnownPositionMs = 0;
       _lastKnownDurationMs = 0;
     }
+    _liveSessionHasProgress = false;
+    _liveStartupPhase = _LiveStartupPhase.tracksUnknown;
+    _liveSessionVideoOutputCount = 0;
+    _liveVoConfigured = false;
+    _liveStartSpecTriggered = false;
+    _videoWidth = 0;
+    _videoHeight = 0;
     if (!bypassLocalProxy &&
         !forceLiveLocalProxy &&
         !useAlternateLiveUa &&
@@ -2976,9 +3669,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     _playbackErrorCause = null;
     try {
       final previousIsoLease = _blurayIsoLease;
+      final previousOfflineHlsLease = _offlineHlsLease;
       _blurayIsoLease = null;
       final previousSmbProxy = _smbStreamProxy;
       _smbStreamProxy = null;
+      _offlineHlsLease = null;
       _blurayChapters = const [];
       await _playerConfiguration;
       await _changeMedia(session, () async {
@@ -2991,6 +3686,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         await _localMedia.releaseUnless(null);
         await previousIsoLease?.close();
         await previousSmbProxy?.close();
+        await previousOfflineHlsLease?.close();
       });
     } catch (_) {
       if (session == _playSession) _failPlayback();
@@ -3081,6 +3777,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     CloudMediaLease? pendingLease;
     LocalMediaLease? pendingLocalLease;
     BlurayIsoLease? pendingBlurayLease;
+    OfflineHlsLease? pendingOfflineHlsLease;
     List<BlurayChapter> pendingBlurayChapters = const [];
     try {
       var resolvedEpisode = quality ?? (_currentEpisode.isLocalFile
@@ -3183,6 +3880,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           isCancelled: () => !mounted || session != _playSession,
         );
         pendingBlurayChapters = pendingBlurayLease.chapters;
+      } else if (_currentEpisode.isLocalFile &&
+          OfflineHlsLease.isLocalM3u8(safePlayUrl)) {
+        pendingOfflineHlsLease = await OfflineHlsLease.open(safePlayUrl);
       }
       final forceProxyForWindowsHttps =
           Platform.isWindows && parsedTargetUri?.scheme.toLowerCase() == 'https';
@@ -3224,6 +3924,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         await _cloudMedia.discard(pendingLease);
         await _localMedia.discard(pendingLocalLease);
         await pendingBlurayLease?.close();
+        await pendingOfflineHlsLease?.close();
         return;
       }
       var effectiveAudioUrl = resolvedEpisode.externalAudioUrl;
@@ -3234,11 +3935,14 @@ class _PlayerScreenState extends State<PlayerScreen>
           effectiveAudioUrl = proxiedAudio.toString();
         }
       }
-      final effectiveOpenUrl = pendingBlurayLease?.url.toString() ??
+      final effectiveOpenUrl = pendingOfflineHlsLease?.url.toString() ??
+          pendingBlurayLease?.url.toString() ??
           pendingLocalLease?.url.toString() ??
           safePlayUrl;
       final effectiveOpenHeaders =
-          (pendingBlurayLease != null || pendingLocalLease != null)
+          (pendingOfflineHlsLease != null ||
+                  pendingBlurayLease != null ||
+                  pendingLocalLease != null)
               ? const <String, String>{}
               : headers;
       _activeStreamUrl = safePlayUrl;
@@ -3254,41 +3958,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         _localMedia.adopt(pendingLocalLease);
         _blurayIsoLease = pendingBlurayLease;
         _smbStreamProxy = pendingSmbProxy;
+        _offlineHlsLease = pendingOfflineHlsLease;
         _blurayChapters = pendingBlurayChapters;
         _allowEvents = true;
-        final hasFallback = _isLiveStream
-            ? (_currentLine.episodes.length > 1 &&
-                _failedLiveEpisodes.length <
-                    math.min(_currentLine.episodes.length - 1, 8))
-            : (_nextFallbackQuality() != null ||
-                (PlaybackRecoveryPolicy.decide(
-                          episode: _currentEpisode,
-                          isTrial: false,
-                          hasNextQuality: false,
-                        ) ==
-                        PlaybackRecoveryDecision.alternateLine &&
-                    _lines.length > 1 &&
-                    _failedLinesForEpisode.length < 6));
-        _startup.waitForProgress(
-          () {
-            if (mounted && session == _playSession && _allowEvents) {
-              _failPlayback(TimeoutException('media startup'));
-              _changeMedia(
-                session,
-                () => _usingAvPlayer
-                    ? (_iosAvPlayerController?.stop() ?? Future<void>.value())
-                    : _player.stop(),
-              ).catchError((_) {});
-            }
-          },
-          hasFallback: hasFallback || (_isLiveStream && !_liveDirectFallbackTried),
-          startOffset: _pendingResumeMs > 0
-              ? Duration(milliseconds: _pendingResumeMs)
-              : Duration.zero,
-          timeoutOverride: _isLiveStream
-              ? Duration(seconds: !_liveDirectFallbackTried ? 7 : 8)
-              : null,
-        );
+        _armStartupWatchdog(session);
         _activeResolvedMediaUrl = effectiveOpenUrl;
         _activeResolvedHeaders = Map<String, String>.from(effectiveOpenHeaders);
         if (_castController.isCasting) {
@@ -3391,17 +4064,24 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (!identical(_blurayIsoLease, pendingBlurayLease)) {
           await pendingBlurayLease?.close();
         }
+        if (!identical(_offlineHlsLease, pendingOfflineHlsLease)) {
+          await pendingOfflineHlsLease?.close();
+        }
         return;
       }
       _allowHistory = true;
       await _engineSetRate(_isLiveStream ? 1.0 : _normalSpeed);
       if (!mounted || session != _playSession) return;
+      _probeCurrentEpisodeContainerTags(session);
       _scheduleHide();
     } catch (error) {
       await _cloudMedia.discard(pendingLease);
       await _localMedia.discard(pendingLocalLease);
       if (!identical(_blurayIsoLease, pendingBlurayLease)) {
         await pendingBlurayLease?.close();
+      }
+      if (!identical(_offlineHlsLease, pendingOfflineHlsLease)) {
+        await pendingOfflineHlsLease?.close();
       }
       if (mounted && session == _playSession) _failPlayback(error);
     }
@@ -3538,7 +4218,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_screenLocked ||
         _isSliderDragging ||
         _hasActivePlayerOverlay ||
-        (isWindowsDesktopUi && _windowsMoreControls)) {
+        ((isWindowsDesktopUi || _isMacosPlayerPlatform) &&
+            _windowsMoreControls)) {
       return;
     }
     final hideDelay = _desktop
@@ -3679,7 +4360,56 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!_playerFocusNode.hasFocus) {
       _playerFocusNode.requestFocus();
     }
+    _hideTimer?.cancel();
     _hudUnmountTimer?.cancel();
+    if (_usesDesktopSubtitleHudLayout) {
+      if (_controlsVisible && !_hudFadingOut) {
+        final reduceMotion = MediaQuery.disableAnimationsOf(context);
+        if (reduceMotion) {
+          setState(() {
+            _hudFadingOut = false;
+            _hudAutoHidden = true;
+            _controlsVisible = false;
+          });
+          _syncMobileSystemBars();
+          if (_desktop) _restorePlayerFocusIfCurrent();
+          return;
+        }
+        // Match the auto-hide fade-out state machine so bottom subtitles stay
+        // lifted throughout the 180ms fade-out and only return to the bottom
+        // baseline after the bottom controls have completely faded & unmounted.
+        setState(() {
+          _hudFadingOut = true;
+          _hudAutoHidden = false;
+        });
+        _hudUnmountTimer = Timer(const Duration(milliseconds: 190), () {
+          if (mounted &&
+              _hudFadingOut &&
+              !_screenLocked &&
+              !_isSliderDragging &&
+              !_hasActivePlayerOverlay) {
+            setState(() {
+              _hudFadingOut = false;
+              _hudAutoHidden = true;
+              _controlsVisible = false;
+            });
+            _syncMobileSystemBars();
+            if (_desktop) {
+              _restorePlayerFocusIfCurrent();
+            }
+          }
+        });
+        return;
+      }
+      setState(() {
+        _hudFadingOut = false;
+        _hudAutoHidden = false;
+        _controlsVisible = true;
+      });
+      _syncMobileSystemBars();
+      _scheduleHide();
+      return;
+    }
     setState(() {
       _hudFadingOut = false;
       _hudAutoHidden = false;
@@ -3693,7 +4423,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final dist = delta.distance;
     if (!_desktop || dist <= 0.001) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final hidden = _screenLocked ? !_lockButtonVisible : !_controlsVisible;
+    final hidden = _screenLocked
+        ? !_lockButtonVisible
+        : (!_controlsVisible || _hudFadingOut);
     if (hidden) {
       if (_pointerWakeWindowStartMs == 0 ||
           now - _pointerWakeLastEventMs > 350 ||
@@ -3726,8 +4458,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       return;
     }
-    if (!_controlsVisible) {
-      setState(() => _controlsVisible = true);
+    if (!_controlsVisible || _hudFadingOut) {
+      _hudUnmountTimer?.cancel();
+      setState(() {
+        _hudFadingOut = false;
+        _hudAutoHidden = false;
+        _controlsVisible = true;
+      });
       _lastPointerScheduleMs = now;
       _restorePlayerFocusIfCurrent();
       _scheduleHide();
@@ -4099,9 +4836,47 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  List<LiveChannel> get _allLiveCatalogChannels => [
+    for (final g in widget.liveGroups)
+      for (final ch in g.channels)
+        if (ch.episodes.isNotEmpty) ch,
+  ];
+
+  bool get _canStepLiveChannel =>
+      _hasLiveChannelCatalog && _allLiveCatalogChannels.length > 1;
+
+  void _stepLiveChannel(int delta) {
+    if (!mounted || !_hasLiveChannelCatalog || delta == 0) return;
+    final channels = _allLiveCatalogChannels;
+    if (channels.length <= 1) return;
+    final active = _activeLiveChannel;
+    var currentIdx = -1;
+    if (active != null) {
+      currentIdx = channels.indexWhere((ch) => identical(ch, active));
+      if (currentIdx < 0) {
+        currentIdx = channels.indexWhere(
+          (ch) => ch.name == active.name && ch.group == active.group,
+        );
+      }
+    }
+    if (currentIdx < 0) {
+      currentIdx = channels.indexWhere(
+        (ch) => ch.name == _displayTitle && ch.group == _currentLine.name,
+      );
+    }
+    if (currentIdx < 0) {
+      currentIdx = 0;
+    }
+    final nextIdx = (currentIdx + delta) % channels.length;
+    final safeNext = nextIdx < 0 ? nextIdx + channels.length : nextIdx;
+    _switchLiveChannel(channels[safeNext], lineIdx: 0);
+  }
+
   void _stepEpisode(int delta) {
-    final next = _episodeIndex + delta;
-    if (next < 0 || next >= _currentLine.episodes.length) return;
+    final next = _adjacentVisibleEpisodeIndex(delta);
+    if (next == null || next < 0 || next >= _currentLine.episodes.length) {
+      return;
+    }
     _saveProgress(immediate: true, syncImmediate: false);
     _failedLinesForEpisode.clear();
     _failedLiveEpisodes.clear();
@@ -4130,10 +4905,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     _scheduleHide();
   }
 
-  void _showHud(String text) {
+  void _showHud(String text, {bool persistent = false}) {
     if (!mounted) return;
     _hudTimer?.cancel();
     setState(() => _hudText = text);
+    if (persistent) return;
     _hudTimer = Timer(const Duration(milliseconds: 1100), () {
       if (mounted && !_speedBoosting && _hudText == text) {
         setState(() => _hudText = '');
@@ -4197,7 +4973,13 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _applyPlayerKernel(String kernel) async {
     try {
-      final dyn = _player.platform as dynamic;
+      final platform = _player.platform;
+      if (platform is MdkPlatformPlayer) {
+        platform.applyKernelStrategy(kernel, isLive: _isLiveStream);
+        await platform.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
+        return;
+      }
+      final dyn = platform as dynamic;
       await dyn.setProperty('tls-verify', _isLiveStream ? 'no' : 'yes');
       await dyn.setProperty('hwdec', _hardwareDecoder(kernel));
       await dyn.setProperty('cache-on-disk', 'no');
@@ -4228,6 +5010,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       await dyn.setProperty('vid', 'auto');
       await dyn.setProperty('audio-display', 'no');
+      if (_isMacosPlayerPlatform) {
+        // Keep libass prepared on macOS so embedded ASS fonts load on file open
+        // and `sub-pos` can shift bottom ASS/PGS subtitles without moving top
+        // signs. Windows mpv and iOS mpv keep their original subtitle config.
+        await dyn.setProperty('sub-ass', 'yes');
+        await dyn.setProperty('sub-ass-override', 'yes');
+        await dyn.setProperty('sub-pos', '$_lastAppliedMpvSubPos');
+        _mpvSubtitleAssInitialized = true;
+      }
       if (_isIosPlayerPlatform) {
         await IosMpvProfile.applyToPlayer(
           _player,
@@ -4505,10 +5296,19 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _sleepTimer.removeListener(_onHudSubstateChanged);
     _sleepTimer.dispose();
+    _danmuPositionMs.dispose();
     _skipCountdown.removeListener(_onHudSubstateChanged);
     _skipCountdown.dispose();
     _startSpecController.removeListener(_onHudSubstateChanged);
     _startSpecController.dispose();
+    widget.storage.seriesScrapeRevision.removeListener(
+      _onPlayerSeriesScrapeRevision,
+    );
+    if (!OhosRuntime.isOhos) {
+      widget.storage.danmuSourcesRevision.removeListener(
+        _onDanmuSourcesRevisionChanged,
+      );
+    }
     _castController.removeListener(_onCastStateChanged);
     _castController.dispose();
     _danmuMatchToken?.cancel();
@@ -4551,6 +5351,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     iosAvPlayerController?.removeListener(_onIosAvPlayerChanged);
     _winQualityController.removeListener(_onHudSubstateChanged);
     _winQualityController.dispose();
+    _detachLiveVideoOutputObservers();
     for (final sub in _playerSubscriptions) {
       unawaited(sub.cancel());
     }
@@ -4585,9 +5386,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     final cloudLease = _cloudMedia.detach();
     final localLease = _localMedia.detach();
     final blurayIsoLease = _blurayIsoLease;
+    final offlineHlsLease = _offlineHlsLease;
     _blurayIsoLease = null;
     final smbStreamProxy = _smbStreamProxy;
     _smbStreamProxy = null;
+    _offlineHlsLease = null;
     _blurayChapters = const [];
     _mediaChanges.whenComplete(() async {
       try {
@@ -4608,7 +5411,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (widget.debugIosAvPlayerController == null) {
           iosAvPlayerController?.dispose();
         }
-        await _player.dispose();
+        if (!_playerDisposed) {
+          _playerDisposed = true;
+          await _player.dispose();
+        }
       } finally {
         try {
           await cloudLease?.close();
@@ -4621,6 +5427,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             } finally {
               try {
                 await smbStreamProxy?.close();
+                await offlineHlsLease?.close();
               } finally {
                 releaseSource?.call();
               }
@@ -4942,11 +5749,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _applyManualSpeed(double newSpeed) {
-    final clamped = double.parse(
-      newSpeed
-          .clamp(StorageService.minPlaySpeed, StorageService.maxPlaySpeed)
-          .toStringAsFixed(2),
-    );
+    final clamped = _normalizePlaybackSpeed(newSpeed);
     if (_useEnhancedHud) {
       final events = _gestureFsm.onManualSpeedChanged(clamped);
       _applyGestureEvents(events);
@@ -5124,6 +5927,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _danmuMatchToken = null;
     _danmuSessionGen++;
     _danmuBoundForEpisode = false;
+    _matchedDanmuCandidate = null;
+    _pendingDanmuCandidates = const <DanmuCandidate>[];
+    _scrapedDanmuEpisodeNumber = null;
     final cache = _danmuCache;
     if (cache != null) {
       unawaited(cache.bindSession(''));
@@ -5131,6 +5937,607 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!_isLiveStream && _danmuSettings.effectiveEnabled) {
       _bindDanmuForCurrentEpisode();
     }
+  }
+
+  void _onPlayerSeriesScrapeRevision() {
+    if (!mounted) return;
+    setState(() {});
+    if (!_isLiveStream && _danmuSettings.effectiveEnabled) {
+      _reloadDanmuAfterCalibration();
+    }
+  }
+
+  void _onDanmuSourcesRevisionChanged() {
+    if (!mounted || OhosRuntime.isOhos) return;
+    unawaited(_reloadDanmuSettingsFromStorage());
+  }
+
+  Future<void> _reloadDanmuSettingsFromStorage() async {
+    try {
+      final loaded = await DanmuPrefs.load();
+      if (!mounted) return;
+      final next = _danmuSettings.copyWith(
+        serverUrls: loaded.serverUrls,
+        appId: loaded.appId,
+        appSecret: loaded.appSecret,
+        authorizedCredentialOrigins: loaded.authorizedCredentialOrigins,
+      );
+      final serverChanged = next.serverUrls != _danmuSettings.serverUrls ||
+          next.appId != _danmuSettings.appId ||
+          next.appSecret != _danmuSettings.appSecret ||
+          next.authorizedCredentialOrigins !=
+              _danmuSettings.authorizedCredentialOrigins;
+      setState(() {
+        _danmuSettings = next;
+      });
+      if (serverChanged && widget.debugDanmuProvider == null) {
+        _rebuildDanmuPipeline();
+      }
+      if (!_isLiveStream && _danmuSettings.effectiveEnabled) {
+        _bindDanmuForCurrentEpisode();
+      }
+    } catch (_) {}
+  }
+
+  void _reloadDanmuAfterCalibration() {
+    if (OhosRuntime.isOhos || _isLiveStream) return;
+    _danmuMatchToken?.cancel();
+    _danmuMatchToken = null;
+    _danmuSessionGen++;
+    _danmuBoundForEpisode = false;
+    _matchedDanmuCandidate = null;
+    _pendingDanmuCandidates = const <DanmuCandidate>[];
+    if (_danmuSettings.effectiveEnabled) {
+      _bindDanmuForCurrentEpisode();
+    } else {
+      final cache = _danmuCache;
+      if (cache != null) {
+        unawaited(cache.bindSession(''));
+      }
+    }
+  }
+
+  List<int> _visibleOrderedEpisodeIndices() {
+    final count = _currentLine.episodes.length;
+    if (count == 0) return const <int>[];
+    if (_isLiveStream) {
+      return List<int>.generate(count, (i) => i, growable: false);
+    }
+    final override = widget.storage.getSeriesScrapeOverride(
+      widget.site.key,
+      widget.video.id,
+      isPrivate: widget.site.isEffectivelyPrivate,
+    );
+    final scrape = _scrapeLineEpisodesFor(_currentLine, override: override);
+    final sortByScraped =
+        override?.sortByScrapedEpisode ?? scrape.sourceOrderScrambled;
+    final hideSpecials = override?.hideSpecials ?? false;
+    return scrape.orderedIndices(
+      sortByScraped: sortByScraped,
+      hideSpecials: hideSpecials,
+    );
+  }
+
+  int? _adjacentVisibleEpisodeIndex(int delta) {
+    if (delta == 0) return null;
+    final order = _visibleOrderedEpisodeIndices();
+    if (order.isEmpty) return null;
+    final pos = order.indexOf(_episodeIndex);
+    if (pos >= 0) {
+      final targetPos = pos + delta;
+      if (targetPos < 0 || targetPos >= order.length) return null;
+      return order[targetPos];
+    }
+    if (delta > 0) return order.first;
+    return null;
+  }
+
+  LineEpisodeScrapeResult _scrapeLineEpisodesFor(
+    CmsLine line, {
+    SeriesScrapeOverride? override,
+  }) {
+    final ov = override ??
+        widget.storage.getSeriesScrapeOverride(
+          widget.site.key,
+          widget.video.id,
+          isPrivate: widget.site.isEffectivelyPrivate,
+        );
+    final effectiveTitle = (ov != null && ov.effectiveDanmuTitle.isNotEmpty)
+        ? ov.effectiveDanmuTitle
+        : widget.video.title;
+    return SeriesScraper.scrapeLineEpisodes(
+      line.episodes,
+      seriesTitle: effectiveTitle,
+      episodeOffset: ov?.episodeOffset ?? 0,
+      manualOverrides: ov?.episodeNumberOverrides ?? const {},
+      episodeCalibrations: ov?.episodeCalibrations ?? const {},
+      runtimeContainerTags: _runtimeContainerTags,
+    );
+  }
+
+  ScrapedEpisodeInfo? _currentScrapedEpisodeInfo({
+    SeriesScrapeOverride? override,
+  }) {
+    if (_isLiveStream) return null;
+    final scrape = _scrapeLineEpisodesFor(_currentLine, override: override);
+    return scrape.infoForOriginalIndex(_episodeIndex);
+  }
+
+  ({int? matchedIndex, bool seasonConflict, String conflictSummary})
+      _resolveTargetLineEpisodeMatch(int targetLineIndex) {
+    final targetLine = _lines[targetLineIndex];
+    if (targetLine.episodes.isEmpty) {
+      return (matchedIndex: null, seasonConflict: false, conflictSummary: '');
+    }
+    if (_isLiveStream) {
+      return (
+        matchedIndex: CspBridge.matchEpisodeIndexInLine(
+          targetLine,
+          _currentEpisode.name,
+          _episodeIndex,
+        ),
+        seasonConflict: false,
+        conflictSummary: '',
+      );
+    }
+    final srcInfo = _currentScrapedEpisodeInfo();
+    final targetScrape = _scrapeLineEpisodesFor(targetLine);
+    if (srcInfo != null) {
+      final matched = SeriesScraper.matchEpisodeIndexInScrapedLine(
+        srcInfo,
+        targetScrape,
+      );
+      if (matched != null &&
+          matched >= 0 &&
+          matched < targetLine.episodes.length) {
+        return (
+          matchedIndex: matched,
+          seasonConflict: false,
+          conflictSummary: '',
+        );
+      }
+      final srcSeason = srcInfo.seasonNumber;
+      final srcEp = srcInfo.resolvedEpisodeNumber;
+      if (!srcInfo.isSpecial && !srcInfo.needsConfirmation && srcEp != null) {
+        final targetHasWrongWork = targetScrape.byOriginalIndex.any(
+          (c) =>
+              !c.isSpecial &&
+              c.resolvedEpisodeNumber == srcEp &&
+              !SeriesScraper.areWorkTitlesCompatible(srcInfo, c),
+        );
+        final targetHasOtherSeason = srcSeason != null &&
+            targetScrape.byOriginalIndex.any(
+              (c) =>
+                  !c.isSpecial &&
+                  c.seasonNumber != null &&
+                  c.seasonNumber != srcSeason,
+            );
+        final targetHasExplicitEpisodes = targetScrape.regularCount > 0;
+        final targetHasExplicitSpecials = targetScrape.specialCount > 0;
+        if (targetHasWrongWork ||
+            targetHasOtherSeason ||
+            targetHasExplicitEpisodes ||
+            targetHasExplicitSpecials) {
+          final String summary;
+          if (targetHasWrongWork) {
+            summary =
+                '目标线路「${targetLine.name}」的 ${srcInfo.formattedSeasonEpisode} 属于其他作品，请手动选集';
+          } else if (targetHasExplicitSpecials && !targetHasExplicitEpisodes) {
+            summary =
+                '目标线路「${targetLine.name}」仅有预告/特别篇，未找到正片 ${srcInfo.formattedSeasonEpisode}，请手动选集';
+          } else {
+            summary =
+                '目标线路「${targetLine.name}」未找到 ${srcInfo.formattedSeasonEpisode}，请手动选集';
+          }
+          return (
+            matchedIndex: null,
+            seasonConflict: true,
+            conflictSummary: summary,
+          );
+        }
+      }
+    }
+    final fallbackIdx = CspBridge.matchEpisodeIndexInLine(
+      targetLine,
+      _currentEpisode.name,
+      _episodeIndex,
+    );
+    if (srcInfo != null &&
+        !srcInfo.isSpecial &&
+        fallbackIdx >= 0 &&
+        fallbackIdx < targetLine.episodes.length) {
+      final fallbackInfo = targetScrape.infoForOriginalIndex(fallbackIdx);
+      if (fallbackInfo != null) {
+        if (fallbackInfo.isSpecial) {
+          return (
+            matchedIndex: null,
+            seasonConflict: true,
+            conflictSummary:
+                '目标线路「${targetLine.name}」仅匹配到预告/特别篇，请手动选集',
+          );
+        }
+        if (!SeriesScraper.areWorkTitlesCompatible(srcInfo, fallbackInfo)) {
+          return (
+            matchedIndex: null,
+            seasonConflict: true,
+            conflictSummary:
+                '目标线路「${targetLine.name}」对应条目作品不一致，请手动选集',
+          );
+        }
+      }
+    }
+    return (
+      matchedIndex: fallbackIdx,
+      seasonConflict: false,
+      conflictSummary: '',
+    );
+  }
+
+  void _switchToLineWithConflictGuard(int targetLineIndex) {
+    if (targetLineIndex < 0 || targetLineIndex >= _lines.length) return;
+    final match = _resolveTargetLineEpisodeMatch(targetLineIndex);
+    if (match.matchedIndex == null) {
+      final msg = match.conflictSummary.isNotEmpty
+          ? match.conflictSummary
+          : '目标线路「${_lines[targetLineIndex].name}」未找到对应集数，请手动选集';
+      _showHud(msg);
+      _showEpisodesSheet(
+        initialLineIndex: targetLineIndex,
+        initialNotice: msg,
+      );
+      return;
+    }
+    _failedLinesForEpisode.clear();
+    _failedLiveEpisodes.clear();
+    final keepPos = _position.inMilliseconds >= 1000
+        ? _position.inMilliseconds
+        : _lastKnownPositionMs;
+    _saveProgress(immediate: true, syncImmediate: false);
+    setState(() {
+      _lineIndex = targetLineIndex;
+      _episodeIndex = match.matchedIndex!;
+    });
+    _openCurrentEpisode(resumeMs: keepPos);
+  }
+
+  void _probeCurrentEpisodeContainerTags(int session) {
+    if (!mounted ||
+        _isLiveStream ||
+        session != _playSession ||
+        OhosRuntime.isOhos ||
+        _usingAvPlayer ||
+        _videoKernel.mdkPlatform != null ||
+        _videoKernel.ohosPlatform != null) {
+      return;
+    }
+    final platform = _player.platform;
+    if (platform == null) return;
+    final ep = _currentEpisode;
+    final stableKey = SeriesScraper.stableEpisodeKey(ep);
+    if (stableKey.isEmpty) return;
+    final gen = ++_containerProbeGen;
+    final beforeInfo = _currentScrapedEpisodeInfo();
+
+    unawaited(() async {
+      try {
+        final dyn = platform as dynamic;
+        String? rawMeta;
+        String? mediaTitle;
+        try {
+          final m = await dyn.getProperty('metadata');
+          if (m != null) rawMeta = m.toString();
+        } catch (_) {}
+        try {
+          final mt = await dyn.getProperty('media-title');
+          if (mt != null) mediaTitle = mt.toString();
+        } catch (_) {}
+        if (!mounted || session != _playSession || gen != _containerProbeGen) {
+          return;
+        }
+        final parsed = ContainerMetadataReader.parseMpvMetadataJson(
+          rawMeta,
+          mediaTitle: mediaTitle,
+          fallbackFileName:
+              ep.originalFileName.isNotEmpty ? ep.originalFileName : ep.name,
+        );
+        if (parsed.isEmpty) return;
+        final existing = _runtimeContainerTags[stableKey];
+        bool changed = existing == null || existing.length != parsed.length;
+        if (!changed) {
+          for (final entry in parsed.entries) {
+            if (existing[entry.key] != entry.value) {
+              changed = true;
+              break;
+            }
+          }
+        }
+        if (!changed) return;
+        _runtimeContainerTags[stableKey] = parsed;
+        ContainerMetadataCache.putByStableKey(stableKey, parsed);
+        final afterInfo = _currentScrapedEpisodeInfo();
+        setState(() {});
+        final identityChanged =
+            beforeInfo?.seasonNumber != afterInfo?.seasonNumber ||
+                beforeInfo?.resolvedEpisodeNumber !=
+                    afterInfo?.resolvedEpisodeNumber ||
+                beforeInfo?.recognizedWorkTitle !=
+                    afterInfo?.recognizedWorkTitle ||
+                beforeInfo?.status != afterInfo?.status;
+        if (identityChanged && _danmuSettings.effectiveEnabled) {
+          _reloadDanmuAfterCalibration();
+        }
+      } catch (_) {}
+    }());
+  }
+
+  Future<void> _openPlayerSeriesScrapeSheet() async {
+    if (_isLiveStream || widget.site.isEffectivelyPrivate) return;
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final beforeOverride = widget.storage.getSeriesScrapeOverride(
+      widget.site.key,
+      widget.video.id,
+      isPrivate: false,
+    );
+    await showSeriesScrapeSheet(
+      context,
+      site: widget.site,
+      video: widget.video,
+      storage: widget.storage,
+      activeLine: _currentLine,
+      initialOverride: beforeOverride,
+      initialTab: 1,
+      focusEpisodeIndex: _episodeIndex,
+      runtimeContainerTags: _runtimeContainerTags,
+      pendingDanmuCandidates: _pendingDanmuCandidates,
+      onSelectDanmuCandidate: _manualBindDanmuCandidate,
+    );
+    // Note: seriesScrapeRevision listener immediately updates UI & reloads
+    // danmu from current playback timestamp while preserving play/pause state.
+  }
+
+  ({
+    DanmuMatchQuery query,
+    int? scrapedEpisodeNumber,
+    int episodeOffset,
+    String effectiveTitle,
+    bool isMotionComic,
+    SeriesScrapeOverride? override,
+    ScrapedEpisodeInfo? episodeInfo,
+    EpisodeManualCalibration? manualCalibration,
+    bool canAutoMatch,
+  }) _resolveDanmuMatchContext() {
+    final override = widget.storage.getSeriesScrapeOverride(
+      widget.site.key,
+      widget.video.id,
+      isPrivate: widget.site.isEffectivelyPrivate,
+    );
+    final scrape = _scrapeLineEpisodesFor(_currentLine, override: override);
+    final epInfo = scrape.infoForOriginalIndex(_episodeIndex);
+    final stableKey = SeriesScraper.stableEpisodeKey(_currentEpisode);
+    final manualCalibration =
+        stableKey.isNotEmpty ? override?.episodeCalibrations[stableKey] : null;
+    // Propagate confirmed / container-recognized work title into the actual
+    // danmu query: per-episode user calibration > series user binding >
+    // container SHOW/SERIES/TVSH tag > catalog title.
+    final String effectiveTitle;
+    if (manualCalibration != null &&
+        manualCalibration.workTitle.trim().isNotEmpty) {
+      effectiveTitle = manualCalibration.workTitle.trim();
+    } else if (override != null && override.effectiveDanmuTitle.isNotEmpty) {
+      effectiveTitle = override.effectiveDanmuTitle;
+    } else if (epInfo != null &&
+        epInfo.recognizedWorkTitle.trim().isNotEmpty) {
+      effectiveTitle = epInfo.recognizedWorkTitle.trim();
+    } else {
+      effectiveTitle = widget.video.title;
+    }
+    final isMotionComic = (override != null && override.hasWorkBinding)
+        ? override.isMotionComic
+        : SeriesScraper.isMotionComicText(
+            effectiveTitle,
+            extraContext: '${widget.video.tag} ${widget.video.remarks}',
+          );
+    final episodeOffset = override?.episodeOffset ?? 0;
+    final int? scrapedEpNum = epInfo?.resolvedEpisodeNumber;
+    final bool needsConfirmation = epInfo?.needsConfirmation ?? false;
+    final bool isUnoverriddenSpecial =
+        epInfo != null && epInfo.isSpecial && !epInfo.hasManualOverride;
+
+    final int effectiveEpNum;
+    final bool canAutoMatch;
+    if (scrapedEpNum != null && scrapedEpNum > 0) {
+      effectiveEpNum = scrapedEpNum;
+      canAutoMatch = true;
+    } else if (needsConfirmation || isUnoverriddenSpecial) {
+      // Never auto-fabricate an episode number from list index when the file
+      // is 待确认 or a trailer/special.
+      effectiveEpNum = 0;
+      canAutoMatch = false;
+    } else {
+      effectiveEpNum = 0;
+      canAutoMatch = false;
+    }
+    final effectiveDurMs = _duration.inMilliseconds > 0
+        ? _duration.inMilliseconds
+        : _lastKnownDurationMs;
+    final year = (override != null && override.matchedYear.isNotEmpty)
+        ? override.matchedYear
+        : widget.video.year;
+    final query = DanmuMatchQuery(
+      title: effectiveTitle,
+      episodeTitle: epInfo != null &&
+              !epInfo.needsConfirmation &&
+              epInfo.formattedSeasonEpisode.isNotEmpty
+          ? epInfo.formattedSeasonEpisode
+          : _currentEpisode.name,
+      episodeIndex: effectiveEpNum,
+      durationSec: effectiveDurMs > 0 ? effectiveDurMs ~/ 1000 : 0,
+      seasonNumber: epInfo?.seasonNumber,
+      isMotionComic: isMotionComic,
+      year: year,
+      animeIdOverride: override?.danmuAnimeId ?? '',
+      originOverride: override?.danmuOrigin ?? '',
+    );
+    return (
+      query: query,
+      scrapedEpisodeNumber: effectiveEpNum > 0 ? effectiveEpNum : null,
+      episodeOffset: episodeOffset,
+      effectiveTitle: effectiveTitle,
+      isMotionComic: isMotionComic,
+      override: override,
+      episodeInfo: epInfo,
+      manualCalibration: manualCalibration,
+      canAutoMatch: canAutoMatch,
+    );
+  }
+
+  String _currentDanmuMatchSummary() {
+    final matched = _matchedDanmuCandidate;
+    if (matched != null) {
+      final parts = <String>[
+        if (matched.animeTitle.isNotEmpty) matched.animeTitle,
+        if (matched.episodeTitle.isNotEmpty) matched.episodeTitle,
+      ];
+      return parts.isNotEmpty
+          ? '当前匹配：${parts.join(" · ")}'
+          : '已绑定弹幕（ID ${matched.animeId}）';
+    }
+    final epInfo = _currentScrapedEpisodeInfo();
+    if (epInfo != null && epInfo.needsConfirmation) {
+      return '当前识别：待确认（请在选集 → 识别／校准本集确认）';
+    }
+    if (_pendingDanmuCandidates.isNotEmpty) {
+      return '弹幕服务仅返回相近/邻集候选，请手动选择';
+    }
+    final epNum = _scrapedDanmuEpisodeNumber;
+    if (epNum != null && epNum > 0) {
+      final label = epInfo?.readableSeasonEpisodeZh ?? '第 $epNum 集';
+      return '当前识别：$label（${_danmuBoundForEpisode ? "已加载" : "待匹配"}）';
+    }
+    return '当前集：${_currentEpisode.name}';
+  }
+
+  Future<List<DanmuCandidate>> _searchDanmuCandidatesManually(
+    String keyword,
+    int? episodeNumber,
+  ) async {
+    if (_danmuProvider == null || _danmuCache == null) {
+      _rebuildDanmuPipeline();
+    }
+    final provider = _danmuProvider;
+    if (provider == null) return const <DanmuCandidate>[];
+    final ctx = _resolveDanmuMatchContext();
+    final query = DanmuMatchQuery(
+      title: keyword.trim().isNotEmpty ? keyword.trim() : ctx.effectiveTitle,
+      episodeTitle: _currentEpisode.name,
+      episodeIndex: episodeNumber ?? ctx.query.episodeIndex,
+      durationSec: ctx.query.durationSec,
+      seasonNumber: ctx.query.seasonNumber,
+      isMotionComic: SeriesScraper.isMotionComicText(keyword)
+          ? true
+          : ctx.isMotionComic,
+      year: ctx.query.year,
+    );
+    return provider.matchOrSearch(query);
+  }
+
+  void _manualBindDanmuCandidate(DanmuCandidate candidate) {
+    final boundId = candidate.boundEpisodeId.trim();
+    if (boundId.isEmpty) return;
+    if (_danmuProvider == null || _danmuCache == null) {
+      _rebuildDanmuPipeline();
+    }
+    final cache = _danmuCache;
+    if (cache == null) return;
+    _danmuMatchToken?.cancel();
+    final gen = ++_danmuSessionGen;
+    _matchedDanmuCandidate = candidate;
+    _pendingDanmuCandidates = const <DanmuCandidate>[];
+    unawaited(() async {
+      try {
+        await cache.bindSession(boundId);
+        if (!mounted || gen != _danmuSessionGen) return;
+        _danmuBoundForEpisode = true;
+        final tickMs = _position.inMilliseconds > 0
+            ? _position.inMilliseconds
+            : (_pendingResumeMs > 0 ? _pendingResumeMs : _lastKnownPositionMs);
+        cache.onPlaybackTick(tickMs, playing: _playing);
+        _showHud(
+          '已切换弹幕：${candidate.animeTitle} ${candidate.episodeTitle}'.trim(),
+        );
+      } catch (_) {}
+    }());
+    // Persist BOTH the per-episode manually chosen danmu binding (source +
+    // boundEpisodeId) keyed by stable file/item identity AND the series-level
+    // anime binding so saving, refreshing, or resuming keeps this exact choice.
+    if (!widget.site.isEffectivelyPrivate) {
+      final existing = widget.storage.getSeriesScrapeOverride(
+            widget.site.key,
+            widget.video.id,
+            isPrivate: false,
+          ) ??
+          const SeriesScrapeOverride();
+      final stableKey = SeriesScraper.stableEpisodeKey(_currentEpisode);
+      final nextCalibs = Map<String, EpisodeManualCalibration>.from(
+        existing.episodeCalibrations,
+      );
+      if (stableKey.isNotEmpty) {
+        final prev =
+            nextCalibs[stableKey] ?? const EpisodeManualCalibration();
+        nextCalibs[stableKey] = prev.copyWith(
+          danmuBoundEpisodeId: boundId,
+          danmuSourceOrigin: candidate.sourceOrigin.trim(),
+          danmuAnimeId: candidate.animeId.trim(),
+          danmuAnimeTitle: candidate.animeTitle.trim(),
+          danmuEpisodeTitle: candidate.episodeTitle.trim(),
+          updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        );
+      }
+      final updated = existing.copyWith(
+        danmuAnimeId: candidate.animeId.isNotEmpty
+            ? candidate.animeId
+            : existing.danmuAnimeId,
+        danmuOrigin: candidate.sourceOrigin.isNotEmpty
+            ? candidate.sourceOrigin
+            : existing.danmuOrigin,
+        danmuTitleOverride: candidate.animeTitle.isNotEmpty
+            ? candidate.animeTitle
+            : existing.danmuTitleOverride,
+        episodeCalibrations: nextCalibs,
+      );
+      unawaited(
+        widget.storage.saveSeriesScrapeOverride(
+          widget.site.key,
+          widget.video.id,
+          updated,
+        ),
+      );
+    }
+  }
+
+  void _updateDanmuEpisodeOffset(int nextOffset) {
+    final clamped = nextOffset.clamp(-500, 500);
+    _activeDanmuEpisodeOffset = clamped;
+    if (!widget.site.isEffectivelyPrivate) {
+      final existing = widget.storage.getSeriesScrapeOverride(
+        widget.site.key,
+        widget.video.id,
+        isPrivate: false,
+      );
+      final updated = (existing ?? const SeriesScrapeOverride())
+          .copyWith(episodeOffset: clamped);
+      unawaited(
+        widget.storage.saveSeriesScrapeOverride(
+          widget.site.key,
+          widget.video.id,
+          updated,
+        ),
+      );
+    }
+    _matchedDanmuCandidate = null;
+    _danmuBoundForEpisode = false;
+    _pendingDanmuCandidates = const <DanmuCandidate>[];
+    _bindDanmuForCurrentEpisode();
   }
 
   void _bindDanmuForCurrentEpisode() {
@@ -5155,16 +6562,74 @@ class _PlayerScreenState extends State<PlayerScreen>
     final token = DanmuCancelToken();
     _danmuMatchToken = token;
     final gen = ++_danmuSessionGen;
-    final effectiveDurMs = _duration.inMilliseconds > 0
-        ? _duration.inMilliseconds
-        : _lastKnownDurationMs;
-    final scrapedEp = _currentScrapedEpisode();
-    final query = DanmuMatchQuery(
-      title: _effectiveScrapeTitle,
-      episodeTitle: scrapedEp.danmuEpisodeTitle,
-      episodeIndex: scrapedEp.isSpecial ? 0 : scrapedEp.effectiveEpisodeNumber,
-      durationSec: effectiveDurMs > 0 ? effectiveDurMs ~/ 1000 : 0,
-    );
+    final DanmuMatchQuery query;
+    if (!_episodeScrapeOverride.isDefault) {
+      final effectiveDurMs = _duration.inMilliseconds > 0
+          ? _duration.inMilliseconds
+          : _lastKnownDurationMs;
+      final scrapedEp = _currentScrapedEpisode();
+      query = DanmuMatchQuery(
+        title: _effectiveScrapeTitle,
+        episodeTitle: scrapedEp.danmuEpisodeTitle,
+        episodeIndex:
+            scrapedEp.isSpecial ? 0 : scrapedEp.effectiveEpisodeNumber,
+        durationSec: effectiveDurMs > 0 ? effectiveDurMs ~/ 1000 : 0,
+      );
+    } else {
+      final ctx = _resolveDanmuMatchContext();
+      _scrapedDanmuEpisodeNumber = ctx.scrapedEpisodeNumber;
+      _activeDanmuEpisodeOffset = ctx.episodeOffset;
+      _pendingDanmuCandidates = const <DanmuCandidate>[];
+
+      // Honor explicit per-episode manual danmu candidate choice across saves,
+      // refreshes, and app restarts, loading directly from current playback time.
+      final manualCalib = ctx.manualCalibration;
+      if (manualCalib != null && manualCalib.hasDanmuBinding) {
+        final savedOrigin = manualCalib.danmuSourceOrigin.trim();
+        final originAvailable = widget.debugDanmuProvider != null ||
+            savedOrigin.isEmpty ||
+            _danmuSettings.normalizedOrigins.contains(savedOrigin);
+        if (originAvailable) {
+          final manualCand = DanmuCandidate(
+            sourceOrigin: savedOrigin,
+            animeId: manualCalib.danmuAnimeId,
+            animeTitle: manualCalib.danmuAnimeTitle.isNotEmpty
+                ? manualCalib.danmuAnimeTitle
+                : ctx.effectiveTitle,
+            boundEpisodeId: manualCalib.danmuBoundEpisodeId,
+            episodeTitle: manualCalib.danmuEpisodeTitle,
+            confidence: 1.0,
+          );
+          unawaited(() async {
+            try {
+              await cache.bindSession(manualCand.boundEpisodeId);
+              if (!mounted || gen != _danmuSessionGen || token.isCancelled) {
+                return;
+              }
+              _matchedDanmuCandidate = manualCand;
+              _pendingDanmuCandidates = const <DanmuCandidate>[];
+              _danmuBoundForEpisode = true;
+              final tickMs = _position.inMilliseconds > 0
+                  ? _position.inMilliseconds
+                  : (_pendingResumeMs > 0
+                      ? _pendingResumeMs
+                      : _lastKnownPositionMs);
+              cache.onPlaybackTick(tickMs, playing: _playing);
+              if (mounted) setState(() {});
+            } catch (_) {}
+          }());
+          return;
+        }
+      }
+
+      if (!ctx.canAutoMatch) {
+        _matchedDanmuCandidate = null;
+        _danmuBoundForEpisode = false;
+        unawaited(cache.bindSession(''));
+        return;
+      }
+      query = ctx.query;
+    }
 
     unawaited(() async {
       try {
@@ -5173,16 +6638,37 @@ class _PlayerScreenState extends State<PlayerScreen>
           cancelToken: token,
         );
         if (!mounted || gen != _danmuSessionGen || token.isCancelled) return;
-        if (candidates.isEmpty) return;
-        var best = candidates.first;
-        for (final c in candidates.skip(1)) {
-          if (c.confidence > best.confidence) best = c;
+        if (candidates.isEmpty) {
+          _matchedDanmuCandidate = null;
+          _danmuBoundForEpisode = false;
+          unawaited(cache.bindSession(''));
+          return;
         }
-        if (best.boundEpisodeId.trim().isEmpty) return;
+        final best = DandanplayProvider.selectUniqueAutoBindCandidate(
+          candidates,
+          query: query,
+          preferredOrigins: _danmuSettings.normalizedOrigins,
+        );
+        if (best == null) {
+          // Server only returned neighbor/unrelated/low-confidence or ambiguous
+          // multi-season candidates: do NOT silently bind based on response
+          // order; retain them for explicit user choice.
+          _matchedDanmuCandidate = null;
+          _danmuBoundForEpisode = false;
+          _pendingDanmuCandidates = List<DanmuCandidate>.unmodifiable(
+            candidates.where((c) => c.boundEpisodeId.trim().isNotEmpty),
+          );
+          unawaited(cache.bindSession(''));
+          if (mounted) setState(() {});
+          return;
+        }
         await cache.bindSession(best.boundEpisodeId);
         if (!mounted || gen != _danmuSessionGen || token.isCancelled) return;
+        _matchedDanmuCandidate = best;
+        _pendingDanmuCandidates = const <DanmuCandidate>[];
         _danmuBoundForEpisode = true;
         cache.onPlaybackTick(_position.inMilliseconds, playing: _playing);
+        if (mounted) setState(() {});
       } catch (_) {
         // Isolated danmu fetch failure must never disturb video playback.
       }
@@ -5199,7 +6685,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       _danmuSettings = next;
     });
     if (persist) {
-      unawaited(DanmuPrefs.save(next));
+      unawaited(
+        DanmuPrefs.save(next, saveSourcesAndCredentials: serverChanged),
+      );
     }
     if (serverChanged && widget.debugDanmuProvider == null) {
       _rebuildDanmuPipeline();
@@ -5239,6 +6727,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final session = _playSession;
+    final matchCtx = _isLiveStream ? null : _resolveDanmuMatchContext();
+    final matchSummary = _isLiveStream ? '' : _currentDanmuMatchSummary();
     if (_useIos26PlayerChrome) {
       unawaited(
         showIosGlassPopover<void>(
@@ -5251,6 +6741,25 @@ class _PlayerScreenState extends State<PlayerScreen>
           contentPadding: const EdgeInsets.fromLTRB(4, 2, 4, 8),
           builder: (ctx) => DanmuSettingsSheet(
             initialSettings: _danmuSettings,
+            currentMatchSummary: matchSummary,
+            episodeOffset: matchCtx?.episodeOffset ?? _activeDanmuEpisodeOffset,
+            initialSearchKeyword: matchCtx?.effectiveTitle ?? widget.video.title,
+            initialEpisodeNumber: matchCtx?.scrapedEpisodeNumber,
+            onEpisodeOffsetChanged: _isLiveStream
+                ? null
+                : (offset) {
+                    if (!mounted || session != _playSession) return;
+                    _updateDanmuEpisodeOffset(offset);
+                  },
+            onSearchCandidates: _isLiveStream
+                ? null
+                : _searchDanmuCandidatesManually,
+            onSelectCandidate: _isLiveStream
+                ? null
+                : (cand) {
+                    if (!mounted || session != _playSession) return;
+                    _manualBindDanmuCandidate(cand);
+                  },
             onChanged: (updated) {
               if (!mounted || session != _playSession) return;
               _applyDanmuSettings(updated, persist: false);
@@ -5264,6 +6773,24 @@ class _PlayerScreenState extends State<PlayerScreen>
       DanmuSettingsSheet.show(
         context,
         initialSettings: _danmuSettings,
+        currentMatchSummary: matchSummary,
+        episodeOffset: matchCtx?.episodeOffset ?? _activeDanmuEpisodeOffset,
+        initialSearchKeyword: matchCtx?.effectiveTitle ?? widget.video.title,
+        initialEpisodeNumber: matchCtx?.scrapedEpisodeNumber,
+        onEpisodeOffsetChanged: _isLiveStream
+            ? null
+            : (offset) {
+                if (!mounted || session != _playSession) return;
+                _updateDanmuEpisodeOffset(offset);
+              },
+        onSearchCandidates:
+            _isLiveStream ? null : _searchDanmuCandidatesManually,
+        onSelectCandidate: _isLiveStream
+            ? null
+            : (cand) {
+                if (!mounted || session != _playSession) return;
+                _manualBindDanmuCandidate(cand);
+              },
         onChanged: (updated) {
           if (!mounted || session != _playSession) return;
           _applyDanmuSettings(updated, persist: false);
@@ -5392,6 +6919,132 @@ class _PlayerScreenState extends State<PlayerScreen>
     return '$sign${absSec}s';
   }
 
+  bool get _usesDesktopSubtitleHudLayout =>
+      _isMacosPlayerPlatform &&
+      !OhosRuntime.shouldUseTvUi(widget.storage.tvUiMode);
+
+  // Keep subtitles lifted throughout the entire HUD fade-out transition
+  // (`_hudFadingOut == true` while `_controlsVisible == true`) and only restore
+  // to baseline once `_controlsVisible` becomes `false` after fade-out finishes.
+  bool get _isDesktopBottomControlsVisible =>
+      _usesDesktopSubtitleHudLayout &&
+      !_screenLocked &&
+      !_castController.isCasting &&
+      (_controlsVisible || _isSliderDragging);
+
+  double _effectiveDesktopBottomControlsHeight(EdgeInsets viewPadding) {
+    if (_measuredDesktopBottomBarHeight > 0.0) {
+      return _measuredDesktopBottomBarHeight;
+    }
+    final fallback = widget.embedded ? 64.0 : (_isLiveStream ? 50.0 : 86.0);
+    return fallback + viewPadding.bottom;
+  }
+
+  double _computeSubtitleBottomPadding(EdgeInsets viewPadding) {
+    if (!_usesDesktopSubtitleHudLayout) {
+      return SubtitleLayoutGeometry.defaultBottomPadding;
+    }
+    return SubtitleLayoutGeometry.computeTextOverlayBottomPadding(
+      hudControlsVisible: _isDesktopBottomControlsVisible,
+      measuredBottomBarHeight:
+          _effectiveDesktopBottomControlsHeight(viewPadding),
+      bottomSafeInset: viewPadding.bottom,
+    );
+  }
+
+  void _handleDesktopBottomControlsHeightChanged(double height) {
+    if (!mounted || height <= 0.0) return;
+    if ((height - _measuredDesktopBottomBarHeight).abs() < 0.5) return;
+    setState(() {
+      _measuredDesktopBottomBarHeight = height;
+    });
+    _scheduleSyncNativeSubtitleState();
+  }
+
+  void _scheduleSyncNativeSubtitleState() {
+    if (!_isMacosPlayerPlatform || _subtitleSyncScheduled || !mounted) return;
+    _subtitleSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _subtitleSyncScheduled = false;
+      if (!mounted) return;
+      unawaited(_syncNativeSubtitleState());
+    });
+  }
+
+  Future<void> _syncNativeSubtitleState() async {
+    if (!mounted ||
+        !_isMacosPlayerPlatform ||
+        OhosRuntime.isOhos ||
+        _usingAvPlayer ||
+        _videoKernel.mdkPlatform != null ||
+        _videoKernel.ohosPlatform != null) {
+      return;
+    }
+    final platform = _player.platform;
+    if (platform == null) return;
+    final epoch = ++_subtitleSyncEpoch;
+    final selected = _player.state.track.subtitle;
+    final available = _player.state.tracks.subtitle;
+
+    String? liveSid;
+    if (selected.id == 'auto') {
+      try {
+        final rawSid = await (platform as dynamic).getProperty('sid');
+        if (rawSid != null) {
+          liveSid = rawSid.toString().trim();
+        }
+      } catch (_) {}
+    }
+    if (!mounted || epoch != _subtitleSyncEpoch) return;
+
+    final resolved = SubtitleLayoutGeometry.resolveActiveTrack(
+      selected: selected,
+      available: available,
+      mpvSid: liveSid,
+    );
+    final mode = SubtitleLayoutGeometry.classifyTrack(resolved);
+    if (mode != _subtitleRenderMode) {
+      setState(() {
+        _subtitleRenderMode = mode;
+      });
+    }
+
+    final wantsNative = mode == SubtitleRenderMode.mpvNativeAss ||
+        mode == SubtitleRenderMode.mpvNativeBitmap;
+    final viewPadding = MediaQuery.viewPaddingOf(context);
+    final viewport = _lastVideoStackViewport.isEmpty
+        ? MediaQuery.sizeOf(context)
+        : _lastVideoStackViewport;
+    final targetSubPos = wantsNative
+        ? SubtitleLayoutGeometry.computeMpvSubPos(
+            viewport: viewport,
+            videoWidth: _videoWidth,
+            videoHeight: _videoHeight,
+            fit: _fit,
+            hudControlsVisible: _isDesktopBottomControlsVisible,
+            measuredBottomBarHeight:
+                _effectiveDesktopBottomControlsHeight(viewPadding),
+          )
+        : 100;
+
+    try {
+      final dyn = platform as dynamic;
+      if (wantsNative && !_mpvSubtitleAssInitialized) {
+        await dyn.setProperty('sub-ass', 'yes');
+        await dyn.setProperty('sub-ass-override', 'yes');
+        _mpvSubtitleAssInitialized = true;
+      }
+      if (_lastAppliedMpvSubVisible != wantsNative) {
+        await dyn.setProperty('sub-visibility', wantsNative ? 'yes' : 'no');
+        _lastAppliedMpvSubVisible = wantsNative;
+      }
+      if (_lastAppliedMpvSubPos != targetSubPos) {
+        await dyn.setProperty('sub-pos', '$targetSubPos');
+        _lastAppliedMpvSubPos = targetSubPos;
+      }
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
     final viewPadding = MediaQuery.viewPaddingOf(context);
@@ -5426,8 +7079,45 @@ class _PlayerScreenState extends State<PlayerScreen>
                 : math.max(16.0, effectiveTopOverlaySafe + 76.0)))
         : math.max(16.0, effectiveTopOverlaySafe + 16.0);
 
-    final subtitleOverlay =
-        widget.debugSubtitleLayer ?? _videoKernel.buildSubtitleOverlay();
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final subtitleBottomPadding = _computeSubtitleBottomPadding(viewPadding);
+    final subtitleAnimDuration =
+        reduceMotion ? Duration.zero : const Duration(milliseconds: 200);
+    final showFlutterTextSubtitles = !_isMacosPlayerPlatform ||
+        (_subtitleRenderMode != SubtitleRenderMode.mpvNativeAss &&
+            _subtitleRenderMode != SubtitleRenderMode.mpvNativeBitmap);
+    final subtitleOverlay = widget.debugSubtitleLayer ??
+        _videoKernel.buildSubtitleOverlay(
+          subtitleViewKey: _subtitleViewKey,
+          padding: EdgeInsets.fromLTRB(
+            SubtitleLayoutGeometry.defaultHorizontalPadding,
+            0.0,
+            SubtitleLayoutGeometry.defaultHorizontalPadding,
+            subtitleBottomPadding,
+          ),
+          visible: showFlutterTextSubtitles,
+        );
+    if (widget.debugSubtitleLayer == null &&
+        subtitleOverlay != null &&
+        (subtitleBottomPadding - _lastAppliedSubtitleOverlayBottomPadding)
+                .abs() >=
+            0.5) {
+      _lastAppliedSubtitleOverlayBottomPadding = subtitleBottomPadding;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _subtitleViewKey.currentState?.setPadding(
+          EdgeInsets.fromLTRB(
+            SubtitleLayoutGeometry.defaultHorizontalPadding,
+            0.0,
+            SubtitleLayoutGeometry.defaultHorizontalPadding,
+            subtitleBottomPadding,
+          ),
+          duration: subtitleAnimDuration,
+        );
+      });
+    }
+    _scheduleSyncNativeSubtitleState();
+
     final effectiveDanmuSpeed = (_gestureFsm.isSpeedBoosting ||
             _gestureFsm.isSpeedLockReady ||
             _gestureFsm.isSpeedLocked)
@@ -5440,6 +7130,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ? DanmuLayer(
                     settings: _danmuSettings,
                     positionMs: _position.inMilliseconds,
+                    positionListenable: _danmuPositionMs,
                     playing: _playing,
                     playSpeed: effectiveDanmuSpeed,
                     segmentCache: _danmuCache,
@@ -5451,39 +7142,62 @@ class _PlayerScreenState extends State<PlayerScreen>
                   )
                 : null));
 
-    final videoStack = Stack(
-      key: const Key('player-video-stack'),
-      fit: StackFit.expand,
-      children: [
-        Center(
-          key: const Key('player-video-surface-layer'),
-          child: RepaintBoundary(
-            child: _usingAvPlayer &&
-                    widget.debugVideoSurface == null &&
-                    _iosAvPlayerController != null
-                ? _iosAvPlayerController!.buildView(
-                    key: const Key('ios-avplayer-surface'),
-                  )
-                : _videoKernel.buildVideoSurface(
-                    fit: _fit,
-                    videoWidth: _videoWidth,
-                    videoHeight: _videoHeight,
-                    externalSubtitleOverlay: !OhosRuntime.isOhos,
-                  ),
-          ),
-        ),
-        // M3b: DanmuLayer strictly ABOVE video surface and BELOW subtitles & HUD.
-        if (activeDanmuWidget != null && !OhosRuntime.isOhos)
-          Positioned.fill(
-            key: const Key('player-danmu-layer'),
-            child: IgnorePointer(child: activeDanmuWidget),
-          ),
-        // M3b: Subtitles strictly ABOVE DanmuLayer and BELOW HUD overlays.
-        if (subtitleOverlay != null)
-          Positioned.fill(
-            key: const Key('player-subtitle-layer'),
-            child: IgnorePointer(child: subtitleOverlay),
-          ),
+    final Widget? positionedSubtitleChild = subtitleOverlay == null
+        ? null
+        : (widget.debugSubtitleLayer != null && _usesDesktopSubtitleHudLayout
+            ? AnimatedPadding(
+                key: const Key('player-subtitle-padding'),
+                duration: subtitleAnimDuration,
+                curve: Curves.easeOutCubic,
+                padding: EdgeInsets.only(bottom: subtitleBottomPadding),
+                child: subtitleOverlay,
+              )
+            : subtitleOverlay);
+
+    final videoStack = LayoutBuilder(
+      builder: (stackCtx, stackConstraints) {
+        final nextViewport = stackConstraints.biggest;
+        if (nextViewport.width > 0 &&
+            nextViewport.height > 0 &&
+            ((nextViewport.width - _lastVideoStackViewport.width).abs() >= 1.0 ||
+                (nextViewport.height - _lastVideoStackViewport.height).abs() >=
+                    1.0)) {
+          _lastVideoStackViewport = nextViewport;
+          _scheduleSyncNativeSubtitleState();
+        }
+        return Stack(
+          key: const Key('player-video-stack'),
+          fit: StackFit.expand,
+          children: [
+            Center(
+              key: const Key('player-video-surface-layer'),
+              child: RepaintBoundary(
+                child: _usingAvPlayer &&
+                        widget.debugVideoSurface == null &&
+                        _iosAvPlayerController != null
+                    ? _iosAvPlayerController!.buildView(
+                        key: const Key('ios-avplayer-surface'),
+                      )
+                    : _videoKernel.buildVideoSurface(
+                        fit: _fit,
+                        videoWidth: _videoWidth,
+                        videoHeight: _videoHeight,
+                        externalSubtitleOverlay: !OhosRuntime.isOhos,
+                      ),
+              ),
+            ),
+            // M3b: DanmuLayer strictly ABOVE video surface and BELOW subtitles & HUD.
+            if (activeDanmuWidget != null && !OhosRuntime.isOhos)
+              Positioned.fill(
+                key: const Key('player-danmu-layer'),
+                child: IgnorePointer(child: activeDanmuWidget),
+              ),
+            // M3b: Subtitles strictly ABOVE DanmuLayer and BELOW HUD overlays.
+            if (positionedSubtitleChild != null)
+              Positioned.fill(
+                key: const Key('player-subtitle-layer'),
+                child: IgnorePointer(child: positionedSubtitleChild),
+              ),
         if (_playerBrightness < 0.995)
           IgnorePointer(
             child: ColoredBox(
@@ -5493,126 +7207,114 @@ class _PlayerScreenState extends State<PlayerScreen>
               child: const SizedBox.expand(),
             ),
           ),
-        // Bubble-free smoothly fading playback toast with adaptive contrast text.
-        Positioned.fill(
-          child: IgnorePointer(
-            child: Align(
-              alignment: const Alignment(0, -0.70),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 28),
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 220),
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeInCubic,
-                  child: (_hudText.isNotEmpty &&
-                          speedCapsuleMode == SpeedCapsuleMode.hidden &&
-                          desktopPreview == null)
-                      ? Text(
-                          _hudText,
-                          key: const ValueKey<String>('player-hud-toast:visible'),
-                          maxLines: 2,
-                          textAlign: TextAlign.center,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Color(0xF7FFFFFF),
-                            fontSize: 13.5,
-                            fontWeight: FontWeight.w600,
-                            letterSpacing: 0.1,
-                            height: 1.32,
-                            shadows: [
-                              Shadow(
-                                color: Color(0xE0000000),
-                                blurRadius: 8,
-                                offset: Offset(0, 1.5),
-                              ),
-                              Shadow(
-                                color: Color(0x9E000000),
-                                blurRadius: 20,
-                                offset: Offset(0, 2),
-                              ),
-                            ],
-                          ),
-                        )
-                      : const SizedBox.shrink(key: ValueKey<String>('player-hud-toast:empty')),
-                ),
-              ),
-            ),
-          ),
-        ),
-        // Bubble-free smoothly fading loading indicator (zero white pill, clear of side lock button).
-        Positioned.fill(
-          child: IgnorePointer(
-            child: Center(
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                  showPortraitCompanion ? 54 : 32,
-                  (_desktop &&
-                          _controlsVisible &&
-                          !_screenLocked &&
-                          !widget.embedded)
-                      ? 152
-                      : 0,
-                  showPortraitCompanion ? 54 : 32,
-                  0,
-                ),
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 220),
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeInCubic,
-                  child: (_loading || _buffering)
-                      ? KeyedSubtree(
-                          key: const Key('player-loading-indicator'),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              widget.loadingIndicator ??
-                                  (!OhosRuntime.isOhos
-                                      ? const BrandLogoLoader(
-                                          key: Key('player-brand-logo-loader'),
-                                          size: 22,
-                                        )
-                                      : const CupertinoActivityIndicator(
-                                          radius: 10,
-                                          color: Colors.white,
-                                        )),
-                              const SizedBox(width: 9),
-                              Flexible(
-                                child: Text(
-                                  '正在加载 ${_isLiveStream ? _currentEpisode.name : _currentScrapedEpisode().compactLabel(singleItemMovie: _currentLine.episodes.length <= 1)}…',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: Color(0xF5FFFFFF),
-                                    fontSize: 13.5,
-                                    fontWeight: FontWeight.w600,
-                                    letterSpacing: 0.1,
-                                    shadows: [
-                                      Shadow(
-                                        color: Color(0xE0000000),
-                                        blurRadius: 8,
-                                        offset: Offset(0, 1.5),
-                                      ),
-                                      Shadow(
-                                        color: Color(0x9E000000),
-                                        blurRadius: 18,
-                                        offset: Offset(0, 2),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        )
-                      : const SizedBox.shrink(
-                          key: ValueKey<String>('player-loading-empty'),
+        // Bubble-free playback toast with adaptive contrast text.
+        if (_hudText.isNotEmpty &&
+            speedCapsuleMode == SpeedCapsuleMode.hidden &&
+            desktopPreview == null)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Align(
+                alignment: const Alignment(0, -0.70),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 28),
+                  child: Text(
+                    _hudText,
+                    key: const ValueKey<String>('player-hud-toast:visible'),
+                    maxLines: 2,
+                    textAlign: TextAlign.center,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xF7FFFFFF),
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.1,
+                      height: 1.32,
+                      shadows: [
+                        Shadow(
+                          color: Color(0xE0000000),
+                          blurRadius: 8,
+                          offset: Offset(0, 1.5),
                         ),
+                        Shadow(
+                          color: Color(0x9E000000),
+                          blurRadius: 20,
+                          offset: Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),
           ),
-        ),
+        // Bubble-free loading indicator (zero white pill, clear of side lock button).
+        if (_loading || _buffering)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Center(
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    showPortraitCompanion ? 54 : 32,
+                    (_desktop &&
+                            _controlsVisible &&
+                            !_screenLocked &&
+                            !widget.embedded)
+                        ? 152
+                        : 0,
+                    showPortraitCompanion ? 54 : 32,
+                    0,
+                  ),
+                  child: KeyedSubtree(
+                    key: const Key('player-loading-indicator'),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        widget.loadingIndicator ??
+                            (!OhosRuntime.isOhos
+                                ? const BrandLogoLoader(
+                                    key: Key('player-brand-logo-loader'),
+                                    size: 22,
+                                  )
+                                : const CupertinoActivityIndicator(
+                                    radius: 10,
+                                    color: Colors.white,
+                                  )),
+                        const SizedBox(width: 9),
+                        Flexible(
+                          child: Text(
+                            '正在加载 ${_isLiveStream ? _currentEpisode.name : _currentScrapedEpisode().compactLabel(singleItemMovie: _currentLine.episodes.length <= 1)}…',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Color(0xF5FFFFFF),
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.1,
+                              shadows: [
+                                Shadow(
+                                  color: Color(0xE0000000),
+                                  blurRadius: 8,
+                                  offset: Offset(0, 1.5),
+                                ),
+                                Shadow(
+                                  color: Color(0x9E000000),
+                                  blurRadius: 18,
+                                  offset: Offset(0, 2),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
       ],
+    );
+      },
     );
 
     final Widget surfaceWidget = _useEnhancedHud
@@ -6000,12 +7702,40 @@ class _PlayerScreenState extends State<PlayerScreen>
               return KeyEventResult.handled;
             }
             if (event is KeyDownEvent &&
+                (event.logicalKey == LogicalKeyboardKey.channelUp ||
+                    event.logicalKey == LogicalKeyboardKey.channelDown)) {
+              if (_isLiveStream) {
+                final delta =
+                    event.logicalKey == LogicalKeyboardKey.channelUp ? 1 : -1;
+                if (_hasLiveChannelCatalog) {
+                  _stepLiveChannel(delta);
+                } else {
+                  _stepEpisode(delta);
+                }
+                return KeyEventResult.handled;
+              }
+            }
+            if (event is KeyDownEvent &&
+                _isLiveStream &&
+                _hasLiveChannelCatalog &&
+                (event.logicalKey == LogicalKeyboardKey.pageUp ||
+                    event.logicalKey == LogicalKeyboardKey.pageDown)) {
+              _stepLiveChannel(
+                event.logicalKey == LogicalKeyboardKey.pageDown ? 1 : -1,
+              );
+              return KeyEventResult.handled;
+            }
+            if (event is KeyDownEvent &&
                 (event.logicalKey == LogicalKeyboardKey.arrowUp ||
                     event.logicalKey == LogicalKeyboardKey.arrowDown)) {
               if (_isLiveStream && !_controlsVisible) {
-                _stepEpisode(
-                  event.logicalKey == LogicalKeyboardKey.arrowUp ? -1 : 1,
-                );
+                final delta =
+                    event.logicalKey == LogicalKeyboardKey.arrowUp ? -1 : 1;
+                if (_hasLiveChannelCatalog) {
+                  _stepLiveChannel(delta);
+                } else {
+                  _stepEpisode(delta);
+                }
               } else if (!_isLiveStream &&
                   event.logicalKey == LogicalKeyboardKey.arrowDown) {
                 _openTvPlayerControlSheet();
@@ -6140,14 +7870,38 @@ class _PlayerScreenState extends State<PlayerScreen>
             }
             return KeyEventResult.handled;
           }
+          if (event.logicalKey == LogicalKeyboardKey.channelUp) {
+            if (_isLiveStream && _hasLiveChannelCatalog) {
+              _stepLiveChannel(1);
+            } else {
+              _stepEpisode(1);
+            }
+            return KeyEventResult.handled;
+          }
+          if (event.logicalKey == LogicalKeyboardKey.channelDown) {
+            if (_isLiveStream && _hasLiveChannelCatalog) {
+              _stepLiveChannel(-1);
+            } else {
+              _stepEpisode(-1);
+            }
+            return KeyEventResult.handled;
+          }
           if (event.logicalKey == LogicalKeyboardKey.keyN ||
               event.logicalKey == LogicalKeyboardKey.pageDown) {
-            _stepEpisode(1);
+            if (_isLiveStream && _hasLiveChannelCatalog) {
+              _stepLiveChannel(1);
+            } else {
+              _stepEpisode(1);
+            }
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.keyP ||
               event.logicalKey == LogicalKeyboardKey.pageUp) {
-            _stepEpisode(-1);
+            if (_isLiveStream && _hasLiveChannelCatalog) {
+              _stepLiveChannel(-1);
+            } else {
+              _stepEpisode(-1);
+            }
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.space ||
@@ -6387,13 +8141,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   },
                                   onSwitchDevice: () => _handleCastTap(null),
                                   onExitCast: _handleExitCast,
-                                  onPreviousEpisode: _episodeIndex > 0
-                                      ? () => _stepEpisode(-1)
-                                      : null,
-                                  onNextEpisode: _episodeIndex <
-                                          _currentLine.episodes.length - 1
-                                      ? () => _stepEpisode(1)
-                                      : null,
+                                  onPreviousEpisode:
+                                      _adjacentVisibleEpisodeIndex(-1) != null
+                                          ? () => _stepEpisode(-1)
+                                          : null,
+                                  onNextEpisode:
+                                      _adjacentVisibleEpisodeIndex(1) != null
+                                          ? () => _stepEpisode(1)
+                                          : null,
                                   onOpenEpisodes:
                                       _currentLine.episodes.length > 1
                                           ? _showEpisodesSheet
@@ -6760,13 +8515,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   },
                                   onSwitchDevice: () => _handleCastTap(null),
                                   onExitCast: _handleExitCast,
-                                  onPreviousEpisode: _episodeIndex > 0
-                                      ? () => _stepEpisode(-1)
-                                      : null,
-                                  onNextEpisode: _episodeIndex <
-                                          _currentLine.episodes.length - 1
-                                      ? () => _stepEpisode(1)
-                                      : null,
+                                  onPreviousEpisode:
+                                      _adjacentVisibleEpisodeIndex(-1) != null
+                                          ? () => _stepEpisode(-1)
+                                          : null,
+                                  onNextEpisode:
+                                      _adjacentVisibleEpisodeIndex(1) != null
+                                          ? () => _stepEpisode(1)
+                                          : null,
                                   onOpenEpisodes: _showEpisodesSheet,
                                   onOpenLines: _lines.length > 1
                                       ? _showLinesSheet
@@ -8172,20 +9928,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           onTap: () {
                             if (selected) return;
                             HapticFeedback.selectionClick();
-                            _failedLinesForEpisode.clear();
-                            final keepPos = _position.inMilliseconds >= 1000
-                                ? _position.inMilliseconds
-                                : _lastKnownPositionMs;
-                            _saveProgress(immediate: true, syncImmediate: false);
-                            setState(() {
-                              _lineIndex = idx;
-                              _episodeIndex = CspBridge.matchEpisodeIndexInLine(
-                                _lines[idx],
-                                _currentEpisode.name,
-                                _episodeIndex,
-                              );
-                            });
-                            _openCurrentEpisode(resumeMs: keepPos);
+                            _switchToLineWithConflictGuard(idx);
                           },
                           child: Container(
                             padding: const EdgeInsets.symmetric(
@@ -8369,6 +10112,33 @@ class _PlayerScreenState extends State<PlayerScreen>
                 _openCurrentEpisode();
               },
             ),
+            if (_canStepLiveChannel)
+              AppleCapsuleButton(
+                key: const ValueKey('live-error-next-channel'),
+                label: '下一台',
+                icon: CupertinoIcons.forward_end_fill,
+                compact: true,
+                onPressed: () => _stepLiveChannel(1),
+              ),
+            if (_isWindowsPlayerPlatform && widget.debugPlayer == null)
+              AppleCapsuleButton(
+                label: _videoKernel.isMdk ? '切回 MPV 重试' : '切换 MDK 核显重试',
+                icon: CupertinoIcons.desktopcomputer,
+                compact: true,
+                onPressed: () {
+                  _failedLinesForEpisode.clear();
+                  _failedLiveEpisodes.clear();
+                  _failedQualityUrls.clear();
+                  unawaited(
+                    _switchWindowsPlaybackEngine(
+                      _videoKernel.isMdk
+                          ? WindowsPlaybackEngine.mpv
+                          : WindowsPlaybackEngine.mdk,
+                      persist: false,
+                    ),
+                  );
+                },
+              ),
             if (_qualityChoices.length > 1)
               AppleCapsuleButton(
                 label: '切换画质 (${_qualityChoices.length})',
@@ -8670,6 +10440,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
       return _buildWindowsChrome(context);
+    }
+    if (_isMacosPlayerPlatform) {
+      return _buildMacosChrome(context);
     }
     final size = MediaQuery.sizeOf(context);
     final isLandscape = size.width > size.height;
@@ -9166,6 +10939,17 @@ class _PlayerScreenState extends State<PlayerScreen>
           label: '音轨选择',
           onTap: () => closeAndRun(_showAudioTracksSheet),
         ),
+        if (_isWindowsPlayerPlatform)
+          DesktopMoreMenuRow(
+            key: const ValueKey('windows-more-engine-switch'),
+            icon: CupertinoIcons.desktopcomputer,
+            label: '播放引擎',
+            valueText: _windowsEngine == WindowsPlaybackEngine.mdk
+                ? 'MDK 核显'
+                : 'MPV 旗舰',
+            active: _windowsEngine == WindowsPlaybackEngine.mdk,
+            onTap: () => closeAndRun(_showWindowsEngineSheet),
+          ),
         DesktopMoreMenuRow(
           icon: CupertinoIcons.slider_horizontal_3,
           label: '播放策略',
@@ -9319,8 +11103,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         _scheduleHide();
       },
       onMuteToggle: _toggleDesktopMute,
-      hasPrevEpisode: _episodeIndex > 0,
-      hasNextEpisode: _episodeIndex < _currentLine.episodes.length - 1,
+      hasPrevEpisode: _adjacentVisibleEpisodeIndex(-1) != null,
+      hasNextEpisode: _adjacentVisibleEpisodeIndex(1) != null,
       onPrevEpisode: () => _stepEpisode(-1),
       onNextEpisode: () => _stepEpisode(1),
       moreControlsOpen: _windowsMoreControls,
@@ -9398,6 +11182,106 @@ class _PlayerScreenState extends State<PlayerScreen>
         _scheduleHide();
       },
       onToggleExpand: _toggleOrientation,
+      onBottomControlsHeightChanged: _handleDesktopBottomControlsHeightChanged,
+    );
+  }
+
+  /// macOS desktop cinema player HUD:
+  /// - Reuses [DesktopPlayerHud] with easy-to-click full-width progress bar,
+  ///   inline volume + wheel volume, keyboard hold scrub preview, subtitles,
+  ///   4-tier Anime4K, compact anchored "More" popover, and native fullscreen.
+  /// - Adds windowed top clearance (`28pt`) so the Back button & title never
+  ///   collide with macOS traffic-light buttons; clears automatically in
+  ///   native fullscreen.
+  /// - Deliberately keeps Windows HDR (`videoQualityVisible`) and vocal boost
+  ///   (`audioLoudnessVisible`) hidden on macOS pending Mac output/power eval.
+  Widget _buildMacosChrome(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final scale = (width / 1280).clamp(.78, 1.0);
+    final isFullscreen = _desktopWindow?.fullscreen == true;
+    return Theme(
+      data: Theme.of(context).copyWith(brightness: Brightness.dark),
+      child: CupertinoTheme(
+        data: CupertinoTheme.of(context).copyWith(brightness: Brightness.dark),
+        child: Builder(
+          builder: (darkContext) => DesktopPlayerHud(
+            embedded: widget.embedded,
+            topSafeInset: (!widget.embedded && !isFullscreen) ? 28.0 : 0.0,
+            title: _displayTitle,
+            playing: _playing,
+            isLive: _isLiveStream,
+            isFullscreen: isFullscreen,
+            normalSpeed: _normalSpeed,
+            volume: _engineVolume100,
+            volumeStream: _usingAvPlayer ? null : _safePlayerVolumeStream(),
+            onVolumeChanged: (v) {
+              final next = v.clamp(0.0, 100.0);
+              _engineSetVolume100(next);
+              if (mounted) setState(() {});
+              _showHud('音量 ${next.round()}%');
+              _scheduleHide();
+            },
+            onMuteToggle: _toggleDesktopMute,
+            hasPrevEpisode: _adjacentVisibleEpisodeIndex(-1) != null,
+            hasNextEpisode: _adjacentVisibleEpisodeIndex(1) != null,
+            onPrevEpisode: () => _stepEpisode(-1),
+            onNextEpisode: () => _stepEpisode(1),
+            moreControlsOpen: _windowsMoreControls,
+            sleepTimerActive: _sleepTimer.isActive,
+            sleepTimerLabel: _sleepTimer.shortStatusLabel,
+            danmuEnabled: widget.onToggleDanmu != null
+                ? widget.danmuEnabled
+                : (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled),
+            onDanmuToggle: OhosRuntime.isOhos ? null : _handleDanmuToggle,
+            onDanmuSettingsTap:
+                OhosRuntime.isOhos ? null : _handleDanmuSettingsTap,
+            anime4kVisible: _anime4kAvailable,
+            anime4kActive: _anime4kController.preset != Anime4kPreset.off,
+            anime4kLabel: _anime4kController.preset == Anime4kPreset.off
+                ? 'Anime4K'
+                : 'Anime4K·${_anime4kController.preset.labelZh}',
+            onAnime4kTap: _anime4kAvailable ? _showAnime4kSheet : null,
+            videoQualityVisible: false,
+            audioLoudnessVisible: false,
+            topHeader: _buildTopHeader(
+              darkContext,
+              true,
+              scale,
+              includeLockButton: false,
+              includeLiveFullscreen: false,
+            ),
+            lockButton: widget.embedded ? null : _buildDesktopLockButton(scale),
+            progressBar: _isLiveStream
+                ? null
+                : _buildDesktopFullWidthProgressBar(darkContext, scale),
+            transportButtons: _buildCenterTransportButtons(scale),
+            moreToolsDock: _buildDesktopMoreMenuPopover(darkContext, width),
+            onExit: _exitPlayer,
+            onPlayPause: _enginePlayOrPause,
+            onVolumeTap: _showWindowsVolume,
+            onEpisodesTap: _showEpisodesSheet,
+            onSpeedTap: _showSpeedSheet,
+            onSubtitlesTap: _showSubtitleTracksSheet,
+            onSleepTimerTap: _showSleepTimerSheet,
+            onToggleMore: () {
+              setState(() => _windowsMoreControls = !_windowsMoreControls);
+              if (_windowsMoreControls && !widget.embedded) {
+                _hideTimer?.cancel();
+              } else {
+                _scheduleHide();
+              }
+            },
+            onCloseMore: () {
+              if (!_windowsMoreControls) return;
+              setState(() => _windowsMoreControls = false);
+              _scheduleHide();
+            },
+            onToggleExpand: _toggleOrientation,
+            onBottomControlsHeightChanged:
+                _handleDesktopBottomControlsHeightChanged,
+          ),
+        ),
+      ),
     );
   }
 
@@ -9519,14 +11403,36 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ],
               ),
               SizedBox(height: 2 * scale),
-              Text(
-                '${_currentEpisode.name} · ${_currentLine.name}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: AppleColors.labelSecondary,
-                  fontSize: 12 * scale,
-                ),
+              Builder(
+                builder: (_) {
+                  final epInfo = _currentScrapedEpisodeInfo();
+                  final rawFile = epInfo != null &&
+                          epInfo.originalFileName.isNotEmpty
+                      ? epInfo.originalFileName
+                      : _currentEpisode.name;
+                  final parts = <String>[
+                    if (epInfo != null && !epInfo.isSpecial)
+                      epInfo.formattedSeasonEpisode
+                    else if (epInfo != null && epInfo.isSpecial)
+                      epInfo.displayLabel,
+                    if (rawFile.isNotEmpty &&
+                        (epInfo == null ||
+                            rawFile != epInfo.formattedSeasonEpisode &&
+                                rawFile != epInfo.displayLabel))
+                      rawFile,
+                    _currentLine.name,
+                  ];
+                  return Text(
+                    parts.join(' · '),
+                    key: const Key('player-header-episode-label'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: AppleColors.labelSecondary,
+                      fontSize: 12 * scale,
+                    ),
+                  );
+                },
               ),
             ],
           ),
@@ -9906,13 +11812,13 @@ class _PlayerScreenState extends State<PlayerScreen>
         () => _setScreenLocked(true),
         shortLabel: '锁定',
       ),
-      if (_episodeIndex > 0)
+      if (_adjacentVisibleEpisodeIndex(-1) != null)
         _PlayerAction(
           CupertinoIcons.backward_end_fill,
           live ? '上源' : '上集',
           () => _stepEpisode(-1),
         ),
-      if (_episodeIndex < _currentLine.episodes.length - 1)
+      if (_adjacentVisibleEpisodeIndex(1) != null)
         _PlayerAction(
           CupertinoIcons.forward_end_fill,
           live ? '下源' : '下集',
@@ -10234,6 +12140,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         _showHud('画面：适应屏幕');
       }
     });
+    if (!_usingAvPlayer) {
+      unawaited(_syncNativeSubtitleState());
+    }
   }
 
   void _toggleAutoNext() {
@@ -10882,6 +12791,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         );
         if (!mounted || session != _playSession || picked == null) return;
         _player.setSubtitleTrack(picked);
+        _scheduleSyncNativeSubtitleState();
         if (picked == SubtitleTrack.no()) {
           _showHud('已关闭内嵌字幕');
         } else {
@@ -10975,6 +12885,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 onTap: () {
                   Navigator.of(ctx).pop();
                   _player.setSubtitleTrack(SubtitleTrack.no());
+                  _scheduleSyncNativeSubtitleState();
                   _showHud('已关闭内嵌字幕');
                 },
               ),
@@ -10997,6 +12908,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   onTap: () {
                     Navigator.of(ctx).pop();
                     _player.setSubtitleTrack(t);
+                    _scheduleSyncNativeSubtitleState();
                     _showHud('已切换字幕：${label.isEmpty ? t.id : label}');
                   },
                 );
@@ -11117,6 +13029,148 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  Future<void> _switchWindowsPlaybackEngine(
+    WindowsPlaybackEngine next, {
+    bool persist = true,
+    String? customToast,
+  }) async {
+    if (!_isWindowsPlayerPlatform) return;
+    if (widget.debugPlayer != null) {
+      if (persist) {
+        await widget.storage.setWindowsPlaybackEngine(next.id);
+      }
+      if (!mounted) return;
+      setState(() => _windowsEngine = next);
+      _showHud(customToast ?? '已切换至 ${next.labelZh}');
+      return;
+    }
+    if (_switchingWindowsEngine) return;
+    final alreadyTarget =
+        _windowsEngine == next &&
+        _videoKernel.isMdk == (next == WindowsPlaybackEngine.mdk);
+    if (alreadyTarget) return;
+    _switchingWindowsEngine = true;
+    final keepPos = _position.inMilliseconds >= 1000
+        ? _position.inMilliseconds
+        : _lastKnownPositionMs;
+    final keepVolume = _engineVolume100;
+    final session = ++_playSession;
+    _allowEvents = false;
+    if (next == WindowsPlaybackEngine.mdk) {
+      _mdkAutoFallbackTriggered = false;
+    }
+    try {
+      if (persist) {
+        await widget.storage.setWindowsPlaybackEngine(next.id);
+      }
+      for (final sub in _playerSubscriptions) {
+        unawaited(sub.cancel());
+      }
+      _playerSubscriptions.clear();
+      final oldPlayer = _player;
+      await _changeMedia(session, () async {
+        try {
+          if (!OhosRuntime.isOhos &&
+              _anime4kController.isAvailableForPlayer(oldPlayer)) {
+            await _anime4kController.resetSession(oldPlayer);
+          }
+        } catch (_) {}
+        try {
+          await oldPlayer.stop();
+        } catch (_) {}
+        if (!_playerDisposed) {
+          _playerDisposed = true;
+          try {
+            await oldPlayer.dispose();
+          } catch (_) {}
+        }
+      });
+      if (!mounted || session != _playSession) return;
+      final nextKernel = VideoKernel.create(
+        debugVideoSurface: widget.debugVideoSurface,
+        hwdec: _hardwareDecoder(_playerKernel),
+        windowsEngine: next,
+        kernelStrategy: _playerKernel,
+      );
+      _videoKernel = nextKernel;
+      _player = nextKernel.player;
+      _playerDisposed = false;
+      _attachPlayerStreams();
+      setState(() {
+        _windowsEngine = next;
+        _loading = true;
+        _playing = false;
+        _buffering = false;
+        _playbackError = '';
+        _playbackErrorCause = null;
+        _videoWidth = 0;
+        _videoHeight = 0;
+        _videoCodec = '';
+        _audioCodec = '';
+      });
+      _playerConfiguration = _applyPlayerKernel(_playerKernel);
+      await _playerConfiguration;
+      if (!mounted || session != _playSession) return;
+      await _player.setVolume(keepVolume);
+      if (!OhosRuntime.isOhos &&
+          !_videoKernel.isMdk &&
+          _anime4kController.isAvailableForPlayer(_player)) {
+        unawaited(_initAnime4kAfterKernel());
+      }
+      _showHud(customToast ?? '已切换至 ${next.labelZh}，正在续播…');
+      unawaited(_openCurrentEpisode(resumeMs: keepPos));
+    } finally {
+      _switchingWindowsEngine = false;
+    }
+  }
+
+  void _showWindowsEngineSheet() {
+    if (!_isWindowsPlayerPlatform) return;
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    const engines = <WindowsPlaybackEngine>[
+      WindowsPlaybackEngine.mdk,
+      WindowsPlaybackEngine.mpv,
+    ];
+    showAppleModalSheet<void>(
+      context: context,
+      title: '切换 Windows 播放引擎',
+      maxWidth: 500,
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: engines.map((engine) {
+              final selected = _windowsEngine == engine;
+              return AppleGroupedTile(
+                key: ValueKey('player-engine-option-${engine.id}'),
+                icon: engine == WindowsPlaybackEngine.mdk
+                    ? CupertinoIcons.bolt_fill
+                    : CupertinoIcons.sparkles,
+                iconBgColor: selected
+                    ? AppleColors.systemBlue
+                    : AppleColors.groupedTertiary,
+                title: engine.labelZh,
+                subtitle: engine.descriptionZh,
+                trailing: selected
+                    ? const Icon(
+                        CupertinoIcons.checkmark_alt,
+                        color: AppleColors.systemBlue,
+                        size: 18,
+                      )
+                    : null,
+                onTap: () async {
+                  Navigator.of(ctx).pop();
+                  await _switchWindowsPlaybackEngine(engine);
+                },
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _openTvPlayerControlSheet() {
     unawaited(
       showTvPlayerControlSheet(
@@ -11125,10 +13179,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         currentSpeed: _normalSpeed,
         onSpeedSelected: (nextSpeed) {
           if (!mounted) return;
-          setState(() => _normalSpeed = nextSpeed);
-          widget.storage.setPlaySpeed(nextSpeed);
+          final normalized = _normalizePlaybackSpeed(nextSpeed);
+          setState(() => _normalSpeed = normalized);
+          widget.storage.setPlaySpeed(normalized);
           final speedLabel =
-              nextSpeed.toString().replaceAll(RegExp(r'\.0$'), '');
+              normalized.toString().replaceAll(RegExp(r'\.0$'), '');
           _showHud('倍速 ${speedLabel}x');
         },
         currentFit: _fit,
@@ -11145,7 +13200,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _showSpeedSheet({Rect? anchorRect}) {
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
-    const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+    final speeds = _supportedPlaybackSpeeds;
     if (_canUseNativeIosSheet) {
       final session = _playSession;
       unawaited(() async {
@@ -12387,21 +14442,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   return;
                 }
                 Navigator.of(ctx).pop();
-                _failedLinesForEpisode.clear();
-                _failedLiveEpisodes.clear();
-                final keepPos = _position.inMilliseconds >= 1000
-                    ? _position.inMilliseconds
-                    : _lastKnownPositionMs;
-                _saveProgress(immediate: true, syncImmediate: false);
-                setState(() {
-                  _lineIndex = i;
-                  _episodeIndex = CspBridge.matchEpisodeIndexInLine(
-                    _lines[i],
-                    _currentEpisode.name,
-                    _episodeIndex,
-                  );
-                });
-                _openCurrentEpisode(resumeMs: keepPos);
+                _switchToLineWithConflictGuard(i);
               },
             );
             return lineReason != null
@@ -12430,20 +14471,40 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  void _showEpisodesSheet({Rect? anchorRect}) {
+  void _showEpisodesSheet({
+    Rect? anchorRect,
+    int? initialLineIndex,
+    String? initialNotice,
+  }) {
     _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
     final parses = widget.storage.loadSavedConfig()?.parses ?? const [];
     String? episodeChecker(CmsEpisode ep) =>
         _episodeUnavailableReason(ep, parses);
+    final override = widget.storage.getSeriesScrapeOverride(
+      widget.site.key,
+      widget.video.id,
+      isPrivate: widget.site.isEffectivelyPrivate,
+    );
+    final scrapeResults = _isLiveStream
+        ? null
+        : List<LineEpisodeScrapeResult>.generate(
+            _lines.length,
+            (i) => _scrapeLineEpisodesFor(_lines[i], override: override),
+            growable: false,
+          );
+    final canCalibrate = !_isLiveStream && !widget.site.isEffectivelyPrivate;
+    final startLineIndex = (initialLineIndex ?? _lineIndex)
+        .clamp(0, math.max(0, _lines.length - 1))
+        .toInt();
     Widget buildPicker(BuildContext ctx) => PlayerEpisodePickerSheet(
       lines: _lines,
-      initialLineIndex: _lineIndex,
+      initialLineIndex: startLineIndex,
       activeLineIndex: _lineIndex,
       activeEpisodeIndex: _episodeIndex,
       episodeUnavailableReason: episodeChecker,
-      scrapeOverride: _episodeScrapeOverride,
+      episodeScrapeOverride: _episodeScrapeOverride,
       seriesTitle: _effectiveScrapeTitle,
       onOpenScrape: _isLiveStream
           ? null
@@ -12451,12 +14512,35 @@ class _PlayerScreenState extends State<PlayerScreen>
               Navigator.of(ctx).pop();
               unawaited(_showEpisodeScrapeSheet());
             },
+      lineScrapeResults: scrapeResults,
+      scrapeOverride: override,
+      initialNotice: initialNotice,
+      onCalibrateCurrent: canCalibrate
+          ? () {
+              Navigator.of(ctx).pop();
+              unawaited(_openPlayerSeriesScrapeSheet());
+            }
+          : null,
       onSelect: (lineIdx, epIdx) {
         Navigator.of(ctx).pop();
         _failedLinesForEpisode.clear();
         _failedLiveEpisodes.clear();
-        final sameEpisode = epIdx == _episodeIndex;
-        final keepPos = sameEpisode
+        final curInfo = _currentScrapedEpisodeInfo(override: override);
+        final nextInfo = (scrapeResults != null &&
+                lineIdx >= 0 &&
+                lineIdx < scrapeResults.length)
+            ? scrapeResults[lineIdx].infoForOriginalIndex(epIdx)
+            : null;
+        final sameLogicalEpisode = (lineIdx == _lineIndex && epIdx == _episodeIndex) ||
+            (curInfo != null &&
+                nextInfo != null &&
+                !curInfo.needsConfirmation &&
+                !nextInfo.needsConfirmation &&
+                curInfo.resolvedEpisodeNumber != null &&
+                curInfo.resolvedEpisodeNumber ==
+                    nextInfo.resolvedEpisodeNumber &&
+                curInfo.seasonNumber == nextInfo.seasonNumber);
+        final keepPos = sameLogicalEpisode
             ? (_position.inMilliseconds >= 1000
                   ? _position.inMilliseconds
                   : _lastKnownPositionMs)
@@ -12539,9 +14623,13 @@ class PlayerEpisodePickerSheet extends StatefulWidget {
   final int activeLineIndex;
   final int activeEpisodeIndex;
   final String? Function(CmsEpisode episode)? episodeUnavailableReason;
-  final EpisodeScrapeOverride scrapeOverride;
+  final EpisodeScrapeOverride episodeScrapeOverride;
   final String seriesTitle;
   final VoidCallback? onOpenScrape;
+  final List<LineEpisodeScrapeResult>? lineScrapeResults;
+  final SeriesScrapeOverride? scrapeOverride;
+  final String? initialNotice;
+  final VoidCallback? onCalibrateCurrent;
   final void Function(int lineIndex, int episodeIndex) onSelect;
 
   const PlayerEpisodePickerSheet({
@@ -12551,9 +14639,13 @@ class PlayerEpisodePickerSheet extends StatefulWidget {
     required this.activeLineIndex,
     required this.activeEpisodeIndex,
     this.episodeUnavailableReason,
-    this.scrapeOverride = const EpisodeScrapeOverride(),
+    this.episodeScrapeOverride = const EpisodeScrapeOverride(),
     this.seriesTitle = '',
     this.onOpenScrape,
+    this.lineScrapeResults,
+    this.scrapeOverride,
+    this.initialNotice,
+    this.onCalibrateCurrent,
     required this.onSelect,
   });
 
@@ -12586,6 +14678,7 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
         .clamp(0, math.max(0, widget.lines.length - 1))
         .toInt();
     _groupIndex = (widget.activeEpisodeIndex ~/ _groupSize);
+    _blockedEpisodeNotice = widget.initialNotice;
     _cachedLineBlockedReasons = _computeLineBlockedReasons();
   }
 
@@ -12636,19 +14729,50 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
     final episodes = _line.episodes;
     final scraped = EpisodeScraper.scrapeLine(
       episodes,
-      override: widget.scrapeOverride,
+      override: widget.episodeScrapeOverride,
       seriesTitle: widget.seriesTitle,
     );
-    final orderedVisible = _descending
-        ? scraped.visibleRawIndices.reversed.toList(growable: false)
-        : scraped.visibleRawIndices;
-    final total = orderedVisible.length;
+    final safeLineIdx = widget.lines.isEmpty
+        ? 0
+        : _previewLineIndex.clamp(0, widget.lines.length - 1).toInt();
+    final lineScrape = (widget.lineScrapeResults != null &&
+            safeLineIdx < widget.lineScrapeResults!.length)
+        ? widget.lineScrapeResults![safeLineIdx]
+        : null;
+    final useEpisodeScraper =
+        !widget.episodeScrapeOverride.isDefault || lineScrape == null;
+    final List<int> orderedAll;
+    if (useEpisodeScraper) {
+      orderedAll = _descending
+          ? scraped.visibleRawIndices.reversed.toList(growable: false)
+          : List<int>.of(scraped.visibleRawIndices);
+    } else {
+      final sortByScraped = widget.scrapeOverride?.sortByScrapedEpisode ??
+          lineScrape.sourceOrderScrambled;
+      final hideSpecials = widget.scrapeOverride?.hideSpecials ?? false;
+      orderedAll = List<int>.of(
+        lineScrape.orderedIndices(
+          sortByScraped: sortByScraped,
+          hideSpecials: hideSpecials,
+        ),
+      );
+      if (safeLineIdx == widget.activeLineIndex &&
+          widget.activeEpisodeIndex >= 0 &&
+          widget.activeEpisodeIndex < episodes.length &&
+          !orderedAll.contains(widget.activeEpisodeIndex)) {
+        orderedAll.insert(0, widget.activeEpisodeIndex);
+      }
+    }
+    final total = orderedAll.length;
     final groupCount = total <= 0 ? 1 : ((total - 1) ~/ _groupSize) + 1;
     final safeGroup = _groupIndex.clamp(0, math.max(0, groupCount - 1)).toInt();
     final int startIdx = safeGroup * _groupSize;
     final int endIdx = math.min(startIdx + _groupSize, total);
 
-    final indices = orderedVisible.sublist(startIdx, endIdx);
+    final indices = orderedAll.sublist(startIdx, endIdx);
+    if (!useEpisodeScraper && _descending) {
+      indices.setAll(0, indices.reversed.toList(growable: false));
+    }
 
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
@@ -12657,9 +14781,6 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
         : (screenSize.width >= 580
             ? 4
             : (screenSize.width < 360 ? 2 : 3));
-    final safeLineIdx = widget.lines.isEmpty
-        ? 0
-        : _previewLineIndex.clamp(0, widget.lines.length - 1).toInt();
     final lineBlockedReason = safeLineIdx < _cachedLineBlockedReasons.length
         ? _cachedLineBlockedReasons[safeLineIdx]
         : null;
@@ -12778,6 +14899,46 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
               ),
             ),
             const SizedBox(width: 6),
+            if (widget.onCalibrateCurrent != null) ...[
+              GestureDetector(
+                key: const Key('player-episode-calibrate-btn'),
+                onTap: widget.onCalibrateCurrent,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 11,
+                    vertical: 7,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0x380A84FF),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: const Color(0x8060A5FA),
+                      width: 0.7,
+                    ),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        CupertinoIcons.sparkles,
+                        size: 13,
+                        color: Color(0xFF93C5FD),
+                      ),
+                      SizedBox(width: 4),
+                      Text(
+                        '识别／校准本集',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+            ],
             if (widget.onOpenScrape != null) ...[
               GestureDetector(
                 onTap: widget.onOpenScrape,
@@ -12787,12 +14948,12 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                     vertical: 7,
                   ),
                   decoration: BoxDecoration(
-                    color: !widget.scrapeOverride.isDefault
+                    color: !widget.episodeScrapeOverride.isDefault
                         ? const Color(0x330A84FF)
                         : const Color(0xCC26262C),
                     borderRadius: BorderRadius.circular(999),
                     border: Border.all(
-                      color: !widget.scrapeOverride.isDefault
+                      color: !widget.episodeScrapeOverride.isDefault
                           ? AppleColors.systemBlue
                           : const Color(0x30FFFFFF),
                       width: 0.65,
@@ -12982,13 +15143,31 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                       _previewLineIndex == widget.activeLineIndex &&
                       epIndex == widget.activeEpisodeIndex;
                   final parsed = _ParsedEpisodeLabel.parse(ep.name, epIndex);
-                  final numBadge = epInfo?.badgeLabel ??
-                      '#${(epIndex + 1).toString().padLeft(2, '0')}';
+                  final seriesEpInfo = lineScrape?.infoForOriginalIndex(epIndex);
+                  final numBadge = useEpisodeScraper
+                      ? (epInfo?.badgeLabel ??
+                          '#${(epIndex + 1).toString().padLeft(2, '0')}')
+                      : (seriesEpInfo != null
+                          ? seriesEpInfo.formattedSeasonEpisode
+                          : '#${(epIndex + 1).toString().padLeft(2, '0')}');
+                  final tileTitle = !useEpisodeScraper &&
+                          seriesEpInfo != null &&
+                          seriesEpInfo.originalFileName.isNotEmpty
+                      ? seriesEpInfo.originalFileName
+                      : parsed.title;
                   final badgeText = isUnavailable
                       ? '不可解析'
-                      : (parsed.sizeBadge.isNotEmpty
-                            ? parsed.sizeBadge
-                            : (epInfo?.qualityBadge ?? ''));
+                      : (useEpisodeScraper
+                          ? (parsed.sizeBadge.isNotEmpty
+                              ? parsed.sizeBadge
+                              : (epInfo?.qualityBadge ?? ''))
+                          : (seriesEpInfo != null &&
+                                  seriesEpInfo.hasManualOverride
+                              ? '已校准'
+                              : (seriesEpInfo != null &&
+                                      seriesEpInfo.qualityTag.isNotEmpty
+                                  ? seriesEpInfo.qualityTag
+                                  : parsed.sizeBadge)));
 
                   final tile = GestureDetector(
                     onTap: () {
@@ -13047,18 +15226,22 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                                 ),
                                 const SizedBox(width: 4),
                               ],
-                              Text(
-                                numBadge,
-                                style: TextStyle(
-                                  color: selected
-                                      ? const Color(0xE6FFFFFF)
-                                      : AppleColors.labelTertiary,
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w700,
+                              Expanded(
+                                child: Text(
+                                  numBadge,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: selected
+                                        ? const Color(0xE6FFFFFF)
+                                        : AppleColors.labelTertiary,
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.w700,
+                                  ),
                                 ),
                               ),
-                              const Spacer(),
-                              if (badgeText.isNotEmpty)
+                              if (badgeText.isNotEmpty) ...[
+                                const SizedBox(width: 4),
                                 Container(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 5.5,
@@ -13072,6 +15255,8 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                                   ),
                                   child: Text(
                                     badgeText,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
                                       color: selected
                                           ? Colors.white
@@ -13081,11 +15266,12 @@ class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
                                     ),
                                   ),
                                 ),
+                              ],
                             ],
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            parsed.title,
+                            tileTitle,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(

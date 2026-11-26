@@ -48,14 +48,8 @@ Future<void> showTvPlayerControlSheet({
 /// audio track switching, subtitle track switching (including native `SubtitleTrack.no()`),
 /// aspect ratio (`BoxFit.contain` / `cover` / `fill`), and live resolution badge.
 class TvPlayerControlSheet extends StatefulWidget {
-  static const List<double> supportedSpeeds = <double>[
-    0.75,
-    1.0,
-    1.25,
-    1.5,
-    1.75,
-    2.0,
-  ];
+  static const List<double> supportedSpeeds =
+      OhosPlatformPlayer.supportedSpeeds;
 
   final Player player;
   final double initialSpeed;
@@ -89,7 +83,9 @@ class _TvPlayerControlSheetState extends State<TvPlayerControlSheet> {
   @override
   void initState() {
     super.initState();
-    _speed = widget.initialSpeed;
+    _speed = widget.player.platform is OhosPlatformPlayer || OhosRuntime.isOhos
+        ? OhosPlatformPlayer.normalizeSupportedRate(widget.initialSpeed)
+        : widget.initialSpeed;
     _fit = widget.initialFit;
     void refresh(dynamic _) {
       if (mounted) {
@@ -102,6 +98,14 @@ class _TvPlayerControlSheetState extends State<TvPlayerControlSheet> {
     _subs.add(widget.player.stream.tracks.listen(refresh));
     _subs.add(widget.player.stream.track.listen(refresh));
     _subs.add(widget.player.stream.buffering.listen(refresh));
+    if (widget.player.platform is OhosPlatformPlayer) {
+      _subs.add(widget.player.stream.rate.listen((r) {
+        final normalized = OhosPlatformPlayer.normalizeSupportedRate(r);
+        if (mounted && (_speed - normalized).abs() >= 0.01) {
+          setState(() => _speed = normalized);
+        }
+      }));
+    }
   }
 
   @override
@@ -301,7 +305,7 @@ class _TvPlayerControlSheetState extends State<TvPlayerControlSheet> {
                             final label = _formatSpeedLabel(s);
                             return TvFocusPill(
                               autofocus: isSelected ||
-                                  (i == 1 &&
+                                  ((s - 1.0).abs() < 0.01 &&
                                       !TvPlayerControlSheet.supportedSpeeds.any(
                                         (v) => (_speed - v).abs() < 0.01,
                                       )),

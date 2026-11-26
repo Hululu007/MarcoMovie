@@ -64,6 +64,11 @@ public final class LiteCatalog {
         public Object ext;
         public boolean extTooLarge;
         public boolean requiresParser;
+        public boolean explicitSitePlayUrl;
+        public int playUrlParseType = -1;
+        public final Map<String, String> playUrlHeaders = new LinkedHashMap<String, String>();
+        public final List<Parse> jsonParses = new ArrayList<Parse>();
+        public String unsupportedParseReason = "";
 
         public String siteId() {
             String k =
@@ -152,6 +157,9 @@ public final class LiteCatalog {
 
         public String playbackHint() {
             if (requiresParser && (playUrl == null || playUrl.trim().length() == 0)) {
+                if (unsupportedParseReason != null && unsupportedParseReason.length() > 0) {
+                    return unsupportedParseReason;
+                }
                 return capabilityReason(STATUS_PARSER_REQUIRED);
             }
             return "";
@@ -177,7 +185,216 @@ public final class LiteCatalog {
         }
 
         public String limitation() {
-            return capabilityReason(capabilityStatus());
+            String status = capabilityStatus();
+            if (STATUS_NEEDS_JAR.equals(status) && isPythonApi(api)) {
+                return "此来源需要 Python 插件运行环境，基础版尚未支持";
+            }
+            return capabilityReason(status);
+        }
+    }
+
+    public static final class RecordSiteResolution {
+        public final Site matchedSite;
+        public final List<Site> ambiguousCandidates;
+        public final boolean synthesizedFallback;
+
+        public RecordSiteResolution(
+                Site matchedSite, List<Site> ambiguousCandidates, boolean synthesizedFallback) {
+            this.matchedSite = matchedSite;
+            this.ambiguousCandidates =
+                    ambiguousCandidates == null || ambiguousCandidates.isEmpty()
+                            ? Collections.<Site>emptyList()
+                            : Collections.unmodifiableList(
+                                    new ArrayList<Site>(ambiguousCandidates));
+            this.synthesizedFallback = synthesizedFallback;
+        }
+    }
+
+    public static RecordSiteResolution resolveSiteForRecord(
+            List<Site> availableSites, String siteKey, String siteApi, String siteName) {
+        return resolveSiteForRecord(availableSites, siteKey, siteApi, siteName, true);
+    }
+
+    public static RecordSiteResolution resolveSiteForRecord(
+            List<Site> availableSites,
+            String siteKey,
+            String siteApi,
+            String siteName,
+            boolean siteKeyUnambiguouslyUnique) {
+        String sk = siteKey == null ? "" : siteKey.trim();
+        String sa = siteApi == null ? "" : siteApi.trim();
+        String sn = siteName == null ? "" : siteName.trim();
+        if (sa.length() > 0) {
+            if (availableSites != null) {
+                for (int i = 0; i < availableSites.size(); i++) {
+                    Site s = availableSites.get(i);
+                    if (s != null
+                            && s.supported
+                            && sk.equals(s.key == null ? "" : s.key.trim())
+                            && sa.equals(s.api == null ? "" : s.api.trim())) {
+                        return new RecordSiteResolution(s, null, false);
+                    }
+                }
+                for (int i = 0; i < availableSites.size(); i++) {
+                    Site s = availableSites.get(i);
+                    if (s != null
+                            && s.supported
+                            && sa.equals(s.api == null ? "" : s.api.trim())) {
+                        return new RecordSiteResolution(s, null, false);
+                    }
+                }
+            }
+            boolean validApi = sa.startsWith("emby://account/");
+            if (!validApi) {
+                try {
+                    http(sa);
+                    validApi = true;
+                } catch (Exception ignored) {
+                }
+            }
+            if (validApi) {
+                Site fallback = new Site();
+                fallback.key = sk;
+                fallback.originalKey = sk;
+                fallback.name = sn.length() > 0 ? sn : "已存片源";
+                fallback.api = sa;
+                fallback.originalApi = sa;
+                fallback.type =
+                        sa.startsWith("emby://") ? 1 : (hasXmlInUrlPath(sa) ? 0 : 1);
+                fallback.supported = true;
+                return new RecordSiteResolution(fallback, null, true);
+            }
+            return new RecordSiteResolution(null, null, false);
+        }
+        List<Site> matches = new ArrayList<Site>();
+        if (availableSites != null && sk.length() > 0) {
+            for (int i = 0; i < availableSites.size(); i++) {
+                Site s = availableSites.get(i);
+                if (s != null
+                        && s.supported
+                        && sk.equals(s.key == null ? "" : s.key.trim())) {
+                    matches.add(s);
+                }
+            }
+        }
+        if (matches.size() == 1) {
+            if (siteKeyUnambiguouslyUnique) {
+                return new RecordSiteResolution(matches.get(0), null, false);
+            }
+            return new RecordSiteResolution(null, matches, false);
+        }
+        if (matches.size() > 1) {
+            return new RecordSiteResolution(null, matches, false);
+        }
+        return new RecordSiteResolution(null, null, false);
+    }
+
+    public static Site resolveSelectedSite(
+            List<Site> availableSites,
+            Site previousSelected,
+            String savedSelectedKey,
+            String savedSelectedApi) {
+        if (availableSites == null || availableSites.isEmpty()) return null;
+        if (previousSelected != null) {
+            String prevId = previousSelected.siteId();
+            String prevKey = previousSelected.key == null ? "" : previousSelected.key;
+            String prevApi = previousSelected.api == null ? "" : previousSelected.api;
+            for (int i = 0; i < availableSites.size(); i++) {
+                Site s = availableSites.get(i);
+                if (s != null && s.supported && prevId.equals(s.siteId())) {
+                    return s;
+                }
+            }
+            if (prevKey.length() > 0 && prevApi.length() > 0) {
+                for (int i = 0; i < availableSites.size(); i++) {
+                    Site s = availableSites.get(i);
+                    if (s != null
+                            && s.supported
+                            && prevKey.equals(s.key)
+                            && prevApi.equals(s.api)) {
+                        return s;
+                    }
+                }
+            }
+            if (prevKey.length() > 0) {
+                for (int i = 0; i < availableSites.size(); i++) {
+                    Site s = availableSites.get(i);
+                    if (s != null && s.supported && prevKey.equals(s.key)) {
+                        return s;
+                    }
+                }
+            }
+        }
+        String sk = savedSelectedKey == null ? "" : savedSelectedKey.trim();
+        String sa = savedSelectedApi == null ? "" : savedSelectedApi.trim();
+        if (sk.length() > 0 && sa.length() > 0) {
+            for (int i = 0; i < availableSites.size(); i++) {
+                Site s = availableSites.get(i);
+                if (s != null && s.supported && sk.equals(s.key) && sa.equals(s.api)) {
+                    return s;
+                }
+            }
+        }
+        if (sk.length() > 0) {
+            for (int i = 0; i < availableSites.size(); i++) {
+                Site s = availableSites.get(i);
+                if (s != null && s.supported && sk.equals(s.key)) {
+                    return s;
+                }
+            }
+        }
+        for (int i = 0; i < availableSites.size(); i++) {
+            Site s = availableSites.get(i);
+            if (s != null && s.supported) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    public static boolean sameSiteBinding(Site a, Site b) {
+        if (a == b) return true;
+        if (a == null || b == null) return false;
+        String ka = a.key == null ? "" : a.key;
+        String kb = b.key == null ? "" : b.key;
+        String aa = a.api == null ? "" : a.api;
+        String ab = b.api == null ? "" : b.api;
+        return ka.equals(kb) && aa.equals(ab) && a.type == b.type;
+    }
+
+    public static final class Parse {
+        public String name = "";
+        public String url = "";
+        public int type;
+        public final Map<String, String> headers = new LinkedHashMap<String, String>();
+        public final List<String> flags = new ArrayList<String>();
+    }
+
+    public static final class ResolvedPlay {
+        public final String url;
+        public final Map<String, String> headers;
+        public final String mode;
+        public final String parseName;
+
+        public ResolvedPlay(String url, Map<String, String> headers, String mode, String parseName) {
+            this.url = url == null ? "" : url;
+            this.headers =
+                    headers == null || headers.isEmpty()
+                            ? Collections.<String, String>emptyMap()
+                            : Collections.unmodifiableMap(
+                                    new LinkedHashMap<String, String>(headers));
+            this.mode = mode == null ? "direct" : mode;
+            this.parseName = parseName == null ? "" : parseName;
+        }
+    }
+
+    public static final class FetchResult {
+        public final String body;
+        public final String finalUrl;
+
+        public FetchResult(String body, String finalUrl) {
+            this.body = body == null ? "" : body;
+            this.finalUrl = finalUrl == null ? "" : finalUrl;
         }
     }
 
@@ -189,18 +406,642 @@ public final class LiteCatalog {
         public String name = "";
         public String url = "";
         public final Map<String, String> headers = new LinkedHashMap<String, String>();
+        public final List<LiveGroup> inlineGroups = new ArrayList<LiveGroup>();
     }
 
     public static final class LiveChannel {
         public String name = "";
         public String group = "";
         public final List<String> urls = new ArrayList<String>();
+        public final List<Map<String, String>> lineHeaders = new ArrayList<Map<String, String>>();
         public final Map<String, String> headers = new LinkedHashMap<String, String>();
+
+        public Map<String, String> headersForLine(int index) {
+            if (index >= 0 && index < lineHeaders.size()) {
+                return lineHeaders.get(index);
+            }
+            return headers;
+        }
     }
 
     public static final class LiveGroup {
         public String name = "";
         public final List<LiveChannel> channels = new ArrayList<LiveChannel>();
+    }
+
+    public static String cmsAction(Site site) {
+        return site != null && site.type == 0 ? "videolist" : "detail";
+    }
+
+    public static String cmsCategoriesUrl(Site site) throws Exception {
+        return query(site.api, "ac", "list");
+    }
+
+    public static String cmsListUrl(Site site, String categoryId, String keyword, int page)
+            throws Exception {
+        String ac = cmsAction(site);
+        String pg = String.valueOf(Math.max(1, page));
+        if (categoryId != null && categoryId.length() > 0) {
+            return query(site.api, "ac", ac, "pg", pg, "t", categoryId);
+        }
+        if (keyword != null && keyword.length() > 0) {
+            return query(site.api, "ac", ac, "pg", pg, "wd", keyword);
+        }
+        return query(site.api, "ac", ac, "pg", pg);
+    }
+
+    public static String cmsDetailUrl(Site site, String videoId) throws Exception {
+        return query(site.api, "ac", cmsAction(site), "ids", videoId);
+    }
+
+    public static boolean isDirectStreamUrl(String value) {
+        if (value == null) return false;
+        String trimmed = value.trim();
+        if (trimmed.length() == 0) return false;
+        try {
+            http(trimmed);
+        } catch (Exception invalid) {
+            return false;
+        }
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        String path = lower.split("[?#]", 2)[0];
+        return path.endsWith(".m3u8")
+                || path.endsWith(".mp4")
+                || path.endsWith(".flv")
+                || path.endsWith(".mkv")
+                || path.endsWith(".ts")
+                || path.endsWith(".webm")
+                || path.endsWith(".mpd")
+                || path.endsWith(".mov")
+                || path.endsWith(".avi")
+                || path.endsWith(".3gp")
+                || path.endsWith(".m4v");
+    }
+
+    private static boolean hasExplicitUriScheme(String value) {
+        if (value == null || value.length() == 0) return false;
+        int colon = value.indexOf(':');
+        if (colon <= 0) return false;
+        int slash = value.indexOf('/');
+        int q = value.indexOf('?');
+        int hash = value.indexOf('#');
+        if ((slash >= 0 && slash < colon)
+                || (q >= 0 && q < colon)
+                || (hash >= 0 && hash < colon)) {
+            return false;
+        }
+        char first = value.charAt(0);
+        if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z'))) {
+            return false;
+        }
+        for (int i = 1; i < colon; i++) {
+            char c = value.charAt(i);
+            boolean ok =
+                    (c >= 'a' && c <= 'z')
+                            || (c >= 'A' && c <= 'Z')
+                            || (c >= '0' && c <= '9')
+                            || c == '+'
+                            || c == '-'
+                            || c == '.';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    private static String stripJsonPrefix(String url) {
+        if (url == null) return "";
+        String trimmed = url.trim();
+        if (trimmed.regionMatches(true, 0, "json:", 0, 5)) {
+            return trimmed.substring(5).trim();
+        }
+        return trimmed;
+    }
+
+    private static boolean matchesAnyParseUrl(String cleanUrl, List<Parse> parses) {
+        if (cleanUrl == null || cleanUrl.length() == 0 || parses == null) return false;
+        for (int i = 0; i < parses.size(); i++) {
+            Parse p = parses.get(i);
+            if (p != null && cleanUrl.equals(stripJsonPrefix(p.url))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static Map<String, String> safeSiteMediaHeaders(Site source, String targetUrl) {
+        if (source == null || source.headers.isEmpty()) {
+            return Collections.<String, String>emptyMap();
+        }
+        if (source.api != null
+                && (source.api.startsWith("http://") || source.api.startsWith("https://"))) {
+            return com.pilipala.source.MediaRequestHeaders.forTarget(
+                    source.headers, source.api, targetUrl);
+        }
+        return com.pilipala.source.MediaRequestHeaders.forTarget(
+                source.headers, "http://origin.invalid/", targetUrl);
+    }
+
+    public static String buildParseRequestUrl(String parseBaseUrl, String rawEpisodeUrl)
+            throws Exception {
+        if (parseBaseUrl == null || parseBaseUrl.trim().length() == 0) {
+            throw new IOException("解析接口地址为空");
+        }
+        String base = parseBaseUrl.trim();
+        if (base.regionMatches(true, 0, "json:", 0, 5)) {
+            base = base.substring(5).trim();
+        }
+        base = http(base);
+        String encoded =
+                URLEncoder.encode(rawEpisodeUrl == null ? "" : rawEpisodeUrl, "UTF-8")
+                        .replace("+", "%20");
+        if (base.contains("{url}")) {
+            return base.replace("{url}", encoded);
+        }
+        if (base.endsWith("=") || base.endsWith("?") || base.endsWith("&")) {
+            return base + encoded;
+        }
+        return base + (base.indexOf('?') >= 0 ? "&url=" : "?url=") + encoded;
+    }
+
+    public static ResolvedPlay resolvePlayUrl(String rawEpisodeUrl, Site source, String lineName)
+            throws Exception {
+        if (rawEpisodeUrl == null || rawEpisodeUrl.trim().length() == 0) {
+            throw new IOException("剧集播放地址为空");
+        }
+        String raw = rawEpisodeUrl.trim();
+        if (isDirectStreamUrl(raw)) {
+            String normalized = http(raw);
+            return new ResolvedPlay(
+                    normalized, safeSiteMediaHeaders(source, normalized), "direct", "");
+        }
+        String playUrl = source != null && source.playUrl != null ? source.playUrl.trim() : "";
+        boolean explicitJsonPrefix = playUrl.regionMatches(true, 0, "json:", 0, 5);
+        if (playUrl.length() > 0
+                && !explicitJsonPrefix
+                && !playUrl.startsWith("http://")
+                && !playUrl.startsWith("https://")) {
+            throw new IOException("此解析配置依赖脚本或外部运行环境，轻量版仅支持 HTTP(S) JSON 解析与可播直链");
+        }
+        String cleanPlayUrl = stripJsonPrefix(playUrl);
+        Exception lastError = null;
+        Set<String> triedEffectiveConfigs = new HashSet<String>();
+        boolean prioritizeSitePlayUrl =
+                source != null
+                        && cleanPlayUrl.length() > 0
+                        && (source.explicitSitePlayUrl
+                                || explicitJsonPrefix
+                                || source.jsonParses.isEmpty()
+                                || !matchesAnyParseUrl(cleanPlayUrl, source.jsonParses));
+        if (prioritizeSitePlayUrl) {
+            Parse matchedRegistered = findMatchingRegisteredParse(source, cleanPlayUrl, lineName);
+            Map<String, String> effectiveSiteHeaders = new LinkedHashMap<String, String>();
+            if (matchedRegistered != null && !matchedRegistered.headers.isEmpty()) {
+                effectiveSiteHeaders.putAll(matchedRegistered.headers);
+            }
+            if (!source.playUrlHeaders.isEmpty()) {
+                effectiveSiteHeaders.putAll(source.playUrlHeaders);
+            }
+            triedEffectiveConfigs.add(effectiveParseConfigKey(cleanPlayUrl, effectiveSiteHeaders));
+            try {
+                return resolveViaHttpEndpoint(
+                        cleanPlayUrl,
+                        raw,
+                        effectiveSiteHeaders,
+                        source,
+                        explicitJsonPrefix,
+                        explicitJsonPrefix ? "站点 JSON 解析" : "站点播放解析");
+            } catch (Exception ex) {
+                lastError = ex;
+                if (Thread.currentThread().isInterrupted()) throw ex;
+            }
+        }
+        if (source != null
+                && (source.playUrlParseType == 1
+                        || source.playUrlParseType == 2
+                        || source.playUrlParseType == 3
+                        || !source.jsonParses.isEmpty())) {
+            List<Parse> candidates =
+                    orderedCandidateParses(source, lineName, triedEffectiveConfigs);
+            for (int i = 0; i < candidates.size(); i++) {
+                Parse p = candidates.get(i);
+                String candKey = effectiveParseConfigKey(stripJsonPrefix(p.url), p.headers);
+                if (!triedEffectiveConfigs.add(candKey)) continue;
+                try {
+                    return resolveViaHttpEndpoint(p.url, raw, p.headers, source, true, p.name);
+                } catch (Exception ex) {
+                    lastError = ex;
+                    if (Thread.currentThread().isInterrupted()) throw ex;
+                }
+            }
+        }
+        if (lastError != null) throw lastError;
+        if (source != null && source.requiresParser) {
+            String reason =
+                    source.unsupportedParseReason != null
+                                    && source.unsupportedParseReason.length() > 0
+                            ? source.unsupportedParseReason
+                            : "此线路需要播放解析接口，但当前订阅未提供可用的 HTTP(S) JSON 解析配置";
+            throw new IOException(reason);
+        }
+        String normalized;
+        try {
+            normalized = http(raw);
+        } catch (Exception invalid) {
+            throw new IOException("此剧集地址不是可直接播放的 HTTP(S) 媒体地址");
+        }
+        return new ResolvedPlay(
+                normalized, safeSiteMediaHeaders(source, normalized), "direct", "");
+    }
+
+    private static String effectiveParseConfigKey(String cleanUrl, Map<String, String> headers) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(cleanUrl == null ? "" : cleanUrl.trim());
+        if (headers != null && !headers.isEmpty()) {
+            List<String> keys = new ArrayList<String>(headers.keySet());
+            Collections.sort(
+                    keys,
+                    new java.util.Comparator<String>() {
+                        public int compare(String a, String b) {
+                            return a.toLowerCase(Locale.ROOT)
+                                    .compareTo(b.toLowerCase(Locale.ROOT));
+                        }
+                    });
+            for (int i = 0; i < keys.size(); i++) {
+                String k = keys.get(i);
+                String v = headers.get(k);
+                sb.append('\n')
+                        .append(k.trim().toLowerCase(Locale.ROOT))
+                        .append('=')
+                        .append(v == null ? "" : v.trim());
+            }
+        }
+        return sb.toString();
+    }
+
+    private static Parse findMatchingRegisteredParse(Site source, String cleanUrl, String lineName) {
+        if (source == null
+                || cleanUrl == null
+                || cleanUrl.length() == 0
+                || source.jsonParses.isEmpty()) {
+            return null;
+        }
+        List<Parse> ordered =
+                orderedCandidateParses(source, lineName, Collections.<String>emptySet());
+        for (int i = 0; i < ordered.size(); i++) {
+            Parse p = ordered.get(i);
+            if (p != null && cleanUrl.equals(stripJsonPrefix(p.url))) {
+                return p;
+            }
+        }
+        return null;
+    }
+
+    private static List<Parse> orderedCandidateParses(
+            Site source, String lineName, Set<String> alreadyTriedConfigs) {
+        List<String> lineTokens = new ArrayList<String>();
+        if (lineName != null && lineName.trim().length() > 0) {
+            String[] parts = lineName.split("\n");
+            for (int i = 0; i < parts.length; i++) {
+                String tok = parts[i].trim().toLowerCase(Locale.ROOT);
+                if (tok.length() > 0 && !lineTokens.contains(tok)) {
+                    lineTokens.add(tok);
+                }
+            }
+        }
+        final List<Parse> candidates = new ArrayList<Parse>();
+        final List<Integer> ranks = new ArrayList<Integer>();
+        for (int i = 0; i < source.jsonParses.size(); i++) {
+            Parse p = source.jsonParses.get(i);
+            if (p == null) continue;
+            String pClean = stripJsonPrefix(p.url);
+            String pKey = effectiveParseConfigKey(pClean, p.headers);
+            if (alreadyTriedConfigs != null && alreadyTriedConfigs.contains(pKey)) continue;
+            int bestRank = Integer.MAX_VALUE;
+            if (!lineTokens.isEmpty() && !p.flags.isEmpty()) {
+                for (int t = 0; t < lineTokens.size(); t++) {
+                    String tok = lineTokens.get(t);
+                    for (int j = 0; j < p.flags.size(); j++) {
+                        String fl = p.flags.get(j).trim().toLowerCase(Locale.ROOT);
+                        if (fl.length() == 0) continue;
+                        if (tok.equals(fl)) {
+                            int r = t * 2;
+                            if (r < bestRank) bestRank = r;
+                        } else if (tok.contains(fl)) {
+                            int r = t * 2 + 1;
+                            if (r < bestRank) bestRank = r;
+                        }
+                    }
+                }
+            }
+            candidates.add(p);
+            ranks.add(Integer.valueOf(bestRank));
+        }
+        // Stable insertion sort by bestRank so rawFrom (token 0) beats display name (token 1)
+        List<Parse> ordered = new ArrayList<Parse>(candidates.size());
+        List<Integer> orderedRanks = new ArrayList<Integer>(candidates.size());
+        for (int i = 0; i < candidates.size(); i++) {
+            Parse p = candidates.get(i);
+            int r = ranks.get(i).intValue();
+            int pos = ordered.size();
+            while (pos > 0 && orderedRanks.get(pos - 1).intValue() > r) {
+                pos--;
+            }
+            ordered.add(pos, p);
+            orderedRanks.add(pos, Integer.valueOf(r));
+        }
+        if (ordered.isEmpty()
+                && source.playUrl != null
+                && stripJsonPrefix(source.playUrl).startsWith("http")) {
+            String fallbackUrl = stripJsonPrefix(source.playUrl);
+            String fallbackKey = effectiveParseConfigKey(fallbackUrl, source.playUrlHeaders);
+            if (alreadyTriedConfigs == null || !alreadyTriedConfigs.contains(fallbackKey)) {
+                Parse fallback = new Parse();
+                fallback.name = "JSON 解析";
+                fallback.url = fallbackUrl;
+                fallback.type = source.playUrlParseType > 0 ? source.playUrlParseType : 1;
+                fallback.headers.putAll(source.playUrlHeaders);
+                ordered.add(fallback);
+            }
+        }
+        return ordered;
+    }
+
+    private static boolean isMediaContentType(String contentType) {
+        if (contentType == null) return false;
+        String lower = contentType.toLowerCase(Locale.ROOT);
+        return lower.startsWith("video/")
+                || lower.startsWith("audio/")
+                || lower.contains("mpegurl")
+                || lower.contains("x-mpegurl")
+                || lower.contains("dash+xml")
+                || lower.contains("mp2t");
+    }
+
+    private static ResolvedPlay resolveViaHttpEndpoint(
+            String parseBaseUrl,
+            String rawEpisodeUrl,
+            Map<String, String> parseRequestHeaders,
+            Site source,
+            boolean explicitJsonParse,
+            String parseName)
+            throws Exception {
+        String current = buildParseRequestUrl(parseBaseUrl, rawEpisodeUrl);
+        long deadlineNs = System.nanoTime() + 12000000000L;
+        Map<String, String> reqHeaders = new LinkedHashMap<String, String>();
+        Map<String, String> siteSafeHeaders = safeSiteMediaHeaders(source, current);
+        for (Map.Entry<String, String> entry : siteSafeHeaders.entrySet()) {
+            putSafeSingleHeader(reqHeaders, entry.getKey(), entry.getValue());
+        }
+        if (parseRequestHeaders != null) {
+            for (Map.Entry<String, String> entry : parseRequestHeaders.entrySet()) {
+                putSafeSingleHeader(reqHeaders, entry.getKey(), entry.getValue());
+            }
+        }
+        Map<String, RedirectCookie> redirectCookies = new LinkedHashMap<String, RedirectCookie>();
+        boolean redirected = false;
+
+        for (int hop = 0; hop < 6; hop++) {
+            if (Thread.currentThread().isInterrupted() || System.nanoTime() > deadlineNs) {
+                throw new InterruptedIOException("解析接口请求超时");
+            }
+            HttpURLConnection c = (HttpURLConnection) new URL(current).openConnection();
+            IN_FLIGHT.add(c);
+            if (c instanceof javax.net.ssl.HttpsURLConnection) {
+                NetworkTls.configure((javax.net.ssl.HttpsURLConnection) c);
+            }
+            int remainingMs = (int) Math.max(1000L, (deadlineNs - System.nanoTime()) / 1000000L);
+            c.setConnectTimeout(Math.min(8000, remainingMs));
+            c.setReadTimeout(Math.min(10000, remainingMs));
+            c.setInstanceFollowRedirects(false);
+            c.setRequestProperty("User-Agent", USER_AGENT);
+            for (Map.Entry<String, String> h : reqHeaders.entrySet()) {
+                c.setRequestProperty(h.getKey(), h.getValue());
+            }
+            try {
+                int status = c.getResponseCode();
+                List<String> setCookies = c.getHeaderFields().get("Set-Cookie");
+                if (setCookies == null) {
+                    for (Map.Entry<String, List<String>> entry : c.getHeaderFields().entrySet()) {
+                        if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
+                            setCookies = entry.getValue();
+                            break;
+                        }
+                    }
+                }
+                List<RedirectCookie> newCookies = parseSetCookies(setCookies, new URL(current));
+                for (int i = 0; i < newCookies.size(); i++) {
+                    RedirectCookie cookie = newCookies.get(i);
+                    redirectCookies.put(
+                            cookie.domain
+                                    + "|"
+                                    + cookie.hostOnly
+                                    + "|"
+                                    + cookie.path
+                                    + "|"
+                                    + cookie.name,
+                            cookie);
+                }
+                if (status >= 300 && status < 400) {
+                    String loc = c.getHeaderField("Location");
+                    if (loc == null) throw new IOException("解析接口重定向缺少地址");
+                    String next = http(new URL(new URL(current), loc).toString());
+                    URL before = new URL(current), after = new URL(next);
+                    if ("https".equalsIgnoreCase(before.getProtocol())
+                            && "http".equalsIgnoreCase(after.getProtocol())) {
+                        throw new IOException("解析接口不允许降级重定向");
+                    }
+                    if (after.getUserInfo() != null) {
+                        throw new IOException("解析接口重定向不能注入凭据");
+                    }
+                    reqHeaders = inheritedHeaders(before, after, reqHeaders);
+                    mergeRedirectCookies(reqHeaders, redirectCookies.values(), after);
+                    current = next;
+                    redirected = true;
+                    if (!explicitJsonParse && isDirectStreamUrl(next)) {
+                        return new ResolvedPlay(next, reqHeaders, "prefix-redirect", parseName);
+                    }
+                    continue;
+                }
+                if (status < 200 || status >= 300) {
+                    throw new IOException("解析接口返回 HTTP " + status);
+                }
+                String contentType = c.getContentType();
+                if (isMediaContentType(contentType)) {
+                    return new ResolvedPlay(
+                            current,
+                            reqHeaders,
+                            redirected ? "prefix-redirect" : "prefix-media",
+                            parseName);
+                }
+                InputStream in = c.getInputStream();
+                if ("gzip".equalsIgnoreCase(c.getContentEncoding())) {
+                    in = new GZIPInputStream(in);
+                }
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buf = new byte[4096];
+                int n;
+                int limit = 256 * 1024;
+                boolean truncatedAsBinary = false;
+                while ((n = in.read(buf)) != -1) {
+                    if (Thread.currentThread().isInterrupted() || System.nanoTime() > deadlineNs) {
+                        throw new InterruptedIOException("解析接口读取超时");
+                    }
+                    if (out.size() == 0 && n >= 8 && looksLikeBinaryMedia(buf, n)) {
+                        truncatedAsBinary = true;
+                        break;
+                    }
+                    if (out.size() + n > limit) {
+                        if (!explicitJsonParse
+                                && contentType != null
+                                && contentType.toLowerCase(Locale.ROOT)
+                                        .contains("octet-stream")) {
+                            truncatedAsBinary = true;
+                            break;
+                        }
+                        throw new IOException("解析接口返回内容过大");
+                    }
+                    out.write(buf, 0, n);
+                }
+                if (truncatedAsBinary) {
+                    return new ResolvedPlay(
+                            current,
+                            reqHeaders,
+                            redirected ? "prefix-redirect" : "prefix-media",
+                            parseName);
+                }
+                String body = decodeText(out.toByteArray()).trim();
+                if (body.startsWith("\ufeff")) body = body.substring(1).trim();
+                if (body.startsWith("#EXTM3U")) {
+                    return new ResolvedPlay(
+                            current,
+                            reqHeaders,
+                            redirected ? "prefix-redirect" : "prefix-media",
+                            parseName);
+                }
+                if (isHtml(body)) {
+                    throw new IOException("解析接口返回网页内容，轻量版不支持网页嗅探解析");
+                }
+                if (body.startsWith("{")) {
+                    return parseJsonPlayResponse(body, current, source, parseName);
+                }
+                throw new IOException("解析接口未返回可识别的 JSON 或媒体流");
+            } finally {
+                IN_FLIGHT.remove(c);
+                c.disconnect();
+            }
+        }
+        throw new IOException("解析接口重定向过多");
+    }
+
+    private static boolean looksLikeBinaryMedia(byte[] buf, int len) {
+        if (len >= 8
+                && buf[4] == 'f'
+                && buf[5] == 't'
+                && buf[6] == 'y'
+                && buf[7] == 'p') {
+            return true;
+        }
+        if (len >= 4
+                && (buf[0] & 0xff) == 0x1a
+                && (buf[1] & 0xff) == 0x45
+                && (buf[2] & 0xff) == 0xdf
+                && (buf[3] & 0xff) == 0xa3) {
+            return true;
+        }
+        if (len >= 3 && buf[0] == 'F' && buf[1] == 'L' && buf[2] == 'V') {
+            return true;
+        }
+        return len >= 1 && buf[0] == 0x47 && (len < 189 || buf[188] == 0x47);
+    }
+
+    public static ResolvedPlay parseJsonPlayResponse(
+            String jsonBody, String parseEndpointUrl, Site source, String parseName)
+            throws Exception {
+        JSONObject obj = new JSONObject(withoutComments(jsonBody).trim());
+        JSONObject dataObj = obj.optJSONObject("data");
+        String mediaUrl = Json.str(obj, "url", "").trim();
+        if (mediaUrl.length() == 0 && dataObj != null) {
+            mediaUrl = Json.str(dataObj, "url", "").trim();
+        }
+        if (mediaUrl.length() == 0 && obj.opt("data") instanceof String) {
+            String ds = Json.str(obj, "data", "").trim();
+            if (ds.startsWith("http://") || ds.startsWith("https://")) {
+                mediaUrl = ds;
+            }
+        }
+        if (mediaUrl.length() == 0) {
+            String msg = Json.str(obj, "msg", Json.str(obj, "message", "")).trim();
+            throw new IOException(
+                    msg.length() > 0 ? ("解析失败：" + msg) : "解析接口返回空播放地址");
+        }
+        if (!hasExplicitUriScheme(mediaUrl)
+                && parseEndpointUrl != null
+                && parseEndpointUrl.length() > 0) {
+            mediaUrl = new URL(new URL(parseEndpointUrl), mediaUrl).toString();
+        }
+        String normalizedUrl;
+        try {
+            normalizedUrl = http(mediaUrl);
+        } catch (Exception invalid) {
+            throw new IOException("解析接口返回了不受支持的播放协议地址");
+        }
+        Map<String, String> mergedHeaders =
+                new LinkedHashMap<String, String>(safeSiteMediaHeaders(source, normalizedUrl));
+        extractParseResponseHeaders(mergedHeaders, obj);
+        if (dataObj != null) {
+            extractParseResponseHeaders(mergedHeaders, dataObj);
+        }
+        return new ResolvedPlay(normalizedUrl, mergedHeaders, "json-parse", parseName);
+    }
+
+    private static void extractParseResponseHeaders(Map<String, String> target, JSONObject obj) {
+        if (obj == null) return;
+        applyHeaderField(target, obj.opt("header"));
+        applyHeaderField(target, obj.opt("headers"));
+        String ua = Json.str(obj, "ua", Json.str(obj, "User-Agent", Json.str(obj, "user-agent", ""))).trim();
+        if (ua.length() > 0) putSafeSingleHeader(target, "User-Agent", ua);
+        String ref = Json.str(obj, "referer", Json.str(obj, "Referer", "")).trim();
+        if (ref.length() > 0) putSafeSingleHeader(target, "Referer", ref);
+        String origin = Json.str(obj, "origin", Json.str(obj, "Origin", "")).trim();
+        if (origin.length() > 0) putSafeSingleHeader(target, "Origin", origin);
+        String cookie = Json.str(obj, "cookie", Json.str(obj, "Cookie", "")).trim();
+        if (cookie.length() > 0) putSafeSingleHeader(target, "Cookie", cookie);
+    }
+
+    private static void applyHeaderField(Map<String, String> target, Object field) {
+        if (field == null || field == JSONObject.NULL) return;
+        if (field instanceof JSONObject) {
+            putSafeHeaders(target, (JSONObject) field);
+        } else if (field instanceof String) {
+            String raw = ((String) field).trim();
+            if (raw.startsWith("{")) {
+                try {
+                    putSafeHeaders(target, new JSONObject(raw));
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    static void putSafeSingleHeader(Map<String, String> target, String k, String v) {
+        if (k == null || k.length() == 0 || v == null) return;
+        if (k.indexOf('\r') >= 0
+                || k.indexOf('\n') >= 0
+                || v.indexOf('\r') >= 0
+                || v.indexOf('\n') >= 0) {
+            return;
+        }
+        for (Iterator<String> it = target.keySet().iterator(); it.hasNext(); ) {
+            if (it.next().equalsIgnoreCase(k)) {
+                it.remove();
+            }
+        }
+        if ("user-agent".equalsIgnoreCase(k) || "ua".equalsIgnoreCase(k)) k = "User-Agent";
+        else if ("referer".equalsIgnoreCase(k) || "referrer".equalsIgnoreCase(k)) k = "Referer";
+        else if ("cookie".equalsIgnoreCase(k)) k = "Cookie";
+        else if ("origin".equalsIgnoreCase(k)) k = "Origin";
+        else if ("authorization".equalsIgnoreCase(k)) k = "Authorization";
+        target.put(k, v);
     }
 
     public static String http(String value) throws Exception {
@@ -275,13 +1116,26 @@ public final class LiteCatalog {
     public static boolean isHtml(String s) {
         if (s == null) return false;
         String t = s.replaceFirst("^\\uFEFF", "").trim().toLowerCase(Locale.ROOT);
-        return t.startsWith("<!doctype") || t.startsWith("<html");
+        if (t.startsWith("<html")) return true;
+        if (t.startsWith("<!doctype")) {
+            String rest = t.substring(9).trim();
+            return rest.startsWith("html") || rest.startsWith("xhtml");
+        }
+        return false;
+    }
+
+    static boolean isPythonApi(String api) {
+        if (api == null) return false;
+        String lower = api.trim().toLowerCase(Locale.ROOT).split("[?#]", 2)[0];
+        return lower.startsWith("py_") || lower.endsWith(".py");
     }
 
     static boolean isScriptOrJarApi(String api) {
         if (api == null) return false;
         String lower = api.trim().toLowerCase(Locale.ROOT).split("[?#]", 2)[0];
         return lower.startsWith("csp_")
+                || lower.startsWith("js_")
+                || lower.startsWith("py_")
                 || lower.endsWith(".js")
                 || lower.endsWith(".mjs")
                 || lower.endsWith(".py")
@@ -294,6 +1148,19 @@ public final class LiteCatalog {
             if (urlPath == null) return false;
             String lowerPath = urlPath.toLowerCase(Locale.ROOT);
             return lowerPath.contains("xml") || lowerPath.endsWith(".xml");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static boolean hasJsonInUrlPath(String httpUrl) {
+        try {
+            String urlPath = new URL(http(httpUrl)).getPath();
+            if (urlPath == null) return false;
+            String lowerPath = urlPath.toLowerCase(Locale.ROOT);
+            return lowerPath.endsWith(".json")
+                    || lowerPath.contains("/json")
+                    || lowerPath.contains("json/");
         } catch (Exception e) {
             return false;
         }
@@ -444,14 +1311,17 @@ public final class LiteCatalog {
                     || !(key.equalsIgnoreCase("Authorization")
                             || key.equalsIgnoreCase("Proxy-Authorization")
                             || key.equalsIgnoreCase("Cookie")
-                            || key.equalsIgnoreCase("Cookie2"))) {
+                            || key.equalsIgnoreCase("Cookie2")
+                            || key.equalsIgnoreCase("X-Api-Key")
+                            || key.equalsIgnoreCase("X-Emby-Token")
+                            || key.equalsIgnoreCase("X-Plex-Token"))) {
                 out.put(key, entry.getValue());
             }
         }
         return out;
     }
 
-    private static String fetchOnce(
+    private static FetchResult fetchOnceWithUrl(
             String address, Map<String, String> requestHeaders, String defaultUa)
             throws Exception {
         String current = http(address);
@@ -527,7 +1397,7 @@ public final class LiteCatalog {
                     if (out.size() + n > MAX_BYTES) throw new IOException("配置或列表超过大小限制");
                     out.write(b, 0, n);
                 }
-                return decodeText(out.toByteArray());
+                return new FetchResult(decodeText(out.toByteArray()), current);
             } finally {
                 IN_FLIGHT.remove(c);
                 c.disconnect();
@@ -536,7 +1406,14 @@ public final class LiteCatalog {
         throw new IOException("重定向过多");
     }
 
-    public static String fetch(String address, Map<String, String> headers) throws Exception {
+    private static String fetchOnce(
+            String address, Map<String, String> requestHeaders, String defaultUa)
+            throws Exception {
+        return fetchOnceWithUrl(address, requestHeaders, defaultUa).body;
+    }
+
+    public static FetchResult fetchWithFinalUrl(String address, Map<String, String> headers)
+            throws Exception {
         String customUa = null;
         if (headers != null) {
             for (Map.Entry<String, String> entry : headers.entrySet()) {
@@ -546,7 +1423,11 @@ public final class LiteCatalog {
                 }
             }
         }
-        return fetchOnce(address, headers, customUa != null ? customUa : USER_AGENT);
+        return fetchOnceWithUrl(address, headers, customUa != null ? customUa : USER_AGENT);
+    }
+
+    public static String fetch(String address, Map<String, String> headers) throws Exception {
+        return fetchWithFinalUrl(address, headers).body;
     }
 
     public static String fetchConfig(String address) throws Exception {
@@ -828,23 +1709,73 @@ public final class LiteCatalog {
         JSONArray rows = document.optJSONArray("sites");
         if ((rows == null || rows.length() == 0) && Json.str(document, "api", "").length() > 0)
             rows = new JSONArray().put(document);
-        if (rows == null || rows.length() == 0) throw new IOException("配置没有 sites 列表");
-        String defaultJsonParseUrl = "";
+        if (rows == null || rows.length() == 0) {
+            if (!parseLivesFromDocument(document, base).isEmpty()) {
+                return new ArrayList<Site>();
+            }
+            throw new IOException("配置没有 sites 列表");
+        }
+        List<Parse> supportedJsonParses = new ArrayList<Parse>();
+        boolean hasWebSniffParse = false;
+        boolean hasScriptParse = false;
         JSONArray parses = document.optJSONArray("parses");
         if (parses != null) {
-            for (int i = 0; i < parses.length(); i++) {
+            for (int i = 0; i < parses.length() && i < 100; i++) {
                 JSONObject pj = parses.optJSONObject(i);
-                if (pj != null) {
-                    int pType = Json.integer(pj, "type", 0);
-                    String pUrl = Json.str(pj, "url", "");
-                    if ((pType == 1 || pType == 2 || pType == 3)
-                            && (pUrl.startsWith("http://") || pUrl.startsWith("https://"))) {
-                        defaultJsonParseUrl = pUrl;
-                        break;
+                if (pj == null) continue;
+                int pType = Json.integer(pj, "type", 0);
+                String pUrl = Json.str(pj, "url", "").trim();
+                String pName = Json.str(pj, "name", "").trim();
+                if (pUrl.length() > 0
+                        && !pUrl.startsWith("http://")
+                        && !pUrl.startsWith("https://")
+                        && base != null
+                        && base.length() > 0
+                        && (pUrl.startsWith("./") || pUrl.startsWith("../") || pUrl.startsWith("/"))) {
+                    try {
+                        pUrl = new URL(new URL(base), pUrl).toString();
+                    } catch (Exception ignored) {
                     }
+                }
+                boolean httpParse = pUrl.startsWith("http://") || pUrl.startsWith("https://");
+                if (pType == 0) {
+                    hasWebSniffParse = true;
+                    continue;
+                }
+                if ((pType == 1 || pType == 2 || pType == 3)
+                        && httpParse
+                        && !isScriptOrJarApi(pUrl)) {
+                    Parse parsedItem = new Parse();
+                    parsedItem.name = pName.length() > 0 ? pName : ("JSON 解析 " + (supportedJsonParses.size() + 1));
+                    parsedItem.url = pUrl;
+                    parsedItem.type = pType;
+                    putSafeHeaders(parsedItem.headers, pj.optJSONObject("header"));
+                    putSafeHeaders(parsedItem.headers, pj.optJSONObject("headers"));
+                    JSONObject pExt = pj.optJSONObject("ext");
+                    if (pExt != null) {
+                        putSafeHeaders(parsedItem.headers, pExt.optJSONObject("header"));
+                        putSafeHeaders(parsedItem.headers, pExt.optJSONObject("headers"));
+                        JSONArray flagArr = pExt.optJSONArray("flag");
+                        if (flagArr != null) {
+                            for (int f = 0; f < flagArr.length(); f++) {
+                                String fl = flagArr.optString(f, "").trim();
+                                if (fl.length() > 0) parsedItem.flags.add(fl);
+                            }
+                        }
+                    }
+                    supportedJsonParses.add(parsedItem);
+                } else {
+                    hasScriptParse = true;
                 }
             }
         }
+        Parse defaultJsonParse = supportedJsonParses.isEmpty() ? null : supportedJsonParses.get(0);
+        String defaultUnsupportedParseReason =
+                hasWebSniffParse
+                        ? "配置中的解析接口仅包含网页嗅探解析 (type=0)，轻量版仅支持 HTTP(S) JSON 解析与可播直链"
+                        : (hasScriptParse
+                                ? "配置中的解析接口依赖外部脚本或插件，轻量版仅支持 HTTP(S) JSON 解析与可播直链"
+                                : "");
         List<Site> sites = new ArrayList<Site>();
         for (int i = 0; i < rows.length() && i < 500; i++) {
             JSONObject row = rows.getJSONObject(i);
@@ -856,17 +1787,30 @@ public final class LiteCatalog {
             s.group = parsedGroup.length() > 0 ? parsedGroup : "默认分组";
             s.type = Json.integer(row, "type", -1);
             s.api = Json.str(row, "api", "");
-            s.playUrl = Json.str(row, "playUrl", "");
-            if (s.playUrl.length() == 0
-                    && (Json.integer(row, "parse", 0) == 1 || Json.integer(row, "jx", 0) == 1)) {
-                s.playUrl = defaultJsonParseUrl;
+            s.playUrl = Json.str(row, "playUrl", "").trim();
+            s.explicitSitePlayUrl = s.playUrl.length() > 0;
+            boolean siteRequestsParse =
+                    Json.integer(row, "parse", 0) == 1 || Json.integer(row, "jx", 0) == 1;
+            if (s.playUrl.length() == 0 && siteRequestsParse) {
+                if (defaultJsonParse != null) {
+                    s.playUrl = defaultJsonParse.url;
+                    s.playUrlParseType = defaultJsonParse.type;
+                    s.playUrlHeaders.putAll(defaultJsonParse.headers);
+                    s.jsonParses.addAll(supportedJsonParses);
+                } else {
+                    s.unsupportedParseReason = defaultUnsupportedParseReason;
+                }
+            } else if (s.playUrl.regionMatches(true, 0, "json:", 0, 5)) {
+                s.playUrlParseType = 1;
+                if (siteRequestsParse) {
+                    s.jsonParses.addAll(supportedJsonParses);
+                }
+            } else if (siteRequestsParse && !supportedJsonParses.isEmpty()) {
+                s.jsonParses.addAll(supportedJsonParses);
             }
             s.searchable = Json.integer(row, "searchable", 1) != 0;
             s.ext = row.opt("ext");
-            s.requiresParser =
-                    s.playUrl.length() > 0
-                            || Json.integer(row, "parse", 0) == 1
-                            || Json.integer(row, "jx", 0) == 1;
+            s.requiresParser = s.playUrl.length() > 0 || siteRequestsParse;
             String rawJar = Json.str(row, "jar", "");
             if (rawJar.length() > 0) {
                 if ((rawJar.startsWith("./") || rawJar.startsWith("../"))
@@ -905,6 +1849,7 @@ public final class LiteCatalog {
             }
             if (!s.api.startsWith("csp_")
                     && !s.api.startsWith("js_")
+                    && !s.api.startsWith("py_")
                     && base != null
                     && base.length() > 0) {
                 try {
@@ -919,10 +1864,14 @@ public final class LiteCatalog {
                     && !isScriptOrJarApi(s.api)) {
                 s.type = hasXmlInUrlPath(s.api) ? 0 : 1;
             }
+            String checkPlayUrl =
+                    s.playUrl.regionMatches(true, 0, "json:", 0, 5)
+                            ? s.playUrl.substring(5).trim()
+                            : s.playUrl;
             boolean directPlayUrl =
-                    s.playUrl.length() == 0
-                            || s.playUrl.startsWith("http://")
-                            || s.playUrl.startsWith("https://");
+                    checkPlayUrl.length() == 0
+                            || checkPlayUrl.startsWith("http://")
+                            || checkPlayUrl.startsWith("https://");
             s.supported = Site.STATUS_OK.equals(s.capabilityStatus()) && directPlayUrl;
             String ua = Json.str(row, "ua", "");
             if (ua.length() > 0 && ua.indexOf('\r') < 0 && ua.indexOf('\n') < 0) {
@@ -957,18 +1906,60 @@ public final class LiteCatalog {
             s.group = g.length() > 0 ? g : "默认分组";
         }
         if (ov.has("api")) {
+            String prevApi = s.api == null ? "" : s.api.trim();
             String a = ov.optString("api", "").trim();
-            if (a.length() > 0) {
+            if (a.length() > 0 && !a.equals(prevApi)) {
                 s.api = a;
                 if ((a.startsWith("http://") || a.startsWith("https://"))
                         && !isScriptOrJarApi(a)) {
                     s.jar = "";
-                    s.type = hasXmlInUrlPath(a) ? 0 : 1;
+                    if (s.type != 0 && s.type != 1) {
+                        s.type = hasXmlInUrlPath(a) ? 0 : 1;
+                    } else if (hasXmlInUrlPath(a)) {
+                        s.type = 0;
+                    } else if (hasJsonInUrlPath(a) || hasXmlInUrlPath(prevApi)) {
+                        s.type = 1;
+                    }
                 }
             }
         }
+        if (ov.has("type")) {
+            s.type = ov.optInt("type", s.type);
+        }
         if (ov.has("playUrl")) {
-            s.playUrl = ov.optString("playUrl", "").trim();
+            String prevPlayUrl = s.playUrl == null ? "" : s.playUrl.trim();
+            String nextPlayUrl = ov.optString("playUrl", "").trim();
+            boolean hasExplicitFlag = ov.has("playUrlExplicit");
+            boolean explicitFlag = ov.optBoolean("playUrlExplicit", false);
+            if (nextPlayUrl.length() == 0) {
+                s.playUrl = "";
+                s.explicitSitePlayUrl = false;
+                s.playUrlHeaders.clear();
+                s.playUrlParseType = -1;
+            } else if (hasExplicitFlag) {
+                if (explicitFlag) {
+                    if (!nextPlayUrl.equals(prevPlayUrl) || !s.explicitSitePlayUrl) {
+                        s.playUrl = nextPlayUrl;
+                        s.explicitSitePlayUrl = true;
+                        s.playUrlHeaders.clear();
+                        s.playUrlParseType =
+                                nextPlayUrl.regionMatches(true, 0, "json:", 0, 5) ? 1 : -1;
+                    }
+                } else if (!nextPlayUrl.equals(prevPlayUrl)) {
+                    s.playUrl = nextPlayUrl;
+                    s.explicitSitePlayUrl = false;
+                    s.playUrlHeaders.clear();
+                    s.playUrlParseType =
+                            nextPlayUrl.regionMatches(true, 0, "json:", 0, 5) ? 1 : -1;
+                }
+            } else if (!nextPlayUrl.equals(prevPlayUrl)) {
+                s.playUrl = nextPlayUrl;
+                s.explicitSitePlayUrl = true;
+                s.playUrlHeaders.clear();
+                s.playUrlParseType =
+                        nextPlayUrl.regionMatches(true, 0, "json:", 0, 5) ? 1 : -1;
+            }
+            s.requiresParser = s.playUrl.length() > 0 || !s.jsonParses.isEmpty();
         }
         if (ov.has("ext")) {
             String e = ov.optString("ext", "").trim();
@@ -983,11 +1974,16 @@ public final class LiteCatalog {
         if (ov.has("searchable")) {
             s.searchable = ov.optBoolean("searchable", s.searchable);
         }
-        boolean directPlayUrl =
+        String checkPlayUrl =
                 s.playUrl == null
-                        || s.playUrl.length() == 0
-                        || s.playUrl.startsWith("http://")
-                        || s.playUrl.startsWith("https://");
+                        ? ""
+                        : (s.playUrl.regionMatches(true, 0, "json:", 0, 5)
+                                ? s.playUrl.substring(5).trim()
+                                : s.playUrl);
+        boolean directPlayUrl =
+                checkPlayUrl.length() == 0
+                        || checkPlayUrl.startsWith("http://")
+                        || checkPlayUrl.startsWith("https://");
         s.supported = Site.STATUS_OK.equals(s.capabilityStatus()) && directPlayUrl;
     }
 
@@ -1084,11 +2080,89 @@ public final class LiteCatalog {
         return out;
     }
 
+    private static Integer parseOptionalIntField(JSONObject obj, String key) {
+        if (obj == null || !obj.has(key) || obj.isNull(key)) return null;
+        Object raw = obj.opt(key);
+        if (raw instanceof Number) {
+            return Integer.valueOf(((Number) raw).intValue());
+        }
+        if (raw instanceof String) {
+            String s = ((String) raw).trim();
+            if (s.matches("^-?\\d{1,6}$")) {
+                try {
+                    return Integer.valueOf(Integer.parseInt(s));
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+    private static void validateJsonCmsStatus(JSONObject root) throws IOException {
+        if (root == null) return;
+        JSONArray listArr = root.optJSONArray("list");
+        boolean hasItems = listArr != null && listArr.length() > 0;
+        String msg = Json.str(root, "msg", Json.str(root, "message", "")).trim();
+        String msgSuffix = msg.length() > 0 ? ("：" + msg) : "";
+        Integer code = parseOptionalIntField(root, "code");
+        if (code != null && (code.intValue() >= 400 || code.intValue() < 0)) {
+            throw new IOException("片源接口返回错误码 " + code + msgSuffix);
+        }
+        Integer status = parseOptionalIntField(root, "status");
+        if (status != null && (status.intValue() >= 400 || status.intValue() < 0)) {
+            throw new IOException("片源接口返回错误状态 " + status + msgSuffix);
+        }
+        Integer errno = parseOptionalIntField(root, "errno");
+        if (errno != null && (errno.intValue() >= 400 || errno.intValue() < 0)) {
+            throw new IOException("片源接口返回错误码 " + errno + msgSuffix);
+        }
+        if (!hasItems) {
+            Object okVal = root.opt("ok");
+            Object successVal = root.opt("success");
+            if (Boolean.FALSE.equals(okVal) || Boolean.FALSE.equals(successVal)) {
+                throw new IOException("片源接口返回失败状态" + msgSuffix);
+            }
+            if (root.has("error") && !root.isNull("error")) {
+                Object errObj = root.opt("error");
+                if (errObj instanceof JSONObject) {
+                    throw new IOException("片源接口返回错误对象" + msgSuffix);
+                }
+                if (errObj instanceof String) {
+                    String errStr = ((String) errObj).trim();
+                    if (errStr.length() > 0
+                            && !"false".equalsIgnoreCase(errStr)
+                            && !"0".equals(errStr)
+                            && !"ok".equalsIgnoreCase(errStr)
+                            && !"none".equalsIgnoreCase(errStr)) {
+                        throw new IOException("片源接口返回错误：" + errStr);
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean isXmlErrorRootTag(String tag) {
+        if (tag == null) return false;
+        String lower = tag.trim().toLowerCase(Locale.ROOT);
+        return "html".equals(lower)
+                || "error".equals(lower)
+                || "errors".equals(lower)
+                || "err".equals(lower)
+                || "fault".equals(lower)
+                || "exception".equals(lower)
+                || "failure".equals(lower)
+                || "status".equals(lower);
+    }
+
     public static JSONObject parseCmsResponse(String raw) throws Exception {
         if (raw == null) throw new IOException("空响应");
         String trimmed = raw.trim();
         if (trimmed.startsWith("\ufeff")) trimmed = trimmed.substring(1).trim();
-        JSONObject root = trimmed.startsWith("<") ? parseXmlCms(trimmed) : new JSONObject(trimmed);
+        if (isHtml(trimmed)) {
+            throw new IOException("片源返回了网页内容而非 CMS 数据");
+        }
+        boolean isXml = trimmed.startsWith("<");
+        JSONObject root = isXml ? parseXmlCms(trimmed) : new JSONObject(trimmed);
         if (!root.has("list") && root.has("data") && root.optJSONObject("data") != null) {
             JSONObject data = root.optJSONObject("data");
             if (data.has("list")) {
@@ -1100,10 +2174,20 @@ public final class LiteCatalog {
             if (!root.has("total") && data.has("total")) root.put("total", data.get("total"));
             if (!root.has("limit") && data.has("limit")) root.put("limit", data.get("limit"));
         }
+        if (!isXml) {
+            validateJsonCmsStatus(root);
+            JSONObject dataObj = root.optJSONObject("data");
+            if (dataObj != null) {
+                validateJsonCmsStatus(dataObj);
+            }
+        }
         return root;
     }
 
     public static JSONObject parseXmlCms(String xml) throws Exception {
+        if (isHtml(xml)) {
+            throw new IOException("片源返回了 HTML 网页而非 XML CMS 数据");
+        }
         XmlPullParser parser = Xml.newPullParser();
         parser.setInput(new StringReader(xml));
         JSONArray classes = new JSONArray();
@@ -1113,11 +2197,26 @@ public final class LiteCatalog {
         List<String> froms = new ArrayList<String>();
         List<String> urls = new ArrayList<String>();
         String currentDdFlag = "";
+        String rootTag = null;
+        boolean sawListTag = false;
+        boolean sawClassTag = false;
+        boolean sawErrorTag = false;
+        int xmlErrorCode = 0;
         int event = parser.getEventType();
         while (event != XmlPullParser.END_DOCUMENT) {
             if (event == XmlPullParser.START_TAG) {
                 String tag = parser.getName();
+                if (rootTag == null) {
+                    rootTag = tag;
+                    if ("html".equalsIgnoreCase(rootTag)) {
+                        throw new IOException("片源返回了 HTML 网页而非 XML CMS 数据");
+                    }
+                    if (isXmlErrorRootTag(rootTag)) {
+                        throw new IOException("片源返回了错误 XML 文档 (<" + rootTag + ">)");
+                    }
+                }
                 if ("list".equalsIgnoreCase(tag)) {
+                    sawListTag = true;
                     try {
                         String pg = parser.getAttributeValue(null, "page");
                         String pc = parser.getAttributeValue(null, "pagecount");
@@ -1125,7 +2224,10 @@ public final class LiteCatalog {
                         if (pc != null) pagecount = Math.max(1, Integer.parseInt(pc.trim()));
                     } catch (Exception ignored) {
                     }
+                } else if ("class".equalsIgnoreCase(tag)) {
+                    sawClassTag = true;
                 } else if ("ty".equalsIgnoreCase(tag)) {
+                    sawClassTag = true;
                     String id = parser.getAttributeValue(null, "id");
                     String name = safeNextText(parser).trim();
                     if (id != null && id.trim().length() > 0 && name.length() > 0) {
@@ -1136,6 +2238,20 @@ public final class LiteCatalog {
                     currentVideo = new JSONObject();
                     froms.clear();
                     urls.clear();
+                } else if (currentVideo == null
+                        && ("error".equalsIgnoreCase(tag) || "err".equalsIgnoreCase(tag))) {
+                    sawErrorTag = true;
+                } else if (currentVideo == null && "code".equalsIgnoreCase(tag)) {
+                    String codeText = safeNextText(parser).trim();
+                    if (codeText.matches("^-?\\d{1,6}$")) {
+                        try {
+                            int parsedCode = Integer.parseInt(codeText);
+                            if (parsedCode >= 400 || parsedCode < 0) {
+                                xmlErrorCode = parsedCode;
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    }
                 } else if (currentVideo != null) {
                     if ("id".equalsIgnoreCase(tag)) {
                         currentVideo.put("vod_id", safeNextText(parser).trim());
@@ -1186,11 +2302,24 @@ public final class LiteCatalog {
             }
             event = parser.next();
         }
-        return new JSONObject()
-                .put("page", page)
-                .put("pagecount", pagecount)
-                .put("class", classes)
-                .put("list", list);
+        if (list.length() == 0 && (sawErrorTag || xmlErrorCode >= 400 || xmlErrorCode < 0)) {
+            throw new IOException(
+                    xmlErrorCode != 0
+                            ? ("片源 XML 返回错误码 " + xmlErrorCode)
+                            : "片源 XML 返回错误节点");
+        }
+        if (!sawListTag && !sawClassTag && list.length() == 0 && classes.length() == 0) {
+            throw new IOException("返回 XML 不是有效的苹果 CMS 列表或分类文档");
+        }
+        JSONObject res =
+                new JSONObject()
+                        .put("page", page)
+                        .put("pagecount", pagecount)
+                        .put("class", classes);
+        if (sawListTag || list.length() > 0) {
+            res.put("list", list);
+        }
+        return res;
     }
 
     private static String safeNextText(XmlPullParser parser) {
@@ -1212,12 +2341,57 @@ public final class LiteCatalog {
     }
 
     public static String query(String api, String... pairs) throws Exception {
-        StringBuilder b = new StringBuilder(api);
-        for (int i = 0; i < pairs.length; i += 2)
-            b.append(b.indexOf("?") < 0 ? '?' : '&')
+        String rawApi = api == null ? "" : api.trim();
+        int hashIdx = rawApi.indexOf('#');
+        String fragment = hashIdx >= 0 ? rawApi.substring(hashIdx) : "";
+        String withoutFragment = hashIdx >= 0 ? rawApi.substring(0, hashIdx) : rawApi;
+        int qIdx = withoutFragment.indexOf('?');
+        String basePart = qIdx >= 0 ? withoutFragment.substring(0, qIdx) : withoutFragment;
+        String existingQuery = qIdx >= 0 ? withoutFragment.substring(qIdx + 1) : "";
+
+        Set<String> replaceKeys = new HashSet<String>();
+        boolean isCmsActionCall = false;
+        for (int i = 0; i + 1 < pairs.length; i += 2) {
+            String k = pairs[i] == null ? "" : pairs[i].trim().toLowerCase(Locale.ROOT);
+            if (k.length() > 0) replaceKeys.add(k);
+            if ("ac".equals(k)) isCmsActionCall = true;
+        }
+        if (isCmsActionCall) {
+            replaceKeys.add("ac");
+            replaceKeys.add("t");
+            replaceKeys.add("pg");
+            replaceKeys.add("wd");
+            replaceKeys.add("ids");
+        }
+
+        StringBuilder b = new StringBuilder(basePart);
+        boolean hasQuery = false;
+        if (existingQuery.length() > 0) {
+            String[] segments = existingQuery.split("&");
+            for (int i = 0; i < segments.length; i++) {
+                String seg = segments[i];
+                if (seg.length() == 0) continue;
+                int eq = seg.indexOf('=');
+                String rawKey = eq >= 0 ? seg.substring(0, eq) : seg;
+                String decodedKey;
+                try {
+                    decodedKey = URLDecoder.decode(rawKey, "UTF-8").trim().toLowerCase(Locale.ROOT);
+                } catch (Exception ignored) {
+                    decodedKey = rawKey.trim().toLowerCase(Locale.ROOT);
+                }
+                if (replaceKeys.contains(decodedKey)) continue;
+                b.append(hasQuery ? '&' : '?').append(seg);
+                hasQuery = true;
+            }
+        }
+        for (int i = 0; i + 1 < pairs.length; i += 2) {
+            b.append(hasQuery ? '&' : '?')
                     .append(URLEncoder.encode(pairs[i], "UTF-8"))
                     .append('=')
                     .append(URLEncoder.encode(pairs[i + 1], "UTF-8"));
+            hasQuery = true;
+        }
+        if (fragment.length() > 0) b.append(fragment);
         return b.toString();
     }
 
@@ -1228,49 +2402,147 @@ public final class LiteCatalog {
     }
 
     public static List<LiveSource> parseLives(String rawConfig, String base) {
-        List<LiveSource> out = new ArrayList<LiveSource>();
-        if (rawConfig == null || rawConfig.trim().length() == 0) return out;
+        if (rawConfig == null || rawConfig.trim().length() == 0) {
+            return new ArrayList<LiveSource>();
+        }
         try {
             JSONObject doc = decodeConfig(rawConfig);
-            base = Json.str(doc, com.pilipala.source.Warehouse.ORIGIN, base);
-            JSONArray lives = doc.optJSONArray("lives");
-            if (lives == null) return out;
-            for (int i = 0; i < lives.length() && out.size() < 32; i++) {
-                JSONObject item = lives.optJSONObject(i);
-                if (item == null) continue;
-                JSONArray channels = item.optJSONArray("channels");
-                if (channels != null && channels.length() > 0) {
-                    for (int j = 0; j < channels.length() && out.size() < 32; j++) {
-                        JSONObject ch = channels.optJSONObject(j);
-                        if (ch == null) continue;
-                        JSONArray urls = ch.optJSONArray("urls");
-                        String rawUrl =
-                                urls != null && urls.length() > 0
-                                        ? urls.optString(0, "")
-                                        : ch.optString("url", "");
-                        addLiveSourceItem(
-                                out,
-                                ch.optString("name", item.optString("group", "直播源")),
-                                rawUrl,
-                                item,
-                                base);
-                    }
-                } else {
-                    addLiveSourceItem(
-                            out,
-                            item.optString("name", "直播源 " + (out.size() + 1)),
-                            item.optString("url", ""),
-                            item,
-                            base);
-                }
-            }
+            return parseLivesFromDocument(doc, base);
         } catch (Exception ignored) {
+            return new ArrayList<LiveSource>();
+        }
+    }
+
+    private static List<LiveSource> parseLivesFromDocument(JSONObject doc, String base) {
+        List<LiveSource> out = new ArrayList<LiveSource>();
+        if (doc == null) return out;
+        base = Json.str(doc, com.pilipala.source.Warehouse.ORIGIN, base);
+        JSONArray lives = doc.optJSONArray("lives");
+        if (lives == null) return out;
+
+        Map<String, LiveGroup> inlineGroups = new LinkedHashMap<String, LiveGroup>();
+        Map<String, LiveChannel> inlineChannelMap = new LinkedHashMap<String, LiveChannel>();
+        String inlineSourceName = "";
+
+        for (int i = 0; i < lives.length() && out.size() < 32; i++) {
+            JSONObject item = lives.optJSONObject(i);
+            if (item == null) continue;
+            JSONArray channels = item.optJSONArray("channels");
+            if (channels != null && channels.length() > 0) {
+                String itemGroup =
+                        Json.str(item, "group", Json.str(item, "name", "")).trim();
+                Map<String, String> itemHeaders = extractLiveMetaHeaders(item);
+                for (int j = 0; j < channels.length() && inlineChannelMap.size() < 800; j++) {
+                    JSONObject ch = channels.optJSONObject(j);
+                    if (ch == null) continue;
+                    String chName = Json.str(ch, "name", "").trim();
+                    String chGroup = Json.str(ch, "group", itemGroup).trim();
+                    if (chGroup.length() == 0) chGroup = "直播频道";
+                    Map<String, String> chHeaders = new LinkedHashMap<String, String>(itemHeaders);
+                    mergeLiveMetaHeaders(chHeaders, ch);
+
+                    List<String> rawUrls = new ArrayList<String>();
+                    JSONArray urlsArr = ch.optJSONArray("urls");
+                    if (urlsArr != null && urlsArr.length() > 0) {
+                        for (int k = 0; k < urlsArr.length(); k++) {
+                            String candidate = urlsArr.optString(k, "").trim();
+                            if (candidate.length() > 0) rawUrls.add(candidate);
+                        }
+                    } else {
+                        String single = Json.str(ch, "url", "").trim();
+                        if (single.length() > 0) rawUrls.add(single);
+                    }
+                    if (rawUrls.isEmpty()) continue;
+
+                    boolean allProxyEntries = true;
+                    for (int k = 0; k < rawUrls.size(); k++) {
+                        if (!rawUrls.get(k).startsWith("proxy://")) {
+                            allProxyEntries = false;
+                            break;
+                        }
+                    }
+                    if (allProxyEntries) {
+                        for (int k = 0; k < rawUrls.size() && out.size() < 32; k++) {
+                            addLiveSourceItem(
+                                    out,
+                                    chName.length() > 0 ? chName : chGroup,
+                                    rawUrls.get(k),
+                                    item,
+                                    chHeaders,
+                                    base);
+                        }
+                        continue;
+                    }
+
+                    if (inlineSourceName.length() == 0) {
+                        String n = Json.str(item, "name", "").trim();
+                        inlineSourceName = n.length() > 0 ? n : (itemGroup.length() > 0 ? itemGroup : "内置直播");
+                    }
+                    String effectiveName =
+                            chName.length() > 0
+                                    ? chName
+                                    : ("频道 " + (inlineChannelMap.size() + 1));
+                    for (int k = 0; k < rawUrls.size(); k++) {
+                        String entry = rawUrls.get(k);
+                        if (entry.startsWith("proxy://")) {
+                            addLiveSourceItem(out, effectiveName, entry, item, chHeaders, base);
+                            continue;
+                        }
+                        for (String part : entry.split("#")) {
+                            addChannelUrl(
+                                    inlineGroups,
+                                    inlineChannelMap,
+                                    chGroup,
+                                    effectiveName,
+                                    part.trim(),
+                                    chHeaders,
+                                    base);
+                        }
+                    }
+                }
+            } else {
+                addLiveSourceItem(
+                        out,
+                        Json.str(item, "name", "直播源 " + (out.size() + 1)),
+                        Json.str(item, "url", ""),
+                        item,
+                        null,
+                        base);
+            }
+        }
+        if (!inlineGroups.isEmpty()) {
+            LiveSource inlineSrc = new LiveSource();
+            inlineSrc.name = inlineSourceName.length() > 0 ? inlineSourceName : "内置直播";
+            inlineSrc.url = "";
+            inlineSrc.inlineGroups.addAll(inlineGroups.values());
+            out.add(0, inlineSrc);
         }
         return out;
     }
 
+    private static Map<String, String> extractLiveMetaHeaders(JSONObject meta) {
+        Map<String, String> headers = new LinkedHashMap<String, String>();
+        mergeLiveMetaHeaders(headers, meta);
+        return headers;
+    }
+
+    private static void mergeLiveMetaHeaders(Map<String, String> target, JSONObject meta) {
+        if (meta == null) return;
+        String ua = Json.str(meta, "ua", "").trim();
+        if (ua.length() > 0) putSafeSingleHeader(target, "User-Agent", ua);
+        String ref = Json.str(meta, "referer", Json.str(meta, "Referer", "")).trim();
+        if (ref.length() > 0) putSafeSingleHeader(target, "Referer", ref);
+        putSafeHeaders(target, meta.optJSONObject("header"));
+        putSafeHeaders(target, meta.optJSONObject("headers"));
+    }
+
     private static void addLiveSourceItem(
-            List<LiveSource> out, String name, String rawUrl, JSONObject meta, String base) {
+            List<LiveSource> out,
+            String name,
+            String rawUrl,
+            JSONObject meta,
+            Map<String, String> extraHeaders,
+            String base) {
         if (rawUrl == null) return;
         String u = rawUrl.trim();
         if (u.length() == 0) return;
@@ -1309,19 +2581,24 @@ public final class LiteCatalog {
         LiveSource src = new LiveSource();
         src.name = name == null || name.trim().length() == 0 ? "直播源" : name.trim();
         src.url = u;
-        String ua = Json.str(meta, "ua", "");
-        if (ua.length() > 0 && ua.indexOf('\r') < 0 && ua.indexOf('\n') < 0) {
-            src.headers.put("User-Agent", ua);
+        mergeLiveMetaHeaders(src.headers, meta);
+        if (extraHeaders != null) {
+            for (Map.Entry<String, String> e : extraHeaders.entrySet()) {
+                putSafeSingleHeader(src.headers, e.getKey(), e.getValue());
+            }
         }
-        putSafeHeaders(src.headers, meta.optJSONObject("header"));
-        putSafeHeaders(src.headers, meta.optJSONObject("headers"));
         out.add(src);
     }
 
     public static List<LiveGroup> fetchLiveGroups(LiveSource src) throws Exception {
-        if (src == null || src.url == null) return Collections.emptyList();
+        if (src == null) return Collections.emptyList();
+        if (!src.inlineGroups.isEmpty()) {
+            return src.inlineGroups;
+        }
+        if (src.url == null || src.url.trim().length() == 0) return Collections.emptyList();
         String u = src.url.trim();
         String content;
+        String baseUrl = null;
         if (u.startsWith("proxy://")) {
             int extIdx = u.indexOf("ext=");
             if (extIdx < 0) throw new IOException("不支持的代理直播地址");
@@ -1336,17 +2613,25 @@ public final class LiteCatalog {
                                     "UTF-8")
                             .trim();
             if (decoded.startsWith("http://") || decoded.startsWith("https://")) {
-                content = fetch(decoded, src.headers);
+                FetchResult res = fetchWithFinalUrl(decoded, src.headers);
+                content = res.body;
+                baseUrl = res.finalUrl;
             } else {
                 content = decoded;
             }
         } else {
-            content = fetch(u, src.headers);
+            FetchResult res = fetchWithFinalUrl(u, src.headers);
+            content = res.body;
+            baseUrl = res.finalUrl;
         }
-        return parseLiveContent(content);
+        return parseLiveContent(content, baseUrl);
     }
 
     public static List<LiveGroup> parseLiveContent(String raw) {
+        return parseLiveContent(raw, null);
+    }
+
+    public static List<LiveGroup> parseLiveContent(String raw, String baseUrl) {
         if (raw == null) return Collections.emptyList();
         String text = raw.trim();
         if (text.startsWith("\ufeff")) text = text.substring(1).trim();
@@ -1365,12 +2650,16 @@ public final class LiteCatalog {
         } else if (!text.startsWith("#EXTM3U")
                 && !text.contains(",#genre#")
                 && !text.contains("http://")
-                && !text.contains("https://")) {
+                && !text.contains("https://")
+                && !text.contains("#EXTINF:")) {
             try {
                 String decoded =
                         new String(Base64.decode(text.replaceAll("\\s+", ""), Base64.DEFAULT), "UTF-8")
                                 .trim();
-                if (decoded.contains("http://") || decoded.contains("https://")) text = decoded;
+                if (decoded.contains("http://")
+                        || decoded.contains("https://")
+                        || decoded.startsWith("#EXTM3U")
+                        || decoded.contains(",#genre#")) text = decoded;
             } catch (Exception ignored) {
             }
         }
@@ -1392,13 +2681,24 @@ public final class LiteCatalog {
                             comma >= 0 && comma + 1 < line.length()
                                     ? line.substring(comma + 1).trim()
                                     : extractAttr(line, "tvg-name", "频道");
+                    String extUa = extractAttr(line, "http-user-agent", "");
+                    if (extUa.length() == 0) extUa = extractAttr(line, "user-agent", "");
+                    if (extUa.length() > 0) putSafeSingleHeader(pendingHeaders, "User-Agent", extUa);
+                    String extRef = extractAttr(line, "http-referrer", "");
+                    if (extRef.length() == 0) extRef = extractAttr(line, "http-referer", "");
+                    if (extRef.length() == 0) extRef = extractAttr(line, "referer", "");
+                    if (extRef.length() > 0) putSafeSingleHeader(pendingHeaders, "Referer", extRef);
                 } else if (line.startsWith("#EXTGRP:")) {
                     String g = line.substring(8).trim();
                     if (g.length() > 0) currentGroup = g;
-                } else if (line.startsWith("#EXTVLCOPT:http-user-agent=")) {
-                    pendingHeaders.put("User-Agent", line.substring(27).trim());
-                } else if (line.startsWith("#EXTVLCOPT:http-referrer=")) {
-                    pendingHeaders.put("Referer", line.substring(25).trim());
+                } else if (line.regionMatches(true, 0, "#EXTVLCOPT:http-user-agent=", 0, 27)) {
+                    putSafeSingleHeader(pendingHeaders, "User-Agent", line.substring(27).trim());
+                } else if (line.regionMatches(true, 0, "#EXTVLCOPT:http-referrer=", 0, 25)) {
+                    putSafeSingleHeader(pendingHeaders, "Referer", line.substring(25).trim());
+                } else if (line.regionMatches(true, 0, "#EXTVLCOPT:http-referer=", 0, 24)) {
+                    putSafeSingleHeader(pendingHeaders, "Referer", line.substring(24).trim());
+                } else if (line.regionMatches(true, 0, "#EXTVLCOPT:http-origin=", 0, 23)) {
+                    putSafeSingleHeader(pendingHeaders, "Origin", line.substring(23).trim());
                 } else if (!line.startsWith("#")) {
                     addChannelUrl(
                             groups,
@@ -1406,7 +2706,8 @@ public final class LiteCatalog {
                             currentGroup,
                             currentName.length() > 0 ? currentName : "频道 " + (channelMap.size() + 1),
                             line,
-                            pendingHeaders);
+                            pendingHeaders,
+                            baseUrl);
                     currentName = "";
                     pendingHeaders = new LinkedHashMap<String, String>();
                 }
@@ -1431,11 +2732,37 @@ public final class LiteCatalog {
                             currentGroup,
                             left,
                             u.trim(),
-                            Collections.<String, String>emptyMap());
+                            Collections.<String, String>emptyMap(),
+                            baseUrl);
                 }
             }
         }
         return new ArrayList<LiveGroup>(groups.values());
+    }
+
+    private static String decodePercentOnce(String raw) {
+        if (raw == null || raw.indexOf('%') < 0) return raw == null ? "" : raw;
+        int len = raw.length();
+        ByteArrayOutputStream buf = new ByteArrayOutputStream(len);
+        try {
+            for (int i = 0; i < len; i++) {
+                char c = raw.charAt(i);
+                if (c == '%' && i + 2 < len) {
+                    int hi = Character.digit(raw.charAt(i + 1), 16);
+                    int lo = Character.digit(raw.charAt(i + 2), 16);
+                    if (hi >= 0 && lo >= 0) {
+                        buf.write((hi << 4) | lo);
+                        i += 2;
+                        continue;
+                    }
+                }
+                byte[] utf = String.valueOf(c).getBytes("UTF-8");
+                buf.write(utf, 0, utf.length);
+            }
+            return new String(buf.toByteArray(), "UTF-8");
+        } catch (Exception ignored) {
+            return raw;
+        }
     }
 
     private static void addChannelUrl(
@@ -1444,27 +2771,68 @@ public final class LiteCatalog {
             String groupName,
             String chName,
             String rawUrl,
-            Map<String, String> extraHeaders) {
+            Map<String, String> extraHeaders,
+            String baseUrl) {
         if (rawUrl == null || rawUrl.length() == 0) return;
-        String urlPart = rawUrl;
-        Map<String, String> inlineHeaders = new LinkedHashMap<String, String>(extraHeaders);
-        int pipe = rawUrl.indexOf('|');
+        String urlPart = rawUrl.trim();
+        Map<String, String> inlineHeaders = new LinkedHashMap<String, String>();
+        if (extraHeaders != null) {
+            for (Map.Entry<String, String> e : extraHeaders.entrySet()) {
+                putSafeSingleHeader(inlineHeaders, e.getKey(), e.getValue());
+            }
+        }
+        int pipe = urlPart.indexOf('|');
         if (pipe > 0) {
-            urlPart = rawUrl.substring(0, pipe).trim();
-            String tail = rawUrl.substring(pipe + 1);
+            String tail = urlPart.substring(pipe + 1);
+            urlPart = urlPart.substring(0, pipe).trim();
             for (String kv : tail.split("&|\\|")) {
                 int eq = kv.indexOf('=');
                 if (eq > 0) {
-                    String k = kv.substring(0, eq).trim();
-                    String v = kv.substring(eq + 1).trim();
-                    if ("referer".equalsIgnoreCase(k)) inlineHeaders.put("Referer", v);
-                    else if ("user-agent".equalsIgnoreCase(k) || "ua".equalsIgnoreCase(k))
-                        inlineHeaders.put("User-Agent", v);
+                    String k = decodePercentOnce(kv.substring(0, eq).trim()).trim();
+                    String v = decodePercentOnce(kv.substring(eq + 1).trim()).trim();
+                    if ("referer".equalsIgnoreCase(k) || "referrer".equalsIgnoreCase(k)) {
+                        putSafeSingleHeader(inlineHeaders, "Referer", v);
+                    } else if ("user-agent".equalsIgnoreCase(k) || "ua".equalsIgnoreCase(k)) {
+                        putSafeSingleHeader(inlineHeaders, "User-Agent", v);
+                    } else if ("origin".equalsIgnoreCase(k)) {
+                        putSafeSingleHeader(inlineHeaders, "Origin", v);
+                    } else if ("cookie".equalsIgnoreCase(k)) {
+                        putSafeSingleHeader(inlineHeaders, "Cookie", v);
+                    }
                 }
             }
         }
         int dollar = urlPart.indexOf('$');
-        if (dollar > 0) urlPart = urlPart.substring(0, dollar).trim();
+        if (dollar >= 0) {
+            String left = urlPart.substring(0, dollar).trim();
+            String right = urlPart.substring(dollar + 1).trim();
+            boolean leftIsHttp =
+                    left.startsWith("http://") || left.startsWith("https://");
+            boolean rightLooksLikeUrl =
+                    right.startsWith("http://")
+                            || right.startsWith("https://")
+                            || right.startsWith("/")
+                            || right.startsWith("./")
+                            || right.startsWith("../")
+                            || right.toLowerCase(Locale.ROOT).contains(".m3u8")
+                            || right.toLowerCase(Locale.ROOT).contains(".mp4")
+                            || right.toLowerCase(Locale.ROOT).contains(".flv")
+                            || right.toLowerCase(Locale.ROOT).contains(".ts");
+            if (!leftIsHttp && rightLooksLikeUrl) {
+                urlPart = right;
+            } else if (left.length() > 0) {
+                urlPart = left;
+            }
+        }
+        if (!urlPart.startsWith("http://")
+                && !urlPart.startsWith("https://")
+                && baseUrl != null
+                && baseUrl.length() > 0) {
+            try {
+                urlPart = new URL(new URL(baseUrl), urlPart).toString();
+            } catch (Exception ignored) {
+            }
+        }
         try {
             urlPart = http(urlPart);
         } catch (Exception invalid) {
@@ -1487,8 +2855,16 @@ public final class LiteCatalog {
             channelMap.put(chKey, ch);
             grp.channels.add(ch);
         }
-        if (!ch.urls.contains(urlPart)) {
+        boolean duplicate = false;
+        for (int i = 0; i < ch.urls.size(); i++) {
+            if (urlPart.equals(ch.urls.get(i)) && inlineHeaders.equals(ch.headersForLine(i))) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
             ch.urls.add(urlPart);
+            ch.lineHeaders.add(new LinkedHashMap<String, String>(inlineHeaders));
         }
     }
 

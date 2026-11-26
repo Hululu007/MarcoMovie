@@ -10,6 +10,8 @@ import 'core/app_log.dart';
 import 'core/cms_client.dart';
 import 'core/download_service.dart';
 import 'core/launch_diagnostics.dart';
+import 'core/macos_window_bounds.dart';
+import 'core/mdk_platform_player.dart';
 import 'core/ohos_runtime.dart';
 import 'core/storage_service.dart';
 import 'core/video_kernel.dart';
@@ -69,6 +71,13 @@ void _applyWinningBootstrapSideEffects(MarcoAppBootstrapResult result) {
           .catchError((_) {}),
     );
   }
+  if (!kIsWeb && Platform.isMacOS) {
+    final macBounds = MacosWindowBoundsController.installShared(storage);
+    unawaited(macBounds.syncOnStartup(initialThemeMode: AppleTheme.mode.value));
+    AppleTheme.mode.addListener(() {
+      macBounds.applyAppearanceMode(AppleTheme.mode.value);
+    });
+  }
   unawaited(
     DownloadService.instance.init(client).catchError((Object e) {
       debugPrint('DownloadService init warning: $e');
@@ -114,6 +123,9 @@ Future<void> main() async {
   // so cold launch never stalls on a 20 MB dlopen before painting Frame 1.
   if (!OhosRuntime.isOhos && !Platform.isIOS) {
     VideoKernel.ensureMediaKitInitialized();
+    if (Platform.isWindows) {
+      MdkPlatformPlayer.ensureInitialized();
+    }
   }
   try {
     SystemChrome.setSystemUIOverlayStyle(

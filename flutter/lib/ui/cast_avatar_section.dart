@@ -14,6 +14,7 @@ class CastAvatarSection extends StatefulWidget {
   final String actorRaw;
   final String year;
   final String doubanId;
+  final bool? wantMotionComic;
   final List<CastMember>? initialMembers;
   final EdgeInsetsGeometry padding;
   final EdgeInsetsGeometry? containerMargin;
@@ -29,6 +30,7 @@ class CastAvatarSection extends StatefulWidget {
     this.actorRaw = '',
     this.year = '',
     this.doubanId = '',
+    this.wantMotionComic,
     this.initialMembers,
     this.padding = const EdgeInsets.symmetric(horizontal: 16),
     this.containerMargin,
@@ -66,7 +68,9 @@ class _CastAvatarSectionState extends State<CastAvatarSection> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.title != widget.title ||
         oldWidget.actorRaw != widget.actorRaw ||
+        oldWidget.year != widget.year ||
         oldWidget.doubanId != widget.doubanId ||
+        oldWidget.wantMotionComic != widget.wantMotionComic ||
         oldWidget.allowExternalLookup != widget.allowExternalLookup ||
         oldWidget.initialMembers != widget.initialMembers) {
       _initAndLoad();
@@ -80,7 +84,9 @@ class _CastAvatarSectionState extends State<CastAvatarSection> {
       _loading = false;
       return;
     }
-    final cached = CastAvatarService.peekCached(widget.title);
+    final hasExplicitDouban = widget.doubanId.trim().isNotEmpty;
+    final cached =
+        hasExplicitDouban ? null : CastAvatarService.peekCached(widget.title);
     if (cached != null &&
         cached.isNotEmpty &&
         (cached.any((m) => m.avatarUrl.isNotEmpty) ||
@@ -97,13 +103,14 @@ class _CastAvatarSectionState extends State<CastAvatarSection> {
       _loading = false;
       return;
     }
-    _loading = widget.title.trim().isNotEmpty;
+    _loading = widget.title.trim().isNotEmpty || hasExplicitDouban;
     if (!_loading) return;
     CastAvatarService.resolveCast(
       title: widget.title,
       actorRaw: widget.actorRaw,
       year: widget.year,
       doubanId: widget.doubanId,
+      wantMotionComic: widget.wantMotionComic,
       onProgress: (partial) {
         if (!mounted || gen != _generation || partial.isEmpty) return;
         setState(() => _members = partial);

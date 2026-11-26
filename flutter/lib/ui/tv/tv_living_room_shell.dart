@@ -2,12 +2,15 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
+import '../../core/app_update.dart';
 import '../../core/cms_client.dart';
 import '../../core/models.dart';
 import '../../core/ohos_runtime.dart';
@@ -17,6 +20,7 @@ import '../cloud_sync_panel.dart';
 import '../netdisk_sheet.dart';
 import '../player_screen.dart';
 import '../poster_image.dart';
+import '../release_notes_view.dart';
 import 'tv_ambient_theme.dart';
 import 'tv_detail_screen.dart';
 import 'tv_focus_widgets.dart';
@@ -26,11 +30,20 @@ import 'tv_focus_widgets.dart';
 class TvLivingRoomShell extends StatefulWidget {
   final StorageService storage;
   final CmsClient client;
+  final Duration searchSiteTimeout;
+  final Route<void> Function(
+    CmsSite site,
+    CmsVideo video,
+    List<LiveGroup> liveGroups,
+    LiveChannel initialChannel,
+  )? debugLiveRouteBuilder;
 
   const TvLivingRoomShell({
     super.key,
     required this.storage,
     required this.client,
+    this.searchSiteTimeout = const Duration(seconds: 12),
+    this.debugLiveRouteBuilder,
   });
 
   @override
@@ -66,17 +79,34 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
 
   // Search state
   String _searchQuery = '';
+  String _searchActiveKeyword = '';
   bool _searching = false;
   bool _searchPerformed = false;
   String _searchSelectedSiteKey = '__all__';
   final List<(CmsSite, CmsVideo)> _searchResults = <(CmsSite, CmsVideo)>[];
+  final Set<Completer<void>> _activeSearchCancels = <Completer<void>>{};
   int _searchEpoch = 0;
+  int _searchTotalSites = 0;
+  int _searchCompletedSites = 0;
+  int _searchSucceededSites = 0;
+  int _searchFailedCount = 0;
+  int _searchTimedOutCount = 0;
 
   // Library state (0: 观看历史, 1: 我的收藏)
   int _librarySegment = 0;
 
-  // Settings sidebar state (0: 外观与柔光, 1: 订阅与片源, 2: 4K网盘加速, 3: WebDAV云同步, 4: 播放与跳过, 5: 备份与存储)
+  // Settings sidebar state (0: 外观与柔光, 1: 订阅与片源, 2: 4K网盘加速, 3: WebDAV云同步, 4: 播放与跳过, 5: 备份与存储, 6: 版本与更新)
   int _settingsSection = 0;
+
+  // HarmonyOS update state
+  String _installedVersion = '读取中';
+  String _installedBuildNumber = '';
+  bool _updateChecking = false;
+  bool _updateFailed = false;
+  bool _updateHasNewer = false;
+  int _updateVersionCompare = 0;
+  String _updateStatus = '点击检查 HarmonyOS NEXT 独立更新源';
+  AppUpdate? _latestUpdate;
 
   // Dynamic focused-poster ambient tint for `海报色彩氛围联动`
   Color? _focusedPosterTint;
@@ -103,11 +133,148 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
   void initState() {
     super.initState();
     _homeScrollController.addListener(_onHomeScroll);
+    unawaited(_loadInstalledVersion());
     _reloadConfigAndFetch();
+  }
+
+  Future<String> _resolveInstalledVersion() async {
+    if (OhosRuntime.isOhos) {
+      final pkg = await OhosRuntime.getPackageInfo();
+      if (pkg != null && pkg.version.isNotEmpty) {
+        if (mounted) {
+          _installedBuildNumber = pkg.buildNumber;
+        }
+        return pkg.version;
+      }
+    }
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (info.version.trim().isNotEmpty) {
+        if (mounted) {
+          _installedBuildNumber = info.buildNumber.trim();
+        }
+        return info.version.trim();
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  Future<void> _loadInstalledVersion() async {
+    final ver = await _resolveInstalledVersion();
+    if (!mounted) return;
+    setState(() {
+      _installedVersion = ver.isNotEmpty ? ver : '未知';
+    });
+  }
+
+  Future<void> _checkHarmonyUpdate() async {
+    if (_updateChecking) return;
+    setState(() {
+      _updateChecking = true;
+      _updateFailed = false;
+      _updateHasNewer = false;
+      _updateVersionCompare = 0;
+      _latestUpdate = null;
+      _updateStatus = '正在检查 HarmonyOS NEXT 独立更新源…';
+    });
+    try {
+      final installed = await _resolveInstalledVersion();
+      if (installed.isEmpty) {
+        throw const FormatException('无法读取已安装版本');
+      }
+      if (mounted) {
+        _installedVersion = installed;
+      }
+      final platform = OhosRuntime.isOhos ? 'harmonyos' : AppUpdate.currentPlatform;
+      final release = await AppUpdate.check(platform: platform);
+      final targetUrl = platform == 'harmonyos'
+          ? release.harmonyosUrl
+          : release.downloadUrlForPlatform(platform);
+      if (platform == 'harmonyos' && targetUrl == null) {
+        throw const FormatException('未获取到有效的鸿蒙 HAP 安装包或校验信息');
+      }
+      final cmp = AppUpdate.compareVersions(release.version, installed);
+      final newer = cmp > 0;
+      if (!mounted) return;
+      setState(() {
+        _latestUpdate = release;
+        _updateVersionCompare = cmp;
+        _updateHasNewer = newer;
+        _updateFailed = false;
+        _updateChecking = false;
+        _updateStatus = cmp > 0
+            ? '发现新版本 v${release.version}（当前 v$installed）'
+            : cmp == 0
+                ? '当前已是最新版本（v$installed）'
+                : '当前已装版本 v$installed 高于正式源版本 v${release.version}（无需降级）';
+      });
+    } on FormatException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _latestUpdate = null;
+        _updateVersionCompare = 0;
+        _updateHasNewer = false;
+        _updateFailed = true;
+        _updateChecking = false;
+        _updateStatus = '检查更新失败：${e.message}';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _latestUpdate = null;
+        _updateVersionCompare = 0;
+        _updateHasNewer = false;
+        _updateFailed = true;
+        _updateChecking = false;
+        _updateStatus = '暂时无法检查更新，请检查网络后重试';
+      });
+    }
+  }
+
+  Future<void> _openOrCopyHarmonyUpdateUrl(String url, String label) async {
+    if (OhosRuntime.isOhos) {
+      final opened = await OhosRuntime.openExternalUrl(url);
+      if (opened) return;
+    }
+    await Clipboard.setData(ClipboardData(text: url));
+    _showToast('已复制$label：$url');
+  }
+
+  void _cancelActiveSearchRequests() {
+    if (_activeSearchCancels.isEmpty) {
+      return;
+    }
+    final pending = _activeSearchCancels.toList(growable: false);
+    _activeSearchCancels.clear();
+    for (final completer in pending) {
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+    }
+  }
+
+  void _cancelAndResetSearch({bool clearQuery = false}) {
+    _searchEpoch++;
+    _cancelActiveSearchRequests();
+    _searching = false;
+    _searchPerformed = false;
+    _searchActiveKeyword = '';
+    _searchSelectedSiteKey = '__all__';
+    _searchResults.clear();
+    _searchTotalSites = 0;
+    _searchCompletedSites = 0;
+    _searchSucceededSites = 0;
+    _searchFailedCount = 0;
+    _searchTimedOutCount = 0;
+    if (clearQuery) {
+      _searchQuery = '';
+    }
   }
 
   @override
   void dispose() {
+    _searchEpoch++;
+    _cancelActiveSearchRequests();
     _homeScrollController.dispose();
     super.dispose();
   }
@@ -140,6 +307,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
       chosen ??= available.first;
     }
     setState(() {
+      _cancelAndResetSearch();
       _config = cfg;
       _activeSite = chosen;
       _categories = const [];
@@ -295,42 +463,111 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
     if (kw.isEmpty) {
       return;
     }
-    final sites = (_config?.publicAvailableSites ?? const <CmsSite>[])
+    final allSites = (_config?.publicAvailableSites ?? const <CmsSite>[])
         .where((s) => s.searchable)
-        .take(16)
         .toList(growable: false);
     final epoch = ++_searchEpoch;
+    final hadInFlight = _activeSearchCancels.isNotEmpty;
+    _cancelActiveSearchRequests();
     setState(() {
-      _searching = true;
+      _searching = allSites.isNotEmpty;
       _searchPerformed = true;
+      _searchActiveKeyword = kw;
       _searchSelectedSiteKey = '__all__';
       _searchResults.clear();
+      _searchTotalSites = allSites.length;
+      _searchCompletedSites = 0;
+      _searchSucceededSites = 0;
+      _searchFailedCount = 0;
+      _searchTimedOutCount = 0;
     });
+    if (allSites.isEmpty) {
+      return;
+    }
     unawaited(widget.storage.addSearchKeyword(kw));
-    const concurrency = 4;
-    var cursor = 0;
-    Future<void> worker() async {
-      while (cursor < sites.length && mounted && epoch == _searchEpoch) {
-        final site = sites[cursor++];
-        try {
-          final res = await widget.client.fetchSearch(site, kw);
-          if (!mounted || epoch != _searchEpoch) {
-            return;
-          }
-          if (res.videos.isNotEmpty) {
-            setState(() {
-              for (final v in res.videos) {
-                _searchResults.add((site, v));
-              }
-            });
-          }
-        } catch (_) {}
+    if (hadInFlight) {
+      // Drain the microtask queue so cancelled AbortableRequest triggers abort
+      // previous sockets before opening the next epoch's connections (<= 4 live).
+      await Future<void>.delayed(Duration.zero);
+      if (!mounted || epoch != _searchEpoch) {
+        return;
       }
     }
+    const batchSize = 16;
+    const concurrency = 4;
 
-    await Future.wait<void>(
-      List<Future<void>>.generate(concurrency, (_) => worker()),
-    );
+    for (var batchStart = 0;
+        batchStart < allSites.length;
+        batchStart += batchSize) {
+      if (!mounted || epoch != _searchEpoch) {
+        return;
+      }
+      final batchEnd = math.min(batchStart + batchSize, allSites.length);
+      final batch = allSites.sublist(batchStart, batchEnd);
+      var cursor = 0;
+
+      Future<void> worker() async {
+        while (cursor < batch.length && mounted && epoch == _searchEpoch) {
+          final site = batch[cursor++];
+          final siteCancel = Completer<void>();
+          _activeSearchCancels.add(siteCancel);
+          var timedOut = false;
+          final timeoutTimer = Timer(widget.searchSiteTimeout, () {
+            timedOut = true;
+            if (!siteCancel.isCompleted) {
+              siteCancel.complete();
+            }
+          });
+          try {
+            final res = await widget.client.runSourceOperation(
+              () => widget.client.fetchSearch(site, kw),
+              cancellation: siteCancel,
+            );
+            if (!mounted || epoch != _searchEpoch) {
+              return;
+            }
+            setState(() {
+              _searchCompletedSites++;
+              _searchSucceededSites++;
+              if (res.videos.isNotEmpty) {
+                for (final v in res.videos) {
+                  _searchResults.add((site, v));
+                }
+              }
+            });
+          } on TimeoutException {
+            if (!mounted || epoch != _searchEpoch) {
+              return;
+            }
+            setState(() {
+              _searchCompletedSites++;
+              _searchFailedCount++;
+              _searchTimedOutCount++;
+            });
+          } catch (_) {
+            if (!mounted || epoch != _searchEpoch) {
+              return;
+            }
+            setState(() {
+              _searchCompletedSites++;
+              _searchFailedCount++;
+              if (timedOut) {
+                _searchTimedOutCount++;
+              }
+            });
+          } finally {
+            timeoutTimer.cancel();
+            _activeSearchCancels.remove(siteCancel);
+          }
+        }
+      }
+
+      final workerCount = math.min(concurrency, batch.length);
+      await Future.wait<void>(
+        List<Future<void>>.generate(workerCount, (_) => worker()),
+      );
+    }
+
     if (mounted && epoch == _searchEpoch) {
       setState(() => _searching = false);
     }
@@ -353,40 +590,47 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
   }
 
   Future<void> _openLiveGroupPlayer(LiveSource source, LiveGroup group, int channelIdx) async {
-    final episodes = <CmsEpisode>[];
-    for (final ch in group.channels) {
-      final eps = ch.episodes;
-      if (eps.isNotEmpty) {
-        episodes.add(
-          CmsEpisode(
-            name: ch.name,
-            url: eps.first.url,
-            headers: eps.first.headers,
-            variants: eps.length > 1 ? eps.sublist(1) : const [],
-          ),
-        );
-      }
-    }
-    if (episodes.isEmpty) {
+    if (group.channels.isEmpty) {
       return;
     }
+    final safeChannelIdx = channelIdx.clamp(0, group.channels.length - 1);
+    final channel = group.channels[safeChannelIdx];
+    final channelEpisodes = channel.episodes;
+    if (channelEpisodes.isEmpty) {
+      return;
+    }
+    final catalogGroups = _liveGroups.any((g) => g.channels.isNotEmpty)
+        ? _liveGroups
+        : <LiveGroup>[group];
     final liveVideo = CmsVideo(
-      id: 'live_group_${group.name}',
-      title: group.name,
-      lines: [CmsLine(name: source.name, episodes: episodes)],
-    );
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(
-        builder: (_) => PlayerScreen(
-          site: source.playbackSite,
-          video: liveVideo,
-          initialLineIndex: 0,
-          initialEpisodeIndex: channelIdx.clamp(0, episodes.length - 1),
-          storage: widget.storage,
-          isLive: true,
+      id: channel.name,
+      title: channel.name,
+      lines: [
+        CmsLine(
+          name: channel.group.isNotEmpty ? channel.group : group.name,
+          episodes: channelEpisodes,
         ),
-      ),
+      ],
     );
+    final route = widget.debugLiveRouteBuilder?.call(
+          source.playbackSite,
+          liveVideo,
+          catalogGroups,
+          channel,
+        ) ??
+        MaterialPageRoute<void>(
+          builder: (_) => PlayerScreen(
+            site: source.playbackSite,
+            video: liveVideo,
+            initialLineIndex: 0,
+            initialEpisodeIndex: 0,
+            storage: widget.storage,
+            isLive: true,
+            liveGroups: catalogGroups,
+            initialLiveChannel: channel,
+          ),
+        );
+    await Navigator.of(context).push<void>(route);
   }
 
   Future<void> _showQrSyncDialog() async {
@@ -572,7 +816,10 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
   }
 
   Future<void> _switchDepot(SubscriptionEntry sub, CmsDepot depot) async {
-    setState(() => _homeLoading = true);
+    setState(() {
+      _cancelAndResetSearch();
+      _homeLoading = true;
+    });
     try {
       final updated = await widget.client.switchSubscriptionDepot(sub, depot);
       final all = widget.storage.getSubscriptions().map((item) {
@@ -723,20 +970,48 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
     try {
       String? content;
       if (OhosRuntime.isOhos) {
-        final picked = await OhosRuntime.pickConfigOrBackupFile();
-        content = picked?.content;
+        final picked = await OhosRuntime.pickDocumentFile(
+          purpose: isBackup
+              ? OhosDocumentPurpose.backup
+              : OhosDocumentPurpose.subscription,
+          maxBytes: isBackup
+              ? StorageService.maxLocalBackupBytes
+              : CmsClient.maxResponseBytes,
+        );
+        if (picked == null) {
+          return;
+        }
+        if (isBackup) {
+          StorageService.validateLocalBackupUtf8Bytes(picked.bytes);
+        }
+        content = isBackup
+            ? picked.decodeUtf8(allowMalformed: false)
+            : CmsClient.readSubscriptionFile(picked.bytes, picked.name);
       } else {
         final result = await FilePicker.platform.pickFiles(
           type: FileType.custom,
-          allowedExtensions: const ['json', 'txt', 'm3u', 'm3u8'],
+          allowedExtensions: isBackup
+              ? const ['json']
+              : const ['json', 'zip', 'txt', 'm3u', 'm3u8'],
           withData: true,
         );
         if (result != null && result.files.isNotEmpty) {
           final f = result.files.first;
+          final Uint8List rawBytes;
           if (f.bytes != null) {
-            content = utf8.decode(f.bytes!, allowMalformed: true);
+            rawBytes = f.bytes!;
           } else if (f.path != null) {
-            content = await File(f.path!).readAsString();
+            rawBytes = await File(f.path!).readAsBytes();
+          } else {
+            return;
+          }
+          if (isBackup) {
+            if (rawBytes.length > StorageService.maxSyncPayloadBytes) {
+              throw const FormatException('备份文件超过 8 MB 限制');
+            }
+            content = utf8.decode(rawBytes, allowMalformed: false);
+          } else {
+            content = CmsClient.readSubscriptionFile(rawBytes, f.name);
           }
         }
       }
@@ -744,7 +1019,11 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         return;
       }
       if (isBackup) {
-        await widget.storage.importBackupJson(content);
+        if (OhosRuntime.isOhos) {
+          await widget.storage.importValidatedLocalBackupJson(content);
+        } else {
+          await widget.storage.importBackupJson(content);
+        }
         _reloadConfigAndFetch();
         _showToast('跨端备份已恢复');
       } else {
@@ -760,6 +1039,8 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         _reloadConfigAndFetch();
         _showToast('本地配置导入成功');
       }
+    } on FormatException catch (e) {
+      _showToast('文件导入失败：${e.message}');
     } catch (e) {
       _showToast('文件导入失败：$e');
     }
@@ -767,20 +1048,24 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
 
   Future<void> _exportBackup() async {
     try {
-      final jsonText = widget.storage.exportBackupJson();
       const fileName = 'marco-movie-backup.json';
       if (OhosRuntime.isOhos) {
+        final jsonText = widget.storage.exportValidatedLocalBackupJson();
         final saved = await OhosRuntime.saveTextFile(
           fileName: fileName,
           content: jsonText,
+          maxBytes: StorageService.maxLocalBackupBytes,
         );
         if (saved != null) {
           _showToast('已导出备份文件');
         }
         return;
       }
+      final jsonText = widget.storage.exportBackupJson();
       await Clipboard.setData(ClipboardData(text: jsonText));
       _showToast('跨端备份 JSON 已复制到剪贴板');
+    } on FormatException catch (e) {
+      _showToast('备份导出失败：${e.message}');
     } catch (e) {
       _showToast('备份导出失败：$e');
     }
@@ -1607,6 +1892,41 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (_searching)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(
+                      children: [
+                        const CupertinoActivityIndicator(radius: 11),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            '正在多站并发搜索「$_searchActiveKeyword」（已完成 $_searchCompletedSites/$_searchTotalSites 站'
+                            '${_searchFailedCount > 0 ? " · 异常 $_searchFailedCount" : ""}）…',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: TvAmbientColors.secondaryText,
+                              fontSize: 15.5,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else if (_searchResults.isNotEmpty && _searchFailedCount > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      '已搜索全部 $_searchTotalSites 站，另有 $_searchFailedCount 个站点异常'
+                      '${_searchTimedOutCount > 0 ? "（含 $_searchTimedOutCount 站超时）" : ""}',
+                      style: const TextStyle(
+                        color: Color(0xFFFFCA58),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
                 if (_searchResults.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 18),
@@ -1653,23 +1973,6 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                         ],
                       ),
                     ),
-                  )
-                else if (_searching)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: Row(
-                      children: [
-                        const CupertinoActivityIndicator(radius: 11),
-                        const SizedBox(width: 12),
-                        Text(
-                          '正在多站并发搜索「$_searchQuery」…',
-                          style: const TextStyle(
-                            color: TvAmbientColors.secondaryText,
-                            fontSize: 16,
-                          ),
-                        ),
-                      ],
-                    ),
                   ),
                 Expanded(
                   child: !_searchPerformed
@@ -1694,13 +1997,66 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                           ),
                         )
                       : (filteredResults.isEmpty && !_searching)
-                          ? const Center(
-                              child: Text(
-                                '未找到匹配的影视内容，可尝试缩短关键词',
-                                style: TextStyle(
-                                  color: TvAmbientColors.secondaryText,
-                                  fontSize: 16,
-                                ),
+                          ? Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    _searchTotalSites > 0 &&
+                                            _searchSucceededSites == 0 &&
+                                            _searchFailedCount > 0
+                                        ? CupertinoIcons.exclamationmark_triangle_fill
+                                        : CupertinoIcons.search,
+                                    size: 42,
+                                    color: _searchTotalSites > 0 &&
+                                            _searchSucceededSites == 0 &&
+                                            _searchFailedCount > 0
+                                        ? AppleColors.systemOrange
+                                        : TvAmbientColors.mutedText,
+                                  ),
+                                  const SizedBox(height: 14),
+                                  Text(
+                                    _searchTotalSites > 0 &&
+                                            _searchSucceededSites == 0 &&
+                                            _searchFailedCount > 0
+                                        ? '搜索失败：全部 $_searchTotalSites 个站点均连接失败或超时'
+                                            '${_searchTimedOutCount > 0 ? "（超时 $_searchTimedOutCount 站）" : ""}'
+                                        : '未找到匹配的影视内容，可尝试缩短关键词',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: TvAmbientColors.secondaryText,
+                                      fontSize: 16,
+                                    ),
+                                  ),
+                                  if (_searchSucceededSites > 0 &&
+                                      _searchFailedCount > 0) ...[
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      '另有 $_searchFailedCount 个站点异常'
+                                      '${_searchTimedOutCount > 0 ? "（含 $_searchTimedOutCount 站超时）" : ""}',
+                                      style: const TextStyle(
+                                        color: Color(0xFFFFCA58),
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                  if (_searchFailedCount > 0) ...[
+                                    const SizedBox(height: 18),
+                                    TvFocusPill(
+                                      key: const ValueKey('tv-search-retry-btn'),
+                                      prominent: true,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 22,
+                                        vertical: 11,
+                                      ),
+                                      onSelect: _runGlobalSearch,
+                                      child: const Text(
+                                        '重新搜索',
+                                        style: TextStyle(fontSize: 15.5),
+                                      ),
+                                    ),
+                                  ],
+                                ],
                               ),
                             )
                           : GridView.builder(
@@ -1960,6 +2316,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
       (CupertinoIcons.cloud_upload_fill, 'WebDAV 云同步'),
       (CupertinoIcons.slider_horizontal_3, '播放与跳过'),
       (CupertinoIcons.archivebox_fill, '备份与存储'),
+      (CupertinoIcons.arrow_down_circle_fill, '版本与更新'),
     ];
 
     return Padding(
@@ -2009,16 +2366,16 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                     ),
                   ),
                 const Spacer(),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(10, 0, 10, 6),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      MarcoBrandLogo(iconSize: 28, fontSize: 17),
-                      SizedBox(height: 6),
+                      const MarcoBrandLogo(iconSize: 28, fontSize: 17),
+                      const SizedBox(height: 6),
                       Text(
-                        'HarmonyOS 客厅原画端 · HUKS 安全存储',
-                        style: TextStyle(
+                        'v$_installedVersion · HarmonyOS NEXT 客厅端',
+                        style: const TextStyle(
                           color: TvAmbientColors.secondaryText,
                           fontSize: 12.5,
                           fontWeight: FontWeight.w500,
@@ -2040,7 +2397,8 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                 2 => _buildSettingsNetdiskSection(),
                 3 => _buildSettingsWebdavSection(),
                 4 => _buildSettingsPlaybackSection(),
-                _ => _buildSettingsBackupSection(),
+                5 => _buildSettingsBackupSection(),
+                _ => _buildSettingsUpdateSection(),
               },
             ),
           ),
@@ -2622,7 +2980,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
   Widget _buildSettingsPlaybackSection() {
     final uiMode = widget.storage.tvUiMode;
     final speed = widget.storage.playSpeed;
-    const speeds = <double>[0.75, 1.0, 1.25, 1.5, 2.0];
+    const speeds = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2786,6 +3144,243 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                 ],
               ),
             ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsUpdateSection() {
+    final release = _latestUpdate;
+    final hapUrl = release?.harmonyosUrl?.toString() ?? '';
+    final releasePageUrl =
+        release?.releaseUrl?.toString() ?? 'https://marcotv.wlj9919.top/movie/';
+    final sizeText = release?.size != null
+        ? '${(release!.size! / (1024 * 1024)).toStringAsFixed(1)} MB'
+        : '';
+    final buildSuffix =
+        _installedBuildNumber.isNotEmpty ? ' (Build $_installedBuildNumber)' : '';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _settingsGlassCard(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'HarmonyOS NEXT 独立版本更新',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        '当前已装版本：v$_installedVersion$buildSuffix · 支持架构：arm64-v8a',
+                        style: const TextStyle(
+                          color: TvAmbientColors.secondaryText,
+                          fontSize: 14.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                TvFocusPill(
+                  key: const ValueKey('tv-check-update-btn'),
+                  prominent: true,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 22,
+                    vertical: 12,
+                  ),
+                  onSelect: _updateChecking ? null : _checkHarmonyUpdate,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_updateChecking)
+                        const CupertinoActivityIndicator(radius: 8)
+                      else
+                        const Icon(CupertinoIcons.arrow_clockwise, size: 16),
+                      const SizedBox(width: 8),
+                      Text(
+                        _updateChecking ? '正在检查…' : '检查版本更新',
+                        style: const TextStyle(fontSize: 15.5),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Icon(
+                  _updateFailed
+                      ? CupertinoIcons.exclamationmark_triangle_fill
+                      : _updateHasNewer
+                          ? CupertinoIcons.arrow_down_circle_fill
+                          : CupertinoIcons.checkmark_seal_fill,
+                  size: 20,
+                  color: _updateFailed
+                      ? AppleColors.systemOrange
+                      : _updateHasNewer
+                          ? AppleColors.systemBlue
+                          : AppleColors.systemGreen,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _updateStatus,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (release != null) ...[
+              const SizedBox(height: 16),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: TvAmbientColors.glassStroke),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '安装包：${release.packageFileName ?? "MarcoMovie-${release.version}-harmonyos-universal.hap"}'
+                      '${sizeText.isNotEmpty ? "（$sizeText）" : ""}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if ((release.checksum ?? '').isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'SHA-256：${release.checksum}',
+                        style: const TextStyle(
+                          color: TvAmbientColors.secondaryText,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ],
+                    if (release.notes.trim().isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      ReleaseNotesSummaryView(
+                        rawNotes: release.notes,
+                        fontSize: 13.5,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (_updateVersionCompare >= 0) ...[
+                const SizedBox(height: 14),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0x260A84FF),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: const Color(0x660A84FF),
+                    ),
+                  ),
+                  child: const Text(
+                    AppUpdate.harmonyosUnsignedInstallGuide,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13.5,
+                      height: 1.5,
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  if (hapUrl.isNotEmpty && _updateVersionCompare >= 0)
+                    TvFocusPill(
+                      key: const ValueKey('tv-download-hap-btn'),
+                      prominent: true,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 11,
+                      ),
+                      onSelect: () => _openOrCopyHarmonyUpdateUrl(
+                        hapUrl,
+                        '未签名 HAP 下载链接',
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(CupertinoIcons.arrow_down_to_line, size: 16),
+                          const SizedBox(width: 8),
+                          Text(
+                            _updateHasNewer
+                                ? '下载未签名 HAP v${release.version}'
+                                : '重新下载 HAP v${release.version}',
+                            style: const TextStyle(fontSize: 15),
+                          ),
+                        ],
+                      ),
+                    ),
+                  if (hapUrl.isNotEmpty && _updateVersionCompare >= 0)
+                    TvFocusPill(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 11,
+                      ),
+                      onSelect: () async {
+                        await Clipboard.setData(ClipboardData(text: hapUrl));
+                        _showToast('已复制 HAP 下载链接');
+                      },
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(CupertinoIcons.doc_on_clipboard, size: 16),
+                          SizedBox(width: 8),
+                          Text('复制 HAP 链接', style: TextStyle(fontSize: 15)),
+                        ],
+                      ),
+                    ),
+                  TvFocusPill(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 11,
+                    ),
+                    onSelect: () => _openOrCopyHarmonyUpdateUrl(
+                      releasePageUrl,
+                      '鸿蒙发布页地址',
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(CupertinoIcons.globe, size: 16),
+                        SizedBox(width: 8),
+                        Text('打开鸿蒙发布页', style: TextStyle(fontSize: 15)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ],

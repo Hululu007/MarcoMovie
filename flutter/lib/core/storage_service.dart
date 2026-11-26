@@ -13,15 +13,20 @@ import 'catpaw_host.dart';
 import 'windows_appearance_preferences.dart';
 import 'cms_parser.dart';
 import 'csp_bridge.dart';
+import 'danmu/danmu_prefs.dart';
+import 'danmu/danmu_source_sync.dart';
 import 'episode_scraper.dart';
 import 'ios_avplayer_controller.dart';
 import 'ios_mpv_profile.dart';
 import 'local_media_proxy.dart';
+import 'macos_window_bounds.dart';
+import 'mdk_platform_player.dart';
 import 'models.dart';
 import 'quark_account.dart';
 import 'netdisk_session.dart';
 import 'ohos_runtime.dart';
 import 'secure_credential_store.dart';
+import 'series_scraper.dart';
 import 'spider_plugin_registry.dart';
 import 'storage_file_store.dart';
 
@@ -124,7 +129,37 @@ class StorageService {
   static const int syncVersion = 2;
   static const String defaultSyncFileName = 'marco-movie-sync.json';
   static const int maxSyncTombstones = 300;
+  /// WebDAV cloud sync payload limit (kept independent of local backup files).
   static const int maxSyncPayloadBytes = 8 * 1024 * 1024;
+  /// Unified UTF-8 byte limit for local backup export and import on phone & Smart Screen.
+  static const int maxLocalBackupBytes = 32 * 1024 * 1024;
+
+  static String formatLocalBackupByteLimit([
+    int maxBytes = maxLocalBackupBytes,
+  ]) {
+    final mb = (maxBytes / (1024 * 1024)).round();
+    return '${mb < 1 ? 1 : mb} MB';
+  }
+
+  static void validateLocalBackupUtf8Bytes(
+    List<int> bytes, {
+    int maxBytes = maxLocalBackupBytes,
+  }) {
+    if (bytes.length > maxBytes) {
+      throw FormatException(
+        '本地备份文件超过 ${formatLocalBackupByteLimit(maxBytes)} 限制（当前 ${(bytes.length / (1024 * 1024)).toStringAsFixed(1)} MB）',
+      );
+    }
+  }
+
+  static Uint8List encodeValidatedLocalBackupUtf8(
+    String rawBackup, {
+    int maxBytes = maxLocalBackupBytes,
+  }) {
+    final bytes = Uint8List.fromList(utf8.encode(rawBackup));
+    validateLocalBackupUtf8Bytes(bytes, maxBytes: maxBytes);
+    return bytes;
+  }
   static const double minPlaySpeed = 0.5;
   static const double maxPlaySpeed = 3.0;
   static const String keyOrigin = 'origin';
@@ -204,10 +239,14 @@ class StorageService {
   static const String keyWebdavAuto = 'webdav_auto';
   static const String keyWebdavSyncSubs = 'webdav_sync_subs';
   static const String keyWebdavSyncHistory = 'webdav_sync_history';
+  static const String keyWebdavSyncDanmu = 'webdav_sync_danmu';
   static const String keySyncTombstones = 'sync_tombstones';
   static const String keySyncLastTime = 'sync_last_time';
   static const String keySyncLastStatus = 'sync_last_status';
+  static const String keySyncDanmuLastStatus = 'sync_danmu_last_status';
   static const String keyVideoSkipRecords = 'video_skip_records';
+  static const String keySeriesScrapeOverrides = 'series_scrape_overrides_v1';
+  static const int maxSeriesScrapeOverrides = 300;
   static const String keyPlayerAlwaysShowClock = 'player_always_show_clock';
   static const String keyTvUiMode = 'tv_ui_mode';
   static const String keyTvAmbientTheme = 'tv_ambient_theme';
@@ -262,6 +301,8 @@ class StorageService {
       _testMemorySecureStores = <String, InMemorySecureCredentialStore>{};
 
   final ValueNotifier<int> watchHistoryRevision = ValueNotifier<int>(0);
+  final ValueNotifier<int> danmuSourcesRevision = ValueNotifier<int>(0);
+  int _danmuSyncGeneration = 0;
   final ValueNotifier<bool> historyCorruptionNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<bool> subscriptionsCorruptionNotifier =
       ValueNotifier<bool>(false);
@@ -565,6 +606,15 @@ class StorageService {
     if (_historyCorrupted) {
       historyCorruptionNotifier.value = true;
     }
+    DanmuPrefs.registerSourcesChangedHook(_prefs, () {
+      danmuSourcesRevision.value++;
+      if (webdavAuto &&
+          webdavSyncDanmu &&
+          isWebdavConfigured &&
+          !OhosRuntime.isOhos) {
+        scheduleAutoWebdavSync(immediate: true);
+      }
+    });
   }
 
   factory StorageService(
@@ -978,6 +1028,10 @@ class StorageService {
       _prefs.getString(keyDefaultAspectMode) ?? 'contain';
   String get playerKernel =>
       _prefs.getString(keyPlayerKernel) ?? 'exo';
+  String get windowsPlaybackEngine =>
+      WindowsPlaybackEngine.fromId(
+        _prefs.getString(WindowsPlaybackEngine.prefKey),
+      ).id;
   String get iosPlaybackEngineMode =>
       IosPlaybackEngineMode.fromId(
         _prefs.getString(IosMpvProfile.prefKeyEngineMode),
@@ -2238,10 +2292,21 @@ class StorageService {
   }
 
   String _liveSnapshotKey(LiveSource source) {
+    final sortedHeaders = source.headers.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final headerSig = [
+      for (final e in sortedHeaders) '${e.key}=${e.value}',
+    ].join('\n');
+    final inlineDigest = source.inlineContent.isEmpty
+        ? ''
+        : sha256.convert(utf8.encode(source.inlineContent)).toString();
+    final pluginSig = source.plugin == null
+        ? ''
+        : '${source.plugin!.key}|${source.plugin!.api}|${source.plugin!.ext}';
     final digest = sha256
         .convert(
           utf8.encode(
-            '${source.subscriptionId}|${source.name}|${source.url}|${source.inlineContent.length}',
+            '${source.subscriptionId}|${source.name}|${source.url}|${source.origin}|$headerSig|$inlineDigest|$pluginSig',
           ),
         )
         .toString()
@@ -2873,6 +2938,10 @@ class StorageService {
   }
   Future<void> setPlayerKernel(String kernel) async {
     await _prefs.setString(keyPlayerKernel, kernel.trim());
+  }
+  Future<void> setWindowsPlaybackEngine(String engine) async {
+    final normalized = WindowsPlaybackEngine.fromId(engine).id;
+    await _prefs.setString(WindowsPlaybackEngine.prefKey, normalized);
   }
   Future<void> setIosPlaybackEngineMode(String mode) async {
     final normalized = IosPlaybackEngineMode.fromId(mode).id;
@@ -4134,6 +4203,23 @@ class StorageService {
     }
     return jsonEncode(decoded);
   }
+  /// Exports a local backup JSON and enforces HarmonyOS's unified UTF-8 byte limit
+  /// so any backup reported as exported on HarmonyOS can be restored by the same version.
+  String exportValidatedLocalBackupJson({int maxBytes = maxLocalBackupBytes}) {
+    final raw = exportBackupJson();
+    encodeValidatedLocalBackupUtf8(raw, maxBytes: maxBytes);
+    return raw;
+  }
+
+  /// Imports a HarmonyOS local backup JSON after enforcing the unified UTF-8 byte limit.
+  Future<CmsConfig?> importValidatedLocalBackupJson(
+    String rawBackup, {
+    int maxBytes = maxLocalBackupBytes,
+  }) async {
+    encodeValidatedLocalBackupUtf8(rawBackup, maxBytes: maxBytes);
+    return await importBackupJson(rawBackup);
+  }
+
   /// Imports a backup JSON generated by either Android TV/Phone or Windows/Mac/iOS.
   /// Validates all fields before mutating preferences so failed restores preserve existing state.
   Future<CmsConfig?> importBackupJson(String rawBackup) =>
@@ -4839,8 +4925,14 @@ class StorageService {
   bool get webdavAuto => _prefs.getBool(keyWebdavAuto) ?? true;
   bool get webdavSyncSubs => _prefs.getBool(keyWebdavSyncSubs) ?? true;
   bool get webdavSyncHistory => _prefs.getBool(keyWebdavSyncHistory) ?? true;
+  bool get webdavSyncDanmu =>
+      !OhosRuntime.isOhos && (_prefs.getBool(keyWebdavSyncDanmu) ?? false);
   int get syncLastTime => _prefs.getInt(keySyncLastTime) ?? 0;
   String get syncLastStatus => _prefs.getString(keySyncLastStatus) ?? '';
+  String get syncDanmuLastStatus =>
+      _prefs.getString(keySyncDanmuLastStatus) ?? '';
+  List<String> get danmuPendingAuthOrigins =>
+      DanmuPrefs.readPendingAuthOriginsSync(_prefs);
   bool get isWebdavConfigured => webdavUrl.isNotEmpty;
 
   String get syncStatusSummary {
@@ -4869,6 +4961,7 @@ class StorageService {
     required bool auto,
     bool? syncSubs,
     bool? syncHistory,
+    bool? syncDanmu,
   }) async {
     await _writeSecret(keyWebdavPass, pass);
     await _prefs.setString(keyWebdavUrl, url.trim());
@@ -4879,6 +4972,12 @@ class StorageService {
     }
     if (syncHistory != null) {
       await _prefs.setBool(keyWebdavSyncHistory, syncHistory);
+    }
+    if (syncDanmu != null) {
+      await _prefs.setBool(keyWebdavSyncDanmu, syncDanmu);
+      if (!syncDanmu) {
+        _danmuSyncGeneration++;
+      }
     }
     if (!auto || url.trim().isEmpty) {
       cancelPendingAutoSync();
@@ -4891,6 +4990,13 @@ class StorageService {
 
   Future<void> setWebdavSyncHistory(bool enabled) async {
     await _prefs.setBool(keyWebdavSyncHistory, enabled);
+  }
+
+  Future<void> setWebdavSyncDanmu(bool enabled) async {
+    await _prefs.setBool(keyWebdavSyncDanmu, enabled);
+    if (!enabled) {
+      _danmuSyncGeneration++;
+    }
   }
 
   static bool _isHttpOriginUrl(String raw) {
@@ -5057,6 +5163,26 @@ class StorageService {
     return trimmed.endsWith('/')
         ? '$trimmed$defaultSyncFileName'
         : '$trimmed/$defaultSyncFileName';
+  }
+
+  /// Derives the sibling danmu-sources sidecar URL in the same WebDAV directory
+  /// as the main sync file (e.g. `family.json` -> `family.danmu.json`,
+  /// `marco-movie-sync.json` -> `marco-movie-sync.danmu.json`) so legacy clients
+  /// rebuilding the main sync file never erase synced danmu sources.
+  static String resolveWebdavDanmuFileUrl(String rawUrl) {
+    final mainUrl = resolveWebdavFileUrl(rawUrl);
+    final uri = Uri.parse(mainUrl);
+    final path = uri.path;
+    final lowerPath = path.toLowerCase();
+    final String nextPath;
+    if (lowerPath.endsWith('.danmu.json')) {
+      nextPath = path;
+    } else if (lowerPath.endsWith('.json')) {
+      nextPath = '${path.substring(0, path.length - 5)}.danmu.json';
+    } else {
+      nextPath = '$path.danmu.json';
+    }
+    return uri.replace(path: nextPath).toString();
   }
 
   static String resolveLanSyncEndpoint(String rawUrl) {
@@ -5943,13 +6069,15 @@ class StorageService {
   Future<void> _ensureWebdavCollections(
     http.Client client,
     String rawBaseUrl,
-    Uri fileUri,
-  ) async {
+    Uri fileUri, {
+    void Function()? ensureEnabled,
+  }) async {
     final segments =
         fileUri.pathSegments.where((s) => s.isNotEmpty).toList(growable: false);
     if (segments.length <= 1) return;
     final skipSegments = baseCollectionDepth(rawBaseUrl, fileUri);
     for (var i = skipSegments; i < segments.length - 1; i++) {
+      ensureEnabled?.call();
       final collUri = fileUri.replace(
         pathSegments: <String>[...segments.sublist(0, i + 1), ''],
       );
@@ -5960,9 +6088,12 @@ class StorageService {
             await client.send(req).timeout(const Duration(seconds: 10));
         final status = streamed.statusCode;
         await streamed.stream.drain<void>();
+        ensureEnabled?.call();
         if (status == 401) {
           break;
         }
+      } on FormatException {
+        rethrow;
       } on Object catch (e) {
         debugPrint('StorageService: MKCOL failed for $collUri: $e');
       }
@@ -5975,12 +6106,22 @@ class StorageService {
     required int historyCount,
     required int favoriteCount,
     required int subscriptionCount,
+    bool mainSynced = true,
+    int? danmuSourceCount,
+    String? danmuError,
   }) {
     final dt = DateTime.fromMillisecondsSinceEpoch(nowMs);
     final hh = dt.hour.toString().padLeft(2, '0');
     final mm = dt.minute.toString().padLeft(2, '0');
+    if (!mainSynced) {
+      final count = danmuSourceCount ?? 0;
+      return '$prefix $hh:$mm（弹幕源 $count）';
+    }
     final subSegment = webdavSyncSubs ? ' · 订阅 $subscriptionCount' : '';
-    return '$prefix $hh:$mm（历史 $historyCount · 收藏 $favoriteCount$subSegment）';
+    final danmuSegment = danmuError != null
+        ? ' · 弹幕源失败'
+        : (danmuSourceCount != null ? ' · 弹幕源 $danmuSourceCount' : '');
+    return '$prefix $hh:$mm（历史 $historyCount · 收藏 $favoriteCount$subSegment$danmuSegment）';
   }
 
   Future<http.Response> _putWebdavWithMkcolRetry(
@@ -5990,7 +6131,9 @@ class StorageService {
     List<int> encodedPayload, {
     String? ifMatch,
     String? ifNoneMatch,
+    void Function()? ensureEnabled,
   }) async {
+    ensureEnabled?.call();
     var putResp = await httpClient
         .put(
           uri,
@@ -6003,7 +6146,14 @@ class StorageService {
         )
         .timeout(const Duration(seconds: 15));
     if (putResp.statusCode == 404 || putResp.statusCode == 409) {
-      await _ensureWebdavCollections(httpClient, rawBaseUrl, uri);
+      ensureEnabled?.call();
+      await _ensureWebdavCollections(
+        httpClient,
+        rawBaseUrl,
+        uri,
+        ensureEnabled: ensureEnabled,
+      );
+      ensureEnabled?.call();
       putResp = await httpClient
           .put(
             uri,
@@ -6021,11 +6171,410 @@ class StorageService {
 
   Future<
     ({
+      int sourceCount,
+      bool changed,
+      bool uploaded,
+      List<String> pendingAuthOrigins,
+      String targetUrl,
+    })
+  >
+  _syncDanmuSidecarWithClient(
+    http.Client effectiveClient,
+    String rawBaseUrl, {
+    int? nowMs,
+  }) async {
+    final targetUrl = resolveWebdavDanmuFileUrl(rawBaseUrl);
+    final uri = Uri.parse(targetUrl);
+    final hostKey = _extractHostKey(uri);
+    const maxRetries = 4;
+    var attempt = 0;
+    var sawAbsent412 = false;
+    final rand = Random();
+    final syncGen = _danmuSyncGeneration;
+
+    void ensureDanmuSyncEnabled() {
+      if (!webdavSyncDanmu || syncGen != _danmuSyncGeneration) {
+        throw const FormatException('「同步弹幕源」已关闭，已停止读写弹幕源文件');
+      }
+    }
+
+    Future<DanmuSourceSyncMergeResult> rebaseInFlightLocalEdits({
+      required DanmuSourceSyncDocument startLocalDoc,
+      required DanmuSourceSyncDocument committedDoc,
+      required ({
+        DanmuSourceSyncDocument local,
+        DanmuSourceSyncDocument? base,
+        bool hasLocalCredentials,
+        Set<String> authorizedCredentialOrigins,
+        List<String> pendingAuthOrigins,
+      }) latestState,
+    }) async {
+      final minCausalTs = committedDoc.updatedAt + 1;
+      final latestLocal = latestState.local;
+      final causalLocal = latestLocal.copyWith(
+        updatedAt: max(latestLocal.updatedAt, minCausalTs),
+        clearedAt: latestLocal.clearedAt > 0
+            ? max(latestLocal.clearedAt, minCausalTs)
+            : 0,
+      );
+      final rebased = DanmuSourceSyncMerger.merge(
+        local: causalLocal,
+        base: startLocalDoc,
+        remote: committedDoc,
+        hasLocalCredentials: latestState.hasLocalCredentials,
+        authorizedCredentialOrigins: latestState.authorizedCredentialOrigins,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      await DanmuPrefs.applyRebasedLocalAndBase(
+        localDoc: rebased.merged,
+        baseDoc: committedDoc,
+        prefs: _prefs,
+        pendingAuthOrigins: rebased.pendingAuthOrigins,
+      );
+      if (rebased.localChanged) {
+        danmuSourcesRevision.value++;
+      }
+      return rebased;
+    }
+
+    while (true) {
+      ensureDanmuSyncEnabled();
+      DanmuSourceSyncDocument? remoteDoc;
+      String? remoteEtag;
+      var fileAbsent = false;
+
+      final getResp = await effectiveClient
+          .get(uri, headers: _webdavHeaders())
+          .timeout(const Duration(seconds: 15));
+      ensureDanmuSyncEnabled();
+      if (getResp.statusCode >= 200 && getResp.statusCode < 300) {
+        if (getResp.bodyBytes.length > maxSyncPayloadBytes) {
+          throw const FormatException('远端弹幕源同步文件超过 8 MB 大小限制');
+        }
+        remoteDoc = DanmuSourceSyncDocument.tryParseJson(
+          utf8.decode(getResp.bodyBytes),
+          treatAsRemote: true,
+        );
+        if (remoteDoc == null) {
+          throw const FormatException('远端弹幕源同步文件格式无效或缺少有效清空记录');
+        }
+        final h = getResp.headers['etag']?.trim();
+        if (h != null && h.isNotEmpty && !isWeakEtag(h)) {
+          remoteEtag = h;
+        }
+      } else if (getResp.statusCode == 404) {
+        remoteDoc = null;
+        fileAbsent = true;
+      } else if (getResp.statusCode == 401 || getResp.statusCode == 403) {
+        throw FormatException(
+          'WebDAV 弹幕源认证失败 (HTTP ${getResp.statusCode})，请检查账号与应用密码',
+        );
+      } else {
+        throw FormatException('WebDAV 弹幕源读取失败 (HTTP ${getResp.statusCode})');
+      }
+
+      final state = DanmuPrefs.readSyncStateSync(_prefs);
+      final startLocalDoc = state.local;
+      final startLocalRevision = startLocalDoc.revision;
+      final startLocalUpdatedAt = startLocalDoc.updatedAt;
+      final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+      final mergeRes = DanmuSourceSyncMerger.merge(
+        local: startLocalDoc,
+        base: state.base,
+        remote: remoteDoc,
+        hasLocalCredentials: state.hasLocalCredentials,
+        authorizedCredentialOrigins: state.authorizedCredentialOrigins,
+        nowMs: now,
+      );
+
+      if (!mergeRes.needsUpload) {
+        ensureDanmuSyncEnabled();
+        final latestState = DanmuPrefs.readSyncStateSync(_prefs);
+        final editedInFlight =
+            latestState.local.revision != startLocalRevision ||
+                latestState.local.updatedAt != startLocalUpdatedAt;
+        if (editedInFlight) {
+          if (remoteDoc != null) {
+            await rebaseInFlightLocalEdits(
+              startLocalDoc: startLocalDoc,
+              committedDoc: mergeRes.merged,
+              latestState: latestState,
+            );
+          }
+          if (attempt < maxRetries) {
+            attempt++;
+            continue;
+          }
+          scheduleAutoWebdavSync();
+          final afterRebase = DanmuPrefs.readSyncStateSync(_prefs);
+          return (
+            sourceCount: afterRebase.local.sources.length,
+            changed: false,
+            uploaded: false,
+            pendingAuthOrigins: afterRebase.pendingAuthOrigins,
+            targetUrl: targetUrl,
+          );
+        }
+        if (remoteDoc != null || !mergeRes.merged.isFreshUninitialized) {
+          await DanmuPrefs.applySyncedDocument(
+            mergeRes.merged,
+            prefs: _prefs,
+            pendingAuthOrigins: mergeRes.pendingAuthOrigins,
+          );
+          if (mergeRes.localChanged) {
+            danmuSourcesRevision.value++;
+          }
+        }
+        await _prefs.setString(
+          keySyncDanmuLastStatus,
+          '弹幕源同步成功（${mergeRes.merged.sources.length} 个）',
+        );
+        return (
+          sourceCount: mergeRes.merged.sources.length,
+          changed: mergeRes.localChanged,
+          uploaded: false,
+          pendingAuthOrigins: mergeRes.pendingAuthOrigins,
+          targetUrl: targetUrl,
+        );
+      }
+
+      final encodedPayload = utf8.encode(mergeRes.merged.toPayloadJson());
+      if (encodedPayload.length > maxSyncPayloadBytes) {
+        throw const FormatException('本地弹幕源同步数据超过 8 MB 大小限制');
+      }
+
+      final skipCond =
+          hostKey.isNotEmpty && _noConditionalWriteHosts.contains(hostKey);
+      final absent412Fallback = fileAbsent && sawAbsent412;
+      String? ifMatch;
+      String? ifNoneMatch;
+      if (!skipCond) {
+        if (fileAbsent) {
+          if (!absent412Fallback) {
+            ifNoneMatch = '*';
+          }
+        } else if (remoteEtag != null && remoteEtag.isNotEmpty) {
+          ifMatch = remoteEtag;
+        }
+      }
+
+      ensureDanmuSyncEnabled();
+      var putResp = await _putWebdavWithMkcolRetry(
+        effectiveClient,
+        rawBaseUrl,
+        uri,
+        encodedPayload,
+        ifMatch: ifMatch,
+        ifNoneMatch: ifNoneMatch,
+        ensureEnabled: ensureDanmuSyncEnabled,
+      );
+      ensureDanmuSyncEnabled();
+
+      if (ifNoneMatch != null &&
+          _isIfNoneMatchRejectedStatus(putResp.statusCode)) {
+        ensureDanmuSyncEnabled();
+        final retryResp = await _putWebdavWithMkcolRetry(
+          effectiveClient,
+          rawBaseUrl,
+          uri,
+          encodedPayload,
+          ensureEnabled: ensureDanmuSyncEnabled,
+        );
+        ensureDanmuSyncEnabled();
+        if (retryResp.statusCode >= 200 &&
+            retryResp.statusCode < 300 &&
+            hostKey.isNotEmpty) {
+          _noConditionalWriteHosts.add(hostKey);
+        }
+        putResp = retryResp;
+      }
+
+      if (putResp.statusCode == 412) {
+        if (attempt < maxRetries && !(fileAbsent && sawAbsent412)) {
+          if (ifNoneMatch != null) {
+            sawAbsent412 = true;
+          }
+          attempt++;
+          final jitterMs = 35 + rand.nextInt(80);
+          await Future<void>.delayed(Duration(milliseconds: jitterMs));
+          ensureDanmuSyncEnabled();
+          continue;
+        }
+        // Only fall back to unconditional PUT when the server does not support
+        // `If-None-Match: *` on a genuinely absent file (`fileAbsent`). For a
+        // real `If-Match` ETag conflict, NEVER drop preconditions and overwrite
+        // peer writes — preserve both server data and local pending edits.
+        if (ifNoneMatch != null && fileAbsent) {
+          ensureDanmuSyncEnabled();
+          final fallbackResp = await _putWebdavWithMkcolRetry(
+            effectiveClient,
+            rawBaseUrl,
+            uri,
+            encodedPayload,
+            ensureEnabled: ensureDanmuSyncEnabled,
+          );
+          ensureDanmuSyncEnabled();
+          if (fallbackResp.statusCode >= 200 &&
+              fallbackResp.statusCode < 300 &&
+              hostKey.isNotEmpty) {
+            _noConditionalWriteHosts.add(hostKey);
+          }
+          putResp = fallbackResp;
+        } else {
+          const conflictMsg =
+              '弹幕源同步持续发生并发冲突（HTTP 412），已保留本机待同步修改与云端最新配置，请重试';
+          await _prefs.setString(keySyncDanmuLastStatus, conflictMsg);
+          throw const FormatException(conflictMsg);
+        }
+      }
+
+      if (putResp.statusCode == 401 || putResp.statusCode == 403) {
+        throw FormatException('WebDAV 弹幕源写入被拒绝 (HTTP ${putResp.statusCode})');
+      }
+      if (putResp.statusCode < 200 || putResp.statusCode >= 300) {
+        throw FormatException(
+          '弹幕源 ${_formatWebdavWriteError(putResp.statusCode)}',
+        );
+      }
+
+      if (absent412Fallback && hostKey.isNotEmpty) {
+        _noConditionalWriteHosts.add(hostKey);
+      }
+
+      // Guard against local edits that occurred while PUT was in flight:
+      // NEVER revert newer local edits back to the uploaded snapshot, and NEVER
+      // mistake previously unseen peer additions committed in `mergeRes.merged`
+      // for local deletions. Rebase the exact local delta (`startLocalDoc` ->
+      // `postPutState.local`) onto `mergeRes.merged` before the follow-up pass.
+      final postPutState = DanmuPrefs.readSyncStateSync(_prefs);
+      final editedDuringPut =
+          postPutState.local.revision != startLocalRevision ||
+              postPutState.local.updatedAt != startLocalUpdatedAt;
+      if (editedDuringPut) {
+        final rebased = await rebaseInFlightLocalEdits(
+          startLocalDoc: startLocalDoc,
+          committedDoc: mergeRes.merged,
+          latestState: postPutState,
+        );
+        if (attempt < maxRetries) {
+          attempt++;
+          continue;
+        }
+        scheduleAutoWebdavSync();
+        await _prefs.setString(
+          keySyncDanmuLastStatus,
+          '弹幕源已保留上传期间的新编辑，待继续同步',
+        );
+        return (
+          sourceCount: rebased.merged.sources.length,
+          changed: rebased.localChanged,
+          uploaded: true,
+          pendingAuthOrigins: rebased.pendingAuthOrigins,
+          targetUrl: targetUrl,
+        );
+      }
+
+      await DanmuPrefs.applySyncedDocument(
+        mergeRes.merged,
+        prefs: _prefs,
+        pendingAuthOrigins: mergeRes.pendingAuthOrigins,
+      );
+      if (mergeRes.localChanged) {
+        danmuSourcesRevision.value++;
+      }
+      await _prefs.setString(
+        keySyncDanmuLastStatus,
+        '弹幕源同步成功（${mergeRes.merged.sources.length} 个）',
+      );
+      return (
+        sourceCount: mergeRes.merged.sources.length,
+        changed: mergeRes.localChanged,
+        uploaded: true,
+        pendingAuthOrigins: mergeRes.pendingAuthOrigins,
+        targetUrl: targetUrl,
+      );
+    }
+  }
+
+  /// Syncs ONLY the derived danmu-sources sidecar file (e.g. `family.danmu.json`).
+  /// Used both for standalone danmu-only retries after partial sync failures and
+  /// direct testing.
+  Future<
+    ({
+      int sourceCount,
+      bool changed,
+      bool uploaded,
+      List<String> pendingAuthOrigins,
+      String targetUrl,
+    })
+  >
+  syncDanmuSourcesWithWebdav({http.Client? client}) async {
+    if (OhosRuntime.isOhos) {
+      throw StateError('当前平台不支持弹幕源同步');
+    }
+    if (!webdavSyncDanmu) {
+      throw const FormatException('「同步弹幕源」已关闭，已停止读写弹幕源文件');
+    }
+    if (_syncInFlight) {
+      throw StateError('正在同步中，请稍候');
+    }
+    final rawBaseUrl = webdavUrl;
+    resolveWebdavDanmuFileUrl(rawBaseUrl);
+    _syncInFlight = true;
+    final effectiveClient = client ?? _webdavTestClient ?? http.Client();
+    final ownsClient = client == null && _webdavTestClient == null;
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final res = await _syncDanmuSidecarWithClient(
+        effectiveClient,
+        rawBaseUrl,
+        nowMs: now,
+      );
+      await _prefs.setInt(keySyncLastTime, now);
+      if (!webdavSyncSubs && !webdavSyncHistory) {
+        await _prefs.setString(
+          keySyncLastStatus,
+          _formatSyncSuccessSummary(
+            '同步成功',
+            now,
+            historyCount: 0,
+            favoriteCount: 0,
+            subscriptionCount: 0,
+            mainSynced: false,
+            danmuSourceCount: res.sourceCount,
+          ),
+        );
+      }
+      return res;
+    } catch (e) {
+      final msg = e is FormatException ? e.message : e.toString();
+      await _prefs.setString(keySyncDanmuLastStatus, '弹幕源同步失败：$msg');
+      rethrow;
+    } finally {
+      _syncInFlight = false;
+      if (ownsClient) effectiveClient.close();
+      if (_resyncRequested) {
+        final immediateNext = _resyncImmediate;
+        _resyncRequested = false;
+        _resyncImmediate = false;
+        scheduleAutoWebdavSync(immediate: immediateNext);
+      }
+    }
+  }
+
+  Future<
+    ({
       int historyCount,
       int favoriteCount,
       int subscriptionCount,
       bool changed,
       bool subscriptionsChanged,
+      bool mainSynced,
+      bool danmuSynced,
+      int danmuSourceCount,
+      bool danmuChanged,
+      String? danmuError,
+      List<String> danmuPendingAuthOrigins,
     })
   >
   syncWithWebdav({http.Client? client}) async {
@@ -6034,151 +6583,208 @@ class StorageService {
     }
     final rawBaseUrl = webdavUrl;
     final targetUrl = resolveWebdavFileUrl(rawBaseUrl);
+    final shouldSyncMain = webdavSyncSubs || webdavSyncHistory;
+    final shouldSyncDanmu = webdavSyncDanmu && !OhosRuntime.isOhos;
+    if (!shouldSyncMain && !shouldSyncDanmu) {
+      throw const FormatException('请至少开启一项同步内容');
+    }
     _syncInFlight = true;
     _lastHistoryAutoPushMs = DateTime.now().millisecondsSinceEpoch;
     final effectiveClient = client ?? _webdavTestClient ?? http.Client();
     final ownsClient = client == null && _webdavTestClient == null;
     try {
-      final uri = Uri.parse(targetUrl);
-      final hostKey = _extractHostKey(uri);
-      const maxRetries = 2;
-      var attempt = 0;
-      var sawAbsent412 = false;
-      final rand = Random();
+      var historyCount = 0;
+      var favoriteCount = 0;
+      var subscriptionCount = 0;
+      var mainChanged = false;
+      var subscriptionsChanged = false;
+      var now = DateTime.now().millisecondsSinceEpoch;
 
-      while (true) {
-        String? remoteBody;
-        String? remoteEtag;
-        var fileAbsent = false;
+      if (shouldSyncMain) {
+        final uri = Uri.parse(targetUrl);
+        final hostKey = _extractHostKey(uri);
+        const maxRetries = 2;
+        var attempt = 0;
+        var sawAbsent412 = false;
+        final rand = Random();
 
-        final getResp = await effectiveClient
-            .get(uri, headers: _webdavHeaders())
-            .timeout(const Duration(seconds: 15));
-        if (getResp.statusCode >= 200 && getResp.statusCode < 300) {
-          if (getResp.bodyBytes.length > maxSyncPayloadBytes) {
-            throw const FormatException('远端同步文件超过 8 MB 大小限制');
-          }
-          remoteBody = utf8.decode(getResp.bodyBytes);
-          final h = getResp.headers['etag']?.trim();
-          if (h != null && h.isNotEmpty && !isWeakEtag(h)) {
-            remoteEtag = h;
-          }
-        } else if (getResp.statusCode == 404) {
-          remoteBody = null;
-          fileAbsent = true;
-        } else if (getResp.statusCode == 401 || getResp.statusCode == 403) {
-          throw FormatException(
-            'WebDAV 认证失败 (HTTP ${getResp.statusCode})，请检查账号与应用密码',
-          );
-        } else {
-          throw FormatException('WebDAV 读取失败 (HTTP ${getResp.statusCode})');
-        }
+        while (true) {
+          String? remoteBody;
+          String? remoteEtag;
+          var fileAbsent = false;
 
-        final now = DateTime.now().millisecondsSinceEpoch;
-        final merged = await mergeSyncPayload(remoteBody, nowMs: now);
-        final encodedPayload = utf8.encode(merged.payloadJson);
-        if (encodedPayload.length > maxSyncPayloadBytes) {
-          throw const FormatException('本地待同步数据超过 8 MB 大小限制');
-        }
-
-        final skipCond =
-            hostKey.isNotEmpty && _noConditionalWriteHosts.contains(hostKey);
-        final absent412Fallback = fileAbsent && sawAbsent412;
-        String? ifMatch;
-        String? ifNoneMatch;
-        if (!skipCond) {
-          if (fileAbsent) {
-            if (!absent412Fallback) {
-              ifNoneMatch = '*';
+          final getResp = await effectiveClient
+              .get(uri, headers: _webdavHeaders())
+              .timeout(const Duration(seconds: 15));
+          if (getResp.statusCode >= 200 && getResp.statusCode < 300) {
+            if (getResp.bodyBytes.length > maxSyncPayloadBytes) {
+              throw const FormatException('远端同步文件超过 8 MB 大小限制');
             }
-          } else if (remoteEtag != null && remoteEtag.isNotEmpty) {
-            ifMatch = remoteEtag;
+            remoteBody = utf8.decode(getResp.bodyBytes);
+            final h = getResp.headers['etag']?.trim();
+            if (h != null && h.isNotEmpty && !isWeakEtag(h)) {
+              remoteEtag = h;
+            }
+          } else if (getResp.statusCode == 404) {
+            remoteBody = null;
+            fileAbsent = true;
+          } else if (getResp.statusCode == 401 || getResp.statusCode == 403) {
+            throw FormatException(
+              'WebDAV 认证失败 (HTTP ${getResp.statusCode})，请检查账号与应用密码',
+            );
+          } else {
+            throw FormatException('WebDAV 读取失败 (HTTP ${getResp.statusCode})');
           }
-        }
-        final usedConditional = ifMatch != null || ifNoneMatch != null;
 
-        var putResp = await _putWebdavWithMkcolRetry(
-          effectiveClient,
-          rawBaseUrl,
-          uri,
-          encodedPayload,
-          ifMatch: ifMatch,
-          ifNoneMatch: ifNoneMatch,
-        );
+          now = DateTime.now().millisecondsSinceEpoch;
+          final merged = await mergeSyncPayload(remoteBody, nowMs: now);
+          final encodedPayload = utf8.encode(merged.payloadJson);
+          if (encodedPayload.length > maxSyncPayloadBytes) {
+            throw const FormatException('本地待同步数据超过 8 MB 大小限制');
+          }
 
-        if (ifNoneMatch != null &&
-            _isIfNoneMatchRejectedStatus(putResp.statusCode)) {
-          final retryResp = await _putWebdavWithMkcolRetry(
+          final skipCond =
+              hostKey.isNotEmpty && _noConditionalWriteHosts.contains(hostKey);
+          final absent412Fallback = fileAbsent && sawAbsent412;
+          String? ifMatch;
+          String? ifNoneMatch;
+          if (!skipCond) {
+            if (fileAbsent) {
+              if (!absent412Fallback) {
+                ifNoneMatch = '*';
+              }
+            } else if (remoteEtag != null && remoteEtag.isNotEmpty) {
+              ifMatch = remoteEtag;
+            }
+          }
+          final usedConditional = ifMatch != null || ifNoneMatch != null;
+
+          var putResp = await _putWebdavWithMkcolRetry(
             effectiveClient,
             rawBaseUrl,
             uri,
             encodedPayload,
+            ifMatch: ifMatch,
+            ifNoneMatch: ifNoneMatch,
           );
-          if (retryResp.statusCode >= 200 && retryResp.statusCode < 300) {
-            if (hostKey.isNotEmpty) _noConditionalWriteHosts.add(hostKey);
-            putResp = retryResp;
-          } else {
-            putResp = retryResp;
-          }
-        }
 
-        if (putResp.statusCode == 412) {
-          if (attempt < maxRetries && !(fileAbsent && sawAbsent412)) {
-            if (ifNoneMatch != null) {
-              sawAbsent412 = true;
-            }
-            attempt++;
-            final jitterMs = 50 + rand.nextInt(100);
-            await Future<void>.delayed(Duration(milliseconds: jitterMs));
-            continue;
-          }
-          if (usedConditional) {
-            final fallbackResp = await _putWebdavWithMkcolRetry(
+          if (ifNoneMatch != null &&
+              _isIfNoneMatchRejectedStatus(putResp.statusCode)) {
+            final retryResp = await _putWebdavWithMkcolRetry(
               effectiveClient,
               rawBaseUrl,
               uri,
               encodedPayload,
             );
-            if (fallbackResp.statusCode >= 200 &&
-                fallbackResp.statusCode < 300 &&
-                hostKey.isNotEmpty) {
-              _noConditionalWriteHosts.add(hostKey);
+            if (retryResp.statusCode >= 200 && retryResp.statusCode < 300) {
+              if (hostKey.isNotEmpty) _noConditionalWriteHosts.add(hostKey);
+              putResp = retryResp;
+            } else {
+              putResp = retryResp;
             }
-            putResp = fallbackResp;
           }
-        }
 
-        if (putResp.statusCode == 401 || putResp.statusCode == 403) {
-          throw FormatException('WebDAV 写入被拒绝 (HTTP ${putResp.statusCode})');
-        }
-        if (putResp.statusCode < 200 || putResp.statusCode >= 300) {
-          throw FormatException(_formatWebdavWriteError(putResp.statusCode));
-        }
+          if (putResp.statusCode == 412) {
+            if (attempt < maxRetries && !(fileAbsent && sawAbsent412)) {
+              if (ifNoneMatch != null) {
+                sawAbsent412 = true;
+              }
+              attempt++;
+              final jitterMs = 50 + rand.nextInt(100);
+              await Future<void>.delayed(Duration(milliseconds: jitterMs));
+              continue;
+            }
+            if (usedConditional) {
+              final fallbackResp = await _putWebdavWithMkcolRetry(
+                effectiveClient,
+                rawBaseUrl,
+                uri,
+                encodedPayload,
+              );
+              if (fallbackResp.statusCode >= 200 &&
+                  fallbackResp.statusCode < 300 &&
+                  hostKey.isNotEmpty) {
+                _noConditionalWriteHosts.add(hostKey);
+              }
+              putResp = fallbackResp;
+            }
+          }
 
-        if (absent412Fallback && hostKey.isNotEmpty) {
-          _noConditionalWriteHosts.add(hostKey);
-        }
+          if (putResp.statusCode == 401 || putResp.statusCode == 403) {
+            throw FormatException('WebDAV 写入被拒绝 (HTTP ${putResp.statusCode})');
+          }
+          if (putResp.statusCode < 200 || putResp.statusCode >= 300) {
+            throw FormatException(_formatWebdavWriteError(putResp.statusCode));
+          }
 
-        _lastHistoryAutoPushMs = now;
-        await _prefs.setInt(keySyncLastTime, now);
-        await _prefs.setString(
-          keySyncLastStatus,
-          _formatSyncSuccessSummary(
-            '同步成功',
-            now,
-            historyCount: merged.historyCount,
-            favoriteCount: merged.favoriteCount,
-            subscriptionCount: merged.subscriptionCount,
-          ),
-        );
-        return (
-          historyCount: merged.historyCount,
-          favoriteCount: merged.favoriteCount,
-          subscriptionCount: merged.subscriptionCount,
-          changed: merged.changed,
-          subscriptionsChanged: merged.subscriptionsChanged,
-        );
+          if (absent412Fallback && hostKey.isNotEmpty) {
+            _noConditionalWriteHosts.add(hostKey);
+          }
+
+          historyCount = merged.historyCount;
+          favoriteCount = merged.favoriteCount;
+          subscriptionCount = merged.subscriptionCount;
+          mainChanged = merged.changed;
+          subscriptionsChanged = merged.subscriptionsChanged;
+          break;
+        }
       }
+
+      var danmuSynced = false;
+      var danmuSourceCount = 0;
+      var danmuChanged = false;
+      String? danmuError;
+      var danmuPendingAuthOrigins = const <String>[];
+
+      if (shouldSyncDanmu && webdavSyncDanmu) {
+        try {
+          final dRes = await _syncDanmuSidecarWithClient(
+            effectiveClient,
+            rawBaseUrl,
+            nowMs: now,
+          );
+          danmuSynced = true;
+          danmuSourceCount = dRes.sourceCount;
+          danmuChanged = dRes.changed;
+          danmuPendingAuthOrigins = dRes.pendingAuthOrigins;
+        } catch (e) {
+          final msg = e is FormatException ? e.message : e.toString();
+          await _prefs.setString(keySyncDanmuLastStatus, '弹幕源同步失败：$msg');
+          if (!shouldSyncMain) {
+            rethrow;
+          }
+          danmuError = msg;
+        }
+      }
+
+      _lastHistoryAutoPushMs = now;
+      await _prefs.setInt(keySyncLastTime, now);
+      await _prefs.setString(
+        keySyncLastStatus,
+        _formatSyncSuccessSummary(
+          danmuError != null ? '部分同步完成' : '同步成功',
+          now,
+          historyCount: historyCount,
+          favoriteCount: favoriteCount,
+          subscriptionCount: subscriptionCount,
+          mainSynced: shouldSyncMain,
+          danmuSourceCount: shouldSyncDanmu ? danmuSourceCount : null,
+          danmuError: danmuError,
+        ),
+      );
+      return (
+        historyCount: historyCount,
+        favoriteCount: favoriteCount,
+        subscriptionCount: subscriptionCount,
+        changed: mainChanged || danmuChanged,
+        subscriptionsChanged: subscriptionsChanged,
+        mainSynced: shouldSyncMain,
+        danmuSynced: danmuSynced,
+        danmuSourceCount: danmuSourceCount,
+        danmuChanged: danmuChanged,
+        danmuError: danmuError,
+        danmuPendingAuthOrigins: danmuPendingAuthOrigins,
+      );
     } catch (e) {
       await _prefs.setString(keySyncLastStatus, '上次失败：$e');
       rethrow;
@@ -6418,5 +7024,104 @@ class StorageService {
       }
     }
     await _prefs.setString(keyEpisodeScrapeOverrides, jsonEncode(map));
+  }
+
+  /// Revision counter incremented whenever a series scrape binding or episode
+  /// calibration override is saved or cleared.
+  final ValueNotifier<int> seriesScrapeRevision = ValueNotifier<int>(0);
+
+  Map<String, SeriesScrapeOverride> _readSeriesScrapeOverrides() {
+    final raw = _prefs.getString(keySeriesScrapeOverrides) ?? '{}';
+    final out = <String, SeriesScrapeOverride>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        for (final entry in decoded.entries) {
+          final k = entry.key.toString();
+          final v = entry.value;
+          if (k.isEmpty || v is! Map) continue;
+          final parsed = SeriesScrapeOverride.fromJson(
+            Map<String, dynamic>.from(v),
+          );
+          if (!parsed.isEmpty) {
+            out[k] = parsed;
+          }
+        }
+      }
+    } on Object catch (e) {
+      debugPrint('StorageService: _readSeriesScrapeOverrides parse failed: $e');
+    }
+    return out;
+  }
+
+  Future<void> _writeSeriesScrapeOverrides(
+    Map<String, SeriesScrapeOverride> records,
+  ) async {
+    final entries = records.entries.where((e) => !e.value.isEmpty).toList()
+      ..sort((a, b) => b.value.updatedAtMs.compareTo(a.value.updatedAtMs));
+    final bounded = entries.take(maxSeriesScrapeOverrides);
+    final payload = <String, Map<String, dynamic>>{
+      for (final e in bounded) e.key: e.value.toJson(),
+    };
+    await _prefs.setString(keySeriesScrapeOverrides, jsonEncode(payload));
+  }
+
+  SeriesScrapeOverride? getSeriesScrapeOverride(
+    String siteKey,
+    String videoId, {
+    bool isPrivate = false,
+  }) {
+    if (_isPrivateVideoSkip(siteKey, isPrivate)) return null;
+    final key = _videoSkipKey(siteKey, videoId);
+    if (key.isEmpty) return null;
+    return _readSeriesScrapeOverrides()[key];
+  }
+
+  Future<void> saveSeriesScrapeOverride(
+    String siteKey,
+    String videoId,
+    SeriesScrapeOverride override, {
+    bool isPrivate = false,
+  }) async {
+    if (_isPrivateVideoSkip(siteKey, isPrivate)) return;
+    final key = _videoSkipKey(siteKey, videoId);
+    if (key.isEmpty) return;
+    final records = _readSeriesScrapeOverrides();
+    if (override.isEmpty) {
+      records.remove(key);
+    } else {
+      records[key] = override.copyWith(
+        updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+      );
+    }
+    await _writeSeriesScrapeOverrides(records);
+    seriesScrapeRevision.value++;
+  }
+
+  Future<void> clearSeriesScrapeOverride(
+    String siteKey,
+    String videoId, {
+    bool isPrivate = false,
+  }) async {
+    if (_isPrivateVideoSkip(siteKey, isPrivate)) return;
+    final key = _videoSkipKey(siteKey, videoId);
+    if (key.isEmpty) return;
+    final records = _readSeriesScrapeOverrides();
+    if (records.remove(key) != null) {
+      await _writeSeriesScrapeOverrides(records);
+      seriesScrapeRevision.value++;
+    }
+  }
+
+  MacosWindowBounds? loadMacosWindowBounds() =>
+      MacosWindowBounds.tryParseJson(_prefs.getString(MacosWindowBounds.prefKey));
+
+  Future<void> saveMacosWindowBounds(MacosWindowBounds bounds) async {
+    if (!bounds.isValid) return;
+    await _prefs.setString(MacosWindowBounds.prefKey, bounds.toJsonString());
+  }
+
+  Future<void> clearMacosWindowBounds() async {
+    await _prefs.remove(MacosWindowBounds.prefKey);
   }
 }

@@ -482,6 +482,16 @@ class IosAvPlayerController extends ChangeNotifier {
         );
       }
       if (avPlayerNativeExtensions.contains(urlExt)) {
+        final lower = cleanUrl.toLowerCase();
+        if (urlExt == '.m3u8' &&
+            !lower.startsWith('http://') &&
+            !lower.startsWith('https://')) {
+          return IosAvPlayerPrecheckResult(
+            supported: false,
+            reason: '本地离线 HLS 播放列表将自动切换至 MPV 播放',
+            detectedExtension: urlExt,
+          );
+        }
         return IosAvPlayerPrecheckResult(
           supported: true,
           detectedExtension: urlExt,

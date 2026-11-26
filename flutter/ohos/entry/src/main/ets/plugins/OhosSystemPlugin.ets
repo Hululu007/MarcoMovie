@@ -17,10 +17,15 @@ import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { window } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
 import {
+  concatByteChunks,
   extractMethodArg,
   recordFromDynamicObject,
   stringArrayFromDynamicValue
 } from './OhosDynamicBridge';
+import {
+  OhosSecureCredentialEngine,
+  OhosSecureStorageDeps
+} from './OhosSecureCredentialEngine';
 
 const CHANNEL_NAME: string = 'com.pilipala.marcomovie/ohos_system';
 const REMOTE_KEY_CHANNEL_NAME: string = 'com.pilipala.marcomovie/ohos_remote';
@@ -31,8 +36,12 @@ const PACKAGE_INFO_CHANNEL: string = 'dev.fluttercommunity.plus/package_info';
 const URL_LAUNCHER_CHANNEL: string = 'plugins.flutter.io/url_launcher';
 const PREFS_STORE_NAME: string = 'marco_movie_prefs';
 const SECURE_FALLBACK_STORE_NAME: string = 'marco_movie_secure_fallback';
+const SECURE_STATE_STORE_NAME: string = 'marco_movie_secure_state';
+const ASSET_SERVICE_UNAVAILABLE_CODE: number = 24000001;
 const ASSET_NOT_FOUND_CODE: number = 24000002;
 const ASSET_DUPLICATE_CODE: number = 24000003;
+const ASSET_ACCESS_DENIED_CODE: number = 24000004;
+const ASSET_STATUS_MISMATCH_CODE: number = 24000005;
 
 class PathProviderCompatHandler implements MethodCallHandler {
   private readonly host: OhosSystemPlugin;
@@ -89,11 +98,25 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
   private appContext: common.Context | null = null;
   private abilityContext: common.UIAbilityContext | null = null;
   private remoteBoundContext: common.UIAbilityContext | null = null;
+  private readonly secureEngine: OhosSecureCredentialEngine;
 
   constructor(context?: common.UIAbilityContext) {
     if (context !== undefined) {
       this.abilityContext = context;
     }
+    const deps: OhosSecureStorageDeps = {
+      assetQueryBytes: (alias: string): Promise<Uint8Array | null> => this.assetQueryBytes(alias),
+      assetPutBytes: (alias: string, secretBytes: Uint8Array): Promise<void> => this.assetPutBytes(alias, secretBytes),
+      assetRemoveAlias: (alias: string): Promise<void> => this.assetRemoveAlias(alias),
+      readLegacyFallback: (key: string): Promise<string | null> => this.readSecureFallback(key),
+      deleteLegacyFallback: (key: string): Promise<void> => this.deleteSecureFallback(key),
+      readPendingDeleteMarker: (markerKey: string): Promise<boolean> => this.readPendingDeleteMarker(markerKey),
+      writePendingDeleteMarker: (markerKey: string): Promise<void> => this.writePendingDeleteMarker(markerKey),
+      clearPendingDeleteMarker: (markerKey: string): Promise<void> => this.clearPendingDeleteMarker(markerKey),
+      encodeUtf8: (text: string): Uint8Array => this.encodeUtf8(text),
+      decodeUtf8: (bytes: Uint8Array): string => this.decodeUtf8(bytes)
+    };
+    this.secureEngine = new OhosSecureCredentialEngine(deps);
   }
 
   getUniqueClassName(): string {
@@ -321,10 +344,26 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
           result.success(await this.handlePickJsonFile());
           return;
         }
+        case 'pickDocumentFile': {
+          const purpose: string = String(this.getArg(call, 'purpose') ?? 'subscription');
+          const extensions: Array<string> = stringArrayFromDynamicValue(this.getArg(call, 'extensions'));
+          const rawMaxBytes: ESObject = this.getArg(call, 'maxBytes');
+          const maxBytes: number = rawMaxBytes === undefined || rawMaxBytes === null
+            ? 16 * 1024 * 1024
+            : Math.max(1024, Math.trunc(Number(rawMaxBytes)));
+          const rawAsBytes: ESObject = this.getArg(call, 'asBytes');
+          const asBytes: boolean = rawAsBytes === undefined || rawAsBytes === null ? true : Boolean(rawAsBytes);
+          result.success(await this.handlePickDocumentFile(purpose, extensions, maxBytes, asBytes));
+          return;
+        }
         case 'saveTextFile': {
           const fileName: string = String(this.getArg(call, 'fileName') ?? 'marco_movie_export.json');
           const content: string = String(this.getArg(call, 'content') ?? '');
-          result.success(await this.handleSaveTextFile(fileName, content));
+          const rawMaxBytes: ESObject = this.getArg(call, 'maxBytes');
+          const maxBytes: number = rawMaxBytes === undefined || rawMaxBytes === null
+            ? 0
+            : Math.max(0, Math.trunc(Number(rawMaxBytes)));
+          result.success(await this.handleSaveTextFile(fileName, content, maxBytes));
           return;
         }
         case 'openExternalUrl': {
@@ -412,8 +451,8 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
     const info: Record<string, string> = {
       'appName': 'Marco Movie',
       'packageName': String(bundleInfo.name ?? 'com.pilipala.marcomovie'),
-      'version': String(bundleInfo.versionName ?? '0.1.1'),
-      'buildNumber': String(bundleInfo.versionCode ?? 1000002)
+      'version': String(bundleInfo.versionName ?? '0.1.2'),
+      'buildNumber': String(bundleInfo.versionCode ?? 1000003)
     };
     return info;
   }
@@ -489,81 +528,124 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
     return decoder.decodeToString(bytes);
   }
 
-  private buildAssetAlias(key: string): Uint8Array {
-    return this.encodeUtf8('marco_movie:' + key);
+  private buildAssetAliasBytes(alias: string): Uint8Array {
+    return this.encodeUtf8(alias);
   }
 
-  private async handleSecureRead(key: string): Promise<string | null> {
-    if (key.length === 0) {
-      return null;
+  private sanitizeAssetError(operation: string, err: ESObject): Error {
+    const error = err as BusinessError;
+    const code: number = Math.trunc(Number(error?.code ?? 0));
+    if (code === ASSET_STATUS_MISMATCH_CODE) {
+      return new Error('系统安全存储当前不可用（设备锁屏或尚未首次解锁），请解锁后重试 (code=24000005)');
     }
+    if (code === ASSET_SERVICE_UNAVAILABLE_CODE) {
+      return new Error('系统安全存储服务暂不可用，请稍后重试 (code=24000001)');
+    }
+    if (code === ASSET_ACCESS_DENIED_CODE) {
+      return new Error('系统安全存储拒绝访问，请检查应用签名状态后重试 (code=24000004)');
+    }
+    const suffix: string = code !== 0 ? ' (code=' + String(code) + ')' : '';
+    return new Error('系统安全存储' + operation + '失败，请稍后重试' + suffix);
+  }
+
+  private async assetQueryBytes(alias: string): Promise<Uint8Array | null> {
     try {
       const query: asset.AssetMap = new Map();
-      query.set(asset.Tag.ALIAS, this.buildAssetAlias(key));
+      query.set(asset.Tag.ALIAS, this.buildAssetAliasBytes(alias));
       query.set(asset.Tag.RETURN_TYPE, asset.ReturnType.ALL);
       const records: Array<asset.AssetMap> = await asset.query(query);
-      if (records.length > 0) {
-        const secretValue: asset.Value | undefined = records[0].get(asset.Tag.SECRET);
-        if (secretValue instanceof Uint8Array) {
-          return this.decodeUtf8(secretValue);
-        }
+      if (records.length === 0) {
+        return null;
       }
+      const secretValue: asset.Value | undefined = records[0].get(asset.Tag.SECRET);
+      if (secretValue instanceof Uint8Array) {
+        return secretValue.slice(0, secretValue.byteLength);
+      }
+      return null;
     } catch (err) {
       const error = err as BusinessError;
-      if (error?.code === ASSET_NOT_FOUND_CODE) {
-        return await this.readSecureFallback(key);
+      if (Number(error?.code ?? 0) === ASSET_NOT_FOUND_CODE) {
+        return null;
       }
-      return await this.readSecureFallback(key);
+      throw this.sanitizeAssetError('读取', err);
     }
-    return await this.readSecureFallback(key);
   }
 
-  private async handleSecureWrite(key: string, value: string): Promise<boolean> {
-    if (key.length === 0) {
-      return false;
-    }
-    const aliasBytes: Uint8Array = this.buildAssetAlias(key);
-    const secretBytes: Uint8Array = this.encodeUtf8(value);
+  private async assetPutBytes(alias: string, secretBytes: Uint8Array): Promise<void> {
+    const aliasBytes: Uint8Array = this.buildAssetAliasBytes(alias);
+    const attrs: asset.AssetMap = new Map();
+    attrs.set(asset.Tag.ALIAS, aliasBytes);
+    attrs.set(asset.Tag.SECRET, secretBytes);
+    attrs.set(asset.Tag.ACCESSIBILITY, asset.Accessibility.DEVICE_FIRST_UNLOCKED);
     try {
-      const attrs: asset.AssetMap = new Map();
-      attrs.set(asset.Tag.ALIAS, aliasBytes);
-      attrs.set(asset.Tag.SECRET, secretBytes);
-      attrs.set(asset.Tag.ACCESSIBILITY, asset.Accessibility.DEVICE_FIRST_UNLOCKED);
-      try {
-        await asset.add(attrs);
-      } catch (addErr) {
-        const addError = addErr as BusinessError;
-        if (addError?.code === ASSET_DUPLICATE_CODE) {
+      await asset.add(attrs);
+    } catch (addErr) {
+      const addError = addErr as BusinessError;
+      if (Number(addError?.code ?? 0) === ASSET_DUPLICATE_CODE) {
+        try {
           const query: asset.AssetMap = new Map();
           query.set(asset.Tag.ALIAS, aliasBytes);
           const updateAttrs: asset.AssetMap = new Map();
           updateAttrs.set(asset.Tag.SECRET, secretBytes);
           await asset.update(query, updateAttrs);
-        } else {
-          throw new Error(String(addError?.message ?? 'AssetStore add failed'));
+        } catch (updateErr) {
+          throw this.sanitizeAssetError('更新', updateErr);
         }
+      } else {
+        throw this.sanitizeAssetError('写入', addErr);
       }
-      await this.deleteSecureFallback(key);
-      return true;
-    } catch (_err) {
-      await this.writeSecureFallback(key, value);
-      return true;
     }
   }
 
-  private async handleSecureDelete(key: string): Promise<boolean> {
-    if (key.length === 0) {
-      return false;
-    }
+  private async assetRemoveAlias(alias: string): Promise<void> {
     try {
       const query: asset.AssetMap = new Map();
-      query.set(asset.Tag.ALIAS, this.buildAssetAlias(key));
+      query.set(asset.Tag.ALIAS, this.buildAssetAliasBytes(alias));
       await asset.remove(query);
-    } catch (_err) {
-      // Ignore ASSET_NOT_FOUND or unavailable HUKS on unconfigured emulators.
+    } catch (err) {
+      const error = err as BusinessError;
+      if (Number(error?.code ?? 0) === ASSET_NOT_FOUND_CODE) {
+        return;
+      }
+      throw this.sanitizeAssetError('删除', err);
     }
-    await this.deleteSecureFallback(key);
-    return true;
+  }
+
+  private async handleSecureRead(key: string): Promise<string | null> {
+    return await this.secureEngine.read(key);
+  }
+
+  private async handleSecureWrite(key: string, value: string): Promise<boolean> {
+    return await this.secureEngine.write(key, value);
+  }
+
+  private async handleSecureDelete(key: string): Promise<boolean> {
+    return await this.secureEngine.delete(key);
+  }
+
+  private async readPendingDeleteMarker(markerKey: string): Promise<boolean> {
+    const stateStore: dataPreferences.Preferences = await this.getPrefsStore(SECURE_STATE_STORE_NAME);
+    const exists: boolean = await stateStore.has(markerKey);
+    if (!exists) {
+      return false;
+    }
+    const val: dataPreferences.ValueType = await stateStore.get(markerKey, '');
+    return String(val) === '1';
+  }
+
+  private async writePendingDeleteMarker(markerKey: string): Promise<void> {
+    const stateStore: dataPreferences.Preferences = await this.getPrefsStore(SECURE_STATE_STORE_NAME);
+    await stateStore.put(markerKey, '1');
+    await stateStore.flush();
+  }
+
+  private async clearPendingDeleteMarker(markerKey: string): Promise<void> {
+    const stateStore: dataPreferences.Preferences = await this.getPrefsStore(SECURE_STATE_STORE_NAME);
+    const exists: boolean = await stateStore.has(markerKey);
+    if (exists) {
+      await stateStore.delete(markerKey);
+      await stateStore.flush();
+    }
   }
 
   private async readSecureFallback(key: string): Promise<string | null> {
@@ -576,12 +658,6 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
     return String(val);
   }
 
-  private async writeSecureFallback(key: string, value: string): Promise<void> {
-    const fallback: dataPreferences.Preferences = await this.getPrefsStore(SECURE_FALLBACK_STORE_NAME);
-    await fallback.put(key, value);
-    await fallback.flush();
-  }
-
   private async deleteSecureFallback(key: string): Promise<void> {
     const fallback: dataPreferences.Preferences = await this.getPrefsStore(SECURE_FALLBACK_STORE_NAME);
     const exists: boolean = await fallback.has(key);
@@ -592,8 +668,13 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
   }
 
   private extractFileName(uri: string, fallbackName: string): string {
-    if (fallbackName.length > 0 && fallbackName.indexOf('/') === -1) {
-      return fallbackName;
+    const trimmedFallback: string = fallbackName.trim();
+    if (trimmedFallback.length > 0 && trimmedFallback.indexOf('/') === -1) {
+      try {
+        return decodeURIComponent(trimmedFallback);
+      } catch (_err) {
+        return trimmedFallback;
+      }
     }
     const cleanUri: string = uri.split('?')[0];
     const parts: Array<string> = cleanUri.split('/');
@@ -605,52 +686,138 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
     }
   }
 
-  private async handlePickJsonFile(): Promise<Record<string, string> | null> {
+  private resolveSuffixFilters(purpose: string, requestedExtensions: Array<string>): Array<string> {
+    const cleaned: Array<string> = [];
+    for (let i = 0; i < requestedExtensions.length; i++) {
+      const ext: string = requestedExtensions[i].trim().toLowerCase();
+      if (ext.length === 0) {
+        continue;
+      }
+      const normalized: string = ext.startsWith('.') ? ext : '.' + ext;
+      if (cleaned.indexOf(normalized) === -1) {
+        cleaned.push(normalized);
+      }
+    }
+    if (cleaned.length > 0) {
+      return cleaned;
+    }
+    if (purpose === 'backup') {
+      return ['.json'];
+    }
+    if (purpose === 'live') {
+      return ['.m3u', '.m3u8', '.txt', '.json'];
+    }
+    return ['.json', '.zip', '.txt', '.m3u', '.m3u8'];
+  }
+
+  private formatByteLimitLabel(maxBytes: number): string {
+    const mb: number = Math.max(1, Math.round(maxBytes / (1024 * 1024)));
+    return String(mb) + ' MB';
+  }
+
+  private async readPickedUriBytesAsync(uri: string, maxBytes: number): Promise<Uint8Array> {
+    const file: fs.File = await fs.open(uri, fs.OpenMode.READ_ONLY);
+    try {
+      try {
+        const stat: fs.Stat = await fs.stat(file.fd);
+        if (stat.size > maxBytes) {
+          throw new Error('FILE_TOO_LARGE:所选文件超过 ' + this.formatByteLimitLabel(maxBytes) + ' 限制');
+        }
+      } catch (statErr) {
+        if (statErr instanceof Error && statErr.message.startsWith('FILE_TOO_LARGE:')) {
+          throw statErr;
+        }
+        // Some virtual document URIs report stat errors; enforce limit strictly during chunked read below.
+      }
+      const chunks: Array<Uint8Array> = [];
+      let totalBytes: number = 0;
+      const chunkBuffer: ArrayBuffer = new ArrayBuffer(65536);
+      while (true) {
+        const bytesRead: number = await fs.read(file.fd, chunkBuffer);
+        if (bytesRead <= 0) {
+          break;
+        }
+        totalBytes += bytesRead;
+        if (totalBytes > maxBytes) {
+          throw new Error('FILE_TOO_LARGE:所选文件超过 ' + this.formatByteLimitLabel(maxBytes) + ' 限制');
+        }
+        const copy: Uint8Array = new Uint8Array(bytesRead);
+        copy.set(new Uint8Array(chunkBuffer, 0, bytesRead));
+        chunks.push(copy);
+      }
+      return concatByteChunks(chunks);
+    } finally {
+      try {
+        await fs.close(file);
+      } catch (_closeErr) {
+        // Ignore close errors.
+      }
+    }
+  }
+
+  private async handlePickDocumentFile(
+    purpose: string,
+    requestedExtensions: Array<string>,
+    maxBytes: number,
+    asBytes: boolean
+  ): Promise<Record<string, Object> | null> {
     const context: common.Context = this.requireContext();
     const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
     const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
     options.maxSelectNumber = 1;
-    options.fileSuffixFilters = ['.json', '.txt', '.m3u', '.m3u8'];
+    options.fileSuffixFilters = this.resolveSuffixFilters(purpose, requestedExtensions);
     const selectedUris: Array<string> = await documentPicker.select(options);
     if (!selectedUris || selectedUris.length === 0 || !selectedUris[0]) {
       return null;
     }
     const uri: string = selectedUris[0];
-    const file: fs.File = fs.openSync(uri, fs.OpenMode.READ_ONLY);
-    try {
-      const chunks: Array<Uint8Array> = [];
-      let totalBytes: number = 0;
-      const chunkBuffer: ArrayBuffer = new ArrayBuffer(65536);
-      while (true) {
-        const bytesRead: number = fs.readSync(file.fd, chunkBuffer);
-        if (bytesRead <= 0) {
-          break;
-        }
-        const copy: Uint8Array = new Uint8Array(bytesRead);
-        copy.set(new Uint8Array(chunkBuffer, 0, bytesRead));
-        chunks.push(copy);
-        totalBytes += bytesRead;
-      }
-      const merged: Uint8Array = new Uint8Array(totalBytes);
-      let offset: number = 0;
-      for (let i = 0; i < chunks.length; i++) {
-        merged.set(chunks[i], offset);
-        offset += chunks[i].byteLength;
-      }
-      const content: string = this.decodeUtf8(merged);
-      const fileName: string = this.extractFileName(uri, String(file.name ?? ''));
-      const payload: Record<string, string> = {
+    const merged: Uint8Array = await this.readPickedUriBytesAsync(uri, maxBytes);
+    const fileName: string = this.extractFileName(uri, '');
+    if (asBytes) {
+      const payload: Record<string, Object> = {
         'name': fileName,
         'path': uri,
-        'content': content
+        'bytes': merged,
+        'size': merged.byteLength
       };
       return payload;
-    } finally {
-      fs.closeSync(file);
     }
+    const textPayload: Record<string, Object> = {
+      'name': fileName,
+      'path': uri,
+      'content': this.decodeUtf8(merged),
+      'size': merged.byteLength
+    };
+    return textPayload;
   }
 
-  private async handleSaveTextFile(fileName: string, content: string): Promise<string | null> {
+  private async handlePickJsonFile(): Promise<Record<string, string> | null> {
+    const picked: Record<string, Object> | null = await this.handlePickDocumentFile(
+      'subscription',
+      ['.json', '.txt', '.m3u', '.m3u8'],
+      16 * 1024 * 1024,
+      false
+    );
+    if (picked === null) {
+      return null;
+    }
+    const payload: Record<string, string> = {
+      'name': String(picked['name'] ?? 'selected.json'),
+      'path': String(picked['path'] ?? ''),
+      'content': String(picked['content'] ?? '')
+    };
+    return payload;
+  }
+
+  private async handleSaveTextFile(
+    fileName: string,
+    content: string,
+    maxBytes: number = 0
+  ): Promise<string | null> {
+    const encoded: Uint8Array = this.encodeUtf8(content);
+    if (maxBytes > 0 && encoded.byteLength > maxBytes) {
+      throw new Error('FILE_TOO_LARGE:导出文件超过 ' + this.formatByteLimitLabel(maxBytes) + ' 限制');
+    }
     const context: common.Context = this.requireContext();
     const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
     const saveOptions: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
@@ -660,20 +827,30 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
       return null;
     }
     const uri: string = savedUris[0];
-    const file: fs.File = fs.openSync(
+    const file: fs.File = await fs.open(
       uri,
       fs.OpenMode.WRITE_ONLY | fs.OpenMode.CREATE | fs.OpenMode.TRUNC
     );
     try {
-      const encoded: Uint8Array = this.encodeUtf8(content);
-      const exactBuffer: ArrayBuffer = encoded.buffer.slice(
-        encoded.byteOffset,
-        encoded.byteOffset + encoded.byteLength
-      );
-      fs.writeSync(file.fd, exactBuffer);
+      let writtenTotal: number = 0;
+      while (writtenTotal < encoded.byteLength) {
+        const remainingSlice: ArrayBuffer = encoded.buffer.slice(
+          encoded.byteOffset + writtenTotal,
+          encoded.byteOffset + encoded.byteLength
+        );
+        const written: number = await fs.write(file.fd, remainingSlice);
+        if (written <= 0) {
+          throw new Error('写入文件未完成，请重试');
+        }
+        writtenTotal += written;
+      }
       return uri;
     } finally {
-      fs.closeSync(file);
+      try {
+        await fs.close(file);
+      } catch (_closeErr) {
+        // Ignore close errors.
+      }
     }
   }
 

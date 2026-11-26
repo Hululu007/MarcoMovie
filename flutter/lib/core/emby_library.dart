@@ -239,19 +239,42 @@ class EmbyLibrary {
     void add(Map row) {
       final name = row['Name']?.toString() ?? '正片';
       final sources = row['MediaSources'];
-      final sid = sources is List && sources.isNotEmpty
-          ? sources.first['Id']
-          : row['Id'];
+      final firstSource =
+          sources is List && sources.isNotEmpty && sources.first is Map
+              ? sources.first as Map
+              : null;
+      final sid = firstSource?['Id'] ?? row['Id'];
+      final itemId = row['Id']?.toString() ?? '';
+      final seasonNum = (row['ParentIndexNumber'] as num?)?.toInt();
+      final epNum = (row['IndexNumber'] as num?)?.toInt();
+      final rawMediaPath = (firstSource?['Path']?.toString() ?? '').trim();
+      var origFile = '';
+      var dirPath = '';
+      if (rawMediaPath.isNotEmpty) {
+        final normPath = rawMediaPath.replaceAll('\\', '/');
+        final slash = normPath.lastIndexOf('/');
+        if (slash >= 0) {
+          origFile = normPath.substring(slash + 1);
+          dirPath = normPath.substring(0, slash);
+        } else {
+          origFile = normPath;
+        }
+      }
       episodes.add(
         CmsEpisode(
-          name: row['ParentIndexNumber'] == null
+          name: seasonNum == null
               ? name
-              : 'S${row['ParentIndexNumber']}E${row['IndexNumber']} $name',
+              : (epNum != null ? 'S${seasonNum}E$epNum $name' : name),
           url: Uri(
             scheme: 'mmemby',
             host: 'play',
-            queryParameters: {'id': row['Id'], 'source': sid ?? row['Id']},
+            queryParameters: {'id': itemId, 'source': (sid ?? itemId).toString()},
           ).toString(),
+          sourceSeasonNumber: seasonNum,
+          sourceEpisodeNumber: epNum,
+          sourceItemId: itemId,
+          originalFileName: origFile,
+          directoryPath: dirPath,
         ),
       );
     }
@@ -386,6 +409,12 @@ class EmbyLibrary {
         'PlayMethod': direct ? 'DirectStream' : 'Transcode',
         'CanSeek': true,
       },
+      sourceSeasonNumber: episode.sourceSeasonNumber,
+      sourceEpisodeNumber: episode.sourceEpisodeNumber,
+      sourceItemId: episode.sourceItemId.isNotEmpty ? episode.sourceItemId : id,
+      originalFileName: episode.originalFileName,
+      directoryPath: episode.directoryPath,
+      containerTags: episode.containerTags,
     );
   }
 
