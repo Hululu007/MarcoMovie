@@ -3508,7 +3508,7 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView, UIContextMenuIntera
     willEndFor configuration: UIContextMenuConfiguration,
     animator: UIContextMenuInteractionAnimating?
   ) {
-    let finish = { [weak self] in
+    let finish: () -> Void = { [weak self] in
       self?.contextMenuActive = false
     }
     if let animator = animator {
