@@ -7,6 +7,8 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'ai_oauth_manager.dart';
+import 'ai_provider_profiles.dart';
 import 'ohos_runtime.dart';
 import 'secure_credential_store.dart';
 
@@ -83,7 +85,9 @@ class AiConfig {
   final int monthlyTokenBudget;
   final bool nlSearchEnabled;
   final bool titleCleanupEnabled;
+  final bool picksEnabled;
   final bool firstUseConsentAccepted;
+  final String activeProfileId;
 
   const AiConfig({
     this.enabled = false,
@@ -95,7 +99,9 @@ class AiConfig {
     this.monthlyTokenBudget = 0,
     this.nlSearchEnabled = true,
     this.titleCleanupEnabled = true,
+    this.picksEnabled = true,
     this.firstUseConsentAccepted = false,
+    this.activeProfileId = '',
   });
 
   /// Secondary lightweight model for batch filename cleanup; falls back to [model].
@@ -114,7 +120,9 @@ class AiConfig {
     int? monthlyTokenBudget,
     bool? nlSearchEnabled,
     bool? titleCleanupEnabled,
+    bool? picksEnabled,
     bool? firstUseConsentAccepted,
+    String? activeProfileId,
   }) {
     final nextTimeout = (timeoutSeconds ?? this.timeoutSeconds)
         .clamp(minTimeoutSeconds, maxTimeoutSeconds);
@@ -129,8 +137,10 @@ class AiConfig {
       monthlyTokenBudget: nextBudget < 0 ? 0 : nextBudget,
       nlSearchEnabled: nlSearchEnabled ?? this.nlSearchEnabled,
       titleCleanupEnabled: titleCleanupEnabled ?? this.titleCleanupEnabled,
+      picksEnabled: picksEnabled ?? this.picksEnabled,
       firstUseConsentAccepted:
           firstUseConsentAccepted ?? this.firstUseConsentAccepted,
+      activeProfileId: (activeProfileId ?? this.activeProfileId).trim(),
     );
   }
 
@@ -144,7 +154,9 @@ class AiConfig {
         'monthlyTokenBudget': monthlyTokenBudget,
         'nlSearchEnabled': nlSearchEnabled,
         'titleCleanupEnabled': titleCleanupEnabled,
+        'picksEnabled': picksEnabled,
         'firstUseConsentAccepted': firstUseConsentAccepted,
+        'activeProfileId': activeProfileId.trim(),
       };
 
   factory AiConfig.fromJson(Map<String, dynamic> json) {
@@ -164,7 +176,9 @@ class AiConfig {
       monthlyTokenBudget: rawBudget < 0 ? 0 : rawBudget,
       nlSearchEnabled: json['nlSearchEnabled'] != false,
       titleCleanupEnabled: json['titleCleanupEnabled'] != false,
+      picksEnabled: json['picksEnabled'] != false,
       firstUseConsentAccepted: json['firstUseConsentAccepted'] == true,
+      activeProfileId: (json['activeProfileId'] ?? '').toString().trim(),
     );
   }
 }
@@ -264,9 +278,11 @@ class AiMovieCandidate {
 /// monthly token budget guard, and Privacy Space hard-blocker.
 class AiService extends ChangeNotifier {
   static const String prefsConfigKey = 'marco_ai_config_v1';
+  static const String prefsProfilesKey = 'marco_ai_profiles_v1';
   static const String prefsUsageKey = 'marco_ai_usage_v1';
   static const String prefsCacheKey = 'marco_ai_cache_v1';
   static const String secureApiKeySlot = 'marco_ai_api_key_v1';
+  static const String secureProfileSecretPrefix = 'marco_ai_profile_secret_';
   static const int maxCacheEntries = 200;
 
   static final RegExp _forbiddenUrlLikeRe = RegExp(
@@ -279,8 +295,10 @@ class AiService extends ChangeNotifier {
   http.Client? _injectedHttpClient;
   SecureStorageBackend _secureBackend;
   DateTime Function() _clock;
+  GitHubCopilotDeviceFlow _copilotFlow;
 
   AiConfig _config = const AiConfig();
+  List<AiProviderProfile> _profiles = <AiProviderProfile>[];
   String _apiKey = '';
   AiMonthlyUsage? _usage;
   final LinkedHashMap<String, String> _cache = LinkedHashMap<String, String>();
@@ -291,22 +309,42 @@ class AiService extends ChangeNotifier {
     http.Client? httpClient,
     SecureStorageBackend? secureStorage,
     DateTime Function()? clock,
+    GitHubCopilotDeviceFlow? copilotFlow,
   })  : _injectedHttpClient = httpClient,
         _secureBackend = secureStorage ?? const FlutterSecureStorageBackend(),
-        _clock = clock ?? DateTime.now;
+        _clock = clock ?? DateTime.now,
+        _copilotFlow = copilotFlow ?? GitHubCopilotDeviceFlow.instance;
 
   AiConfig get config => _config;
+  List<AiProviderProfile> get profiles =>
+      List<AiProviderProfile>.unmodifiable(_profiles);
+
+  AiProviderProfile? get activeProfile {
+    final targetId = _config.activeProfileId.trim();
+    if (targetId.isEmpty) return null;
+    for (final profile in _profiles) {
+      if (profile.id == targetId) return profile;
+    }
+    return null;
+  }
+
+  AiAuthMode get activeAuthMode => activeProfile?.authMode ?? AiAuthMode.apiKey;
   bool get isLoaded => _loaded;
   bool get hasApiKey => _apiKey.trim().isNotEmpty;
   int get cachedEntryCount => _cache.length;
 
-  /// True when AI Assistant is enabled and has non-empty Base URL, API key, and model.
-  bool get isConfigured =>
-      !OhosRuntime.isOhos &&
-      _config.enabled &&
-      _config.baseUrl.trim().isNotEmpty &&
-      _config.model.trim().isNotEmpty &&
-      _apiKey.trim().isNotEmpty;
+  /// True when AI Assistant is enabled and has non-empty Base URL, model, and
+  /// either an API key/OAuth token or a local loopback zero-auth endpoint.
+  bool get isConfigured {
+    if (OhosRuntime.isOhos || !_config.enabled) return false;
+    final base = _config.baseUrl.trim();
+    final model = _config.model.trim();
+    if (base.isEmpty || model.isEmpty) return false;
+    final active = activeProfile;
+    final noKeyRequired =
+        (active != null && !active.requiresApiKey) || isLoopbackAiBaseUrl(base);
+    return noKeyRequired || _apiKey.trim().isNotEmpty;
+  }
 
   String get currentMonthKey {
     final now = _clock();
@@ -331,16 +369,20 @@ class AiService extends ChangeNotifier {
     http.Client? httpClient,
     SecureStorageBackend? secureStorage,
     DateTime Function()? clock,
+    GitHubCopilotDeviceFlow? copilotFlow,
     bool resetState = false,
   }) {
     if (httpClient != null) _injectedHttpClient = httpClient;
     if (secureStorage != null) _secureBackend = secureStorage;
     if (clock != null) _clock = clock;
+    if (copilotFlow != null) _copilotFlow = copilotFlow;
     if (resetState) {
       _config = const AiConfig();
+      _profiles = <AiProviderProfile>[];
       _apiKey = '';
       _usage = null;
       _cache.clear();
+      _copilotFlow.clearSessionCache();
       _loaded = false;
       _loadFuture = null;
       notifyListeners();
@@ -352,7 +394,10 @@ class AiService extends ChangeNotifier {
     _injectedHttpClient = null;
     _secureBackend = const FlutterSecureStorageBackend();
     _clock = DateTime.now;
+    _copilotFlow = GitHubCopilotDeviceFlow.instance;
+    _copilotFlow.clearSessionCache();
     _config = const AiConfig();
+    _profiles = <AiProviderProfile>[];
     _apiKey = '';
     _usage = null;
     _cache.clear();
@@ -423,7 +468,32 @@ class AiService extends ChangeNotifier {
         }
       }
 
-      final storedKey = await _secureBackend.read(secureApiKeySlot);
+      final rawProfiles = prefs.getString(prefsProfilesKey);
+      _profiles = <AiProviderProfile>[];
+      if (rawProfiles != null && rawProfiles.trim().isNotEmpty) {
+        final decodedProfiles = jsonDecode(rawProfiles);
+        if (decodedProfiles is List) {
+          for (final item in decodedProfiles) {
+            if (item is Map) {
+              final profile = AiProviderProfile.fromJson(
+                Map<String, dynamic>.from(item),
+              );
+              if (profile.id.isNotEmpty) {
+                _profiles.add(profile);
+              }
+            }
+          }
+        }
+      }
+
+      String? storedKey;
+      final activeId = _config.activeProfileId.trim();
+      if (activeId.isNotEmpty) {
+        storedKey = await _secureBackend.read(
+          '$secureProfileSecretPrefix$activeId',
+        );
+      }
+      storedKey ??= await _secureBackend.read(secureApiKeySlot);
       _apiKey = (storedKey ?? '').trim();
     } catch (_) {
       _usage ??= AiMonthlyUsage(monthKey: currentMonthKey);
@@ -446,12 +516,238 @@ class AiService extends ChangeNotifier {
     await ensureLoaded();
     final trimmed = rawKey.trim();
     _apiKey = trimmed;
+    final activeId = _config.activeProfileId.trim();
     if (trimmed.isEmpty) {
       await _secureBackend.delete(secureApiKeySlot);
+      if (activeId.isNotEmpty) {
+        await _secureBackend.delete('$secureProfileSecretPrefix$activeId');
+      }
     } else {
       await _secureBackend.write(secureApiKeySlot, trimmed);
+      if (activeId.isNotEmpty) {
+        await _secureBackend.write('$secureProfileSecretPrefix$activeId', trimmed);
+      }
     }
     notifyListeners();
+  }
+
+  /// Reads the stored secret for a specific [profileId] from [SecureStorageBackend].
+  Future<String> readProfileSecret(String profileId) async {
+    await ensureLoaded();
+    final id = profileId.trim();
+    if (id.isEmpty) return '';
+    final secret = await _secureBackend.read('$secureProfileSecretPrefix$id');
+    return (secret ?? '').trim();
+  }
+
+  /// Persists or clears the secret for [profileId] in [SecureStorageBackend].
+  Future<void> setProfileSecret(String profileId, String rawSecret) async {
+    await ensureLoaded();
+    final id = profileId.trim();
+    if (id.isEmpty) return;
+    final trimmed = rawSecret.trim();
+    final slot = '$secureProfileSecretPrefix$id';
+    if (trimmed.isEmpty) {
+      await _secureBackend.delete(slot);
+    } else {
+      await _secureBackend.write(slot, trimmed);
+    }
+    if (_config.activeProfileId.trim() == id) {
+      _apiKey = trimmed;
+      if (trimmed.isEmpty) {
+        await _secureBackend.delete(secureApiKeySlot);
+      } else {
+        await _secureBackend.write(secureApiKeySlot, trimmed);
+      }
+    }
+    notifyListeners();
+  }
+
+  Future<void> _persistProfiles() async {
+    if (OhosRuntime.isOhos) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      prefsProfilesKey,
+      jsonEncode(<Map<String, dynamic>>[
+        for (final p in _profiles) p.toJson(),
+      ]),
+    );
+  }
+
+  /// Creates or updates a provider profile. When [activate] is true (or when
+  /// updating the currently active profile), transparently mirrors its
+  /// connection parameters into [config] and active credential slot.
+  Future<AiProviderProfile> saveProfile(
+    AiProviderProfile profile, {
+    String? secret,
+    bool activate = false,
+    bool enableAiWhenActivating = false,
+  }) async {
+    await ensureLoaded();
+    final nowMs = _clock().millisecondsSinceEpoch;
+    final id = profile.id.trim().isNotEmpty
+        ? profile.id.trim()
+        : 'profile_$nowMs';
+    final normalized = profile.copyWith(
+      id: id,
+      name: profile.name.trim().isNotEmpty ? profile.name.trim() : '未命名服务商',
+      createdAtMs: profile.createdAtMs > 0 ? profile.createdAtMs : nowMs,
+      updatedAtMs: nowMs,
+    );
+    final idx = _profiles.indexWhere((p) => p.id == id);
+    if (idx >= 0) {
+      _profiles[idx] = normalized;
+    } else {
+      _profiles.add(normalized);
+    }
+    await _persistProfiles();
+
+    if (secret != null) {
+      final trimmed = secret.trim();
+      final slot = '$secureProfileSecretPrefix$id';
+      if (trimmed.isEmpty) {
+        await _secureBackend.delete(slot);
+      } else {
+        await _secureBackend.write(slot, trimmed);
+      }
+    }
+
+    if (activate || _config.activeProfileId.trim() == id) {
+      final effectiveSecret = secret != null
+          ? secret.trim()
+          : (await _secureBackend.read('$secureProfileSecretPrefix$id') ?? '')
+              .trim();
+      _apiKey = effectiveSecret;
+      if (effectiveSecret.isEmpty) {
+        await _secureBackend.delete(secureApiKeySlot);
+      } else {
+        await _secureBackend.write(secureApiKeySlot, effectiveSecret);
+      }
+      _config = _config.copyWith(
+        enabled: enableAiWhenActivating ? true : _config.enabled,
+        protocol: normalized.protocol,
+        baseUrl: normalized.baseUrl,
+        model: normalized.model,
+        fastModel: normalized.fastModel,
+        activeProfileId: normalized.id,
+      );
+      if (!OhosRuntime.isOhos) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(prefsConfigKey, jsonEncode(_config.toJson()));
+      }
+    }
+    notifyListeners();
+    return normalized;
+  }
+
+  /// Switches the active provider instance and loads its credentials from
+  /// [SecureStorageBackend].
+  Future<void> activateProfile(
+    String profileId, {
+    bool enableAi = false,
+  }) async {
+    await ensureLoaded();
+    final id = profileId.trim();
+    final target = _profiles.where((p) => p.id == id).firstOrNull;
+    if (target == null) return;
+    final stored =
+        (await _secureBackend.read('$secureProfileSecretPrefix$id') ?? '')
+            .trim();
+    _apiKey = stored;
+    if (stored.isEmpty) {
+      await _secureBackend.delete(secureApiKeySlot);
+    } else {
+      await _secureBackend.write(secureApiKeySlot, stored);
+    }
+    _config = _config.copyWith(
+      enabled: enableAi ? true : _config.enabled,
+      protocol: target.protocol,
+      baseUrl: target.baseUrl,
+      model: target.model,
+      fastModel: target.fastModel,
+      activeProfileId: target.id,
+    );
+    if (!OhosRuntime.isOhos) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(prefsConfigKey, jsonEncode(_config.toJson()));
+    }
+    notifyListeners();
+  }
+
+  /// Deletes a saved provider profile and scrubs its secret from
+  /// [SecureStorageBackend].
+  Future<void> deleteProfile(String profileId) async {
+    await ensureLoaded();
+    final id = profileId.trim();
+    if (id.isEmpty) return;
+    _profiles.removeWhere((p) => p.id == id);
+    await _secureBackend.delete('$secureProfileSecretPrefix$id');
+    await _persistProfiles();
+
+    if (_config.activeProfileId.trim() == id) {
+      if (_profiles.isNotEmpty) {
+        await activateProfile(_profiles.first.id);
+        return;
+      }
+      _apiKey = '';
+      await _secureBackend.delete(secureApiKeySlot);
+      _config = _config.copyWith(
+        activeProfileId: '',
+        baseUrl: '',
+        model: '',
+        fastModel: '',
+      );
+      if (!OhosRuntime.isOhos) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(prefsConfigKey, jsonEncode(_config.toJson()));
+      }
+    }
+    notifyListeners();
+  }
+
+  /// Fetches available model IDs for the active (or overridden) provider.
+  Future<List<String>> fetchAvailableModels({
+    AiConfig? configOverride,
+    String? apiKeyOverride,
+    AiAuthMode? authModeOverride,
+    bool isPrivateSession = false,
+  }) async {
+    if (isPrivateSession) {
+      throw const AiServiceException(
+        AiErrorCode.privacySpaceBlocked,
+        '隐私空间已硬性禁用所有外部 AI 网络请求',
+      );
+    }
+    await ensureLoaded();
+    final cfg = configOverride ?? _config;
+    var key = (apiKeyOverride ?? _apiKey).trim();
+    var baseUrl = cfg.baseUrl.trim();
+    final mode = authModeOverride ?? activeAuthMode;
+    final extraHeaders = <String, String>{};
+
+    if (mode == AiAuthMode.githubCopilotDeviceFlow) {
+      final session = await _copilotFlow.getOrRefreshSessionToken(
+        key,
+        httpClient: _injectedHttpClient,
+        clock: _clock,
+      );
+      key = session.token;
+      baseUrl = session.apiBaseUrl;
+      extraHeaders.addAll(GitHubCopilotDeviceFlow.standardCopilotHeaders);
+    } else if (mode == AiAuthMode.openRouterOAuth ||
+        baseUrl.toLowerCase().contains('openrouter.ai')) {
+      extraHeaders['HTTP-Referer'] = 'https://marcotv.wlj9919.top';
+      extraHeaders['X-Title'] = 'Marco Movie';
+    }
+
+    return AiModelCatalogFetcher.fetchModels(
+      protocol: cfg.protocol,
+      baseUrl: baseUrl,
+      apiKey: key,
+      authMode: mode,
+      extraHeaders: extraHeaders,
+      httpClient: _injectedHttpClient,
+    );
   }
 
   /// Persists non-secret [AiConfig] to [SharedPreferences].
@@ -608,6 +904,7 @@ class AiService extends ChangeNotifier {
     bool isPrivateSession = false,
     AiConfig? configOverride,
     String? apiKeyOverride,
+    AiAuthMode? authModeOverride,
     bool ignoreEnabledFlag = false,
   }) async {
     if (isPrivateSession) {
@@ -625,26 +922,51 @@ class AiService extends ChangeNotifier {
     await ensureLoaded();
 
     final cfg = configOverride ?? _config;
-    final key = (apiKeyOverride ?? _apiKey).trim();
+    final rawKey = (apiKeyOverride ?? _apiKey).trim();
+    final mode = authModeOverride ??
+        (configOverride == null ? activeAuthMode : AiAuthMode.apiKey);
     if (!ignoreEnabledFlag && !cfg.enabled) {
       throw const AiServiceException(
         AiErrorCode.disabled,
         'AI 助手尚未启用',
       );
     }
-    final effectiveModel = (modelOverride != null && modelOverride.trim().isNotEmpty)
-        ? modelOverride.trim()
-        : cfg.model.trim();
-    if (cfg.baseUrl.trim().isEmpty || key.isEmpty || effectiveModel.isEmpty) {
+    final effectiveModel =
+        (modelOverride != null && modelOverride.trim().isNotEmpty)
+            ? modelOverride.trim()
+            : cfg.model.trim();
+    final allowEmptyKey =
+        mode == AiAuthMode.localNoAuth || isLoopbackAiBaseUrl(cfg.baseUrl);
+    if (cfg.baseUrl.trim().isEmpty ||
+        (!allowEmptyKey && rawKey.isEmpty) ||
+        effectiveModel.isEmpty) {
       throw const AiServiceException(
         AiErrorCode.unconfigured,
         '请先填写完整的接口地址、API 密钥与主模型名称',
       );
     }
 
+    var effectiveBaseUrl = cfg.baseUrl.trim();
+    var effectiveKey = rawKey;
+    final extraHeaders = <String, String>{};
+    if (mode == AiAuthMode.githubCopilotDeviceFlow) {
+      final session = await _copilotFlow.getOrRefreshSessionToken(
+        rawKey,
+        httpClient: _injectedHttpClient,
+        clock: _clock,
+      );
+      effectiveKey = session.token;
+      effectiveBaseUrl = session.apiBaseUrl;
+      extraHeaders.addAll(GitHubCopilotDeviceFlow.standardCopilotHeaders);
+    } else if (mode == AiAuthMode.openRouterOAuth ||
+        effectiveBaseUrl.toLowerCase().contains('openrouter.ai')) {
+      extraHeaders['HTTP-Referer'] = 'https://marcotv.wlj9919.top';
+      extraHeaders['X-Title'] = 'Marco Movie';
+    }
+
     final uri = resolveEndpointUri(
       protocol: cfg.protocol,
-      baseUrl: cfg.baseUrl,
+      baseUrl: effectiveBaseUrl,
       model: effectiveModel,
     );
 
@@ -679,12 +1001,15 @@ class AiService extends ChangeNotifier {
     final headers = <String, String>{
       'Content-Type': 'application/json',
       'Accept': 'application/json',
+      ...extraHeaders,
     };
     final Map<String, dynamic> body;
 
     switch (cfg.protocol) {
       case AiApiProtocol.openaiCompatible:
-        headers['Authorization'] = 'Bearer $key';
+        if (effectiveKey.isNotEmpty) {
+          headers['Authorization'] = 'Bearer $effectiveKey';
+        }
         body = <String, dynamic>{
           'model': effectiveModel,
           'messages': <Map<String, String>>[
@@ -696,7 +1021,9 @@ class AiService extends ChangeNotifier {
           'max_tokens': maxTokens,
         };
       case AiApiProtocol.anthropicMessages:
-        headers['x-api-key'] = key;
+        if (effectiveKey.isNotEmpty) {
+          headers['x-api-key'] = effectiveKey;
+        }
         headers['anthropic-version'] = '2023-06-01';
         body = <String, dynamic>{
           'model': effectiveModel,
@@ -708,7 +1035,9 @@ class AiService extends ChangeNotifier {
           'temperature': temperature,
         };
       case AiApiProtocol.geminiGenerateContent:
-        headers['x-goog-api-key'] = key;
+        if (effectiveKey.isNotEmpty) {
+          headers['x-goog-api-key'] = effectiveKey;
+        }
         body = <String, dynamic>{
           if (systemPrompt.trim().isNotEmpty)
             'systemInstruction': <String, dynamic>{
@@ -810,6 +1139,9 @@ class AiService extends ChangeNotifier {
         }
       }
     } catch (_) {}
+    if (detail.isNotEmpty) {
+      detail = redactAiSecret(detail);
+    }
     // Strip any URL from upstream error details to keep UI diagnostics clean.
     if (detail.isNotEmpty && containsForbiddenUrl(detail)) {
       detail = '';
@@ -972,6 +1304,7 @@ class AiService extends ChangeNotifier {
   Future<AiConnectionTestResult> testConnection({
     AiConfig? configOverride,
     String? apiKeyOverride,
+    AiAuthMode? authModeOverride,
     bool isPrivateSession = false,
   }) async {
     final sw = Stopwatch()..start();
@@ -987,6 +1320,7 @@ class AiService extends ChangeNotifier {
         isPrivateSession: isPrivateSession,
         configOverride: configOverride,
         apiKeyOverride: apiKeyOverride,
+        authModeOverride: authModeOverride,
         ignoreEnabledFlag: true,
       );
       sw.stop();
@@ -1058,6 +1392,83 @@ class AiService extends ChangeNotifier {
       temperature: 0.3,
       maxTokens: 768,
       useCache: true,
+      isPrivateSession: isPrivateSession,
+    );
+    return parseSearchCandidatesJson(completion.text);
+  }
+
+  static const String _personalizedPicksSystemPrompt =
+      '你是本地私人影单推荐助手。请结合用户近期公开看过的影片与收藏片单，以及可选的心情/偏好提示，'
+      '推荐 6 到 8 部不与原片单重复、口味高度契合的高口碑真实影视作品。\n'
+      '严格只输出纯 JSON 数组，格式为：'
+      '[{"title":"标准中文片名","year":"2020","reason":"结合其片单的一句话推荐理由（24字以内）"}]。\n'
+      '安全与合规硬性约束：只允许输出结构化影视元数据（title、year、reason）；'
+      '严禁生成或返回任何网址、URL、域名、网盘链接、磁力链接或播放地址；'
+      '严禁输出 Markdown 代码块或任何额外解释文字。';
+
+  /// Generates on-demand personalized movie/series recommendations based ONLY
+  /// on deduplicated public watch history and favorite titles.
+  /// Hard-blocked in Privacy Space and never triggered automatically on launch.
+  Future<List<AiMovieCandidate>> suggestPersonalizedRecommendations({
+    required List<String> recentTitles,
+    required List<String> favoriteTitles,
+    String moodHint = '',
+    bool isPrivateSession = false,
+    bool bypassCache = false,
+  }) async {
+    if (isPrivateSession) {
+      throw const AiServiceException(
+        AiErrorCode.privacySpaceBlocked,
+        '隐私空间已硬性禁用所有外部 AI 网络请求',
+      );
+    }
+    await ensureLoaded();
+    if (!_config.picksEnabled) {
+      throw const AiServiceException(
+        AiErrorCode.disabled,
+        'AI 为你挑片开关未开启',
+      );
+    }
+
+    List<String> sanitizeTitles(List<String> raw, int maxCount) {
+      final seen = <String>{};
+      final out = <String>[];
+      for (final item in raw) {
+        final t = item.replaceAll(RegExp(r'\s+'), ' ').trim();
+        if (t.isEmpty || t.length > 60 || containsForbiddenUrl(t)) continue;
+        final key = t.toLowerCase();
+        if (seen.add(key)) {
+          out.add(t);
+          if (out.length >= maxCount) break;
+        }
+      }
+      return out;
+    }
+
+    final cleanRecent = sanitizeTitles(recentTitles, 8);
+    final cleanFavs = sanitizeTitles(favoriteTitles, 8);
+    final cleanMood = moodHint.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+    if (cleanRecent.isEmpty && cleanFavs.isEmpty && cleanMood.isEmpty) {
+      throw const AiServiceException(
+        AiErrorCode.malformedResponse,
+        '请先积累少量观看记录、收藏影片，或输入此刻想看的氛围提示',
+      );
+    }
+
+    final promptLines = <String>[
+      if (cleanRecent.isNotEmpty) '近期观看：${cleanRecent.join("、")}',
+      if (cleanFavs.isNotEmpty) '我的收藏：${cleanFavs.join("、")}',
+      if (cleanMood.isNotEmpty) '此刻偏好：$cleanMood',
+    ];
+
+    final completion = await complete(
+      feature: 'ai_picks_v1',
+      systemPrompt: _personalizedPicksSystemPrompt,
+      userPrompt: promptLines.join('\n'),
+      temperature: 0.45,
+      maxTokens: 900,
+      useCache: !bypassCache,
       isPrivateSession: isPrivateSession,
     );
     return parseSearchCandidatesJson(completion.text);

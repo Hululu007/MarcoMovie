@@ -981,6 +981,28 @@ extension _WindowsDetail on _DetailScreenState {
                                   onPressed: () =>
                                       _openSeriesScrapeSheet(initialTab: 1),
                                 ),
+                              if (!_activeSite.isEffectivelyPrivate &&
+                                  !useUnifiedEpisodes &&
+                                  activeLine != null &&
+                                  AiLabPasscodeStore.instance.isUnlocked &&
+                                  AiService.instance.isConfigured &&
+                                  AiService.instance.config.titleCleanupEnabled)
+                                _windowsCinemaActionPill(
+                                  _windowsAiCleaningEpisodes
+                                      ? 'AI 净化中…'
+                                      : (_windowsAiCleanedEpisodes.isNotEmpty
+                                          ? 'AI 选集已净化'
+                                          : 'AI 净化选集'),
+                                  key: const ValueKey(
+                                    'windows-detail-ai-clean-episodes',
+                                  ),
+                                  icon: CupertinoIcons.wand_stars,
+                                  selected: _windowsAiCleanedEpisodes.isNotEmpty,
+                                  onPressed: _windowsAiCleaningEpisodes
+                                      ? null
+                                      : () =>
+                                          _runWindowsAiEpisodeCleanup(activeLine),
+                                ),
                               if ((useUnifiedEpisodes
                                       ? unifiedSlots.length
                                       : activeIndices.length) >=
@@ -1192,6 +1214,15 @@ extension _WindowsDetail on _DetailScreenState {
           padding: const EdgeInsets.only(bottom: 14),
           child: Text(reason, style: const TextStyle(color: _cinemaMuted)),
         ),
+      if (_windowsAiCleanNotice case final aiNote?)
+        Padding(
+          key: const ValueKey('windows-detail-ai-clean-notice'),
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Text(
+            aiNote,
+            style: const TextStyle(color: Color(0xFF8AB8FF), fontSize: 12),
+          ),
+        ),
       if (indices.isEmpty && filterKw.isNotEmpty)
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 16),
@@ -1220,19 +1251,26 @@ extension _WindowsDetail on _DetailScreenState {
             Builder(builder: (_) {
               final ep = line.episodes[index];
               final info = scrape.byOriginalIndex[index];
-              final showDualLine = info.resolvedEpisodeNumber != null &&
-                  !info.isSpecial &&
-                  ep.name.trim() != info.displayLabel &&
-                  !ep.name.contains('第${info.resolvedEpisodeNumber}集') &&
-                  !ep.name.contains('第 ${info.resolvedEpisodeNumber} 集');
+              final aiCleaned = _windowsAiCleanedEpisodes[ep.name];
+              final aiLabel = _formatWindowsAiEpisodeLabel(aiCleaned);
+              final primaryLabel =
+                  aiLabel.isNotEmpty ? aiLabel : info.displayLabel;
+              final showDualLine = (aiLabel.isNotEmpty &&
+                      aiLabel != ep.name.trim()) ||
+                  (info.resolvedEpisodeNumber != null &&
+                      !info.isSpecial &&
+                      ep.name.trim() != info.displayLabel &&
+                      !ep.name.contains('第${info.resolvedEpisodeNumber}集') &&
+                      !ep.name.contains('第 ${info.resolvedEpisodeNumber} 集'));
               final isBookmarked =
                   bookmark?.line == line.name && bookmark?.index == index;
               return SizedBox(
                 width: (box.maxWidth - (columns - 1) * 10) / columns,
                 child: Tooltip(
                   message: [
-                    if (showDualLine) info.displayLabel,
+                    if (showDualLine) primaryLabel,
                     ep.name,
+                    if (aiCleaned?.fromAi == true) 'AI 已净化',
                     if (info.isSpecial) '特别篇/预告',
                     if (_episodeUnavailableReason(ep) case final reason?)
                       reason,
@@ -1270,7 +1308,7 @@ extension _WindowsDetail on _DetailScreenState {
                                     children: [
                                       Expanded(
                                         child: Text(
-                                          info.displayLabel,
+                                          primaryLabel,
                                           maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
                                           style: const TextStyle(
@@ -1536,5 +1574,53 @@ extension _WindowsDetail on _DetailScreenState {
           ),
       ],
     );
+  }
+
+  String _formatWindowsAiEpisodeLabel(CleanedMediaTitle? cleaned) {
+    if (cleaned == null) return '';
+    final badge = cleaned.episodeBadge ?? '';
+    final title = cleaned.title.trim();
+    if (badge.isNotEmpty && title.isNotEmpty && title != _video.title.trim()) {
+      return '$badge · $title';
+    }
+    if (badge.isNotEmpty) return badge;
+    return title;
+  }
+
+  Future<void> _runWindowsAiEpisodeCleanup(CmsLine line) async {
+    if (_windowsAiCleaningEpisodes ||
+        _activeSite.isEffectivelyPrivate ||
+        !AiLabPasscodeStore.instance.isUnlocked) {
+      return;
+    }
+    final rawNames = <String>[
+      for (final ep in line.episodes) ep.name,
+    ];
+    if (rawNames.isEmpty) return;
+    _updateWindowsState(() {
+      _windowsAiCleaningEpisodes = true;
+      _windowsAiCleanNotice = '正在调用 AI 轻量模型整理当前线路选集标题…';
+    });
+    try {
+      final cleaned = await AiTitleCleaner.instance.cleanBatch(
+        rawNames,
+        isPrivateSession: _activeSite.isEffectivelyPrivate,
+      );
+      if (!mounted) return;
+      var aiCount = 0;
+      _updateWindowsState(() {
+        for (var i = 0; i < rawNames.length && i < cleaned.length; i++) {
+          _windowsAiCleanedEpisodes[rawNames[i]] = cleaned[i];
+          if (cleaned[i].fromAi) aiCount++;
+        }
+        _windowsAiCleanNotice = aiCount > 0
+            ? 'AI 已净化 $aiCount 条选集标题（保留原始播放地址，不阻塞播放）'
+            : '已完成本地规则选集整理（未触发远程改写）';
+      });
+    } finally {
+      if (mounted) {
+        _updateWindowsState(() => _windowsAiCleaningEpisodes = false);
+      }
+    }
   }
 }

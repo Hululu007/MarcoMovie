@@ -13,7 +13,7 @@ ALLOWED_HOSTS={'nodejs.org','api.github.com','release-assets.githubusercontent.c
  'pub.dev','www.6huo.com','api.bgm.tv','bgm.tv','lain.bgm.tv','baike.baidu.com','baike.so.com','v.qq.com','weibo.com',
  'cj.ffzyapi.com','tyyszy.com','bfzyapi.com','caiji.dyttzyapi.com','cj.lziapi.com','suoniapi.com','cj.rycjapi.com','hhzyapi.com','jszyapi.com','ikunzyapi.com','subocaiji.com','api.xinlangapi.com','www.hongniuzy2.com','caiji.moduapi.cc','360zy.com','zuidazy.me',
  'uop.quark.cn','pan.quark.cn','drive.quark.cn','drive-pc.quark.cn','drive-social-api.quark.cn','su.quark.cn','www.wogg.net','api.open.uc.cn','drive.uc.cn','su.uc.cn','passport.baidu.com','pan.baidu.com','wappass.baidu.com','passport.aliyundrive.com','www.aliyundrive.com','www.alipan.com','api.qrserver.com','www.mdzypic.com','dav.jianguoyun.com',
- 'api.themoviedb.org','image.tmdb.org','api.theintrodb.org','api.trakt.tv','api.mdblist.com','api.assrt.net','api.opensubtitles.com','api.dandanplay.net','api.deepseek.com','dashscope.aliyuncs.com','api.siliconflow.cn','api.moonshot.cn','open.bigmodel.cn'}
+ 'api.themoviedb.org','image.tmdb.org','api.theintrodb.org','api.trakt.tv','api.mdblist.com','api.assrt.net','api.opensubtitles.com','api.dandanplay.net','api.deepseek.com','dashscope.aliyuncs.com','api.siliconflow.cn','api.moonshot.cn','open.bigmodel.cn','openrouter.ai','api.openai.com','api.anthropic.com','generativelanguage.googleapis.com','api.githubcopilot.com'}
 
 # Permit documentation/example URLs only in the pinned upstream text files. A changed
 # file goes through normal host review again. Private-value scanning remains active.

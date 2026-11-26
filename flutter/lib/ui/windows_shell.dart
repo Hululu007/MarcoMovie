@@ -658,54 +658,246 @@ extension _WindowsShell on _AdaptiveShellState {
   }) {
     final resolvedPoster =
         resolvedPosterOverride ?? _resolveHistoryPoster(entry);
-    return InkWell(
-      onTap: () => _openSyncedMediaEntry(
+    final isDark = winDark(context);
+    final fraction = entry.complete
+        ? 1.0
+        : entry.progressFraction.clamp(0.0, 1.0);
+    final showProgress = entry.duration > 0 && fraction > 0.01;
+    final episodeTag = entry.episode.trim().isEmpty
+        ? '第 ${entry.index + 1} 集'
+        : entry.episode.trim();
+    final subtitle = iosHistoryCardSubtitle(entry);
+
+    Future<void> openContextMenu(TapDownDetails details) async {
+      final overlay =
+          Overlay.of(context).context.findRenderObject() as RenderBox?;
+      if (overlay == null) return;
+      final selected = await showMenu<String>(
+        context: context,
+        position: RelativeRect.fromRect(
+          details.globalPosition & const Size(1, 1),
+          Offset.zero & overlay.size,
+        ),
+        items: const <PopupMenuEntry<String>>[
+          PopupMenuItem<String>(
+            value: 'resume',
+            child: Row(
+              children: [
+                Icon(CupertinoIcons.play_fill, size: 15),
+                SizedBox(width: 8),
+                Text('继续播放'),
+              ],
+            ),
+          ),
+          PopupMenuItem<String>(
+            value: 'delete',
+            child: Row(
+              children: [
+                Icon(CupertinoIcons.trash, size: 15),
+                SizedBox(width: 8),
+                Text('删除记录'),
+              ],
+            ),
+          ),
+        ],
+      );
+      if (!mounted) return;
+      if (selected == 'resume') {
+        _openSyncedMediaEntry(
           siteKey: entry.site,
           videoId: entry.id,
           title: entry.title,
-          poster: resolvedPoster),
-      borderRadius: BorderRadius.circular(20),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        AspectRatio(
-            aspectRatio: 16 / 9,
-            child: ClipRRect(
-                borderRadius: BorderRadius.circular(20),
-                child: Stack(fit: StackFit.expand, children: [
-                  PosterImage(
+          poster: resolvedPoster,
+        );
+      } else if (selected == 'delete') {
+        await _deleteWindowsHistoryEntryWithUndo(entry);
+      }
+    }
+
+    return GestureDetector(
+      onSecondaryTapDown: openContextMenu,
+      child: InkWell(
+        onTap: () => _openSyncedMediaEntry(
+          siteKey: entry.site,
+          videoId: entry.id,
+          title: entry.title,
+          poster: resolvedPoster,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AspectRatio(
+              key: ValueKey('win-hist-poster-aspect-${entry.site}-${entry.id}'),
+              aspectRatio: 2 / 3,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    PosterImage(
                       url: resolvedPoster,
                       title: entry.title,
                       placeholder: ColoredBox(
-                          color: Colors.white.withValues(alpha: .12))),
-                  const Positioned(
-                      right: 14,
-                      bottom: 14,
-                      child: CircleAvatar(
-                          radius: 16,
-                          backgroundColor: Color(0xDDEDF3FA),
-                          child: Icon(CupertinoIcons.play_fill,
-                              size: 13, color: Color(0xFF2B455F))))
-                ]))),
-        const SizedBox(height: 12),
-        Text(entry.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style:
-                TextStyle(color: winInk(context), fontWeight: FontWeight.w600)),
-        const SizedBox(height: 5),
-        Text(
-            '${entry.episode} · 已看 ${Duration(milliseconds: entry.position).inMinutes} 分钟',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: winMuted(context), fontSize: 11)),
-        const SizedBox(height: 10),
-        ClipRRect(
-            borderRadius: BorderRadius.circular(3),
-            child: LinearProgressIndicator(
-                value: entry.progressFraction,
-                minHeight: 3,
-                color: const Color(0xFF6484AC),
-                backgroundColor: Colors.white24)),
-      ]),
+                        color: isDark
+                            ? Colors.white.withValues(alpha: .08)
+                            : const Color(0xFFE5E9F0),
+                        child: Center(
+                          child: Icon(
+                            CupertinoIcons.film,
+                            size: 28,
+                            color: winMuted(context).withValues(alpha: .45),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Subtle top-right quick delete action
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: Tooltip(
+                        message: '删除这条观看记录',
+                        child: Material(
+                          color: Colors.black.withValues(alpha: 0.46),
+                          shape: const CircleBorder(),
+                          clipBehavior: Clip.antiAlias,
+                          child: InkWell(
+                            key: ValueKey(
+                              'win-hist-delete-${entry.site}-${entry.id}',
+                            ),
+                            onTap: () =>
+                                _deleteWindowsHistoryEntryWithUndo(entry),
+                            child: const Padding(
+                              padding: EdgeInsets.all(6),
+                              child: Icon(
+                                CupertinoIcons.xmark,
+                                size: 12,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Bottom cinema gradient scrim with episode tag, play icon & progress bar
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: DecoratedBox(
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: <Color>[
+                              Color(0x00000000),
+                              Color(0x990A0E15),
+                              Color(0xDE0A0E15),
+                            ],
+                          ),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(10, 26, 10, 10),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 7,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black
+                                            .withValues(alpha: 0.42),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Text(
+                                        entry.complete
+                                            ? '$episodeTag · 已看完'
+                                            : episodeTag,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 10.8,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  const CircleAvatar(
+                                    radius: 13,
+                                    backgroundColor: Color(0xE6EDF3FA),
+                                    child: Icon(
+                                      CupertinoIcons.play_fill,
+                                      size: 11,
+                                      color: Color(0xFF1D3550),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (showProgress) ...[
+                                const SizedBox(height: 8),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(3),
+                                  child: LinearProgressIndicator(
+                                    value: fraction,
+                                    minHeight: 3.2,
+                                    color: const Color(0xFF6FA8FF),
+                                    backgroundColor:
+                                        Colors.white.withValues(alpha: 0.24),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Crisp cinema poster border
+                    IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: winSurfaceBorder(context),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 9),
+            Text(
+              entry.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: winInk(context),
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: winMuted(context),
+                fontSize: 11.2,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1346,6 +1538,12 @@ extension _WindowsShell on _AdaptiveShellState {
         padding: EdgeInsets.fromLTRB(pad, 8, pad, 20),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           _windowsHeading('我的', actions: [
+            if (!_privateSessionUnlocked &&
+                AiLabPasscodeStore.instance.isUnlocked)
+              WinButton('AI 为你挑片',
+                  key: const ValueKey('windows-ai-picks-btn'),
+                  icon: CupertinoIcons.sparkles,
+                  onPressed: _openWindowsAiPicksDialog),
             if (!_privateSessionUnlocked)
               WinButton('多端同步',
                   icon: CupertinoIcons.cloud, onPressed: _openCloudSyncCenter)
@@ -1381,13 +1579,32 @@ extension _WindowsShell on _AdaptiveShellState {
                             action: () => _windowsNavigate('discover'),
                             button: '去发现');
                       }
-                      final count = (box.maxWidth / 330).floor().clamp(2, 5);
-                      final tileWidth = (box.maxWidth - (count - 1) * 24) / count;
-                      final mediaHeight = tileWidth * 9 / 16;
-                      final textScale =
-                          MediaQuery.textScalerOf(ctx).scale(1.0).clamp(1.0, 1.6);
-                      final mainAxisExtent =
-                          mediaHeight + (isHistory ? 78.0 : 86.0) * textScale;
+                      final textScale = MediaQuery.textScalerOf(ctx)
+                          .scale(1.0)
+                          .clamp(1.0, 1.6);
+                      final int count;
+                      final double crossSpacing;
+                      final double mainSpacing;
+                      final double mediaHeight;
+                      final double mainAxisExtent;
+                      if (isHistory) {
+                        // 2:3 vertical cinema poster wall for Continue Watching
+                        count = (box.maxWidth / 215).floor().clamp(3, 6);
+                        crossSpacing = 18.0;
+                        mainSpacing = 22.0;
+                        final tileWidth =
+                            (box.maxWidth - (count - 1) * crossSpacing) / count;
+                        mediaHeight = tileWidth * 1.5;
+                        mainAxisExtent = mediaHeight + 58.0 * textScale;
+                      } else {
+                        count = (box.maxWidth / 330).floor().clamp(2, 5);
+                        crossSpacing = 24.0;
+                        mainSpacing = 25.0;
+                        final tileWidth =
+                            (box.maxWidth - (count - 1) * crossSpacing) / count;
+                        mediaHeight = tileWidth * 9 / 16;
+                        mainAxisExtent = mediaHeight + 86.0 * textScale;
+                      }
                       return GridView.builder(
                         key: PageStorageKey<String>(
                           isHistory
@@ -1396,8 +1613,8 @@ extension _WindowsShell on _AdaptiveShellState {
                         ),
                         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: count,
-                          crossAxisSpacing: 24,
-                          mainAxisSpacing: 25,
+                          crossAxisSpacing: crossSpacing,
+                          mainAxisSpacing: mainSpacing,
                           mainAxisExtent: mainAxisExtent,
                         ),
                         itemCount: itemCount,
@@ -1810,7 +2027,16 @@ extension _WindowsShell on _AdaptiveShellState {
   }
 
   Widget _windowsSettingsPage(double pad) {
-    const tabs = ['背景与外观', '首页与排版', '播放', '内容来源', '账号', '同步与备份', '更多设置'];
+    const tabs = [
+      '背景与外观',
+      '首页与排版',
+      '播放',
+      '内容来源',
+      '账号',
+      '同步与备份',
+      '更多设置',
+      'AI 实验室',
+    ];
     return Padding(
         padding: EdgeInsets.fromLTRB(pad, 8, pad, 24),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1828,15 +2054,18 @@ extension _WindowsShell on _AdaptiveShellState {
                   Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             SizedBox(
                 width: 160,
-                child: ListView(children: [
-                  for (final label in tabs)
-                    Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: WinButton(label,
-                            selected: label == _windowsSettings,
-                            onPressed: () => _updateWindowsState(
-                                () => _windowsSettings = label)))
-                ])),
+                child: LayoutBuilder(builder: (_, navBox) {
+                  final gap = navBox.maxHeight < 410 ? 4.0 : 8.0;
+                  return ListView(children: [
+                    for (final label in tabs)
+                      Padding(
+                          padding: EdgeInsets.only(bottom: gap),
+                          child: WinButton(label,
+                              selected: label == _windowsSettings,
+                              onPressed: () => _updateWindowsState(
+                                  () => _windowsSettings = label)))
+                  ]);
+                })),
             const SizedBox(width: 30),
             Expanded(
                 child: SingleChildScrollView(child: WindowsSettingsRegion(child: _windowsSettingsContent()))),
@@ -1846,6 +2075,14 @@ extension _WindowsShell on _AdaptiveShellState {
 
   Widget _windowsSettingsContent() {
     if (_windowsSettings == '背景与外观') return const WindowsAppearanceSettings();
+    if (_windowsSettings == 'AI 实验室') {
+      return WindowsAiLabPanel(
+        urlOpener: widget.onOpenExternalUrlForTest,
+        onChanged: () {
+          if (mounted) _updateWindowsState(() {});
+        },
+      );
+    }
     if (_windowsSettings == '首页与排版')
       return _buildLayoutSettingsSection(
           context, () => _updateWindowsState(() {}));
@@ -1958,6 +2195,16 @@ extension _WindowsShell on _AdaptiveShellState {
                 value: '打开官网',
                 icon: CupertinoIcons.chat_bubble_2_fill,
                 onTap: () => _openOfficialCommunityLink(originContext: rowCtx),
+              ),
+            ),
+            Builder(
+              builder: (rowCtx) => WinSettingsRow(
+                key: const ValueKey('windows-settings-donate-support'),
+                title: '捐赠支持作者',
+                subtitle: 'Marco Movie 永久免费开源无广告，欢迎自愿请作者喝杯咖啡',
+                value: '前往捐赠',
+                icon: CupertinoIcons.heart_fill,
+                onTap: () => _openOfficialDonateLink(originContext: rowCtx),
               ),
             ),
             WinSettingsRow(
@@ -2124,6 +2371,14 @@ extension _WindowsShell on _AdaptiveShellState {
                 WinButton('搜索',
                     selected: true,
                     onPressed: () => _runGlobalSearch(_searchController.text)),
+                if (!_privateSessionUnlocked &&
+                    AiLabPasscodeStore.instance.isUnlocked) ...[
+                  const SizedBox(width: 8),
+                  WinButton('AI 找片',
+                      key: const ValueKey('windows-ai-search-btn'),
+                      icon: CupertinoIcons.sparkles,
+                      onPressed: _openWindowsAiSearchDialog),
+                ],
               ])),
           const SizedBox(height: 14),
           if (!_searchPerformed && history.isNotEmpty)

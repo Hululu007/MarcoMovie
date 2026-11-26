@@ -28,6 +28,9 @@ abstract final class OfficialChannelInfo {
   static const String officialWebsiteDisplay = 'marcotv.wlj9919.top';
   static const String officialWebsiteUrl = 'https://marcotv.wlj9919.top';
   static final Uri officialWebsiteUri = Uri.parse(officialWebsiteUrl);
+  static const String officialDonateUrl =
+      'https://marcotv.wlj9919.top/movie/#donate';
+  static final Uri officialDonateUri = Uri.parse(officialDonateUrl);
   static const String officialCommunityUrl = officialWebsiteUrl;
   static final Uri officialCommunityUri = officialWebsiteUri;
   static const String antiTamperWarning =

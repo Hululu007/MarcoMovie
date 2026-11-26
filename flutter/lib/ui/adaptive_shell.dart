@@ -20,6 +20,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'add_resource_library_sheet.dart';
 import '../core/cms_parser.dart';
 import '../core/config_center_bridge.dart';
+import '../core/ai_lab_passcode.dart';
 import '../core/ai_service.dart';
 import '../core/app_update.dart';
 import '../core/csp_bridge.dart';
@@ -59,6 +60,8 @@ import 'ios_press_slide_menu.dart';
 import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
+import 'windows_ai_lab_panel.dart';
+import 'windows_update_notice.dart';
 import 'windows_update_sheet.dart';
 import 'live_station_badge.dart';
 import 'macos_update_sheet.dart';
@@ -609,7 +612,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   BuildContext? _officialCommunityOriginContext;
   ModalRoute<dynamic>? _officialCommunityOriginRoute;
   int? _officialCommunityOriginTabIndex;
+  bool _openingOfficialDonateLink = false;
+  int _officialDonateActionToken = 0;
+  BuildContext? _officialDonateOriginContext;
+  ModalRoute<dynamic>? _officialDonateOriginRoute;
+  int? _officialDonateOriginTabIndex;
   bool _startupOnboardingChecked = false;
+  bool _windowsPostUpdateChecked = false;
+  bool get _isWindowsPostUpdateNoticeHost =>
+      !kIsWeb &&
+      !OhosRuntime.isOhos &&
+      defaultTargetPlatform == TargetPlatform.windows;
   bool get _isMacOS =>
       !kIsWeb &&
       defaultTargetPlatform == TargetPlatform.macOS &&
@@ -717,6 +730,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
     activeAppleModalSheetCount.addListener(_onRootOverlayVisibilityChanged);
     activeIosGlassPopoverCount.addListener(_onRootOverlayVisibilityChanged);
+    if (_isWindowsPostUpdateNoticeHost) {
+      AiLabPasscodeStore.instance.addListener(_onWindowsAiLabStateChanged);
+      AiService.instance.addListener(_onWindowsAiLabStateChanged);
+      unawaited(AiLabPasscodeStore.instance.ensureLoaded());
+      unawaited(AiService.instance.ensureLoaded());
+    }
     if (!kIsWeb &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !OhosRuntime.isOhos) {
@@ -1012,9 +1031,106 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
 
+  void _onWindowsAiLabStateChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<String> _resolveInstalledAppVersionTag() async {
+    if (OhosRuntime.isOhos) return '';
+    try {
+      final info = await PackageInfo.fromPlatform();
+      return WindowsPostUpdateNoticePrefs.normalizeVersionTag(
+        info.version,
+        info.buildNumber,
+      );
+    } catch (_) {
+      return '';
+    }
+  }
+
   Future<void> _runStartupPrompts() async {
     if (!mounted) return;
+    if (_isWindowsPostUpdateNoticeHost) {
+      await _runWindowsPostUpdateNoticePrompt();
+      if (!mounted) return;
+    }
     await _runFirstLaunchPrompts();
+  }
+
+  Future<void> _runWindowsPostUpdateNoticePrompt() async {
+    if (_windowsPostUpdateChecked || !mounted) return;
+    _windowsPostUpdateChecked = true;
+    if (_privateSessionUnlocked ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    final currentTag = await _resolveInstalledAppVersionTag();
+    if (currentTag.isEmpty || !mounted) return;
+    final WindowsPostUpdateNoticePrefs postUpdatePrefs;
+    OnboardingPrefs? onboardingPrefs;
+    try {
+      postUpdatePrefs = await WindowsPostUpdateNoticePrefs.load()
+          .timeout(const Duration(seconds: 3));
+      onboardingPrefs = await OnboardingPrefs.load()
+          .timeout(const Duration(seconds: 3));
+    } catch (e) {
+      debugPrint('WindowsPostUpdateNoticePrefs load skipped on launch: $e');
+      return;
+    }
+    if (!mounted ||
+        _officialNoticeOpen ||
+        _privateSessionUnlocked ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    if (!postUpdatePrefs.shouldShowForVersion(currentTag)) {
+      return;
+    }
+    final frameReady = Completer<void>();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!frameReady.isCompleted) frameReady.complete();
+    });
+    await frameReady.future;
+    if (!mounted ||
+        _officialNoticeOpen ||
+        _privateSessionUnlocked ||
+        widget.storage.isSubscriptionsCorrupted ||
+        widget.storage.isHistoryCorrupted) {
+      return;
+    }
+    final isUpgrade = postUpdatePrefs.lastSeenVersion.isNotEmpty ||
+        _config != null ||
+        widget.storage.getSubscriptions().isNotEmpty ||
+        (onboardingPrefs.doneVersion >= OnboardingPrefs.currentVersion);
+    final displayVersion =
+        WindowsPostUpdateNoticePrefs.displayVersionFromTag(currentTag);
+    _officialNoticeOpen = true;
+    var persisted = false;
+    try {
+      await showWindowsPostUpdateNoticeDialog(
+        context,
+        isUpgrade: isUpgrade,
+        versionLabel: displayVersion,
+        urlOpener: widget.onOpenExternalUrlForTest,
+        onConfirm: () async {
+          persisted = await postUpdatePrefs.markVersionSeen(currentTag);
+          if (onboardingPrefs != null &&
+              onboardingPrefs.shouldShowOfficialChannelNotice()) {
+            await onboardingPrefs.markOfficialChannelNoticeSeen();
+          }
+          return persisted;
+        },
+      );
+    } finally {
+      _officialNoticeOpen = false;
+    }
+    if (!persisted) {
+      debugPrint(
+        'WindowsPostUpdateNotice: acknowledged for current session; preference write did not persist.',
+      );
+    }
   }
 
   Future<void> _runFirstLaunchPrompts() async {
@@ -1248,18 +1364,274 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
 
+  Future<void> _openOfficialDonateLink({BuildContext? originContext}) async {
+    final targetContext = originContext ?? context;
+    if (_openingOfficialDonateLink &&
+        _officialDonateOriginContext != null &&
+        _officialDonateOriginTabIndex != null &&
+        _isSettingsOriginActive(
+          _officialDonateOriginContext!,
+          _officialDonateOriginRoute,
+          _officialDonateOriginTabIndex!,
+        )) {
+      return;
+    }
+    final token = ++_officialDonateActionToken;
+    final originRoute = ModalRoute.of(targetContext);
+    final originTabIndex = _tabIndex;
+    final startClipboardEpoch = officialExplicitClipboardEpoch;
+    _openingOfficialDonateLink = true;
+    _officialDonateOriginContext = targetContext;
+    _officialDonateOriginRoute = originRoute;
+    _officialDonateOriginTabIndex = originTabIndex;
+    try {
+      final opened = await launchExternalOfficialUrl(
+        OfficialChannelInfo.officialDonateUri,
+        urlOpener: widget.onOpenExternalUrlForTest,
+      );
+      if (opened) {
+        return;
+      }
+      if (token != _officialDonateActionToken ||
+          officialExplicitClipboardEpoch != startClipboardEpoch ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      final copied = await copyOfficialChannelText(
+        OfficialChannelInfo.officialDonateUrl,
+      );
+      if (token != _officialDonateActionToken ||
+          officialExplicitClipboardEpoch != startClipboardEpoch ||
+          !_isSettingsOriginActive(
+            targetContext,
+            originRoute,
+            originTabIndex,
+          ) ||
+          !targetContext.mounted) {
+        return;
+      }
+      if (copied) {
+        await showAppleNativeAlert(
+          targetContext,
+          title: '已复制官网捐赠区链接',
+          message: '请在浏览器中打开：${OfficialChannelInfo.officialDonateUrl}',
+          actions: const [
+            AppleNativeAlertAction(id: 'ok', title: '好', isDefault: true),
+          ],
+        );
+        return;
+      }
+      await showOfficialChannelManualCopyDialog(
+        targetContext,
+        title: '无法自动打开或复制链接',
+        message: '请手动选取以下官网捐赠区地址，并在浏览器中打开：',
+        selectableValue: OfficialChannelInfo.officialDonateUrl,
+      );
+    } finally {
+      if (token == _officialDonateActionToken) {
+        _openingOfficialDonateLink = false;
+        _officialDonateOriginContext = null;
+        _officialDonateOriginRoute = null;
+        _officialDonateOriginTabIndex = null;
+      }
+    }
+  }
+
   Future<void> _openOfficialNoticeDialogFromSettings() async {
     if (!mounted || _officialNoticeOpen) return;
     _officialNoticeOpen = true;
     try {
-      await showOfficialChannelNoticeDialog(
-        context,
-        urlOpener: widget.onOpenExternalUrlForTest,
-        barrierDismissible: true,
-      );
+      if (_isWindowsPostUpdateNoticeHost) {
+        final displayVer =
+            (_currentAppVersion == '读取中' || _currentAppVersion == '未知')
+                ? ''
+                : _currentAppVersion;
+        await showWindowsPostUpdateNoticeDialog(
+          context,
+          isUpgrade: false,
+          versionLabel: displayVer,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          barrierDismissible: true,
+        );
+      } else {
+        await showOfficialChannelNoticeDialog(
+          context,
+          urlOpener: widget.onOpenExternalUrlForTest,
+          barrierDismissible: true,
+        );
+      }
     } finally {
       _officialNoticeOpen = false;
     }
+  }
+
+  Future<void> _deleteWindowsHistoryEntryWithUndo(
+    WatchHistoryEntry entry,
+  ) async {
+    await widget.storage.removeWatchHistoryItem(entry.site, entry.id);
+    if (!mounted) return;
+    _cachedWatchHistory = widget.storage.getWatchHistory();
+    setState(() {});
+    _showWindowsUndoHistoryBanner(entry);
+  }
+
+  void _showWindowsUndoHistoryBanner(WatchHistoryEntry entry) {
+    if (!mounted) return;
+    _dismissUndoHistoryBanner();
+    final overlay = Overlay.maybeOf(context, rootOverlay: true);
+    if (overlay == null) return;
+    late OverlayEntry bannerEntry;
+    bannerEntry = OverlayEntry(
+      builder: (_) => Positioned(
+        left: 24,
+        right: 24,
+        bottom: 24,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 440),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                key: const ValueKey('windows-undo-history-banner'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 11,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xF21A202C),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.14),
+                  ),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x44000000),
+                      blurRadius: 18,
+                      offset: Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '已删除「${entry.title}」的观看记录',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13.2,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    TextButton(
+                      key: const ValueKey('windows-undo-history-action'),
+                      onPressed: () async {
+                        _dismissUndoHistoryBanner();
+                        await widget.storage.restoreWatchHistoryEntry(entry);
+                        if (!mounted) return;
+                        _cachedWatchHistory = widget.storage.getWatchHistory();
+                        setState(() {});
+                      },
+                      style: TextButton.styleFrom(
+                        foregroundColor: const Color(0xFF6FA8FF),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                      ),
+                      child: const Text(
+                        '撤销',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    _undoHistoryOverlayEntry = bannerEntry;
+    overlay.insert(bannerEntry);
+    _undoHistoryTimer = Timer(const Duration(seconds: 3), () {
+      if (_undoHistoryOverlayEntry == bannerEntry) {
+        _dismissUndoHistoryBanner();
+      }
+    });
+  }
+
+  Future<void> _openWindowsAiSearchDialog() async {
+    if (!mounted ||
+        _privateSessionUnlocked ||
+        !AiLabPasscodeStore.instance.isUnlocked) {
+      return;
+    }
+    await showWindowsAiSearchDialog(
+      context,
+      isPrivateSession: _privateSessionUnlocked,
+      onOpenSettings: () {
+        if (!mounted) return;
+        setState(() {
+          _windowsSettings = 'AI 实验室';
+          _windowsPage = 'settings';
+        });
+      },
+      onPickTitle: (title) {
+        if (!mounted) return;
+        setState(() {
+          _windowsPage = 'search';
+          _searchController.text = title;
+        });
+        _runGlobalSearch(title);
+      },
+    );
+  }
+
+  Future<void> _openWindowsAiPicksDialog() async {
+    if (!mounted ||
+        _privateSessionUnlocked ||
+        !AiLabPasscodeStore.instance.isUnlocked) {
+      return;
+    }
+    final recentTitles = _cachedWatchHistory
+        .map((e) => e.title)
+        .where((t) => t.trim().isNotEmpty)
+        .toList(growable: false);
+    final favoriteTitles = widget.storage
+        .getFavorites()
+        .map((f) => f.title)
+        .where((t) => t.trim().isNotEmpty)
+        .toList(growable: false);
+    await showWindowsAiPicksDialog(
+      context,
+      recentTitles: recentTitles,
+      favoriteTitles: favoriteTitles,
+      isPrivateSession: _privateSessionUnlocked,
+      onOpenSettings: () {
+        if (!mounted) return;
+        setState(() {
+          _windowsSettings = 'AI 实验室';
+          _windowsPage = 'settings';
+        });
+      },
+      onPickTitle: (title) {
+        if (!mounted) return;
+        setState(() {
+          _windowsPage = 'search';
+          _searchController.text = title;
+        });
+        _runGlobalSearch(title);
+      },
+    );
   }
 
   Future<void> _openOnboardingRoute({
@@ -1731,6 +2103,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
     activeAppleModalSheetCount.removeListener(_onRootOverlayVisibilityChanged);
     activeIosGlassPopoverCount.removeListener(_onRootOverlayVisibilityChanged);
+    AiLabPasscodeStore.instance.removeListener(_onWindowsAiLabStateChanged);
+    AiService.instance.removeListener(_onWindowsAiLabStateChanged);
     if (_useRootNativeTabChrome) {
       unawaited(IosLiquidGlassBridge.setRootTabVisible(false, animated: false));
     }

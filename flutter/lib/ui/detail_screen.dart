@@ -10,6 +10,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter/scheduler.dart' show SchedulerPhase;
 import 'package:flutter/services.dart' show HapticFeedback, SystemUiOverlayStyle;
+import '../core/ai_lab_passcode.dart';
+import '../core/ai_service.dart';
+import '../core/ai_title_cleaner.dart';
 import '../core/cms_client.dart';
 import '../core/cms_parser.dart';
 import '../core/csp_bridge.dart';
@@ -308,6 +311,10 @@ class _DetailScreenState extends State<DetailScreen> {
   SeriesScrapeOverride? _scrapeOverride;
   final TextEditingController _windowsEpisodeQueryCtrl = TextEditingController();
   String _windowsEpisodeQuery = '';
+  final Map<String, CleanedMediaTitle> _windowsAiCleanedEpisodes =
+      <String, CleanedMediaTitle>{};
+  bool _windowsAiCleaningEpisodes = false;
+  String? _windowsAiCleanNotice;
   CmsLine? _cachedScrapeLine;
   String _cachedScrapeSig = '';
   LineEpisodeScrapeResult? _cachedScrapeResult;
