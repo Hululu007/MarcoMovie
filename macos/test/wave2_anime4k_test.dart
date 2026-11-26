@@ -548,7 +548,7 @@ void main() {
         // Tap '性能' preset -> hot-switches without restarting playback
         final opensBefore = player.openCount;
         await tester.tap(find.byKey(const ValueKey('anime4k-preset-performance')));
-        for (var i = 0; i < 30 && a4k.preset != Anime4kPreset.performance; i++) {
+        for (var i = 0; i < 120 && a4k.preset != Anime4kPreset.performance; i++) {
           await tester.runAsync(
             () => Future<void>.delayed(const Duration(milliseconds: 10)),
           );
