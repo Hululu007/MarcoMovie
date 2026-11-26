@@ -817,7 +817,8 @@ class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     _route = ModalRoute.of(context);
-    _tickerModeEnabled = TickerMode.valuesOf(context).enabled;
+    // ignore: deprecated_member_use
+    _tickerModeEnabled = TickerMode.of(context);
     _rebindScrollables();
     _ready = _computeReady();
   }
