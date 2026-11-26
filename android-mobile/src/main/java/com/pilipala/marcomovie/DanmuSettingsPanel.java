@@ -533,6 +533,8 @@ public final class DanmuSettingsPanel {
         return Collections.unmodifiableList(out);
     }
 
+    private static final String KEY_LEGACY_MOBILE_DANMU_DEFAULT = "danmaku_default";
+
     public static DanmuConfig loadConfig(Context context, boolean isTv) {
         if (context == null) return DanmuConfig.defaults(isTv);
         SharedPreferences prefs = context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE);
@@ -550,8 +552,15 @@ public final class DanmuSettingsPanel {
         if (unifiedOrigins.isEmpty()) {
             unifiedOrigins = prefs.getString(KEY_SERVER_URLS, def.serverUrls);
         }
+        boolean effectiveEnabled =
+                DanmuSourceManager.resolveEffectiveDanmuEnabled(
+                        prefs.contains(KEY_ENABLED),
+                        prefs.getBoolean(KEY_ENABLED, def.enabled),
+                        isTv,
+                        unifiedOrigins != null && !unifiedOrigins.trim().isEmpty(),
+                        prefs.getBoolean(KEY_LEGACY_MOBILE_DANMU_DEFAULT, true));
         return new DanmuConfig(
-                prefs.getBoolean(KEY_ENABLED, def.enabled),
+                effectiveEnabled,
                 unifiedOrigins,
                 prefs.getString(KEY_APP_ID, def.appId),
                 prefs.getString(KEY_APP_SECRET, def.appSecret),

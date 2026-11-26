@@ -2743,6 +2743,43 @@ public final class MobileIos077ParityChecks {
                         && !stBackAuto.formatTrackOptionLabel(t1080On).contains("已锁定")
                         && stBackAuto.formatTrackOptionLabel(t1080On).contains("当前解码"),
                 "R2-12: Back to Auto clears lock badge while still reporting decoded 1080P");
+
+        // State 4 (Android 16 real-device regression): Media3 ABR group marks ALL tracks
+        // group.isTrackSelected(i)==true while decoder actually outputs 1920x1080 -> must pick ONLY
+        // 1080P as decoded!
+        VideoTrackOption abr720 =
+                new VideoTrackOption(0, 1280, 720, 750_000, 24f, "H.264", false, true, "");
+        VideoTrackOption abr1080 =
+                new VideoTrackOption(1, 1920, 1080, 2_800_000, 24f, "H.264", false, true, "");
+        List<VideoTrackOption> abrGroup = Arrays.asList(abr720, abr1080);
+        int resolvedDecoded =
+                VideoTrackOption.resolveActiveDecodedIndex(
+                        abrGroup, 1920, 1080, 2_800_000, "H.264");
+        check(
+                resolvedDecoded == 1,
+                "R2-12: ABR multi-selected group resolves single decoded 1080P track, got "
+                        + resolvedDecoded);
+        VideoTrackOption.SelectionState stAbr =
+                new VideoTrackOption.SelectionState(true, -1, resolvedDecoded, "1920×1080");
+        check(
+                !stAbr.formatTrackOptionLabel(abr720).contains("当前解码")
+                        && stAbr.formatTrackOptionLabel(abr1080).contains("当前解码")
+                        && stAbr.policySummary(abrGroup).contains("1080P"),
+                "R2-12: ABR Auto mode tags ONLY decoded 1080P (not 720P)");
+
+        // Auto-danmu enabled reconciliation regression (Android 16 real-device catch):
+        check(
+                DanmuSourceManager.resolveEffectiveDanmuEnabled(false, false, false, true, true),
+                "R2-7: Mobile with configured danmu origins & default-on inherits enabled=true when danmu_enabled unset");
+        check(
+                !DanmuSourceManager.resolveEffectiveDanmuEnabled(true, false, false, true, true),
+                "R2-7: Explicit danmu_enabled=false is strictly respected");
+        check(
+                !DanmuSourceManager.resolveEffectiveDanmuEnabled(false, false, false, false, true),
+                "R2-7: No configured origins remains disabled by default");
+        check(
+                !DanmuSourceManager.resolveEffectiveDanmuEnabled(false, false, true, true, true),
+                "R2-7: TV default remains disabled unless explicitly enabled");
         pass(
                 "R2-P2.12: Slim-bar preference reconciliation & auto->1080p->auto policy vs decoded track");
     }

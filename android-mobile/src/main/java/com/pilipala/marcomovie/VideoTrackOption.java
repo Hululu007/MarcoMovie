@@ -138,7 +138,8 @@ public final class VideoTrackOption {
         public String formatTrackOptionLabel(VideoTrackOption opt) {
             if (opt == null) return "";
             boolean isLocked = !autoPolicy && manualTrackIndex == opt.index;
-            boolean isDecoded = decodedTrackIndex == opt.index || opt.selected;
+            boolean isDecoded =
+                    decodedTrackIndex >= 0 ? (decodedTrackIndex == opt.index) : opt.selected;
             String tag;
             if (isLocked && isDecoded) tag = "（已锁定 · 当前解码）";
             else if (isLocked) tag = "（已锁定）";
@@ -151,6 +152,49 @@ public final class VideoTrackOption {
         public int menuSelectedOffset() {
             return (autoPolicy || manualTrackIndex < 0) ? 0 : (1 + manualTrackIndex);
         }
+    }
+
+    /**
+     * Resolves the single actively decoded track index from enumerated variants and the active
+     * decoder format, avoiding Media3 adaptive groups marking every ABR candidate as selected.
+     */
+    public static int resolveActiveDecodedIndex(
+            java.util.List<VideoTrackOption> tracks,
+            int activeWidth,
+            int activeHeight,
+            int activeBitrateBps,
+            String activeCodec) {
+        if (tracks == null || tracks.isEmpty()) return -1;
+        String normCodec = activeCodec == null ? "" : activeCodec.trim();
+        if (activeWidth > 0 && activeHeight > 0) {
+            int bestIdx = -1;
+            int bestScore = -1;
+            for (int i = 0; i < tracks.size(); i++) {
+                VideoTrackOption t = tracks.get(i);
+                if (t == null || t.width != activeWidth || t.height != activeHeight) continue;
+                int score = 10;
+                if (t.selected) score += 2;
+                if (!normCodec.isEmpty() && normCodec.equalsIgnoreCase(t.codec)) score += 4;
+                if (activeBitrateBps > 0 && t.bitrateBps > 0) {
+                    if (t.bitrateBps == activeBitrateBps) {
+                        score += 8;
+                    } else if (Math.abs(t.bitrateBps - activeBitrateBps)
+                            <= Math.max(50_000, activeBitrateBps / 10)) {
+                        score += 4;
+                    }
+                }
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestIdx = t.index;
+                }
+            }
+            if (bestIdx >= 0) return bestIdx;
+        }
+        for (int i = 0; i < tracks.size(); i++) {
+            VideoTrackOption t = tracks.get(i);
+            if (t != null && t.selected) return t.index;
+        }
+        return -1;
     }
 
     /** Captures playback position and paused state before a quality/variant switch. */

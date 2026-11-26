@@ -6964,10 +6964,12 @@ final class PlaybackControls {
             if (!dmCfg.enabled
                     && defaultDanmuOn
                     && !a.isTvDevice()
-                    && !dmCfg.serverUrls.isEmpty()) {
+                    && !dmCfg.serverUrls.isEmpty()
+                    && !a.prefs.contains(DanmuSettingsPanel.KEY_ENABLED)) {
                 DanmuSettingsPanel.DanmuConfig.Builder b = dmCfg.toBuilder();
                 b.enabled = true;
                 dmCfg = b.build();
+                DanmuSettingsPanel.saveConfig(a, dmCfg);
             }
             danmaku.applyConfig(dmCfg);
             if (dmCfg.enabled && !dmCfg.serverUrls.isEmpty()) {

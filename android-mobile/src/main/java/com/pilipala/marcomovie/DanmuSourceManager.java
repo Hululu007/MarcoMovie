@@ -272,6 +272,21 @@ final class DanmuSourceManager {
         return sb.toString();
     }
 
+    /**
+     * Resolves effective segmented-danmu enabled state on mobile/TV so adding a custom danmu
+     * service when {@code Prefs.DANMAKU_DEFAULT} is already enabled doesn't silently drop matched
+     * episodes in async playback callbacks before {@code danmu_enabled} is explicitly written.
+     */
+    static boolean resolveEffectiveDanmuEnabled(
+            boolean hasExplicitEnabledKey,
+            boolean explicitEnabledValue,
+            boolean isTv,
+            boolean hasConfiguredOrigins,
+            boolean mobileDefaultDanmuOn) {
+        if (hasExplicitEnabledKey) return explicitEnabledValue;
+        return !isTv && hasConfiguredOrigins && mobileDefaultDanmuOn;
+    }
+
     static boolean addOrUpdateSource(Context context, String name, String rawUrl, long latencyMs) {
         String norm = normalizeServiceOrigin(rawUrl);
         if (context == null || norm == null) return false;

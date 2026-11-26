@@ -1707,8 +1707,8 @@ public class MoviePlayer {
     public java.util.List<VideoTrackOption> listVideoTracks() {
         return onMain(
                 () -> {
-                    java.util.List<VideoTrackOption> out = new java.util.ArrayList<>();
-                    if (released || exo == null) return out;
+                    java.util.List<VideoTrackOption> raw = new java.util.ArrayList<>();
+                    if (released || exo == null) return raw;
                     int idx = 0;
                     for (androidx.media3.common.Tracks.Group group :
                             exo.getCurrentTracks().getGroups()) {
@@ -1723,7 +1723,7 @@ public class MoviePlayer {
                                                             .isTransferHdr(f.colorInfo))
                                             || MimeTypes.VIDEO_DOLBY_VISION.equals(
                                                     f.sampleMimeType);
-                            out.add(
+                            raw.add(
                                     new VideoTrackOption(
                                             idx++,
                                             f.width,
@@ -1735,6 +1735,39 @@ public class MoviePlayer {
                                             group.isTrackSelected(i),
                                             f.label));
                         }
+                    }
+                    if (raw.isEmpty()) return raw;
+                    androidx.media3.common.Format activeFmt = exo.getVideoFormat();
+                    androidx.media3.common.VideoSize vs = exo.getVideoSize();
+                    int activeW =
+                            activeFmt != null && activeFmt.width > 0
+                                    ? activeFmt.width
+                                    : (vs != null ? vs.width : 0);
+                    int activeH =
+                            activeFmt != null && activeFmt.height > 0
+                                    ? activeFmt.height
+                                    : (vs != null ? vs.height : 0);
+                    int activeBr = activeFmt != null ? activeFmt.bitrate : -1;
+                    String activeCodec =
+                            activeFmt != null ? shortVideoCodec(activeFmt.sampleMimeType) : "";
+                    int decodedIdx =
+                            VideoTrackOption.resolveActiveDecodedIndex(
+                                    raw, activeW, activeH, activeBr, activeCodec);
+                    if (decodedIdx < 0) return raw;
+                    java.util.List<VideoTrackOption> out = new java.util.ArrayList<>(raw.size());
+                    for (int i = 0; i < raw.size(); i++) {
+                        VideoTrackOption t = raw.get(i);
+                        out.add(
+                                new VideoTrackOption(
+                                        t.index,
+                                        t.width,
+                                        t.height,
+                                        t.bitrateBps,
+                                        t.frameRate,
+                                        t.codec,
+                                        t.hdr,
+                                        t.index == decodedIdx,
+                                        t.rawLabel));
                     }
                     return out;
                 });
