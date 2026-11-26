@@ -1,3 +1,11 @@
+## 2026-11-26 iOS / iPadOS 0.7.8 专项体验与发热修复：Dock 单槽长按定向锚点、资源库对称网格与 13 枚统一风格图标、片库筛选空/裸序号清洗及 iPad Pro 2020（iPadOS 15.4）发热治理（iOS / iPadOS 0.7.8）
+
+- [iOS / iPadOS 0.7.8](docs/releases/ios-v0.7.8.md)
+- **修复底部 Dock 长按选中整条且菜单气泡固定靠左**：为 `MarcoNativeLiquidTabCapsuleView` 每个 Tab 槽位增加独立 `previewPillView` 与 iOS 13–15 / iOS 16+ 双版本 `UITargetedPreview` 定向预览代理，长按前复位滑块透镜动画，确保长按任意 Tab 仅抬起该单个按钮并就近正上方弹出菜单。
+- **优化「添加资源库」排版对称性与 13 枚独立统一风格图标**：改为左右 `16pt` 对称外边距的等高居中卡片网格，2 / 3 / 4 列下左右卡片与图标边距严格对称；全部 13 个资源库图标重绘为统一圆角方圆风格并赋予互不重复的专属配色与几何图标。
+- **修复「片库筛选」空白与裸序号按钮**：Dart 与原生 `MarcoNativeFilterSheetController` 双端同步过滤空白、零宽不可见字符、纯符号、空 ID、孤立序号与重复「全部」，并将紧随分组出现的 `①`–`⑤` 等裸续页序号自动继承前缀（如 `热门电影②`、`好莱坞③`）。
+- **治理 iPad Pro 2020（iPadOS 15.4）异常发热（仅 iOS 端）**：停止 `AppleAmbientBackground` 在 iOS 120Hz 屏上的常驻后台呼吸重绘并去除海报 `ShaderMask` 高半径离屏模糊；`GlassworkBackdrop` 在 iOS `< 26` 禁用 54-tap `glasswork.frag` 并限制 `sigma <= 10`（`TileMode.clamp`），接入系统 `thermalState` 热压通知在 `.serious` / `.critical` 时平滑降级 `BackdropFilter`；`AuroraBackground` iOS 端限帧 30fps 且热压暂停；精简竖屏播放与详情页嵌套模糊层；`DeviceQualityProfiler` 补全 `iPad Pro (2018/2020)` 识别且 `IosMpvProfile` 在 iOS `< 16` / 热压下自动关闭 `hdr-compute-peak` 与抖动。
+
 ## 2026-11-26 iOS / iPadOS 0.7.7 双包并行升级：首次启动官方防伪声明与联系反馈、SMB2 / 个人网盘直连浏览、iPad 冷启动/全屏/控件排版修复、多窗口方向监听迁移及片尾回看续播加固（iOS / iPadOS 0.7.7）
 
 - [iOS / iPadOS 0.7.7](docs/releases/ios-v0.7.7.md)
