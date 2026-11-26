@@ -573,7 +573,36 @@ final class MobileSettingsScreen {
                 Arrays.<View>asList(themeRow, accentRow, scaleRow));
 
         // Section ②: 导航与首页
+        boolean isLargeOrFoldable = MobileRootShell.isTabletOrFoldable(a);
         List<View> navRows = new ArrayList<>();
+        if (isLargeOrFoldable) {
+            navRows.add(
+                    mobileIntRow(
+                            shell,
+                            sv,
+                            "ms-tablet-dock-pos",
+                            MobileIcons.IC_SWITCH_SOURCE,
+                            TINT_VIOLET,
+                            "导航栏位置 (Dock)",
+                            Prefs.TABLET_DOCK_POSITION,
+                            new String[] {
+                                "自动适配（横屏左侧 · 竖屏底部）",
+                                "顶部悬浮栏（上）",
+                                "底部悬浮栏（下）",
+                                "左侧竖向边栏（左）",
+                                "右侧竖向边栏（右）"
+                            },
+                            new String[] {"自动适配", "顶部", "底部", "左侧", "右侧"},
+                            new int[] {
+                                MobileRootShell.DOCK_POS_AUTO,
+                                MobileRootShell.DOCK_POS_TOP,
+                                MobileRootShell.DOCK_POS_BOTTOM,
+                                MobileRootShell.DOCK_POS_LEFT,
+                                MobileRootShell.DOCK_POS_RIGHT
+                            },
+                            MobileRootShell.DOCK_POS_AUTO,
+                            true));
+        }
         navRows.add(
                 mobileIntRow(
                         shell,
@@ -581,7 +610,7 @@ final class MobileSettingsScreen {
                         "ms-nav-style",
                         MobileIcons.IC_MENU,
                         TINT_BLUE,
-                        "底部导航栏形态",
+                        isLargeOrFoldable ? "横向导航栏形态（上/下位置）" : "底部导航栏形态",
                         Prefs.NAV_STYLE,
                         new String[] {"4+1 分离搜索（右侧独立搜索圆钮）", "五栏一体胶囊"},
                         new String[] {"4+1 分离搜索", "五栏一体"},
@@ -674,7 +703,14 @@ final class MobileSettingsScreen {
                                         a,
                                         MobileHomeSections.ID_WATCH_HISTORY,
                                         a.prefs.getBoolean(Prefs.MOBILE_SHOW_HISTORY, true))));
-        addSection(a, body, "导航与首页", "长按或按住上滑底栏任意图标，均可呼出高频快捷菜单。", navRows);
+        addSection(
+                a,
+                body,
+                "导航与首页",
+                isLargeOrFoldable
+                        ? "已识别为平板 / 折叠屏设备，可将 Dock 导航栏自由固定在屏幕上下左右任意一侧；长按或向内轻滑导航图标可呼出高频快捷菜单。"
+                        : "长按或按住上滑底栏任意图标，均可呼出高频快捷菜单。",
+                navRows);
 
         // Section ③: 背景与动效
         boolean wpOn = a.prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false);

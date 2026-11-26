@@ -2036,6 +2036,93 @@ public final class MobileUiRedesignChecks {
                 "Pillar 9 wiring: MainActivity first-launch/destroy, CrashReportDialog guard, and MobileSettingsScreen contact/channel/donate entries are all connected");
     }
 
+    private static void test10_TabletAndFoldableDockPositions(Path root) throws Exception {
+        // 1. Pure-JVM tablet & foldable device classification
+        // Configuration.SCREENLAYOUT_SIZE_NORMAL = 2, SCREENLAYOUT_SIZE_LARGE = 3, XLARGE = 4
+        check(
+                !MobileRootShell.isTabletOrFoldableDevice(360, 2, 360f, 800f, false)
+                        && !MobileRootShell.isTabletOrFoldableDevice(393, 2, 852f, 393f, false),
+                "Pillar 10 dock: ordinary bar phones stay false in both portrait and landscape");
+        check(
+                MobileRootShell.isTabletOrFoldableDevice(600, 3, 600f, 960f, false)
+                        && MobileRootShell.isTabletOrFoldableDevice(768, 4, 1200f, 768f, false),
+                "Pillar 10 dock: 8-inch and 11-inch Android tablets detected as large-screen");
+        check(
+                MobileRootShell.isTabletOrFoldableDevice(360, 2, 360f, 800f, true)
+                        && MobileRootShell.isTabletOrFoldableDevice(670, 3, 670f, 780f, false),
+                "Pillar 10 dock: foldables detected via hinge_angle sensor (even folded) and unfolded inner geometry");
+
+        // 2. Pure-JVM 4-edge resolution (Auto / Top / Bottom / Left / Right)
+        check(
+                MobileRootShell.resolveDockPosition(
+                                        MobileRootShell.DOCK_POS_AUTO, true, 900f, false)
+                                == MobileRootShell.DOCK_POS_LEFT
+                        && MobileRootShell.resolveDockPosition(
+                                        MobileRootShell.DOCK_POS_AUTO, true, 600f, true)
+                                == MobileRootShell.DOCK_POS_BOTTOM,
+                "Pillar 10 dock: AUTO resolves to LEFT on landscape wide screens and BOTTOM in portrait");
+        check(
+                MobileRootShell.resolveDockPosition(MobileRootShell.DOCK_POS_TOP, true, 900f, false)
+                                == MobileRootShell.DOCK_POS_TOP
+                        && MobileRootShell.resolveDockPosition(
+                                        MobileRootShell.DOCK_POS_BOTTOM, true, 900f, false)
+                                == MobileRootShell.DOCK_POS_BOTTOM
+                        && MobileRootShell.resolveDockPosition(
+                                        MobileRootShell.DOCK_POS_LEFT, true, 600f, true)
+                                == MobileRootShell.DOCK_POS_LEFT
+                        && MobileRootShell.resolveDockPosition(
+                                        MobileRootShell.DOCK_POS_RIGHT, true, 600f, true)
+                                == MobileRootShell.DOCK_POS_RIGHT,
+                "Pillar 10 dock: tablets/foldables honor explicit TOP, BOTTOM, LEFT, and RIGHT in both orientations");
+        check(
+                MobileRootShell.resolveDockPosition(MobileRootShell.DOCK_POS_TOP, false, 360f, true)
+                                == MobileRootShell.DOCK_POS_BOTTOM
+                        && MobileRootShell.resolveDockPosition(
+                                        MobileRootShell.DOCK_POS_RIGHT, false, 360f, true)
+                                == MobileRootShell.DOCK_POS_BOTTOM,
+                "Pillar 10 dock: ordinary phones safely ignore synced tablet custom edge overrides");
+
+        // 3. Prefs sanitization & invariant
+        check(
+                Integer.valueOf(0)
+                                .equals(Prefs.sanitizeMobileSetting(Prefs.TABLET_DOCK_POSITION, 0))
+                        && Integer.valueOf(4)
+                                .equals(Prefs.sanitizeMobileSetting(Prefs.TABLET_DOCK_POSITION, 4))
+                        && Prefs.sanitizeMobileSetting(Prefs.TABLET_DOCK_POSITION, -1) == null
+                        && Prefs.sanitizeMobileSetting(Prefs.TABLET_DOCK_POSITION, 5) == null
+                        && Arrays.asList(Prefs.MOBILE_KEYS).contains(Prefs.TABLET_DOCK_POSITION)
+                        && Prefs.KEYS.length == 46,
+                "Pillar 10 dock: TABLET_DOCK_POSITION accepts 0..4, rejects out-of-range, and preserves Prefs.KEYS=46");
+
+        // 4. Settings index & static wiring
+        check(
+                hasHit(
+                                MobileSettingsIndex.search("dock"),
+                                MobileSettingsIndex.SUB_APPEARANCE,
+                                "ms-tablet-dock-pos")
+                        && hasHit(
+                                MobileSettingsIndex.search("折叠屏"),
+                                MobileSettingsIndex.SUB_APPEARANCE,
+                                "ms-tablet-dock-pos"),
+                "Pillar 10 dock: MobileSettingsIndex resolves dock/tablet/foldable queries");
+        String settingsSrc =
+                readUtf8(
+                        root,
+                        "android-mobile/src/main/java/com/pilipala/marcomovie/MobileSettingsScreen.java");
+        String shellSrc =
+                readUtf8(
+                        root,
+                        "android-mobile/src/main/java/com/pilipala/marcomovie/MobileRootShell.java");
+        check(
+                settingsSrc.contains("MobileRootShell.isTabletOrFoldable(a)")
+                        && settingsSrc.contains("\"ms-tablet-dock-pos\"")
+                        && shellSrc.contains("DOCK_POS_TOP")
+                        && shellSrc.contains("DOCK_POS_BOTTOM")
+                        && shellSrc.contains("DOCK_POS_LEFT")
+                        && shellSrc.contains("DOCK_POS_RIGHT"),
+                "Pillar 10 dock: Settings gates ms-tablet-dock-pos on tablet/foldable detection and MobileRootShell renders all 4 edges");
+    }
+
     public static void main(String[] args) throws Exception {
         Path root = args.length > 0 ? Paths.get(args[0]) : Paths.get(".");
         test1_MobileThemeAndPrefs(root);
@@ -2047,6 +2134,7 @@ public final class MobileUiRedesignChecks {
         test7_UxFirstPrinciplesStateLogic();
         test8_StaticUxHygieneAndReviewerGuards(root);
         test9_AuthorFirstLaunchNoticeAndContact(root);
+        test10_TabletAndFoldableDockPositions(root);
         System.out.println("MobileUiRedesignChecks OK (" + passed + " checks passed)");
     }
 }

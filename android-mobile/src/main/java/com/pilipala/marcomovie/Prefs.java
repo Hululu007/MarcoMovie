@@ -149,6 +149,7 @@ final class Prefs {
     static final String MOBILE_UI_SCALE_PERCENT = "mobile_ui_scale_percent";
     static final String NAV_STYLE = "nav_style";
     static final String NAV_SCROLL_BEHAVIOR = "nav_scroll_behavior";
+    static final String TABLET_DOCK_POSITION = "tablet_dock_position";
     static final String COVER_AMBIENT = "cover_ambient";
     static final String ACCENT_PRESET = "accent_preset";
     static final String HOME_MODE = "home_mode";
@@ -269,6 +270,7 @@ final class Prefs {
         MOBILE_UI_SCALE_PERCENT,
         NAV_STYLE,
         NAV_SCROLL_BEHAVIOR,
+        TABLET_DOCK_POSITION,
         COVER_AMBIENT,
         ACCENT_PRESET,
         HOME_MODE,
@@ -444,6 +446,7 @@ final class Prefs {
         mr.put(MOBILE_UI_SCALE_PERCENT, new int[] {90, 120});
         mr.put(NAV_STYLE, new int[] {0, 1});
         mr.put(NAV_SCROLL_BEHAVIOR, new int[] {0, 2});
+        mr.put(TABLET_DOCK_POSITION, new int[] {0, 4});
         mr.put(ACCENT_PRESET, new int[] {0, 7});
         mr.put(HOME_MODE, new int[] {0, 1});
         mr.put(DETAIL_TAP_MODE, new int[] {0, 2});

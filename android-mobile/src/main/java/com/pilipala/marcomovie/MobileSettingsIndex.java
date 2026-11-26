@@ -53,6 +53,12 @@ final class MobileSettingsIndex {
                 "外观与导航",
                 "底部导航栏形态（4+1 分离搜索 / 五栏一体）",
                 "底栏 搜索按钮 分离 胶囊 导航");
+        add(
+                SUB_APPEARANCE,
+                "ms-tablet-dock-pos",
+                "外观与导航",
+                "大屏 / 折叠屏导航栏位置 (Dock)",
+                "平板 折叠屏 dock 导航栏 位置 上下左右 顶部 底部 左侧 右侧 边栏");
         add(SUB_APPEARANCE, "ms-nav-scroll", "外观与导航", "滑动页面时底栏自动收起", "上滑 折叠 隐藏 常驻 滚动 导航");
         add(SUB_APPEARANCE, "ms-home-sections", "外观与导航", "首页专题显示与排序", "首页 专题 栏目 隐藏 显示 开关 排序 发现 模块");
         add(SUB_APPEARANCE, "ms-home-banner", "外观与导航", "首页精选大图横幅", "轮播 海报 头图 横幅");

@@ -51,6 +51,14 @@ final class MobileRootShell {
     static final int TAB_SETTINGS = 3;
     static final int TAB_SEARCH = 4;
 
+    static final int DOCK_POS_AUTO = 0;
+    static final int DOCK_POS_BOTTOM = 1;
+    static final int DOCK_POS_TOP = 2;
+    static final int DOCK_POS_LEFT = 3;
+    static final int DOCK_POS_RIGHT = 4;
+
+    private static final String FEATURE_HINGE_ANGLE = "android.hardware.sensor.hinge_angle";
+
     private static final String[] TAB_NAMES = {"发现", "直播", "片库", "设置", "搜索"};
     private static final int[] TAB_ICON_IDS = {
         MobileIcons.IC_DISCOVER,
@@ -83,7 +91,118 @@ final class MobileRootShell {
     private boolean renderedDark;
     private int renderedAccent;
     boolean isSideRailLayout;
+    int activeDockPosition = DOCK_POS_BOTTOM;
+    private int renderedDockPref = DOCK_POS_AUTO;
+    private FrameLayout sideRailWrap;
     private int lastRenderedTab = -1;
+
+    /**
+     * Pure-JVM large-screen tablet &amp; foldable detector.
+     *
+     * <p>Returns {@code true} for Android tablets, unfolded book-style foldables, and devices
+     * advertising {@code android.hardware.sensor.hinge_angle} (even while folded on the outer
+     * cover screen), while staying {@code false} for ordinary bar phones in both portrait and
+     * landscape orientations.
+     */
+    static boolean isTabletOrFoldableDevice(
+            int smallestScreenWidthDp,
+            int screenLayoutSize,
+            float windowWidthDp,
+            float windowHeightDp,
+            boolean hasHingeAngleFeature) {
+        if (hasHingeAngleFeature) return true;
+        if (smallestScreenWidthDp >= 580) return true;
+        if (screenLayoutSize >= android.content.res.Configuration.SCREENLAYOUT_SIZE_LARGE) {
+            return true;
+        }
+        return Math.min(windowWidthDp, windowHeightDp) >= 540f;
+    }
+
+    static boolean isTabletOrFoldable(MainActivity a) {
+        if (a == null || a.isTvDevice()) return false;
+        int swDp = 0;
+        int layoutSize = 0;
+        float density = 1f;
+        try {
+            android.content.res.Resources res = a.getResources();
+            if (res != null) {
+                if (res.getDisplayMetrics() != null && res.getDisplayMetrics().density > 0f) {
+                    density = res.getDisplayMetrics().density;
+                }
+                android.content.res.Configuration cfg = res.getConfiguration();
+                if (cfg != null) {
+                    swDp = cfg.smallestScreenWidthDp;
+                    layoutSize =
+                            cfg.screenLayout
+                                    & android.content.res.Configuration.SCREENLAYOUT_SIZE_MASK;
+                }
+            }
+            android.content.res.Configuration sysCfg =
+                    android.content.res.Resources.getSystem().getConfiguration();
+            if (sysCfg != null) {
+                swDp = Math.max(swDp, sysCfg.smallestScreenWidthDp);
+                int sysSize =
+                        sysCfg.screenLayout
+                                & android.content.res.Configuration.SCREENLAYOUT_SIZE_MASK;
+                layoutSize = Math.max(layoutSize, sysSize);
+            }
+        } catch (Throwable ignored) {
+        }
+        boolean hasHinge = false;
+        try {
+            if (a.getPackageManager() != null) {
+                hasHinge = a.getPackageManager().hasSystemFeature(FEATURE_HINGE_ANGLE);
+            }
+        } catch (Throwable ignored) {
+        }
+        float winWDp = a.windowWidth() / density;
+        float winHDp = a.windowHeight() / density;
+        return isTabletOrFoldableDevice(swDp, layoutSize, winWDp, winHDp, hasHinge);
+    }
+
+    /**
+     * Pure-JVM resolver turning the saved {@link Prefs#TABLET_DOCK_POSITION} preference into one of
+     * the four concrete edges ({@link #DOCK_POS_TOP}, {@link #DOCK_POS_BOTTOM}, {@link
+     * #DOCK_POS_LEFT}, {@link #DOCK_POS_RIGHT}).
+     */
+    static int resolveDockPosition(
+            int savedPref, boolean isTabletOrFoldable, float windowWidthDp, boolean portrait) {
+        if (isTabletOrFoldable) {
+            if (savedPref == DOCK_POS_BOTTOM
+                    || savedPref == DOCK_POS_TOP
+                    || savedPref == DOCK_POS_LEFT
+                    || savedPref == DOCK_POS_RIGHT) {
+                return savedPref;
+            }
+        }
+        return (windowWidthDp >= 640f && !portrait) ? DOCK_POS_LEFT : DOCK_POS_BOTTOM;
+    }
+
+    static String dockPositionLabel(int pref) {
+        switch (pref) {
+            case DOCK_POS_BOTTOM:
+                return "底部";
+            case DOCK_POS_TOP:
+                return "顶部";
+            case DOCK_POS_LEFT:
+                return "左侧";
+            case DOCK_POS_RIGHT:
+                return "右侧";
+            case DOCK_POS_AUTO:
+            default:
+                return "自动适配";
+        }
+    }
+
+    private static int currentEffectiveDockPosition(MainActivity a) {
+        float density =
+                a.getResources() != null && a.getResources().getDisplayMetrics() != null
+                        ? Math.max(1f, a.getResources().getDisplayMetrics().density)
+                        : 1f;
+        float widthDp = a.windowWidth() / density;
+        int pref = a.mobilePrefs().getInt(Prefs.TABLET_DOCK_POSITION, DOCK_POS_AUTO);
+        return resolveDockPosition(pref, isTabletOrFoldable(a), widthDp, a.isPortrait());
+    }
 
     private boolean dockCollapseFullHide;
     private MotionSpring dockCollapseSpring;
@@ -318,6 +437,9 @@ final class MobileRootShell {
                 || a.isPortrait() != renderedPortrait
                 || MobileTheme.isDark(a) != renderedDark
                 || a.mobileAccentColor() != renderedAccent
+                || a.mobilePrefs().getInt(Prefs.TABLET_DOCK_POSITION, DOCK_POS_AUTO)
+                        != renderedDockPref
+                || currentEffectiveDockPosition(a) != activeDockPosition
                 || a.isFinishing()) {
             return false;
         }
@@ -471,6 +593,8 @@ final class MobileRootShell {
         if (floatingDockWrap == null || expandedDockLayer == null) return;
         float p = Math.max(0f, Math.min(1f, rawProgress));
         boolean reduced = MobileMotion.isReduced(a);
+        boolean isTop = activeDockPosition == DOCK_POS_TOP;
+        float sign = isTop ? -1f : 1f;
         if (dockCollapseFullHide) {
             if (collapsedDockLayer != null) {
                 collapsedDockLayer.setAlpha(0f);
@@ -478,7 +602,7 @@ final class MobileRootShell {
             }
             float alpha = 1f - p;
             expandedDockLayer.setAlpha(alpha);
-            expandedDockLayer.setTranslationY(reduced ? 0f : p * a.dp(96));
+            expandedDockLayer.setTranslationY(reduced ? 0f : sign * p * a.dp(96));
             expandedDockLayer.setScaleX(reduced ? 1f : (1f - 0.04f * p));
             expandedDockLayer.setScaleY(reduced ? 1f : (1f - 0.04f * p));
             expandedDockLayer.setVisibility(alpha > 0.01f ? View.VISIBLE : View.INVISIBLE);
@@ -495,7 +619,7 @@ final class MobileRootShell {
             expandedDockLayer.setScaleY(1f);
         } else {
             float expT = 1f - expA;
-            expandedDockLayer.setTranslationY(expT * a.dp(6));
+            expandedDockLayer.setTranslationY(sign * expT * a.dp(6));
             float expS = 1f - 0.05f * expT;
             expandedDockLayer.setScaleX(expS);
             expandedDockLayer.setScaleY(expS);
@@ -510,7 +634,7 @@ final class MobileRootShell {
                 collapsedDockLayer.setScaleY(1f);
             } else {
                 float colT = 1f - colA;
-                collapsedDockLayer.setTranslationY(colT * a.dp(6));
+                collapsedDockLayer.setTranslationY(sign * colT * a.dp(6));
                 float colS = 1f - 0.05f * colT;
                 collapsedDockLayer.setScaleX(colS);
                 collapsedDockLayer.setScaleY(colS);
@@ -619,6 +743,7 @@ final class MobileRootShell {
         lastRenderedTab = -1;
         statusBarVeil = null;
         floatingDockWrap = null;
+        sideRailWrap = null;
         expandedDockLayer = null;
         collapsedDockLayer = null;
         mainCapsule = null;
@@ -644,14 +769,21 @@ final class MobileRootShell {
         a.setContentView(shellRoot);
         a.watchRootLayout(shellRoot);
         renderedPortrait = a.isPortrait();
+        renderedDockPref = a.mobilePrefs().getInt(Prefs.TABLET_DOCK_POSITION, DOCK_POS_AUTO);
+        activeDockPosition = currentEffectiveDockPosition(a);
+        isSideRailLayout =
+                activeDockPosition == DOCK_POS_LEFT || activeDockPosition == DOCK_POS_RIGHT;
         final boolean builtPortrait = renderedPortrait;
+        final int builtDockPosition = activeDockPosition;
         shellRoot.addOnLayoutChangeListener(
                 (view, l, t, r, b, ol, ot, or, ob) -> {
                     int w = r - l, h = b - t;
                     if (w <= 0 || h <= 0 || a.root != shellRoot) return;
                     a.usableWidth = w;
                     a.usableHeight = h;
-                    if ((w < h) != builtPortrait) {
+                    boolean orientChanged = (w < h) != builtPortrait;
+                    boolean dockChanged = currentEffectiveDockPosition(a) != builtDockPosition;
+                    if (orientChanged || dockChanged) {
                         a.ui.post(
                                 () -> {
                                     if (!a.isFinishing()
@@ -668,30 +800,42 @@ final class MobileRootShell {
         ambientCanvas = new AmbientCanvasView(a);
         shellRoot.addView(ambientCanvas, new FrameLayout.LayoutParams(-1, -1));
 
-        float widthDp = a.windowWidth() / a.getResources().getDisplayMetrics().density;
-        isSideRailLayout = widthDp >= 640 && !a.isPortrait();
-
         if (isSideRailLayout) {
+            boolean rightRail = activeDockPosition == DOCK_POS_RIGHT;
             LinearLayout mainRow = a.row();
             mainRow.setGravity(Gravity.TOP);
             shellRoot.addView(mainRow, new FrameLayout.LayoutParams(-1, -1));
 
             FrameLayout railWrap = new FrameLayout(a);
+            railWrap.setTag(rightRail ? "mobile-right-rail" : "mobile-left-rail");
             railWrap.setPadding(
-                    a.dp(12),
+                    a.dp(rightRail ? 6 : 12),
                     a.statusBarHeight() + a.dp(12),
-                    a.dp(6),
+                    a.dp(rightRail ? 12 : 6),
                     a.navigationBarHeight() + a.dp(12));
             LinearLayout rail = buildVerticalSideRail(p);
             railWrap.addView(
                     rail, new FrameLayout.LayoutParams(a.dp(76), -2, Gravity.CENTER_VERTICAL));
-            mainRow.addView(railWrap, new LinearLayout.LayoutParams(-2, -1));
+            sideRailWrap = railWrap;
 
             contentContainer = new FrameLayout(a);
-            mainRow.addView(contentContainer, new LinearLayout.LayoutParams(0, -1, 1f));
+            if (rightRail) {
+                mainRow.addView(contentContainer, new LinearLayout.LayoutParams(0, -1, 1f));
+                mainRow.addView(railWrap, new LinearLayout.LayoutParams(-2, -1));
+            } else {
+                mainRow.addView(railWrap, new LinearLayout.LayoutParams(-2, -1));
+                mainRow.addView(contentContainer, new LinearLayout.LayoutParams(0, -1, 1f));
+            }
         } else {
+            boolean topDock = activeDockPosition == DOCK_POS_TOP;
             contentContainer = new FrameLayout(a);
-            shellRoot.addView(contentContainer, new FrameLayout.LayoutParams(-1, -1));
+            FrameLayout.LayoutParams contentLp = new FrameLayout.LayoutParams(-1, -1);
+            if (topDock) {
+                // Reserve clean vertical headroom for the 64dp floating top Dock so every tab's
+                // header starts neatly below the top capsule with zero overlap.
+                contentLp.topMargin = a.dp(74);
+            }
+            shellRoot.addView(contentContainer, contentLp);
 
             // Immersive status-bar fade veil so scrolled content glides smoothly beneath system
             // icons without harsh visual collisions on Android 15/16 Edge-to-Edge screens.
@@ -710,32 +854,44 @@ final class MobileRootShell {
                     statusBarVeil,
                     new FrameLayout.LayoutParams(-1, a.statusBarHeight() + a.dp(14), Gravity.TOP));
 
-            floatingDockWrap = buildFloatingBottomDock(p);
+            floatingDockWrap = buildFloatingHorizontalDock(p, topDock);
             FrameLayout.LayoutParams dockLp =
-                    new FrameLayout.LayoutParams(-1, a.dp(64), Gravity.BOTTOM);
-            dockLp.bottomMargin = a.navigationBarHeight() + a.dp(10);
+                    new FrameLayout.LayoutParams(
+                            -1, a.dp(64), topDock ? Gravity.TOP : Gravity.BOTTOM);
+            if (topDock) {
+                dockLp.topMargin = a.statusBarHeight() + a.dp(8);
+            } else {
+                dockLp.bottomMargin = a.navigationBarHeight() + a.dp(10);
+            }
             shellRoot.addView(floatingDockWrap, dockLp);
         }
 
-        // Live Android 15/16 WindowInsets listener keeps status-bar veil & floating dock margin
-        // pixel-locked to the real system gesture bar / punch-hole cutout after first attach.
+        // Live Android 15/16 WindowInsets listener keeps status-bar veil & floating dock/rail
+        // margins pixel-locked to real system gesture bars and cutouts across all 4 edges.
         if (Build.VERSION.SDK_INT >= 23) {
             shellRoot.setOnApplyWindowInsetsListener(
                     (v, insets) -> {
                         if (insets != null) {
                             int topInset;
                             int bottomInset;
+                            int leftInset;
+                            int rightInset;
                             if (Build.VERSION.SDK_INT >= 30) {
-                                topInset =
+                                android.graphics.Insets topBars =
                                         insets.getInsets(
-                                                        WindowInsets.Type.statusBars()
-                                                                | WindowInsets.Type.displayCutout())
-                                                .top;
-                                bottomInset =
-                                        insets.getInsets(WindowInsets.Type.navigationBars()).bottom;
+                                                WindowInsets.Type.statusBars()
+                                                        | WindowInsets.Type.displayCutout());
+                                android.graphics.Insets navBars =
+                                        insets.getInsets(WindowInsets.Type.navigationBars());
+                                topInset = topBars.top;
+                                bottomInset = navBars.bottom;
+                                leftInset = Math.max(topBars.left, navBars.left);
+                                rightInset = Math.max(topBars.right, navBars.right);
                             } else {
                                 topInset = insets.getSystemWindowInsetTop();
                                 bottomInset = insets.getSystemWindowInsetBottom();
+                                leftInset = insets.getSystemWindowInsetLeft();
+                                rightInset = insets.getSystemWindowInsetRight();
                             }
                             if (statusBarVeil != null && topInset > 0) {
                                 ViewGroup.LayoutParams slp = statusBarVeil.getLayoutParams();
@@ -749,11 +905,39 @@ final class MobileRootShell {
                                 FrameLayout.LayoutParams dlp =
                                         (FrameLayout.LayoutParams)
                                                 floatingDockWrap.getLayoutParams();
-                                int clampedBottom = Math.max(0, Math.min(a.dp(56), bottomInset));
-                                int targetMargin = clampedBottom + a.dp(10);
-                                if (dlp != null && dlp.bottomMargin != targetMargin) {
-                                    dlp.bottomMargin = targetMargin;
-                                    floatingDockWrap.setLayoutParams(dlp);
+                                if (dlp != null) {
+                                    if (activeDockPosition == DOCK_POS_TOP) {
+                                        int clampedTop = Math.max(0, Math.min(a.dp(64), topInset));
+                                        int targetTop = clampedTop + a.dp(8);
+                                        if (dlp.topMargin != targetTop) {
+                                            dlp.topMargin = targetTop;
+                                            floatingDockWrap.setLayoutParams(dlp);
+                                        }
+                                    } else {
+                                        int clampedBottom =
+                                                Math.max(0, Math.min(a.dp(56), bottomInset));
+                                        int targetBottom = clampedBottom + a.dp(10);
+                                        if (dlp.bottomMargin != targetBottom) {
+                                            dlp.bottomMargin = targetBottom;
+                                            floatingDockWrap.setLayoutParams(dlp);
+                                        }
+                                    }
+                                }
+                            }
+                            if (sideRailWrap != null) {
+                                boolean rightRail = activeDockPosition == DOCK_POS_RIGHT;
+                                int padL =
+                                        rightRail ? a.dp(6) : (Math.max(0, leftInset) + a.dp(12));
+                                int padR =
+                                        rightRail ? (Math.max(0, rightInset) + a.dp(12)) : a.dp(6);
+                                int padT = Math.max(a.statusBarHeight(), topInset) + a.dp(12);
+                                int padB =
+                                        Math.max(a.navigationBarHeight(), bottomInset) + a.dp(12);
+                                if (sideRailWrap.getPaddingLeft() != padL
+                                        || sideRailWrap.getPaddingRight() != padR
+                                        || sideRailWrap.getPaddingTop() != padT
+                                        || sideRailWrap.getPaddingBottom() != padB) {
+                                    sideRailWrap.setPadding(padL, padT, padR, padB);
                                 }
                             }
                         }
@@ -764,7 +948,7 @@ final class MobileRootShell {
         switchTab(activeTab);
     }
 
-    private FrameLayout buildFloatingBottomDock(MobileTheme.Palette p) {
+    private FrameLayout buildFloatingHorizontalDock(MobileTheme.Palette p, boolean isTopDock) {
         boolean unifiedFiveBar = a.mobilePrefs().getInt(Prefs.NAV_STYLE, 0) == 1;
         float dockElev = a.dp(p.isDark ? 10f : 6f);
         int availW = a.windowWidth();
@@ -774,7 +958,7 @@ final class MobileRootShell {
         FrameLayout stage = new FrameLayout(a);
         stage.setClipChildren(false);
         stage.setClipToPadding(false);
-        stage.setTag("mobile-bottom-dock");
+        stage.setTag(isTopDock ? "mobile-top-dock" : "mobile-bottom-dock");
 
         // Layer A: Expanded Android 16 / Material 3 Expressive Floating Navigation Bar
         expandedDockLayer = a.row();
@@ -880,7 +1064,7 @@ final class MobileRootShell {
 
         MobileIcons.IconView expandChevron =
                 MobileIcons.create(a, MobileIcons.IC_CHEVRON_DOWN, 12.5f, p.textTertiary);
-        expandChevron.setRotation(180f);
+        expandChevron.setRotation(isTopDock ? 0f : 180f);
         LinearLayout.LayoutParams miniChevLp =
                 new LinearLayout.LayoutParams(a.dp(12.5f), a.dp(12.5f));
         miniChevLp.leftMargin = a.dp(6);
@@ -991,6 +1175,7 @@ final class MobileRootShell {
                     draggedDuringMenu[0] = false;
                     cancelHold.run();
                     view.animate().cancel();
+                    view.setTranslationX(0f);
                     view.setTranslationY(0f);
                     view.setScaleX(1f);
                     view.setScaleY(1f);
@@ -1028,14 +1213,39 @@ final class MobileRootShell {
                     } else if (act == MotionEvent.ACTION_MOVE) {
                         float dx = ev.getRawX() - downX[0];
                         float dy = downY[0] - ev.getRawY();
+                        // Compute inward pull away from whichever screen edge hosts the Dock
+                        float inwardPull;
+                        float crossAxis;
+                        if (activeDockPosition == DOCK_POS_TOP) {
+                            inwardPull = ev.getRawY() - downY[0];
+                            crossAxis = Math.abs(dx);
+                        } else if (activeDockPosition == DOCK_POS_LEFT) {
+                            inwardPull = dx;
+                            crossAxis = Math.abs(dy);
+                        } else if (activeDockPosition == DOCK_POS_RIGHT) {
+                            inwardPull = -dx;
+                            crossAxis = Math.abs(dy);
+                        } else {
+                            inwardPull = dy;
+                            crossAxis = Math.abs(dx);
+                        }
                         if (!menuActive[0]) {
-                            if (Math.abs(dx) > touchSlop * 1.4f && dy < touchSlop) {
+                            if (crossAxis > touchSlop * 1.4f && inwardPull < touchSlop) {
                                 cancelHold.run();
                             }
-                            if (dy > 0f && !reduced) {
-                                v.setTranslationY(-MobileMotion.rubberBand(dy, maxPullPx));
+                            if (inwardPull > 0f && !reduced) {
+                                float rb = MobileMotion.rubberBand(inwardPull, maxPullPx);
+                                if (activeDockPosition == DOCK_POS_TOP) {
+                                    v.setTranslationY(rb);
+                                } else if (activeDockPosition == DOCK_POS_LEFT) {
+                                    v.setTranslationX(rb);
+                                } else if (activeDockPosition == DOCK_POS_RIGHT) {
+                                    v.setTranslationX(-rb);
+                                } else {
+                                    v.setTranslationY(-rb);
+                                }
                             }
-                            if (dy >= pullTriggerPx) {
+                            if (inwardPull >= pullTriggerPx) {
                                 openMenuNow.run();
                                 if (sessionRef[0] != null) {
                                     draggedDuringMenu[0] = true;
@@ -1053,11 +1263,13 @@ final class MobileRootShell {
                         cancelHold.run();
                         v.animate().cancel();
                         if (reduced) {
+                            v.setTranslationX(0f);
                             v.setTranslationY(0f);
                             v.setScaleX(1f);
                             v.setScaleY(1f);
                         } else {
                             v.animate()
+                                    .translationX(0f)
                                     .translationY(0f)
                                     .scaleX(1f)
                                     .scaleY(1f)
@@ -1231,25 +1443,40 @@ final class MobileRootShell {
             rowLabels.add(tv);
         }
 
-        // Compute anchored position right above (or beside, on side rail) the pressed Dock button
+        // Compute anchored position inward from whichever edge hosts the Dock
+        // (Top/Bottom/Left/Right)
         int[] rootLoc = new int[2];
         int[] ancLoc = new int[2];
         shellRoot.getLocationOnScreen(rootLoc);
         anchor.getLocationOnScreen(ancLoc);
         int rootW = Math.max(a.dp(300), shellRoot.getWidth());
         int rootH = Math.max(a.dp(480), shellRoot.getHeight());
-        int ancCenterX = ancLoc[0] - rootLoc[0] + anchor.getWidth() / 2;
+        int ancLeftX = ancLoc[0] - rootLoc[0];
+        int ancCenterX = ancLeftX + anchor.getWidth() / 2;
         int ancTopY = ancLoc[1] - rootLoc[1];
+        int ancBottomY = ancTopY + anchor.getHeight();
 
         FrameLayout.LayoutParams clp;
-        if (isSideRailLayout) {
+        if (activeDockPosition == DOCK_POS_LEFT) {
             clp = new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.TOP);
             clp.leftMargin =
-                    Math.min(
-                            rootW - menuW - a.dp(16),
-                            ancLoc[0] - rootLoc[0] + anchor.getWidth() + a.dp(12));
+                    Math.min(rootW - menuW - a.dp(16), ancLeftX + anchor.getWidth() + a.dp(12));
             clp.topMargin =
                     Math.max(a.statusBarHeight() + a.dp(16), Math.min(rootH - a.dp(240), ancTopY));
+        } else if (activeDockPosition == DOCK_POS_RIGHT) {
+            clp = new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.TOP);
+            clp.leftMargin = Math.max(a.dp(14), ancLeftX - menuW - a.dp(24));
+            clp.topMargin =
+                    Math.max(a.statusBarHeight() + a.dp(16), Math.min(rootH - a.dp(240), ancTopY));
+        } else if (activeDockPosition == DOCK_POS_TOP) {
+            clp = new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.TOP);
+            int left = ancCenterX - (menuW + a.dp(12)) / 2;
+            left = Math.max(a.dp(14), Math.min(rootW - menuW - a.dp(26), left));
+            clp.leftMargin = left;
+            clp.topMargin =
+                    Math.max(
+                            a.statusBarHeight() + a.dp(76),
+                            Math.min(rootH - a.dp(240), ancBottomY + a.dp(10)));
         } else {
             clp = new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.BOTTOM);
             int left = ancCenterX - (menuW + a.dp(12)) / 2;
