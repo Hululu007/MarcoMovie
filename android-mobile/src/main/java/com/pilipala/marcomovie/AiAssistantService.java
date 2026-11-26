@@ -1,14 +1,12 @@
 package com.pilipala.marcomovie;
 
 import android.content.SharedPreferences;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -20,10 +18,12 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * User-configured OpenAI-compatible LLM client (DeepSeek, Qwen, SiliconFlow, Kimi, Zhipu GLM,
- * Ollama, or custom endpoint) for episode title purification, search title cleaning, Python spider
- * static security auditing, and bilingual subtitle translation. Zero built-in keys; falls back to
- * {@link EpisodeNameCleaner} when unconfigured.
+ * Refactored multi-protocol AI Assistant Service for Android Mobile / Tablet.
+ *
+ * <p>Strictly gated by {@link AiBetaGate#isUnlocked(android.content.Context)} during beta testing.
+ * Supports both BYOK API Keys (DeepSeek, Qwen, SiliconFlow, Kimi, Zhipu GLM, OpenAI, native
+ * Anthropic Claude, native Google Gemini, OpenRouter, local Ollama, and Custom OpenAI-compatible
+ * gateways) and Subscription/OAuth sign-in via {@link AiAuthManager}. Zero built-in keys.
  */
 final class AiAssistantService {
     interface ResultCallback<T> {
@@ -31,7 +31,17 @@ final class AiAssistantService {
     }
 
     static final String[] PROVIDER_IDS = {
-        "deepseek", "qwen", "siliconflow", "kimi", "glm", "ollama", "custom"
+        "deepseek",
+        "qwen",
+        "siliconflow",
+        "kimi",
+        "glm",
+        "openai",
+        "anthropic",
+        "gemini",
+        "openrouter",
+        "ollama",
+        "custom"
     };
     static final String[] PROVIDER_LABELS = {
         "DeepSeek 官方",
@@ -39,8 +49,12 @@ final class AiAssistantService {
         "SiliconFlow 硅基流动",
         "Moonshot (Kimi)",
         "智谱清言 (GLM)",
+        "OpenAI 官方",
+        "Anthropic Claude (原生接口)",
+        "Google Gemini (原生接口)",
+        "OpenRouter 聚合网关",
         "Ollama 局域网本地",
-        "自定义 OpenAI 兼容接口"
+        "自定义 OpenAI 兼容网关"
     };
 
     private static final Pattern PY_SUSPICIOUS =
@@ -54,6 +68,10 @@ final class AiAssistantService {
         if ("siliconflow".equals(provider)) return "https://api.siliconflow.cn/v1";
         if ("kimi".equals(provider)) return "https://api.moonshot.cn/v1";
         if ("glm".equals(provider)) return "https://open.bigmodel.cn/api/paas/v4";
+        if ("openai".equals(provider)) return "https://api.openai.com/v1";
+        if ("anthropic".equals(provider)) return "https://api.anthropic.com";
+        if ("gemini".equals(provider)) return "https://generativelanguage.googleapis.com";
+        if ("openrouter".equals(provider)) return "https://openrouter.ai/api/v1";
         if ("ollama".equals(provider)) return "http://127.0.0.1:11434/v1";
         if ("custom".equals(provider)) return "";
         return "https://api.deepseek.com/v1";
@@ -64,7 +82,12 @@ final class AiAssistantService {
         if ("siliconflow".equals(provider)) return "Qwen/Qwen2.5-7B-Instruct";
         if ("kimi".equals(provider)) return "moonshot-v1-8k";
         if ("glm".equals(provider)) return "glm-4-flash";
+        if ("openai".equals(provider)) return "gpt-4o-mini";
+        if ("anthropic".equals(provider)) return "claude-3-5-haiku-latest";
+        if ("gemini".equals(provider)) return "gemini-2.5-flash";
+        if ("openrouter".equals(provider)) return "openai/gpt-4o-mini";
         if ("ollama".equals(provider)) return "qwen2.5:7b";
+        if ("custom".equals(provider)) return "gpt-4o-mini";
         return "deepseek-chat";
     }
 
@@ -77,14 +100,10 @@ final class AiAssistantService {
 
     static boolean isConfigured(MainActivity a) {
         if (a == null || a.isTvDevice()) return false;
+        if (!AiBetaGate.isUnlocked(a)) return false;
         SharedPreferences mp = a.mobilePrefs();
         if (!mp.getBoolean(Prefs.AI_ENABLED, false)) return false;
-        String provider = mp.getString(Prefs.AI_PROVIDER, "deepseek");
-        String base = resolveBaseUrl(a);
-        if (base.isEmpty()) return false;
-        if ("ollama".equals(provider)) return true;
-        String key = a.secretsPrefs().getString(Prefs.SECRET_AI_API_KEY, "").trim();
-        return !key.isEmpty();
+        return AiAuthManager.isActiveCredentialReady(a);
     }
 
     static String resolveBaseUrl(MainActivity a) {
@@ -179,8 +198,7 @@ final class AiAssistantService {
         if (!isConfigured(a) || sourceLines == null || sourceLines.isEmpty() || callback == null) {
             return;
         }
-        final List<String> batch =
-                new ArrayList<>(sourceLines.subList(0, Math.min(40, sourceLines.size())));
+        final List<String> batch = new ArrayList<>(sourceLines);
         final String cacheKey = "sub_" + sha256(batch.toString());
         a.worker.execute(
                 () -> {
@@ -193,7 +211,7 @@ final class AiAssistantService {
                             JSONArray arr = new JSONArray(batch);
                             String sys =
                                     "你是影视字幕翻译专家。将输入外语台词数组逐条自然翻译为简体中文。严格只返回 JSON 对象：{\"zh\":[\"译文1\",...]}，条数与输入完全一致。";
-                            String reply = chatCompletion(a, sys, arr.toString(), 1800);
+                            String reply = chatCompletion(a, sys, arr.toString(), 2200);
                             parsed = extractJsonObject(reply);
                             if (parsed != null) writeDiskCache(a, cacheKey, parsed.toString());
                         }
@@ -224,105 +242,72 @@ final class AiAssistantService {
                         final String msg = "连接成功：" + (reply == null ? "" : reply.trim());
                         a.ui.post(() -> callback.onResult(msg));
                     } catch (Exception e) {
-                        final String err = "连接失败：" + a.message(e);
+                        final String err = "连接失败：" + AiAuthManager.sanitizeLogBody(a.message(e));
                         a.ui.post(() -> callback.onResult(err));
                     }
                 });
     }
 
-    private static String chatCompletion(
+    static String chatCompletion(
             MainActivity a, String systemPrompt, String userPrompt, int maxTokens)
             throws Exception {
-        String base = resolveBaseUrl(a);
-        if (base.isEmpty()) throw new IllegalStateException("未配置 AI 接口地址");
-        String endpoint = base.endsWith("/chat/completions") ? base : (base + "/chat/completions");
-        String apiKey = a.secretsPrefs().getString(Prefs.SECRET_AI_API_KEY, "").trim();
-        String model = resolveModel(a);
-
-        JSONObject body = new JSONObject();
-        body.put("model", model);
-        body.put("temperature", 0.2);
-        body.put("max_tokens", maxTokens);
-        JSONArray messages = new JSONArray();
-        messages.put(new JSONObject().put("role", "system").put("content", systemPrompt));
-        messages.put(new JSONObject().put("role", "user").put("content", userPrompt));
-        body.put("messages", messages);
-
-        HttpURLConnection conn = (HttpURLConnection) new URL(endpoint).openConnection();
-        conn.setRequestMethod("POST");
-        conn.setDoOutput(true);
-        conn.setConnectTimeout(12000);
-        conn.setReadTimeout(25000);
-        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        if (!apiKey.isEmpty()) {
-            conn.setRequestProperty("Authorization", "Bearer " + apiKey);
-        }
-        byte[] payload = body.toString().getBytes("UTF-8");
-        try (OutputStream out = conn.getOutputStream()) {
-            out.write(payload);
-        }
-        int code = conn.getResponseCode();
-        InputStream stream =
-                code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
-        String respText = "";
-        if (stream != null) {
-            try (InputStream in = stream;
-                    ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-                byte[] buf = new byte[4096];
-                int n;
-                while ((n = in.read(buf)) != -1) {
-                    if (bos.size() + n > 512 * 1024) break;
-                    bos.write(buf, 0, n);
-                }
-                respText = new String(bos.toByteArray(), "UTF-8");
-            }
-        }
-        conn.disconnect();
-        if (code < 200 || code >= 300) {
-            throw new java.io.IOException("HTTP " + code);
-        }
-        JSONObject root = new JSONObject(respText);
-        JSONArray choices = root.optJSONArray("choices");
-        if (choices == null || choices.length() == 0) return "";
-        JSONObject msg = choices.getJSONObject(0).optJSONObject("message");
-        return msg == null ? "" : msg.optString("content", "");
+        return chatCompletion(a, systemPrompt, userPrompt, maxTokens, 0.25);
     }
 
-    private static JSONObject extractJsonObject(String raw) {
+    static String chatCompletion(
+            MainActivity a,
+            String systemPrompt,
+            String userPrompt,
+            int maxTokens,
+            double temperature)
+            throws Exception {
+        AiAuthManager.ResolvedRequest req = AiAuthManager.resolveActiveRequest(a);
+        return AiAuthManager.executeChatCompletion(
+                req, systemPrompt, userPrompt, maxTokens, temperature);
+    }
+
+    static JSONObject extractJsonObject(String raw) {
         if (raw == null) return null;
-        int start = raw.indexOf('{');
-        int end = raw.lastIndexOf('}');
+        String trimmed = raw.trim();
+        if (trimmed.startsWith("```")) {
+            int firstNl = trimmed.indexOf('\n');
+            if (firstNl > 0) trimmed = trimmed.substring(firstNl + 1);
+            int fenceEnd = trimmed.lastIndexOf("```");
+            if (fenceEnd > 0) trimmed = trimmed.substring(0, fenceEnd);
+        }
+        int start = trimmed.indexOf('{');
+        int end = trimmed.lastIndexOf('}');
         if (start >= 0 && end > start) {
             try {
-                return new JSONObject(raw.substring(start, end + 1));
+                return new JSONObject(trimmed.substring(start, end + 1));
             } catch (Exception ignored) {
             }
         }
         return null;
     }
 
-    private static File cacheDir(MainActivity a) {
+    static File cacheDir(MainActivity a) {
         File d = new File(a.getCacheDir(), "ai_cache_v1");
         if (!d.exists()) d.mkdirs();
         return d;
     }
 
-    private static String readDiskCache(MainActivity a, String key) {
+    static String readDiskCache(MainActivity a, String key) {
         File f = new File(cacheDir(a), key + ".json");
         if (!f.exists() || System.currentTimeMillis() - f.lastModified() > 14L * 86400_000L) {
             return null;
         }
         try (InputStream in = new FileInputStream(f)) {
-            return Cms.read(in, 256 * 1024);
+            return Cms.read(in, 512 * 1024);
         } catch (Exception ignored) {
             return null;
         }
     }
 
-    private static void writeDiskCache(MainActivity a, String key, String json) {
+    static void writeDiskCache(MainActivity a, String key, String json) {
         File f = new File(cacheDir(a), key + ".json");
         try (OutputStream out = new FileOutputStream(f)) {
-            out.write(json.getBytes("UTF-8"));
+            out.write(json.getBytes(StandardCharsets.UTF_8));
         } catch (Exception ignored) {
         }
     }
@@ -341,16 +326,18 @@ final class AiAssistantService {
         if (files != null) for (File f : files) f.delete();
     }
 
-    private static String sha256(String s) {
+    static String sha256(String s) {
         try {
-            byte[] d = MessageDigest.getInstance("SHA-256").digest(s.getBytes("UTF-8"));
+            byte[] d =
+                    MessageDigest.getInstance("SHA-256")
+                            .digest((s == null ? "" : s).getBytes(StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder(32);
             for (int i = 0; i < 16; i++) {
                 sb.append(String.format(Locale.US, "%02x", d[i] & 0xff));
             }
             return sb.toString();
         } catch (Exception e) {
-            return Integer.toHexString(s.hashCode());
+            return Integer.toHexString(s == null ? 0 : s.hashCode());
         }
     }
 }

@@ -3814,6 +3814,7 @@ public final class MainActivity extends Activity {
         if (inlinePlayer != null) inlinePlayer.onActivityStart();
         CspEngine.syncAllPluginActivities(this);
         PersonalNetdiskBrowser.onActivityResumed();
+        AiAuthManager.notifyActivityResumed();
         syncCastService();
         syncSpiderGateway();
         if (!isTvDevice() && config != null) {
@@ -3900,6 +3901,7 @@ public final class MainActivity extends Activity {
             CloudSyncDialog.pushOnExit(this);
         }
         foreground = false;
+        AiAuthManager.notifyActivityBackgrounded();
         if (!isTvDevice()) {
             MobileHomePage.clearLoadingSiteOnNormalStop(this);
         }

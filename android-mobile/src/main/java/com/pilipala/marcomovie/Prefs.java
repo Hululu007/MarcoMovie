@@ -614,6 +614,10 @@ final class Prefs {
                                 || "siliconflow".equals(text)
                                 || "kimi".equals(text)
                                 || "glm".equals(text)
+                                || "openai".equals(text)
+                                || "anthropic".equals(text)
+                                || "gemini".equals(text)
+                                || "openrouter".equals(text)
                                 || "ollama".equals(text)
                                 || "custom".equals(text))
                         ? text

@@ -493,6 +493,22 @@ final class MobileSearchPage {
         modeHint.setSingleLine(true);
         modeHint.setEllipsize(TextUtils.TruncateAt.END);
         modeRow.addView(modeHint, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        final TextView aiDiscoverPill;
+        if (AiBetaGate.isUnlocked(a)) {
+            aiDiscoverPill = a.text("AI 找片", 12f, p.accent);
+            aiDiscoverPill.setTypeface(null, Typeface.BOLD);
+            aiDiscoverPill.setSingleLine(true);
+            aiDiscoverPill.setPadding(a.dp(11), a.dp(6), a.dp(11), a.dp(6));
+            aiDiscoverPill.setBackground(
+                    a.bg(MobileTheme.withAlpha(p.accent, p.isDark ? 0x26 : 0x16), 999));
+            MobileMotion.bindPress(aiDiscoverPill, 0.94f);
+            LinearLayout.LayoutParams aiLp = new LinearLayout.LayoutParams(-2, -2);
+            aiLp.leftMargin = a.dp(8);
+            modeRow.addView(aiDiscoverPill, aiLp);
+        } else {
+            aiDiscoverPill = null;
+        }
         page.addView(modeRow, new LinearLayout.LayoutParams(-1, -2));
 
         final Runnable updateModePills =
@@ -977,6 +993,21 @@ final class MobileSearchPage {
                 };
         fuzzyPill.setOnClickListener(switchMode);
         exactPill.setOnClickListener(switchMode);
+        if (aiDiscoverPill != null) {
+            aiDiscoverPill.setOnClickListener(
+                    v ->
+                            AiCinemaCopilot.showDiscoverySheet(
+                                    a,
+                                    pickedTitle -> {
+                                        if (pickedTitle == null || pickedTitle.trim().isEmpty()) {
+                                            return;
+                                        }
+                                        String cleanTitle = pickedTitle.trim();
+                                        input.setText(cleanTitle);
+                                        input.setSelection(cleanTitle.length());
+                                        runSearch[0].run();
+                                    }));
+        }
 
         goBtn.setOnClickListener(v -> runSearch[0].run());
         input.setOnEditorActionListener(

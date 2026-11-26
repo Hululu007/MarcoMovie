@@ -76,7 +76,17 @@ final class PlaybackControls {
     Dialog activeDialog;
     View menuAnchor;
     String lastSubtitle = "";
+    private java.io.File activeSubtitleFile;
     boolean dialogOpen, transitioning;
+
+    void setActiveSubtitleFile(java.io.File file) {
+        this.activeSubtitleFile = file;
+    }
+
+    java.io.File activeSubtitleFile() {
+        return activeSubtitleFile;
+    }
+
     private TvMarkerHost markerState;
     private final TvMarkerTailGate markerTail = new TvMarkerTailGate();
     private MoviePlayer markerObservedPlayer;
@@ -2860,11 +2870,11 @@ final class PlaybackControls {
         container.addView(toggleRow, trLp);
 
         if (!AiAssistantService.isConfigured(a)) {
-            TextView hint =
-                    a.text(
-                            "尚未启用 AI 翻译服务。请前往「设置 → 刮削、网盘与 AI 助手」配置模型与 Key 后，即可为在线字幕实时生成中英双语译文。",
-                            12.5f,
-                            0xFFB8C0CE);
+            String hintMsg =
+                    AiBetaGate.isUnlocked(a)
+                            ? "尚未配置 AI 模型凭据。请前往「设置 → AI 观影实验室」填写 API Key 或登录订阅账号后，即可为整集在线字幕实时生成滑动窗口双语译文。"
+                            : "AI 全片双语字幕属于「AI 观影实验室」内测功能。请前往「设置 → 网盘、追剧与 AI 助手」输入内测口令开启。";
+            TextView hint = a.text(hintMsg, 12.5f, 0xFFB8C0CE);
             hint.setLineSpacing(a.dp(4), 1f);
             hint.setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(10));
             hint.setBackground(a.bg(0x14FFFFFF, 12));
@@ -3343,6 +3353,22 @@ final class PlaybackControls {
                                 if (dlgRef[0] != null) dlgRef[0].dismiss();
                                 openManualDanmuMatch();
                             }));
+            if (AiBetaGate.isUnlocked(a)) {
+                avRows.add(
+                        buildMobileMoreToolRow(
+                                MobileIcons.IC_SPARKLE,
+                                "AI 剧情与台词助手",
+                                "防剧透 · 台词问答",
+                                () -> {
+                                    if (dlgRef[0] != null) dlgRef[0].dismiss();
+                                    long curPos =
+                                            a.player != null && a.prepared
+                                                    ? Math.max(0L, a.player.getCurrentPosition())
+                                                    : 0L;
+                                    AiCinemaCopilot.showPlayerCopilotSheet(
+                                            a, video, a.activeEpisode, curPos, activeSubtitleFile);
+                                }));
+            }
         }
         addMoreGroupCard(body, avRows);
 

@@ -187,15 +187,32 @@ final class MobileSettingsIndex {
                 "网盘、追剧与 AI 助手",
                 "绑定 Bangumi / 豆瓣追剧账号",
                 "追剧 日历 bangumi 豆瓣 douban cookie");
+        add(
+                SUB_SERVICES,
+                "ms-ai-lab-gate",
+                "网盘、追剧与 AI 助手",
+                "AI 观影实验室（内测口令开启）",
+                "ai 内测 口令 实验室 观影助手 找片 前情提要 双语字幕");
         add(SUB_SERVICES, "ms-ai-enable", "网盘、追剧与 AI 助手", "启用 AI 观影助手", "ai 智能 开关 大模型");
         add(
                 SUB_SERVICES,
                 "ms-ai-cfg",
                 "网盘、追剧与 AI 助手",
-                "AI 服务商、端点与模型配置",
-                "ai deepseek 通义千问 硅基流动 kimi glm ollama openai");
+                "AI 认证中心（API Key / 订阅账号登录）",
+                "ai api key oauth 订阅账号 openrouter kimi code openai claude anthropic gemini deepseek 通义千问 硅基流动 glm ollama");
+        add(
+                SUB_SERVICES,
+                "ms-ai-discovery",
+                "网盘、追剧与 AI 助手",
+                "今晚看什么 · AI 找片",
+                "ai 找片 推荐 选片 今晚看什么 电影 电视剧");
         add(SUB_SERVICES, "ms-ai-clean-search", "网盘、追剧与 AI 助手", "AI 净化搜索结果片名", "ai 搜索 净化 片名");
-        add(SUB_SERVICES, "ms-ai-translate-sub", "网盘、追剧与 AI 助手", "AI 字幕实时双语翻译", "ai 字幕 翻译 双语");
+        add(
+                SUB_SERVICES,
+                "ms-ai-translate-sub",
+                "网盘、追剧与 AI 助手",
+                "全片 AI 滑动窗口双语字幕",
+                "ai 字幕 翻译 双语 全片");
         add(
                 SUB_SERVICES,
                 "ms-ai-py-audit",

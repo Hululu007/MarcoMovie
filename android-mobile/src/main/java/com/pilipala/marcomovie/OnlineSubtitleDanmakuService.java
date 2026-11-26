@@ -434,12 +434,26 @@ final class OnlineSubtitleDanmakuService {
                         if (bilingualAiTranslate
                                 && AiAssistantService.isConfigured(a)
                                 && safeName.toLowerCase(Locale.ROOT).endsWith(".srt")) {
-                            synthesizeAiBilingualSrt(a, new String(bytes, "UTF-8"), outFile);
+                            String showTitle =
+                                    a.playbackControls != null
+                                                    && a.playbackControls.video != null
+                                                    && a.playbackControls.video.title != null
+                                            ? a.playbackControls.video.title
+                                            : cand.title;
+                            long posMs =
+                                    a.player != null && a.prepared
+                                            ? Math.max(0L, a.player.getCurrentPosition())
+                                            : 0L;
+                            AiSubtitleTranslator.translateAndMountFullEpisodeAsync(
+                                    a, showTitle, new String(bytes, "UTF-8"), outFile, posMs, null);
                         }
 
                         final String display = cand.title;
                         a.ui.post(
                                 () -> {
+                                    if (a.playbackControls != null) {
+                                        a.playbackControls.setActiveSubtitleFile(outFile);
+                                    }
                                     if (a.player != null && a.prepared) {
                                         try {
                                             a.player.addExternalSubtitle(
@@ -458,66 +472,6 @@ final class OnlineSubtitleDanmakuService {
                     } catch (Exception e) {
                         a.ui.post(() -> a.toast("在线字幕下载失败：" + a.message(e)));
                     }
-                });
-    }
-
-    private static void synthesizeAiBilingualSrt(
-            final MainActivity a, final String srtText, final File targetFile) {
-        final List<String[]> blocks = new ArrayList<>();
-        final List<String> lines = new ArrayList<>();
-        Matcher m = SRT_BLOCK.matcher(srtText.replace("\r\n", "\n"));
-        while (m.find() && blocks.size() < 40) {
-            String idx = m.group(1);
-            String timing = m.group(2);
-            String body = m.group(3).trim();
-            blocks.add(new String[] {idx, timing, body});
-            lines.add(body.replace('\n', ' '));
-        }
-        if (lines.isEmpty()) return;
-        AiAssistantService.translateSubtitleLinesAsync(
-                a,
-                lines,
-                zhList -> {
-                    if (zhList == null || zhList.size() != blocks.size()) return;
-                    a.worker.execute(
-                            () -> {
-                                try {
-                                    StringBuilder sb = new StringBuilder();
-                                    boolean bilingual =
-                                            a.mobilePrefs()
-                                                    .getBoolean(Prefs.SUBTITLE_BILINGUAL, true);
-                                    for (int i = 0; i < blocks.size(); i++) {
-                                        String[] b = blocks.get(i);
-                                        String zh = zhList.get(i);
-                                        sb.append(b[0])
-                                                .append('\n')
-                                                .append(b[1])
-                                                .append('\n')
-                                                .append(zh);
-                                        if (bilingual) sb.append('\n').append(b[2]);
-                                        sb.append("\n\n");
-                                    }
-                                    // Append any remaining untranslated tail cues unchanged
-                                    try (OutputStream out = new FileOutputStream(targetFile)) {
-                                        out.write(sb.toString().getBytes("UTF-8"));
-                                    }
-                                    a.ui.post(
-                                            () -> {
-                                                if (a.player != null && a.prepared) {
-                                                    try {
-                                                        a.player.addExternalSubtitle(
-                                                                Uri.fromFile(targetFile),
-                                                                "AI 双语字幕",
-                                                                MediaOptions.subtitleMime(
-                                                                        targetFile.getName(), ""));
-                                                        a.toast("AI 双语字幕已实时生成并刷新");
-                                                    } catch (Exception ignored) {
-                                                    }
-                                                }
-                                            });
-                                } catch (Exception ignored) {
-                                }
-                            });
                 });
     }
 }
