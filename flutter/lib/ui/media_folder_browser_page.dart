@@ -1,10 +1,15 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 
+import '../core/ai_service.dart';
+import '../core/ai_title_cleaner.dart';
 import '../core/cms_client.dart';
 import '../core/models.dart';
+import '../core/ohos_runtime.dart';
 import '../core/personal_netdisk_library.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
@@ -41,6 +46,9 @@ class MediaFolderBrowserPage extends StatefulWidget {
 
 class _MediaFolderBrowserPageState extends State<MediaFolderBrowserPage> {
   final List<CmsVideo> _items = <CmsVideo>[];
+  final Map<String, CleanedMediaTitle> _aiCleanedByRaw =
+      <String, CleanedMediaTitle>{};
+  int _aiCleanEpoch = 0;
   bool _loading = true;
   bool _loadingMore = false;
   String? _error;
@@ -48,10 +56,75 @@ class _MediaFolderBrowserPageState extends State<MediaFolderBrowserPage> {
   int _page = 1;
   int _pageCount = 1;
 
+  bool get _isIosAiCleanupEligible =>
+      !kIsWeb &&
+      !OhosRuntime.isOhos &&
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      !widget.site.isEffectivelyPrivate;
+
   @override
   void initState() {
     super.initState();
+    AiService.instance.addListener(_onAiServiceChanged);
     unawaited(_loadPage(1, replace: true));
+  }
+
+  @override
+  void dispose() {
+    _aiCleanEpoch++;
+    AiService.instance.removeListener(_onAiServiceChanged);
+    super.dispose();
+  }
+
+  void _onAiServiceChanged() {
+    if (!mounted) return;
+    if (_isIosAiCleanupEligible &&
+        AiService.instance.isConfigured &&
+        AiService.instance.config.titleCleanupEnabled) {
+      unawaited(_enhanceTitlesInBackground(_items));
+    } else if (_aiCleanedByRaw.isNotEmpty) {
+      setState(() => _aiCleanedByRaw.clear());
+    }
+  }
+
+  Future<void> _enhanceTitlesInBackground(List<CmsVideo> candidates) async {
+    if (!_isIosAiCleanupEligible || candidates.isEmpty) return;
+    await AiService.instance.ensureLoaded();
+    if (!mounted ||
+        !AiService.instance.isConfigured ||
+        !AiService.instance.config.titleCleanupEnabled) {
+      return;
+    }
+    final rawNames = <String>[];
+    for (final v in candidates) {
+      final isFolder = v.tag == PersonalCloudLibrary.folderTag ||
+          v.id.startsWith('mmfolder://');
+      if (isFolder) continue;
+      final t = v.title.trim();
+      if (t.isNotEmpty && !_aiCleanedByRaw.containsKey(v.title)) {
+        rawNames.add(v.title);
+      }
+    }
+    if (rawNames.isEmpty) return;
+
+    final epoch = ++_aiCleanEpoch;
+    final cleaned = await AiTitleCleaner.instance.cleanBatch(
+      rawNames,
+      isPrivateSession: widget.site.isEffectivelyPrivate,
+    );
+    if (!mounted || epoch != _aiCleanEpoch) return;
+
+    var updated = false;
+    for (var i = 0; i < rawNames.length && i < cleaned.length; i++) {
+      final entry = cleaned[i];
+      if (entry.fromAi && entry.title.trim().isNotEmpty) {
+        _aiCleanedByRaw[rawNames[i]] = entry;
+        updated = true;
+      }
+    }
+    if (updated && mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _loadPage(int page, {required bool replace}) async {
@@ -83,6 +156,7 @@ class _MediaFolderBrowserPageState extends State<MediaFolderBrowserPage> {
         _error = null;
         _requiresReauth = false;
       });
+      unawaited(_enhanceTitlesInBackground(listing.videos));
     } on PersonalCloudException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -355,32 +429,93 @@ class _MediaFolderBrowserPageState extends State<MediaFolderBrowserPage> {
                   ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        item.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: palette.labelPrimary,
-                          fontSize: 14.5,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      if (item.remarks.isNotEmpty) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          item.remarks,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: palette.labelSecondary,
-                            fontSize: 12,
+                  child: Builder(
+                    builder: (ctx) {
+                      final aiCleaned = (!isFolder &&
+                              _isIosAiCleanupEligible &&
+                              AiService.instance.isConfigured &&
+                              AiService.instance.config.titleCleanupEnabled)
+                          ? _aiCleanedByRaw[item.title]
+                          : null;
+                      final displayTitle =
+                          aiCleaned != null ? aiCleaned.title : item.title;
+                      final epBadge = aiCleaned?.episodeBadge;
+                      final yearBadge =
+                          (aiCleaned != null && aiCleaned.year.isNotEmpty)
+                              ? aiCleaned.year
+                              : null;
+                      final subParts = <String>[
+                        if (item.remarks.isNotEmpty) item.remarks,
+                        if (aiCleaned != null && aiCleaned.title != item.title)
+                          item.title,
+                      ];
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            displayTitle,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: palette.labelPrimary,
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
-                        ),
-                      ],
-                    ],
+                          if (epBadge != null || yearBadge != null) ...[
+                            const SizedBox(height: 4),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: [
+                                if (epBadge != null)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6.5,
+                                      vertical: 1.5,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: AppleColors.systemIndigo
+                                          .withValues(alpha: 0.16),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Text(
+                                      epBadge,
+                                      style: const TextStyle(
+                                        color: AppleColors.systemIndigo,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                if (yearBadge != null)
+                                  Text(
+                                    yearBadge,
+                                    style: TextStyle(
+                                      color: palette.labelSecondary,
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
+                          if (subParts.isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              subParts.join(' · '),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: palette.labelSecondary,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ],
+                      );
+                    },
                   ),
                 ),
                 Icon(

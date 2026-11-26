@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui';
 
@@ -6,12 +7,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Colors, Material, MaterialType;
 import 'package:flutter/services.dart';
 
+import '../core/ai_service.dart';
 import '../core/cms_client.dart';
 import '../core/csp_bridge.dart';
 import '../core/models.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
 import 'desktop_horizontal_scroller.dart';
+import 'ios_ai_settings_page.dart';
 import 'ios_liquid_glass.dart';
 import 'motion/ios27_springs.dart';
 import 'poster_expand_route.dart';
@@ -50,6 +53,7 @@ class AggregatedSearchGroup {
   final String tag;
   final double? doubanScore;
   final int? rtScore;
+  final String aiReason;
   final List<SearchSourceMatch> matches;
 
   const AggregatedSearchGroup({
@@ -63,6 +67,7 @@ class AggregatedSearchGroup {
     required this.tag,
     required this.doubanScore,
     required this.rtScore,
+    this.aiReason = '',
     required this.matches,
   });
 
@@ -188,6 +193,7 @@ List<AggregatedSearchGroup> aggregateSearchResults({
   required String query,
   required String Function(CmsSite site) sourceLabelOf,
   String preferredSiteKey = '',
+  Map<String, String> aiReasonsByNormalizedKey = const <String, String>{},
 }) {
   if (results.isEmpty) return const <AggregatedSearchGroup>[];
 
@@ -301,8 +307,29 @@ List<AggregatedSearchGroup> aggregateSearchResults({
       }
     }
 
+    String resolvedAiReason = '';
+    int? aiOrderIndex;
+    if (aiReasonsByNormalizedKey.isNotEmpty) {
+      var idx = 0;
+      for (final entry in aiReasonsByNormalizedKey.entries) {
+        final cKey = entry.key;
+        if (cKey.isNotEmpty &&
+            (bucket.normalizedKey == cKey ||
+                (cKey.length >= 2 &&
+                    (bucket.normalizedKey.contains(cKey) ||
+                        cKey.contains(bucket.normalizedKey))))) {
+          resolvedAiReason = entry.value;
+          aiOrderIndex = idx;
+          break;
+        }
+        idx++;
+      }
+    }
+
     var tier = 3;
-    if (normQuery.isNotEmpty) {
+    if (aiOrderIndex != null) {
+      tier = 0;
+    } else if (normQuery.isNotEmpty) {
       if (bucket.normalizedKey == normQuery) {
         tier = 0;
       } else if (bucket.normalizedKey.startsWith(normQuery)) {
@@ -323,13 +350,22 @@ List<AggregatedSearchGroup> aggregateSearchResults({
       tag: bestTag,
       doubanScore: bestDouban,
       rtScore: bestRt,
+      aiReason: resolvedAiReason,
       matches: List<SearchSourceMatch>.unmodifiable(matches),
     );
-    scoredGroups.add((tier, matches.length, bucket.firstSeenIndex, group));
+    scoredGroups.add((
+      tier,
+      matches.length,
+      aiOrderIndex ?? (1000 + bucket.firstSeenIndex),
+      group,
+    ));
   }
 
   scoredGroups.sort((a, b) {
     if (a.$1 != b.$1) return a.$1.compareTo(b.$1);
+    if (aiReasonsByNormalizedKey.isNotEmpty && a.$3 < 1000 && b.$3 < 1000) {
+      if (a.$3 != b.$3) return a.$3.compareTo(b.$3);
+    }
     if (a.$2 != b.$2) return b.$2.compareTo(a.$2);
     return a.$3.compareTo(b.$3);
   });
@@ -693,11 +729,65 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
   /// `0` = 智能聚合 (Smart Aggregated Cinema Cards), `1` = 全部海报 (Poster Grid).
   int _viewMode = 0;
 
+  /// Natural-language BYO-API search state (iOS-only, disabled in Privacy Space).
+  bool _aiSearchMode = false;
+  bool _aiSearching = false;
+  bool _aiSearchPerformed = false;
+  String _aiSearchKeyword = '';
+  String _aiSiteFilterKey = '';
+  int _aiSearchEpoch = 0;
+  final List<(CmsSite, CmsVideo)> _aiResults = <(CmsSite, CmsVideo)>[];
+  final Set<String> _aiSeenResultKeys = <String>{};
+  final Map<String, String> _aiReasonsByNormKey = <String, String>{};
+  List<AiMovieCandidate> _aiCandidates = const <AiMovieCandidate>[];
+  String? _aiNoticeBanner;
+  bool _aiUnmatchedExpanded = false;
+  final List<StreamSubscription<(CmsSite, List<CmsVideo>)>> _aiSubscriptions =
+      <StreamSubscription<(CmsSite, List<CmsVideo>)>>[];
+
+  bool _canUseIosAiSearch(bool isPrivate) =>
+      isIosAiFeatureSupported && !isPrivate;
+
   @override
   void initState() {
     super.initState();
     widget.stateRevision.addListener(_onRevisionChanged);
     _searchFocusNode.addListener(_onSearchFocusChanged);
+    AiService.instance.addListener(_onAiConfigChanged);
+    unawaited(AiService.instance.ensureLoaded());
+  }
+
+  void _onAiConfigChanged() {
+    if (!mounted) return;
+    if (!AiService.instance.isConfigured ||
+        !AiService.instance.config.nlSearchEnabled) {
+      if (_aiSearchMode) {
+        _cancelAiSearchOnly();
+        _aiSearchMode = false;
+      }
+    }
+    setState(() {});
+  }
+
+  void _cancelAiSubscriptions() {
+    for (final sub in _aiSubscriptions) {
+      unawaited(sub.cancel());
+    }
+    _aiSubscriptions.clear();
+  }
+
+  void _cancelAiSearchOnly() {
+    _aiSearchEpoch++;
+    _cancelAiSubscriptions();
+    _aiSearching = false;
+    _aiSearchPerformed = false;
+    _aiSearchKeyword = '';
+    _aiSiteFilterKey = '';
+    _aiResults.clear();
+    _aiSeenResultKeys.clear();
+    _aiReasonsByNormKey.clear();
+    _aiCandidates = const <AiMovieCandidate>[];
+    _aiUnmatchedExpanded = false;
   }
 
   void _onSearchFocusChanged() {
@@ -722,6 +812,9 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
 
   @override
   void dispose() {
+    _aiSearchEpoch++;
+    _cancelAiSubscriptions();
+    AiService.instance.removeListener(_onAiConfigChanged);
     _searchFocusNode.removeListener(_onSearchFocusChanged);
     _searchFocusNode.dispose();
     widget.stateRevision.removeListener(_onRevisionChanged);
@@ -730,12 +823,219 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
     super.dispose();
   }
 
+  Future<void> _handleAiPillTap(bool isPrivate) async {
+    if (!_canUseIosAiSearch(isPrivate)) return;
+    HapticFeedback.selectionClick();
+    await AiService.instance.ensureLoaded();
+    if (!mounted) return;
+    if (!AiService.instance.isConfigured ||
+        !AiService.instance.config.nlSearchEnabled) {
+      await pushIosAiSettingsPage(context, backLabel: '全站搜索');
+      if (!mounted) return;
+      if (AiService.instance.isConfigured &&
+          AiService.instance.config.nlSearchEnabled) {
+        setState(() {
+          _aiSearchMode = true;
+          _aiNoticeBanner = null;
+        });
+      }
+      return;
+    }
+    setState(() {
+      _aiSearchMode = !_aiSearchMode;
+      _aiNoticeBanner = null;
+      if (!_aiSearchMode) {
+        _cancelAiSearchOnly();
+      }
+    });
+  }
+
+  Future<bool> _ensureFirstUseAiConsent() async {
+    if (AiService.instance.config.firstUseConsentAccepted) return true;
+    final accepted = await showCupertinoDialog<bool>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        key: const ValueKey('ios-ai-consent-dialog'),
+        title: const Text('启用 AI 自然语言找片'),
+        content: const Padding(
+          padding: EdgeInsets.only(top: 6),
+          child: Text(
+            '系统仅将您输入的找片描述发送至您自行配置的接口换取候选片名，随后在您已配置的自有片源中检索真实可播影片，不会上传播放地址或个人记录。',
+          ),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          CupertinoDialogAction(
+            key: const ValueKey('ios-ai-consent-accept-btn'),
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('同意并继续'),
+          ),
+        ],
+      ),
+    );
+    if (accepted == true) {
+      await AiService.instance.acceptFirstUseConsent();
+      return true;
+    }
+    return false;
+  }
+
   void _submitQuery(String raw) {
     final kw = raw.trim();
     if (kw.isEmpty) return;
     _expandedGroupKeys.clear();
+    final snap = widget.readSnapshot();
+    if (_aiSearchMode &&
+        _canUseIosAiSearch(snap.isPrivate) &&
+        AiService.instance.isConfigured &&
+        AiService.instance.config.nlSearchEnabled) {
+      unawaited(_runAiNaturalSearch(kw, snap));
+      return;
+    }
+    _cancelAiSearchOnly();
+    _aiNoticeBanner = null;
     widget.onSearch(kw);
     if (mounted) setState(() {});
+  }
+
+  Future<void> _runAiNaturalSearch(String kw, GlobalSearchSnapshot snap) async {
+    if (snap.isPrivate) {
+      _cancelAiSearchOnly();
+      _aiSearchMode = false;
+      widget.onSearch(kw);
+      return;
+    }
+    final okConsent = await _ensureFirstUseAiConsent();
+    if (!okConsent || !mounted) return;
+
+    _cancelAiSubscriptions();
+    final epoch = ++_aiSearchEpoch;
+    unawaited(widget.storage.addSearchKeyword(kw, forPrivate: false));
+
+    setState(() {
+      _aiSearching = true;
+      _aiSearchPerformed = true;
+      _aiSearchKeyword = kw;
+      _aiSiteFilterKey = '';
+      _aiResults.clear();
+      _aiSeenResultKeys.clear();
+      _aiReasonsByNormKey.clear();
+      _aiCandidates = const <AiMovieCandidate>[];
+      _aiNoticeBanner = null;
+      _aiUnmatchedExpanded = false;
+    });
+
+    List<AiMovieCandidate> candidates;
+    try {
+      candidates = await AiService.instance.suggestSearchCandidates(
+        kw,
+        isPrivateSession: snap.isPrivate,
+      );
+    } catch (error) {
+      if (!mounted || epoch != _aiSearchEpoch) return;
+      final detail = error is AiServiceException ? error.messageZh : 'AI 接口暂不可用';
+      setState(() {
+        _cancelAiSearchOnly();
+        _aiNoticeBanner = '$detail，已自动回退为关键词搜索';
+      });
+      widget.onSearch(kw);
+      return;
+    }
+
+    if (!mounted || epoch != _aiSearchEpoch) return;
+    if (candidates.isEmpty) {
+      setState(() {
+        _cancelAiSearchOnly();
+        _aiNoticeBanner = 'AI 未返回有效候选片名，已自动回退为关键词搜索';
+      });
+      widget.onSearch(kw);
+      return;
+    }
+
+    final candidateNormKeys = <String>[];
+    final reasonsMap = <String, String>{};
+    for (final c in candidates) {
+      final norm = normalizeSearchGroupTitle(c.title);
+      if (norm.isNotEmpty) {
+        candidateNormKeys.add(norm);
+        if (c.reason.isNotEmpty) {
+          reasonsMap.putIfAbsent(norm, () => c.reason);
+        }
+      }
+    }
+
+    setState(() {
+      _aiCandidates = candidates;
+      _aiReasonsByNormKey
+        ..clear()
+        ..addAll(reasonsMap);
+    });
+
+    final latestSnap = widget.readSnapshot();
+    final sites = latestSnap.visibleSupportedSites
+        .where((s) => s.supported && s.searchable && !s.isEffectivelyPrivate)
+        .toList(growable: false);
+    if (sites.isEmpty) {
+      if (mounted && epoch == _aiSearchEpoch) {
+        setState(() => _aiSearching = false);
+      }
+      return;
+    }
+
+    final completers = <Completer<void>>[];
+    for (final cand in candidates) {
+      final titleQuery = cand.title.trim();
+      if (titleQuery.isEmpty) continue;
+      final done = Completer<void>();
+      completers.add(done);
+      final sub = widget.client.searchAcrossSites(sites, titleQuery).listen(
+        (batch) {
+          if (!mounted || epoch != _aiSearchEpoch) return;
+          final (site, videos) = batch;
+          final siteKey = '${site.subscriptionId}:${site.key}';
+          var addedAny = false;
+          for (final video in videos) {
+            final vNorm = normalizeSearchGroupTitle(video.title);
+            if (vNorm.isEmpty) continue;
+            final matchesAnyCandidate = candidateNormKeys.any(
+              (cNorm) =>
+                  vNorm == cNorm ||
+                  (cNorm.length >= 2 &&
+                      (vNorm.contains(cNorm) ||
+                          (vNorm.length >= 2 && cNorm.contains(vNorm)))),
+            );
+            if (!matchesAnyCandidate) continue;
+            final dedupe =
+                '$siteKey::${video.id.isNotEmpty ? video.id : video.title.trim()}';
+            if (_aiSeenResultKeys.add(dedupe)) {
+              _aiResults.add((site, video));
+              addedAny = true;
+            }
+          }
+          if (addedAny && mounted) {
+            setState(() {});
+          }
+        },
+        onError: (_) {
+          if (!done.isCompleted) done.complete();
+        },
+        onDone: () {
+          if (!done.isCompleted) done.complete();
+        },
+      );
+      _aiSubscriptions.add(sub);
+    }
+
+    await Future.wait(completers.map((c) => c.future));
+    if (!mounted || epoch != _aiSearchEpoch) return;
+    _cancelAiSubscriptions();
+    setState(() {
+      _aiSearching = false;
+    });
   }
 
   void _handleClearHistory(bool isPrivate) {
@@ -790,15 +1090,26 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
     final accentColor =
         isPriv ? const Color(0xFFA78BFA) : AppleColors.systemBlue;
 
+    final usingAiResults = !isPriv &&
+        _aiSearchMode &&
+        (_aiSearching || _aiSearchPerformed);
+    final rawResults = usingAiResults ? _aiResults : snap.results;
+    final effectiveSearching = usingAiResults ? _aiSearching : snap.searching;
+    final effectiveSearchPerformed =
+        usingAiResults ? _aiSearchPerformed : snap.searchPerformed;
+    final effectiveKeyword =
+        usingAiResults ? _aiSearchKeyword : snap.searchKeyword;
+
     // Tally hits per source for the horizontal filter strip.
     final siteCounts = <String, int>{};
     final siteByKey = <String, CmsSite>{};
-    for (final (site, _) in snap.results) {
+    for (final (site, _) in rawResults) {
       final k = '${site.subscriptionId}:${site.key}';
       siteByKey[k] = site;
       siteCounts[k] = (siteCounts[k] ?? 0) + 1;
     }
-    var activeSiteFilterKey = snap.siteFilterKey;
+    var activeSiteFilterKey =
+        usingAiResults ? _aiSiteFilterKey : snap.siteFilterKey;
     if (activeSiteFilterKey.isNotEmpty &&
         !siteByKey.containsKey(activeSiteFilterKey)) {
       final matchInSupported = snap.visibleSupportedSites
@@ -820,8 +1131,8 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
       });
 
     final filteredResults = activeSiteFilterKey.isEmpty
-        ? snap.results
-        : snap.results
+        ? rawResults
+        : rawResults
             .where(
               (r) => '${r.$1.subscriptionId}:${r.$1.key}' == activeSiteFilterKey,
             )
@@ -832,14 +1143,36 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
         : '${snap.activeSite!.subscriptionId}:${snap.activeSite!.key}';
     final aggregatedGroups = aggregateSearchResults(
       results: filteredResults,
-      query: snap.searchKeyword,
+      query: effectiveKeyword,
       sourceLabelOf: widget.sourceLabelOf,
       preferredSiteKey: preferredSiteKey,
+      aiReasonsByNormalizedKey:
+          usingAiResults ? _aiReasonsByNormKey : const <String, String>{},
     );
 
-    final showZeroState =
-        !snap.searchPerformed && snap.results.isEmpty && !snap.searching;
-    final showResultsToolbar = snap.searchPerformed && snap.results.isNotEmpty;
+    final unmatchedAiCandidates = <AiMovieCandidate>[];
+    if (usingAiResults && _aiCandidates.isNotEmpty) {
+      for (final cand in _aiCandidates) {
+        final cNorm = normalizeSearchGroupTitle(cand.title);
+        if (cNorm.isEmpty) continue;
+        final hitInAllResults = rawResults.any((pair) {
+          final vNorm = normalizeSearchGroupTitle(pair.$2.title);
+          return vNorm == cNorm ||
+              (cNorm.length >= 2 &&
+                  (vNorm.contains(cNorm) ||
+                      (vNorm.length >= 2 && cNorm.contains(vNorm))));
+        });
+        if (!hitInAllResults) {
+          unmatchedAiCandidates.add(cand);
+        }
+      }
+    }
+
+    final showZeroState = !effectiveSearchPerformed &&
+        rawResults.isEmpty &&
+        !effectiveSearching;
+    final showResultsToolbar =
+        effectiveSearchPerformed && rawResults.isNotEmpty;
 
     final double barHeight = compactLandscape ? 46.0 : 54.0;
     final double barBottomGap = viewInsetsBottom > 0
@@ -915,6 +1248,10 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                     _buildTopHeader(
                       context: context,
                       snap: snap,
+                      usingAiResults: usingAiResults,
+                      effectiveSearching: effectiveSearching,
+                      effectiveSearchPerformed: effectiveSearchPerformed,
+                      totalResultCount: rawResults.length,
                       isPriv: isPriv,
                       compactLandscape: compactLandscape,
                       safeTop: safePadding.top,
@@ -925,13 +1262,63 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                       accentColor: accentColor,
                     ),
 
-                    if (snap.searching)
+                    if (_aiNoticeBanner != null && !isPriv)
+                      Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          16,
+                          0,
+                          16,
+                          compactLandscape ? 5 : 8,
+                        ),
+                        child: Container(
+                          key: const ValueKey('ios-ai-search-fallback-notice'),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 11,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppleColors.systemOrange.withValues(
+                              alpha: isDarkSearch ? 0.16 : 0.11,
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: AppleColors.systemOrange.withValues(
+                                alpha: 0.34,
+                              ),
+                              width: 0.6,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                CupertinoIcons.info_circle_fill,
+                                size: 14,
+                                color: AppleColors.systemOrange,
+                              ),
+                              const SizedBox(width: 7),
+                              Expanded(
+                                child: Text(
+                                  _aiNoticeBanner!,
+                                  style: TextStyle(
+                                    color: searchPalette.labelPrimary,
+                                    fontSize: 12,
+                                    height: 1.35,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                    if (effectiveSearching)
                       _buildSearchingBar(accentColor: accentColor),
 
                     if (showResultsToolbar)
                       _buildResultsToolbar(
                         context: context,
-                        snap: snap,
+                        usingAiResults: usingAiResults,
+                        totalResultCount: rawResults.length,
                         compactLandscape: compactLandscape,
                         activeSiteFilterKey: activeSiteFilterKey,
                         hitSiteEntries: hitSiteEntries,
@@ -939,7 +1326,7 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                         accentColor: accentColor,
                       ),
 
-                    if (snap.notices.isNotEmpty)
+                    if (!usingAiResults && snap.notices.isNotEmpty)
                       _buildSourceNoticesBox(
                         snap: snap,
                         compactLandscape: compactLandscape,
@@ -958,19 +1345,25 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                               accentColor: accentColor,
                               bottomPadding: contentBottomReserve,
                             )
-                          : (filteredResults.isEmpty && snap.searching)
+                          : (filteredResults.isEmpty && effectiveSearching)
                               ? _buildSearchingSkeleton(
                                   bottomPadding: contentBottomReserve,
                                 )
                               : filteredResults.isEmpty
                                   ? _buildEmptyState(
                                       snap: snap,
+                                      usingAiResults: usingAiResults,
+                                      totalResultCount: rawResults.length,
+                                      unmatchedAiCandidates:
+                                          unmatchedAiCandidates,
                                       activeSiteFilterKey: activeSiteFilterKey,
                                       bottomPadding: contentBottomReserve,
                                     )
                                   : _viewMode == 0
                                       ? _buildAggregatedList(
                                           groups: aggregatedGroups,
+                                          unmatchedAiCandidates:
+                                              unmatchedAiCandidates,
                                           isPriv: isPriv,
                                           accentColor: accentColor,
                                           bottomPadding: contentBottomReserve,
@@ -1057,6 +1450,10 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
   Widget _buildTopHeader({
     required BuildContext context,
     required GlobalSearchSnapshot snap,
+    required bool usingAiResults,
+    required bool effectiveSearching,
+    required bool effectiveSearchPerformed,
+    required int totalResultCount,
     required bool isPriv,
     required bool compactLandscape,
     required double safeTop,
@@ -1067,19 +1464,34 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
     required Color accentColor,
   }) {
     final String subtitle;
-    if (snap.searching) {
-      subtitle = snap.results.isEmpty
+    if (usingAiResults && effectiveSearching) {
+      subtitle = totalResultCount == 0
+          ? 'AI 正在理解找片意图并匹配 $availableSiteCount 个自有片源…'
+          : 'AI 找片检索中 · 已命中 $aggregatedCount 部可播影片';
+    } else if (usingAiResults && effectiveSearchPerformed) {
+      subtitle = totalResultCount > 0
+          ? 'AI 推荐命中 $aggregatedCount 部可播影片 · 来自 $hitSourceCount 个自有片源'
+          : 'AI 已生成推荐，当前自有片源暂无可播命中';
+    } else if (effectiveSearching) {
+      subtitle = totalResultCount == 0
           ? '正在并发检索 $availableSiteCount 个片源…'
-          : '检索中 · 已找到 ${snap.results.length} 条结果 ($hitSourceCount 个片源)';
-    } else if (snap.searchPerformed && snap.results.isNotEmpty) {
+          : '检索中 · 已找到 $totalResultCount 条结果 ($hitSourceCount 个片源)';
+    } else if (effectiveSearchPerformed && totalResultCount > 0) {
       subtitle = _viewMode == 0
           ? '聚合 $aggregatedCount 部影片 · 来自 $hitSourceCount 个片源'
-          : '共 ${snap.results.length} 条结果 · 来自 $hitSourceCount 个片源';
-    } else if (snap.searchPerformed) {
+          : '共 $totalResultCount 条结果 · 来自 $hitSourceCount 个片源';
+    } else if (effectiveSearchPerformed) {
       subtitle = '已完成 $availableSiteCount 个片源检索';
+    } else if (_aiSearchMode && !isPriv) {
+      subtitle = 'AI 找片已开启 · 输入氛围或题材，仅展示自有片源可播结果';
     } else {
       subtitle = '并发检索 $availableSiteCount 个可用片源';
     }
+
+    final showAiPill = _canUseIosAiSearch(isPriv);
+    final aiConfigured = AiService.instance.isConfigured &&
+        AiService.instance.config.nlSearchEnabled;
+    final aiPillActive = showAiPill && aiConfigured && _aiSearchMode;
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
@@ -1166,7 +1578,14 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                       SizedBox(height: 3),
                       Row(
                         children: [
-                          if (snap.searching) ...[
+                          if (usingAiResults && effectiveSearching) ...[
+                            Icon(
+                              CupertinoIcons.sparkles,
+                              size: 13,
+                              color: AppleColors.systemIndigo,
+                            ),
+                            SizedBox(width: 5),
+                          ] else if (snap.searching) ...[
                             const CupertinoActivityIndicator(radius: 6.5),
                             SizedBox(width: 6),
                           ],
@@ -1187,6 +1606,76 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                     ],
                   ),
           ),
+          if (showAiPill) ...[
+            Builder(
+              builder: (pillCtx) {
+                final pp = ApplePalette.of(pillCtx);
+                return Ios27Pressable(
+                  pressedScale: Ios27Spring.pressSwellScale,
+                  borderRadius: 999,
+                  onTap: () => _handleAiPillTap(isPriv),
+                  child: Container(
+                    key: const ValueKey('ios-search-ai-pill'),
+                    padding: EdgeInsets.symmetric(
+                      horizontal: compactLandscape ? 9 : 11,
+                      vertical: compactLandscape ? 4 : 6,
+                    ),
+                    decoration: BoxDecoration(
+                      gradient: aiPillActive
+                          ? const LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [
+                                AppleColors.systemIndigo,
+                                AppleColors.systemBlue,
+                              ],
+                            )
+                          : null,
+                      color: aiPillActive
+                          ? null
+                          : (pp.isDark
+                              ? const Color(0x42262634)
+                              : Colors.white.withValues(alpha: 0.90)),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: aiPillActive
+                            ? const Color(0x88FFFFFF)
+                            : (pp.isDark
+                                ? const Color(0x30FFFFFF)
+                                : Colors.black.withValues(alpha: 0.08)),
+                        width: 0.65,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          CupertinoIcons.sparkles,
+                          size: 12.5,
+                          color: aiPillActive
+                              ? Colors.white
+                              : AppleColors.systemIndigo,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'AI 找片',
+                          style: TextStyle(
+                            color:
+                                aiPillActive ? Colors.white : pp.labelPrimary,
+                            fontSize: 12,
+                            fontWeight: aiPillActive
+                                ? FontWeight.w700
+                                : FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+            if (historyNotEmpty) const SizedBox(width: 7),
+          ],
           if (historyNotEmpty)
             Builder(
               builder: (btnCtx) {
@@ -1252,7 +1741,8 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
 
   Widget _buildResultsToolbar({
     required BuildContext context,
-    required GlobalSearchSnapshot snap,
+    required bool usingAiResults,
+    required int totalResultCount,
     required bool compactLandscape,
     required String activeSiteFilterKey,
     required List<MapEntry<String, CmsSite>> hitSiteEntries,
@@ -1305,7 +1795,7 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                       final key = isAll ? '' : hitSiteEntries[idx - 1].key;
                       final site = isAll ? null : hitSiteEntries[idx - 1].value;
                       final count = isAll
-                          ? snap.results.length
+                          ? totalResultCount
                           : (siteCounts[key] ?? 0);
                       final selected = activeSiteFilterKey == key;
                       final titleText =
@@ -1316,8 +1806,12 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                         onTap: () {
                           HapticFeedback.selectionClick();
                           final nextKey = (selected && !isAll) ? '' : key;
-                          widget.onSiteFilterChanged(nextKey);
-                          if (mounted) setState(() {});
+                          if (usingAiResults) {
+                            setState(() => _aiSiteFilterKey = nextKey);
+                          } else {
+                            widget.onSiteFilterChanged(nextKey);
+                            if (mounted) setState(() {});
+                          }
                         },
                         child: AnimatedContainer(
                           duration: Ios27ConcentricGeometry.isReduceMotion(ctx)
@@ -1916,20 +2410,118 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
     );
   }
 
+  Widget _buildUnmatchedAiCandidatesFooter(
+    List<AiMovieCandidate> unmatched,
+  ) {
+    final p = ApplePalette.of(context);
+    final previewTitles =
+        unmatched.map((c) => c.title).take(4).join('、') +
+        (unmatched.length > 4 ? '…' : '');
+    return GestureDetector(
+      key: const ValueKey('ios-ai-unmatched-footer'),
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _aiUnmatchedExpanded = !_aiUnmatchedExpanded),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
+        decoration: BoxDecoration(
+          color: p.isDark
+              ? const Color(0x521C1C24)
+              : Colors.white.withValues(alpha: 0.86),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: p.isDark
+                ? const Color(0x22FFFFFF)
+                : Colors.black.withValues(alpha: 0.07),
+            width: 0.6,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  CupertinoIcons.sparkles,
+                  size: 13,
+                  color: p.labelSecondary,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '另有 ${unmatched.length} 部推荐未在当前片源命中：$previewTitles',
+                    maxLines: _aiUnmatchedExpanded ? 3 : 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: p.labelSecondary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Icon(
+                  _aiUnmatchedExpanded
+                      ? CupertinoIcons.chevron_up
+                      : CupertinoIcons.chevron_down,
+                  size: 12,
+                  color: p.labelTertiary,
+                ),
+              ],
+            ),
+            if (_aiUnmatchedExpanded) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final c in unmatched)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8.5,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: p.isDark
+                            ? const Color(0x382A2A34)
+                            : const Color(0x10000000),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        c.year.isNotEmpty ? '${c.title} (${c.year})' : c.title,
+                        style: TextStyle(
+                          color: p.labelSecondary,
+                          fontSize: 11.5,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildEmptyState({
     required GlobalSearchSnapshot snap,
+    required bool usingAiResults,
+    required int totalResultCount,
+    required List<AiMovieCandidate> unmatchedAiCandidates,
     required String activeSiteFilterKey,
     required double bottomPadding,
   }) {
     final bool hasUnfilteredHits =
-        activeSiteFilterKey.isNotEmpty && snap.results.isNotEmpty;
-    final String message = !snap.searchPerformed
+        activeSiteFilterKey.isNotEmpty && totalResultCount > 0;
+    final String message = !snap.searchPerformed && !usingAiResults
         ? '输入关键词，并发检索全部已启用片源'
         : hasUnfilteredHits
             ? '当前所选线路暂无匹配影片'
-            : snap.notices.isEmpty
-                ? '没有找到匹配影片'
-                : '本次搜索未返回影片，请查看上方片源提示';
+            : usingAiResults
+                ? '当前已启用的自有片源中暂未命中这些推荐影片'
+                : snap.notices.isEmpty
+                    ? '没有找到匹配影片'
+                    : '本次搜索未返回影片，请查看上方片源提示';
 
     return Center(
       child: SingleChildScrollView(
@@ -1939,7 +2531,7 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              CupertinoIcons.search,
+              usingAiResults ? CupertinoIcons.sparkles : CupertinoIcons.search,
               color: ApplePalette.of(context).labelTertiary,
               size: 40,
             ),
@@ -1955,13 +2547,21 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
             if (hasUnfilteredHits) ...[
               const SizedBox(height: 12),
               AppleCapsuleButton(
-                label: '查看全部线路 (${snap.results.length})',
+                label: '查看全部线路 ($totalResultCount)',
                 compact: true,
                 onPressed: () {
-                  widget.onSiteFilterChanged('');
-                  if (mounted) setState(() {});
+                  if (usingAiResults) {
+                    setState(() => _aiSiteFilterKey = '');
+                  } else {
+                    widget.onSiteFilterChanged('');
+                    if (mounted) setState(() {});
+                  }
                 },
               ),
+            ],
+            if (usingAiResults && unmatchedAiCandidates.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              _buildUnmatchedAiCandidatesFooter(unmatchedAiCandidates),
             ],
           ],
         ),
@@ -1971,19 +2571,26 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
 
   Widget _buildAggregatedList({
     required List<AggregatedSearchGroup> groups,
+    required List<AiMovieCandidate> unmatchedAiCandidates,
     required bool isPriv,
     required Color accentColor,
     required double bottomPadding,
   }) {
+    final hasUnmatchedFooter =
+        !_aiSearching && unmatchedAiCandidates.isNotEmpty;
+    final totalCount = groups.length + (hasUnmatchedFooter ? 1 : 0);
     return ListView.separated(
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       physics: const BouncingScrollPhysics(
         parent: AlwaysScrollableScrollPhysics(),
       ),
       padding: EdgeInsets.fromLTRB(16, 4, 16, bottomPadding),
-      itemCount: groups.length,
+      itemCount: totalCount,
       separatorBuilder: (_, __) => const SizedBox(height: 12),
       itemBuilder: (ctx, index) {
+        if (index >= groups.length) {
+          return _buildUnmatchedAiCandidatesFooter(unmatchedAiCandidates);
+        }
         final group = groups[index];
         final expanded = _expandedGroupKeys.contains(group.normalizedKey);
         return _AggregatedSearchCard(
@@ -2135,9 +2742,13 @@ class _IosGlobalSearchPageState extends State<IosGlobalSearchPage> {
                     focusNode: _searchFocusNode,
                     autofocus: true,
                     borderless: true,
-                    placeholder: '搜索片名、演员或导演…',
+                    placeholder: _aiSearchMode
+                        ? '描述想看的题材、氛围或情节（AI 找片）…'
+                        : '搜索片名、演员或导演…',
                     onSuffixTap: () {
                       widget.controller.clear();
+                      _cancelAiSearchOnly();
+                      _aiNoticeBanner = null;
                       widget.onResetSearch();
                       if (mounted) setState(() {});
                     },
@@ -2374,6 +2985,54 @@ class _AggregatedSearchCard extends StatelessWidget {
                               style: TextStyle(
                                 color: cardPalette.labelTertiary,
                                 fontSize: 12,
+                              ),
+                            ),
+                          ],
+                          if (group.aiReason.isNotEmpty) ...[
+                            const SizedBox(height: 6),
+                            Container(
+                              key: ValueKey('ai-reason-${group.normalizedKey}'),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 4.5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppleColors.systemIndigo.withValues(
+                                  alpha: isDarkCard ? 0.20 : 0.10,
+                                ),
+                                borderRadius: BorderRadius.circular(9),
+                                border: Border.all(
+                                  color: AppleColors.systemIndigo.withValues(
+                                    alpha: isDarkCard ? 0.36 : 0.22,
+                                  ),
+                                  width: 0.55,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    CupertinoIcons.sparkles,
+                                    size: 11.5,
+                                    color: AppleColors.systemIndigo,
+                                  ),
+                                  const SizedBox(width: 4.5),
+                                  Flexible(
+                                    child: Text(
+                                      group.aiReason,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: isDarkCard
+                                            ? const Color(0xFFD6D4FF)
+                                            : AppleColors.systemIndigo,
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w600,
+                                        height: 1.25,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
