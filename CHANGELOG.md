@@ -1,3 +1,8 @@
+## 2026-11-27 Windows x64 0.7.4 AI 实验室跨端统一 Ed25519 口令协议对齐升级（Windows 0.7.4）
+
+- [Windows 0.7.4](docs/releases/windows-v0.7.4.md)
+- **三端统一 `MMAILAB1` Ed25519 离线口令协议对齐**：与 Android 移动端、iOS 完全对齐同一套公钥与跨端载荷规范，补齐 `shared`、`exp_oauth`、`min_vc` 与随机 `n` nonce 字段解析（并在 Windows AI 实验室状态条展示），升级 `matchesPlatform` 支持多平台逗号/分号组合列表（如 `windows,ios`、`android,windows`）及跨端别名归一化（`android-mobile`/`mobile`、`win`/`pc`、`iphone`/`ipad`），将 `AiLabPasscodeStore` 改为动态识别运行平台并保留既有解锁记录无缝兼容；同步升级 `scripts/sign_manifest.py` 支持 `--plat` / `--shared` / `--exp-oauth` / `--min-vc`。
+
 ## 2026-11-26 Windows x64 0.7.3 更新后捐赠与防骗提示、「继续观看」竖屏海报墙及 Ed25519 离线口令门禁「AI 实验室」（Windows 0.7.3）
 
 - [Windows 0.7.3](docs/releases/windows-v0.7.3.md)
