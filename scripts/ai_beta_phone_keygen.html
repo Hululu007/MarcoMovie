@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Marco Movie · 作者离线发码器</title>
+<title>Marco Movie · 三端统一离线发码器 (Ed25519)</title>
 <style>
 :root{--bg:#0a0b0e;--card:#15171e;--sub:#20232d;--fg:#f3f5f9;--muted:#949ba8;--accent:#007aff;--ok:#10b981;--warn:#f59e0b;--danger:#ff453a;--r:16px}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -28,7 +28,6 @@ textarea{resize:vertical;min-height:74px;font-family:ui-monospace,SFMono-Regular
 .pill.on{background:rgba(0,122,255,.22);color:#60a5fa}
 .btn{display:inline-flex;align-items:center;justify-content:center;width:100%;padding:12px 14px;border-radius:12px;border:none;font-size:14px;font-weight:700;cursor:pointer;background:var(--accent);color:#fff}
 .btn.sec{background:var(--sub);color:var(--fg)}
-.btn.danger{background:rgba(255,69,58,.18);color:var(--danger)}
 .btn.sm{width:auto;padding:7px 12px;font-size:12px;border-radius:10px}
 .code-box{background:#0e1016;border-radius:12px;padding:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all;margin:8px 0;color:#d8e7ff}
 .item{background:var(--sub);border-radius:12px;padding:11px 12px;margin-top:8px}
@@ -49,8 +48,8 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
   </header>
 
   <section id="vaultCard" class="card">
-    <h2>作者签名密钥库 <button id="lockBtn" class="btn sm sec hidden" onclick="lockVault()">锁定</button></h2>
-    <p id="vaultHint" class="hint">纯离线运行（零联网、零外泄）。三端统一口令：Android 移动端 · iOS · Windows 通用同一把 P-256 密钥。</p>
+    <h2>Ed25519 签名密钥库 <button id="lockBtn" class="btn sm sec hidden" onclick="lockVault()">锁定</button></h2>
+    <p id="vaultHint" class="hint">纯离线运行（零联网）。签发 MMAILAB1 统一口令：Android 移动端 · iOS · Windows 三端共用同一把 Ed25519 密钥。</p>
 
     <div id="unlockPane">
       <label class="lbl">输入主密码解锁</label>
@@ -61,10 +60,10 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
     </div>
 
     <div id="importPane" style="margin-top:12px">
-      <label class="lbl">首次导入密钥（支持电脑端导出的 ai_beta_mobile_vault.json 或 ai_beta_signing.key）</label>
-      <input id="vaultFile" type="file" accept=".json,.key,application/json,text/plain" onchange="handleImportFile(event)">
+      <label class="lbl">首次导入密钥（支持 ai_lab_mobile_vault.json 或原始 64 位 hex 私钥 ai-lab-ed25519.key）</label>
+      <input id="vaultFile" type="file" accept=".json,.key,.txt,application/json,text/plain" onchange="handleImportFile(event)">
       <div id="rawPwdBox" class="hidden" style="margin-top:8px">
-        <label class="lbl">为导入的原始私钥设置本机加密主密码（至少 6 位）</label>
+        <label class="lbl">为导入的 Ed25519 私钥设置本机加密主密码（至少 6 位）</label>
         <div class="row">
           <input id="newVaultPwd" type="password" placeholder="设置主密码">
           <button class="btn" style="flex:0 0 108px" onclick="finishRawImport()">加密保存</button>
@@ -74,7 +73,7 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
   </section>
 
   <section id="issueCard" class="card hidden">
-    <h2>签发统一内测口令</h2>
+    <h2>签发统一内测口令 (MMAILAB1)</h2>
     <label class="lbl">适用平台（全选或留空 = 三端通用）</label>
     <div class="pills" id="platPills">
       <button type="button" class="pill on" data-p="all" onclick="pickPlat('all')">三端通用</button>
@@ -93,8 +92,8 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
 
     <div class="row" style="margin-top:8px">
       <div>
-        <label class="lbl">批次号 Batch</label>
-        <input id="batchIn" type="number" min="1" max="65535" value="1">
+        <label class="lbl">标签 / 批次 Tag</label>
+        <input id="tagIn" type="text" value="channel-01" placeholder="如：channel-01">
       </div>
       <div>
         <label class="lbl">有效天数（0=永久）</label>
@@ -112,8 +111,8 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
         <input id="minVcIn" type="number" min="0" max="65535" value="0">
       </div>
       <div>
-        <label class="lbl">发放备注（仅记录在本机台账）</label>
-        <input id="noteIn" type="text" placeholder="如：腾讯频道第 1 批">
+        <label class="lbl">发放备注（仅存本机台账）</label>
+        <input id="noteIn" type="text" placeholder="如：腾讯频道第一批">
       </div>
     </div>
 
@@ -140,7 +139,7 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
 
   <section class="card">
     <h2>离线验签与口令解析</h2>
-    <textarea id="verifyIn" placeholder="粘贴 MM-AI1-... 口令离线检验真伪、平台、批次与有效期"></textarea>
+    <textarea id="verifyIn" placeholder="粘贴 MMAILAB1.… 口令离线检验 Ed25519 真伪、适用平台与有效期"></textarea>
     <button class="btn sec" style="margin-top:8px" onclick="verifyInputCode()">立即离线验证</button>
     <div id="verifyOut" class="code-box hidden"></div>
   </section>
@@ -153,22 +152,15 @@ input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
 <div id="toast" class="toast"></div>
 
 <script>
-// Pure-JS BigInt NIST P-256 ECDSA + RFC 6979 + SHA-256 + PBKDF2-HMAC-SHA256 Vault
-// Works 100% offline in file://, content://, iOS Safari, Android Chrome, and Node.js!
-const MarcoCrypto = (() => {
-  const P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffffn;
-  const A = P - 3n;
-  const B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604bn;
-  const N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
-  const GX = 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296n;
-  const GY = 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5n;
-  const G = [GX, GY];
-  const DOMAIN_SEP = new TextEncoder().encode("MARCO-AI-BETA-V1:");
-  const TOKEN_PREFIX = "MM-AI1-";
-  const DEFAULT_PUB_HEX = "0456317d317a40913428b964ef557207cac459d89c37a2c9377c84caa5e94a7a8fb0c80cb3ac36b149d50de0c6a5324cca2afe33c95224a52ddb05e541d176eaf1";
-  const EPOCH_2026_UTC_MS = Date.UTC(2026, 0, 1);
+// Pure-JS BigInt RFC 8032 Ed25519 + SHA-512 + SHA-256 + PBKDF2-HMAC-SHA256 Encrypted Vault
+// 100% offline compatible with file://, content://, iOS Safari, Android Chrome, and Node.js!
+const MarcoEd25519 = (() => {
+  const TOKEN_PREFIX = "MMAILAB1.";
+  const SIGN_DOMAIN = new TextEncoder().encode("marco-ai-lab-v1:");
+  const DEFAULT_PUB_HEX = "1dbeaed851b873d7c327d30d718fca0ac1509ef5ac4061b9bd1aa90c841c6929";
 
-  const K = new Uint32Array([
+  // --- SHA-256 (for PBKDF2 & encrypted local vault) ---
+  const K256 = new Uint32Array([
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
     0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
@@ -178,14 +170,11 @@ const MarcoCrypto = (() => {
     0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
     0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
   ]);
-
   function sha256(bytes) {
-    const len = bytes.length;
-    const bitLen = len * 8;
+    const len = bytes.length, bitLen = len * 8;
     const total = Math.ceil((len + 9) / 64) * 64;
     const buf = new Uint8Array(total);
-    buf.set(bytes);
-    buf[len] = 0x80;
+    buf.set(bytes); buf[len] = 0x80;
     const dv = new DataView(buf.buffer);
     dv.setUint32(total - 8, Math.floor(bitLen / 0x100000000), false);
     dv.setUint32(total - 4, bitLen >>> 0, false);
@@ -202,7 +191,7 @@ const MarcoCrypto = (() => {
       for (let i = 0; i < 64; i++) {
         const S1 = ((e>>>6)|(e<<26)) ^ ((e>>>11)|(e<<21)) ^ ((e>>>25)|(e<<7));
         const ch = (e & f) ^ (~e & g);
-        const t1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+        const t1 = (h + S1 + ch + K256[i] + w[i]) >>> 0;
         const S0 = ((a>>>2)|(a<<30)) ^ ((a>>>13)|(a<<19)) ^ ((a>>>22)|(a<<10));
         const maj = (a & b) ^ (a & c) ^ (b & c);
         const t2 = (S0 + maj) >>> 0;
@@ -211,20 +200,85 @@ const MarcoCrypto = (() => {
       h0=(h0+a)>>>0; h1=(h1+b)>>>0; h2=(h2+c)>>>0; h3=(h3+d)>>>0;
       h4=(h4+e)>>>0; h5=(h5+f)>>>0; h6=(h6+g)>>>0; h7=(h7+h)>>>0;
     }
-    const out = new Uint8Array(32);
-    const odv = new DataView(out.buffer);
+    const out = new Uint8Array(32), odv = new DataView(out.buffer);
     [h0,h1,h2,h3,h4,h5,h6,h7].forEach((v,i)=>odv.setUint32(i*4,v,false));
     return out;
   }
 
+  // --- SHA-512 (for RFC 8032 Ed25519) ---
+  const M64 = (1n << 64n) - 1n;
+  const K512 = [
+    0x428a2f98d728ae22n,0x7137449123ef65cdn,0xb5c0fbcfec4d3b2fn,0xe9b5dba58189dbbcn,
+    0x3956c25bf348b538n,0x59f111f1b605d019n,0x923f82a4af194f9bn,0xab1c5ed5da6d8118n,
+    0xd807aa98a3030242n,0x12835b0145706fben,0x243185be4ee4b28cn,0x550c7dc3d5ffb4e2n,
+    0x72be5d74f27b896fn,0x80deb1fe3b1696b1n,0x9bdc06a725c71235n,0xc19bf174cf692694n,
+    0xe49b69c19ef14ad2n,0xefbe4786384f25e3n,0x0fc19dc68b8cd5b5n,0x240ca1cc77ac9c65n,
+    0x2de92c6f592b0275n,0x4a7484aa6ea6e483n,0x5cb0a9dcbd41fbd4n,0x76f988da831153b5n,
+    0x983e5152ee66dfabn,0xa831c66d2db43210n,0xb00327c898fb213fn,0xbf597fc7beef0ee4n,
+    0xc6e00bf33da88fc2n,0xd5a79147930aa725n,0x06ca6351e003826fn,0x142929670a0e6e70n,
+    0x27b70a8546d22ffcn,0x2e1b21385c26c926n,0x4d2c6dfc5ac42aedn,0x53380d139d95b3dfn,
+    0x650a73548baf63den,0x766a0abb3c77b2a8n,0x81c2c92e47edaee6n,0x92722c851482353bn,
+    0xa2bfe8a14cf10364n,0xa81a664bbc423001n,0xc24b8b70d0f89791n,0xc76c51a30654be30n,
+    0xd192e819d6ef5218n,0xd69906245565a910n,0xf40e35855771202an,0x106aa07032bbd1b8n,
+    0x19a4c116b8d2d0c8n,0x1e376c085141ab53n,0x2748774cdf8eeb99n,0x34b0bcb5e19b48a8n,
+    0x391c0cb3c5c95a63n,0x4ed8aa4ae3418acbn,0x5b9cca4f7763e373n,0x682e6ff3d6b2b8a3n,
+    0x748f82ee5defb2fcn,0x78a5636f43172f60n,0x84c87814a1f0ab72n,0x8cc702081a6439ecn,
+    0x90befffa23631e28n,0xa4506cebde82bde9n,0xbef9a3f7b2c67915n,0xc67178f2e372532bn,
+    0xca273eceea26619cn,0xd186b8c721c0c207n,0xeada7dd6cde0eb1en,0xf57d4f7fee6ed178n,
+    0x06f067aa72176fban,0x0a637dc5a2c898a6n,0x113f9804bef90daen,0x1b710b35131c471bn,
+    0x28db77f523047d84n,0x32caab7b40c72493n,0x3c9ebe0a15c9bebcn,0x431d67c49c100d4cn,
+    0x4cc5d4becb3e42b6n,0x597f299cfc657e2an,0x5fcb6fab3ad6faecn,0x6c44198c4a475817n
+  ];
+  const rotr64 = (x, n) => ((x >> n) | ((x << (64n - n)) & M64)) & M64;
+  function sha512(bytes) {
+    const len = bytes.length, bitLen = BigInt(len) * 8n;
+    const total = Math.ceil((len + 17) / 128) * 128;
+    const buf = new Uint8Array(total);
+    buf.set(bytes); buf[len] = 0x80;
+    let tmp = bitLen;
+    for (let i = 0; i < 16; i++) { buf[total - 1 - i] = Number(tmp & 0xffn); tmp >>= 8n; }
+    let H = [
+      0x6a09e667f3bcc908n,0xbb67ae8584caa73bn,0x3c6ef372fe94f82bn,0xa54ff53a5f1d36f1n,
+      0x510e527fade682d1n,0x9b05688c2b3e6c1fn,0x1f83d9abfb41bd6bn,0x5be0cd19137e2179n
+    ];
+    const W = new Array(80);
+    for (let off = 0; off < total; off += 128) {
+      for (let i = 0; i < 16; i++) {
+        let v = 0n;
+        for (let j = 0; j < 8; j++) v = (v << 8n) | BigInt(buf[off + i*8 + j]);
+        W[i] = v;
+      }
+      for (let i = 16; i < 80; i++) {
+        const s0 = rotr64(W[i-15], 1n) ^ rotr64(W[i-15], 8n) ^ (W[i-15] >> 7n);
+        const s1 = rotr64(W[i-2], 19n) ^ rotr64(W[i-2], 61n) ^ (W[i-2] >> 6n);
+        W[i] = (W[i-16] + s0 + W[i-7] + s1) & M64;
+      }
+      let [a,b,c,d,e,f,g,h] = H;
+      for (let i = 0; i < 80; i++) {
+        const S1 = rotr64(e, 14n) ^ rotr64(e, 18n) ^ rotr64(e, 41n);
+        const ch = (e & f) ^ ((~e & M64) & g);
+        const t1 = (h + S1 + ch + K512[i] + W[i]) & M64;
+        const S0 = rotr64(a, 28n) ^ rotr64(a, 34n) ^ rotr64(a, 39n);
+        const maj = (a & b) ^ (a & c) ^ (b & c);
+        const t2 = (S0 + maj) & M64;
+        h=g; g=f; f=e; e=(d+t1)&M64; d=c; c=b; b=a; a=(t1+t2)&M64;
+      }
+      H = [(H[0]+a)&M64,(H[1]+b)&M64,(H[2]+c)&M64,(H[3]+d)&M64,(H[4]+e)&M64,(H[5]+f)&M64,(H[6]+g)&M64,(H[7]+h)&M64];
+    }
+    const out = new Uint8Array(64);
+    for (let i = 0; i < 8; i++) {
+      let v = H[i];
+      for (let j = 7; j >= 0; j--) { out[i*8 + j] = Number(v & 0xffn); v >>= 8n; }
+    }
+    return out;
+  }
+
   function concat(...arrs) {
-    const n = arrs.reduce((s,a)=>s+a.length, 0);
-    const out = new Uint8Array(n);
+    const out = new Uint8Array(arrs.reduce((s,a)=>s+a.length, 0));
     let o = 0;
     for (const a of arrs) { out.set(a, o); o += a.length; }
     return out;
   }
-
   function hmacSha256(key, msg) {
     const k = key.length > 64 ? sha256(key) : key;
     const ipad = new Uint8Array(64), opad = new Uint8Array(64);
@@ -234,122 +288,124 @@ const MarcoCrypto = (() => {
     }
     return sha256(concat(opad, sha256(concat(ipad, msg))));
   }
-
   function pbkdf2Sha256(pwdBytes, salt, iters, dkLen) {
-    const blocks = Math.ceil(dkLen / 32);
-    const out = new Uint8Array(blocks * 32);
+    const blocks = Math.ceil(dkLen / 32), out = new Uint8Array(blocks * 32);
     for (let b = 1; b <= blocks; b++) {
-      const be = new Uint8Array(4);
-      new DataView(be.buffer).setUint32(0, b, false);
+      const be = new Uint8Array(4); new DataView(be.buffer).setUint32(0, b, false);
       let u = hmacSha256(pwdBytes, concat(salt, be));
       const t = new Uint8Array(u);
-      for (let i = 1; i < iters; i++) {
-        u = hmacSha256(pwdBytes, u);
-        for (let j = 0; j < 32; j++) t[j] ^= u[j];
-      }
+      for (let i = 1; i < iters; i++) { u = hmacSha256(pwdBytes, u); for (let j = 0; j < 32; j++) t[j] ^= u[j]; }
       out.set(t, (b - 1) * 32);
     }
     return out.slice(0, dkLen);
   }
 
-  const mod = (a, m) => ((a % m) + m) % m;
-  function modInv(a, m) {
-    let t = 0n, newT = 1n, r = m, newR = mod(a, m);
-    while (newR !== 0n) {
-      const q = r / newR;
-      [t, newT] = [newT, t - q * newT];
-      [r, newR] = [newR, r - q * newR];
-    }
-    return t < 0n ? t + m : t;
+  // --- RFC 8032 Ed25519 (Extended Coordinates) ---
+  const Q = (1n << 255n) - 19n;
+  const L = (1n << 252n) + 27742317777372353535851937790883648493n;
+  const mod = (a, m = Q) => ((a % m) + m) % m;
+  function modPow(b, e, m = Q) {
+    let r = 1n, x = mod(b, m), k = e;
+    while (k > 0n) { if (k & 1n) r = (r * x) % m; x = (x * x) % m; k >>= 1n; }
+    return r;
   }
+  const inv = (x) => modPow(x, Q - 2n, Q);
+  const D = mod(-121665n * inv(121666n));
+  const TWO_D = mod(2n * D);
+  const I = modPow(2n, (Q - 1n) >> 2n);
+  function recoverX(y, sign) {
+    if (y >= Q) return null;
+    const y2 = mod(y * y);
+    const xx = mod((y2 - 1n) * inv(mod(D * y2 + 1n)));
+    let x = modPow(xx, (Q + 3n) >> 3n);
+    if (mod(x * x) !== xx) {
+      x = mod(x * I);
+      if (mod(x * x) !== xx) return null;
+    }
+    if (x === 0n && sign === 1) return null;
+    if (Number(x & 1n) !== sign) x = Q - x;
+    return x;
+  }
+  const BY = mod(4n * inv(5n)), BX = recoverX(BY, 0);
+  const BASE = [BX, BY, 1n, mod(BX * BY)];
+  const ID = [0n, 1n, 1n, 0n];
   function ptAdd(p1, p2) {
-    if (!p1) return p2;
-    if (!p2) return p1;
-    const [x1, y1] = p1, [x2, y2] = p2;
-    let lam;
-    if (x1 === x2) {
-      if (mod(y1 + y2, P) === 0n) return null;
-      lam = mod((3n * x1 * x1 + A) * modInv(2n * y1, P), P);
-    } else {
-      lam = mod((y2 - y1) * modInv(x2 - x1, P), P);
-    }
-    const x3 = mod(lam * lam - x1 - x2, P);
-    const y3 = mod(lam * (x1 - x3) - y1, P);
-    return [x3, y3];
+    const [x1,y1,z1,t1] = p1, [x2,y2,z2,t2] = p2;
+    const a = mod((y1 - x1) * (y2 - x2));
+    const b = mod((y1 + x1) * (y2 + x2));
+    const c = mod(t1 * TWO_D * t2);
+    const d = mod(2n * z1 * z2);
+    const e = mod(b - a), f = mod(d - c), g = mod(d + c), h = mod(b + a);
+    return [mod(e * f), mod(g * h), mod(f * g), mod(e * h)];
   }
-  function scalarMul(k, pt) {
-    if (k % N === 0n || !pt) return null;
-    let res = null, add = pt, kk = k;
-    while (kk > 0n) {
-      if (kk & 1n) res = ptAdd(res, add);
-      add = ptAdd(add, add);
-      kk >>= 1n;
-    }
+  function scalarMult(base, k) {
+    let res = ID, add = base, kk = k;
+    while (kk > 0n) { if (kk & 1n) res = ptAdd(res, add); add = ptAdd(add, add); kk >>= 1n; }
     return res;
+  }
+  function leToBig(b) {
+    let v = 0n;
+    for (let i = b.length - 1; i >= 0; i--) v = (v << 8n) | BigInt(b[i]);
+    return v;
+  }
+  function bigToLe32(n) {
+    const out = new Uint8Array(32); let v = n;
+    for (let i = 0; i < 32; i++) { out[i] = Number(v & 0xffn); v >>= 8n; }
+    return out;
+  }
+  function encodePt(p) {
+    const zi = inv(p[2]), x = mod(p[0] * zi), y = mod(p[1] * zi);
+    const out = bigToLe32(y);
+    if (x & 1n) out[31] |= 0x80;
+    return out;
+  }
+  function decodePt(enc) {
+    if (enc.length !== 32) return null;
+    const sign = (enc[31] >> 7) & 1;
+    const cp = enc.slice(); cp[31] &= 0x7f;
+    const y = leToBig(cp), x = recoverX(y, sign);
+    return x === null ? null : [x, y, 1n, mod(x * y)];
+  }
+  function publicKeyFromSeed(seed) {
+    const h = sha512(seed);
+    let a = leToBig(h.slice(0, 32));
+    a &= (1n << 254n) - 8n; a |= 1n << 254n;
+    return encodePt(scalarMult(BASE, a));
+  }
+  function sign(seed, msg) {
+    const h = sha512(seed);
+    let a = leToBig(h.slice(0, 32));
+    a &= (1n << 254n) - 8n; a |= 1n << 254n;
+    const A = encodePt(scalarMult(BASE, a));
+    const r = mod(leToBig(sha512(concat(h.slice(32), msg))), L);
+    const R = encodePt(scalarMult(BASE, r));
+    const k = mod(leToBig(sha512(concat(R, A, msg))), L);
+    const S = mod(r + k * a, L);
+    return concat(R, bigToLe32(S));
+  }
+  function verify(pub, msg, sig) {
+    if (pub.length !== 32 || sig.length !== 64) return false;
+    const R = decodePt(sig.slice(0, 32)), A = decodePt(pub);
+    const s = leToBig(sig.slice(32));
+    if (!R || !A || s >= L) return false;
+    const k = mod(leToBig(sha512(concat(sig.slice(0, 32), pub, msg))), L);
+    const lhs = scalarMult(BASE, s), rhs = ptAdd(R, scalarMult(A, k));
+    return mod(lhs[0] * rhs[2]) === mod(rhs[0] * lhs[2]) && mod(lhs[1] * rhs[2]) === mod(rhs[1] * lhs[2]);
   }
 
   function hexToBytes(hex) {
-    const out = new Uint8Array(hex.length / 2);
-    for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i*2, i*2+2), 16);
+    const clean = hex.replace(/[^0-9a-fA-F]/g, "");
+    const out = new Uint8Array(clean.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i*2, i*2+2), 16);
     return out;
   }
-  function bytesToHex(b) {
-    return Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
-  }
-  function bytesToBigInt(b) { return BigInt("0x" + (bytesToHex(b) || "0")); }
-  function bigIntToBytes32(n) { return hexToBytes(n.toString(16).padStart(64, "0")); }
-
-  function rfc6979K(privBig, digestBytes) {
-    const xBytes = bigIntToBytes32(privBig);
-    const h1Bytes = bigIntToBytes32(bytesToBigInt(digestBytes) % N);
-    let v = new Uint8Array(32).fill(1);
-    let k = new Uint8Array(32).fill(0);
-    k = hmacSha256(k, concat(v, new Uint8Array([0]), xBytes, h1Bytes));
-    v = hmacSha256(k, v);
-    k = hmacSha256(k, concat(v, new Uint8Array([1]), xBytes, h1Bytes));
-    v = hmacSha256(k, v);
-    while (true) {
-      v = hmacSha256(k, v);
-      const cand = bytesToBigInt(v);
-      if (cand >= 1n && cand < N) return cand;
-      k = hmacSha256(k, concat(v, new Uint8Array([0])));
-      v = hmacSha256(k, v);
-    }
-  }
-
-  function derivePubBytes(privBig) {
-    const pt = scalarMul(privBig, G);
-    return concat(new Uint8Array([4]), bigIntToBytes32(pt[0]), bigIntToBytes32(pt[1]));
-  }
-
-  function ecdsaSign(privBig, msgBytes) {
-    const digest = sha256(msgBytes);
-    const z = bytesToBigInt(digest);
-    const k = rfc6979K(privBig, digest);
-    const pt = scalarMul(k, G);
-    const r = pt[0] % N;
-    let s = mod(modInv(k, N) * (z + r * privBig), N);
-    if (s > N / 2n) s = N - s;
-    return [r, s];
-  }
-
-  function ecdsaVerify(pubBytes, msgBytes, r, s) {
-    if (pubBytes.length !== 65 || pubBytes[0] !== 4) return false;
-    const q = [bytesToBigInt(pubBytes.slice(1, 33)), bytesToBigInt(pubBytes.slice(33, 65))];
-    if (r < 1n || r >= N || s < 1n || s >= N) return false;
-    const z = bytesToBigInt(sha256(msgBytes));
-    const w = modInv(s, N);
-    const pt = ptAdd(scalarMul(mod(z * w, N), G), scalarMul(mod(r * w, N), q));
-    return !!pt && (pt[0] % N) === r;
-  }
-
+  function bytesToHex(b) { return Array.from(b, x => x.toString(16).padStart(2, "0")).join(""); }
   const B64A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   function b64UrlEncode(bytes) {
     let out = "";
     for (let i = 0; i < bytes.length; i += 3) {
       const b0 = bytes[i], b1 = i+1 < bytes.length ? bytes[i+1] : -1, b2 = i+2 < bytes.length ? bytes[i+2] : -1;
-      out += B64A[b0 >> 2];
-      out += B64A[((b0 & 3) << 4) | (b1 >= 0 ? (b1 >> 4) : 0)];
+      out += B64A[b0 >> 2] + B64A[((b0 & 3) << 4) | (b1 >= 0 ? (b1 >> 4) : 0)];
       if (b1 >= 0) out += B64A[((b1 & 15) << 2) | (b2 >= 0 ? (b2 >> 6) : 0)];
       if (b2 >= 0) out += B64A[b2 & 63];
     }
@@ -371,192 +427,138 @@ const MarcoCrypto = (() => {
     }
     return out;
   }
-
   function randomBytes(n) {
     const b = new Uint8Array(n);
     if (typeof crypto !== "undefined" && crypto.getRandomValues) crypto.getRandomValues(b);
     else for (let i = 0; i < n; i++) b[i] = Math.floor(Math.random() * 256);
     return b;
   }
-
+  function canonicalizeJson(obj) {
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      return "{" + Object.keys(obj).sort().map(k => JSON.stringify(k) + ":" + canonicalizeJson(obj[k])).join(",") + "}";
+    }
+    if (Array.isArray(obj)) return "[" + obj.map(canonicalizeJson).join(",") + "]";
+    return JSON.stringify(obj);
+  }
   function keystream(encKey, nonce, len) {
-    const out = new Uint8Array(len);
-    let off = 0, ctr = 0;
+    const out = new Uint8Array(len); let off = 0, ctr = 0;
     while (off < len) {
-      const cb = new Uint8Array(4);
-      new DataView(cb.buffer).setUint32(0, ctr++, false);
+      const cb = new Uint8Array(4); new DataView(cb.buffer).setUint32(0, ctr++, false);
       const blk = sha256(concat(encKey, nonce, cb));
-      const take = Math.min(32, len - off);
-      out.set(blk.slice(0, take), off);
-      off += take;
+      const take = Math.min(32, len - off); out.set(blk.slice(0, take), off); off += take;
     }
     return out;
   }
-
-  function encryptVault(privBig, pubBytes, password, iters = 100000) {
+  function encryptVault(seed, pub, password, iters = 100000) {
     const salt = randomBytes(16), nonce = randomBytes(16);
     const derived = pbkdf2Sha256(new TextEncoder().encode(password), salt, iters, 64);
     const encKey = derived.slice(0, 32), macKey = derived.slice(32, 64);
-    const pt = bigIntToBytes32(privBig);
-    const ks = keystream(encKey, nonce, 32);
-    const ct = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) ct[i] = pt[i] ^ ks[i];
-    const mac = hmacSha256(macKey, concat(new TextEncoder().encode("MARCO-VAULT-V1:"), salt, nonce, ct));
+    const ks = keystream(encKey, nonce, 32), ct = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) ct[i] = seed[i] ^ ks[i];
+    const mac = hmacSha256(macKey, concat(new TextEncoder().encode("MARCO-ED25519-VAULT-V1:"), salt, nonce, ct));
     return {
-      format: "marco-ai-vault-v1", kdf: "pbkdf2-hmac-sha256", iterations: iters,
+      format: "marco-ai-ed25519-vault-v1", kdf: "pbkdf2-hmac-sha256", iterations: iters,
       salt_hex: bytesToHex(salt), nonce_hex: bytesToHex(nonce),
-      ciphertext_hex: bytesToHex(ct), mac_hex: bytesToHex(mac),
-      pub_uncompressed_hex: bytesToHex(pubBytes)
+      ciphertext_hex: bytesToHex(ct), mac_hex: bytesToHex(mac), pub_hex: bytesToHex(pub)
     };
   }
-
   function decryptVault(vault, password) {
-    if (!vault || vault.format !== "marco-ai-vault-v1") throw new Error("无效密钥库格式");
+    if (!vault || vault.format !== "marco-ai-ed25519-vault-v1") throw new Error("无效 Ed25519 密钥库格式");
     const salt = hexToBytes(vault.salt_hex), nonce = hexToBytes(vault.nonce_hex);
     const ct = hexToBytes(vault.ciphertext_hex), expMac = hexToBytes(vault.mac_hex);
-    const iters = Number(vault.iterations || 100000);
-    const derived = pbkdf2Sha256(new TextEncoder().encode(password), salt, iters, 64);
+    const derived = pbkdf2Sha256(new TextEncoder().encode(password), salt, Number(vault.iterations || 100000), 64);
     const encKey = derived.slice(0, 32), macKey = derived.slice(32, 64);
-    const actMac = hmacSha256(macKey, concat(new TextEncoder().encode("MARCO-VAULT-V1:"), salt, nonce, ct));
-    let diff = 0;
-    for (let i = 0; i < 32; i++) diff |= actMac[i] ^ expMac[i];
+    const actMac = hmacSha256(macKey, concat(new TextEncoder().encode("MARCO-ED25519-VAULT-V1:"), salt, nonce, ct));
+    let diff = 0; for (let i = 0; i < 32; i++) diff |= actMac[i] ^ expMac[i];
     if (diff !== 0) throw new Error("主密码错误或密钥库已损坏");
-    const ks = keystream(encKey, nonce, ct.length);
-    const pt = new Uint8Array(ct.length);
-    for (let i = 0; i < ct.length; i++) pt[i] = ct[i] ^ ks[i];
-    const privBig = bytesToBigInt(pt);
-    const pubBytes = hexToBytes(vault.pub_uncompressed_hex);
-    if (bytesToHex(derivePubBytes(privBig)) !== vault.pub_uncompressed_hex.toLowerCase()) {
-      throw new Error("公钥一致性校验失败");
-    }
-    return { privBig, pubBytes };
+    const ks = keystream(encKey, nonce, 32), seed = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) seed[i] = ct[i] ^ ks[i];
+    const pub = hexToBytes(vault.pub_hex);
+    if (bytesToHex(publicKeyFromSeed(seed)) !== vault.pub_hex.toLowerCase()) throw new Error("公钥一致性校验失败");
+    return { seed, pub };
   }
-
-  function platformLabel(flags) {
-    const m = flags & 0x70;
-    if (m === 0 || m === 0x70) return "三端通用 (Android/iOS/Windows)";
-    const list = [];
-    if (m & 0x10) list.push("Android");
-    if (m & 0x20) list.push("iOS");
-    if (m & 0x40) list.push("Windows");
-    return "仅限 " + list.join("/");
+  function encodePasscode(seed, { tag = "channel-01", days = 30, plat = "all", shared = false, expOAuth = false, minVc = 0, nowEpochSec = null }) {
+    const iat = nowEpochSec === null ? Math.floor(Date.now() / 1000) : Math.floor(nowEpochSec);
+    const exp = days <= 0 ? 0 : iat + Math.floor(days) * 86400;
+    const obj = { exp, iat, plat: plat || "all", tag: (tag || "beta").trim() || "beta", v: 1, n: bytesToHex(randomBytes(3)) };
+    if (shared) obj.shared = true;
+    if (expOAuth) obj.exp_oauth = true;
+    if (minVc > 0) obj.min_vc = Math.floor(minVc);
+    const payloadBytes = new TextEncoder().encode(canonicalizeJson(obj));
+    const sig = sign(seed, concat(SIGN_DOMAIN, payloadBytes));
+    return TOKEN_PREFIX + b64UrlEncode(payloadBytes) + "." + b64UrlEncode(sig);
   }
-
-  function encodePasscode(privBig, { batchId, expireDay, flags, minVersionCode = 0, nonce = null }) {
-    const actualNonce = nonce === null ? ((randomBytes(2)[0] << 8) | randomBytes(2)[1]) : (nonce & 0xffff);
-    const payload = new Uint8Array(10);
-    const dv = new DataView(payload.buffer);
-    dv.setUint8(0, 1);
-    dv.setUint8(1, flags & 0xff);
-    dv.setUint16(2, batchId & 0xffff, false);
-    dv.setUint16(4, expireDay & 0xffff, false);
-    dv.setUint16(6, minVersionCode & 0xffff, false);
-    dv.setUint16(8, actualNonce & 0xffff, false);
-    const [r, s] = ecdsaSign(privBig, concat(DOMAIN_SEP, payload));
-    return TOKEN_PREFIX + b64UrlEncode(concat(payload, bigIntToBytes32(r), bigIntToBytes32(s)));
-  }
-
   function verifyPasscode(code, pubHex = DEFAULT_PUB_HEX) {
-    const cleaned = (code || "").replace(/\s+/g, "");
-    if (!cleaned.startsWith(TOKEN_PREFIX)) return { valid: false, error: "前缀不是 MM-AI1-" };
-    const raw = b64UrlDecode(cleaned.slice(TOKEN_PREFIX.length));
-    if (!raw || raw.length !== 74) return { valid: false, error: "编码或长度无效" };
-    const payload = raw.slice(0, 10);
-    const r = bytesToBigInt(raw.slice(10, 42)), s = bytesToBigInt(raw.slice(42, 74));
-    const ok = ecdsaVerify(hexToBytes(pubHex), concat(DOMAIN_SEP, payload), r, s);
-    const dv = new DataView(payload.buffer);
-    const version = dv.getUint8(0), flags = dv.getUint8(1);
-    const batchId = dv.getUint16(2, false), expireDay = dv.getUint16(4, false);
-    const minVc = dv.getUint16(6, false), nonce = dv.getUint16(8, false);
-    const expireDate = expireDay === 0 ? "永久有效" : new Date(EPOCH_2026_UTC_MS + expireDay * 86400000).toISOString().slice(0, 10);
-    return {
-      valid: ok, version, flags, batchId, expireDay, expireDate, minVersionCode: minVc, nonce,
-      platform: platformLabel(flags),
-      shared: !!(flags & 0x04),
-      experimentalOAuth: !!(flags & 0x02)
-    };
+    const collapsed = (code || "").replace(/\s+/g, "");
+    const m = collapsed.match(/MMAILAB1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)/);
+    if (!m) return { valid: false, error: "格式不是 MMAILAB1.<载荷>.<签名>" };
+    const payloadBytes = b64UrlDecode(m[1]), sig = b64UrlDecode(m[2]);
+    if (!payloadBytes || !sig || sig.length !== 64) return { valid: false, error: "编码损坏" };
+    const ok = verify(hexToBytes(pubHex), concat(SIGN_DOMAIN, payloadBytes), sig);
+    let claims = null;
+    try { claims = JSON.parse(new TextDecoder().decode(payloadBytes)); } catch (_) {}
+    const exp = claims && claims.exp ? Number(claims.exp) : 0;
+    const expireDate = exp <= 0 ? "永久有效" : new Date(exp * 1000).toISOString().slice(0, 10);
+    return { valid: ok, claims, expireDate, canonical: m[0] };
   }
 
   return {
-    DEFAULT_PUB_HEX, EPOCH_2026_UTC_MS,
-    hexToBytes, bytesToHex, bytesToBigInt, derivePubBytes,
-    encryptVault, decryptVault, encodePasscode, verifyPasscode, platformLabel
+    DEFAULT_PUB_HEX, hexToBytes, bytesToHex, publicKeyFromSeed,
+    encryptVault, decryptVault, encodePasscode, verifyPasscode
   };
 })();
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = MarcoCrypto;
+  module.exports = MarcoEd25519;
 }
 
 // --- Mobile UI Controller ---
 const PRELOADED_VAULT = /*__PRELOADED_ENCRYPTED_VAULT__*/null;
-const LS_VAULT = "marco_ai_encrypted_vault_v1";
-const LS_LEDGER = "marco_ai_issue_ledger_v1";
-const LS_BATCH = "marco_ai_last_batch_v1";
-
-let activePrivBig = null;
-let activePubHex = MarcoCrypto.DEFAULT_PUB_HEX;
-let pendingRawKey = null;
+const LS_VAULT = "marco_ai_ed25519_vault_v1";
+const LS_LEDGER = "marco_ai_ed25519_ledger_v1";
+let activeSeed = null;
+let activePubHex = MarcoEd25519.DEFAULT_PUB_HEX;
+let pendingRawSeed = null;
 let selectedPlats = new Set(["all"]);
-let lastIssued = { codes: [], summary: "", plat: "", expire: "" };
+let lastIssued = { codes: [], summary: "" };
 
 function toast(msg) {
   const el = document.getElementById("toast");
   if (!el) return;
-  el.textContent = msg;
-  el.classList.add("show");
-  clearTimeout(window._tId);
-  window._tId = setTimeout(() => el.classList.remove("show"), 2200);
+  el.textContent = msg; el.classList.add("show");
+  clearTimeout(window._tId); window._tId = setTimeout(() => el.classList.remove("show"), 2200);
 }
-
 function getStoredVault() {
-  try {
-    const s = localStorage.getItem(LS_VAULT);
-    if (s) return JSON.parse(s);
-  } catch (_) {}
+  try { const s = localStorage.getItem(LS_VAULT); if (s) return JSON.parse(s); } catch (_) {}
   return PRELOADED_VAULT;
 }
-
 function initUi() {
   if (typeof document === "undefined") return;
-  const savedBatch = Number(localStorage.getItem(LS_BATCH) || "1");
-  document.getElementById("batchIn").value = Math.max(1, savedBatch);
   const v = getStoredVault();
   if (v) {
-    activePubHex = v.pub_uncompressed_hex || MarcoCrypto.DEFAULT_PUB_HEX;
-    document.getElementById("vaultHint").textContent = "已载入加密签名密钥库，请输入主密码解锁后发码。";
+    activePubHex = v.pub_hex || MarcoEd25519.DEFAULT_PUB_HEX;
+    document.getElementById("vaultHint").textContent = "已载入加密 Ed25519 签名密钥库，输入主密码解锁即可签发三端通用 MMAILAB1 口令。";
   } else {
     document.getElementById("unlockPane").classList.add("hidden");
   }
   renderLedger();
 }
-
 function unlockStoredVault() {
   const v = getStoredVault();
   if (!v) return toast("请先导入密钥文件");
   const pwd = document.getElementById("unlockPwd").value;
   if (!pwd) return toast("请输入主密码");
   try {
-    const res = MarcoCrypto.decryptVault(v, pwd);
-    activePrivBig = res.privBig;
-    activePubHex = MarcoCrypto.bytesToHex(res.pubBytes);
+    const res = MarcoEd25519.decryptVault(v, pwd);
+    activeSeed = res.seed; activePubHex = MarcoEd25519.bytesToHex(res.pub);
     document.getElementById("unlockPwd").value = "";
-    syncUnlockedUi(true);
-    toast("签名密钥库已解锁");
-  } catch (e) {
-    toast(e.message || "解锁失败");
-  }
+    syncUnlockedUi(true); toast("Ed25519 密钥库已解锁");
+  } catch (e) { toast(e.message || "解锁失败"); }
 }
-
-function lockVault() {
-  activePrivBig = null;
-  syncUnlockedUi(false);
-  toast("已锁定密钥库");
-}
-
+function lockVault() { activeSeed = null; syncUnlockedUi(false); toast("已锁定密钥库"); }
 function syncUnlockedUi(on) {
   const b = document.getElementById("lockBadge");
-  b.textContent = on ? "已解锁 · 离线签发就绪" : "未解锁";
+  b.textContent = on ? "已解锁 · 三端离线签发就绪" : "未解锁";
   b.classList.toggle("ok", on);
   document.getElementById("lockBtn").classList.toggle("hidden", !on);
   document.getElementById("unlockPane").classList.toggle("hidden", on || !getStoredVault());
@@ -564,198 +566,118 @@ function syncUnlockedUi(on) {
   document.getElementById("issueCard").classList.toggle("hidden", !on);
   document.getElementById("ledgerCard").classList.toggle("hidden", !on);
 }
-
 function handleImportFile(ev) {
-  const f = ev.target.files && ev.target.files[0];
-  if (!f) return;
+  const f = ev.target.files && ev.target.files[0]; if (!f) return;
   const reader = new FileReader();
   reader.onload = () => {
+    const text = String(reader.result || "").trim();
     try {
-      const obj = JSON.parse(String(reader.result));
-      if (obj.format === "marco-ai-vault-v1") {
+      const obj = JSON.parse(text);
+      if (obj.format === "marco-ai-ed25519-vault-v1") {
         localStorage.setItem(LS_VAULT, JSON.stringify(obj));
-        activePubHex = obj.pub_uncompressed_hex || MarcoCrypto.DEFAULT_PUB_HEX;
+        activePubHex = obj.pub_hex || MarcoEd25519.DEFAULT_PUB_HEX;
         document.getElementById("unlockPane").classList.remove("hidden");
         document.getElementById("rawPwdBox").classList.add("hidden");
-        toast("已导入加密密钥库，请输入主密码解锁");
-      } else if (obj.format === "marco-ai-beta-p256-v1" && obj.d_hex) {
-        pendingRawKey = obj;
-        document.getElementById("rawPwdBox").classList.remove("hidden");
-        toast("已读取私钥，请设置主密码加密保存在本机");
-      } else {
-        toast("不识别的密钥文件格式");
+        return toast("已导入加密密钥库，请输入主密码解锁");
       }
-    } catch (_) {
-      toast("解析文件失败，请确认 JSON 文件完整");
+    } catch (_) {}
+    const hex = text.split(/\r?\n/).filter(l => l.trim() && !l.trim().startsWith("#")).join("").trim();
+    if (/^[0-9a-fA-F]{64}$/.test(hex)) {
+      pendingRawSeed = MarcoEd25519.hexToBytes(hex);
+      document.getElementById("rawPwdBox").classList.remove("hidden");
+      return toast("已读取 32 字节 Ed25519 私钥，请设置本机加密主密码");
     }
+    toast("无法识别的密钥文件格式");
   };
   reader.readAsText(f);
 }
-
 function finishRawImport() {
-  if (!pendingRawKey) return;
+  if (!pendingRawSeed) return;
   const pwd = document.getElementById("newVaultPwd").value;
   if (!pwd || pwd.length < 6) return toast("主密码至少 6 位");
-  try {
-    const privBig = BigInt("0x" + pendingRawKey.d_hex);
-    const pubBytes = MarcoCrypto.derivePubBytes(privBig);
-    const vault = MarcoCrypto.encryptVault(privBig, pubBytes, pwd);
-    localStorage.setItem(LS_VAULT, JSON.stringify(vault));
-    pendingRawKey = null;
-    document.getElementById("newVaultPwd").value = "";
-    document.getElementById("rawPwdBox").classList.add("hidden");
-    activePrivBig = privBig;
-    activePubHex = MarcoCrypto.bytesToHex(pubBytes);
-    syncUnlockedUi(true);
-    toast("私钥已加密存入本机并解锁");
-  } catch (e) {
-    toast("加密保存失败：" + e.message);
-  }
+  const pub = MarcoEd25519.publicKeyFromSeed(pendingRawSeed);
+  const vault = MarcoEd25519.encryptVault(pendingRawSeed, pub, pwd);
+  localStorage.setItem(LS_VAULT, JSON.stringify(vault));
+  activeSeed = pendingRawSeed; activePubHex = MarcoEd25519.bytesToHex(pub);
+  pendingRawSeed = null; document.getElementById("newVaultPwd").value = "";
+  document.getElementById("rawPwdBox").classList.add("hidden");
+  syncUnlockedUi(true); toast("私钥已加密存入本机并解锁");
 }
-
 function pickPlat(p) {
-  if (p === "all") {
-    selectedPlats = new Set(["all"]);
-  } else {
+  if (p === "all") selectedPlats = new Set(["all"]);
+  else {
     selectedPlats.delete("all");
-    if (selectedPlats.has(p)) selectedPlats.delete(p);
-    else selectedPlats.add(p);
+    if (selectedPlats.has(p)) selectedPlats.delete(p); else selectedPlats.add(p);
     if (selectedPlats.size === 0 || selectedPlats.size === 3) selectedPlats = new Set(["all"]);
   }
-  document.querySelectorAll("#platPills .pill").forEach(btn => {
-    btn.classList.toggle("on", selectedPlats.has(btn.dataset.p));
-  });
+  document.querySelectorAll("#platPills .pill").forEach(b => b.classList.toggle("on", selectedPlats.has(b.dataset.p)));
 }
-
 function setDays(d, btn) {
   document.getElementById("daysIn").value = d;
   document.querySelectorAll("#daysPills .pill").forEach(b => b.classList.toggle("on", b === btn));
 }
-
 function issueNow() {
-  if (!activePrivBig) return toast("请先解锁密钥库");
-  const batchId = Math.max(1, Math.min(65535, Number(document.getElementById("batchIn").value) || 1));
+  if (!activeSeed) return toast("请先解锁密钥库");
+  const tag = (document.getElementById("tagIn").value || "channel-01").trim();
   const days = Math.max(0, Number(document.getElementById("daysIn").value) || 0);
   const count = Math.max(1, Math.min(50, Number(document.getElementById("countIn").value) || 1));
   const minVc = Math.max(0, Math.min(65535, Number(document.getElementById("minVcIn").value) || 0));
   const note = (document.getElementById("noteIn").value || "").trim();
   const shared = document.getElementById("sharedChk").checked;
   const expOAuth = document.getElementById("expChk").checked;
-
-  let flags = 0x01;
-  if (expOAuth) flags |= 0x02;
-  if (shared) flags |= 0x04;
-  if (!selectedPlats.has("all")) {
-    if (selectedPlats.has("android")) flags |= 0x10;
-    if (selectedPlats.has("ios")) flags |= 0x20;
-    if (selectedPlats.has("windows")) flags |= 0x40;
-  }
-
-  let expireDay = 0, expireLabel = "永久有效";
-  if (days > 0) {
-    const todayUtc = Math.floor((Date.now() - MarcoCrypto.EPOCH_2026_UTC_MS) / 86400000);
-    expireDay = Math.max(1, todayUtc + days);
-    expireLabel = new Date(MarcoCrypto.EPOCH_2026_UTC_MS + expireDay * 86400000).toISOString().slice(0, 10);
-  }
-
+  const plat = selectedPlats.has("all") ? "all" : Array.from(selectedPlats).join(",");
   const codes = [];
+  let expireLabel = "永久有效";
   for (let i = 0; i < count; i++) {
-    const c = MarcoCrypto.encodePasscode(activePrivBig, { batchId, expireDay, flags, minVersionCode: minVc });
-    const chk = MarcoCrypto.verifyPasscode(c, activePubHex);
-    if (!chk.valid) return toast("内部自检失败");
+    const c = MarcoEd25519.encodePasscode(activeSeed, { tag, days, plat, shared, expOAuth, minVc });
+    const chk = MarcoEd25519.verifyPasscode(c, activePubHex);
+    if (!chk.valid) return toast("签名自检失败");
+    expireLabel = chk.expireDate;
     codes.push(c);
   }
-
-  const plat = MarcoCrypto.platformLabel(flags);
-  const summary = `批次 #${String(batchId).padStart(4,"0")} · ${plat} · ${shared ? "频道通用" : "专属独立"} · 有效至 ${expireLabel}`;
-  lastIssued = { codes, summary, plat, expire: expireLabel };
-
+  const platZh = plat === "all" ? "三端通用 (Android/iOS/Windows)" : ("仅限 " + plat);
+  const summary = `${tag} · ${platZh} · ${shared ? "频道通用" : "专属测试"} · 有效至 ${expireLabel}`;
+  lastIssued = { codes, summary };
   document.getElementById("resultMeta").textContent = summary;
   document.getElementById("resultCodes").textContent = codes.join("\n");
   document.getElementById("resultWrap").classList.remove("hidden");
-
-  localStorage.setItem(LS_BATCH, String(batchId + 1));
-  document.getElementById("batchIn").value = batchId + 1;
-
   const ledger = loadLedger();
-  ledger.unshift({
-    at: new Date().toLocaleString("zh-CN", { hour12: false }),
-    batchId, plat, shared, expOAuth, expireLabel, count, note, codes
-  });
+  ledger.unshift({ at: new Date().toLocaleString("zh-CN", { hour12: false }), tag, plat: platZh, shared, expireLabel, count, note, codes });
   localStorage.setItem(LS_LEDGER, JSON.stringify(ledger.slice(0, 100)));
-  renderLedger();
-  toast(`已签发 ${count} 枚口令`);
+  renderLedger(); toast(`已签发 ${count} 枚 MMAILAB1 口令`);
 }
-
-function copyText(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(() => toast("已复制到剪贴板")).catch(() => fallbackCopy(text));
-  } else {
-    fallbackCopy(text);
-  }
+function copyText(t) {
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(()=>toast("已复制到剪贴板")).catch(()=>fallbackCopy(t));
+  else fallbackCopy(t);
 }
-function fallbackCopy(text) {
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand("copy");
-  document.body.removeChild(ta);
-  toast("已复制到剪贴板");
+function fallbackCopy(t) {
+  const ta = document.createElement("textarea"); ta.value = t; document.body.appendChild(ta); ta.select();
+  document.execCommand("copy"); document.body.removeChild(ta); toast("已复制到剪贴板");
 }
-
 function copyLastCodes(withCaption) {
   if (!lastIssued.codes.length) return;
   const raw = lastIssued.codes.join("\n");
   if (!withCaption) return copyText(raw);
-  const msg = `【Marco Movie · AI 观影实验室测试口令】\n${lastIssued.summary}\n复制下方口令前往「设置 → 网盘、追剧与 AI 助手 → AI 观影实验室」粘贴开启：\n${raw}`;
-  copyText(msg);
+  copyText(`【Marco Movie · AI 观影实验室测试口令】\n${lastIssued.summary}\n复制下方口令前往设置「AI 观影实验室」粘贴解锁：\n${raw}`);
 }
-
 function verifyInputCode() {
-  const val = document.getElementById("verifyIn").value;
-  const res = MarcoCrypto.verifyPasscode(val, activePubHex);
+  const res = MarcoEd25519.verifyPasscode(document.getElementById("verifyIn").value, activePubHex);
   const out = document.getElementById("verifyOut");
-  out.textContent = JSON.stringify(res, null, 2);
-  out.classList.remove("hidden");
-  toast(res.valid ? "签名验证通过" : ("验证失败：" + (res.error || "签名无效")));
+  out.textContent = JSON.stringify(res, null, 2); out.classList.remove("hidden");
+  toast(res.valid ? "Ed25519 签名验证通过" : ("验证失败：" + (res.error || "签名无效")));
 }
-
-function loadLedger() {
-  try { return JSON.parse(localStorage.getItem(LS_LEDGER) || "[]"); } catch (_) { return []; }
-}
-
+function loadLedger() { try { return JSON.parse(localStorage.getItem(LS_LEDGER) || "[]"); } catch (_) { return []; } }
 function renderLedger() {
-  const box = document.getElementById("ledgerList");
-  if (!box) return;
+  const box = document.getElementById("ledgerList"); if (!box) return;
   const list = loadLedger();
-  if (!list.length) {
-    box.innerHTML = '<p class="hint">暂无发码记录。</p>';
-    return;
-  }
-  box.innerHTML = list.map((it, idx) => `
-    <div class="item">
-      <div class="item-top">
-        <span>#${String(it.batchId).padStart(4,"0")} · ${it.note || (it.shared ? "频道通用" : "专属测试")} (${it.count}枚)</span>
-        <button class="btn sm sec" onclick="copyLedger(${idx})">复制</button>
-      </div>
-      <div class="item-meta">${it.plat} · 有效至 ${it.expireLabel} · ${it.at}</div>
-    </div>`).join("");
+  if (!list.length) { box.innerHTML = '<p class="hint">暂无发码记录。</p>'; return; }
+  box.innerHTML = list.map((it, idx) => `<div class="item"><div class="item-top"><span>${it.tag} · ${it.note || (it.shared ? "频道通用" : "专属测试")} (${it.count}枚)</span><button class="btn sm sec" onclick="copyLedger(${idx})">复制</button></div><div class="item-meta">${it.plat} · 有效至 ${it.expireLabel} · ${it.at}</div></div>`).join("");
 }
-
-function copyLedger(idx) {
-  const it = loadLedger()[idx];
-  if (it && it.codes) copyText(it.codes.join("\n"));
-}
-
+function copyLedger(idx) { const it = loadLedger()[idx]; if (it && it.codes) copyText(it.codes.join("\n")); }
 function exportLedger() {
   const blob = new Blob([JSON.stringify(loadLedger(), null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "marco-ai-passcode-ledger.json";
-  a.click();
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "marco-ai-passcode-ledger.json"; a.click();
 }
-
 if (typeof window !== "undefined") window.addEventListener("DOMContentLoaded", initUi);
 </script>
 </body>

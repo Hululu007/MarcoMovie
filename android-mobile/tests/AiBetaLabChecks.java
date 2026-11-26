@@ -153,23 +153,25 @@ public final class AiBetaLabChecks {
             String jsIosOnlyCode,
             String jsAndWinCode,
             String realAuthorCode) {
-        long nowValid = AiBetaGate.EPOCH_2026_UTC_MS + 10L * AiBetaGate.MILLIS_PER_DAY;
+        long nowValid = 1768000000L * 1000L; // 2026-01-10 UTC
 
-        // 1. Default embedded public key sanity
+        // 1. Default embedded Ed25519 public key sanity
         byte[] embedded = AiBetaGate.hexToBytes(AiBetaGate.DEFAULT_PUBLIC_KEY_HEX);
         check(
-                embedded.length == 65 && embedded[0] == 0x04,
-                "Gate: DEFAULT_PUBLIC_KEY_HEX is valid 65-byte uncompressed P-256 point");
+                embedded.length == 32
+                        && "1dbeaed851b873d7c327d30d718fca0ac1509ef5ac4061b9bd1aa90c841c6929"
+                                .equals(AiBetaGate.DEFAULT_PUBLIC_KEY_HEX),
+                "Gate: DEFAULT_PUBLIC_KEY_HEX matches unified 32-byte Ed25519 public key");
 
         if (realAuthorCode != null && !realAuthorCode.isEmpty()) {
             AiBetaGate.VerifyResult realRes =
                     AiBetaGate.verifyPasscode(realAuthorCode, 103, System.currentTimeMillis());
             check(
                     realRes.ok && realRes.coreAiEnabled(),
-                    "Gate: real author-signed passcode verifies against embedded DEFAULT_PUBLIC_KEY_HEX");
+                    "Gate: real ai-lab-ed25519.key token verifies against embedded DEFAULT_PUBLIC_KEY_HEX");
         }
 
-        // 2. Shared standard code passes & disables experimental OAuth
+        // 2. Shared standard MMAILAB1 code passes & disables experimental OAuth
         AiBetaGate.VerifyResult rShared =
                 AiBetaGate.verifyPasscode(sharedCode, 103, nowValid, pubKey);
         check(
@@ -177,35 +179,37 @@ public final class AiBetaLabChecks {
                         && rShared.coreAiEnabled()
                         && rShared.sharedChannel()
                         && !rShared.experimentalOAuthAllowed()
-                        && rShared.batchId == 101,
-                "Gate: shared standard code verifies with batch=101, shared=true, expOAuth=false");
+                        && "channel-101".equals(rShared.tag),
+                "Gate: shared MMAILAB1 code verifies with tag=channel-101, shared=true, expOAuth=false");
 
-        // 3. Whitespace/line-break resilience when copied from QQ Channel
+        // 3. Prose & whitespace/line-break extraction resilience when copied from QQ Channel
         String wrapped =
-                sharedCode.substring(0, 24)
+                "测试口令如下：\n"
+                        + sharedCode.substring(0, 24)
                         + "\n  "
                         + sharedCode.substring(24, 60)
                         + " \t "
                         + sharedCode.substring(60);
         AiBetaGate.VerifyResult rWrapped =
                 AiBetaGate.verifyPasscode(wrapped, 103, nowValid, pubKey);
-        check(rWrapped.ok && rWrapped.batchId == 101, "Gate: whitespace-wrapped code verifies");
+        check(
+                rWrapped.ok && "channel-101".equals(rWrapped.tag),
+                "Gate: prose/whitespace-wrapped MMAILAB1 code extracts and verifies");
 
-        // 4. Experimental OAuth permanent code
+        // 4. Permanent experimental-OAuth code
         AiBetaGate.VerifyResult rExp =
-                AiBetaGate.verifyPasscode(
-                        expCode, 103, nowValid + 3650L * AiBetaGate.MILLIS_PER_DAY, pubKey);
+                AiBetaGate.verifyPasscode(expCode, 103, nowValid + 3650L * 86400_000L, pubKey);
         check(
                 rExp.ok
                         && rExp.coreAiEnabled()
                         && !rExp.sharedChannel()
                         && rExp.experimentalOAuthAllowed()
-                        && rExp.expireDay == 0
+                        && rExp.expiresAtEpochSec == 0L
                         && "永久有效".equals(rExp.expireDateLabel())
-                        && rExp.batchId == 202,
-                "Gate: permanent experimental-OAuth code verifies and sets experimentalOAuthAllowed=true");
+                        && "core-202".equals(rExp.tag),
+                "Gate: permanent experimental-OAuth MMAILAB1 code verifies and sets experimentalOAuthAllowed=true");
 
-        // 5. Tampered payload & tampered signature rejected
+        // 5. Tampered signature & tampered payload rejected
         char[] chars = sharedCode.toCharArray();
         int idx = chars.length - 4;
         chars[idx] = chars[idx] == 'A' ? 'B' : 'A';
@@ -213,10 +217,10 @@ public final class AiBetaLabChecks {
                 AiBetaGate.verifyPasscode(new String(chars), 103, nowValid, pubKey);
         check(
                 !rTamperedSig.ok && rTamperedSig.errorReason.contains("签名"),
-                "Gate: tampered signature rejected");
+                "Gate: tampered Ed25519 signature rejected");
 
         char[] chars2 = sharedCode.toCharArray();
-        chars2[9] = chars2[9] == 'A' ? 'B' : 'A';
+        chars2[12] = chars2[12] == 'A' ? 'B' : 'A';
         AiBetaGate.VerifyResult rTamperedPayload =
                 AiBetaGate.verifyPasscode(new String(chars2), 103, nowValid, pubKey);
         check(
@@ -230,80 +234,80 @@ public final class AiBetaLabChecks {
                 AiBetaGate.verifyPasscode(highMinVcCode, 999, nowValid, pubKey);
         check(
                 !rLowVc.ok && rLowVc.errorReason.contains("版本") && rOkVc.ok,
-                "Gate: minVersionCode blocks older app versions and allows >= minVersionCode");
+                "Gate: min_vc blocks older app versions and allows >= min_vc");
 
         // 7. Expiration enforcement + Store auto-lock
-        long day1Valid = AiBetaGate.EPOCH_2026_UTC_MS + 1L * AiBetaGate.MILLIS_PER_DAY + 3600_000L;
-        long day3Expired = AiBetaGate.EPOCH_2026_UTC_MS + 3L * AiBetaGate.MILLIS_PER_DAY;
+        long beforeExp = (1768000000L + 100L) * 1000L;
+        long afterExpTime = (1768000000L + 2L * 86400L) * 1000L;
         MemoryGateStore store = new MemoryGateStore();
         check(
-                !AiBetaGate.currentStatus(store, 103, day1Valid, pubKey).ok,
+                !AiBetaGate.currentStatus(store, 103, beforeExp, pubKey).ok,
                 "Gate: store starts locked");
         AiBetaGate.VerifyResult act =
-                AiBetaGate.activate(store, expiredCode, 103, day1Valid, pubKey);
+                AiBetaGate.activate(store, expiredCode, 103, beforeExp, pubKey);
         check(
-                act.ok && AiBetaGate.currentStatus(store, 103, day1Valid, pubKey).ok,
+                act.ok && AiBetaGate.currentStatus(store, 103, beforeExp, pubKey).ok,
                 "Gate: activate unlocks before expiry");
         AiBetaGate.VerifyResult afterExp =
-                AiBetaGate.currentStatus(store, 103, day3Expired, pubKey);
+                AiBetaGate.currentStatus(store, 103, afterExpTime, pubKey);
         check(
                 !afterExp.ok && afterExp.errorReason.contains("过期"),
                 "Gate: expired code auto-locks cleanly on subsequent checks");
         AiBetaGate.deactivate(store);
         check(
-                !AiBetaGate.currentStatus(store, 103, day1Valid, pubKey).ok,
+                !AiBetaGate.currentStatus(store, 103, beforeExp, pubKey).ok,
                 "Gate: deactivate clears active passcode");
 
-        // 8. 3-way Phone HTML JS signer -> Android Java verifier + 3-platform scoping
+        // 8. 3-way Phone HTML JS Ed25519 signer -> Android Java verifier + 3-platform scoping
         AiBetaGate.VerifyResult jsAllAnd =
                 AiBetaGate.verifyPasscode(
-                        jsAllPlatCode, 103, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_ANDROID);
+                        jsAllPlatCode, 103, nowValid, pubKey, AiBetaGate.PLATFORM_ANDROID);
         AiBetaGate.VerifyResult jsAllIos =
                 AiBetaGate.verifyPasscode(
-                        jsAllPlatCode, 100, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_IOS);
+                        jsAllPlatCode, 100, nowValid, pubKey, AiBetaGate.PLATFORM_IOS);
         AiBetaGate.VerifyResult jsAllWin =
                 AiBetaGate.verifyPasscode(
-                        jsAllPlatCode, 1, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_WINDOWS);
+                        jsAllPlatCode, 1, nowValid, pubKey, AiBetaGate.PLATFORM_WINDOWS);
         check(
                 jsAllAnd.ok
                         && jsAllIos.ok
                         && jsAllWin.ok
                         && "三端通用".equals(jsAllAnd.platformScopeLabel())
-                        && jsAllAnd.batchId == 501,
-                "Gate: Phone-JS minted 3-platform code verifies in Java across Android, iOS, and Windows");
+                        && "js-all-501".equals(jsAllAnd.tag),
+                "Gate: Phone-JS minted 3-platform MMAILAB1 code verifies in Java across Android, iOS, and Windows");
 
         AiBetaGate.VerifyResult jsIosOnAndroid =
                 AiBetaGate.verifyPasscode(
-                        jsIosOnlyCode, 103, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_ANDROID);
+                        jsIosOnlyCode, 103, nowValid, pubKey, AiBetaGate.PLATFORM_ANDROID);
         AiBetaGate.VerifyResult jsIosOnIos =
                 AiBetaGate.verifyPasscode(
-                        jsIosOnlyCode, 100, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_IOS);
+                        jsIosOnlyCode, 100, nowValid, pubKey, AiBetaGate.PLATFORM_IOS);
         AiBetaGate.VerifyResult jsIosOnWin =
                 AiBetaGate.verifyPasscode(
-                        jsIosOnlyCode, 1, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_WINDOWS);
+                        jsIosOnlyCode, 1, nowValid, pubKey, AiBetaGate.PLATFORM_WINDOWS);
         check(
                 !jsIosOnAndroid.ok
                         && jsIosOnAndroid.errorReason.contains("iOS")
                         && jsIosOnIos.ok
                         && !jsIosOnWin.ok,
-                "Gate: Phone-JS minted iOS-only code is rejected on Android/Windows and passes on iOS");
+                "Gate: Phone-JS minted iOS-only MMAILAB1 code is rejected on Android/Windows and passes on iOS");
 
         AiBetaGate.VerifyResult jsAwOnAnd =
                 AiBetaGate.verifyPasscode(
-                        jsAndWinCode, 103, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_ANDROID);
+                        jsAndWinCode, 103, nowValid, pubKey, AiBetaGate.PLATFORM_ANDROID);
         AiBetaGate.VerifyResult jsAwOnWin =
                 AiBetaGate.verifyPasscode(
-                        jsAndWinCode, 1, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_WINDOWS);
+                        jsAndWinCode, 1, nowValid, pubKey, AiBetaGate.PLATFORM_WINDOWS);
         AiBetaGate.VerifyResult jsAwOnIos =
                 AiBetaGate.verifyPasscode(
-                        jsAndWinCode, 100, nowValid, pubKey, AiBetaGate.FLAG_PLATFORM_IOS);
+                        jsAndWinCode, 100, nowValid, pubKey, AiBetaGate.PLATFORM_IOS);
         check(
                 jsAwOnAnd.ok
                         && jsAwOnWin.ok
                         && !jsAwOnIos.ok
                         && jsAwOnAnd.platformScopeLabel().contains("安卓")
                         && jsAwOnAnd.platformScopeLabel().contains("Windows"),
-                "Gate: Phone-JS minted Android+Windows code passes on Android/Windows and rejects iOS");
+                "Gate: Phone-JS minted Android+Windows MMAILAB1 code passes on Android/Windows and rejects iOS");
     }
 
     private static void test2_DualModeAuthAndOpenMinisHardening() throws Exception {

@@ -1,4 +1,4 @@
-"""Pure-JVM + local mock HTTP + 3-way Python/Phone-JS/Java ECDSA verification suite."""
+"""Pure-JVM + local mock HTTP + 3-way Python/Phone-JS/Java Ed25519 MMAILAB1 verification suite."""
 
 from pathlib import Path
 import json
@@ -36,36 +36,32 @@ public final class TextUtils {
 
 
 def run_phone_js_roundtrip(
-    work_dir: Path, priv_int: int, pub_bytes: bytes, shared_code_from_python: str
+    work_dir: Path, seed: bytes, pub_bytes: bytes, shared_code_from_python: str
 ) -> dict:
-    """Tests scripts/ai_beta_phone_keygen.html crypto & encrypted vault directly in Node.js."""
+    """Tests scripts/ai_beta_phone_keygen.html Ed25519 crypto & encrypted vault directly in Node.js."""
+    base_epoch = 1768000000
     node = shutil.which("node")
     if not node:
-        # Fallback to Python-encoded vectors if node is absent in an isolated CI container
         return {
             "jsAllPlatCode": codegen.encode_passcode(
-                priv_int, batch_id=501, expire_day=60, flags=0x01 | 0x04, min_version_code=0
+                seed, tag="js-all-501", days=60, platforms="all", shared=True, now_epoch=base_epoch
             ),
             "jsIosOnlyCode": codegen.encode_passcode(
-                priv_int, batch_id=502, expire_day=60, flags=0x01 | 0x20, min_version_code=0
+                seed, tag="js-ios-502", days=60, platforms="ios", now_epoch=base_epoch
             ),
             "jsAndWinCode": codegen.encode_passcode(
-                priv_int,
-                batch_id=503,
-                expire_day=60,
-                flags=0x01 | 0x10 | 0x40,
-                min_version_code=0,
+                seed, tag="js-aw-503", days=60, platforms="android,windows", now_epoch=base_epoch
             ),
         }
 
     html = (ROOT / "scripts" / "ai_beta_phone_keygen.html").read_text(encoding="utf-8")
     m = re.search(r"<script>([\s\S]*?)</script>", html)
     assert m, "Missing <script> block in ai_beta_phone_keygen.html"
-    js_mod = work_dir / "phone_crypto.cjs"
+    js_mod = work_dir / "phone_ed25519.cjs"
     js_mod.write_text(m.group(1), encoding="utf-8")
 
-    # Encrypt vault in Python -> decrypt in Phone JS (tests PBKDF2-SHA256 + Encrypt-then-MAC!)
-    vault = codegen.encrypt_mobile_vault(priv_int, pub_bytes, "marco-test-pwd-99")
+    # Encrypt Ed25519 seed vault in Python -> decrypt in Phone JS
+    vault = codegen.encrypt_mobile_vault(seed, pub_bytes, "marco-ed-pwd-99")
     vault_file = work_dir / "vault.json"
     vault_file.write_text(json.dumps(vault), encoding="utf-8")
 
@@ -73,34 +69,30 @@ def run_phone_js_roundtrip(
     driver.write_text(
         """
 const fs = require("fs");
-const cryptoMod = require(process.argv[2]);
+const edMod = require(process.argv[2]);
 const vault = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
 const pyCode = process.argv[4];
+const baseEpoch = 1768000000;
 
-// 1. Wrong password must fail
 let wrongFailed = false;
-try { cryptoMod.decryptVault(vault, "wrong-pwd"); } catch (_) { wrongFailed = true; }
+try { edMod.decryptVault(vault, "wrong-pwd"); } catch (_) { wrongFailed = true; }
 if (!wrongFailed) throw new Error("Phone JS vault accepted wrong password!");
 
-// 2. Decrypt Python-encrypted vault
-const { privBig, pubBytes } = cryptoMod.decryptVault(vault, "marco-test-pwd-99");
-const pubHex = cryptoMod.bytesToHex(pubBytes);
+const { seed, pub } = edMod.decryptVault(vault, "marco-ed-pwd-99");
+const pubHex = edMod.bytesToHex(pub);
 
-// 3. Verify Python-signed code inside Phone JS
-const pyCheck = cryptoMod.verifyPasscode(pyCode, pubHex);
-if (!pyCheck.valid || pyCheck.batchId !== 101) {
-  throw new Error("Phone JS failed to verify Python-signed code: " + JSON.stringify(pyCheck));
+const pyCheck = edMod.verifyPasscode(pyCode, pubHex);
+if (!pyCheck.valid || !pyCheck.claims || pyCheck.claims.tag !== "channel-101") {
+  throw new Error("Phone JS failed to verify Python Ed25519 code: " + JSON.stringify(pyCheck));
 }
 
-// 4. Mint 3 codes inside Phone JS (all-platforms, iOS-only, Android+Windows)
-const jsAllPlatCode = cryptoMod.encodePasscode(privBig, { batchId: 501, expireDay: 60, flags: 0x01 | 0x04, minVersionCode: 0 });
-const jsIosOnlyCode = cryptoMod.encodePasscode(privBig, { batchId: 502, expireDay: 60, flags: 0x01 | 0x20, minVersionCode: 0 });
-const jsAndWinCode = cryptoMod.encodePasscode(privBig, { batchId: 503, expireDay: 60, flags: 0x01 | 0x10 | 0x40, minVersionCode: 0 });
+const jsAllPlatCode = edMod.encodePasscode(seed, { tag: "js-all-501", days: 60, plat: "all", shared: true, nowEpochSec: baseEpoch });
+const jsIosOnlyCode = edMod.encodePasscode(seed, { tag: "js-ios-502", days: 60, plat: "ios", nowEpochSec: baseEpoch });
+const jsAndWinCode = edMod.encodePasscode(seed, { tag: "js-aw-503", days: 60, plat: "android,windows", nowEpochSec: baseEpoch });
 
-// 5. Re-encrypt vault in Phone JS and confirm decrypt
-const reVault = cryptoMod.encryptVault(privBig, pubBytes, "js-pwd-2026", 10000);
-const reDec = cryptoMod.decryptVault(reVault, "js-pwd-2026");
-if (reDec.privBig !== privBig) throw new Error("Phone JS vault roundtrip failed");
+const reVault = edMod.encryptVault(seed, pub, "js-ed-pwd-2026", 10000);
+const reDec = edMod.decryptVault(reVault, "js-ed-pwd-2026");
+if (edMod.bytesToHex(reDec.seed) !== edMod.bytesToHex(seed)) throw new Error("Phone JS vault roundtrip failed");
 
 console.log(JSON.stringify({ jsAllPlatCode, jsIosOnlyCode, jsAndWinCode, reVault }));
 """,
@@ -113,14 +105,12 @@ console.log(JSON.stringify({ jsAllPlatCode, jsIosOnlyCode, jsAndWinCode, reVault
         check=True,
     )
     out = json.loads(proc.stdout.strip())
-    # Verify Phone-JS re-encrypted vault decrypts in Python!
-    py_priv, _ = codegen.decrypt_mobile_vault(out["reVault"], "js-pwd-2026")
-    assert py_priv == priv_int, "Python failed to decrypt Phone-JS encrypted vault!"
-    # Verify all 3 Phone-JS minted codes in Python!
+    py_seed, _ = codegen.decrypt_mobile_vault(out["reVault"], "js-ed-pwd-2026")
+    assert py_seed == seed, "Python failed to decrypt Phone-JS Ed25519 vault!"
     for key in ("jsAllPlatCode", "jsIosOnlyCode", "jsAndWinCode"):
         info = codegen.decode_and_verify_passcode(out[key], pub_bytes)
         assert info["valid_signature"], f"Python failed to verify {key}"
-    print("PASS Phone-JS <-> Python 2-way encrypted vault & ECDSA P-256 cross-check")
+    print("PASS Phone-JS <-> Python 2-way encrypted Ed25519 vault & MMAILAB1 cross-check")
     return out
 
 
@@ -128,51 +118,56 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ai-beta-lab-checks-") as tmp:
         work_dir = Path(tmp)
         classes_dir = work_dir / "classes"
+        base_epoch = 1768000000
 
-        priv_int, pub_bytes = codegen.generate_keypair()
+        seed, pub_bytes = codegen.generate_seed_keypair()
         pub_hex = pub_bytes.hex()
         shared_code = codegen.encode_passcode(
-            priv_int,
-            batch_id=101,
-            expire_day=60,
-            flags=codegen.FLAG_CORE_AI | codegen.FLAG_SHARED_CHANNEL,
+            seed,
+            tag="channel-101",
+            days=60,
+            platforms="all",
+            shared=True,
             min_version_code=103,
+            now_epoch=base_epoch,
         )
         exp_code = codegen.encode_passcode(
-            priv_int,
-            batch_id=202,
-            expire_day=0,
-            flags=codegen.FLAG_CORE_AI | codegen.FLAG_EXPERIMENTAL_OAUTH,
+            seed,
+            tag="core-202",
+            days=0,
+            platforms="all",
+            shared=False,
+            experimental_oauth=True,
             min_version_code=103,
+            now_epoch=base_epoch,
         )
         high_min_vc_code = codegen.encode_passcode(
-            priv_int,
-            batch_id=303,
-            expire_day=0,
-            flags=codegen.FLAG_CORE_AI,
+            seed,
+            tag="vc-303",
+            days=0,
+            platforms="all",
             min_version_code=999,
+            now_epoch=base_epoch,
         )
         expired_code = codegen.encode_passcode(
-            priv_int,
-            batch_id=404,
-            expire_day=1,
-            flags=codegen.FLAG_CORE_AI,
-            min_version_code=103,
+            seed,
+            tag="exp-404",
+            days=1,
+            platforms="all",
+            now_epoch=base_epoch,
         )
 
-        js_res = run_phone_js_roundtrip(work_dir, priv_int, pub_bytes, shared_code)
+        js_res = run_phone_js_roundtrip(work_dir, seed, pub_bytes, shared_code)
 
+        # Also cross-check against the author's real unified Ed25519 private key if present locally
         real_author_code = ""
-        author_key_path = ROOT / "android-mobile" / "private" / "ai_beta_signing.key"
-        if author_key_path.exists():
-            author_priv, _ = codegen._load_key_file(author_key_path)
-            real_author_code = codegen.encode_passcode(
-                author_priv,
-                batch_id=1,
-                expire_day=0,
-                flags=codegen.FLAG_CORE_AI | codegen.FLAG_SHARED_CHANNEL,
-                min_version_code=0,
-            )
+        key_path = codegen._default_key_path()
+        if key_path.exists():
+            real_seed, real_pub = codegen.read_ed25519_seed(key_path)
+            if real_pub.hex() == codegen.DEFAULT_PUBKEY_HEX:
+                real_author_code = codegen.encode_passcode(
+                    real_seed, tag="real-unified-check", days=30, platforms="all", shared=True
+                )
 
         runtime_cp = compile_real_android_sources(
             classes_dir=classes_dir,
