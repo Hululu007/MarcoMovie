@@ -233,6 +233,54 @@ final class ProxyAddress {
         }
     }
 
+    static boolean isPrivateLanAddress(java.net.InetAddress addr) {
+        if (addr == null) return false;
+        if (addr.isLoopbackAddress() || addr.isSiteLocalAddress() || addr.isLinkLocalAddress()) {
+            return true;
+        }
+        byte[] raw = addr.getAddress();
+        if (raw != null && raw.length == 4) {
+            int b0 = raw[0] & 0xff;
+            int b1 = raw[1] & 0xff;
+            if (b0 == 10) return true;
+            if (b0 == 172 && b1 >= 16 && b1 <= 31) return true;
+            if (b0 == 192 && b1 == 168) return true;
+            if (b0 == 169 && b1 == 254) return true;
+            if (b0 == 100 && b1 >= 64 && b1 <= 127) return true; // RFC6598 CGNAT / Tailscale LAN
+        }
+        if (raw != null && raw.length == 16) {
+            int b0 = raw[0] & 0xff;
+            if ((b0 & 0xfe) == 0xfc) return true; // IPv6 ULA fc00::/7
+        }
+        return false;
+    }
+
+    /** Matches ONLY literal private/LAN IPv4 addresses (never arbitrary DNS hostnames). */
+    static boolean isPrivateLanHost(String host) {
+        if (host == null || host.isEmpty()) return false;
+        String bare = host.trim();
+        int colon = bare.indexOf(':');
+        if (colon >= 0) bare = bare.substring(0, colon);
+        String[] parts = bare.split("\\.", -1);
+        if (parts.length != 4) return false;
+        int[] oct = new int[4];
+        for (int i = 0; i < 4; i++) {
+            if (parts[i].isEmpty() || parts[i].length() > 3) return false;
+            try {
+                int v = Integer.parseInt(parts[i]);
+                if (v < 0 || v > 255) return false;
+                oct[i] = v;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+        if (oct[0] == 10) return true;
+        if (oct[0] == 172 && oct[1] >= 16 && oct[1] <= 31) return true;
+        if (oct[0] == 192 && oct[1] == 168) return true;
+        if (oct[0] == 169 && oct[1] == 254) return true;
+        return oct[0] == 100 && oct[1] >= 64 && oct[1] <= 127;
+    }
+
     /**
      * Rejects DNS-rebinding Host headers, cross-origin browser requests, and mismatched session
      * tokens.
@@ -244,18 +292,41 @@ final class ProxyAddress {
             String requestToken,
             String expectedToken,
             boolean requireToken) {
-        if (hostHeader != null && !hostHeader.isEmpty() && !isLoopbackHost(hostHeader))
-            return false;
+        return isAllowedRequest(
+                hostHeader,
+                originHeader,
+                secFetchSite,
+                requestToken,
+                expectedToken,
+                requireToken,
+                false);
+    }
+
+    static boolean isAllowedRequest(
+            String hostHeader,
+            String originHeader,
+            String secFetchSite,
+            String requestToken,
+            String expectedToken,
+            boolean requireToken,
+            boolean allowLanConfigRoute) {
+        if (hostHeader != null && !hostHeader.isEmpty()) {
+            boolean hostOk =
+                    isLoopbackHost(hostHeader)
+                            || (allowLanConfigRoute
+                                    && !requireToken
+                                    && isPrivateLanHost(hostHeader));
+            if (!hostOk) return false;
+        }
         if (originHeader != null && !originHeader.isEmpty()) {
-            // Allow exact same-origin loopback form/fetch posts on non-token CSP config pages
-            // while still strictly rejecting cross-origin browser requests and script-route
-            // Origins.
-            boolean sameLoopbackOrigin =
+            // Allow exact same-origin form/fetch posts on non-token CSP config pages while still
+            // strictly rejecting cross-origin browser requests and script-route Origins.
+            boolean sameAllowedOrigin =
                     !requireToken
                             && hostHeader != null
                             && !hostHeader.isEmpty()
                             && originHeader.trim().equalsIgnoreCase("http://" + hostHeader.trim());
-            if (!sameLoopbackOrigin) return false;
+            if (!sameAllowedOrigin) return false;
         }
         if (secFetchSite != null
                 && !secFetchSite.isEmpty()

@@ -84,6 +84,36 @@ final class OnlineSubtitleDanmakuService {
         DanmuSourceManager.saveUnifiedSources(a, list);
     }
 
+    /**
+     * Pure-JVM testable protocol-aware benchmark: only counts sources passing real Dandanplay v2
+     * JSON validation (rejecting HTTP 404/401/403 and business auth failures).
+     */
+    static List<DanmakuSource> benchmarkSourcesSync(
+            List<DanmakuSource> sources, String sampleKeyword) {
+        if (sources == null || sources.isEmpty()) return new ArrayList<>();
+        String kw =
+                sampleKeyword == null || sampleKeyword.trim().isEmpty()
+                        ? "三体"
+                        : sampleKeyword.trim();
+        for (DanmakuSource src : sources) {
+            if (src == null) continue;
+            DanmuSourceManager.ProbeResult probe =
+                    DanmuSourceManager.probeSingleOrigin(src.baseUrl, kw);
+            src.latencyMs = probe.ok ? Math.max(1L, probe.latencyMs) : 9999L;
+        }
+        Collections.sort(
+                sources,
+                new Comparator<DanmakuSource>() {
+                    @Override
+                    public int compare(DanmakuSource a1, DanmakuSource b1) {
+                        long la = a1.latencyMs < 0 ? 9998L : a1.latencyMs;
+                        long lb = b1.latencyMs < 0 ? 9998L : b1.latencyMs;
+                        return Long.compare(la, lb);
+                    }
+                });
+        return sources;
+    }
+
     /** Benchmarks all user-configured Danmaku sources and sorts fastest reachable endpoints first. */
     static void benchmarkDanmakuSourcesAsync(
             final MainActivity a, final Callback<List<DanmakuSource>> callback) {
@@ -94,35 +124,7 @@ final class OnlineSubtitleDanmakuService {
         }
         a.worker.execute(
                 () -> {
-                    for (DanmakuSource src : sources) {
-                        long t0 = System.currentTimeMillis();
-                        HttpURLConnection conn = null;
-                        try {
-                            conn = (HttpURLConnection) new URL(src.baseUrl).openConnection();
-                            conn.setRequestMethod("HEAD");
-                            conn.setConnectTimeout(4500);
-                            conn.setReadTimeout(4500);
-                            int code = conn.getResponseCode();
-                            src.latencyMs =
-                                    (code >= 200 && code < 500)
-                                            ? Math.max(1L, System.currentTimeMillis() - t0)
-                                            : 9999L;
-                        } catch (Exception e) {
-                            src.latencyMs = 9999L;
-                        } finally {
-                            if (conn != null) conn.disconnect();
-                        }
-                    }
-                    Collections.sort(
-                            sources,
-                            new Comparator<DanmakuSource>() {
-                                @Override
-                                public int compare(DanmakuSource a1, DanmakuSource b1) {
-                                    long la = a1.latencyMs < 0 ? 9998L : a1.latencyMs;
-                                    long lb = b1.latencyMs < 0 ? 9998L : b1.latencyMs;
-                                    return Long.compare(la, lb);
-                                }
-                            });
+                    benchmarkSourcesSync(sources, "三体");
                     saveDanmakuSources(a, sources);
                     a.ui.post(
                             () -> {

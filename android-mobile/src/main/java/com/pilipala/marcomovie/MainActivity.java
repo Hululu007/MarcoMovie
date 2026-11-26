@@ -3818,7 +3818,7 @@ public final class MainActivity extends Activity {
         syncSpiderGateway();
         if (!isTvDevice() && config != null) {
             final Cms.Config snap = config;
-            worker.execute(() -> ConfigCenterBridge.syncAll(this, snap, true, true, false));
+            worker.execute(() -> ConfigCenterBridge.syncAll(this, snap, true, false, false));
         }
         if (layoutReady && !privateMode) {
             SourceController.runDailyAutoUpdateIfNeeded(this, false);

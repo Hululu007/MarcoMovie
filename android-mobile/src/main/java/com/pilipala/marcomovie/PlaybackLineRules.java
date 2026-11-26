@@ -198,9 +198,12 @@ final class PlaybackLineRules {
     }
 
     /**
-     * Pure-JVM: applies rename/hide/order/preferred rules to a list of video lines while keeping
-     * every {@link Cms.Line#rawName} immutable. Protects against hiding every single line (if all
-     * lines would be hidden, returns all lines with aliases still applied).
+     * Assigns deterministic per-line identities while keeping every {@link Cms.Line#rawName}
+     * immutable. When a video exposes multiple lines sharing the same {@code rawName}, each line
+     * receives a unique {@code lineId} ({@code rawName}, {@code rawName#2}, ...) so unedited
+     * duplicate-named lines are NEVER collapsed into one and can be edited/deleted/reordered
+     * independently. Existing unique {@code lineId} values are preserved across repeated in-memory
+     * mutations (e.g. reordering in-place during playback).
      */
     static List<Cms.Line> applyToLines(List<Cms.Line> inputLines, JSONObject rule) {
         if (inputLines == null || inputLines.isEmpty()) return new ArrayList<>();
@@ -215,13 +218,38 @@ final class PlaybackLineRules {
                         : Collections.<String>emptyList();
         String preferred = preferredRawName(rule);
 
+        // Compute deterministic unique lineId per input line, preserving pre-assigned unique IDs.
+        Set<String> assignedIds = new LinkedHashSet<>();
+        Map<String, Integer> rawOccurrence = new LinkedHashMap<>();
         List<Cms.Line> cloned = new ArrayList<>(inputLines.size());
         for (Cms.Line orig : inputLines) {
             if (orig == null) continue;
             String raw = orig.rawName();
+            String id = orig.lineId != null ? orig.lineId.trim() : "";
+            if (id.isEmpty() || !assignedIds.add(id)) {
+                int occ = rawOccurrence.containsKey(raw) ? rawOccurrence.get(raw) : 0;
+                String candidate;
+                do {
+                    candidate = occ == 0 ? raw : (raw + "#" + (occ + 1));
+                    occ++;
+                } while (!assignedIds.add(candidate));
+                rawOccurrence.put(raw, occ);
+                id = candidate;
+            } else {
+                int occ = rawOccurrence.containsKey(raw) ? rawOccurrence.get(raw) : 0;
+                rawOccurrence.put(raw, occ + 1);
+            }
+
             Cms.Line copy = new Cms.Line();
             copy.rawName = raw;
-            String alias = aliases != null ? aliases.optString(raw, "").trim() : "";
+            copy.lineId = id;
+            String alias = "";
+            if (aliases != null) {
+                alias = aliases.optString(id, "").trim();
+                if (alias.isEmpty() && id.equals(raw)) {
+                    alias = aliases.optString(raw, "").trim();
+                }
+            }
             copy.name = alias.isEmpty() ? raw : alias;
             copy.episodes.addAll(orig.episodes);
             cloned.add(copy);
@@ -230,7 +258,7 @@ final class PlaybackLineRules {
         // Filter hidden (with last-line safety: never leave 0 lines if input had >= 1)
         List<Cms.Line> visible = new ArrayList<>(cloned.size());
         for (Cms.Line l : cloned) {
-            if (!hidden.contains(l.rawName())) {
+            if (!hidden.contains(l.lineId())) {
                 visible.add(l);
             }
         }
@@ -238,39 +266,87 @@ final class PlaybackLineRules {
             visible.addAll(cloned);
         }
 
-        // Apply custom ordering (preferred line moves first if no explicit order places it
-        // elsewhere)
-        Map<String, Cms.Line> byRaw = new LinkedHashMap<>();
+        // Apply custom ordering keyed by unique lineId (NEVER dropping same-named lines!)
+        Map<String, Cms.Line> byId = new LinkedHashMap<>();
         for (Cms.Line l : visible) {
-            if (!byRaw.containsKey(l.rawName())) {
-                byRaw.put(l.rawName(), l);
-            }
+            byId.put(l.lineId(), l);
         }
         List<Cms.Line> ordered = new ArrayList<>(visible.size());
-        if (!preferred.isEmpty() && byRaw.containsKey(preferred) && order.isEmpty()) {
-            ordered.add(byRaw.remove(preferred));
+        if (!preferred.isEmpty() && byId.containsKey(preferred) && order.isEmpty()) {
+            ordered.add(byId.remove(preferred));
         }
-        for (String raw : order) {
-            Cms.Line l = byRaw.remove(raw);
+        for (String lid : order) {
+            Cms.Line l = byId.remove(lid);
             if (l != null) ordered.add(l);
         }
-        ordered.addAll(byRaw.values());
+        ordered.addAll(byId.values());
         return ordered;
     }
 
-    /** Convenience mutator for a loaded video in place. */
+    /**
+     * Re-binds the active line reference after {@link #applyToLines} produces new {@link Cms.Line}
+     * instances, guaranteeing {@code video.lines.indexOf(activeLine)} never becomes {@code -1}
+     * after in-playback rename/reorder.
+     */
+    static Cms.Line resolveActiveLineAfterApply(
+            List<Cms.Line> transformed, Cms.Line previousActive, Cms.Episode previousEpisode) {
+        if (transformed == null || transformed.isEmpty() || previousActive == null) return null;
+        if (transformed.contains(previousActive)) return previousActive;
+        String prevId = previousActive.lineId();
+        if (!prevId.isEmpty()) {
+            for (Cms.Line cand : transformed) {
+                if (cand != null && prevId.equals(cand.lineId())) return cand;
+            }
+        }
+        if (previousEpisode != null) {
+            for (Cms.Line cand : transformed) {
+                if (cand != null
+                        && cand.rawName().equals(previousActive.rawName())
+                        && cand.episodes.contains(previousEpisode)) {
+                    return cand;
+                }
+            }
+            if (previousEpisode.url != null && !previousEpisode.url.isEmpty()) {
+                for (Cms.Line cand : transformed) {
+                    if (cand == null) continue;
+                    for (Cms.Episode ep : cand.episodes) {
+                        if (ep != null && previousEpisode.url.equals(ep.url)) {
+                            return cand;
+                        }
+                    }
+                }
+            }
+        }
+        for (Cms.Line cand : transformed) {
+            if (cand != null && cand.rawName().equals(previousActive.rawName())) return cand;
+        }
+        return transformed.get(0);
+    }
+
+    /** Convenience mutator for a loaded video in place, keeping {@code a.activeLine} in sync. */
     static void applyToVideo(MainActivity a, Cms.Site site, Cms.Video video) {
         if (a == null || site == null || video == null || video.lines.isEmpty()) return;
+        boolean trackingActive = a.activeLine != null && video.lines.contains(a.activeLine);
+        Cms.Line prevActive = trackingActive ? a.activeLine : null;
+        Cms.Episode prevEp = trackingActive ? a.activeEpisode : null;
         JSONObject rule = loadRuleForSite(a, site);
         List<Cms.Line> transformed = applyToLines(video.lines, rule);
         video.lines.clear();
         video.lines.addAll(transformed);
+        if (trackingActive) {
+            Cms.Line rebound = resolveActiveLineAfterApply(video.lines, prevActive, prevEp);
+            if (rebound != null) {
+                a.activeLine = rebound;
+            }
+        }
     }
 
-    /** Matches a WatchHistory / favorite line name against either rawName or current display name. */
+    /** Matches a WatchHistory / favorite line name against lineId, rawName, or current display name. */
     static boolean matchesLine(Cms.Line line, String savedLineName) {
         if (line == null || savedLineName == null || savedLineName.isEmpty()) return false;
-        return savedLineName.equals(line.rawName()) || savedLineName.equals(line.name);
+        return savedLineName.equals(line.lineId())
+                || savedLineName.equals(line.rawName())
+                || savedLineName.equals(line.name);
     }
 
     /** Interactive long-press line management sheet (rename, move up/down/top, default, delete, restore). */
@@ -283,11 +359,12 @@ final class PlaybackLineRules {
         if (a == null || site == null || video == null || line == null || a.isFinishing()) return;
         final String scope = scopeFor(a, site);
         final JSONObject rule = loadRuleForSite(a, site);
+        final String lid = line.lineId();
         final String raw = line.rawName();
         final int idx = video.lines.indexOf(line);
         final int total = video.lines.size();
         final int hiddenCnt = hiddenCount(rule);
-        final boolean isPref = raw.equals(preferredRawName(rule));
+        final boolean isPref = lid.equals(preferredRawName(rule));
 
         List<String> labels = new ArrayList<>();
         List<Runnable> actions = new ArrayList<>();
@@ -298,7 +375,7 @@ final class PlaybackLineRules {
         labels.add(isPref ? "取消默认优先线路" : "设为该片源默认优先线路");
         actions.add(
                 () -> {
-                    setPreferred(rule, isPref ? "" : raw);
+                    setPreferred(rule, isPref ? "" : lid);
                     saveRuleForScope(a, scope, rule);
                     applyToVideo(a, site, video);
                     a.toast(isPref ? "已取消默认线路" : ("已设「" + line.name + "」为默认线路"));
@@ -309,9 +386,9 @@ final class PlaybackLineRules {
             labels.add("置顶此线路");
             actions.add(
                     () -> {
-                        List<String> curOrder = currentRawOrder(video);
-                        curOrder.remove(raw);
-                        curOrder.add(0, raw);
+                        List<String> curOrder = currentLineIdOrder(video);
+                        curOrder.remove(lid);
+                        curOrder.add(0, lid);
                         setOrder(rule, curOrder);
                         saveRuleForScope(a, scope, rule);
                         applyToVideo(a, site, video);
@@ -321,8 +398,8 @@ final class PlaybackLineRules {
             labels.add("上移一位");
             actions.add(
                     () -> {
-                        List<String> curOrder = currentRawOrder(video);
-                        int pos = curOrder.indexOf(raw);
+                        List<String> curOrder = currentLineIdOrder(video);
+                        int pos = curOrder.indexOf(lid);
                         if (pos > 0) Collections.swap(curOrder, pos, pos - 1);
                         setOrder(rule, curOrder);
                         saveRuleForScope(a, scope, rule);
@@ -334,8 +411,8 @@ final class PlaybackLineRules {
             labels.add("下移一位");
             actions.add(
                     () -> {
-                        List<String> curOrder = currentRawOrder(video);
-                        int pos = curOrder.indexOf(raw);
+                        List<String> curOrder = currentLineIdOrder(video);
+                        int pos = curOrder.indexOf(lid);
                         if (pos >= 0 && pos + 1 < curOrder.size()) {
                             Collections.swap(curOrder, pos, pos + 1);
                         }
@@ -357,7 +434,7 @@ final class PlaybackLineRules {
                                     "删除线路",
                                     true,
                                     () -> {
-                                        setHidden(rule, raw, true);
+                                        setHidden(rule, lid, true);
                                         saveRuleForScope(a, scope, rule);
                                         applyToVideo(a, site, video);
                                         a.toast("已删除线路「" + line.name + "」");
@@ -378,8 +455,8 @@ final class PlaybackLineRules {
 
         String subtitle =
                 raw.equals(line.name)
-                        ? ("原始标识：" + raw + " · 刷新订阅后保留改动")
-                        : ("原始标识：" + raw + "（已重命名）");
+                        ? ("原始标识：" + lid + " · 刷新订阅后保留改动")
+                        : ("原始标识：" + lid + "（已重命名）");
         MobileBottomSheet.showPicker(
                 a,
                 "管理线路 · " + line.name,
@@ -427,7 +504,7 @@ final class PlaybackLineRules {
         saveBtn.setOnClickListener(
                 v -> {
                     String nextName = et.getText().toString().trim();
-                    setAlias(rule, line.rawName(), nextName);
+                    setAlias(rule, line.lineId(), nextName);
                     saveRuleForScope(a, scope, rule);
                     line.name = nextName.isEmpty() ? line.rawName() : nextName;
                     if (handleRef[0] != null) handleRef[0].dismiss();
@@ -438,11 +515,11 @@ final class PlaybackLineRules {
         handleRef[0] = MobileBottomSheet.showCustom(a, "重命名线路", box, null);
     }
 
-    private static List<String> currentRawOrder(Cms.Video video) {
+    private static List<String> currentLineIdOrder(Cms.Video video) {
         List<String> out = new ArrayList<>();
         if (video == null) return out;
         for (Cms.Line l : video.lines) {
-            if (l != null && !out.contains(l.rawName())) out.add(l.rawName());
+            if (l != null && !out.contains(l.lineId())) out.add(l.lineId());
         }
         return out;
     }

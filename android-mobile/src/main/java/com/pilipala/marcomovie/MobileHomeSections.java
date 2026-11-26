@@ -143,20 +143,42 @@ final class MobileHomeSections {
         return arr.toString();
     }
 
+    static boolean isReorderable(String id) {
+        return id != null && CURATED_IDS.contains(id);
+    }
+
+    static boolean canMoveUp(List<String> order, int idx) {
+        if (order == null || idx <= 0 || idx >= order.size()) return false;
+        return isReorderable(order.get(idx)) && isReorderable(order.get(idx - 1));
+    }
+
+    static boolean canMoveDown(List<String> order, int idx) {
+        if (order == null || idx < 0 || idx + 1 >= order.size()) return false;
+        return isReorderable(order.get(idx)) && isReorderable(order.get(idx + 1));
+    }
+
     static List<String> parseOrder(String raw) {
-        List<String> out = new ArrayList<>();
-        Set<String> seen = new LinkedHashSet<>();
+        List<String> curatedOrder = new ArrayList<>();
+        Set<String> seenCurated = new LinkedHashSet<>();
         if (raw != null && !raw.trim().isEmpty()) {
             for (String part : raw.split(",")) {
                 String id = part.trim();
-                if (DEFAULT_ORDER.contains(id) && seen.add(id)) {
-                    out.add(id);
+                if (CURATED_IDS.contains(id) && seenCurated.add(id)) {
+                    curatedOrder.add(id);
                 }
             }
         }
-        for (String id : DEFAULT_ORDER) {
-            if (seen.add(id)) out.add(id);
+        for (String id : CURATED_IDS) {
+            if (seenCurated.add(id)) curatedOrder.add(id);
         }
+        // Keep structural fixed sections (hero, history, source_updates) in their real rendered
+        // slots while honoring user ordering for every curated section that actually reorders on
+        // MobileHomePage.
+        List<String> out = new ArrayList<>(DEFAULT_ORDER.size());
+        out.add(ID_HERO_BILLBOARD);
+        out.add(ID_WATCH_HISTORY);
+        out.addAll(curatedOrder);
+        out.add(ID_SOURCE_UPDATES);
         return out;
     }
 
@@ -325,33 +347,39 @@ final class MobileHomeSections {
                         col.addView(subTv);
                         row.addView(col, new LinearLayout.LayoutParams(0, -2, 1f));
 
-                        if (idx > 0) {
-                            TextView upBtn = a.text("↑", 13f, p.textSecondary);
-                            upBtn.setGravity(Gravity.CENTER);
-                            upBtn.setPadding(a.dp(8), a.dp(6), a.dp(8), a.dp(6));
-                            MobileMotion.bindPress(upBtn, 0.92f);
-                            upBtn.setOnClickListener(
-                                    v -> {
-                                        Collections.swap(order, idx, idx - 1);
-                                        saveOrder(a, order);
-                                        rebuild[0].run();
-                                        if (onChanged != null) onChanged.run();
-                                    });
-                            row.addView(upBtn);
-                        }
-                        if (idx + 1 < order.size()) {
-                            TextView downBtn = a.text("↓", 13f, p.textSecondary);
-                            downBtn.setGravity(Gravity.CENTER);
-                            downBtn.setPadding(a.dp(8), a.dp(6), a.dp(8), a.dp(6));
-                            MobileMotion.bindPress(downBtn, 0.92f);
-                            downBtn.setOnClickListener(
-                                    v -> {
-                                        Collections.swap(order, idx, idx + 1);
-                                        saveOrder(a, order);
-                                        rebuild[0].run();
-                                        if (onChanged != null) onChanged.run();
-                                    });
-                            row.addView(downBtn);
+                        if (isReorderable(id)) {
+                            if (canMoveUp(order, idx)) {
+                                TextView upBtn = a.text("↑", 13f, p.textSecondary);
+                                upBtn.setGravity(Gravity.CENTER);
+                                upBtn.setPadding(a.dp(8), a.dp(6), a.dp(8), a.dp(6));
+                                MobileMotion.bindPress(upBtn, 0.92f);
+                                upBtn.setOnClickListener(
+                                        v -> {
+                                            Collections.swap(order, idx, idx - 1);
+                                            saveOrder(a, order);
+                                            rebuild[0].run();
+                                            if (onChanged != null) onChanged.run();
+                                        });
+                                row.addView(upBtn);
+                            }
+                            if (canMoveDown(order, idx)) {
+                                TextView downBtn = a.text("↓", 13f, p.textSecondary);
+                                downBtn.setGravity(Gravity.CENTER);
+                                downBtn.setPadding(a.dp(8), a.dp(6), a.dp(8), a.dp(6));
+                                MobileMotion.bindPress(downBtn, 0.92f);
+                                downBtn.setOnClickListener(
+                                        v -> {
+                                            Collections.swap(order, idx, idx + 1);
+                                            saveOrder(a, order);
+                                            rebuild[0].run();
+                                            if (onChanged != null) onChanged.run();
+                                        });
+                                row.addView(downBtn);
+                            }
+                        } else {
+                            TextView fixedTag = a.text("固定位置", 10.5f, p.textTertiary);
+                            fixedTag.setPadding(a.dp(6), a.dp(4), a.dp(4), a.dp(4));
+                            row.addView(fixedTag);
                         }
 
                         TextView togglePill =

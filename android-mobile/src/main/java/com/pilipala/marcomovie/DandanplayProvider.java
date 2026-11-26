@@ -537,7 +537,177 @@ public final class DandanplayProvider implements DanmuProvider {
         for (Candidate c : searched) {
             if (seen.add(c.boundEpisodeId)) combined.add(c);
         }
+        sortCandidatesByConfidence(combined);
         return combined;
+    }
+
+    static void sortCandidatesByConfidence(List<Candidate> list) {
+        if (list == null || list.size() <= 1) return;
+        Collections.sort(
+                list,
+                new Comparator<Candidate>() {
+                    @Override
+                    public int compare(Candidate a, Candidate b) {
+                        return Double.compare(b.confidence, a.confidence);
+                    }
+                });
+    }
+
+    /**
+     * Extracts explicit season number from an anime or episode title (standalone; no external
+     * helper dependency). Returns {@code 0} when no explicit season marker is present.
+     */
+    static int extractSeasonFromTitle(String title) {
+        if (title == null || title.trim().isEmpty()) return 0;
+        String s = title.trim();
+        Matcher cnNum = Pattern.compile("第\\s*(\\d{1,2})\\s*[季部]").matcher(s);
+        if (cnNum.find()) {
+            try {
+                return Integer.parseInt(cnNum.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher cnWord = Pattern.compile("第\\s*([一二三四五六七八九十两]{1,3})\\s*[季部]").matcher(s);
+        if (cnWord.find()) {
+            int val = parseSmallChineseNum(cnWord.group(1));
+            if (val > 0) return val;
+        }
+        Matcher enSeason = Pattern.compile("(?i)(?:season|series)\\s*0?(\\d{1,2})\\b").matcher(s);
+        if (enSeason.find()) {
+            try {
+                return Integer.parseInt(enSeason.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher sTag =
+                Pattern.compile("(?i)(?:^|[\\s\\[_\\-·(（])S0?(\\d{1,2})(?:E\\d+|[\\s\\]_\\-·)）]|$)")
+                        .matcher(s);
+        if (sTag.find()) {
+            try {
+                return Integer.parseInt(sTag.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher trailingDigit = Pattern.compile("[\\u4e00-\\u9fff\\s](\\d{1,2})$").matcher(s);
+        if (trailingDigit.find()) {
+            try {
+                int v = Integer.parseInt(trailingDigit.group(1));
+                if (v >= 2 && v <= 20) return v;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return 0;
+    }
+
+    private static int parseSmallChineseNum(String raw) {
+        if (raw == null || raw.isEmpty()) return 0;
+        if ("十".equals(raw)) return 10;
+        if (raw.length() == 1) return chineseDigit(raw.charAt(0));
+        if (raw.length() == 2 && raw.charAt(0) == '十') {
+            int ones = chineseDigit(raw.charAt(1));
+            return ones > 0 ? 10 + ones : 0;
+        }
+        if (raw.length() == 2 && raw.charAt(1) == '十') {
+            int tens = chineseDigit(raw.charAt(0));
+            return tens > 0 ? tens * 10 : 0;
+        }
+        if (raw.length() == 3 && raw.charAt(1) == '十') {
+            int tens = chineseDigit(raw.charAt(0));
+            int ones = chineseDigit(raw.charAt(2));
+            return (tens > 0 && ones > 0) ? tens * 10 + ones : 0;
+        }
+        return 0;
+    }
+
+    private static int chineseDigit(char c) {
+        switch (c) {
+            case '一':
+                return 1;
+            case '二':
+            case '两':
+                return 2;
+            case '三':
+                return 3;
+            case '四':
+                return 4;
+            case '五':
+                return 5;
+            case '六':
+                return 6;
+            case '七':
+                return 7;
+            case '八':
+                return 8;
+            case '九':
+                return 9;
+            default:
+                return 0;
+        }
+    }
+
+    static int extractEpisodeFromTitle(String epTitle) {
+        if (epTitle == null || epTitle.trim().isEmpty()) return 0;
+        String s = epTitle.trim();
+        Matcher m1 = Pattern.compile("第\\s*0*(\\d{1,4})\\s*[集话話期回]").matcher(s);
+        if (m1.find()) {
+            try {
+                return Integer.parseInt(m1.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher m2 =
+                Pattern.compile("(?i)(?:^|[\\s\\[_\\-S\\d])E(?:P)?\\s*0*(\\d{1,4})\\b").matcher(s);
+        if (m2.find()) {
+            try {
+                return Integer.parseInt(m2.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher m3 = Pattern.compile("^0*(\\d{1,4})(?:[\\s\\.\\-:]|$)").matcher(s);
+        if (m3.find()) {
+            try {
+                return Integer.parseInt(m3.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return 0;
+    }
+
+    static double adjustCandidateConfidence(
+            double baseConf, MatchQuery query, String animeTitle, String epTitle) {
+        double score = baseConf;
+        if (query == null) return score;
+        int wantSeason =
+                query.seasonNumber > 0 ? query.seasonNumber : extractSeasonFromTitle(query.title);
+        int candSeason = extractSeasonFromTitle(animeTitle);
+        if (candSeason == 0) {
+            candSeason = extractSeasonFromTitle(epTitle);
+        }
+        if (wantSeason >= 2) {
+            if (candSeason == wantSeason) {
+                score += 0.22;
+            } else if (candSeason > 0) {
+                score -= 0.55;
+            } else {
+                // Unmarked title almost always represents Season 1 when user asks for Season >= 2.
+                score -= 0.40;
+            }
+        } else if (wantSeason == 1) {
+            if (candSeason >= 2) {
+                score -= 0.45;
+            } else {
+                score += 0.05;
+            }
+        }
+        if (query.episodeIndex > 0) {
+            int candEp = extractEpisodeFromTitle(epTitle);
+            if (candEp == query.episodeIndex) {
+                score += 0.08;
+            } else if (candEp > 0) {
+                score -= 0.25;
+            }
+        }
+        return Math.max(0.05, Math.min(1.0, score));
     }
 
     private List<Candidate> tryMatchEndpoint(
@@ -570,10 +740,11 @@ public final class DandanplayProvider implements DanmuProvider {
                 String animeId = stringifyId(m.opt("animeId"));
                 String animeTitle = m.optString("animeTitle", "").trim();
                 String epTitle = m.optString("episodeTitle", "").trim();
-                double conf =
+                double baseConf =
                         m.has("confidence")
                                 ? m.optDouble("confidence", exact ? 1.0 : 0.85)
                                 : (exact ? 1.0 : 0.85);
+                double conf = adjustCandidateConfidence(baseConf, query, animeTitle, epTitle);
                 out.add(
                         new Candidate(
                                 origin,
@@ -583,6 +754,7 @@ public final class DandanplayProvider implements DanmuProvider {
                                 epTitle,
                                 conf));
             }
+            sortCandidatesByConfidence(out);
             return out;
         } catch (JSONException e) {
             return Collections.emptyList();
@@ -593,10 +765,43 @@ public final class DandanplayProvider implements DanmuProvider {
             String origin, MatchQuery query, CancellationToken token) throws IOException {
         String cleanTitle = cleanTitle(query.title);
         if (cleanTitle.isEmpty()) return Collections.emptyList();
+        int wantSeason =
+                query.seasonNumber > 0 ? query.seasonNumber : extractSeasonFromTitle(query.title);
+        List<Candidate> out = fetchSearchEpisodesOnce(origin, cleanTitle, query, token);
+        if (wantSeason >= 2 && extractSeasonFromTitle(cleanTitle) != wantSeason) {
+            boolean hasStrongSeasonHit = false;
+            for (Candidate c : out) {
+                if (extractSeasonFromTitle(c.animeTitle) == wantSeason
+                        || extractSeasonFromTitle(c.episodeTitle) == wantSeason) {
+                    hasStrongSeasonHit = true;
+                    break;
+                }
+            }
+            if (!hasStrongSeasonHit) {
+                try {
+                    List<Candidate> seasonExtra =
+                            fetchSearchEpisodesOnce(
+                                    origin, cleanTitle + " 第" + wantSeason + "季", query, token);
+                    Set<String> seen = new LinkedHashSet<>();
+                    for (Candidate c : out) seen.add(c.boundEpisodeId);
+                    for (Candidate c : seasonExtra) {
+                        if (seen.add(c.boundEpisodeId)) out.add(c);
+                    }
+                } catch (IOException ignored) {
+                }
+            }
+        }
+        sortCandidatesByConfidence(out);
+        return out;
+    }
+
+    private List<Candidate> fetchSearchEpisodesOnce(
+            String origin, String searchAnime, MatchQuery query, CancellationToken token)
+            throws IOException {
         StringBuilder url =
                 new StringBuilder(origin)
                         .append("/api/v2/search/episodes?anime=")
-                        .append(percentEncode(cleanTitle));
+                        .append(percentEncode(searchAnime));
         if (query.episodeIndex > 0) {
             url.append("&episode=").append(query.episodeIndex);
         }
@@ -604,7 +809,7 @@ public final class DandanplayProvider implements DanmuProvider {
         try {
             JSONObject root = new JSONObject(response);
             JSONArray animes = root.optJSONArray("animes");
-            if (animes == null) return Collections.emptyList();
+            if (animes == null) return new ArrayList<>();
             List<Candidate> out = new ArrayList<>();
             for (int i = 0; i < animes.length(); i++) {
                 JSONObject anime = animes.optJSONObject(i);
@@ -619,6 +824,7 @@ public final class DandanplayProvider implements DanmuProvider {
                     String epId = stringifyId(ep.opt("episodeId"));
                     if (epId.isEmpty()) continue;
                     String epTitle = ep.optString("episodeTitle", "");
+                    double conf = adjustCandidateConfidence(0.70, query, animeTitle, epTitle);
                     out.add(
                             new Candidate(
                                     origin,
@@ -626,12 +832,12 @@ public final class DandanplayProvider implements DanmuProvider {
                                     animeTitle,
                                     encodeBoundEpisodeId(origin, epId),
                                     epTitle,
-                                    0.70));
+                                    conf));
                 }
             }
             return out;
         } catch (JSONException e) {
-            return Collections.emptyList();
+            return new ArrayList<>();
         }
     }
 

@@ -314,8 +314,8 @@ final class MobilePlayerOverlay {
     }
 
     private boolean isSlimBarEnabled() {
-        return a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true)
-                && com.pilipala.marcomovie.hud.PlayerHudPrefs.isSlimProgressEnabled(a);
+        return com.pilipala.marcomovie.hud.PlayerHudPrefs.isUnifiedSlimProgressEnabled(
+                a, a.mobilePrefs());
     }
 
     /** Immediately synchronizes idle capsule and mini progress bar when HUD visibility toggles. */

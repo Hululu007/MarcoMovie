@@ -68,6 +68,223 @@ final class ExternalParserResolver {
         }
     }
 
+    interface HttpFetcher {
+        String fetch(String url, Map<String, String> headers) throws Exception;
+    }
+
+    interface EmbeddedExtractor {
+        String extract(String pageUrl, String html);
+    }
+
+    static final class ResolutionOutcome {
+        static final String KIND_DIRECT_EMBEDDED = "direct_embedded";
+        static final String KIND_JSON_PARSER = "json_parser";
+        static final String KIND_WEB_SNIFF = "web_sniff";
+        static final String KIND_WEB_PARSER = "web_parser";
+        static final String KIND_DIRECT_URL = "direct_url";
+        static final String KIND_FAILED = "failed";
+
+        final String kind;
+        final String url;
+        final Map<String, String> headers;
+        final JSONObject rawJson;
+        final String matchedParserName;
+        final String matchedParserUrl;
+        final String webPrefix;
+        final String error;
+
+        ResolutionOutcome(
+                String kind,
+                String url,
+                Map<String, String> headers,
+                JSONObject rawJson,
+                String matchedParserName,
+                String matchedParserUrl,
+                String webPrefix,
+                String error) {
+            this.kind = kind;
+            this.url = url == null ? "" : url;
+            this.headers =
+                    headers == null
+                            ? Collections.<String, String>emptyMap()
+                            : new LinkedHashMap<>(headers);
+            this.rawJson = rawJson;
+            this.matchedParserName = matchedParserName == null ? "" : matchedParserName;
+            this.matchedParserUrl = matchedParserUrl == null ? "" : matchedParserUrl;
+            this.webPrefix = webPrefix == null ? "" : webPrefix;
+            this.error = error == null ? "" : error;
+        }
+    }
+
+    /**
+     * Production routing gate deciding whether a spider/CMS playback result with {@code parse!=0 ||
+     * jx!=0} should execute the external parser chain ({@link #executeParserChain}) rather than
+     * jumping straight to raw WebView sniffing.
+     *
+     * <p>Covers {@code parse=1, jx=0} with no {@code playUrl} prefix for ALL of: VIP pages, opaque
+     * non-HTTP episode IDs, AND ordinary web pages whenever parsers are configured.
+     */
+    static boolean shouldRouteThroughExternalParsers(
+            int parseFlag,
+            int jxFlag,
+            String playPrefix,
+            String episodeUrl,
+            List<Cms.Parse> cfgParses) {
+        if (parseFlag == 0 && jxFlag == 0) return false;
+        if (jxFlag != 0) return true;
+        String cleanPrefix = playPrefix == null ? "" : playPrefix.trim();
+        if (isKnownJsonParserPrefix(cleanPrefix, cfgParses)) return true;
+        if (cleanPrefix.isEmpty() && cfgParses != null && !cfgParses.isEmpty()) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Executes the production external parser chain:
+     *
+     * <ol>
+     *   <li>For non-VIP HTTP pages, tries extracting an embedded direct stream URL first.
+     *   <li>Orders configured parsers by flag match, then runs JSON parsers (up to 8 candidates),
+     *       including opaque episode IDs and normal web pages.
+     *   <li>Falls back to a configured web parser ({@code type == 0}) or explicit non-JSON prefix,
+     *       direct media URL, or raw WebView sniff.
+     * </ol>
+     */
+    static ResolutionOutcome executeParserChain(
+            String epUrl,
+            String lineFlag,
+            String preferredPrefix,
+            List<Cms.Parse> allParses,
+            Map<String, String> siteHeaders,
+            String siteName,
+            HttpFetcher fetcher,
+            EmbeddedExtractor embeddedExtractor) {
+        String cleanEpUrl = epUrl == null ? "" : epUrl.trim();
+        if (cleanEpUrl.isEmpty()) {
+            return new ResolutionOutcome(
+                    ResolutionOutcome.KIND_FAILED, "", null, null, "", "", "", "剧集播放标识为空");
+        }
+        if (Cms.isHttp(cleanEpUrl)
+                && !isKnownVipPageUrl(cleanEpUrl)
+                && fetcher != null
+                && embeddedExtractor != null) {
+            try {
+                String html = fetcher.fetch(cleanEpUrl, siteHeaders);
+                String embedded = embeddedExtractor.extract(cleanEpUrl, html);
+                if (Cms.isDirectStreamUrl(embedded)) {
+                    return new ResolutionOutcome(
+                            ResolutionOutcome.KIND_DIRECT_EMBEDDED,
+                            embedded,
+                            siteHeaders,
+                            null,
+                            "",
+                            "",
+                            "",
+                            "");
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        List<Cms.Parse> candidates =
+                orderParsersForFlag(allParses, lineFlag, preferredPrefix, siteHeaders, siteName);
+        Cms.Parse webFallbackParser = null;
+        int triedJson = 0;
+        for (Cms.Parse p : candidates) {
+            if (Thread.currentThread().isInterrupted()) {
+                return new ResolutionOutcome(
+                        ResolutionOutcome.KIND_FAILED, "", null, null, "", "", "", "已取消");
+            }
+            if (p.type == 0 && webFallbackParser == null) {
+                webFallbackParser = p;
+            }
+            if ((p.type == 1 || p.type == 2 || p.type == 3) && triedJson < 8 && fetcher != null) {
+                triedJson++;
+                try {
+                    String targetUrl = buildWebParserUrl(p.url, cleanEpUrl);
+                    String resp = fetcher.fetch(targetUrl, p.headers);
+                    ParsedResult pr = parseJsonParserResponse(resp, cleanEpUrl);
+                    if (pr.ok && pr.needsWebSniff) {
+                        Map<String, String> merged = new LinkedHashMap<>(p.headers);
+                        Cms.mergeHeaders(merged, pr.headers);
+                        return new ResolutionOutcome(
+                                ResolutionOutcome.KIND_WEB_SNIFF,
+                                pr.url,
+                                merged,
+                                pr.rawJson,
+                                p.name,
+                                p.url,
+                                "",
+                                "");
+                    }
+                    if (pr.ok && pr.rawJson != null) {
+                        Map<String, String> merged = new LinkedHashMap<>(pr.headers);
+                        if (merged.isEmpty() && !p.headers.isEmpty()) merged.putAll(p.headers);
+                        return new ResolutionOutcome(
+                                ResolutionOutcome.KIND_JSON_PARSER,
+                                pr.url,
+                                merged,
+                                pr.rawJson,
+                                p.name,
+                                p.url,
+                                "",
+                                "");
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        String finalPrefix =
+                webFallbackParser != null
+                        ? webFallbackParser.url
+                        : (preferredPrefix != null
+                                        && !isKnownJsonParserPrefix(preferredPrefix, allParses)
+                                ? preferredPrefix.trim()
+                                : "");
+        Map<String, String> fallbackHeaders =
+                webFallbackParser != null
+                        ? webFallbackParser.headers
+                        : Collections.<String, String>emptyMap();
+        String webTarget = buildWebParserUrl(finalPrefix, cleanEpUrl);
+        if (!finalPrefix.isEmpty() && Cms.isHttp(webTarget)) {
+            return new ResolutionOutcome(
+                    ResolutionOutcome.KIND_WEB_PARSER,
+                    cleanEpUrl,
+                    fallbackHeaders,
+                    null,
+                    webFallbackParser != null ? webFallbackParser.name : "",
+                    finalPrefix,
+                    finalPrefix,
+                    "");
+        }
+        if (Cms.isDirectStreamUrl(cleanEpUrl)) {
+            return new ResolutionOutcome(
+                    ResolutionOutcome.KIND_DIRECT_URL,
+                    cleanEpUrl,
+                    siteHeaders,
+                    null,
+                    "",
+                    "",
+                    "",
+                    "");
+        }
+        if (Cms.isHttp(cleanEpUrl)) {
+            return new ResolutionOutcome(
+                    ResolutionOutcome.KIND_WEB_SNIFF,
+                    cleanEpUrl,
+                    siteHeaders,
+                    null,
+                    "",
+                    "",
+                    "",
+                    "");
+        }
+        return new ResolutionOutcome(
+                ResolutionOutcome.KIND_FAILED, "", null, null, "", "", "", "此剧集需要外部解析，未找到可用解析接口");
+    }
+
     private ExternalParserResolver() {}
 
     static boolean isKnownVipPageUrl(String url) {

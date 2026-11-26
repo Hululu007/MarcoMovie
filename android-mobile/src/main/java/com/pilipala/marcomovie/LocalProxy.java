@@ -163,13 +163,14 @@ public final class LocalProxy implements Closeable {
         ServerSocket socket = new ServerSocket();
         try {
             socket.setReuseAddress(true);
-            socket.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 9978));
+            socket.bind(new InetSocketAddress("0.0.0.0", 9978));
             return socket;
         } catch (BindException occupied) {
             socket.close();
             ServerSocket fallback = new ServerSocket();
             try {
-                fallback.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0));
+                fallback.setReuseAddress(true);
+                fallback.bind(new InetSocketAddress("0.0.0.0", 0));
                 return fallback;
             } catch (IOException failure) {
                 fallback.close();
@@ -298,27 +299,44 @@ public final class LocalProxy implements Closeable {
         return null;
     }
 
-    private static long parseClientRequestedEnd(String rangeHeader) {
-        if (rangeHeader == null) return -1L;
+    /**
+     * Parses a single HTTP Range header into {@code [start, end, isSuffix(1/0), suffixLen]}.
+     * Returns {@code null} when header is absent or malformed.
+     */
+    static long[] parseClientRangeSpec(String rangeHeader) {
+        if (rangeHeader == null) return null;
         String s = rangeHeader.trim();
-        if (!s.regionMatches(true, 0, "bytes=", 0, 6)) return -1L;
-        int dash = s.indexOf('-', 6);
-        if (dash < 0 || dash >= s.length() - 1) return -1L;
-        String endPart = s.substring(dash + 1).trim();
-        int comma = endPart.indexOf(',');
-        if (comma >= 0) endPart = endPart.substring(0, comma).trim();
-        if (endPart.isEmpty()) return -1L;
+        if (!s.regionMatches(true, 0, "bytes=", 0, 6)) return null;
+        String spec = s.substring(6).trim();
+        int comma = spec.indexOf(',');
+        if (comma >= 0) spec = spec.substring(0, comma).trim();
+        int dash = spec.indexOf('-');
+        if (dash < 0) return null;
+        String startPart = spec.substring(0, dash).trim();
+        String endPart = spec.substring(dash + 1).trim();
         try {
-            return Long.parseLong(endPart);
+            if (startPart.isEmpty()) {
+                if (endPart.isEmpty()) return null;
+                long suffixLen = Long.parseLong(endPart);
+                if (suffixLen <= 0L) return null;
+                return new long[] {-1L, -1L, 1L, suffixLen};
+            }
+            long start = Long.parseLong(startPart);
+            if (start < 0L) return null;
+            long end = endPart.isEmpty() ? -1L : Long.parseLong(endPart);
+            if (end >= 0L && end < start) return null;
+            return new long[] {start, end, 0L, -1L};
         } catch (NumberFormatException ignored) {
-            return -1L;
+            return null;
         }
     }
 
     void serve(Socket socket) {
         try (Socket connection = socket) {
-            if (connection.getInetAddress() == null
-                    || !connection.getInetAddress().isLoopbackAddress()) return;
+            InetAddress peer = connection.getInetAddress();
+            if (peer == null || !ProxyAddress.isPrivateLanAddress(peer)) return;
+            boolean isLoopbackPeer = peer.isLoopbackAddress();
+            String remoteIp = peer.getHostAddress();
             try {
                 connection.setTcpNoDelay(true);
             } catch (SocketException ignored) {
@@ -343,7 +361,7 @@ public final class LocalProxy implements Closeable {
                     connection.setSoTimeout(30000);
                 }
                 firstRequest = false;
-                if (!serveSingleRequest(requestLine, in, out)) {
+                if (!serveSingleRequest(requestLine, in, out, isLoopbackPeer, remoteIp)) {
                     break;
                 }
             }
@@ -351,7 +369,12 @@ public final class LocalProxy implements Closeable {
         }
     }
 
-    private boolean serveSingleRequest(String requestLine, InputStream in, OutputStream out)
+    private boolean serveSingleRequest(
+            String requestLine,
+            InputStream in,
+            OutputStream out,
+            boolean isLoopbackPeer,
+            String remoteIp)
             throws Exception {
         String[] request = requestLine.split(" ");
         if (request.length < 2) return false;
@@ -498,16 +521,30 @@ public final class LocalProxy implements Closeable {
             requestToken = queryParams.get("_mm_token");
         }
         boolean requireToken = isJs || isHlsRoute || isDiskCacheRoute;
+        boolean allowLanConfigRoute = !isJs && (isProxyRoute || isActionRoute);
+        if (!isLoopbackPeer && !allowLanConfigRoute) {
+            AppLog.w(
+                    "LocalProxy",
+                    "403 rejected non-loopback route method=" + method + " path=" + path,
+                    null);
+            simple(out, 403, "Forbidden");
+            return false;
+        }
         if (!ProxyAddress.isAllowedRequest(
                 headers.get("host"),
                 headers.get("origin"),
                 headers.get("sec-fetch-site"),
                 requestToken,
                 token,
-                requireToken)) {
+                requireToken,
+                allowLanConfigRoute)) {
             AppLog.w("LocalProxy", "403 rejected method=" + method + " path=" + path, null);
             simple(out, 403, "Forbidden");
             return false;
+        }
+        if (!isJs && remoteIp != null && !remoteIp.isEmpty()) {
+            if (!params.containsKey("remote-addr")) params.put("remote-addr", remoteIp);
+            if (!params.containsKey("http-client-ip")) params.put("http-client-ip", remoteIp);
         }
         if (isHlsRoute) {
             RouteHandler handler = hlsRouteHandler;
@@ -727,31 +764,97 @@ public final class LocalProxy implements Closeable {
         }
         if (isJs && code == 206 && method.equals("HEAD")) contentLength = cr[1] - cr[0] + 1;
         if (isJs && code == 200) extraHeaders.remove("Content-Range");
-        long clientReqEnd = parseClientRequestedEnd(headers.get("range"));
+
+        long[] reqRange = parseClientRangeSpec(headers.get("range"));
+        boolean isSuffixReq = reqRange != null && reqRange[2] == 1L;
+        long clientReqStart = reqRange != null && !isSuffixReq ? reqRange[0] : -1L;
+        long clientReqEnd = reqRange != null && !isSuffixReq ? reqRange[1] : -1L;
+        long suffixLen = isSuffixReq ? reqRange[3] : -1L;
+        long desiredStart = cr != null ? cr[0] : 0L;
         long desiredEnd = -1L;
+        long initialSkip = 0L;
+        long firstChunkCap = -1L;
         boolean chainChunks = false;
-        if (cr != null) {
+
+        if (!isJs && isSuffixReq && code == 200 && cr == null && fixedBytes != null) {
+            if (fixedBytes.length == 0) {
+                simple(out, 416, "Range Not Satisfiable");
+                return false;
+            }
+            long total = fixedBytes.length;
+            long sStart = Math.max(0L, total - suffixLen);
+            long sEnd = total - 1L;
+            byte[] slice = Arrays.copyOfRange(fixedBytes, (int) sStart, (int) total);
+            fixedBytes = slice;
+            body = new ByteArrayInputStream(slice);
+            code = 206;
+            cr = new long[] {sStart, sEnd, total};
+            contentRange = "bytes " + sStart + "-" + sEnd + "/" + total;
+            extraHeaders.put("Content-Range", contentRange);
+            contentLength = slice.length;
+        }
+
+        if (!isJs && reqRange != null && code == 206) {
+            if (cr == null) {
+                simple(out, 502, "Missing Content-Range on 206");
+                return false;
+            }
+            if (isSuffixReq) {
+                if (cr[2] <= 0L) {
+                    simple(out, 502, "Missing total length on suffix 206");
+                    return false;
+                }
+                long expectedStart = Math.max(0L, cr[2] - suffixLen);
+                if (cr[0] > expectedStart || cr[1] < expectedStart) {
+                    simple(out, 502, "Misaligned suffix Content-Range");
+                    return false;
+                }
+                initialSkip = expectedStart - cr[0];
+                desiredStart = expectedStart;
+                desiredEnd = cr[2] - 1L;
+            } else {
+                if (cr[0] > clientReqStart || cr[1] < clientReqStart) {
+                    simple(out, 502, "Misaligned Content-Range");
+                    return false;
+                }
+                initialSkip = clientReqStart - cr[0];
+                desiredStart = clientReqStart;
+                if (clientReqEnd >= desiredStart) {
+                    desiredEnd = cr[2] > 0L ? Math.min(clientReqEnd, cr[2] - 1L) : clientReqEnd;
+                } else if (cr[2] > 0L) {
+                    desiredEnd = cr[2] - 1L;
+                } else {
+                    desiredEnd = cr[1];
+                }
+            }
+            if (cr[1] > desiredEnd) {
+                long clampedAvailable = (desiredEnd - cr[0]) + 1L;
+                if (fixedBytes == null || fixedBytes.length >= clampedAvailable) {
+                    cr[1] = desiredEnd;
+                }
+            }
+            firstChunkCap = (cr[1] - desiredStart) + 1L;
+            if (!chunkedClient && cr[1] < desiredEnd) {
+                chainChunks = true;
+            }
+            long advertisedEnd = chainChunks ? desiredEnd : Math.min(cr[1], desiredEnd);
+            contentRange =
+                    "bytes "
+                            + desiredStart
+                            + "-"
+                            + advertisedEnd
+                            + "/"
+                            + (cr[2] > 0L ? String.valueOf(cr[2]) : "*");
+            extraHeaders.put("Content-Range", contentRange);
+            contentLength = (advertisedEnd - desiredStart) + 1L;
+        } else if (cr != null) {
             if (contentLength < 0) {
                 contentLength = (cr[1] - cr[0]) + 1L;
             }
-            if (!isJs && code == 206 && clientReqEnd >= cr[0] && cr[1] > clientReqEnd) {
-                long clampedLen = (clientReqEnd - cr[0]) + 1L;
-                if (fixedBytes == null || fixedBytes.length >= clampedLen) {
-                    cr[1] = clientReqEnd;
-                    contentRange =
-                            "bytes "
-                                    + cr[0]
-                                    + "-"
-                                    + cr[1]
-                                    + "/"
-                                    + (cr[2] > 0 ? String.valueOf(cr[2]) : "*");
-                    extraHeaders.put("Content-Range", contentRange);
-                    contentLength = clampedLen;
-                }
-            }
-            if (!chunkedClient && !isJs && code == 206 && cr[2] > 0) {
-                desiredEnd =
-                        clientReqEnd >= cr[0] ? Math.min(clientReqEnd, cr[2] - 1L) : (cr[2] - 1L);
+            firstChunkCap = (cr[1] - cr[0]) + 1L;
+            desiredStart = cr[0];
+            if (!chunkedClient && !isJs && code == 206 && cr[2] > 0L) {
+                desiredEnd = cr[2] - 1L;
                 if (cr[1] < desiredEnd) {
                     chainChunks = true;
                     extraHeaders.put(
@@ -835,31 +938,44 @@ public final class LocalProxy implements Closeable {
                     out.write("0\r\n\r\n".getBytes("US-ASCII"));
                 } else {
                     long remaining = contentLength;
-                    long currentOffset = cr != null ? cr[0] : 0L;
+                    long currentOffset = desiredStart;
+                    while (initialSkip > 0L) {
+                        int skipped =
+                                payload.read(
+                                        buffer,
+                                        0,
+                                        (int) Math.min((long) buffer.length, initialSkip));
+                        if (skipped < 0) break;
+                        initialSkip -= skipped;
+                    }
                     if (prefetched != null && prefetchedLen > 0 && remaining > 0) {
                         int firstWrite = (int) Math.min(prefetchedLen, remaining);
                         out.write(prefetched, 0, firstWrite);
                         remaining -= firstWrite;
                         currentOffset += firstWrite;
                     }
-                    while (remaining > 0
+                    long firstRemaining =
+                            firstChunkCap >= 0L ? Math.min(remaining, firstChunkCap) : remaining;
+                    while (initialSkip == 0L
+                            && firstRemaining > 0L
                             && (n =
                                             payload.read(
                                                     buffer,
                                                     0,
-                                                    (int) Math.min(buffer.length, remaining)))
+                                                    (int) Math.min(buffer.length, firstRemaining)))
                                     != -1) {
                         if (n == 0) continue;
                         out.write(buffer, 0, n);
                         remaining -= n;
+                        firstRemaining -= n;
                         currentOffset += n;
                     }
-                    while (chainChunks && remaining > 0 && !closed) {
+                    while (chainChunks && remaining > 0L && !closed) {
                         String nextRange =
                                 "bytes="
                                         + currentOffset
                                         + "-"
-                                        + (clientReqEnd >= currentOffset ? clientReqEnd : "");
+                                        + (desiredEnd >= currentOffset ? desiredEnd : "");
                         headers.put("range", nextRange);
                         headers.put("Range", nextRange);
                         params.put("Range", nextRange);
@@ -871,24 +987,34 @@ public final class LocalProxy implements Closeable {
                         if (nextResp == null
                                 || nextResp.length < 3
                                 || !(nextResp[0] instanceof Number)) {
+                            keepAlive = false;
                             break;
                         }
                         int nextCode = ((Number) nextResp[0]).intValue();
-                        if (nextCode != 206 && nextCode != 200) {
+                        // Strictly reject HTTP 200 (or anything other than 206) on continuation
+                        // ranges so byte 0 can NEVER be silently concatenated at currentOffset.
+                        if (nextCode != 206) {
+                            keepAlive = false;
                             break;
                         }
-                        long skipBytes = 0L;
-                        if (nextResp.length > 3) {
-                            long[] nextCr =
-                                    parseContentRange(
-                                            extractHeaderIgnoreCase(nextResp[3], "Content-Range"));
-                            if (nextCr != null) {
-                                if (nextCr[0] > currentOffset || nextCr[1] < currentOffset) {
-                                    break;
-                                }
-                                skipBytes = currentOffset - nextCr[0];
-                            }
+                        long[] nextCr =
+                                nextResp.length > 3
+                                        ? parseContentRange(
+                                                extractHeaderIgnoreCase(
+                                                        nextResp[3], "Content-Range"))
+                                        : null;
+                        if (nextCr == null
+                                || nextCr[0] > currentOffset
+                                || nextCr[1] < currentOffset
+                                || (cr != null
+                                        && cr[2] > 0L
+                                        && nextCr[2] > 0L
+                                        && nextCr[2] != cr[2])) {
+                            keepAlive = false;
+                            break;
                         }
+                        long skipBytes = currentOffset - nextCr[0];
+                        long maxChunkRead = Math.min(remaining, (nextCr[1] - currentOffset) + 1L);
                         BodyPayload nextPayload = extractBody(nextResp[2]);
                         long chunkRead = 0L;
                         try (InputStream nextStream = nextPayload.stream) {
@@ -901,8 +1027,11 @@ public final class LocalProxy implements Closeable {
                                 if (skipped < 0) break;
                                 skipBytes -= skipped;
                             }
-                            if (skipBytes > 0L) break;
-                            while (remaining > 0
+                            if (skipBytes > 0L) {
+                                keepAlive = false;
+                                break;
+                            }
+                            while (maxChunkRead > 0L
                                     && (n =
                                                     nextStream.read(
                                                             buffer,
@@ -910,16 +1039,20 @@ public final class LocalProxy implements Closeable {
                                                             (int)
                                                                     Math.min(
                                                                             buffer.length,
-                                                                            remaining)))
+                                                                            maxChunkRead)))
                                             != -1) {
                                 if (n == 0) continue;
                                 out.write(buffer, 0, n);
                                 remaining -= n;
+                                maxChunkRead -= n;
                                 currentOffset += n;
                                 chunkRead += n;
                             }
                         }
-                        if (chunkRead <= 0L) break;
+                        if (chunkRead <= 0L) {
+                            keepAlive = false;
+                            break;
+                        }
                     }
                     if (remaining > 0L) {
                         keepAlive = false;
@@ -927,8 +1060,35 @@ public final class LocalProxy implements Closeable {
                 }
             }
             out.flush();
+            if (!isJs
+                    && code >= 200
+                    && code < 400
+                    && looksLikeConfigWriteRequest(method, doKey, params)) {
+                notifyPluginConfigRefresh();
+            }
             return keepAlive;
         }
+    }
+
+    private static boolean looksLikeConfigWriteRequest(
+            String method, String doKey, Map<String, String> params) {
+        if ("POST".equalsIgnoreCase(method)) return true;
+        String lowerDo = doKey == null ? "" : doKey.toLowerCase(Locale.ROOT);
+        if (lowerDo.contains("config") || lowerDo.contains("pan") || lowerDo.contains("set")) {
+            return params != null
+                    && (params.containsKey("cookie")
+                            || params.containsKey("token")
+                            || params.containsKey("quark")
+                            || params.containsKey("uc")
+                            || params.containsKey("baidu")
+                            || params.containsKey("ali")
+                            || params.containsKey("quark_cookie")
+                            || params.containsKey("uc_cookie")
+                            || params.containsKey("baidu_cookie")
+                            || params.containsKey("ali_token")
+                            || "set".equalsIgnoreCase(params.get("type")));
+        }
+        return false;
     }
 
     private static void notifyPluginConfigRefresh() {

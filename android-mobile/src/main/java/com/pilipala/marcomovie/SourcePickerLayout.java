@@ -64,6 +64,40 @@ final class SourcePickerLayout {
         return Math.max(1, Math.min(maxColumns, cols));
     }
 
+    /**
+     * Computes the FINAL inner content width (dp) of the Home quick-switch {@link MobileBottomSheet}
+     * after accounting for landscape max-width clamping ({@code 520dp}) and sheet+content padding
+     * ({@code 36dp + 4dp = 40dp}).
+     */
+    static float computeQuickSwitchContentWidthDp(float windowWidthDp, boolean portrait) {
+        float safeWin = Math.max(240f, Float.isNaN(windowWidthDp) ? 360f : windowWidthDp);
+        float sheetWidthDp = portrait ? safeWin : Math.min(Math.max(320f, safeWin - 48f), 520f);
+        return Math.max(200f, sheetWidthDp - 40f);
+    }
+
+    /**
+     * Computes the FINAL inner content width (dp) of the full {@link SourcePicker} dialog after
+     * accounting for dialog outer margins ({@code 48dp} TV / {@code 20dp} mobile), {@code 740dp}
+     * panel cap, and panel+grid horizontal padding ({@code 56dp} TV / {@code 44dp} mobile).
+     */
+    static float computeFullPickerContentWidthDp(float windowWidthDp, boolean isTv) {
+        float safeWin = Math.max(240f, Float.isNaN(windowWidthDp) ? 360f : windowWidthDp);
+        float marginH = isTv ? 48f : 20f;
+        float panelW = Math.min(740f, Math.max(280f, safeWin - marginH));
+        float innerPad = isTv ? 56f : 44f;
+        return Math.max(200f, panelW - innerPad);
+    }
+
+    /**
+     * Computes per-card width (dp) given final content width and resolved column count, useful for
+     * verifying right-side action buttons ({@code >= 64dp}) always have comfortable non-clipped
+     * space.
+     */
+    static float computeCardWidthDp(float contentWidthDp, int columns, float gapDp) {
+        int c = Math.max(1, columns);
+        return Math.max(0f, (contentWidthDp - gapDp * (c - 1)) / c);
+    }
+
     /** Home quick-switch policy: prefer 2 columns, gracefully degrade to 1 on narrow/large font. */
     static int resolveQuickSwitchColumns(float availableWidthDp, float fontScale) {
         return resolveColumns(
@@ -133,11 +167,14 @@ final class SourcePickerLayout {
         tlp.rightMargin = a.dp(4);
         headerRow.addView(titleTv, tlp);
 
-        // Right-side pinned buttons (weight=0, guaranteed visible & clickable)
+        // Right-side pinned buttons (weight=0, minimum 32dp touch target, guaranteed visible &
+        // clickable under landscape, split-screen, and large font scale)
         if (onTogglePreferred != null) {
             FrameLayout starBtn = new FrameLayout(a);
             starBtn.setTag("source-card-star:" + (site != null ? site.key : ""));
             starBtn.setContentDescription(isPreferred ? "取消常用片源" : "设为常用片源");
+            starBtn.setMinimumWidth(a.dp(32));
+            starBtn.setMinimumHeight(a.dp(32));
             MobileIcons.IconView starIcon =
                     MobileIcons.create(
                             a,
@@ -149,20 +186,22 @@ final class SourcePickerLayout {
                     starIcon, new FrameLayout.LayoutParams(a.dp(15), a.dp(15), Gravity.CENTER));
             MobileMotion.bindPress(starBtn, 0.88f);
             starBtn.setOnClickListener(v -> onTogglePreferred.run());
-            headerRow.addView(starBtn, new LinearLayout.LayoutParams(a.dp(30), a.dp(30)));
+            headerRow.addView(starBtn, new LinearLayout.LayoutParams(a.dp(32), a.dp(32)));
         }
 
         if (onManage != null) {
             FrameLayout moreBtn = new FrameLayout(a);
             moreBtn.setTag("source-card-more:" + (site != null ? site.key : ""));
             moreBtn.setContentDescription("管理该片源");
+            moreBtn.setMinimumWidth(a.dp(32));
+            moreBtn.setMinimumHeight(a.dp(32));
             MobileIcons.IconView moreIcon =
                     MobileIcons.create(a, MobileIcons.IC_MORE, 14.5f, p.textSecondary);
             moreBtn.addView(
                     moreIcon, new FrameLayout.LayoutParams(a.dp(15), a.dp(15), Gravity.CENTER));
             MobileMotion.bindPress(moreBtn, 0.88f);
             moreBtn.setOnClickListener(v -> onManage.run());
-            headerRow.addView(moreBtn, new LinearLayout.LayoutParams(a.dp(30), a.dp(30)));
+            headerRow.addView(moreBtn, new LinearLayout.LayoutParams(a.dp(32), a.dp(32)));
         }
 
         card.addView(headerRow, new LinearLayout.LayoutParams(-1, -2));

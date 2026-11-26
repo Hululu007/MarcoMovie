@@ -213,6 +213,9 @@ public final class EmbyAccounts {
                                                                     if (!dlg.isShowing()
                                                                             || a.isFinishing())
                                                                         return;
+                                                                    String prevSession =
+                                                                            prefs.getString(
+                                                                                    api, null);
                                                                     try {
                                                                         if (!prefs.edit()
                                                                                 .putString(
@@ -226,6 +229,16 @@ public final class EmbyAccounts {
                                                                         pass.setText("");
                                                                         dlg.dismiss();
                                                                     } catch (final Exception ex) {
+                                                                        SharedPreferences.Editor
+                                                                                rb = prefs.edit();
+                                                                        if (prevSession == null) {
+                                                                            rb.remove(api);
+                                                                        } else {
+                                                                            rb.putString(
+                                                                                    api,
+                                                                                    prevSession);
+                                                                        }
+                                                                        rb.commit();
                                                                         submit.setEnabled(true);
                                                                         status.setText(
                                                                                 ex.getMessage());

@@ -22,12 +22,25 @@ final class SearchRanking {
     private SearchRanking() {}
 
     /**
-     * Normalizes a title strictly for exact-match comparison: trims whitespace, strips only a
-     * matching outer pair of CJK book-title / quotation brackets ({@code 《》}, {@code 「」}, {@code
-     * 『』}, {@code 〈〉}, {@code 【】}) wrapping the entire title, collapses internal whitespace, and
-     * lowercases ASCII characters. Never strips sequels, subtitles, years, or edition suffixes.
+     * Trims ONLY leading and trailing whitespace without altering internal spaces, case, or CJK
+     * brackets. Exact mode compares titles strictly with this function so {@code IT}/{@code It},
+     * differing internal spaces, and {@code 《三体》}/{@code 三体} remain distinct.
      */
     static String normalizeExactTitle(String raw) {
+        if (raw == null) return "";
+        int start = 0;
+        int end = raw.length();
+        while (start < end && isTrimWhitespace(raw.charAt(start))) start++;
+        while (end > start && isTrimWhitespace(raw.charAt(end - 1))) end--;
+        return raw.substring(start, end);
+    }
+
+    private static boolean isTrimWhitespace(char c) {
+        return Character.isWhitespace(c) || c == '\u3000' || c == '\u00A0';
+    }
+
+    /** Normalization used solely for fuzzy-mode consensus grouping & ranking. */
+    static String normalizeFuzzyTitle(String raw) {
         if (raw == null) return "";
         String s = raw.replace('\u3000', ' ').trim();
         while (s.length() >= 2 && isWrappedByMatchingBrackets(s)) {
@@ -61,7 +74,6 @@ final class SearchRanking {
         else if (first == '【') expectedClose = '】';
         else return false;
         if (last != expectedClose) return false;
-        // Ensure the opening bracket actually matches the final closing bracket (not two pairs).
         int depth = 0;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
@@ -77,8 +89,8 @@ final class SearchRanking {
     }
 
     /**
-     * Returns {@code true} iff {@code rawTitle} is an exact full-title match for {@code keyword}
-     * before title purification or aggregation.
+     * Returns {@code true} iff {@code rawTitle} (edge-trimmed only) equals {@code keyword}
+     * (edge-trimmed only) on the exact original full title.
      */
     static boolean isExactTitleMatch(String rawTitle, String keyword) {
         String normKey = normalizeExactTitle(keyword);
@@ -90,9 +102,9 @@ final class SearchRanking {
     /**
      * Filters (in exact mode) or ranks (in fuzzy mode) search hits.
      *
-     * <p>Exact mode retains hits from all sources whose original {@code video.title} matches {@code
-     * keyword} via {@link #isExactTitleMatch}. Fuzzy mode puts exact matches first, then prioritizes
-     * titles present across more distinct sources, while preserving all hits.
+     * <p>Exact mode retains ALL hits across different sources whose original {@code video.title}
+     * matches {@code keyword} via {@link #isExactTitleMatch}. Fuzzy mode puts exact matches first,
+     * then prioritizes titles present across more distinct sources, while preserving all hits.
      */
     static List<MobileSearchPage.Hit> rankAndFilter(
             List<MobileSearchPage.Hit> hits, String keyword, boolean exactMode) {
@@ -109,13 +121,13 @@ final class SearchRanking {
             return out;
         }
 
-        final String normKey = normalizeExactTitle(keyword);
-        // Count distinct sources per normalized title for cross-source consensus boost.
+        final String normKey = normalizeFuzzyTitle(keyword);
+        // Count distinct sources per fuzzy-normalized title for cross-source consensus boost.
         Map<String, Set<String>> sourcesByTitle = new HashMap<>();
         for (int i = 0; i < hits.size(); i++) {
             MobileSearchPage.Hit h = hits.get(i);
             if (h == null || h.video == null) continue;
-            String tKey = normalizeExactTitle(h.video.title);
+            String tKey = normalizeFuzzyTitle(h.video.title);
             if (tKey.isEmpty()) continue;
             Set<String> set = sourcesByTitle.get(tKey);
             if (set == null) {
@@ -131,7 +143,7 @@ final class SearchRanking {
             MobileSearchPage.Hit h = hits.get(i);
             if (h == null || h.video == null) continue;
             String rawTitle = h.video.title == null ? "" : h.video.title;
-            String normTitle = normalizeExactTitle(rawTitle);
+            String normTitle = normalizeFuzzyTitle(rawTitle);
             int tier = computeFuzzyTier(rawTitle, normTitle, normKey);
             Set<String> srcs = sourcesByTitle.get(normTitle);
             int sourceCount = srcs != null ? srcs.size() : 1;

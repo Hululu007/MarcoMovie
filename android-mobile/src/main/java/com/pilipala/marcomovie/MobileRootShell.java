@@ -1429,7 +1429,10 @@ final class MobileRootShell {
         if (a.config != null && !a.config.sites.isEmpty()) {
             float density = Math.max(1f, a.getResources().getDisplayMetrics().density);
             float fontScale = a.getResources().getConfiguration().fontScale;
-            float availWidthDp = Math.max(220f, (a.windowWidth() - a.dp(36)) / density);
+            float windowWidthDp = a.windowWidth() / density;
+            float availWidthDp =
+                    SourcePickerLayout.computeQuickSwitchContentWidthDp(
+                            windowWidthDp, a.isPortrait());
             int cols = SourcePickerLayout.resolveQuickSwitchColumns(availWidthDp, fontScale);
             int gapPx = a.dp(8);
 

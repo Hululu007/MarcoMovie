@@ -122,6 +122,47 @@ public final class PlayerHudPrefs {
         sp.edit().putBoolean(KEY_SLIM_PROGRESS, enabled).apply();
     }
 
+    /**
+     * Pure-JVM reconciliation rule between legacy {@code marco_player_hud/player_slim_progress}
+     * and {@code mobile_prefs/mini_progress_bar} so Settings and Player NEVER disagree after
+     * upgrade.
+     */
+    public static boolean resolveEffectiveSlimProgress(
+            boolean hasMobileKey, boolean mobileVal, boolean hasHudKey, boolean hudVal) {
+        if (hasHudKey && !hasMobileKey) return hudVal;
+        if (hasMobileKey && !hasHudKey) return mobileVal;
+        if (hasMobileKey && hasHudKey) return mobileVal && hudVal;
+        return true;
+    }
+
+    /** Unified slim-progress getter that heals legacy preference drift across both stores. */
+    public static boolean isUnifiedSlimProgressEnabled(
+            Context context, SharedPreferences mobilePrefs) {
+        SharedPreferences hudSp = open(context);
+        boolean hasHud = hudSp != null && hudSp.contains(KEY_SLIM_PROGRESS);
+        boolean hudVal = hudSp == null || hudSp.getBoolean(KEY_SLIM_PROGRESS, true);
+        boolean hasMobile = mobilePrefs != null && mobilePrefs.contains("mini_progress_bar");
+        boolean mobileVal =
+                mobilePrefs == null || mobilePrefs.getBoolean("mini_progress_bar", true);
+        boolean effective = resolveEffectiveSlimProgress(hasMobile, mobileVal, hasHud, hudVal);
+        if (mobilePrefs != null && (!hasMobile || mobileVal != effective)) {
+            mobilePrefs.edit().putBoolean("mini_progress_bar", effective).apply();
+        }
+        if (hudSp != null && (!hasHud || hudVal != effective)) {
+            hudSp.edit().putBoolean(KEY_SLIM_PROGRESS, effective).apply();
+        }
+        return effective;
+    }
+
+    /** Writes slim-progress visibility atomically to both mobile and HUD preference stores. */
+    public static void setUnifiedSlimProgressEnabled(
+            Context context, SharedPreferences mobilePrefs, boolean enabled) {
+        if (mobilePrefs != null) {
+            mobilePrefs.edit().putBoolean("mini_progress_bar", enabled).apply();
+        }
+        setSlimProgressEnabled(context, enabled);
+    }
+
     public static boolean isSkipCountdownEnabled(Context context) {
         SharedPreferences sp = open(context);
         return sp == null || sp.getBoolean(KEY_SKIP_COUNTDOWN, true);

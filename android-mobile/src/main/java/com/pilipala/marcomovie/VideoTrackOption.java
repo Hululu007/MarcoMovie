@@ -79,10 +79,78 @@ public final class VideoTrackOption {
 
     public static String formatSelectionRecord(
             VideoTrackOption selectedTrack, int decodedWidth, int decodedHeight) {
-        String trackDesc = selectedTrack == null ? "自动优选" : selectedTrack.formatLabel();
+        String policyDesc =
+                selectedTrack == null ? "自动选择策略" : ("手动锁定 " + selectedTrack.formatLabel());
         String decodedDesc =
                 decodedWidth > 0 && decodedHeight > 0 ? (decodedWidth + "×" + decodedHeight) : "未知";
-        return "已选轨道: " + trackDesc + " | 实际解码: " + decodedDesc;
+        return "选择策略: " + policyDesc + " | 当前解码轨道: " + decodedDesc;
+    }
+
+    /**
+     * Explicit separation of "auto-selection policy" ({@link #autoPolicy}) vs "currently decoded
+     * track" ({@link #decodedTrackIndex} / {@link #decodedResolution}), so switching {@code auto ->
+     * 1080p -> auto} accurately reflects both the active selection policy and the active decoder
+     * output.
+     */
+    public static final class SelectionState {
+        public final boolean autoPolicy;
+        public final int manualTrackIndex;
+        public final int decodedTrackIndex;
+        public final String decodedResolution;
+
+        public SelectionState(
+                boolean autoPolicy,
+                int manualTrackIndex,
+                int decodedTrackIndex,
+                String decodedResolution) {
+            this.autoPolicy = autoPolicy;
+            this.manualTrackIndex = autoPolicy ? -1 : manualTrackIndex;
+            this.decodedTrackIndex = decodedTrackIndex;
+            this.decodedResolution = decodedResolution == null ? "" : decodedResolution.trim();
+        }
+
+        private String resolveDecodedTier(java.util.List<VideoTrackOption> tracks) {
+            if (decodedTrackIndex >= 0 && tracks != null && decodedTrackIndex < tracks.size()) {
+                VideoTrackOption d = tracks.get(decodedTrackIndex);
+                String tier = qualityTier(d.width, d.height);
+                if (!tier.isEmpty()) return tier;
+                if (d.width > 0 && d.height > 0) return d.width + "×" + d.height;
+            }
+            return decodedResolution;
+        }
+
+        public String policySummary(java.util.List<VideoTrackOption> tracks) {
+            String decodedTier = resolveDecodedTier(tracks);
+            if (autoPolicy) {
+                return decodedTier.isEmpty() ? "策略：自动优选" : ("策略：自动优选 · 当前解码 " + decodedTier);
+            }
+            return decodedTier.isEmpty() ? "策略：手动锁定轨道" : ("策略：手动锁定 · 当前解码 " + decodedTier);
+        }
+
+        public String formatAutoOptionLabel(java.util.List<VideoTrackOption> tracks) {
+            if (!autoPolicy) return "视频轨 · 自动优选";
+            String decodedTier = resolveDecodedTier(tracks);
+            return decodedTier.isEmpty()
+                    ? "视频轨 · 自动优选（当前策略）"
+                    : ("视频轨 · 自动优选（当前策略 · 解码 " + decodedTier + "）");
+        }
+
+        public String formatTrackOptionLabel(VideoTrackOption opt) {
+            if (opt == null) return "";
+            boolean isLocked = !autoPolicy && manualTrackIndex == opt.index;
+            boolean isDecoded = decodedTrackIndex == opt.index || opt.selected;
+            String tag;
+            if (isLocked && isDecoded) tag = "（已锁定 · 当前解码）";
+            else if (isLocked) tag = "（已锁定）";
+            else if (isDecoded) tag = "（当前解码）";
+            else tag = "";
+            return "视频轨 · " + opt.formatLabel() + tag;
+        }
+
+        /** Returns 0 when auto policy is active, or {@code 1 + manualTrackIndex} when locked. */
+        public int menuSelectedOffset() {
+            return (autoPolicy || manualTrackIndex < 0) ? 0 : (1 + manualTrackIndex);
+        }
     }
 
     /** Captures playback position and paused state before a quality/variant switch. */

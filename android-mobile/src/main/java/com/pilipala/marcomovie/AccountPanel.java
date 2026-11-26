@@ -388,11 +388,11 @@ final class AccountPanel {
             showTvDialog(a, anchor);
             return;
         }
-        // Sync bidirectional Config Center credentials on entry without overwriting valid accounts.
+        // Pull-only sync on entry so opening the page NEVER overwrites existing config files.
         final Cms.Config snap = a.config;
         a.worker.execute(
                 () -> {
-                    ConfigCenterBridge.syncAll(a, snap, true, true, false);
+                    ConfigCenterBridge.syncAll(a, snap, true, false, false);
                     refreshActivePage();
                 });
         String backLabel =

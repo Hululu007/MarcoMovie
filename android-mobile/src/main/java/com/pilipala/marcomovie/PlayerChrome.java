@@ -2155,8 +2155,11 @@ final class PlayerChrome {
     }
 
     void setProgressOnlyMode(boolean progressOnly) {
-        boolean resolved =
-                resolveProgressOnlyMode(progressOnly, PlayerHudPrefs.isSlimProgressEnabled(a));
+        boolean slimOn =
+                a.isTvDevice()
+                        ? PlayerHudPrefs.isSlimProgressEnabled(a)
+                        : PlayerHudPrefs.isUnifiedSlimProgressEnabled(a, a.mobilePrefs());
+        boolean resolved = resolveProgressOnlyMode(progressOnly, slimOn);
         if (this.progressOnlyMode == resolved) return;
         this.progressOnlyMode = resolved;
         int otherVis = resolved ? View.INVISIBLE : View.VISIBLE;
@@ -2213,9 +2216,9 @@ final class PlayerChrome {
         boolean suppressLiveHud =
                 shouldSuppressLiveHudRedraws(a.isTvDevice(), hdrSurfaceActive, a.controlsVisible);
         boolean slimPrefOn =
-                PlayerHudPrefs.isSlimProgressEnabled(a)
-                        && (a.isTvDevice()
-                                || a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true));
+                a.isTvDevice()
+                        ? PlayerHudPrefs.isSlimProgressEnabled(a)
+                        : PlayerHudPrefs.isUnifiedSlimProgressEnabled(a, a.mobilePrefs());
         // On mobile, MobilePlayerOverlay already owns the unified bottom slim bar; avoid drawing a
         // second overlapping bar when the overlay is attached.
         boolean delegatedToOverlay = !a.isTvDevice() && a.mobilePlayerOverlay != null;

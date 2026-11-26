@@ -2455,11 +2455,37 @@ final class PlaybackControls {
     }
 
     int lineIndex() {
-        return a.activeLine == null ? -1 : video.lines.indexOf(a.activeLine);
+        if (a.activeLine == null || video == null || video.lines == null) return -1;
+        int direct = video.lines.indexOf(a.activeLine);
+        if (direct >= 0) return direct;
+        Cms.Line rebound =
+                PlaybackLineRules.resolveActiveLineAfterApply(
+                        video.lines, a.activeLine, a.activeEpisode);
+        if (rebound != null) {
+            int idx = video.lines.indexOf(rebound);
+            if (idx >= 0) {
+                a.activeLine = rebound;
+                return idx;
+            }
+        }
+        return -1;
     }
 
     int episodeIndex() {
-        return a.activeLine == null ? -1 : a.activeLine.episodes.indexOf(a.activeEpisode);
+        lineIndex();
+        if (a.activeLine == null || a.activeEpisode == null) return -1;
+        int direct = a.activeLine.episodes.indexOf(a.activeEpisode);
+        if (direct >= 0) return direct;
+        if (a.activeEpisode.url != null && !a.activeEpisode.url.isEmpty()) {
+            for (int i = 0; i < a.activeLine.episodes.size(); i++) {
+                Cms.Episode ep = a.activeLine.episodes.get(i);
+                if (ep != null && a.activeEpisode.url.equals(ep.url)) {
+                    a.activeEpisode = ep;
+                    return i;
+                }
+            }
+        }
+        return -1;
     }
 
     void choose(String title, String[] labels, int selected, PlayerBubble.IntAction action) {
@@ -3125,16 +3151,17 @@ final class PlaybackControls {
                 (a.player != null && a.prepared)
                         ? a.player.listVideoTracks()
                         : Collections.emptyList();
-        final int selectedTrackIdx =
-                (a.player != null && a.prepared) ? a.player.selectedVideoTrackIndex() : -1;
-        final String activeRes =
-                (a.player != null && a.prepared) ? a.player.activeDecodedResolution() : "";
+        final VideoTrackOption.SelectionState vtState =
+                (a.player != null && a.prepared)
+                        ? a.player.videoTrackSelectionState()
+                        : new VideoTrackOption.SelectionState(true, -1, -1, "");
+        final String activeRes = vtState.decodedResolution;
 
         if (qCount == 0 && videoTracks.isEmpty()) {
             message(
                     activeRes.isEmpty()
                             ? "当前流未提供可切换的画质或视频轨道。"
-                            : ("当前流仅包含单视频轨（实际解码 " + activeRes + "）。"));
+                            : ("当前流仅包含单视频轨（当前解码 " + activeRes + "）。"));
             return;
         }
 
@@ -3147,17 +3174,20 @@ final class PlaybackControls {
         }
         final int vTrackStart = items.size();
         if (!videoTracks.isEmpty()) {
-            items.add("视频轨 · 自动优选" + (selectedTrackIdx < 0 ? "（当前）" : ""));
+            items.add(vtState.formatAutoOptionLabel(videoTracks));
             for (int t = 0; t < videoTracks.size(); t++) {
                 VideoTrackOption opt = videoTracks.get(t);
-                items.add("视频轨 · " + opt.formatLabel() + (opt.selected ? "（当前）" : ""));
+                items.add(vtState.formatTrackOptionLabel(opt));
             }
         }
         int selected =
                 !videoTracks.isEmpty()
-                        ? (selectedTrackIdx >= 0 ? vTrackStart + 1 + selectedTrackIdx : vTrackStart)
+                        ? (vTrackStart + vtState.menuSelectedOffset())
                         : (qCount > 0 ? qStart + currentQualityIdx : -1);
-        String title = activeRes.isEmpty() ? "画质与视频轨" : ("画质与视频轨 · 当前解码 " + activeRes);
+        String title =
+                !videoTracks.isEmpty()
+                        ? ("画质与视频轨 · " + vtState.policySummary(videoTracks))
+                        : (activeRes.isEmpty() ? "画质与视频轨" : ("画质与视频轨 · 当前解码 " + activeRes));
         choose(
                 title,
                 items.toArray(new String[0]),
@@ -3321,8 +3351,8 @@ final class PlaybackControls {
         boolean clockOn = (hudMask & Prefs.HUD_CLOCK) != 0;
         boolean netSpeedOn = (hudMask & Prefs.HUD_NET_SPEED) != 0;
         boolean slimBarOn =
-                a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true)
-                        && com.pilipala.marcomovie.hud.PlayerHudPrefs.isSlimProgressEnabled(a);
+                com.pilipala.marcomovie.hud.PlayerHudPrefs.isUnifiedSlimProgressEnabled(
+                        a, a.mobilePrefs());
         List<View> hudRows = new ArrayList<>();
         hudRows.add(
                 buildMobileMoreToggleRow(
@@ -3360,12 +3390,8 @@ final class PlaybackControls {
                             "底部进度细线",
                             slimBarOn,
                             on -> {
-                                a.mobilePrefs()
-                                        .edit()
-                                        .putBoolean(Prefs.MINI_PROGRESS_BAR, on)
-                                        .apply();
-                                com.pilipala.marcomovie.hud.PlayerHudPrefs.setSlimProgressEnabled(
-                                        a, on);
+                                com.pilipala.marcomovie.hud.PlayerHudPrefs
+                                        .setUnifiedSlimProgressEnabled(a, a.mobilePrefs(), on);
                                 if (a.mobilePlayerOverlay != null) {
                                     a.mobilePlayerOverlay.syncControlsVisibility();
                                 }
@@ -3628,8 +3654,10 @@ final class PlaybackControls {
                 (a.player != null && a.prepared)
                         ? a.player.listVideoTracks()
                         : Collections.emptyList();
-        final int selectedVideoTrackIdx =
-                (a.player != null && a.prepared) ? a.player.selectedVideoTrackIndex() : -1;
+        final VideoTrackOption.SelectionState vtState =
+                (a.player != null && a.prepared)
+                        ? a.player.videoTrackSelectionState()
+                        : new VideoTrackOption.SelectionState(true, -1, -1, "");
         int vTrackMenuCount = videoTracks.size() > 1 ? videoTracks.size() + 1 : 0;
         boolean isLiveMode = "live".equals(site.key);
         boolean canCrossSearch =
@@ -3654,10 +3682,10 @@ final class PlaybackControls {
         }
         final int vTrackStart = items.size();
         if (vTrackMenuCount > 0) {
-            items.add("视频子轨 · 自动优选画质");
+            items.add(vtState.formatAutoOptionLabel(videoTracks));
             for (int t = 0; t < videoTracks.size(); t++) {
                 VideoTrackOption opt = videoTracks.get(t);
-                items.add("视频子轨 · " + (opt.selected ? "✓ " : "") + opt.formatLabel());
+                items.add(vtState.formatTrackOptionLabel(opt));
             }
         }
         final int qStart = items.size();
@@ -3688,9 +3716,7 @@ final class PlaybackControls {
                 qCount > 0
                         ? (qStart + currentQualityIdx)
                         : (vTrackMenuCount > 0
-                                ? (selectedVideoTrackIdx >= 0
-                                        ? vTrackStart + 1 + selectedVideoTrackIdx
-                                        : vTrackStart)
+                                ? (vTrackStart + vtState.menuSelectedOffset())
                                 : (canEpg ? 0 : (curLine >= 0 ? lineStart + curLine : -1)));
         final int finalVTrackMenuCount = vTrackMenuCount;
         final int finalQCount = qCount;
@@ -6387,7 +6413,10 @@ final class PlaybackControls {
         final String clockKey =
                 a.isTvDevice() ? Prefs.TV_PLAYER_TOP_RIGHT_HUD : Prefs.PLAYER_ALWAYS_SHOW_CLOCK;
         boolean alwaysClock = a.prefs.getBoolean(clockKey, a.isTvDevice());
-        boolean slimProgress = PlayerHudPrefs.isSlimProgressEnabled(a);
+        boolean slimProgress =
+                a.isTvDevice()
+                        ? PlayerHudPrefs.isSlimProgressEnabled(a)
+                        : PlayerHudPrefs.isUnifiedSlimProgressEnabled(a, a.mobilePrefs());
         String sleepSummary =
                 SESSION_SLEEP_TIMER.summaryLabel(android.os.SystemClock.uptimeMillis());
         boolean offerCast = !a.isTvDevice() && !a.privateMode && !a.isCast();
@@ -6491,7 +6520,15 @@ final class PlaybackControls {
                             break;
                         case 14:
                             boolean nextSlim = !slimProgress;
-                            PlayerHudPrefs.setSlimProgressEnabled(a, nextSlim);
+                            if (a.isTvDevice()) {
+                                PlayerHudPrefs.setSlimProgressEnabled(a, nextSlim);
+                            } else {
+                                PlayerHudPrefs.setUnifiedSlimProgressEnabled(
+                                        a, a.mobilePrefs(), nextSlim);
+                            }
+                            if (a.mobilePlayerOverlay != null) {
+                                a.mobilePlayerOverlay.syncControlsVisibility();
+                            }
                             if (a.playerChrome != null) a.playerChrome.update();
                             a.toast(nextSlim ? "已开启播放中底部细进度条" : "已关闭播放中底部细进度条");
                             break;

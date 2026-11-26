@@ -334,12 +334,28 @@ final class DanmuSourceManager {
         return new ProbeResult(false, norm, defaultSourceName(norm), -1L, 0, lastErr);
     }
 
-    private static ProbeResult probeSingleOrigin(String origin, String keyword) {
+    static final class DiscoveredService {
+        final String name;
+        final String origin;
+        final String discoveredFrom;
+
+        DiscoveredService(String name, String origin, String discoveredFrom) {
+            this.name = name == null ? "" : name.trim();
+            this.origin = origin == null ? "" : origin.trim();
+            this.discoveredFrom = discoveredFrom == null ? "" : discoveredFrom.trim();
+        }
+    }
+
+    static ProbeResult probeSingleOrigin(String origin, String keyword) {
+        String norm = normalizeServiceOrigin(origin);
+        if (norm == null) {
+            return new ProbeResult(false, "", "", -1L, 0, "弹幕服务地址格式无效");
+        }
         long t0 = System.currentTimeMillis();
         HttpURLConnection conn = null;
         try {
             String probeUrl =
-                    origin
+                    norm
                             + "/api/v2/search/episodes?anime="
                             + DandanplayProvider.percentEncode(keyword);
             conn = ProxyAddress.openHttpConnection(new URL(probeUrl));
@@ -354,8 +370,8 @@ final class DanmuSourceManager {
             if (code == 401 || code == 403) {
                 return new ProbeResult(
                         false,
-                        origin,
-                        defaultSourceName(origin),
+                        norm,
+                        defaultSourceName(norm),
                         elapsed,
                         0,
                         "服务需要认证（HTTP " + code + "）");
@@ -363,42 +379,59 @@ final class DanmuSourceManager {
             if (code < 200 || code >= 300) {
                 return new ProbeResult(
                         false,
-                        origin,
-                        defaultSourceName(origin),
+                        norm,
+                        defaultSourceName(norm),
                         elapsed,
                         0,
                         "探测失败（HTTP " + code + "）");
             }
             String body = readUtf8(conn.getInputStream(), 1024 * 1024);
             JSONObject json = new JSONObject(body.trim());
-            boolean validSchema =
-                    json.has("animes")
-                            || json.has("matches")
-                            || json.has("success")
-                            || json.has("errorCode");
-            if (!validSchema) {
+            if (json.has("success") && !json.optBoolean("success", true)) {
+                String errMsg = json.optString("errorMessage", "").trim();
+                int errCode = json.optInt("errorCode", -1);
+                String detail =
+                        !errMsg.isEmpty()
+                                ? errMsg
+                                : (errCode != -1 ? ("错误码 " + errCode) : "认证或业务拒绝");
+                return new ProbeResult(
+                        false, norm, defaultSourceName(norm), elapsed, 0, "服务返回业务错误：" + detail);
+            }
+            if (json.has("errorCode") && json.optInt("errorCode", 0) != 0) {
+                int errCode = json.optInt("errorCode", -1);
+                String errMsg = json.optString("errorMessage", "").trim();
                 return new ProbeResult(
                         false,
-                        origin,
-                        defaultSourceName(origin),
+                        norm,
+                        defaultSourceName(norm),
                         elapsed,
                         0,
-                        "返回的 JSON 非弹弹Play v2 兼容格式");
+                        "服务返回错误码 " + errCode + (errMsg.isEmpty() ? "" : ("：" + errMsg)));
             }
             JSONArray animes = json.optJSONArray("animes");
-            int count = animes != null ? animes.length() : 0;
+            JSONArray matches = json.optJSONArray("matches");
+            if (animes == null && matches == null) {
+                return new ProbeResult(
+                        false,
+                        norm,
+                        defaultSourceName(norm),
+                        elapsed,
+                        0,
+                        "返回的 JSON 缺少 animes/matches 字段，非兼容弹弹Play v2 接口");
+            }
+            int count = animes != null ? animes.length() : matches.length();
             return new ProbeResult(
                     true,
-                    origin,
-                    defaultSourceName(origin),
+                    norm,
+                    defaultSourceName(norm),
                     elapsed,
                     count,
                     "探测成功（" + elapsed + "ms，返回 " + count + " 条测试结果）");
         } catch (Exception e) {
             return new ProbeResult(
                     false,
-                    origin,
-                    defaultSourceName(origin),
+                    norm,
+                    defaultSourceName(norm),
                     -1L,
                     0,
                     "连接失败："
@@ -408,6 +441,206 @@ final class DanmuSourceManager {
         } finally {
             if (conn != null) conn.disconnect();
         }
+    }
+
+    /**
+     * Parses a remote or local danmu service directory (JSON array/object or line-delimited
+     * {@code Name|URL} / plain URL text), filtering optionally by {@code keyword}.
+     */
+    static List<DiscoveredService> parseDirectoryPayload(
+            String rawPayload, String keyword, String sourceLabel) {
+        List<DiscoveredService> out = new ArrayList<>();
+        if (rawPayload == null || rawPayload.trim().isEmpty()) return out;
+        String kw = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
+        Set<String> seen = new LinkedHashSet<>();
+        String trimmed = rawPayload.trim();
+        if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+            try {
+                JSONArray arr = null;
+                if (trimmed.startsWith("[")) {
+                    arr = new JSONArray(trimmed);
+                } else {
+                    JSONObject obj = new JSONObject(trimmed);
+                    for (String k :
+                            new String[] {"sources", "services", "servers", "danmu", "items"}) {
+                        JSONArray cand = obj.optJSONArray(k);
+                        if (cand != null) {
+                            arr = cand;
+                            break;
+                        }
+                    }
+                }
+                if (arr != null) {
+                    for (int i = 0; i < arr.length(); i++) {
+                        Object item = arr.opt(i);
+                        String rawUrl = "";
+                        String name = "";
+                        String desc = "";
+                        if (item instanceof String) {
+                            rawUrl = ((String) item).trim();
+                        } else if (item instanceof JSONObject) {
+                            JSONObject jo = (JSONObject) item;
+                            rawUrl =
+                                    jo.optString(
+                                                    "url",
+                                                    jo.optString(
+                                                            "baseUrl", jo.optString("origin", "")))
+                                            .trim();
+                            name = jo.optString("name", jo.optString("title", "")).trim();
+                            desc = jo.optString("description", jo.optString("tags", "")).trim();
+                        }
+                        addDiscoveredIfMatched(out, seen, name, rawUrl, desc, kw, sourceLabel);
+                    }
+                }
+                return out;
+            } catch (Exception ignored) {
+            }
+        }
+        String[] lines = trimmed.split("\\r?\\n");
+        for (String line : lines) {
+            String s = line.trim();
+            if (s.isEmpty() || s.startsWith("#")) continue;
+            String name = "";
+            String urlPart = s;
+            int pipe = s.indexOf('|');
+            if (pipe > 0 && s.indexOf("http", pipe) > pipe) {
+                name = s.substring(0, pipe).trim();
+                urlPart = s.substring(pipe + 1).trim();
+            } else {
+                int httpIdx = s.indexOf("http://");
+                if (httpIdx < 0) httpIdx = s.indexOf("https://");
+                if (httpIdx > 0) {
+                    name = s.substring(0, httpIdx).replaceAll("[-:：\\s]+$", "").trim();
+                    urlPart = s.substring(httpIdx).trim();
+                }
+            }
+            int sp = urlPart.indexOf(' ');
+            if (sp > 0) urlPart = urlPart.substring(0, sp).trim();
+            addDiscoveredIfMatched(out, seen, name, urlPart, s, kw, sourceLabel);
+        }
+        return out;
+    }
+
+    private static void addDiscoveredIfMatched(
+            List<DiscoveredService> out,
+            Set<String> seen,
+            String name,
+            String rawUrl,
+            String searchableExtra,
+            String lowerKw,
+            String sourceLabel) {
+        String norm = normalizeServiceOrigin(rawUrl);
+        if (norm == null || !seen.add(norm)) return;
+        String finalName =
+                name != null && !name.trim().isEmpty() ? name.trim() : defaultSourceName(norm);
+        if (lowerKw != null && !lowerKw.isEmpty()) {
+            String hay =
+                    (finalName
+                                    + " "
+                                    + norm
+                                    + " "
+                                    + (searchableExtra == null ? "" : searchableExtra))
+                            .toLowerCase(Locale.ROOT);
+            if (!hay.contains(lowerKw)) return;
+        }
+        out.add(new DiscoveredService(finalName, norm, sourceLabel));
+    }
+
+    /** Extracts danmu service endpoints advertised inside the active subscription configuration. */
+    static List<DiscoveredService> discoverFromSubscriptionConfig(
+            Cms.Config config, String keyword) {
+        List<DiscoveredService> out = new ArrayList<>();
+        if (config == null) return out;
+        String kw = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
+        Set<String> seen = new LinkedHashSet<>();
+        java.util.regex.Pattern urlPat =
+                java.util.regex.Pattern.compile("https?://[^\\s\"'<>\\]\\)]+");
+        if (config.sites != null) {
+            for (Cms.Site site : config.sites) {
+                if (site == null) continue;
+                String extStr = site.ext == null ? "" : String.valueOf(site.ext);
+                String combined =
+                        (site.name == null ? "" : site.name)
+                                + " "
+                                + (site.api == null ? "" : site.api)
+                                + " "
+                                + extStr;
+                String lower = combined.toLowerCase(Locale.ROOT);
+                if (!(lower.contains("danm") || lower.contains("弹幕") || lower.contains("dandan"))) {
+                    continue;
+                }
+                java.util.regex.Matcher m = urlPat.matcher(combined);
+                while (m.find()) {
+                    String found = m.group();
+                    String fl = found.toLowerCase(Locale.ROOT);
+                    if (fl.contains("danm") || fl.contains("dandan") || fl.contains("/dm")) {
+                        String stripped = found.replaceAll("(?i)/api/v2/.*$", "");
+                        addDiscoveredIfMatched(
+                                out,
+                                seen,
+                                site.name != null && !site.name.isEmpty()
+                                        ? (site.name + " 弹幕")
+                                        : "",
+                                stripped,
+                                combined,
+                                kw,
+                                "当前订阅");
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Fetches and searches a remote directory/index URL (JSON or text catalog) for discoverable
+     * danmu services without requiring the user to memorize individual endpoint URLs.
+     */
+    static List<DiscoveredService> fetchDirectoryServices(String directoryUrl, String keyword)
+            throws IOException {
+        if (directoryUrl == null || !Cms.isHttp(directoryUrl.trim())) {
+            return Collections.emptyList();
+        }
+        HttpURLConnection conn = null;
+        try {
+            conn = ProxyAddress.openHttpConnection(new URL(directoryUrl.trim()));
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(6000);
+            conn.setReadTimeout(8000);
+            conn.setRequestProperty("Accept", "application/json, text/plain, */*");
+            conn.setRequestProperty("User-Agent", Cms.USER_AGENT);
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) {
+                throw new IOException("弹幕源目录请求失败（HTTP " + code + "）");
+            }
+            String body = readUtf8(conn.getInputStream(), 1024 * 1024);
+            return parseDirectoryPayload(body, keyword, "来源目录");
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    /**
+     * Searches discoverable danmu services across the active subscription config and an optional
+     * directory/index URL (or official Dandanplay baseline when keyword matches), without requiring
+     * users to know an endpoint URL beforehand.
+     */
+    static List<DiscoveredService> searchDiscoverableServices(
+            Cms.Config config, String keyword, String directoryUrl) {
+        List<DiscoveredService> merged = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        if (directoryUrl != null && Cms.isHttp(directoryUrl.trim())) {
+            try {
+                for (DiscoveredService ds : fetchDirectoryServices(directoryUrl, keyword)) {
+                    if (seen.add(ds.origin)) merged.add(ds);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        for (DiscoveredService ds : discoverFromSubscriptionConfig(config, keyword)) {
+            if (seen.add(ds.origin)) merged.add(ds);
+        }
+        return merged;
     }
 
     /** Dedicated UI for discovering/probing and adding a new danmu service endpoint. */
@@ -420,13 +653,32 @@ final class DanmuSourceManager {
 
         TextView intro =
                 a.text(
-                        "输入新的弹幕服务地址（完整保留非默认端口与 /dm、/数字前缀 等子路径），先探测验证兼容性再加入统一弹幕源列表。",
+                        "可先通过关键词从当前订阅或来源目录搜索发现弹幕服务，也可直接输入服务地址（完整保留非默认端口与 /dm、/数字前缀 等子路径）并做协议探测。",
                         12f,
                         p.textSecondary);
         intro.setLineSpacing(a.dp(2), 1f);
         box.addView(intro);
         a.gap(box, 10);
 
+        // Section 1: Directory & subscription discovery (no pre-known endpoint URL required)
+        final EditText dirSearchKwEt = buildInput(a, "搜索发现关键词（如：弹弹 / 剧名 / 留空列全部）", "");
+        box.addView(dirSearchKwEt, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(box, 6);
+
+        final EditText dirUrlEt = buildInput(a, "弹幕源目录地址（可选，支持 JSON / 文本目录索引）", "");
+        dirUrlEt.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        box.addView(dirUrlEt, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(box, 8);
+
+        final TextView discoverBtn = buildPillBtn(a, "从订阅与目录搜索新弹幕源", false);
+        box.addView(discoverBtn, new LinearLayout.LayoutParams(-1, a.dp(38)));
+        a.gap(box, 6);
+
+        final LinearLayout discoveredHost = a.vertical();
+        box.addView(discoveredHost, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(box, 10);
+
+        // Section 2: Direct URL protocol probe & add
         final EditText nameEt = buildInput(a, "服务名称（可选，如：自建弹幕服务）", "");
         box.addView(nameEt, new LinearLayout.LayoutParams(-1, -2));
         a.gap(box, 8);
@@ -459,6 +711,73 @@ final class DanmuSourceManager {
         final ProbeResult[] lastProbe = new ProbeResult[1];
         final MobileBottomSheet.SheetHandle handle =
                 MobileBottomSheet.showCustom(a, "搜索并添加新弹幕源", box, null);
+
+        discoverBtn.setOnClickListener(
+                v -> {
+                    final String kw = dirSearchKwEt.getText().toString().trim();
+                    final String dirUrl = dirUrlEt.getText().toString().trim();
+                    discoverBtn.setEnabled(false);
+                    discoveredHost.removeAllViews();
+                    discoveredHost.addView(a.text("正在搜索可用弹幕源…", 12f, p.accent));
+                    a.worker.execute(
+                            () -> {
+                                final List<DiscoveredService> found =
+                                        searchDiscoverableServices(a.config, kw, dirUrl);
+                                a.ui.post(
+                                        () -> {
+                                            if (a.isFinishing()) return;
+                                            discoverBtn.setEnabled(true);
+                                            discoveredHost.removeAllViews();
+                                            if (found.isEmpty()) {
+                                                discoveredHost.addView(
+                                                        a.text(
+                                                                "未发现匹配的弹幕服务，可填写目录地址或在下方手动输入探测。",
+                                                                12f,
+                                                                p.textTertiary));
+                                                return;
+                                            }
+                                            for (final DiscoveredService ds : found) {
+                                                LinearLayout itemRow = a.row();
+                                                itemRow.setGravity(Gravity.CENTER_VERTICAL);
+                                                itemRow.setPadding(
+                                                        a.dp(10), a.dp(8), a.dp(10), a.dp(8));
+                                                itemRow.setBackground(MobileTheme.subtleBg(a, 10));
+                                                LinearLayout col = a.vertical();
+                                                TextView t = a.text(ds.name, 13f, p.textPrimary);
+                                                t.setTypeface(null, Typeface.BOLD);
+                                                col.addView(t);
+                                                TextView sub =
+                                                        a.text(
+                                                                ds.discoveredFrom
+                                                                        + " · "
+                                                                        + ds.origin,
+                                                                11f,
+                                                                p.textSecondary);
+                                                sub.setSingleLine(true);
+                                                sub.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                                                col.addView(sub);
+                                                itemRow.addView(
+                                                        col,
+                                                        new LinearLayout.LayoutParams(0, -2, 1f));
+                                                TextView pickBtn = a.text("填入探测", 12f, p.accent);
+                                                pickBtn.setTypeface(null, Typeface.BOLD);
+                                                pickBtn.setPadding(
+                                                        a.dp(8), a.dp(4), a.dp(4), a.dp(4));
+                                                itemRow.addView(pickBtn);
+                                                itemRow.setOnClickListener(
+                                                        cv -> {
+                                                            nameEt.setText(ds.name);
+                                                            urlEt.setText(ds.origin);
+                                                            probeBtn.performClick();
+                                                        });
+                                                LinearLayout.LayoutParams rlp =
+                                                        new LinearLayout.LayoutParams(-1, -2);
+                                                rlp.bottomMargin = a.dp(6);
+                                                discoveredHost.addView(itemRow, rlp);
+                                            }
+                                        });
+                            });
+                });
 
         probeBtn.setOnClickListener(
                 v -> {

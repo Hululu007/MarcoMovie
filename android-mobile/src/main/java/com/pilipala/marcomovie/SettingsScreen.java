@@ -1958,13 +1958,21 @@ final class SettingsScreen {
                             a, !PlayerHudPrefs.isStartSpecHudEnabled(a));
                     a.refresh();
                 });
+        boolean slimOn =
+                a.isTvDevice()
+                        ? PlayerHudPrefs.isSlimProgressEnabled(a)
+                        : PlayerHudPrefs.isUnifiedSlimProgressEnabled(a, a.mobilePrefs());
         link(
                 "播放中底部细进度条",
-                PlayerHudPrefs.isSlimProgressEnabled(a) ? "开启" : "关闭",
+                slimOn ? "开启" : "关闭",
                 "setting-" + PlayerHudPrefs.KEY_SLIM_PROGRESS,
                 () -> {
-                    PlayerHudPrefs.setSlimProgressEnabled(
-                            a, !PlayerHudPrefs.isSlimProgressEnabled(a));
+                    boolean next = !slimOn;
+                    if (a.isTvDevice()) {
+                        PlayerHudPrefs.setSlimProgressEnabled(a, next);
+                    } else {
+                        PlayerHudPrefs.setUnifiedSlimProgressEnabled(a, a.mobilePrefs(), next);
+                    }
                     a.refresh();
                 });
         link(

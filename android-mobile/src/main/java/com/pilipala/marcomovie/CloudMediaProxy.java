@@ -382,6 +382,27 @@ final class CloudMediaProxy implements Closeable {
             RangeSpec reqRange,
             OutputStream out)
             throws Exception {
+        if (reqRange.isSuffix) {
+            long totalForSuffix = lease.knownTotalSize;
+            if (totalForSuffix <= 0L) {
+                ChunkFetchResult probe = fetchValidatedChunk(lease, window, 0L, 0L);
+                if (probe == null || !lease.isWindowCurrent(window)) return;
+                if (probe.totalSize > 0L) {
+                    totalForSuffix = probe.totalSize;
+                    lease.knownTotalSize = totalForSuffix;
+                    if (probe.contentType != null && !probe.contentType.isEmpty()) {
+                        lease.knownContentType = probe.contentType;
+                    }
+                }
+            }
+            if (totalForSuffix <= 0L || reqRange.suffixLength <= 0L) {
+                sendError(out, 416, "Range Not Satisfiable");
+                return;
+            }
+            long suffixStart = Math.max(0L, totalForSuffix - reqRange.suffixLength);
+            reqRange = new RangeSpec(suffixStart, totalForSuffix - 1L, true, false, -1L);
+        }
+
         long start = reqRange.start;
         long initialEnd =
                 reqRange.end >= start
@@ -459,8 +480,8 @@ final class CloudMediaProxy implements Closeable {
             return;
         }
 
-        // Bounded concurrent prefetch pipeline for remaining chunks.
-        Map<Long, Future<ChunkFetchResult>> inflight = new LinkedHashMap<>();
+        // Bounded concurrent prefetch pipeline for remaining chunks (with short-206 resync).
+        Map<Long, InflightChunk> inflight = new LinkedHashMap<>();
         long scheduleOffset = nextOffset;
         try {
             while (nextOffset <= finalEnd && lease.isWindowCurrent(window) && !closed) {
@@ -472,6 +493,7 @@ final class CloudMediaProxy implements Closeable {
                     final long cLen = (cEnd - cStart) + 1L;
                     if (!reserveBuffer(lease, window, cLen)) break;
                     scheduleOffset = cEnd + 1L;
+                    final AtomicBoolean released = new AtomicBoolean(false);
                     Future<ChunkFetchResult> fut =
                             chunkPool.submit(
                                     new Callable<ChunkFetchResult>() {
@@ -479,36 +501,51 @@ final class CloudMediaProxy implements Closeable {
                                         public ChunkFetchResult call() {
                                             try {
                                                 if (!lease.isWindowCurrent(window)) {
-                                                    releaseBuffer(lease, cLen);
+                                                    if (released.compareAndSet(false, true)) {
+                                                        releaseBuffer(lease, cLen);
+                                                    }
                                                     return null;
                                                 }
                                                 ChunkFetchResult res =
                                                         fetchValidatedChunk(
                                                                 lease, window, cStart, cEnd);
                                                 if (res == null || !lease.isWindowCurrent(window)) {
-                                                    releaseBuffer(lease, cLen);
+                                                    if (released.compareAndSet(false, true)) {
+                                                        releaseBuffer(lease, cLen);
+                                                    }
                                                     return null;
                                                 }
                                                 res.reservedBytes = cLen;
+                                                res.releasedFlag = released;
                                                 return res;
                                             } catch (Throwable t) {
-                                                releaseBuffer(lease, cLen);
+                                                if (released.compareAndSet(false, true)) {
+                                                    releaseBuffer(lease, cLen);
+                                                }
                                                 return null;
                                             }
                                         }
                                     });
-                    inflight.put(cStart, fut);
+                    inflight.put(cStart, new InflightChunk(cLen, released, fut));
                 }
 
-                Future<ChunkFetchResult> headFuture = inflight.remove(nextOffset);
-                if (headFuture == null) break;
+                InflightChunk headTask = inflight.remove(nextOffset);
+                if (headTask == null) break;
                 ChunkFetchResult chunk;
                 try {
-                    chunk = headFuture.get();
+                    chunk = headTask.future.get();
                 } catch (Exception e) {
+                    if (headTask.released.compareAndSet(false, true)) {
+                        releaseBuffer(lease, headTask.reservedBytes);
+                    }
                     break;
                 }
-                if (chunk == null) break;
+                if (chunk == null) {
+                    if (headTask.released.compareAndSet(false, true)) {
+                        releaseBuffer(lease, headTask.reservedBytes);
+                    }
+                    break;
+                }
                 try {
                     if (!lease.isWindowCurrent(window)) break;
                     if (chunk.statusCode != 206 || chunk.rangeStart != nextOffset) {
@@ -522,28 +559,44 @@ final class CloudMediaProxy implements Closeable {
                     out.flush();
                     nextOffset += toWrite;
                     lease.metrics.completedChunks.incrementAndGet();
+                    // Handle short 206: upstream returned fewer bytes than requested cEnd.
+                    // Cancel stale speculative prefetches beyond the gap and resume from exact
+                    // nextOffset so zero bytes are lost or misaligned.
+                    if (nextOffset <= finalEnd && !inflight.containsKey(nextOffset)) {
+                        cancelAndReleaseInflight(lease, inflight);
+                        scheduleOffset = nextOffset;
+                    }
                 } finally {
-                    if (chunk.reservedBytes > 0) {
-                        releaseBuffer(lease, chunk.reservedBytes);
-                        chunk.reservedBytes = 0;
+                    if (headTask.released.compareAndSet(false, true)) {
+                        releaseBuffer(lease, headTask.reservedBytes);
                     }
                 }
             }
         } finally {
             window.cancel();
-            for (Future<ChunkFetchResult> f : inflight.values()) {
-                f.cancel(true);
-                try {
-                    if (f.isDone() && !f.isCancelled()) {
-                        ChunkFetchResult leftover = f.get();
-                        if (leftover != null && leftover.reservedBytes > 0) {
-                            releaseBuffer(lease, leftover.reservedBytes);
-                            leftover.reservedBytes = 0;
-                        }
-                    }
-                } catch (Throwable ignored) {
-                }
+            cancelAndReleaseInflight(lease, inflight);
+        }
+    }
+
+    private void cancelAndReleaseInflight(Lease lease, Map<Long, InflightChunk> inflight) {
+        for (InflightChunk task : inflight.values()) {
+            task.future.cancel(true);
+            if (task.released.compareAndSet(false, true)) {
+                releaseBuffer(lease, task.reservedBytes);
             }
+        }
+        inflight.clear();
+    }
+
+    private static final class InflightChunk {
+        final long reservedBytes;
+        final AtomicBoolean released;
+        final Future<ChunkFetchResult> future;
+
+        InflightChunk(long reservedBytes, AtomicBoolean released, Future<ChunkFetchResult> future) {
+            this.reservedBytes = reservedBytes;
+            this.released = released;
+            this.future = future;
         }
     }
 
@@ -579,6 +632,7 @@ final class CloudMediaProxy implements Closeable {
         final String contentType;
         final byte[] bytes;
         long reservedBytes;
+        AtomicBoolean releasedFlag;
 
         ChunkFetchResult(
                 int statusCode,
@@ -596,13 +650,62 @@ final class CloudMediaProxy implements Closeable {
         }
     }
 
+    static int effectivePort(java.net.URI uri) {
+        int port = uri.getPort();
+        if (port > 0) return port;
+        return "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+    }
+
+    static boolean isSameOrigin(java.net.URI a, java.net.URI b) {
+        if (a == null || b == null) return false;
+        if (a.getScheme() == null || b.getScheme() == null) return false;
+        if (a.getHost() == null || b.getHost() == null) return false;
+        return a.getScheme().equalsIgnoreCase(b.getScheme())
+                && a.getHost().equalsIgnoreCase(b.getHost())
+                && effectivePort(a) == effectivePort(b);
+    }
+
+    static boolean isSensitiveHeader(String name) {
+        if (name == null) return false;
+        String lower = name.trim().toLowerCase(Locale.ROOT);
+        return "cookie".equals(lower)
+                || "authorization".equals(lower)
+                || "proxy-authorization".equals(lower)
+                || "x-emby-token".equals(lower)
+                || "x-mediabrowser-token".equals(lower)
+                || "x-auth-token".equals(lower)
+                || "x-api-key".equals(lower);
+    }
+
     private ChunkFetchResult fetchValidatedChunk(
             Lease lease, RangeWindow window, long start, long end) throws IOException {
         if (!lease.isWindowCurrent(window)) return null;
         String currentUrl = lease.upstreamUrl;
+        java.net.URI originUri;
+        try {
+            originUri = new URL(lease.upstreamUrl).toURI();
+        } catch (Exception badOrigin) {
+            return new ChunkFetchResult(502, start, end, -1L, "", new byte[0]);
+        }
+        boolean crossedOrigin = false;
         for (int redirect = 0; redirect < 6; redirect++) {
             if (!lease.isWindowCurrent(window)) return null;
-            HttpURLConnection conn = ProxyAddress.openHttpConnection(new URL(currentUrl));
+            URL hopUrl = new URL(currentUrl);
+            String proto = hopUrl.getProtocol();
+            if (!("http".equalsIgnoreCase(proto) || "https".equalsIgnoreCase(proto))) {
+                return new ChunkFetchResult(502, start, end, -1L, "", new byte[0]);
+            }
+            java.net.URI hopUri;
+            try {
+                hopUri = hopUrl.toURI();
+            } catch (Exception badHop) {
+                return new ChunkFetchResult(502, start, end, -1L, "", new byte[0]);
+            }
+            if (!isSameOrigin(originUri, hopUri)) {
+                crossedOrigin = true;
+            }
+            boolean allowSensitive = !crossedOrigin && isSameOrigin(originUri, hopUri);
+            HttpURLConnection conn = ProxyAddress.openHttpConnection(hopUrl);
             window.activeConnections.put(conn, Boolean.TRUE);
             try {
                 conn.setRequestMethod("GET");
@@ -611,6 +714,7 @@ final class CloudMediaProxy implements Closeable {
                 conn.setReadTimeout(20_000);
                 for (Map.Entry<String, String> h : lease.upstreamHeaders.entrySet()) {
                     if ("Range".equalsIgnoreCase(h.getKey())) continue;
+                    if (!allowSensitive && isSensitiveHeader(h.getKey())) continue;
                     conn.setRequestProperty(h.getKey(), h.getValue());
                 }
                 conn.setRequestProperty("Range", "bytes=" + start + "-" + end);
@@ -620,7 +724,20 @@ final class CloudMediaProxy implements Closeable {
                     if (loc == null || loc.trim().isEmpty()) {
                         return new ChunkFetchResult(502, start, end, -1L, "", new byte[0]);
                     }
-                    currentUrl = new URL(new URL(currentUrl), loc.trim()).toString();
+                    URL nextUrl = new URL(hopUrl, loc.trim());
+                    String nextProto = nextUrl.getProtocol();
+                    if (!("http".equalsIgnoreCase(nextProto)
+                            || "https".equalsIgnoreCase(nextProto))) {
+                        return new ChunkFetchResult(502, start, end, -1L, "", new byte[0]);
+                    }
+                    try {
+                        if (!isSameOrigin(originUri, nextUrl.toURI())) {
+                            crossedOrigin = true;
+                        }
+                    } catch (Exception badNext) {
+                        return new ChunkFetchResult(502, start, end, -1L, "", new byte[0]);
+                    }
+                    currentUrl = nextUrl.toString();
                     continue;
                 }
                 if (!lease.isWindowCurrent(window)) return null;
@@ -689,11 +806,20 @@ final class CloudMediaProxy implements Closeable {
         final long start;
         final long end;
         final boolean hasRangeHeader;
+        final boolean isSuffix;
+        final long suffixLength;
 
         RangeSpec(long start, long end, boolean hasRangeHeader) {
+            this(start, end, hasRangeHeader, false, -1L);
+        }
+
+        RangeSpec(
+                long start, long end, boolean hasRangeHeader, boolean isSuffix, long suffixLength) {
             this.start = start;
             this.end = end;
             this.hasRangeHeader = hasRangeHeader;
+            this.isSuffix = isSuffix;
+            this.suffixLength = suffixLength;
         }
     }
 
@@ -709,12 +835,17 @@ final class CloudMediaProxy implements Closeable {
         String startStr = spec.substring(0, dash).trim();
         String endStr = spec.substring(dash + 1).trim();
         try {
-            if (startStr.isEmpty()) return null;
+            if (startStr.isEmpty()) {
+                if (endStr.isEmpty()) return null;
+                long suffix = Long.parseLong(endStr);
+                if (suffix <= 0) return null;
+                return new RangeSpec(-1L, -1L, true, true, suffix);
+            }
             long start = Long.parseLong(startStr);
             if (start < 0) return null;
             long end = endStr.isEmpty() ? -1L : Long.parseLong(endStr);
             if (end >= 0 && end < start) return null;
-            return new RangeSpec(start, end, true);
+            return new RangeSpec(start, end, true, false, -1L);
         } catch (NumberFormatException ignored) {
             return null;
         }

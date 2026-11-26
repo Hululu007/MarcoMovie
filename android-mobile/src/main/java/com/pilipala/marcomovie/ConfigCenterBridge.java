@@ -172,9 +172,36 @@ final class ConfigCenterBridge {
         }
 
         if (pushToExternal && writableDirs != null && !writableDirs.isEmpty()) {
-            pushCredentialsToDirectories(store, writableDirs, report);
+            pushCredentialsToDirectories(store, writableDirs, null, false, report);
         }
 
+        return report;
+    }
+
+    /**
+     * Pushes only the specified authorized drive(s) into external config files via field-level JSON
+     * merge, preserving all other drives, unknown fields, and user-customized values.
+     */
+    static SyncReport pushAuthorizedDrives(
+            Context context,
+            Cms.Config config,
+            java.util.Collection<String> drives,
+            boolean updateOrder) {
+        if (context == null) return new SyncReport(0);
+        Context app = context.getApplicationContext();
+        NetdiskStore.KeyValueStore store = NetdiskStore.storeFor(app);
+        List<File> writableDirs = collectRuntimeDirs(app, true);
+        SyncReport report = new SyncReport(detectConfigCenters(config).size());
+        if (writableDirs != null && !writableDirs.isEmpty()) {
+            java.util.Set<String> filter = new java.util.LinkedHashSet<>();
+            if (drives != null) {
+                for (String d : drives) {
+                    String norm = NetdiskStore.normalizeDriveKey(d);
+                    if (!norm.isEmpty()) filter.add(norm);
+                }
+            }
+            pushCredentialsToDirectories(store, writableDirs, filter, updateOrder, report);
+        }
         return report;
     }
 
@@ -193,6 +220,7 @@ final class ConfigCenterBridge {
         SyncReport report = new SyncReport(centers.size());
         if (store == null) return report;
 
+        java.util.Set<String> updatedDrives = new java.util.LinkedHashSet<>();
         if (submittedDrives != null) {
             for (Map.Entry<String, String> e : submittedDrives.entrySet()) {
                 String drive = NetdiskStore.normalizeDriveKey(e.getKey());
@@ -201,6 +229,7 @@ final class ConfigCenterBridge {
                 if (!NetdiskStore.isCredentialUsable(drive, val)) continue;
                 if (NetdiskStore.setCredential(store, drive, val, "")) {
                     report.importedDrives.add(drive);
+                    updatedDrives.add(drive);
                 }
             }
         }
@@ -208,59 +237,123 @@ final class ConfigCenterBridge {
             NetdiskStore.setOrder(store, NetdiskStore.parseOrder(submittedOrder));
             report.importedOrder = true;
         }
-        if (writableDirs != null && !writableDirs.isEmpty()) {
-            pushCredentialsToDirectories(store, writableDirs, report);
+        if (writableDirs != null
+                && !writableDirs.isEmpty()
+                && (!updatedDrives.isEmpty() || report.importedOrder)) {
+            pushCredentialsToDirectories(
+                    store, writableDirs, updatedDrives, report.importedOrder, report);
         }
         return report;
     }
 
     /** Builds the canonical CatPaw / WEX Config Center JSON payload matching iOS 0.7.7. */
     static String buildPanConfigJson(NetdiskStore.KeyValueStore store) {
+        return mergeIntoExistingPanConfigJson("", store, null, true);
+    }
+
+    /**
+     * Merges only the specified authorized drive fields into an existing config JSON document,
+     * preserving all other drives (e.g. 115, pikpak, tianyi), unknown top-level/nested keys, and
+     * user-customized values.
+     */
+    static String mergeIntoExistingPanConfigJson(
+            String existingJson,
+            NetdiskStore.KeyValueStore store,
+            java.util.Set<String> drivesToUpdate,
+            boolean updateOrder) {
         try {
-            JSONObject root = new JSONObject();
-            JSONObject pan = new JSONObject();
-            String quark = NetdiskStore.getCredential(store, NetdiskStore.DRIVE_QUARK);
-            String uc = NetdiskStore.getCredential(store, NetdiskStore.DRIVE_UC);
-            String baidu = NetdiskStore.getCredential(store, NetdiskStore.DRIVE_BAIDU);
-            String ali = NetdiskStore.getCredential(store, NetdiskStore.DRIVE_ALI);
-            String aliBare = NetdiskStore.extractAliRefreshToken(ali);
-
-            pan.put("quark", new JSONObject().put("cookie", quark));
-            pan.put("uc", new JSONObject().put("cookie", uc));
-            pan.put("baidu", new JSONObject().put("cookie", baidu));
-            pan.put("ali", new JSONObject().put("token", aliBare).put("cookie", ali));
-            root.put("pan", pan);
-
-            // Also include top-level compat aliases read by WEX / OkConfig / PanConfig spiders.
-            if (!quark.isEmpty()) root.put("quark_cookie", quark);
-            if (!uc.isEmpty()) root.put("uc_cookie", uc);
-            if (!baidu.isEmpty()) root.put("baidu_cookie", baidu);
-            if (!aliBare.isEmpty()) root.put("ali_token", aliBare);
-
-            List<String> order = NetdiskStore.getOrder(store);
-            JSONArray orderArr = new JSONArray();
-            StringBuilder orderCsv = new StringBuilder();
-            for (int i = 0; i < order.size(); i++) {
-                orderArr.put(order.get(i));
-                if (i > 0) orderCsv.append(',');
-                orderCsv.append(order.get(i));
+            JSONObject root;
+            boolean hadExisting = false;
+            String trimmed = existingJson == null ? "" : existingJson.trim();
+            if (trimmed.startsWith("{")) {
+                root = new JSONObject(trimmed);
+                hadExisting = true;
+            } else {
+                root = new JSONObject();
             }
-            root.put("order", orderArr);
-            root.put("panOrder", orderCsv.toString());
+
+            JSONObject pan = root.optJSONObject("pan");
+            if (pan == null) {
+                pan = new JSONObject();
+                root.put("pan", pan);
+            }
+
+            java.util.Set<String> effective =
+                    collectEffectiveAuthorizedDrives(store, drivesToUpdate);
+            for (String drive : effective) {
+                String cred = NetdiskStore.getCredential(store, drive);
+                if (!NetdiskStore.isCredentialUsable(drive, cred)) continue;
+                JSONObject driveObj = pan.optJSONObject(drive);
+                if (driveObj == null) {
+                    driveObj = new JSONObject();
+                    pan.put(drive, driveObj);
+                }
+                if (NetdiskStore.DRIVE_ALI.equals(drive)) {
+                    String aliBare = NetdiskStore.extractAliRefreshToken(cred);
+                    driveObj.put("token", aliBare);
+                    driveObj.put("cookie", cred);
+                    if (!aliBare.isEmpty()) root.put("ali_token", aliBare);
+                } else {
+                    driveObj.put("cookie", cred);
+                    if (NetdiskStore.DRIVE_QUARK.equals(drive)) {
+                        root.put("quark_cookie", cred);
+                    } else if (NetdiskStore.DRIVE_UC.equals(drive)) {
+                        root.put("uc_cookie", cred);
+                    } else if (NetdiskStore.DRIVE_BAIDU.equals(drive)) {
+                        root.put("baidu_cookie", cred);
+                    }
+                }
+            }
+
+            boolean shouldWriteOrder =
+                    updateOrder
+                            || (!hadExisting
+                                    && !root.has("order")
+                                    && !root.has("panOrder")
+                                    && !NetdiskStore.isDefaultOrder(store));
+            if (shouldWriteOrder) {
+                List<String> order = NetdiskStore.getOrder(store);
+                JSONArray orderArr = new JSONArray();
+                StringBuilder orderCsv = new StringBuilder();
+                for (int i = 0; i < order.size(); i++) {
+                    orderArr.put(order.get(i));
+                    if (i > 0) orderCsv.append(',');
+                    orderCsv.append(order.get(i));
+                }
+                root.put("order", orderArr);
+                root.put("panOrder", orderCsv.toString());
+            }
             return root.toString();
         } catch (Exception e) {
-            return "{}";
+            return existingJson != null && !existingJson.trim().isEmpty() ? existingJson : "{}";
         }
     }
 
+    private static java.util.Set<String> collectEffectiveAuthorizedDrives(
+            NetdiskStore.KeyValueStore store, java.util.Set<String> drivesFilter) {
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        if (store == null) return out;
+        java.util.Collection<String> candidates =
+                drivesFilter != null ? drivesFilter : NetdiskStore.DEFAULT_ORDER;
+        for (String raw : candidates) {
+            String drive = NetdiskStore.normalizeDriveKey(raw);
+            if (!drive.isEmpty() && NetdiskStore.isLoggedIn(store, drive)) {
+                out.add(drive);
+            }
+        }
+        return out;
+    }
+
     private static void pushCredentialsToDirectories(
-            NetdiskStore.KeyValueStore store, List<File> dirs, SyncReport report) {
-        String json = buildPanConfigJson(store);
-        String quark = NetdiskStore.getCredential(store, NetdiskStore.DRIVE_QUARK);
-        String uc = NetdiskStore.getCredential(store, NetdiskStore.DRIVE_UC);
-        String baidu = NetdiskStore.getCredential(store, NetdiskStore.DRIVE_BAIDU);
-        String ali = NetdiskStore.getCredential(store, NetdiskStore.DRIVE_ALI);
-        String aliBare = NetdiskStore.extractAliRefreshToken(ali);
+            NetdiskStore.KeyValueStore store,
+            List<File> dirs,
+            java.util.Set<String> drivesFilter,
+            boolean updateOrder,
+            SyncReport report) {
+        java.util.Set<String> effective = collectEffectiveAuthorizedDrives(store, drivesFilter);
+        if (effective.isEmpty() && !updateOrder) {
+            return;
+        }
         List<String> order = NetdiskStore.getOrder(store);
         StringBuilder orderCsv = new StringBuilder();
         for (int i = 0; i < order.size(); i++) {
@@ -268,39 +361,61 @@ final class ConfigCenterBridge {
             orderCsv.append(order.get(i));
         }
         String orderText = orderCsv.toString();
+        String lastMerged = "";
 
         for (File dir : dirs) {
             if (dir == null) continue;
             try {
                 if (!dir.exists() && !dir.mkdirs()) continue;
                 if (!dir.isDirectory() || !dir.canWrite()) continue;
-                writeAtomic(new File(dir, "wexfnwconfig.json"), json, report);
-                writeAtomic(new File(dir, "config_center.json"), json, report);
-                syncCompatFile(new File(dir, "quark_cookie.txt"), quark, report);
-                syncCompatFile(new File(dir, "quark.txt"), quark, report);
-                syncCompatFile(new File(dir, "uc_cookie.txt"), uc, report);
-                syncCompatFile(new File(dir, "uc.txt"), uc, report);
-                syncCompatFile(new File(dir, "baidu_cookie.txt"), baidu, report);
-                syncCompatFile(new File(dir, "baidu.txt"), baidu, report);
-                syncCompatFile(new File(dir, "ali_token.txt"), aliBare, report);
-                syncCompatFile(new File(dir, "token.txt"), aliBare, report);
-                syncCompatFile(new File(dir, "pan_order.txt"), orderText, report);
+                for (String jsonName : new String[] {"wexfnwconfig.json", "config_center.json"}) {
+                    File jsonFile = new File(dir, jsonName);
+                    String existing = readSmallText(jsonFile);
+                    // Preserve corrupted/non-JSON custom files rather than destroying them silently
+                    if (!existing.isEmpty() && !existing.trim().startsWith("{")) continue;
+                    String merged =
+                            mergeIntoExistingPanConfigJson(existing, store, effective, updateOrder);
+                    lastMerged = merged;
+                    if (existing.isEmpty() || !existing.equals(merged)) {
+                        writeAtomic(jsonFile, merged, report);
+                    }
+                }
+                for (String drive : effective) {
+                    String val = NetdiskStore.getCredential(store, drive);
+                    if (!NetdiskStore.isCredentialUsable(drive, val)) continue;
+                    if (NetdiskStore.DRIVE_QUARK.equals(drive)) {
+                        writeCompatFileIfPresent(new File(dir, "quark_cookie.txt"), val, report);
+                        writeCompatFileIfPresent(new File(dir, "quark.txt"), val, report);
+                    } else if (NetdiskStore.DRIVE_UC.equals(drive)) {
+                        writeCompatFileIfPresent(new File(dir, "uc_cookie.txt"), val, report);
+                        writeCompatFileIfPresent(new File(dir, "uc.txt"), val, report);
+                    } else if (NetdiskStore.DRIVE_BAIDU.equals(drive)) {
+                        writeCompatFileIfPresent(new File(dir, "baidu_cookie.txt"), val, report);
+                        writeCompatFileIfPresent(new File(dir, "baidu.txt"), val, report);
+                    } else if (NetdiskStore.DRIVE_ALI.equals(drive)) {
+                        String aliBare = NetdiskStore.extractAliRefreshToken(val);
+                        writeCompatFileIfPresent(new File(dir, "ali_token.txt"), aliBare, report);
+                        writeCompatFileIfPresent(new File(dir, "token.txt"), aliBare, report);
+                    }
+                }
+                if (updateOrder && !orderText.isEmpty()) {
+                    writeCompatFileIfPresent(new File(dir, "pan_order.txt"), orderText, report);
+                }
             } catch (Throwable ignored) {
             }
         }
-        lastPushedJson = json;
+        if (!lastMerged.isEmpty()) {
+            lastPushedJson = lastMerged;
+        }
     }
 
     static String lastPushedPayload() {
         return lastPushedJson;
     }
 
-    private static void syncCompatFile(File file, String content, SyncReport report)
+    private static void writeCompatFileIfPresent(File file, String content, SyncReport report)
             throws IOException {
         if (content == null || content.trim().isEmpty()) {
-            if (file.isFile()) {
-                file.delete();
-            }
             return;
         }
         writeAtomic(file, content, report);

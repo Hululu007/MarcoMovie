@@ -1084,6 +1084,8 @@ public final class MpvPlayer extends MoviePlayer {
                 });
     }
 
+    private volatile int manualVideoTrackIndex = -1;
+
     @Override
     public int selectedVideoTrackIndex() {
         List<VideoTrackOption> tracks = listVideoTracks();
@@ -1091,6 +1093,16 @@ public final class MpvPlayer extends MoviePlayer {
             if (tracks.get(i).selected) return tracks.get(i).index;
         }
         return -1;
+    }
+
+    @Override
+    public boolean isAutoVideoTrackPolicy() {
+        return manualVideoTrackIndex < 0;
+    }
+
+    @Override
+    public int manualVideoTrackIndex() {
+        return manualVideoTrackIndex;
     }
 
     @Override
@@ -1144,6 +1156,9 @@ public final class MpvPlayer extends MoviePlayer {
                                             ? "aid"
                                             : type == C.TRACK_TYPE_TEXT ? "sid" : "";
                     if (prop.isEmpty()) return null;
+                    if (type == C.TRACK_TYPE_VIDEO) {
+                        manualVideoTrackIndex = index >= 0 ? index : -1;
+                    }
                     if (index == -2) {
                         MPVLib.setPropertyString(prop, "no");
                     } else if (index < 0) {

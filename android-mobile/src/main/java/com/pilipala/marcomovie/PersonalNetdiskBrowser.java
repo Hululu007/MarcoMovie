@@ -45,6 +45,7 @@ import org.json.JSONObject;
 final class PersonalNetdiskBrowser {
     private static volatile Runnable activeQrResumeHook;
     private static volatile CloudMediaProxy.Lease activeCloudLease;
+    private static volatile CloudMediaProxy.Lease pendingCloudLease;
 
     private PersonalNetdiskBrowser() {}
 
@@ -59,16 +60,60 @@ final class PersonalNetdiskBrowser {
         }
     }
 
-    static void releaseActiveLease() {
-        CloudMediaProxy.Lease old = activeCloudLease;
-        activeCloudLease = null;
-        if (old != null) {
-            try {
-                CloudMediaProxy.shared().releaseLease(old);
-            } catch (Throwable ignored) {
-                old.revoke();
-            }
+    private static void revokeQuietly(CloudMediaProxy.Lease lease) {
+        if (lease == null) return;
+        try {
+            CloudMediaProxy.shared().releaseLease(lease);
+        } catch (Throwable ignored) {
+            lease.revoke();
         }
+    }
+
+    static synchronized void stagePendingLease(CloudMediaProxy.Lease lease) {
+        CloudMediaProxy.Lease oldPending = pendingCloudLease;
+        pendingCloudLease = lease;
+        if (oldPending != null && oldPending != lease && oldPending != activeCloudLease) {
+            revokeQuietly(oldPending);
+        }
+    }
+
+    static synchronized void releaseActiveLease() {
+        releaseActiveLeaseExcept("");
+    }
+
+    static synchronized void releaseActiveLeaseExcept(String keepLeaseId) {
+        String keep = keepLeaseId == null ? "" : keepLeaseId;
+        CloudMediaProxy.Lease cur = activeCloudLease;
+        if (cur != null && !keep.equals(cur.id)) {
+            activeCloudLease = null;
+            revokeQuietly(cur);
+        }
+        CloudMediaProxy.Lease pend = pendingCloudLease;
+        if (pend != null && !keep.equals(pend.id)) {
+            pendingCloudLease = null;
+            revokeQuietly(pend);
+        }
+    }
+
+    static synchronized boolean adoptLeaseIfMatching(String leaseId) {
+        if (leaseId == null || leaseId.isEmpty()) return false;
+        CloudMediaProxy.Lease pend = pendingCloudLease;
+        if (pend != null && leaseId.equals(pend.id)) {
+            pendingCloudLease = null;
+            CloudMediaProxy.Lease old = activeCloudLease;
+            activeCloudLease = pend;
+            if (old != null && old != pend) revokeQuietly(old);
+            return true;
+        }
+        return activeCloudLease != null && leaseId.equals(activeCloudLease.id);
+    }
+
+    static CloudMediaProxy.Lease currentActiveLease() {
+        return activeCloudLease;
+    }
+
+    static CloudMediaProxy.Lease currentPendingLease() {
+        return pendingCloudLease;
     }
 
     // =========================================================================
@@ -160,7 +205,11 @@ final class PersonalNetdiskBrowser {
                                     if (res.isConfirmed()) {
                                         NetdiskStore.setCredential(
                                                 a, provider, res.credential, res.ownerId);
-                                        ConfigCenterBridge.syncAll(a, a.config, false, true, false);
+                                        ConfigCenterBridge.pushAuthorizedDrives(
+                                                a,
+                                                a.config,
+                                                java.util.Collections.singletonList(provider),
+                                                false);
                                         a.ui.post(
                                                 () -> {
                                                     if (closed.get()) return;
@@ -939,9 +988,7 @@ final class PersonalNetdiskBrowser {
                 () -> {
                     try {
                         PersonalNetdiskLibrary lib = new PersonalNetdiskLibrary(a);
-                        PersonalNetdiskLibrary.ResolvedMedia resolved = lib.resolveFile(item);
-                        releaseActiveLease();
-                        activeCloudLease = resolved.proxyLease;
+                        final PersonalNetdiskLibrary.ResolvedMedia resolved = lib.resolveFile(item);
 
                         final Cms.Site site =
                                 PersonalNetdiskLibrary.buildVirtualSite(
@@ -959,6 +1006,9 @@ final class PersonalNetdiskBrowser {
                         // Populate multi-quality variants into ep.media so quality switcher works!
                         try {
                             JSONObject media = new JSONObject();
+                            if (resolved.proxyLease != null) {
+                                media.put("_cloudLeaseId", resolved.proxyLease.id);
+                            }
                             JSONArray qualities = new JSONArray();
                             for (int i = 0; i < resolved.variants.size(); i++) {
                                 PersonalNetdiskLibrary.PlayVariant pv = resolved.variants.get(i);
@@ -982,7 +1032,14 @@ final class PersonalNetdiskBrowser {
 
                         a.ui.post(
                                 () -> {
-                                    if (a.isFinishing()) return;
+                                    if (a.isFinishing()) {
+                                        revokeQuietly(resolved.proxyLease);
+                                        return;
+                                    }
+                                    // Clean up old playback session BEFORE adopting the new lease
+                                    // so releasePlayer() inside openPlayer() never revokes the
+                                    // freshly resolved stream URL.
+                                    stagePendingLease(resolved.proxyLease);
                                     a.activeLine = line;
                                     a.activeEpisode = ep;
                                     a.openPlayer(site, video, ep);

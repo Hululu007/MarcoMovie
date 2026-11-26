@@ -1740,12 +1740,45 @@ public class MoviePlayer {
                 });
     }
 
+    private volatile int manualVideoTrackIndex = -1;
+
     public int selectedVideoTrackIndex() {
         java.util.List<VideoTrackOption> tracks = listVideoTracks();
         for (int i = 0; i < tracks.size(); i++) {
             if (tracks.get(i).selected) return tracks.get(i).index;
         }
         return -1;
+    }
+
+    /** Returns {@code true} when automatic ABR selection policy is active (no manual override). */
+    public boolean isAutoVideoTrackPolicy() {
+        return onMain(
+                () -> {
+                    if (released || exo == null) return true;
+                    if (manualVideoTrackIndex < 0) {
+                        for (androidx.media3.common.TrackSelectionOverride ov :
+                                exo.getTrackSelectionParameters().overrides.values()) {
+                            if (ov != null && ov.getType() == C.TRACK_TYPE_VIDEO) {
+                                return false;
+                            }
+                        }
+                        return true;
+                    }
+                    return false;
+                });
+    }
+
+    public int manualVideoTrackIndex() {
+        return isAutoVideoTrackPolicy() ? -1 : manualVideoTrackIndex;
+    }
+
+    public VideoTrackOption.SelectionState videoTrackSelectionState() {
+        boolean auto = isAutoVideoTrackPolicy();
+        return new VideoTrackOption.SelectionState(
+                auto,
+                auto ? -1 : manualVideoTrackIndex(),
+                selectedVideoTrackIndex(),
+                activeDecodedResolution());
     }
 
     public String activeDecodedResolution() {
@@ -1820,6 +1853,9 @@ public class MoviePlayer {
         onMain(
                 () -> {
                     check();
+                    if (type == C.TRACK_TYPE_VIDEO) {
+                        manualVideoTrackIndex = index >= 0 ? index : -1;
+                    }
                     androidx.media3.common.TrackSelectionParameters.Builder p =
                             exo.getTrackSelectionParameters()
                                     .buildUpon()

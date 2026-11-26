@@ -65,10 +65,11 @@ public final class EmbyLibrary {
 
     public Map<String, String> imageHeaders(String address) throws Exception {
         URL url = new URL(address);
-        if (!address.substring(
-                                0,
-                                address.indexOf('#') < 0 ? address.length() : address.indexOf('#'))
-                        .startsWith(base + "/Items/")
+        String bare =
+                address.substring(
+                        0, address.indexOf('#') < 0 ? address.length() : address.indexOf('#'));
+        if (!sameOrigin(new URI(base), new URI(bare))
+                || !bare.startsWith(base + "/Items/")
                 || !url.getPath().matches(".*/Items/[a-zA-Z0-9_-]+/Images/Primary"))
             throw new IOException("Emby 海报地址与账户不匹配");
         Map<String, String> h = new HashMap<String, String>();
@@ -124,6 +125,15 @@ public final class EmbyLibrary {
         return "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
     }
 
+    public static boolean isSameOrigin(String a, String b) {
+        if (a == null || b == null) return false;
+        try {
+            return sameOrigin(new URI(a), new URI(b));
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private static boolean sameOrigin(URI a, URI b) {
         if (a == null || b == null) return false;
         if (a.getScheme() == null || b.getScheme() == null) return false;
@@ -147,6 +157,14 @@ public final class EmbyLibrary {
         String currentUrl = url;
         URI originUri = new URI(url);
         for (int hop = 0; hop < 6; hop++) {
+            URI currentUri = new URI(currentUrl);
+            if (!("http".equalsIgnoreCase(currentUri.getScheme())
+                    || "https".equalsIgnoreCase(currentUri.getScheme()))) {
+                throw new IOException("Emby 请求协议无效");
+            }
+            if (!sameOrigin(originUri, currentUri)) {
+                throw new IOException("Emby 拒绝跨源重定向以保护账号凭据");
+            }
             HttpURLConnection c = (HttpURLConnection) new URL(currentUrl).openConnection();
             try {
                 c.setInstanceFollowRedirects(false);
@@ -157,12 +175,7 @@ public final class EmbyLibrary {
                         "Emby Client=\"Marco Movie\", Device=\"Android\", DeviceId=\""
                                 + device
                                 + "\", Version=\"1\"");
-                boolean sameHost =
-                        sameOrigin(originUri, new URI(currentUrl))
-                                || originUri
-                                        .getHost()
-                                        .equalsIgnoreCase(new URI(currentUrl).getHost());
-                if (token.length() > 0 && sameHost) c.setRequestProperty("X-Emby-Token", token);
+                if (token.length() > 0) c.setRequestProperty("X-Emby-Token", token);
                 c.setRequestProperty("Accept", "application/json");
                 if (body != null) {
                     c.setRequestMethod("POST");
@@ -185,7 +198,16 @@ public final class EmbyLibrary {
                     if (loc == null || loc.trim().length() == 0) {
                         throw new IOException("Emby 重定向地址缺失（HTTP " + status + "）");
                     }
-                    currentUrl = new URL(new URL(currentUrl), loc.trim()).toExternalForm();
+                    URL nextUrl = new URL(new URL(currentUrl), loc.trim());
+                    String proto = nextUrl.getProtocol();
+                    if (!("http".equalsIgnoreCase(proto) || "https".equalsIgnoreCase(proto))) {
+                        throw new IOException("Emby 重定向协议无效");
+                    }
+                    URI nextUri = nextUrl.toURI();
+                    if (!sameOrigin(originUri, nextUri)) {
+                        throw new IOException("Emby 拒绝跨源重定向以保护账号凭据");
+                    }
+                    currentUrl = nextUrl.toExternalForm();
                     continue;
                 }
                 if (status == 401 || status == 403) throw new IOException("Emby 拒绝访问，请检查账号或重新登录");
@@ -722,9 +744,7 @@ public final class EmbyLibrary {
             throws Exception {
         URI target = new URL(new URL(base + "/"), relOrAbs).toURI().normalize();
         URI server = new URI(base);
-        if (!server.getScheme().equalsIgnoreCase(target.getScheme())
-                || !server.getAuthority().equalsIgnoreCase(target.getAuthority())
-                || target.getUserInfo() != null) {
+        if (!sameOrigin(server, target) || target.getUserInfo() != null) {
             throw new IOException("Emby 直播流地址与服务器不匹配");
         }
         Map<String, String> params = new LinkedHashMap<String, String>();

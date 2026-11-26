@@ -551,6 +551,7 @@ final class SubscriptionManager {
                     }
                 }
                 copy.put("key", uniqueKey);
+                copy.put("_marco_raw_key", site.siteId());
                 copy.put("name", site.name);
                 copy.put("group", pb.groupName);
                 copy.put("type", site.type);

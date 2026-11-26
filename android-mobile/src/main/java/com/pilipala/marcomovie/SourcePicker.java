@@ -1108,8 +1108,8 @@ final class SourcePicker {
         float density = Math.max(1f, a.getResources().getDisplayMetrics().density);
         int marginH = tv ? a.dp(48) : a.dp(20);
         int panelWidth = Math.min(a.dp(740), Math.max(a.dp(280), a.windowWidth() - marginH));
-        int availWidthPx = Math.max(a.dp(220), panelWidth - a.dp(tv ? 52 : 36));
-        float availWidthDp = availWidthPx / density;
+        float windowWidthDp = a.windowWidth() / density;
+        float availWidthDp = SourcePickerLayout.computeFullPickerContentWidthDp(windowWidthDp, tv);
         int columns = SourcePickerLayout.resolveFullPickerColumns(availWidthDp, fontScale, tv);
         int index = 0;
         for (Cms.Site site : a.config.sites) {

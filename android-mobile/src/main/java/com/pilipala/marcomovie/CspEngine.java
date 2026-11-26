@@ -194,17 +194,49 @@ public final class CspEngine implements SourceEngine {
     }
 
     public static String detectLanAddress() {
-        return NetdiskConfigWebServer.detectLanIpv4();
+        try {
+            Class<?> cls = Class.forName("com.pilipala.marcomovie.NetdiskConfigWebServer");
+            Object res = cls.getDeclaredMethod("detectLanIpv4").invoke(null);
+            return res instanceof String ? (String) res : "";
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     public static void onPluginConfigRefresh() {
         final MainActivity activity = MainActivity.activeActivity;
         if (activity == null || activity.isFinishing()) return;
-        activity.worker.execute(
-                () -> {
-                    ConfigCenterBridge.syncAll(activity, activity.config, true, false, false);
-                    AccountPanel.refreshActivePage();
-                });
+        Thread t =
+                new Thread(
+                        () -> {
+                            try {
+                                Object cfg =
+                                        MainActivity.class.getDeclaredField("config").get(activity);
+                                Class<?> bridge =
+                                        Class.forName("com.pilipala.marcomovie.ConfigCenterBridge");
+                                bridge.getDeclaredMethod(
+                                                "syncAll",
+                                                Context.class,
+                                                Cms.Config.class,
+                                                boolean.class,
+                                                boolean.class,
+                                                boolean.class)
+                                        .invoke(
+                                                null,
+                                                activity,
+                                                cfg instanceof Cms.Config ? (Cms.Config) cfg : null,
+                                                Boolean.TRUE,
+                                                Boolean.FALSE,
+                                                Boolean.FALSE);
+                                Class<?> panel =
+                                        Class.forName("com.pilipala.marcomovie.AccountPanel");
+                                panel.getDeclaredMethod("refreshActivePage").invoke(null);
+                            } catch (Throwable ignored) {
+                            }
+                        },
+                        "csp-config-refresh");
+        t.setDaemon(true);
+        t.start();
     }
 
     public static void onPluginDanmaku(String path) {

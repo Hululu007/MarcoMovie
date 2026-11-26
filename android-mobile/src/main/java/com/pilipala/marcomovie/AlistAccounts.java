@@ -310,24 +310,37 @@ final class AlistAccounts {
                                                 a.ui.post(
                                                         () -> {
                                                             if (a.isFinishing()) return;
-                                                            save(a, candidate);
                                                             try {
-                                                                JSONObject siteJson =
-                                                                        toSiteJson(candidate);
-                                                                SourceController.mergeOrSaveConfig(
-                                                                        a,
-                                                                        Cms.parseConfig(
-                                                                                new JSONObject()
-                                                                                        .put(
-                                                                                                "sites",
-                                                                                                new JSONArray()
-                                                                                                        .put(
-                                                                                                                siteJson))
-                                                                                        .toString(),
-                                                                                ""),
-                                                                        "",
-                                                                        true);
-                                                            } catch (Exception ignored) {
+                                                                commitMountWithMerge(
+                                                                        cfg -> save(a, cfg),
+                                                                        id -> remove(a, id),
+                                                                        cfg -> {
+                                                                            JSONObject siteJson =
+                                                                                    toSiteJson(cfg);
+                                                                            SourceController
+                                                                                    .mergeOrSaveConfig(
+                                                                                            a,
+                                                                                            Cms
+                                                                                                    .parseConfig(
+                                                                                                            new JSONObject()
+                                                                                                                    .put(
+                                                                                                                            "sites",
+                                                                                                                            new JSONArray()
+                                                                                                                                    .put(
+                                                                                                                                            siteJson))
+                                                                                                                    .toString(),
+                                                                                                            ""),
+                                                                                            "",
+                                                                                            true);
+                                                                        },
+                                                                        candidate,
+                                                                        existing);
+                                                            } catch (Exception mergeErr) {
+                                                                saveBtn.setEnabled(true);
+                                                                status.setText(a.message(mergeErr));
+                                                                status.setTextColor(0xffff6961);
+                                                                status.setVisibility(View.VISIBLE);
+                                                                return;
                                                             }
                                                             if (dialog.isShowing()) {
                                                                 dialog.dismiss();
@@ -358,6 +371,46 @@ final class AlistAccounts {
                                         "alist-connect")
                                 .start();
                     });
+        }
+    }
+
+    interface MountAction {
+        void run(AlistEngine.MountConfig config) throws Exception;
+    }
+
+    interface MountRemover {
+        void remove(String id);
+    }
+
+    /**
+     * Atomically persists a validated AList mount and merges it into the active site config,
+     * rolling back the mount entry if config merging/saving fails so the UI never reports false
+     * success.
+     */
+    static void commitMountWithMerge(
+            MountAction saver,
+            MountRemover remover,
+            MountAction merger,
+            AlistEngine.MountConfig candidate,
+            AlistEngine.MountConfig previousExisting)
+            throws Exception {
+        saver.run(candidate);
+        try {
+            merger.run(candidate);
+        } catch (Exception mergeErr) {
+            try {
+                if (previousExisting != null) {
+                    saver.run(previousExisting);
+                } else if (remover != null) {
+                    remover.remove(candidate.id);
+                }
+            } catch (Exception ignored) {
+            }
+            String detail =
+                    mergeErr.getMessage() == null || mergeErr.getMessage().trim().isEmpty()
+                            ? mergeErr.getClass().getSimpleName()
+                            : mergeErr.getMessage().trim();
+            throw new java.io.IOException("AList 保存到片源配置失败：" + detail, mergeErr);
         }
     }
 

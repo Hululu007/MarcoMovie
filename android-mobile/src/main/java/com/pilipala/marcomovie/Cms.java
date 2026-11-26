@@ -424,10 +424,15 @@ public final class Cms {
     public static final class Line {
         public String name;
         public String rawName;
+        public String lineId;
         public final List<Episode> episodes = new ArrayList<>();
 
         public String rawName() {
             return (rawName != null && !rawName.isEmpty()) ? rawName : (name == null ? "" : name);
+        }
+
+        public String lineId() {
+            return (lineId != null && !lineId.isEmpty()) ? lineId : rawName();
         }
     }
 
@@ -1171,11 +1176,13 @@ public final class Cms {
             if (j == null) continue;
             Site s = new Site();
             String rawKey = optSafeString(j, "key", "").trim();
+            String marcoRawKey = optSafeString(j, "_marco_raw_key", "").trim();
             s.key = rawKey.isEmpty() ? "site-" + i : rawKey;
             String rawName = optSafeString(j, "name", "").trim();
             s.name = rawName.isEmpty() ? s.key : rawName;
             if (!keys.add(s.key)) s.key = s.key + "-" + i;
-            s.originalKey = s.key;
+            s.originalKey =
+                    !marcoRawKey.isEmpty() ? marcoRawKey : (!rawKey.isEmpty() ? rawKey : s.key);
             String rawGroup = optSafeString(j, "group", "").trim();
             s.group = rawGroup.isEmpty() ? "默认分组" : rawGroup;
             s.type = Json.integer(j, "type", -1);

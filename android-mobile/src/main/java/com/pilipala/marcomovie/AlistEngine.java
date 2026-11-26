@@ -478,6 +478,23 @@ final class AlistEngine implements SourceEngine {
             }
         }
 
+        private static boolean isSameOriginUri(URI a, URI b) {
+            if (a == null || b == null) return false;
+            if (a.getScheme() == null || b.getScheme() == null) return false;
+            if (a.getHost() == null || b.getHost() == null) return false;
+            int pa =
+                    a.getPort() > 0
+                            ? a.getPort()
+                            : ("https".equalsIgnoreCase(a.getScheme()) ? 443 : 80);
+            int pb =
+                    b.getPort() > 0
+                            ? b.getPort()
+                            : ("https".equalsIgnoreCase(b.getScheme()) ? 443 : 80);
+            return a.getScheme().equalsIgnoreCase(b.getScheme())
+                    && a.getHost().equalsIgnoreCase(b.getHost())
+                    && pa == pb;
+        }
+
         private JSONObject rawPost(String apiPath, JSONObject payload, String authToken)
                 throws IOException {
             String target = config.baseUrl + apiPath;
@@ -486,7 +503,16 @@ final class AlistEngine implements SourceEngine {
             for (int hop = 0; hop < 6; hop++) {
                 HttpURLConnection conn = null;
                 try {
-                    conn = ProxyAddress.openHttpConnection(new URL(target));
+                    URL targetUrl = new URL(target);
+                    String proto = targetUrl.getProtocol();
+                    if (!("http".equalsIgnoreCase(proto) || "https".equalsIgnoreCase(proto))) {
+                        throw new IOException("AList 请求协议无效");
+                    }
+                    URI curUri = targetUrl.toURI();
+                    if (!isSameOriginUri(originUri, curUri)) {
+                        throw new IOException("AList 拒绝跨源重定向以保护凭据");
+                    }
+                    conn = ProxyAddress.openHttpConnection(targetUrl);
                     conn.setRequestMethod("POST");
                     conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
                     conn.setReadTimeout(READ_TIMEOUT_MS);
@@ -495,11 +521,7 @@ final class AlistEngine implements SourceEngine {
                     conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
                     conn.setRequestProperty("Accept", "application/json");
                     conn.setRequestProperty("User-Agent", Cms.USER_AGENT);
-                    URI curUri = URI.create(target);
-                    boolean sameHost =
-                            originUri.getHost() != null
-                                    && originUri.getHost().equalsIgnoreCase(curUri.getHost());
-                    if (authToken != null && !authToken.isEmpty() && sameHost) {
+                    if (authToken != null && !authToken.isEmpty()) {
                         conn.setRequestProperty("Authorization", authToken);
                     }
                     conn.setFixedLengthStreamingMode(bytes.length);
@@ -516,15 +538,34 @@ final class AlistEngine implements SourceEngine {
                         if (loc == null || loc.trim().isEmpty()) {
                             throw new IOException("AList 重定向地址缺失（HTTP " + status + "）");
                         }
-                        target = new URL(new URL(target), loc.trim()).toExternalForm();
+                        URL nextUrl = new URL(targetUrl, loc.trim());
+                        String nextProto = nextUrl.getProtocol();
+                        if (!("http".equalsIgnoreCase(nextProto)
+                                || "https".equalsIgnoreCase(nextProto))) {
+                            throw new IOException("AList 重定向协议无效");
+                        }
+                        if (!isSameOriginUri(originUri, nextUrl.toURI())) {
+                            throw new IOException("AList 拒绝跨源重定向以保护凭据");
+                        }
+                        target = nextUrl.toExternalForm();
                         continue;
                     }
                     InputStream in = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
                     String text = readBoundedUtf8(in);
                     if (text.isEmpty()) {
+                        if (status == 401 || status == 403) {
+                            throw new IOException("AList 认证失败或无访问权限（HTTP " + status + "）");
+                        }
                         throw new IOException("AList 服务返回空响应（HTTP " + status + "）");
                     }
-                    return new JSONObject(text);
+                    try {
+                        return new JSONObject(text);
+                    } catch (Exception badJson) {
+                        if (status == 401 || status == 403) {
+                            throw new IOException("AList 认证失败或无访问权限（HTTP " + status + "）");
+                        }
+                        throw new IOException("AList 响应格式无效（非 JSON，HTTP " + status + "）", badJson);
+                    }
                 } catch (IOException e) {
                     throw e;
                 } catch (Exception e) {
@@ -545,6 +586,10 @@ final class AlistEngine implements SourceEngine {
                 tok = ensureToken(true);
                 resp = rawPost(apiPath, payload, tok);
                 code = resp.optInt("code", -1);
+            }
+            if (code == 401 || code == 403) {
+                String msg = Cms.optSafeString(resp, "message", "认证失败或权限不足");
+                throw new IOException("AList 认证失败：" + msg);
             }
             if (code != 200) {
                 String msg = Cms.optSafeString(resp, "message", "错误码 " + code);
@@ -568,10 +613,15 @@ final class AlistEngine implements SourceEngine {
                 if (data == null) {
                     throw new IOException("AList 目录接口响应缺少 data 字段，请确认地址是否为 AList 服务");
                 }
-                if (data.has("content")
-                        && !data.isNull("content")
-                        && data.optJSONArray("content") == null) {
-                    throw new IOException("AList 目录接口响应格式无效");
+                if (!data.has("content")) {
+                    throw new IOException("AList 目录接口响应缺少 content 字段，请确认地址是否为有效 AList 服务");
+                }
+                if (data.isNull("content")) {
+                    if (!data.has("total") || data.optInt("total", -1) != 0) {
+                        throw new IOException("AList 目录接口响应格式无效（content 为空且缺少合法 total）");
+                    }
+                } else if (data.optJSONArray("content") == null) {
+                    throw new IOException("AList 目录接口响应格式无效（content 非数组）");
                 }
                 List<FsItem> items = new ArrayList<>();
                 int total = data.optInt("total", 0);

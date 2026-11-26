@@ -1351,6 +1351,9 @@ final class MobileSettingsScreen {
                                 describeHudMaskCompact(hudMask),
                                 () -> showCornerHudConfigSheet(shell, sv)),
                         "ms-corner-hud"));
+        boolean reconciledSlimOn =
+                com.pilipala.marcomovie.hud.PlayerHudPrefs.isUnifiedSlimProgressEnabled(
+                        a, a.mobilePrefs());
         gestureRows.add(
                 mobileToggleRow(
                         a,
@@ -1359,11 +1362,11 @@ final class MobileSettingsScreen {
                         TINT_TEAL,
                         "隐藏按钮后保留底部进度细线",
                         Prefs.MINI_PROGRESS_BAR,
-                        true,
+                        reconciledSlimOn,
                         () -> {
                             boolean on = a.mobilePrefs().getBoolean(Prefs.MINI_PROGRESS_BAR, true);
-                            com.pilipala.marcomovie.hud.PlayerHudPrefs.setSlimProgressEnabled(
-                                    a, on);
+                            com.pilipala.marcomovie.hud.PlayerHudPrefs
+                                    .setUnifiedSlimProgressEnabled(a, a.mobilePrefs(), on);
                             if (a.mobilePlayerOverlay != null) {
                                 a.mobilePlayerOverlay.syncControlsVisibility();
                             }
