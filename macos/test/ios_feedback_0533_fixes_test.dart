@@ -578,9 +578,10 @@ void main() {
   test(
     'Issues 5 & 6: wexpianku-v1 detail ignores top banner img and wexwogg-v1 search avoids captcha path',
     () async {
-      final repoRoot = Directory.current.path.endsWith('flutter')
-          ? Directory.current.parent
-          : Directory.current;
+      final repoRoot =
+          Directory('${Directory.current.path}/shared/catpaw').existsSync()
+              ? Directory.current
+              : Directory.current.parent;
       final catpawDir = Directory('${repoRoot.path}/shared/catpaw');
       final nodeCandidates = [
         '${repoRoot.parent.parent.path}/tools/windows-test-node22/node.exe',
