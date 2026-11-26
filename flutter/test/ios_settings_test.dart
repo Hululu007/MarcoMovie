@@ -136,18 +136,17 @@ void main() {
     expect(find.textContaining('Marco Movie ·'), findsNothing);
     expect(find.byType(IosSettingsGroup), findsWidgets);
 
-    await tapKey(tester, 'settings-category-playback');
-    await capture(tester, 'settings-playback-390');
+    // 0.7.9 IA: playback rows live directly on the root under the 「播放」 group.
+    await tapKey(tester, 'settings-category-episodes');
+    await capture(tester, 'settings-episodes-390');
     expect(find.byType(IosSettingsSubPage), findsOneWidget);
 
-    await tapKey(tester, 'settings-open-episodes');
     await tapKey(tester, 'choice-起播倍速-1.5');
     expect(storage.playSpeed, 1.5);
-    await capture(tester, 'settings-episodes-390');
 
     await tapKey(tester, 'settings-drawer-back');
-    expect(find.byKey(const ValueKey('settings-page-playback')), findsOneWidget);
-    await tapKey(tester, 'settings-open-episodes');
+    expect(find.byKey(const ValueKey('ios-settings-root')), findsOneWidget);
+    await tapKey(tester, 'settings-category-episodes');
     expect(
         tester
             .widget<IosSettingsChoiceTile>(
@@ -157,8 +156,8 @@ void main() {
     expect((await StorageService.init()).playSpeed, 1.5);
 
     await tapKey(tester, 'settings-drawer-back');
-    expect(find.byKey(const ValueKey('settings-open-picture')), findsOneWidget);
-    await tapKey(tester, 'settings-drawer-back');
+    expect(
+        find.byKey(const ValueKey('settings-category-picture')), findsOneWidget);
     expect(find.byKey(const ValueKey('ios-settings-root')), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
@@ -194,8 +193,7 @@ void main() {
     expect(find.byKey(const ValueKey('settings-page-sources')), findsOneWidget);
 
     await tapKey(tester, 'settings-drawer-back');
-    await tapKey(tester, 'settings-category-data');
-    await tapKey(tester, 'settings-open-backup');
+    await tapKey(tester, 'settings-category-backup');
     expect(find.byKey(const ValueKey('ios-backup-copy')), findsOneWidget);
     expect(find.byKey(const ValueKey('ios-backup-restore-btn')), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
@@ -283,8 +281,7 @@ void main() {
     final storage = await mount(tester, const Size(390, 844));
     await tester.tap(find.text('设置').last);
     await tester.pumpAndSettle();
-    await tapKey(tester, 'settings-category-playback');
-    await tapKey(tester, 'settings-open-episodes');
+    await tapKey(tester, 'settings-category-episodes');
     await tapKey(tester, 'choice-起播倍速-1.25');
     tester.view.physicalSize = const Size(844, 390);
     await tester.pumpAndSettle();
@@ -292,8 +289,7 @@ void main() {
         find.byKey(const ValueKey('settings-page-episodes')), findsOneWidget);
     expect(storage.playSpeed, 1.25);
     await tapKey(tester, 'settings-drawer-back');
-    expect(
-        find.byKey(const ValueKey('settings-page-playback')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ios-settings-root')), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
@@ -306,6 +302,10 @@ void main() {
     final listRect =
         tester.getRect(find.byKey(const ValueKey('ios-settings-root')));
     final dockRect = tester.getRect(find.byType(AppleLiquidGlassDock));
+    // Scroll to the end: the last root row must be able to clear the Dock.
+    await tester.drag(
+        find.byKey(const ValueKey('ios-settings-root')), const Offset(0, -3000));
+    await tester.pumpAndSettle();
     final aboutRect =
         tester.getRect(find.byKey(const ValueKey('settings-category-about')));
     expect(listRect.bottom, 844.0);
@@ -341,8 +341,7 @@ void main() {
     await tester.tap(find.text('设置').last);
     await tester.pumpAndSettle();
 
-    await tapKey(tester, 'settings-category-playback');
-    await tapKey(tester, 'settings-open-picture');
+    await tapKey(tester, 'settings-category-picture');
     expect(find.byType(IosPlaybackEngineSettingsSection), findsOneWidget);
 
     await tapKey(tester, 'choice-播放内核偏好-mpv');
@@ -374,9 +373,7 @@ void main() {
     expect(storage.iosLargeBufferEnabled, isTrue);
 
     await tapKey(tester, 'settings-drawer-back');
-    await tapKey(tester, 'settings-drawer-back');
-    await tapKey(tester, 'settings-category-data');
-    await tapKey(tester, 'settings-open-cache');
+    await tapKey(tester, 'settings-category-cache');
 
     expect(find.byKey(const ValueKey('ios-switch-hls-ad-removal')),
         findsOneWidget);

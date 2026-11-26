@@ -1296,6 +1296,10 @@ void main() {
       expect(find.byKey(const ValueKey('ios-settings-root')), findsOneWidget);
 
       // Pushing a secondary drawer hides root native tab chrome, popping restores it.
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('settings-category-about')),
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('settings-category-about')));
       await tester.pumpAndSettle();
       final visCallsDuringPush = calls

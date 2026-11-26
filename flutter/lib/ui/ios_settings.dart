@@ -25,6 +25,16 @@ class SettingsPane {
   final Color color;
   final List<SettingsPane> children;
   final Widget? content;
+
+  /// Extra search terms for rows that live inside this pane (in-settings
+  /// search index). Each term resolves to this pane's single canonical entry.
+  final List<String> keywords;
+
+  /// When set, tapping this entry (from its row or a search hit) runs this
+  /// callback instead of pushing an [IosSettingsSubPage]. Used for entries
+  /// whose canonical destination is a standalone page (e.g. 配置中心).
+  final Future<void> Function()? onOpen;
+
   const SettingsPane(
     this.id,
     this.title,
@@ -35,8 +45,32 @@ class SettingsPane {
     this.sectionGroup = 'default',
     this.children = const [],
     this.content,
+    this.keywords = const [],
+    this.onOpen,
   });
+
+  bool matchesQuery(String lowerQuery) {
+    if (title.toLowerCase().contains(lowerQuery) ||
+        subtitle.toLowerCase().contains(lowerQuery) ||
+        (trailingText?.toLowerCase().contains(lowerQuery) ?? false)) {
+      return true;
+    }
+    for (final keyword in keywords) {
+      if (keyword.toLowerCase().contains(lowerQuery)) return true;
+    }
+    return false;
+  }
 }
+
+/// Root group headers of the iOS Settings information architecture.
+/// Order on screen follows the order of the panes returned by the builder.
+const Map<String, String> kIosSettingsSectionHeaders = {
+  'ia-content': '内容与来源',
+  'ia-playback': '播放',
+  'ia-display': '外观与主页',
+  'ia-data': '数据与存储',
+  'ia-general': '通用',
+};
 
 typedef SettingsPanes = List<SettingsPane> Function(VoidCallback refresh);
 
@@ -137,7 +171,34 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
   }
 
   void _openRootPane(BuildContext context, SettingsPane entry) {
+    if (entry.onOpen != null) {
+      _openStandalone(entry);
+      return;
+    }
     _openPanePath(context, [entry.id], parentTitle: '设置');
+  }
+
+  void _openStandalone(SettingsPane entry) {
+    widget.onSecondaryRouteActive?.call(true);
+    unawaited(() async {
+      try {
+        await entry.onOpen!();
+      } finally {
+        widget.onSecondaryRouteActive?.call(false);
+        if (mounted) _notifyChanged();
+      }
+    }());
+  }
+
+  void _openSearchHit(
+    BuildContext context,
+    ({SettingsPane pane, List<String> pathIds, String breadcrumb}) hit,
+  ) {
+    if (hit.pane.onOpen != null) {
+      _openStandalone(hit.pane);
+      return;
+    }
+    _openPanePath(context, hit.pathIds, parentTitle: '设置');
   }
 
   List<List<SettingsPane>> _groupEntries(List<SettingsPane> entries) {
@@ -157,7 +218,7 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
     'core' => '偏好与视听体验',
     'account' => '片源、扩展与数据',
     'about' => '应用信息',
-    _ => null,
+    _ => kIosSettingsSectionHeaders[group],
   };
 
   List<({SettingsPane pane, List<String> pathIds, String breadcrumb})>
@@ -167,19 +228,16 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
     final hits =
         <({SettingsPane pane, List<String> pathIds, String breadcrumb})>[];
     for (final root in roots) {
-      final rootMatch =
-          root.title.toLowerCase().contains(q) ||
-          root.subtitle.toLowerCase().contains(q) ||
-          (root.trailingText?.toLowerCase().contains(q) ?? false);
-      if (rootMatch) {
-        hits.add((pane: root, pathIds: [root.id], breadcrumb: root.subtitle));
+      if (root.matchesQuery(q)) {
+        final header = _sectionHeaderFor(root.sectionGroup);
+        hits.add((
+          pane: root,
+          pathIds: [root.id],
+          breadcrumb: header != null ? '$header · ${root.subtitle}' : root.subtitle,
+        ));
       }
       for (final child in root.children) {
-        final childMatch =
-            child.title.toLowerCase().contains(q) ||
-            child.subtitle.toLowerCase().contains(q) ||
-            (child.trailingText?.toLowerCase().contains(q) ?? false);
-        if (childMatch) {
+        if (child.matchesQuery(q)) {
           hits.add((
             pane: child,
             pathIds: [root.id, child.id],
@@ -346,6 +404,9 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
                             children: [
                               for (final hit in searchHits)
                                 IosSettingsRow(
+                                  key: ValueKey(
+                                    'settings-search-hit-${hit.pathIds.join('/')}',
+                                  ),
                                   icon: hit.pane.icon,
                                   iconColor: hit.pane.color,
                                   title: hit.pane.title,
@@ -355,11 +416,7 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
                                   subtitleMaxLines: 1,
                                   trailingText: hit.pane.trailingText,
                                   showChevron: true,
-                                  onTap: () => _openPanePath(
-                                    context,
-                                    hit.pathIds,
-                                    parentTitle: '设置',
-                                  ),
+                                  onTap: () => _openSearchHit(context, hit),
                                 ),
                             ],
                           ),
@@ -621,6 +678,12 @@ class _IosSettingsSubPageState extends State<IosSettingsSubPage> {
   }
 
   void _openChild(BuildContext context, SettingsPane current, SettingsPane child) {
+    if (child.onOpen != null) {
+      unawaited(child.onOpen!().then((_) {
+        if (mounted) setState(() {});
+      }));
+      return;
+    }
     Navigator.of(context)
         .push<void>(
           buildApplePageRoute<void>(

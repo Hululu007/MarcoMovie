@@ -2110,6 +2110,10 @@ void main() {
       // Settings -> 外观 back button uses native auto-adaptive foregroundColor (null).
       await tester.tap(find.text('设置').last);
       await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('settings-category-appearance')),
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('settings-category-appearance')));
       await tester.pumpAndSettle();
       final backBtn = tester.widget<IosNativeGlassButton>(
