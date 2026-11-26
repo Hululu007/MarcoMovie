@@ -437,20 +437,61 @@ class DeploymentChecks(unittest.TestCase):
             Path(__file__).resolve().parent / 'ios_native' / 'MarcoLiquidGlass.swift'
         ).read_text(encoding='utf-8')
 
-        # 1. Dock long-press context menu targets individual tab's previewPillView
-        #    (never lifting the whole 4-tab capsule or anchoring on the far left).
+        # 1. Dock long-press menu (0.7.9): the pressed tab never lifts / floats.
+        #    iOS 17.4+ presents the tab UIMenu from an invisible ephemeral anchor
+        #    button over the pressed slot via a plain long-press recognizer (no
+        #    context-menu preview); iOS 15-17.3 keeps UIContextMenuInteraction
+        #    but every preview targets an invisible 2pt clear dot.
         capsule_start = liquid_src.index('final class MarcoNativeLiquidTabCapsuleView')
         capsule_end = liquid_src.index('final class MarcoIos27PassthroughChromeView')
         capsule_block = liquid_src[capsule_start:capsule_end]
-        self.assertIn('let previewPillView = UIView()', capsule_block)
-        self.assertIn('private func targetedPreview(for configuration: UIContextMenuConfiguration)', capsule_block)
-        self.assertIn('let targetView = slotViews[idx].previewPillView', capsule_block)
-        self.assertIn('UITargetedPreview(view: targetView, parameters: params)', capsule_block)
+        self.assertNotIn('previewPillView', capsule_block)
+        self.assertNotIn('UITargetedPreview(view: targetView', capsule_block)
+        self.assertNotIn('params.shadowPath = pillPath', capsule_block)
+        self.assertIn('if #available(iOS 17.4, *) {\n      // No UIContextMenuInteraction on iOS 17.4+', capsule_block)
+        self.assertIn('UILongPressGestureRecognizer(', capsule_block)
+        self.assertIn('action: #selector(handleTabMenuLongPress(_:))', capsule_block)
+        self.assertIn('longPress.minimumPressDuration = 0.4', capsule_block)
+        self.assertIn('longPress.cancelsTouchesInView = true', capsule_block)
+        self.assertIn('@available(iOS 17.4, *)\n  private func presentTabMenuAnchored(at idx: Int)', capsule_block)
+        self.assertIn('let anchorBtn = MarcoEphemeralMenuAnchorButton(type: .system)', capsule_block)
+        self.assertIn('anchorBtn.alpha = 0.02', capsule_block)
+        self.assertIn('anchorBtn.showsMenuAsPrimaryAction = true', capsule_block)
+        self.assertIn('anchorBtn.performPrimaryAction()', capsule_block)
+        self.assertIn('UIImpactFeedbackGenerator(style: .medium).impactOccurred()', capsule_block)
+        self.assertIn('self?.onTabMenuAction?(idx, actionId)', capsule_block)
+        self.assertIn('private func tearDownTabMenuAnchor()', capsule_block)
+        self.assertIn('if let hit = hit, hit is MarcoEphemeralMenuAnchorButton {', capsule_block)
+        self.assertIn('override func gestureRecognizerShouldBegin(', capsule_block)
+        self.assertIn('override func willMove(toWindow newWindow: UIWindow?)', capsule_block)
+        # Stale anchors are torn down on the next touch so taps never wedge.
+        touches_began = capsule_block[capsule_block.index('override func touchesBegan('):]
+        self.assertIn('tearDownTabMenuAnchor()', touches_began[:600])
+        # Legacy (< 17.4) previews are invisible: clear 2pt dot, no shadow.
+        self.assertIn('private func invisibleTabMenuPreview(for configuration: UIContextMenuConfiguration)', capsule_block)
+        self.assertIn('params.backgroundColor = .clear', capsule_block)
+        self.assertIn('params.shadowPath = UIBezierPath()', capsule_block)
+        self.assertIn('UITargetedPreview(view: dot, parameters: params)', capsule_block)
         self.assertIn('highlightPreviewForItemWithIdentifier', capsule_block)
         self.assertIn('dismissalPreviewForItemWithIdentifier', capsule_block)
         self.assertIn('previewForHighlightingMenuWithConfiguration', capsule_block)
         self.assertIn('previewForDismissingMenuWithConfiguration', capsule_block)
+        self.assertEqual(capsule_block.count('UIContextMenuInteraction(delegate: self)'), 1)
         self.assertIn('scrubbingLensShadowView.layer.removeAllAnimations()', capsule_block)
+        # Root chrome forwards menu selections over the same channel call.
+        self.assertIn('"rootTabMenuAction",\n        arguments: ["tabIndex": idx, "actionId": actionId]', liquid_src)
+
+        # 1b. Dart: menu-triggered tab switches route through the canonical
+        #     selection path so the Dock highlight follows the landed page.
+        shell_src = (
+            Path(__file__).resolve().parent / 'lib' / 'ui' / 'adaptive_shell.dart'
+        ).read_text(encoding='utf-8')
+        menu_start = shell_src.index('void _handleDockTabMenuAction(int tabIndex, String actionId)')
+        menu_block = shell_src[menu_start : menu_start + 1600]
+        self.assertIn('_handleRootNativeTabSelected(ownerTab);', menu_block)
+        self.assertNotIn('_selectedTabIndexNotifier.value =', menu_block)
+        self.assertIn("'add_library' || 'netdisk_accounts' => 3,", shell_src)
+        self.assertIn("'top' => 0,", shell_src)
 
         # 2. Native filter sheet rejects empty/invisible/empty-id/duplicate options.
         filter_start = liquid_src.index('final class MarcoNativeFilterSheetController')

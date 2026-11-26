@@ -419,43 +419,40 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   List<IosSlideMenuAction> _buildDockTabSlideMenuActions(int tabIndex) =>
       iosSlideActionsFromNativeMenu(_buildDockTabNativeMenuItems(tabIndex));
 
+  /// Root tab that owns a Dock long-press menu action. Every menu-triggered
+  /// page switch first moves the Dock selection to this tab so the native and
+  /// Flutter Dock highlights always follow where the user actually lands.
+  static int? _dockMenuActionOwnerTab(String actionId) => switch (actionId) {
+        'top' => 0,
+        'manage_live' => 1,
+        'favorites' || 'history' => 2,
+        'add_library' || 'netdisk_accounts' => 3,
+        _ => null,
+      };
+
   void _handleDockTabMenuAction(int tabIndex, String actionId) {
     if (!mounted) return;
-    if (_curatedRouteDepth > 0 ||
-        IosRootTabNavigatorObserver.topRouteIsCurated.value) {
-      Navigator.of(context).popUntil((route) => route.isFirst);
+    if (actionId == 'history' && _privateSessionUnlocked) {
+      _showAppleNotice('隐私空间已开启', '隐私空间不记录也不展示普通观看历史。');
+      return;
     }
+    final ownerTab = _dockMenuActionOwnerTab(actionId);
+    if (ownerTab == null) return;
+    if (actionId == 'favorites') {
+      _librarySegment = 0;
+    } else if (actionId == 'history') {
+      _librarySegment = 1;
+    }
+    // Canonical selection path: pops Curated, updates `_tabIndex` /
+    // `_selectedTabIndexNotifier`, pushes `setRootTabSelectedIndex` with a
+    // fresh monotonic epoch and reconciles Dock ownership.
+    _handleRootNativeTabSelected(ownerTab);
     switch (actionId) {
       case 'top':
         _scrollHomeToTop();
         return;
       case 'manage_live':
-        setState(() {
-          _tabIndex = 1;
-          _selectedTabIndexNotifier.value = 1;
-        });
-        _reconcileDockOwnership(animated: true);
         _showLiveSourceManagerSheet();
-        return;
-      case 'favorites':
-        setState(() {
-          _tabIndex = 2;
-          _selectedTabIndexNotifier.value = 2;
-          _librarySegment = 0;
-        });
-        _reconcileDockOwnership(animated: true);
-        return;
-      case 'history':
-        if (_privateSessionUnlocked) {
-          _showAppleNotice('隐私空间已开启', '隐私空间不记录也不展示普通观看历史。');
-          return;
-        }
-        setState(() {
-          _tabIndex = 2;
-          _selectedTabIndexNotifier.value = 2;
-          _librarySegment = 1;
-        });
-        _reconcileDockOwnership(animated: true);
         return;
       case 'add_library':
         unawaited(_showImportConfigDialog(iosBackLabel: '设置'));
