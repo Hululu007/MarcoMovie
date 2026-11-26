@@ -29,6 +29,7 @@ void main() {
     'sync',
     'backup',
     'cache',
+    'ai',
     'about',
   ];
   const expectedGroups = [
@@ -284,6 +285,8 @@ void main() {
         ('多端同步', 'settings-search-hit-sync'),
         ('联系反馈作者', 'settings-search-hit-about'),
         ('联系与反馈作者', 'settings-search-hit-about'),
+        ('AI 助手', 'settings-search-hit-ai'),
+        ('自然语言找片', 'settings-search-hit-ai'),
       ]) {
         await tester.enterText(searchField(), query);
         await tester.pumpAndSettle();

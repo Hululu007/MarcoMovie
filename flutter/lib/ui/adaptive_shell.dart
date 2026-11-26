@@ -19,6 +19,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'add_resource_library_sheet.dart';
 import '../core/cms_parser.dart';
 import '../core/config_center_bridge.dart';
+import '../core/ai_service.dart';
 import '../core/app_update.dart';
 import '../core/csp_bridge.dart';
 import '../core/curated_discovery.dart';
@@ -47,6 +48,7 @@ import 'curated_discovery_section.dart';
 import 'detail_screen.dart';
 import 'ios_filter_sheet.dart';
 import 'ios_glass_popover.dart' show activeIosGlassPopoverCount;
+import 'ios_ai_settings_page.dart';
 import 'ios_download_groups_view.dart';
 import 'ios_history_poster_wall.dart';
 import 'ios_liquid_glass.dart';
@@ -13106,6 +13108,30 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ]),
       ),
       // ────────────────────────────── 通用 ──────────────────────────────
+      if (isIosNative)
+        SettingsPane(
+          'ai',
+          'AI 助手',
+          '自备密钥开启自然语言找片与文件名智能清洗（本机钥匙串加密存储）',
+          CupertinoIcons.sparkles,
+          AppleColors.systemPurple,
+          sectionGroup: 'ia-general',
+          trailingText: AiService.instance.isConfigured ? '已启用' : '未配置',
+          keywords: const [
+            'AI 助手',
+            '大模型',
+            '自然语言找片',
+            'AI 找片',
+            '文件名智能清洗',
+            '标题智能清洗',
+          ],
+          onOpen: () => _trackSecondaryRoute<void>(
+            () async {
+              await pushIosAiSettingsPage(context, backLabel: '设置');
+              refresh();
+            },
+          ),
+        ),
       SettingsPane(
         'about',
         '关于与更新',
