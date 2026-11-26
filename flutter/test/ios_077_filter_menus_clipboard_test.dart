@@ -453,18 +453,29 @@ void main() {
           expect((g1.dx - g2.dx).abs(), lessThan(0.5));
           expect((g2.dx - g3.dx).abs(), lessThan(0.5));
 
-          // Leftmost tile of every group aligns with the group header left edge
-          final embyLeft = tester.getTopLeft(find.byKey(const ValueKey('add-lib-tile-emby'))).dx;
-          final davLeft = tester.getTopLeft(find.byKey(const ValueKey('add-lib-tile-webdav'))).dx;
-          final quarkLeft = tester.getTopLeft(find.byKey(const ValueKey('add-lib-tile-quarkDrive'))).dx;
-          final localLeft = tester.getTopLeft(find.byKey(const ValueKey('add-lib-tile-localDevice'))).dx;
+          // Icon-first grid: the leftmost ICON of every group aligns with the
+          // group header left edge (Home Screen / App Library alignment).
+          final embyLeft = tester.getTopLeft(find.byKey(const ValueKey('add-lib-icon-emby'))).dx;
+          final davLeft = tester.getTopLeft(find.byKey(const ValueKey('add-lib-icon-webdav'))).dx;
+          final quarkLeft = tester.getTopLeft(find.byKey(const ValueKey('add-lib-icon-quarkDrive'))).dx;
+          final localLeft = tester.getTopLeft(find.byKey(const ValueKey('add-lib-icon-localDevice'))).dx;
           expect((embyLeft - g0.dx).abs(), lessThan(0.5));
           expect((davLeft - g1.dx).abs(), lessThan(0.5));
           expect((quarkLeft - g2.dx).abs(), lessThan(0.5));
           expect((localLeft - g3.dx).abs(), lessThan(0.5));
 
-          // Responsive column count check
-          final expectedCols = size.width < 360 ? 2 : 3;
+          // Leftmost tile cells of every group share one left edge.
+          final embyTile = tester.getTopLeft(find.byKey(const ValueKey('add-lib-tile-emby'))).dx;
+          final davTile = tester.getTopLeft(find.byKey(const ValueKey('add-lib-tile-webdav'))).dx;
+          final quarkTile = tester.getTopLeft(find.byKey(const ValueKey('add-lib-tile-quarkDrive'))).dx;
+          final localTile = tester.getTopLeft(find.byKey(const ValueKey('add-lib-tile-localDevice'))).dx;
+          expect((embyTile - davTile).abs(), lessThan(0.5));
+          expect((davTile - quarkTile).abs(), lessThan(0.5));
+          expect((quarkTile - localTile).abs(), lessThan(0.5));
+
+          // Responsive column count check: 4 icons per row on iPhone widths,
+          // 5 on a narrow iPad Split View.
+          final expectedCols = size.width < 480 ? 4 : 5;
           expect(
             find.byKey(ValueKey('add-lib-section-0-cols-$expectedCols')),
             findsOneWidget,

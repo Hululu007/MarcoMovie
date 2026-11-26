@@ -33,26 +33,53 @@ void main() {
         .setMockMethodCallHandler(IosLiquidGlassBridge.channel, null);
   });
 
-  group('iOS Feedback #2 — Resource library symmetric layout & unified distinct icons', () {
+  group('iOS Feedback #2 — Resource library icon-first Home Screen grid & unified distinct icons', () {
     testWidgets(
-      'cards and icons maintain symmetric left/right margins across 2, 3, and 4 columns with all 13 distinct tiles',
+      'bare app icons (no per-tile card), 4 per row on iPhone, symmetric margins on every width, all 13 tiles',
       (tester) async {
         SharedPreferences.setMockInitialValues(<String, Object>{});
         final storage = await StorageService.init();
 
-        const viewports = <(Size, int)>[
-          (Size(320, 844), 2),
-          (Size(390, 844), 3),
-          (Size(507, 900), 3),
-          (Size(768, 1024), 4),
+        const allIds = [
+          'emby',
+          'jellyfin',
+          'plex',
+          'webdav',
+          'smb',
+          'alistNas',
+          'quarkDrive',
+          'ucDrive',
+          'baiduDrive',
+          'aliDrive',
+          'localDevice',
+          'manualInput',
+          'localPack',
         ];
 
-        for (final (size, expectedCols) in viewports) {
+        // (viewport, text scale, expected columns, expected icon size)
+        const viewports = <(Size, double, int, double)>[
+          (Size(320, 844), 1.0, 4, 52),
+          (Size(375, 812), 1.0, 4, 57),
+          (Size(390, 844), 1.0, 4, 60),
+          (Size(440, 956), 1.0, 4, 64),
+          (Size(320, 844), 1.3, 4, 52),
+          (Size(320, 844), 2.0, 3, 64),
+          (Size(507, 900), 1.0, 5, 64),
+          (Size(768, 1024), 1.0, 6, 64),
+        ];
+
+        for (final (size, scale, expectedCols, expectedIcon) in viewports) {
           tester.view.physicalSize = size;
           tester.view.devicePixelRatio = 1.0;
 
           await tester.pumpWidget(
             MaterialApp(
+              builder: (context, child) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  textScaler: TextScaler.linear(scale),
+                ),
+                child: child!,
+              ),
               home: IosSettingsScaffold(
                 title: '添加资源库',
                 body: AddResourceLibraryView(
@@ -64,85 +91,97 @@ void main() {
             ),
           );
           await tester.pump();
+          final at = '${size.width}pt @${scale}x';
 
-          expect(
-            find.byKey(ValueKey('add-lib-section-0-cols-$expectedCols')),
-            findsOneWidget,
-            reason: 'Expected $expectedCols columns at width ${size.width}',
-          );
-
-          // Full row in group 0 (Emby, Jellyfin, Plex): for 3-col check outer cards & icons.
-          if (expectedCols == 3) {
-            final embyRect = tester.getRect(find.byKey(const ValueKey('add-lib-tile-emby')));
-            final plexRect = tester.getRect(find.byKey(const ValueKey('add-lib-tile-plex')));
-            final leftMargin = embyRect.left;
-            final rightMargin = size.width - plexRect.right;
+          for (var s = 0; s < 4; s++) {
             expect(
-              (leftMargin - rightMargin).abs(),
-              lessThan(0.5),
-              reason: 'Card margins must be symmetric at ${size.width}px ($leftMargin vs $rightMargin)',
+              find.byKey(ValueKey('add-lib-section-$s-cols-$expectedCols')),
+              findsOneWidget,
+              reason: 'Expected $expectedCols columns in section $s at $at',
             );
-
-            final embyIcon = tester.getRect(find.byKey(const ValueKey('add-lib-icon-emby')));
-            final plexIcon = tester.getRect(find.byKey(const ValueKey('add-lib-icon-plex')));
-            final iconLeftMargin = embyIcon.left;
-            final iconRightMargin = size.width - plexIcon.right;
-            expect(
-              (iconLeftMargin - iconRightMargin).abs(),
-              lessThan(0.5),
-              reason: 'Icon margins must be symmetric at ${size.width}px ($iconLeftMargin vs $iconRightMargin)',
-            );
-            expect(embyIcon.width, closeTo(54.0, 0.5));
-            expect(embyIcon.height, closeTo(54.0, 0.5));
           }
 
-          // For 4-col (iPad portrait 768px), group 2 (个人网盘) has 4 full tiles: quark..ali.
+          // The grid block is centered: symmetric left/right margins.
+          final grid = tester.getRect(
+            find.byKey(ValueKey('add-lib-section-0-cols-$expectedCols')),
+          );
+          expect(
+            (grid.left - (size.width - grid.right)).abs(),
+            lessThan(0.5),
+            reason: 'Grid margins must be symmetric at $at',
+          );
+
+          // 个人网盘 has 4 tiles: on 4-column iPhone widths it is one full row
+          // whose outer tiles and icons are symmetric.
           if (expectedCols == 4) {
             final quarkRect = tester.getRect(find.byKey(const ValueKey('add-lib-tile-quarkDrive')));
             final aliRect = tester.getRect(find.byKey(const ValueKey('add-lib-tile-aliDrive')));
-            expect(
-              (quarkRect.left - (size.width - aliRect.right)).abs(),
-              lessThan(0.5),
-            );
+            expect((quarkRect.left - (size.width - aliRect.right)).abs(), lessThan(0.5));
+            expect((quarkRect.top - aliRect.top).abs(), lessThan(0.5));
             final quarkIcon = tester.getRect(find.byKey(const ValueKey('add-lib-icon-quarkDrive')));
             final aliIcon = tester.getRect(find.byKey(const ValueKey('add-lib-icon-aliDrive')));
             expect(
               (quarkIcon.left - (size.width - aliIcon.right)).abs(),
               lessThan(0.5),
+              reason: 'Icon margins must be symmetric at $at',
             );
+            // Evenly distributed columns: equal icon pitch.
+            final ucIcon = tester.getRect(find.byKey(const ValueKey('add-lib-icon-ucDrive')));
+            final baiduIcon = tester.getRect(find.byKey(const ValueKey('add-lib-icon-baiduDrive')));
+            final pitch1 = ucIcon.left - quarkIcon.left;
+            final pitch2 = baiduIcon.left - ucIcon.left;
+            final pitch3 = aliIcon.left - baiduIcon.left;
+            expect((pitch1 - pitch2).abs(), lessThan(0.5));
+            expect((pitch2 - pitch3).abs(), lessThan(0.5));
           }
 
-          // For 2-col (320px), first row of group 0 is Emby + Jellyfin.
-          if (expectedCols == 2) {
-            final embyRect = tester.getRect(find.byKey(const ValueKey('add-lib-tile-emby')));
-            final jellyRect = tester.getRect(find.byKey(const ValueKey('add-lib-tile-jellyfin')));
-            expect(
-              (embyRect.left - (size.width - jellyRect.right)).abs(),
-              lessThan(0.5),
-            );
-          }
+          // Icon is centered within its tile cell.
+          final embyTile = tester.getRect(find.byKey(const ValueKey('add-lib-tile-emby')));
+          final embyIcon = tester.getRect(find.byKey(const ValueKey('add-lib-icon-emby')));
+          expect((embyIcon.center.dx - embyTile.center.dx).abs(), lessThan(0.5));
+          expect(embyIcon.width, closeTo(expectedIcon, 0.5), reason: 'icon size at $at');
+          expect(embyIcon.height, closeTo(expectedIcon, 0.5));
 
-          // Every tile renders a unified 60x60 icon canvas.
-          for (final id in const [
-            'emby',
-            'jellyfin',
-            'plex',
-            'webdav',
-            'smb',
-            'alistNas',
-            'quarkDrive',
-            'ucDrive',
-            'baiduDrive',
-            'aliDrive',
-            'localDevice',
-            'manualInput',
-            'localPack',
-          ]) {
-            expect(find.byKey(ValueKey('add-lib-tile-$id')), findsOneWidget);
+          for (final id in allIds) {
+            final tile = find.byKey(ValueKey('add-lib-tile-$id'));
+            expect(tile, findsOneWidget);
             expect(find.byKey(ValueKey('add-lib-icon-$id')), findsOneWidget);
+            // No per-tile card box: nothing decorated / filled / shadowed
+            // behind the tile — only the icon painter itself.
+            expect(
+              find.descendant(of: tile, matching: find.byType(DecoratedBox)),
+              findsNothing,
+              reason: 'Tile $id must not wrap a decorated card at $at',
+            );
+            expect(
+              find.descendant(of: tile, matching: find.byType(Container)),
+              findsNothing,
+            );
+            expect(
+              find.descendant(of: tile, matching: find.byType(ColoredBox)),
+              findsNothing,
+            );
+            expect(
+              find.descendant(of: tile, matching: find.byType(PhysicalModel)),
+              findsNothing,
+            );
+            expect(
+              find.descendant(of: tile, matching: find.byType(InkWell)),
+              findsNothing,
+            );
+            expect(
+              find.ancestor(of: tile, matching: find.byType(DecoratedBox)).evaluate().where(
+                    (e) => find
+                        .descendant(of: find.byWidget(e.widget), matching: find.byKey(const ValueKey('add-lib-section-0')))
+                        .evaluate()
+                        .isEmpty,
+                  ),
+              isEmpty,
+              reason: 'No decorated wrapper between the section and tile $id',
+            );
           }
 
-          expect(tester.takeException(), isNull);
+          expect(tester.takeException(), isNull, reason: 'overflow at $at');
         }
 
         tester.view.resetPhysicalSize();

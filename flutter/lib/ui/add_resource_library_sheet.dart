@@ -5,7 +5,7 @@ import 'dart:math' as math;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, Uint8List, defaultTargetPlatform;
+    show TargetPlatform, Uint8List, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -14,6 +14,7 @@ import '../core/cms_parser.dart';
 import '../core/emby_library.dart';
 import '../core/media_library_connectors.dart';
 import '../core/models.dart';
+import '../core/ohos_runtime.dart';
 import '../core/personal_netdisk_library.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
@@ -34,6 +35,58 @@ int computeAddLibraryColumnCount({
   if (availableWidth < 330 || effectiveWidth < 280) return 2;
   if (availableWidth < 540 || effectiveWidth < 460) return 3;
   return 4;
+}
+
+/// Maximum width of the iOS / iPadOS icon grid content so icons never drift
+/// far apart on a wide iPad canvas (content is centered with symmetric
+/// margins beyond this width).
+const double kIosAddLibraryMaxContentWidth = 640.0;
+
+/// iOS / iPadOS Home-Screen-style column count for the Add Resource Library
+/// icon grid ([availableWidth] is the grid content width):
+/// - iPhone portrait (320–440pt): 4 columns
+/// - Narrow iPad Split View / Slide Over: 5 columns
+/// - iPad / landscape: 6 columns
+/// - Very large Dynamic Type on narrow widths: 3 columns
+int computeIosAddLibraryColumnCount({
+  required double availableWidth,
+  required double textScale,
+}) {
+  final safeScale = math.max(1.0, textScale);
+  if (availableWidth / safeScale < 200) return 3;
+  if (availableWidth < 460) return 4;
+  if (availableWidth < 580) return 5;
+  return 6;
+}
+
+/// App-icon edge length for a grid cell of [cellWidth] (60pt on a standard
+/// iPhone, 52pt minimum on 320pt devices, 64pt maximum on iPad).
+double iosAddLibraryIconSize(double cellWidth) =>
+    (cellWidth * 0.68).clamp(52.0, 64.0).floorToDouble();
+
+/// Continuous-corner (superellipse) app-icon outline matching Apple's
+/// first-party icon silhouette.
+Path buildIosAppIconSquircle(Rect rect, {double exponent = 5.0}) {
+  final path = Path();
+  final cx = rect.center.dx;
+  final cy = rect.center.dy;
+  final a = rect.width / 2;
+  final b = rect.height / 2;
+  const segments = 180;
+  final e = 2 / exponent;
+  for (var i = 0; i < segments; i++) {
+    final t = i / segments * 2 * math.pi;
+    final c = math.cos(t);
+    final s = math.sin(t);
+    final x = cx + a * c.sign * math.pow(c.abs(), e);
+    final y = cy + b * s.sign * math.pow(s.abs(), e);
+    if (i == 0) {
+      path.moveTo(x, y);
+    } else {
+      path.lineTo(x, y);
+    }
+  }
+  return path..close();
 }
 
 enum _LibraryTileId {
@@ -1015,8 +1068,16 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
     );
   }
 
+  /// The icon-first Home-Screen-style hub is iOS / iPadOS only; Windows,
+  /// HarmonyOS and Android keep the previous card grid unchanged.
+  static bool get _useIosLibraryDesign =>
+      !kIsWeb &&
+      !OhosRuntime.isOhos &&
+      defaultTargetPlatform == TargetPlatform.iOS;
+
   @override
   Widget build(BuildContext context) {
+    if (_useIosLibraryDesign) return _buildIosHub(context);
     final safeBottom = MediaQuery.paddingOf(context).bottom;
 
     return SingleChildScrollView(
@@ -1039,6 +1100,124 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
           ],
         ],
       ),
+    );
+  }
+
+  Widget _buildIosHub(BuildContext context) {
+    final safeBottom = MediaQuery.paddingOf(context).bottom;
+    return SingleChildScrollView(
+      key: const ValueKey('add-resource-library-hub'),
+      padding: EdgeInsets.only(top: 10, bottom: safeBottom + 32),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final viewWidth = constraints.maxWidth;
+          final hPad = viewWidth < 360 ? 14.0 : 18.0;
+          final contentWidth = math.max(
+            0.0,
+            math.min(viewWidth - hPad * 2, kIosAddLibraryMaxContentWidth),
+          );
+          return Center(
+            child: SizedBox(
+              width: contentWidth,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (_bannerNotice != null && _noticeSectionIndex == null) ...[
+                    _buildInlineNoticeBanner(),
+                    const SizedBox(height: 16),
+                  ],
+                  for (var sIdx = 0; sIdx < _sections.length; sIdx++) ...[
+                    _buildIosSection(
+                      context,
+                      _sections[sIdx],
+                      sectionIndex: sIdx,
+                      width: contentWidth,
+                    ),
+                    if (_bannerNotice != null && _noticeSectionIndex == sIdx) ...[
+                      const SizedBox(height: 12),
+                      _buildInlineNoticeBanner(),
+                    ],
+                    if (sIdx < _sections.length - 1) const SizedBox(height: 28),
+                  ],
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildIosSection(
+    BuildContext context,
+    _LibrarySectionSpec section, {
+    required int sectionIndex,
+    required double width,
+  }) {
+    final palette = ApplePalette.of(context);
+    final textScale = MediaQuery.textScalerOf(context).scale(14.0) / 14.0;
+    final cols = computeIosAddLibraryColumnCount(
+      availableWidth: width,
+      textScale: textScale,
+    );
+    final cellWidth = width / cols;
+    final iconSize = iosAddLibraryIconSize(cellWidth);
+    // Header aligns with the left edge of the first icon (not the cell), so
+    // the title reads as part of the icon grid like the iOS App Library.
+    final headerInset = math.max(0.0, (cellWidth - iconSize) / 2);
+    final rowCount = (section.tiles.length / cols).ceil();
+    return Column(
+      key: ValueKey('add-lib-section-$sectionIndex'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(headerInset, 0, headerInset, 12),
+          child: Semantics(
+            header: true,
+            child: Text(
+              section.title,
+              style: TextStyle(
+                color: palette.labelSecondary,
+                fontSize: 13,
+                height: 1.25,
+                fontWeight: FontWeight.w600,
+                letterSpacing: -0.08,
+              ),
+            ),
+          ),
+        ),
+        Column(
+          key: ValueKey('add-lib-section-$sectionIndex-cols-$cols'),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var r = 0; r < rowCount; r++) ...[
+              if (r > 0) const SizedBox(height: 18),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var c = 0; c < cols; c++)
+                    Expanded(
+                      child: (r * cols + c) < section.tiles.length
+                          ? _IosLibraryIconTile(
+                              key: ValueKey(
+                                'add-lib-tile-${section.tiles[r * cols + c].id.name}',
+                              ),
+                              tile: section.tiles[r * cols + c],
+                              iconSize: iconSize,
+                              labelColor: palette.labelPrimary,
+                              busy: _busyTileId == section.tiles[r * cols + c].id,
+                              onTap: () => unawaited(
+                                _handleTileTap(section.tiles[r * cols + c].id),
+                              ),
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ],
     );
   }
 
@@ -1116,7 +1295,7 @@ class _AddResourceLibraryViewState extends State<AddResourceLibraryView> {
                           if (c > 0) const SizedBox(width: colGap),
                           Expanded(
                             child: (r * cols + c) < section.tiles.length
-                                ? _ResourceTileButton(
+                                ? _LegacyResourceTileButton(
                                     key: ValueKey(
                                       'add-lib-tile-${section.tiles[r * cols + c].id.name}',
                                     ),
@@ -1160,13 +1339,13 @@ class _FormFieldSpec {
   });
 }
 
-class _ResourceTileButton extends StatefulWidget {
+class _LegacyResourceTileButton extends StatefulWidget {
   final _LibraryTileSpec tile;
   final Color labelColor;
   final bool busy;
   final VoidCallback onTap;
 
-  const _ResourceTileButton({
+  const _LegacyResourceTileButton({
     super.key,
     required this.tile,
     required this.labelColor,
@@ -1175,10 +1354,11 @@ class _ResourceTileButton extends StatefulWidget {
   });
 
   @override
-  State<_ResourceTileButton> createState() => _ResourceTileButtonState();
+  State<_LegacyResourceTileButton> createState() =>
+      _LegacyResourceTileButtonState();
 }
 
-class _ResourceTileButtonState extends State<_ResourceTileButton> {
+class _LegacyResourceTileButtonState extends State<_LegacyResourceTileButton> {
   bool _pressed = false;
 
   @override
@@ -1236,7 +1416,7 @@ class _ResourceTileButtonState extends State<_ResourceTileButton> {
                       width: 54,
                       height: 54,
                       child: CustomPaint(
-                        painter: _LibraryIconPainter(
+                        painter: _LegacyLibraryIconPainter(
                           id: widget.tile.id,
                           isDark: isDark,
                           fontFamily:
@@ -1284,16 +1464,16 @@ class _ResourceTileButtonState extends State<_ResourceTileButton> {
   }
 }
 
-/// Unified iOS squircle icon set: every resource library shares identical
-/// squircle geometry, gradient depth, specular sheen, inner rim, and vector
-/// stroke language, while each service has a distinct color palette and unique
-/// geometric emblem so no two icons look alike.
-class _LibraryIconPainter extends CustomPainter {
+/// Legacy (Windows / HarmonyOS / Android) squircle icon set: every resource
+/// library shares identical squircle geometry, gradient depth, specular sheen,
+/// inner rim, and vector stroke language, while each service has a distinct
+/// color palette and unique geometric emblem so no two icons look alike.
+class _LegacyLibraryIconPainter extends CustomPainter {
   final _LibraryTileId id;
   final bool isDark;
   final String? fontFamily;
 
-  const _LibraryIconPainter({
+  const _LegacyLibraryIconPainter({
     required this.id,
     required this.isDark,
     this.fontFamily,
@@ -1763,8 +1943,527 @@ class _LibraryIconPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _LibraryIconPainter oldDelegate) =>
+  bool shouldRepaint(covariant _LegacyLibraryIconPainter oldDelegate) =>
       oldDelegate.id != id ||
       oldDelegate.isDark != isDark ||
       oldDelegate.fontFamily != fontFamily;
+}
+
+/// iOS / iPadOS Home-Screen-style resource tile: a bare app icon with its
+/// label centered below — no card, fill, border or shadow behind the tile.
+/// Press feedback mirrors SpringBoard (icon scales to 0.92 and dims slightly,
+/// one-shot, no splash).
+class _IosLibraryIconTile extends StatefulWidget {
+  final _LibraryTileSpec tile;
+  final double iconSize;
+  final Color labelColor;
+  final bool busy;
+  final VoidCallback onTap;
+
+  const _IosLibraryIconTile({
+    super.key,
+    required this.tile,
+    required this.iconSize,
+    required this.labelColor,
+    required this.busy,
+    required this.onTap,
+  });
+
+  @override
+  State<_IosLibraryIconTile> createState() => _IosLibraryIconTileState();
+}
+
+class _IosLibraryIconTileState extends State<_IosLibraryIconTile> {
+  bool _pressed = false;
+
+  void _setPressed(bool value) {
+    if (_pressed == value || !mounted) return;
+    setState(() => _pressed = value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final reduceMotion = Ios27ConcentricGeometry.isReduceMotion(context);
+    final isDark = ApplePalette.isDarkOf(context);
+    final duration = Duration(milliseconds: _pressed ? 90 : 160);
+    return Semantics(
+      button: true,
+      label: widget.tile.label,
+      value: widget.busy ? '正在连接' : null,
+      excludeSemantics: true,
+      onTap: widget.onTap,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => _setPressed(true),
+        onTapUp: (_) => _setPressed(false),
+        onTapCancel: () => _setPressed(false),
+        onTap: widget.onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              AnimatedScale(
+                scale: _pressed && !reduceMotion ? 0.92 : 1.0,
+                duration: duration,
+                curve: Curves.easeOutCubic,
+                child: AnimatedOpacity(
+                  opacity: _pressed ? 0.7 : 1.0,
+                  duration: duration,
+                  curve: Curves.easeOut,
+                  child: SizedBox(
+                    key: ValueKey('add-lib-icon-${widget.tile.id.name}'),
+                    width: widget.iconSize,
+                    height: widget.iconSize,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        CustomPaint(
+                          painter: _IosLibraryIconPainter(
+                            id: widget.tile.id,
+                            isDark: isDark,
+                          ),
+                        ),
+                        if (widget.busy)
+                          ClipPath(
+                            clipper: const _IosAppIconClipper(),
+                            child: ColoredBox(
+                              color: Colors.black.withValues(alpha: 0.38),
+                              child: const Center(
+                                child: CupertinoActivityIndicator(
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 7),
+              Text(
+                widget.tile.label,
+                maxLines: 2,
+                softWrap: true,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: widget.labelColor,
+                  fontSize: 12,
+                  height: 1.2,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: -0.08,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _IosAppIconClipper extends CustomClipper<Path> {
+  const _IosAppIconClipper();
+
+  @override
+  Path getClip(Size size) => buildIosAppIconSquircle(Offset.zero & size);
+
+  @override
+  bool shouldReclip(covariant _IosAppIconClipper oldClipper) => false;
+}
+
+/// Apple first-party style app icons for the iOS resource library: one
+/// continuous-corner superellipse, a smooth two-stop vertical gradient, a
+/// faint top sheen and a single bold white SF-Symbols-like glyph drawn on a
+/// 100×100 design grid (resolution independent). Glyphs are original
+/// pictograms (no third-party logos).
+class _IosLibraryIconPainter extends CustomPainter {
+  final _LibraryTileId id;
+  final bool isDark;
+
+  const _IosLibraryIconPainter({required this.id, required this.isDark});
+
+  static const Color _white = Color(0xFFFFFFFF);
+
+  static List<Color> _gradientFor(_LibraryTileId id) {
+    switch (id) {
+      case _LibraryTileId.emby:
+        return const [Color(0xFF62DD76), Color(0xFF1FA94B)];
+      case _LibraryTileId.jellyfin:
+        return const [Color(0xFFC383FF), Color(0xFF7F3CE0)];
+      case _LibraryTileId.plex:
+        return const [Color(0xFF4D4D53), Color(0xFF1C1C1F)];
+      case _LibraryTileId.webdav:
+        return const [Color(0xFF5FCBFF), Color(0xFF0B8FE6)];
+      case _LibraryTileId.smb:
+        return const [Color(0xFF8B89FF), Color(0xFF4A45D8)];
+      case _LibraryTileId.alistNas:
+        return const [Color(0xFF4FE0CF), Color(0xFF0AA294)];
+      case _LibraryTileId.quarkDrive:
+        return const [Color(0xFF6AA6FF), Color(0xFF2161EC)];
+      case _LibraryTileId.ucDrive:
+        return const [Color(0xFFFFB84D), Color(0xFFFF7A00)];
+      case _LibraryTileId.baiduDrive:
+        return const [Color(0xFFFF7373), Color(0xFFE0293C)];
+      case _LibraryTileId.aliDrive:
+        return const [Color(0xFFFF82BA), Color(0xFFE5367C)];
+      case _LibraryTileId.localDevice:
+        return const [Color(0xFF6BE5BE), Color(0xFF0FB07B)];
+      case _LibraryTileId.manualInput:
+        return const [Color(0xFFB3B9C4), Color(0xFF6C7483)];
+      case _LibraryTileId.localPack:
+        return const [Color(0xFFFFD34D), Color(0xFFF59E00)];
+    }
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final shape = buildIosAppIconSquircle(rect);
+    if (!isDark) {
+      canvas.drawShadow(shape, const Color(0x33000000), 1.4, false);
+    }
+    canvas.drawPath(
+      shape,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: _gradientFor(id),
+        ).createShader(rect),
+    );
+    // Faint top sheen (static, no animation).
+    canvas.drawPath(
+      shape,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: const Alignment(0, 0.15),
+          colors: [
+            _white.withValues(alpha: 0.18),
+            _white.withValues(alpha: 0.0),
+          ],
+        ).createShader(rect),
+    );
+    if (isDark) {
+      canvas.drawPath(
+        shape,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.8
+          ..color = _white.withValues(alpha: 0.14),
+      );
+    }
+
+    canvas.save();
+    canvas.clipPath(shape);
+    canvas.scale(size.width / 100, size.height / 100);
+    const grid = Rect.fromLTWH(0, 0, 100, 100);
+    canvas.saveLayer(grid, Paint());
+    _paintGlyph(canvas);
+    if (id == _LibraryTileId.plex) {
+      // Warm amber glyph on graphite for a distinct "home theater" look.
+      canvas.drawRect(
+        grid,
+        Paint()
+          ..blendMode = BlendMode.srcIn
+          ..shader = const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFFFFCB45), Color(0xFFFF9F0A)],
+          ).createShader(const Rect.fromLTWH(0, 20, 100, 60)),
+      );
+    }
+    canvas.restore();
+    canvas.restore();
+  }
+
+  static Paint _fill([double alpha = 1.0]) => Paint()
+    ..isAntiAlias = true
+    ..color = _white.withValues(alpha: alpha);
+
+  static Paint _stroke(double width) => Paint()
+    ..isAntiAlias = true
+    ..color = _white
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = width
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round;
+
+  static Paint _clear() => Paint()
+    ..isAntiAlias = true
+    ..blendMode = BlendMode.clear;
+
+  static Paint _clearStroke(double width) => Paint()
+    ..isAntiAlias = true
+    ..blendMode = BlendMode.clear
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = width
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round;
+
+  static RRect _rr(double l, double t, double r, double b, double radius) =>
+      RRect.fromLTRBR(l, t, r, b, Radius.circular(radius));
+
+  /// Rounded-corner triangle knock-out (fill + round-join stroke).
+  static void _knockTriangle(Canvas c, List<Offset> pts, {double round = 3.4}) {
+    final path = Path()
+      ..moveTo(pts[0].dx, pts[0].dy)
+      ..lineTo(pts[1].dx, pts[1].dy)
+      ..lineTo(pts[2].dx, pts[2].dy)
+      ..close();
+    c.drawPath(path, _clear());
+    c.drawPath(path, _clearStroke(round));
+  }
+
+  void _paintGlyph(Canvas c) {
+    switch (id) {
+      case _LibraryTileId.emby:
+        _glyphTvPlay(c);
+      case _LibraryTileId.jellyfin:
+        _glyphClapper(c);
+      case _LibraryTileId.plex:
+        _glyphPlayStack(c);
+      case _LibraryTileId.webdav:
+        _glyphGlobe(c);
+      case _LibraryTileId.smb:
+        _glyphNetworkDrive(c);
+      case _LibraryTileId.alistNas:
+        _glyphServerRack(c);
+      case _LibraryTileId.quarkDrive:
+        _glyphAtom(c);
+      case _LibraryTileId.ucDrive:
+        _glyphCloudDownload(c);
+      case _LibraryTileId.baiduDrive:
+        _glyphCloudFolder(c);
+      case _LibraryTileId.aliDrive:
+        _glyphLayers(c);
+      case _LibraryTileId.localDevice:
+        _glyphPhonePlay(c);
+      case _LibraryTileId.manualInput:
+        _glyphLink(c);
+      case _LibraryTileId.localPack:
+        _glyphArchiveBox(c);
+    }
+  }
+
+  // Emby · media server: TV with a play knock-out.
+  void _glyphTvPlay(Canvas c) {
+    c.drawRRect(_rr(21, 25, 79, 65, 9), _fill());
+    c.drawRRect(_rr(37, 70, 63, 75, 2.5), _fill());
+    _knockTriangle(c, const [Offset(45, 36.5), Offset(58.5, 45), Offset(45, 53.5)]);
+  }
+
+  // Jellyfin · media server: clapperboard.
+  void _glyphClapper(Canvas c) {
+    c.save();
+    c.translate(50, 52);
+    c.scale(0.94);
+    c.translate(-50, -50);
+    c.drawRRect(_rr(22, 45, 78, 75, 6.5), _fill());
+    for (final x in const [31.0, 45.0, 59.0]) {
+      c.drawPath(
+        Path()
+          ..moveTo(x, 44)
+          ..lineTo(x + 7, 44)
+          ..lineTo(x + 2, 53.5)
+          ..lineTo(x - 5, 53.5)
+          ..close(),
+        _clear(),
+      );
+    }
+    c.save();
+    c.translate(22, 41);
+    c.rotate(-0.24);
+    c.drawRRect(_rr(0, -10.5, 57, 0, 3), _fill());
+    for (final x in const [13.0, 27.0, 41.0]) {
+      c.drawPath(
+        Path()
+          ..moveTo(x, -11)
+          ..lineTo(x + 7, -11)
+          ..lineTo(x + 2, 0.5)
+          ..lineTo(x - 5, 0.5)
+          ..close(),
+        _clear(),
+      );
+    }
+    c.restore();
+    c.restore();
+  }
+
+  // Plex · media server: stacked frames with a play knock-out (amber tint).
+  void _glyphPlayStack(Canvas c) {
+    c.drawRRect(_rr(34, 23, 66, 27, 2), _fill(0.62));
+    c.drawRRect(_rr(28, 29.5, 72, 34, 2.25), _fill(0.86));
+    c.drawRRect(_rr(22, 37, 78, 75, 8), _fill());
+    _knockTriangle(c, const [Offset(45, 47), Offset(58.5, 56), Offset(45, 65)]);
+  }
+
+  // WebDAV · network storage: globe.
+  void _glyphGlobe(Canvas c) {
+    const center = Offset(50, 50);
+    const r = 26.0;
+    final st = _stroke(5.2);
+    c.drawCircle(center, r, st);
+    c.save();
+    c.clipPath(Path()..addOval(Rect.fromCircle(center: center, radius: r)));
+    c.drawOval(Rect.fromCenter(center: center, width: 24, height: 2 * r), st);
+    c.drawLine(const Offset(22, 50), const Offset(78, 50), st);
+    c.drawPath(
+      Path()
+        ..moveTo(26, 35)
+        ..quadraticBezierTo(50, 41, 74, 35),
+      st,
+    );
+    c.drawPath(
+      Path()
+        ..moveTo(26, 65)
+        ..quadraticBezierTo(50, 59, 74, 65),
+      st,
+    );
+    c.restore();
+  }
+
+  // SMB · network storage: drive connected to a LAN line.
+  void _glyphNetworkDrive(Canvas c) {
+    c.save();
+    c.translate(0, 1.5);
+    c.drawRRect(_rr(20, 24, 80, 50, 9), _fill());
+    c.drawLine(const Offset(30, 37), const Offset(47, 37), _clearStroke(4.4));
+    c.drawCircle(const Offset(69, 37), 3.5, _clear());
+    c.drawRect(const Rect.fromLTRB(47.5, 49, 52.5, 64), _fill());
+    c.drawRRect(_rr(18, 63.5, 82, 68.5, 2.5), _fill());
+    c.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromCenter(center: const Offset(50, 66), width: 15, height: 15),
+        const Radius.circular(4.5),
+      ),
+      _fill(),
+    );
+    c.restore();
+  }
+
+  // AList / OpenList · network storage: server rack.
+  void _glyphServerRack(Canvas c) {
+    for (final top in const [25.0, 43.0, 61.0]) {
+      c.drawRRect(_rr(21, top, 79, top + 14, 4.5), _fill());
+      final cy = top + 7;
+      c.drawCircle(Offset(30.5, cy), 2.6, _clear());
+      c.drawCircle(Offset(38.5, cy), 2.6, _clear());
+      c.drawLine(Offset(52, cy), Offset(70, cy), _clearStroke(3.2));
+    }
+  }
+
+  // Quark · cloud drive: atom orbits.
+  void _glyphAtom(Canvas c) {
+    final st = _stroke(4.4);
+    for (final angle in const [0.0, math.pi / 3, 2 * math.pi / 3]) {
+      c.save();
+      c.translate(50, 50);
+      c.rotate(angle);
+      c.drawOval(
+        Rect.fromCenter(center: Offset.zero, width: 58, height: 23),
+        st,
+      );
+      c.restore();
+    }
+    c.drawCircle(const Offset(50, 50), 5.6, _fill());
+  }
+
+  Path _cloudPath() => Path()
+    ..addOval(Rect.fromCircle(center: const Offset(37, 52), radius: 13))
+    ..addOval(Rect.fromCircle(center: const Offset(56, 44), radius: 17))
+    ..addRRect(_rr(22, 50, 79, 71, 10.5));
+
+  // UC · cloud drive: cloud with a download arrow knock-out.
+  void _glyphCloudDownload(Canvas c) {
+    c.save();
+    c.translate(0, 1);
+    c.drawPath(_cloudPath(), _fill());
+    final k = _clearStroke(5.2);
+    c.drawLine(const Offset(50, 44), const Offset(50, 61), k);
+    c.drawPath(
+      Path()
+        ..moveTo(42.5, 54)
+        ..lineTo(50, 61.5)
+        ..lineTo(57.5, 54),
+      k,
+    );
+    c.restore();
+  }
+
+  // Baidu · cloud drive: folder with a cloud knock-out.
+  void _glyphCloudFolder(Canvas c) {
+    c.save();
+    c.translate(0, 1);
+    c.drawRRect(_rr(21, 25, 47, 38, 5), _fill());
+    c.drawRRect(_rr(21, 31, 79, 73, 7.5), _fill());
+    c.drawLine(const Offset(19, 38.5), const Offset(81, 38.5), _clearStroke(2.6));
+    c.drawCircle(const Offset(44.5, 58), 6.2, _clear());
+    c.drawCircle(const Offset(52.5, 54), 8, _clear());
+    c.drawRRect(_rr(37, 56, 63, 64.5, 4.25), _clear());
+    c.restore();
+  }
+
+  // Ali · cloud drive: stacked storage layers.
+  void _glyphLayers(Canvas c) {
+    c.save();
+    c.translate(0, 2);
+    final top = Path()
+      ..moveTo(50, 21)
+      ..lineTo(78, 35)
+      ..lineTo(50, 49)
+      ..lineTo(22, 35)
+      ..close();
+    c.drawPath(top, _fill());
+    c.drawPath(top, _stroke(4.5));
+    final st = _stroke(6.2);
+    c.drawPath(
+      Path()
+        ..moveTo(23, 47.5)
+        ..lineTo(50, 61)
+        ..lineTo(77, 47.5),
+      st,
+    );
+    c.drawPath(
+      Path()
+        ..moveTo(23, 59.5)
+        ..lineTo(50, 73)
+        ..lineTo(77, 59.5),
+      st,
+    );
+    c.restore();
+  }
+
+  // Current device: phone with a play knock-out.
+  void _glyphPhonePlay(Canvas c) {
+    c.drawRRect(_rr(32, 20, 68, 80, 9.5), _fill());
+    c.drawRRect(_rr(44, 25.5, 56, 29.5, 2), _clear());
+    _knockTriangle(c, const [Offset(45.5, 42.5), Offset(57.5, 50.5), Offset(45.5, 58.5)]);
+  }
+
+  // Manual input: subscription link.
+  void _glyphLink(Canvas c) {
+    c.save();
+    c.translate(50, 50);
+    c.rotate(-math.pi / 4);
+    final st = _stroke(6.4);
+    c.drawRRect(_rr(-27, -9.5, 3, 9.5, 9.5), st);
+    c.drawRRect(_rr(-3, -9.5, 27, 9.5, 9.5), st);
+    c.restore();
+  }
+
+  // Local config pack: archive box.
+  void _glyphArchiveBox(Canvas c) {
+    c.drawRRect(_rr(20, 24, 80, 37, 4.5), _fill());
+    c.drawRRect(_rr(24, 40.5, 76, 76, 6), _fill());
+    c.drawRRect(_rr(40, 48.5, 60, 55, 3.25), _clear());
+  }
+
+  @override
+  bool shouldRepaint(covariant _IosLibraryIconPainter oldDelegate) =>
+      oldDelegate.id != id || oldDelegate.isDark != isDark;
 }

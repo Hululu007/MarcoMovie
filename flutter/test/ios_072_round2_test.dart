@@ -377,6 +377,8 @@ void main() {
         expect(find.text('剪贴板快导'), findsNothing);
 
         // Open manual subscription form and verify crisp group pill buttons
+        await tester.ensureVisible(find.byKey(const ValueKey('add-lib-tile-manualInput')));
+        await tester.pump();
         await tester.tap(find.byKey(const ValueKey('add-lib-tile-manualInput')));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 600));
