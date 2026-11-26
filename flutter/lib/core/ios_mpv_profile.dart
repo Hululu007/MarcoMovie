@@ -221,6 +221,7 @@ class IosMpvProfile {
         return true;
       }
       final minIntervalMs = (isIos && iosThermalElevated) ? 500 : 250;
+      if (posDeltaMs >= minIntervalMs) return true;
       return (nowMs - lastUpdateMs) >= minIntervalMs;
     }
     // Only the 2px bottom SlimProgressBar is visible: on iOS 1 Hz (or 2s under
